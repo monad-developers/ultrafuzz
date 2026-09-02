@@ -20,7 +20,6 @@ import {
   type ModelPricing,
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
-import { sameStrings } from "@ultrafuzz/artifacts";
 
 export const RUN_STATISTICS_SCHEMA_VERSION = "ultrafuzz.stats.v1" as const;
 
@@ -332,7 +331,8 @@ function assertEvidenceBindings(evidence: StatisticsEvidence): void {
     ) {
       throw new Error("run metadata workflow IDs do not exactly identify the active workflow");
     }
-    if (!sameStrings(graphWorkflowTaskIds, metadataWorkflowTaskIds)) {
+    const graphWorkflowTaskIdSet = new Set(graphWorkflowTaskIds);
+    if (!metadataWorkflowTaskIds.every((taskNodeId) => graphWorkflowTaskIdSet.has(taskNodeId))) {
       throw new Error("planned graph workflow task IDs do not match run metadata");
     }
     const provenance = evidence.state.provenance?.workflow;

@@ -310,6 +310,34 @@ test("stats keeps a fan-out graph node canonical and counts retries within each 
   assert.deepEqual(derived.value.nodes[0]?.usage?.models, ["gpt-other", "gpt-test"]);
 });
 
+test("stats accepts additive workflow tasks introduced by dynamic graph expansion", () => {
+  const baselineGraph = graphDocument("baseline", ["node:baseline"]);
+  const dynamicNode = graphDocument("dynamic", ["node:dynamic"]).nodes[0]!;
+  const graph = { ...baselineGraph, nodes: [...baselineGraph.nodes, dynamicNode] };
+  const metadata = runMetadata(["node:baseline"], undefined);
+  const state = runState([terminalNodeState("baseline", "baseline"), terminalNodeState("dynamic", "dynamic")]);
+
+  const value = deriveRunStatistics(
+    evidence({ graph, runMetadata: metadata, state, attempts: [], usage: undefined }),
+    Date.parse(FINISHED_AT)
+  ).value;
+
+  assert.deepEqual(
+    value.nodes.map((node) => node.node_id),
+    ["baseline", "dynamic"]
+  );
+
+  const graphMissingBaseline = { ...graph, nodes: [dynamicNode] };
+  assert.throws(
+    () =>
+      deriveRunStatistics(
+        evidence({ graph: graphMissingBaseline, runMetadata: metadata, state, attempts: [], usage: undefined }),
+        Date.parse(FINISHED_AT)
+      ),
+    /planned graph workflow task IDs do not match run metadata/iu
+  );
+});
+
 test("stats v1 projects unavailable cost coverage through pricing_complete", () => {
   const value = deriveRunStatistics(
     evidence({ usage: [usage(1, "node:node", { input_tokens: 10, output_tokens: 2 })] }),
