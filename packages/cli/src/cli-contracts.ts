@@ -464,6 +464,20 @@ export function toCliInspectData(value: RunStatusValue): CliInspectData {
   ) {
     throw new Error("successful inspect result has invalid public run metadata");
   }
+  const publicMetadata: CliPublicRunMetadata = {
+    schema_version: metadata.schema_version,
+    run_id: metadata.run_id,
+    created_at: metadata.created_at,
+    ...(metadata.source_run_id === undefined ? {} : { source_run_id: metadata.source_run_id }),
+    mode: metadata.mode,
+    workflow_ids: [...metadata.workflow_ids],
+    redacted_config_fingerprint: metadata.redacted_config_fingerprint,
+    ...(metadata.prompt_digest === undefined ? {} : { prompt_digest: metadata.prompt_digest }),
+    ...(metadata.audit_profile === undefined ? {} : { audit_profile: metadata.audit_profile }),
+    forge_guard: metadata.forge_guard,
+    ...(metadata.workflow === undefined ? {} : { workflow: metadata.workflow }),
+    ...(metadata.accounting === undefined ? {} : { accounting: metadata.accounting })
+  };
   return {
     run_id: value.run_id,
     run_root: value.run_root,
@@ -477,7 +491,7 @@ export function toCliInspectData(value: RunStatusValue): CliInspectData {
     events: value.events,
     attempts: value.attempts,
     graph: assertPlannedGraph(value.graph),
-    metadata: metadata as CliPublicRunMetadata,
+    metadata: publicMetadata,
     ...(value.workflow === undefined ? {} : { workflow: value.workflow })
   };
 }
