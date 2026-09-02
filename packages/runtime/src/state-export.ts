@@ -84,10 +84,32 @@ export async function listRuns(input: { projectRoot: string; env?: Record<string
   if (!runsRootStat.isDirectory()) {
     throw new Error(`runs root is not a directory: ${runsRoot}`);
   }
+  // A run directory is created before `run.json` is written, so a launch that
+  // fails during submission leaves one behind that cannot be read. Enumerating
+  // runs must not depend on every directory being complete: one unreadable
+  // entry used to abort the whole listing, which hid every healthy run and left
+  // no way to discover the run id that `clean` needs to remove the bad one.
+  const unreadable: RuntimeDiagnostic[] = [];
   const entries = fs
     .readdirSync(runsRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => readRunListEntry(path.join(runsRoot, entry.name), entry.name))
+    .map((entry) => {
+      const runRoot = path.join(runsRoot, entry.name);
+      try {
+        return readRunListEntry(runRoot, entry.name);
+      } catch (error) {
+        // Reported rather than dropped: the operator still needs the id to
+        // clean it, and a silently shorter list is its own kind of wrong.
+        unreadable.push({
+          code: "RUN_LIST_ENTRY_UNREADABLE",
+          message: `run ${entry.name} could not be read and is listed as unreadable: ${error instanceof Error ? error.message : String(error)}`,
+          severity: "warning",
+          source: "product",
+          path: runRoot
+        });
+        return { run_id: entry.name, run_root: runRoot, status: "unreadable", workflow_ids: [] };
+      }
+    })
     .sort((left, right) => (right.created_at ?? "").localeCompare(left.created_at ?? ""));
   return runtimeResult<RunListValue>(
     true,
@@ -96,7 +118,7 @@ export async function listRuns(input: { projectRoot: string; env?: Record<string
       product_runs: entries,
       runs: workflowRunsWithProductEvidence(currentPsRows(workflowSnapshot), entries)
     },
-    diagnosticsForWorkflowSnapshot(workflowSnapshot, "WORKFLOW_PS_FAILED")
+    [...diagnosticsForWorkflowSnapshot(workflowSnapshot, "WORKFLOW_PS_FAILED"), ...unreadable]
   );
 }
 
