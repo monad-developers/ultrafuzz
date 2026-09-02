@@ -38,7 +38,7 @@ import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
-import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import { observationSynchronizationDeadline, synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
 const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -122,7 +122,10 @@ export async function getRunStatus(input: {
       }
     ]);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+  const sync = await synchronizeLinkedWorkflowRun(
+    { projectRoot, runId: input.runId, env: input.env },
+    { deadlineMs: observationSynchronizationDeadline(input.env) }
+  );
   const syncDiagnostics = sync.ok
     ? sync.diagnostics
     : sync.diagnostics.map((diagnostic) => ({
@@ -215,9 +218,15 @@ export async function getRunHealth(input: {
   if (controlDiagnostics.length === 0) {
     const sync = await synchronizeLinkedWorkflowRun(
       { projectRoot, runId: input.runId, env: input.env },
-      { observeOnly: true }
+      { observeOnly: true, deadlineMs: observationSynchronizationDeadline(input.env) }
     );
-    syncDiagnostics.push(...sync.diagnostics);
+    syncDiagnostics.push(
+      ...sync.diagnostics.map((diagnostic) =>
+        diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
+          ? { ...diagnostic, severity: "warning" as const }
+          : diagnostic
+      )
+    );
   } else {
     syncDiagnostics.push({
       code: "WORKFLOW_STATE_SYNC_SKIPPED",

@@ -376,6 +376,27 @@ export interface WorkflowSynchronizationControl {
   observeOnly?: boolean;
 }
 
+const DEFAULT_OBSERVATION_SYNC_TIMEOUT_MS = 15_000;
+const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
+
+/**
+ * Bound the optional state refresh performed before read-only observer queries.
+ * The direct runner query remains authoritative for live health, while a slow
+ * history scan may leave the local projection stale and surface a warning.
+ */
+export function observationSynchronizationDeadline(
+  env: Record<string, string | undefined> = process.env,
+  nowMs = Date.now()
+): number {
+  const configured = env.ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS;
+  const parsed = configured === undefined || !/^[1-9]\d*$/u.test(configured) ? undefined : Number(configured);
+  const timeoutMs =
+    parsed === undefined || !Number.isSafeInteger(parsed)
+      ? DEFAULT_OBSERVATION_SYNC_TIMEOUT_MS
+      : Math.min(parsed, MAX_OBSERVATION_SYNC_TIMEOUT_MS);
+  return nowMs + timeoutMs;
+}
+
 export interface ControllerFailureRefinalizationInput {
   projectRoot: string;
   layout: RunLayout;

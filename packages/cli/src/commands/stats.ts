@@ -16,7 +16,12 @@ import {
   readRegularFileSnapshot,
   validateSafeId
 } from "@ultrafuzz/artifacts";
-import { runsRootForProject, synchronizeLinkedWorkflowRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  observationSynchronizationDeadline,
+  runsRootForProject,
+  synchronizeLinkedWorkflowRun,
+  type RuntimeDiagnostic
+} from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import {
@@ -140,7 +145,10 @@ async function loadLocalEvidence(
     // Statistics are observational: malformed live event output must not
     // mutate the run or hide the last coherent durable snapshot. Ordinary
     // synchronization remains fail-closed and rethrows the parser error.
-    { tolerateInvalidEventStreams: true }
+    {
+      tolerateInvalidEventStreams: true,
+      deadlineMs: observationSynchronizationDeadline(env)
+    }
   );
   const snapshot = readCoherentLocalEvidenceSnapshot(layout);
   const runMetadata = assertRunMetadataDocument(parseLocalJson(snapshot.runMetadata, layout.runMetadataPath), runId);
