@@ -78,6 +78,11 @@ export interface DynamicExpansionManifest {
   items: DynamicExpansionItem[];
 }
 
+export interface DynamicExpansionRetryArchive {
+  archive_path: string;
+  group_node_ids: string[];
+}
+
 export class DynamicExpansionError extends Error {
   readonly code: string;
   readonly details: Record<string, unknown>;
@@ -330,6 +335,109 @@ export function loadOrCreateDynamicExpansion(input: {
     }
     return published;
   });
+}
+
+/**
+ * Withdraw one complete expansion generation before an explicit source retry.
+ *
+ * Smithers resets the producer and all of its dependents, but the expansion
+ * manifests live outside Smithers state. Leaving them active makes the next
+ * workflow render require the canonical source artifact during the gap between
+ * producer completion and verifier publication. A whole-set rename keeps the
+ * old generation durable and prevents a partially rewritten manifest set.
+ */
+export function archiveDynamicExpansionsForRetry(input: {
+  runRoot: string;
+  sourceNodeIds?: readonly string[];
+  requireMissingSources?: boolean;
+}): DynamicExpansionRetryArchive | undefined {
+  const runRoot = path.resolve(input.runRoot);
+  const manifestDir = path.join(runRoot, "dynamic-expansions");
+  assertPathInside(runRoot, manifestDir, "dynamic expansion manifest directory");
+  if (!fs.existsSync(manifestDir)) return undefined;
+  assertNoSymlinkComponents(runRoot, manifestDir, "dynamic expansion manifest directory");
+  const manifestStat = fs.lstatSync(manifestDir);
+  if (!manifestStat.isDirectory() || manifestStat.isSymbolicLink()) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Dynamic expansion manifest root is not a directory", {
+      manifestDir
+    });
+  }
+  const manifests = readExpansionManifests(manifestDir);
+  if (manifests.length === 0) return undefined;
+
+  const sourceNodeIds = new Set(
+    (input.sourceNodeIds ?? []).flatMap((nodeId) => [nodeId, nodeId.startsWith("node:") ? nodeId.slice(5) : nodeId])
+  );
+  const matches = (manifest: DynamicExpansionManifest): boolean => {
+    if (
+      sourceNodeIds.has(manifest.source.node_id) ||
+      sourceNodeIds.has(manifest.source.attempt_id) ||
+      sourceNodeIds.has(`node:${manifest.source.node_id}`) ||
+      sourceNodeIds.has(`node:${manifest.source.attempt_id}`)
+    ) {
+      return true;
+    }
+    if (input.requireMissingSources !== true) return false;
+    const sourcePath = path.join(runRoot, manifest.source.artifact_path);
+    assertPathInside(runRoot, sourcePath, "dynamic source artifact");
+    assertNoSymlinkComponents(runRoot, sourcePath, "dynamic source artifact");
+    return !fs.existsSync(sourcePath);
+  };
+  const matched = manifests.filter(matches);
+  if (matched.length === 0) return undefined;
+  if (matched.length !== manifests.length) {
+    throw dynamicError(
+      "DYNAMIC_RETRY_EXPANSION_AMBIGUOUS",
+      "Dynamic source retry cannot withdraw only part of the published expansion generation",
+      {
+        matchedGroupNodeIds: matched.map((manifest) => manifest.group_node_id),
+        retainedGroupNodeIds: manifests
+          .filter((manifest) => !matches(manifest))
+          .map((manifest) => manifest.group_node_id)
+      }
+    );
+  }
+
+  const expectedEntries = new Set(manifests.map((manifest) => `${manifest.group_node_id}.json`));
+  const unexpectedEntries = fs.readdirSync(manifestDir).filter((entry) => !expectedEntries.has(entry));
+  if (unexpectedEntries.length > 0) {
+    throw dynamicError(
+      "DYNAMIC_RETRY_EXPANSION_INVALID",
+      "Dynamic expansion manifest root contains unrecognized retry state",
+      { unexpectedEntries }
+    );
+  }
+
+  const archiveRoot = path.join(runRoot, "dynamic-expansion-history");
+  assertPathInside(runRoot, archiveRoot, "dynamic expansion history");
+  fs.mkdirSync(archiveRoot, { recursive: true, mode: 0o700 });
+  assertNoSymlinkComponents(runRoot, archiveRoot, "dynamic expansion history");
+  const archivedAt = new Date().toISOString();
+  const archiveDir = path.join(archiveRoot, `${archivedAt.replaceAll(":", "-")}-${crypto.randomUUID()}`);
+  assertPathInside(runRoot, archiveDir, "dynamic expansion retry archive");
+  fs.renameSync(manifestDir, archiveDir);
+  fs.mkdirSync(manifestDir, { mode: manifestStat.mode & 0o777 });
+  publishFileDurableExclusive(
+    archiveDir,
+    "retry.json",
+    `${JSON.stringify(
+      {
+        schema_version: "ultrafuzz.dynamic-expansion-retry.v1",
+        archived_at: archivedAt,
+        source_node_ids: [...sourceNodeIds].sort(),
+        group_node_ids: manifests.map((manifest) => manifest.group_node_id)
+      },
+      null,
+      2
+    )}\n`
+  );
+  fsyncDirectory(manifestDir);
+  fsyncDirectory(archiveRoot);
+  fsyncDirectory(runRoot);
+  return {
+    archive_path: archiveDir,
+    group_node_ids: manifests.map((manifest) => manifest.group_node_id)
+  };
 }
 
 export function dynamicStorageId(groupNodeId: string, generatedNodeId: string): string {
@@ -822,6 +930,15 @@ function withDynamicExpansionLock<T>(manifestDir: string, operation: () => T): T
     } catch {
       // A missing lock after the operation cannot weaken manifest validation.
     }
+  }
+}
+
+function fsyncDirectory(directory: string): void {
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 

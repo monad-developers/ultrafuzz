@@ -66,6 +66,7 @@ import {
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
+import { archiveDynamicExpansionsForRetry } from "./dynamic-expansion.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -5164,6 +5165,27 @@ export async function runSmithersLifecycleCommand(input: {
       input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
         ? smithersFailedTasks(currentInspection)
         : [];
+    const retryProducers = failedTasks.flatMap((failedTask) => {
+      const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
+      return producer === undefined ? [] : [producer];
+    });
+    if (
+      input.retryFailed === true &&
+      input.relaunchPaths !== undefined &&
+      retryProducers.length === 0 &&
+      failedTasks.length === 0 &&
+      inspection !== undefined &&
+      smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")
+    ) {
+      // A previous retry can have crossed the producer/verifier handoff gap
+      // before this fix was installed. The explicit retry is also the
+      // recovery boundary: withdraw a complete generation only when every
+      // manifest points at a source that is currently absent.
+      archiveDynamicExpansionsForRetry({
+        runRoot: input.relaunchPaths.runRoot,
+        requireMissingSources: true
+      });
+    }
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
@@ -5193,6 +5215,12 @@ export async function runSmithersLifecycleCommand(input: {
           keepWorkspaces: input.keepWorkspaces
         });
         if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
+      }
+      if (retryProducers.length > 0 && input.relaunchPaths !== undefined) {
+        archiveDynamicExpansionsForRetry({
+          runRoot: input.relaunchPaths.runRoot,
+          sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
+        });
       }
       preResumeStderr = resetStderr.join("\n");
     }

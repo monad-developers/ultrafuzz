@@ -8,6 +8,7 @@ import test from "node:test";
 import { createInitialRunState, createNodeState } from "@ultrafuzz/artifacts";
 
 import {
+  archiveDynamicExpansionsForRetry,
   DynamicExpansionError,
   dynamicStorageId,
   dynamicRuntimeFingerprint,
@@ -266,6 +267,55 @@ test("persisted expansion rejects prompt-template and dynamic-limit changes", ()
     () => changedLimit.invoke({ maxDynamicNodes: 101 }),
     (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_MANIFEST_SET_INVALID"
   );
+});
+
+test("explicit source retry archives a complete expansion generation and rejects a partial one", () => {
+  const fixture = expansionFixture({ runId: "retry-archive", items: [item(0)] });
+  fixture.invoke();
+  fixture.invoke({
+    groupNodeId: "second",
+    nodeIdTemplate: "dynamic:other:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:second")
+  });
+
+  const archived = archiveDynamicExpansionsForRetry({
+    runRoot: fixture.runRoot,
+    sourceNodeIds: ["node:planner"]
+  });
+  assert.ok(archived);
+  assert.deepEqual(archived.group_node_ids.sort(), ["fanout", "second"]);
+  assert.deepEqual(fs.readdirSync(path.join(fixture.runRoot, "dynamic-expansions")), []);
+  assert.deepEqual(fs.readdirSync(archived.archive_path).sort(), ["fanout.json", "retry.json", "second.json"]);
+
+  const mixed = expansionFixture({ runId: "retry-archive-mixed", items: [item(0)] });
+  mixed.invoke();
+  mixed.invoke({
+    groupNodeId: "second",
+    sourceNodeId: "other-planner",
+    sourceAttemptId: "other-planner",
+    nodeIdTemplate: "dynamic:other:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:second")
+  });
+  assert.throws(
+    () =>
+      archiveDynamicExpansionsForRetry({
+        runRoot: mixed.runRoot,
+        sourceNodeIds: ["planner"]
+      }),
+    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_RETRY_EXPANSION_AMBIGUOUS"
+  );
+  assert.deepEqual(fs.readdirSync(path.join(mixed.runRoot, "dynamic-expansions")).sort(), [
+    "fanout.json",
+    "second.json"
+  ]);
+
+  fs.rmSync(mixed.sourcePath);
+  const recovered = archiveDynamicExpansionsForRetry({
+    runRoot: mixed.runRoot,
+    requireMissingSources: true
+  });
+  assert.ok(recovered);
+  assert.deepEqual(recovered.group_node_ids.sort(), ["fanout", "second"]);
 });
 
 test("dynamic expansion retries when a contended lock disappears before inspection", () => {
