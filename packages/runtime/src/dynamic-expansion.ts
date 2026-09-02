@@ -350,6 +350,7 @@ export function archiveDynamicExpansionsForRetry(input: {
   runRoot: string;
   sourceNodeIds?: readonly string[];
   requireMissingSources?: boolean;
+  archiveCompleteGeneration?: boolean;
 }): DynamicExpansionRetryArchive | undefined {
   const runRoot = path.resolve(input.runRoot);
   const manifestDir = path.join(runRoot, "dynamic-expansions");
@@ -372,6 +373,7 @@ export function archiveDynamicExpansionsForRetry(input: {
     (input.sourceNodeIds ?? []).flatMap((nodeId) => [nodeId, nodeId.startsWith("node:") ? nodeId.slice(5) : nodeId])
   );
   const matches = (manifest: DynamicExpansionManifest): boolean => {
+    if (input.archiveCompleteGeneration === true) return true;
     if (
       sourceNodeIds.has(manifest.source.node_id) ||
       sourceNodeIds.has(manifest.source.attempt_id) ||

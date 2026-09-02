@@ -5169,23 +5169,6 @@ export async function runSmithersLifecycleCommand(input: {
       const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
       return producer === undefined ? [] : [producer];
     });
-    if (
-      input.retryFailed === true &&
-      input.relaunchPaths !== undefined &&
-      retryProducers.length === 0 &&
-      failedTasks.length === 0 &&
-      inspection !== undefined &&
-      smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")
-    ) {
-      // A previous retry can have crossed the producer/verifier handoff gap
-      // before this fix was installed. The explicit retry is also the
-      // recovery boundary: withdraw a complete generation only when every
-      // manifest points at a source that is currently absent.
-      archiveDynamicExpansionsForRetry({
-        runRoot: input.relaunchPaths.runRoot,
-        requireMissingSources: true
-      });
-    }
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
@@ -5216,13 +5199,37 @@ export async function runSmithersLifecycleCommand(input: {
         });
         if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
       }
-      if (retryProducers.length > 0 && input.relaunchPaths !== undefined) {
+      preResumeStderr = resetStderr.join("\n");
+    }
+    if (input.retryFailed === true && input.relaunchPaths !== undefined) {
+      if (retryProducers.length > 0) {
         archiveDynamicExpansionsForRetry({
           runRoot: input.relaunchPaths.runRoot,
           sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
         });
+      } else if (
+        smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
+        smithersSnapshotHasErrorMessage(inspection, "runtime rendered prompt changed for dynamic-")
+      ) {
+        // The source can already have been republished while attempt-owned
+        // state from the prior generation still occupies the new attempt
+        // paths. The runner's exact render failure proves that conflict; an
+        // explicit retry may archive the complete generation and its attempt
+        // state before rematerializing it.
+        archiveDynamicExpansionsForRetry({
+          runRoot: input.relaunchPaths.runRoot,
+          archiveCompleteGeneration: true
+        });
+      } else if (failedTasks.length === 0 && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
+        // A previous retry can have crossed the producer/verifier handoff gap
+        // before this fix was installed. The explicit retry is also the
+        // recovery boundary: withdraw a complete generation only when every
+        // manifest points at a source that is currently absent.
+        archiveDynamicExpansionsForRetry({
+          runRoot: input.relaunchPaths.runRoot,
+          requireMissingSources: true
+        });
       }
-      preResumeStderr = resetStderr.join("\n");
     }
     if (
       failedTasks.length === 0 &&
@@ -5525,6 +5532,22 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   if (snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) return false;
   const run = snapshot.json.data.run;
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
+}
+
+function smithersSnapshotHasErrorMessage(snapshot: SmithersCommandSnapshot, fragment: string): boolean {
+  if (!isObjectRecord(snapshot.json)) return false;
+  const error =
+    snapshot.json.ok === false && isObjectRecord(snapshot.json.error)
+      ? snapshot.json.error
+      : snapshot.json.ok === true && isObjectRecord(snapshot.json.data) && isObjectRecord(snapshot.json.data.run)
+        ? snapshot.json.data.run.error
+        : undefined;
+  let current = isObjectRecord(error) ? error : undefined;
+  for (let depth = 0; current !== undefined && depth < 8; depth += 1) {
+    if (typeof current.message === "string" && current.message.includes(fragment)) return true;
+    current = isObjectRecord(current.cause) ? current.cause : undefined;
+  }
+  return false;
 }
 
 export function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {

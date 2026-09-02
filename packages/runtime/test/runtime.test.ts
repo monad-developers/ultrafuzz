@@ -24813,8 +24813,12 @@ test("resume continues a run-level render failure in place without a no-op rewin
       workflowRunId: "ultrafuzz-render-recovery-run",
       status: "failed",
       state: "failed",
-      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
-      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+      error: {
+        code: "WORKFLOW_RENDER_FAILED",
+        message: "runtime rendered prompt changed for dynamic-fanout-synthetic",
+        cause: { code: "EEXIST" }
+      },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
     }),
     timeline: { timeline: { frames: [{ frameNo: 2 }, { frameNo: 4 }] } }
   });
