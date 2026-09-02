@@ -5777,7 +5777,9 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(workflow, /optional_dependency_artifact_dirs: task\.optionalDependencyArtifactRelativeDirs/u);
   assert.doesNotMatch(workflow, /optional_dependency_artifact_dirs: task\.optionalDependencyArtifactDirs/u);
   assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
-  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 8);
+  assert.match(workflow, /recovery: "verified-dynamic-archive"/u);
+  assert.match(workflow, /structuredClone\(rehydratedVerification\)/u);
 });
 
 test("generated optional admission rejects a present malformed marker before publishing agent access", () => {
@@ -10084,7 +10086,7 @@ test("generated Smithers preparation names its failing step and carries a retry 
   // out of reach of the topology's max_attempts. The compiled budget must never drop below one
   // retry and never reduce an inherited budget. The verifier Task's retries={0} model-replay seal
   // is pinned separately and must stay at zero.
-  const preparationTaskStart = source.indexOf("id={task.preparationId}");
+  const preparationTaskStart = source.lastIndexOf("id={task.preparationId}");
   assert.ok(preparationTaskStart >= 0, source);
   const preparationTask = source.slice(preparationTaskStart, source.indexOf(">", preparationTaskStart));
   assert.match(preparationTask, /retries=\{Math\.max\(task\.retries, 1\)\}/u);

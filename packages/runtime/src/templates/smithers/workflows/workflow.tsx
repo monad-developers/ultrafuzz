@@ -314,6 +314,8 @@ const verificationOutput = z.strictObject({
   verification_marker_size_bytes: z.number().int().positive().max(MAX_ARTIFACT_VERIFICATION_MARKER_BYTES)
 });
 
+type RehydratedVerification = z.infer<typeof verificationOutput>;
+
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -9376,6 +9378,7 @@ export default smithers((ctx) => {
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   let availableTaskSpecs = taskSpecs;
+  let rehydratedAttempts = new Map<string, RehydratedVerification>();
   if (cloudWorker) {
     const hydratedTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
     const hydratedIds = new Set(hydratedTaskSpecs.map((task) => task.id));
@@ -9409,6 +9412,9 @@ export default smithers((ctx) => {
       taskSpecs,
       taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks)
     );
+    rehydratedAttempts = new Map(
+      materialized.rehydratedAttempts.map((entry) => [entry.attempt_id, entry.verification])
+    );
     availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
   }
   if (!cloudWorker) {
@@ -9434,6 +9440,53 @@ export default smithers((ctx) => {
             operatorPrompt,
             taskPrompt: promptForTask(task, inputTask)
           });
+          const rehydratedVerification = rehydratedAttempts.get(task.attemptId);
+          if (rehydratedVerification !== undefined) {
+            return (
+              <Fragment key={task.id}>
+                <Task
+                  id={task.preparationId}
+                  output={outputs.preparation}
+                  dependsOn={task.dependsOn}
+                  continueOnFail={task.continueOnFail}
+                  retries={0}
+                  metadata={{
+                    category: "artifact-preparation",
+                    agentTaskId: task.id,
+                    attemptId: task.attemptId,
+                    recovery: "verified-dynamic-archive"
+                  }}
+                >
+                  {() => ({ prepared: true as const })}
+                </Task>
+                <Task
+                  id={task.id}
+                  output={outputs.agentProcess}
+                  dependsOn={[task.preparationId]}
+                  continueOnFail={task.continueOnFail}
+                  retries={0}
+                  metadata={{ ...task.metadata, recovery: "verified-dynamic-archive" }}
+                >
+                  {() => ({ completed: true as const })}
+                </Task>
+                <Task
+                  id={task.verifierId}
+                  output={outputs.verification}
+                  dependsOn={[task.id]}
+                  continueOnFail={task.continueOnFail}
+                  retries={0}
+                  metadata={{
+                    category: "artifact-contract",
+                    agentTaskId: task.id,
+                    attemptId: task.attemptId,
+                    recovery: "verified-dynamic-archive"
+                  }}
+                >
+                  {() => structuredClone(rehydratedVerification)}
+                </Task>
+              </Fragment>
+            );
+          }
           if (task.execution.mode === "cloud" && !cloudWorker) {
             const dependencyVerificationAuthorities = dependencyVerificationAuthoritiesForTask(task, (producer) =>
               ctx.outputMaybe(outputs.verification, { nodeId: producer.verifierId })

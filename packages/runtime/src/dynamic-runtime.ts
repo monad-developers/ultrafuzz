@@ -22,6 +22,7 @@ import {
   type DynamicExpansionItem,
   type DynamicExpansionManifest
 } from "./dynamic-expansion.js";
+import { rehydrateCompatibleDynamicAttempt, type RehydratedDynamicAttempt } from "./dynamic-expansion-retry.js";
 import { projectArtifactSchemaDir } from "./init.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask, SmithersTaskMetadata } from "./smithers.js";
 import type { PlannedGraph, PlannedGraphNode } from "./types.js";
@@ -49,6 +50,7 @@ export interface DynamicRuntimeMaterialization {
   graph: PlannedGraph;
   expandedGroupIds: string[];
   unresolvedGroupIds: string[];
+  rehydratedAttempts: RehydratedDynamicAttempt[];
 }
 
 /**
@@ -159,7 +161,7 @@ function deriveDynamicRuntime(
 
   assertRuntimeIdentityUniqueness(runtimeGraph, tasks, generatedTasks);
 
-  renderReadyRuntimePrompts({
+  const rehydratedAttempts = renderReadyRuntimePrompts({
     tasks,
     graph: runtimeGraph,
     groups,
@@ -167,7 +169,8 @@ function deriveDynamicRuntime(
     projectRoot,
     runRoot,
     runId,
-    publishMissing: mode === "publish"
+    publishMissing: mode === "publish",
+    rehydrateArchived: mode === "publish"
   });
   attachWorkflowGraphMetadata(runtimeGraph, tasks);
 
@@ -204,7 +207,8 @@ function deriveDynamicRuntime(
     unresolvedGroupIds: groups
       .map((group) => group.groupNodeId)
       .filter((groupId) => !manifests.has(groupId))
-      .sort()
+      .sort(),
+    rehydratedAttempts
   };
 }
 
@@ -438,9 +442,11 @@ function renderReadyRuntimePrompts(input: {
   runRoot: string;
   runId: string;
   publishMissing: boolean;
-}): void {
+  rehydrateArchived: boolean;
+}): RehydratedDynamicAttempt[] {
   const groupContext = input.groups[0]?.promptContext;
-  if (groupContext === undefined) return;
+  if (groupContext === undefined) return [];
+  const rehydrated: RehydratedDynamicAttempt[] = [];
   const graphContext = promptGraphContext(input.graph, input.tasks);
   for (const task of input.tasks) {
     if (task.promptTemplatePath === undefined) continue;
@@ -487,6 +493,17 @@ function renderReadyRuntimePrompts(input: {
     const promptPath = path.join(artifactDir, "prompt.rendered.md");
     assertPathInside(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
+    if (input.rehydrateArchived && task.metadata.node.dynamic !== undefined) {
+      const recovered = rehydrateCompatibleDynamicAttempt({
+        runRoot: input.runRoot,
+        attemptId: task.attemptId,
+        logicalNodeId: task.logicalNodeId,
+        renderedPrompt: result.renderedMarkdown,
+        outputs: task.metadata.artifacts.outputs,
+        manifests: [...input.manifests.values()]
+      });
+      if (recovered !== undefined) rehydrated.push(recovered);
+    }
     fs.mkdirSync(artifactDir, { recursive: true });
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     if (fs.existsSync(promptPath)) {
@@ -501,6 +518,7 @@ function renderReadyRuntimePrompts(input: {
     }
     task.renderedPromptPath = promptPath;
   }
+  return rehydrated;
 }
 
 /**

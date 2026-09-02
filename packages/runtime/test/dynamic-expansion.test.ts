@@ -6,7 +6,12 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { createInitialRunState, createNodeState } from "@ultrafuzz/artifacts";
+import {
+  artifactContractDefinition,
+  artifactContractSchemaBinding,
+  createInitialRunState,
+  createNodeState
+} from "@ultrafuzz/artifacts";
 
 import {
   archiveDynamicExpansionsForRetry,
@@ -16,6 +21,7 @@ import {
   loadOrCreateDynamicExpansion,
   materializeDynamicRuntime,
   planDynamicExpansion,
+  rehydrateCompatibleDynamicAttempt,
   type PlannedGraph
 } from "../src/index.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "../src/smithers.js";
@@ -366,6 +372,186 @@ test("explicit source retry archives a complete expansion generation and rejects
   });
   assert.ok(recovered);
   assert.deepEqual(recovered.group_node_ids.sort(), ["fanout", "second"]);
+});
+
+test("identical dynamic generations rehydrate only exact verified publications", () => {
+  const fixture = expansionFixture({ runId: "retry-rehydrate", items: [item(0)] });
+  const first = fixture.invoke();
+  const generated = first.items[0];
+  assert.ok(generated);
+  const attemptId = generated.storage_id;
+  const renderedPrompt = "synthetic rendered prompt\n";
+  const outputBytes = Buffer.from("[]\n", "utf8");
+  const contract = artifactContractDefinition("ultrafuzz/findings@2");
+  const binding = artifactContractSchemaBinding("ultrafuzz/findings@2");
+  assert.ok(binding);
+  const output = {
+    path: "findings.json",
+    contract: contract.id,
+    contractDigest: contract.digest,
+    schemaFile: binding.schema_file,
+    schemaId: binding.schema_id,
+    schemaSha256: binding.schema_sha256,
+    schemaBundleSha256: binding.schema_bundle_sha256,
+    validatorBuild: binding.validator_build,
+    primary: true
+  } as const;
+  const artifactDir = path.join(fixture.runRoot, "artifacts", attemptId);
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "prompt.rendered.md"), renderedPrompt);
+  fs.writeFileSync(path.join(artifactDir, output.path), outputBytes);
+  const marker = {
+    schema_version: "ultrafuzz.artifact-verification.v2",
+    attempt_id: attemptId,
+    node_id: "fanout",
+    artifacts: [
+      {
+        path: output.path,
+        contract: output.contract,
+        contract_digest: output.contractDigest,
+        schema_file: output.schemaFile,
+        schema_id: output.schemaId,
+        schema_sha256: output.schemaSha256,
+        schema_bundle_sha256: output.schemaBundleSha256,
+        validator_build: output.validatorBuild,
+        sha256: digest(outputBytes),
+        primary: true
+      }
+    ],
+    publications: [{ path: output.path, sha256: digest(outputBytes) }]
+  } as const;
+  const verificationRoot = path.join(fixture.runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(verificationRoot);
+  fs.writeFileSync(path.join(verificationRoot, `${attemptId}.json`), `${JSON.stringify(marker)}\n`);
+
+  archiveDynamicExpansionsForRetry({
+    runRoot: fixture.runRoot,
+    sourceNodeIds: ["planner"]
+  });
+  const regenerated = fixture.invoke();
+  const recovered = rehydrateCompatibleDynamicAttempt({
+    runRoot: fixture.runRoot,
+    attemptId,
+    logicalNodeId: "fanout",
+    renderedPrompt,
+    outputs: [output],
+    manifests: [regenerated]
+  });
+
+  assert.ok(recovered);
+  assert.equal(recovered.verification.primary_artifact, output.path);
+  assert.equal(fs.readFileSync(path.join(artifactDir, "prompt.rendered.md"), "utf8"), renderedPrompt);
+  assert.deepEqual(fs.readFileSync(path.join(artifactDir, output.path)), outputBytes);
+  assert.equal(fs.existsSync(path.join(artifactDir, "unverified-sidecar.txt")), false);
+  assert.ok(
+    rehydrateCompatibleDynamicAttempt({
+      runRoot: fixture.runRoot,
+      attemptId,
+      logicalNodeId: "fanout",
+      renderedPrompt,
+      outputs: [output],
+      manifests: [regenerated]
+    }),
+    "recovery must remain idempotently visible on later workflow renders"
+  );
+  fs.writeFileSync(path.join(artifactDir, "runtime-derived.json"), "{}\n");
+  assert.ok(
+    rehydrateCompatibleDynamicAttempt({
+      runRoot: fixture.runRoot,
+      attemptId,
+      logicalNodeId: "fanout",
+      renderedPrompt,
+      outputs: [output],
+      manifests: [regenerated]
+    }),
+    "runtime-derived files published after recovery must not reactivate the model task"
+  );
+  assert.equal(
+    rehydrateCompatibleDynamicAttempt({
+      runRoot: fixture.runRoot,
+      attemptId,
+      logicalNodeId: "fanout",
+      renderedPrompt: "changed prompt\n",
+      outputs: [output],
+      manifests: [regenerated]
+    }),
+    undefined
+  );
+});
+
+test("dynamic result rehydration rejects changed contracts and publication bytes", () => {
+  const fixture = expansionFixture({ runId: "retry-rehydrate-reject", items: [item(0)] });
+  const manifest = fixture.invoke();
+  const generated = manifest.items[0];
+  assert.ok(generated);
+  const attemptId = generated.storage_id;
+  const artifactDir = path.join(fixture.runRoot, "artifacts", attemptId);
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "prompt.rendered.md"), "prompt\n");
+  fs.writeFileSync(path.join(artifactDir, "result.txt"), "verified\n");
+  const definition = artifactContractDefinition("ultrafuzz/text@1");
+  const marker = {
+    schema_version: "ultrafuzz.artifact-verification.v2",
+    attempt_id: attemptId,
+    node_id: "fanout",
+    artifacts: [
+      {
+        path: "result.txt",
+        contract: definition.id,
+        contract_digest: definition.digest,
+        sha256: digest("verified\n"),
+        primary: true
+      }
+    ],
+    publications: [{ path: "result.txt", sha256: digest("verified\n") }]
+  } as const;
+  const verificationRoot = path.join(fixture.runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(verificationRoot);
+  fs.writeFileSync(path.join(verificationRoot, `${attemptId}.json`), `${JSON.stringify(marker)}\n`);
+  const archived = archiveDynamicExpansionsForRetry({
+    runRoot: fixture.runRoot,
+    sourceNodeIds: ["planner"]
+  });
+  assert.ok(archived);
+  const regenerated = fixture.invoke();
+  assert.equal(
+    rehydrateCompatibleDynamicAttempt({
+      runRoot: fixture.runRoot,
+      attemptId,
+      logicalNodeId: "fanout",
+      renderedPrompt: "prompt\n",
+      outputs: [
+        {
+          path: "result.txt",
+          contract: definition.id,
+          contractDigest: "0".repeat(64),
+          primary: true
+        }
+      ],
+      manifests: [regenerated]
+    }),
+    undefined
+  );
+  fs.writeFileSync(path.join(archived.archive_path, "artifacts", attemptId, "result.txt"), "changed\n");
+
+  assert.equal(
+    rehydrateCompatibleDynamicAttempt({
+      runRoot: fixture.runRoot,
+      attemptId,
+      logicalNodeId: "fanout",
+      renderedPrompt: "prompt\n",
+      outputs: [
+        {
+          path: "result.txt",
+          contract: definition.id,
+          contractDigest: definition.digest,
+          primary: true
+        }
+      ],
+      manifests: [regenerated]
+    }),
+    undefined
+  );
 });
 
 test("dynamic expansion retries when a contended lock disappears before inspection", () => {
