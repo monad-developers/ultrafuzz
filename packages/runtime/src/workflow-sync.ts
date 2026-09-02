@@ -4772,7 +4772,7 @@ function appendTerminalTaskAttempts(input: {
           );
           if (detail === undefined) {
             throw new Error(
-              `Smithers attempt authority is unavailable for attempt ${attempt.retry} of ${JSON.stringify(attempt.nodeId)}`
+              `Smithers attempt authority is unavailable for attempt ${String(attempt.retry)} of ${JSON.stringify(attempt.nodeId)}`
             );
           }
           return inspectSmithersAttemptAgentSelection(input.task, detail, attempt.retry) !== undefined;

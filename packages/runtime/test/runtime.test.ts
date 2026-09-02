@@ -20858,14 +20858,15 @@ test("syncRun excludes a pre-agent terminal failure from the model-attempt ledge
   const sync = await syncRun({ projectRoot: project, runId: "pre-agent-failure", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(run.value);
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+  const state = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "state.json"), "utf8")) as {
     nodes?: Record<string, { status?: string; retry_count?: number }>;
   };
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
   assert.equal(state.nodes?.["project-discovery"]?.retry_count, 0);
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+  assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
 });
 
 test("syncRun keeps redacted failure state and attempt evidence stable across credential rotation", async () => {
