@@ -16,7 +16,7 @@ export function retryTransientSnapshotRead<T>(
       lastRace = error;
     }
   }
-  throw new Error(`run evidence changed during ${attempts} consecutive snapshot read attempts`, {
+  throw new Error(`run evidence changed during ${String(attempts)} consecutive snapshot read attempts`, {
     cause: lastRace
   });
 }
