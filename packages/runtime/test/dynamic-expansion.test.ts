@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -278,7 +279,17 @@ test("explicit source retry archives a complete expansion generation and rejects
     templateFingerprint: digest("fingerprint:second")
   });
   const attemptId = first.items[0]!.storage_id;
-  for (const root of ["artifacts", "workspaces", "invariant-suite-workspace-snapshots"]) {
+  execFileSync("git", ["init", "-q"], { cwd: fixture.runRoot });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: fixture.runRoot });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: fixture.runRoot });
+  fs.writeFileSync(path.join(fixture.runRoot, "tracked.txt"), "base\n", "utf8");
+  execFileSync("git", ["add", "tracked.txt"], { cwd: fixture.runRoot });
+  execFileSync("git", ["commit", "-qm", "fixture"], { cwd: fixture.runRoot });
+  const workspacePath = path.join(fixture.runRoot, "workspaces", attemptId);
+  fs.mkdirSync(path.dirname(workspacePath), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-qb", "retry-attempt", workspacePath], { cwd: fixture.runRoot });
+  fs.writeFileSync(path.join(workspacePath, "retained.txt"), "workspaces result\n", "utf8");
+  for (const root of ["artifacts", "invariant-suite-workspace-snapshots"]) {
     const attemptPath = path.join(fixture.runRoot, root, attemptId);
     fs.mkdirSync(attemptPath, { recursive: true });
     fs.writeFileSync(path.join(attemptPath, "retained.txt"), `${root} result\n`, "utf8");
@@ -288,6 +299,7 @@ test("explicit source retry archives a complete expansion generation and rejects
   fs.writeFileSync(path.join(verificationRoot, `${attemptId}.json`), '{"verified":true}\n', "utf8");
 
   const archived = archiveDynamicExpansionsForRetry({
+    projectRoot: fixture.runRoot,
     runRoot: fixture.runRoot,
     sourceNodeIds: ["node:planner"]
   });
@@ -317,6 +329,10 @@ test("explicit source retry archives a complete expansion generation and rejects
   assert.equal(
     fs.readFileSync(path.join(archived.archive_path, ".ultrafuzz-verification", `${attemptId}.json`), "utf8"),
     '{"verified":true}\n'
+  );
+  assert.doesNotMatch(
+    execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: fixture.runRoot, encoding: "utf8" }),
+    new RegExp(attemptId, "u")
   );
 
   const mixed = expansionFixture({ runId: "retry-archive-mixed", items: [item(0)] });

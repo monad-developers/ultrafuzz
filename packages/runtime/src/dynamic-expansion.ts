@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -347,17 +348,20 @@ export function loadOrCreateDynamicExpansion(input: {
  * old generation durable and prevents a partially rewritten manifest set.
  */
 export function archiveDynamicExpansionsForRetry(input: {
+  projectRoot?: string;
   runRoot: string;
   sourceNodeIds?: readonly string[];
   requireMissingSources?: boolean;
   archiveCompleteGeneration?: boolean;
 }): DynamicExpansionRetryArchive | undefined {
   const runRoot = path.resolve(input.runRoot);
+  const projectRoot = input.projectRoot === undefined ? undefined : path.resolve(input.projectRoot);
+  if (projectRoot !== undefined) assertPathInside(projectRoot, runRoot, "dynamic expansion run root");
   const manifestDir = path.join(runRoot, "dynamic-expansions");
   assertPathInside(runRoot, manifestDir, "dynamic expansion manifest directory");
   const archiveRoot = path.join(runRoot, "dynamic-expansion-history");
   assertPathInside(runRoot, archiveRoot, "dynamic expansion history");
-  const recovered = finishPendingDynamicExpansionRetryArchives(runRoot, archiveRoot);
+  const recovered = finishPendingDynamicExpansionRetryArchives(runRoot, archiveRoot, projectRoot);
   if (!fs.existsSync(manifestDir)) return recovered;
   assertNoSymlinkComponents(runRoot, manifestDir, "dynamic expansion manifest directory");
   const manifestStat = fs.lstatSync(manifestDir);
@@ -439,12 +443,13 @@ export function archiveDynamicExpansionsForRetry(input: {
   fsyncDirectory(manifestDir);
   fsyncDirectory(archiveRoot);
   fsyncDirectory(runRoot);
-  return finishDynamicExpansionRetryArchive(runRoot, archiveDir);
+  return finishDynamicExpansionRetryArchive(runRoot, archiveDir, projectRoot);
 }
 
 function finishPendingDynamicExpansionRetryArchives(
   runRoot: string,
-  archiveRoot: string
+  archiveRoot: string,
+  projectRoot?: string
 ): DynamicExpansionRetryArchive | undefined {
   if (!fs.existsSync(archiveRoot)) return undefined;
   assertNoSymlinkComponents(runRoot, archiveRoot, "dynamic expansion history");
@@ -462,13 +467,17 @@ function finishPendingDynamicExpansionRetryArchives(
     const archiveDir = path.join(archiveRoot, entry.name);
     const archivedManifestDir = path.join(archiveDir, "manifests");
     if (fs.existsSync(archivedManifestDir) && !fs.existsSync(path.join(archiveDir, "retry.json"))) {
-      recovered = finishDynamicExpansionRetryArchive(runRoot, archiveDir);
+      recovered = finishDynamicExpansionRetryArchive(runRoot, archiveDir, projectRoot);
     }
   }
   return recovered;
 }
 
-function finishDynamicExpansionRetryArchive(runRoot: string, archiveDir: string): DynamicExpansionRetryArchive {
+function finishDynamicExpansionRetryArchive(
+  runRoot: string,
+  archiveDir: string,
+  projectRoot?: string
+): DynamicExpansionRetryArchive {
   assertPathInside(runRoot, archiveDir, "dynamic expansion retry archive");
   assertNoSymlinkComponents(runRoot, archiveDir, "dynamic expansion retry archive");
   const archivedManifestDir = path.join(archiveDir, "manifests");
@@ -497,7 +506,7 @@ function finishDynamicExpansionRetryArchive(runRoot: string, archiveDir: string)
       { archiveDir }
     );
   }
-  const archivedAttemptPaths = archiveDynamicAttemptState(runRoot, archiveDir, manifests);
+  const archivedAttemptPaths = archiveDynamicAttemptState(runRoot, archiveDir, manifests, projectRoot);
   publishFileDurableExclusive(
     archiveDir,
     "retry.json",
@@ -556,7 +565,8 @@ function readDynamicExpansionRetryPending(filePath: string): {
 function archiveDynamicAttemptState(
   runRoot: string,
   archiveDir: string,
-  manifests: readonly DynamicExpansionManifest[]
+  manifests: readonly DynamicExpansionManifest[],
+  projectRoot?: string
 ): string[] {
   const storageIds = new Set(manifests.flatMap((manifest) => manifest.items.map((item) => item.storage_id)));
   const ownsAttempt = (attemptId: string): boolean =>
@@ -583,8 +593,8 @@ function archiveDynamicAttemptState(
       const attemptId = root.suffix === "" ? entry.name : entry.name.slice(0, -root.suffix.length);
       return ownsAttempt(attemptId);
     });
-    if (matching.length === 0) continue;
     const destinationRoot = path.join(archiveDir, root.name);
+    if (matching.length === 0 && !fs.existsSync(destinationRoot)) continue;
     fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
     assertNoSymlinkComponents(runRoot, destinationRoot, `archived dynamic retry ${root.name} root`);
     for (const entry of matching) {
@@ -607,8 +617,48 @@ function archiveDynamicAttemptState(
     }
     fsyncDirectory(sourceRoot);
     fsyncDirectory(destinationRoot);
+    if (root.name === "workspaces" && projectRoot !== undefined) {
+      releaseArchivedDynamicWorktreeRegistrations(projectRoot, runRoot, destinationRoot, ownsAttempt);
+    }
   }
   return archivedPaths.sort();
+}
+
+function releaseArchivedDynamicWorktreeRegistrations(
+  projectRoot: string,
+  runRoot: string,
+  archivedWorkspaceRoot: string,
+  ownsAttempt: (attemptId: string) => boolean
+): void {
+  const registered = new Set(
+    execFileSync("git", ["-C", projectRoot, "worktree", "list", "--porcelain", "-z"], {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024
+    })
+      .split("\0")
+      .flatMap((record) => (record.startsWith("worktree ") ? [path.resolve(record.slice("worktree ".length))] : []))
+  );
+  const activeWorkspaceRoot = path.join(runRoot, "workspaces");
+  for (const entry of fs.readdirSync(archivedWorkspaceRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !ownsAttempt(entry.name)) continue;
+    const activePath = path.join(activeWorkspaceRoot, entry.name);
+    if (fs.existsSync(activePath) || !registered.has(path.resolve(activePath))) continue;
+    try {
+      execFileSync("git", ["-C", projectRoot, "worktree", "remove", "--force", activePath], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024
+      });
+    } catch (error) {
+      throw dynamicError(
+        "DYNAMIC_RETRY_WORKTREE_RELEASE_FAILED",
+        "Archived dynamic workspace remains registered in the project repository",
+        {
+          workspacePath: activePath,
+          reason: error instanceof Error ? error.message : String(error)
+        }
+      );
+    }
+  }
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

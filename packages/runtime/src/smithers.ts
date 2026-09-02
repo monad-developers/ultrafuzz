@@ -5204,6 +5204,7 @@ export async function runSmithersLifecycleCommand(input: {
     if (input.retryFailed === true && input.relaunchPaths !== undefined) {
       if (retryProducers.length > 0) {
         archiveDynamicExpansionsForRetry({
+          projectRoot: input.projectRoot,
           runRoot: input.relaunchPaths.runRoot,
           sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
         });
@@ -5217,6 +5218,7 @@ export async function runSmithersLifecycleCommand(input: {
         // explicit retry may archive the complete generation and its attempt
         // state before rematerializing it.
         archiveDynamicExpansionsForRetry({
+          projectRoot: input.projectRoot,
           runRoot: input.relaunchPaths.runRoot,
           archiveCompleteGeneration: true
         });
@@ -5226,6 +5228,7 @@ export async function runSmithersLifecycleCommand(input: {
         // recovery boundary: withdraw a complete generation only when every
         // manifest points at a source that is currently absent.
         archiveDynamicExpansionsForRetry({
+          projectRoot: input.projectRoot,
           runRoot: input.relaunchPaths.runRoot,
           requireMissingSources: true
         });
