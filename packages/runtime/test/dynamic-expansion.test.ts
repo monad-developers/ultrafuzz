@@ -271,12 +271,21 @@ test("persisted expansion rejects prompt-template and dynamic-limit changes", ()
 
 test("explicit source retry archives a complete expansion generation and rejects a partial one", () => {
   const fixture = expansionFixture({ runId: "retry-archive", items: [item(0)] });
-  fixture.invoke();
+  const first = fixture.invoke();
   fixture.invoke({
     groupNodeId: "second",
     nodeIdTemplate: "dynamic:other:{{ item.id }}",
     templateFingerprint: digest("fingerprint:second")
   });
+  const attemptId = first.items[0]!.storage_id;
+  for (const root of ["artifacts", "workspaces", "invariant-suite-workspace-snapshots"]) {
+    const attemptPath = path.join(fixture.runRoot, root, attemptId);
+    fs.mkdirSync(attemptPath, { recursive: true });
+    fs.writeFileSync(path.join(attemptPath, "retained.txt"), `${root} result\n`, "utf8");
+  }
+  const verificationRoot = path.join(fixture.runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(verificationRoot);
+  fs.writeFileSync(path.join(verificationRoot, `${attemptId}.json`), '{"verified":true}\n', "utf8");
 
   const archived = archiveDynamicExpansionsForRetry({
     runRoot: fixture.runRoot,
@@ -285,7 +294,30 @@ test("explicit source retry archives a complete expansion generation and rejects
   assert.ok(archived);
   assert.deepEqual(archived.group_node_ids.sort(), ["fanout", "second"]);
   assert.deepEqual(fs.readdirSync(path.join(fixture.runRoot, "dynamic-expansions")), []);
-  assert.deepEqual(fs.readdirSync(archived.archive_path).sort(), ["fanout.json", "retry.json", "second.json"]);
+  assert.deepEqual(fs.readdirSync(archived.archive_path).sort(), [
+    ".ultrafuzz-verification",
+    "artifacts",
+    "invariant-suite-workspace-snapshots",
+    "manifests",
+    "retry.json",
+    "workspaces"
+  ]);
+  assert.deepEqual(fs.readdirSync(path.join(archived.archive_path, "manifests")).sort(), [
+    "fanout.json",
+    "second.json"
+  ]);
+  for (const root of ["artifacts", "workspaces", "invariant-suite-workspace-snapshots"]) {
+    assert.equal(fs.existsSync(path.join(fixture.runRoot, root, attemptId)), false);
+    assert.equal(
+      fs.readFileSync(path.join(archived.archive_path, root, attemptId, "retained.txt"), "utf8"),
+      `${root} result\n`
+    );
+  }
+  assert.equal(fs.existsSync(path.join(verificationRoot, `${attemptId}.json`)), false);
+  assert.equal(
+    fs.readFileSync(path.join(archived.archive_path, ".ultrafuzz-verification", `${attemptId}.json`), "utf8"),
+    '{"verified":true}\n'
+  );
 
   const mixed = expansionFixture({ runId: "retry-archive-mixed", items: [item(0)] });
   mixed.invoke();

@@ -24847,7 +24847,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
   assert.equal(archivedGenerations.length, 1);
   assert.deepEqual(
     fs.readdirSync(path.join(run.value!.run_root, "dynamic-expansion-history", archivedGenerations[0]!)).sort(),
-    ["fanout.json", "retry.json"]
+    ["manifests", "retry.json"]
   );
 });
 

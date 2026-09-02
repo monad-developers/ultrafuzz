@@ -354,7 +354,10 @@ export function archiveDynamicExpansionsForRetry(input: {
   const runRoot = path.resolve(input.runRoot);
   const manifestDir = path.join(runRoot, "dynamic-expansions");
   assertPathInside(runRoot, manifestDir, "dynamic expansion manifest directory");
-  if (!fs.existsSync(manifestDir)) return undefined;
+  const archiveRoot = path.join(runRoot, "dynamic-expansion-history");
+  assertPathInside(runRoot, archiveRoot, "dynamic expansion history");
+  const recovered = finishPendingDynamicExpansionRetryArchives(runRoot, archiveRoot);
+  if (!fs.existsSync(manifestDir)) return recovered;
   assertNoSymlinkComponents(runRoot, manifestDir, "dynamic expansion manifest directory");
   const manifestStat = fs.lstatSync(manifestDir);
   if (!manifestStat.isDirectory() || manifestStat.isSymbolicLink()) {
@@ -363,7 +366,7 @@ export function archiveDynamicExpansionsForRetry(input: {
     });
   }
   const manifests = readExpansionManifests(manifestDir);
-  if (manifests.length === 0) return undefined;
+  if (manifests.length === 0) return recovered;
 
   const sourceNodeIds = new Set(
     (input.sourceNodeIds ?? []).flatMap((nodeId) => [nodeId, nodeId.startsWith("node:") ? nodeId.slice(5) : nodeId])
@@ -408,18 +411,18 @@ export function archiveDynamicExpansionsForRetry(input: {
     );
   }
 
-  const archiveRoot = path.join(runRoot, "dynamic-expansion-history");
-  assertPathInside(runRoot, archiveRoot, "dynamic expansion history");
   fs.mkdirSync(archiveRoot, { recursive: true, mode: 0o700 });
   assertNoSymlinkComponents(runRoot, archiveRoot, "dynamic expansion history");
   const archivedAt = new Date().toISOString();
   const archiveDir = path.join(archiveRoot, `${archivedAt.replaceAll(":", "-")}-${crypto.randomUUID()}`);
   assertPathInside(runRoot, archiveDir, "dynamic expansion retry archive");
-  fs.renameSync(manifestDir, archiveDir);
+  fs.mkdirSync(archiveDir, { mode: 0o700 });
+  const archivedManifestDir = path.join(archiveDir, "manifests");
+  fs.renameSync(manifestDir, archivedManifestDir);
   fs.mkdirSync(manifestDir, { mode: manifestStat.mode & 0o777 });
   publishFileDurableExclusive(
     archiveDir,
-    "retry.json",
+    "retry.pending.json",
     `${JSON.stringify(
       {
         schema_version: "ultrafuzz.dynamic-expansion-retry.v1",
@@ -434,10 +437,180 @@ export function archiveDynamicExpansionsForRetry(input: {
   fsyncDirectory(manifestDir);
   fsyncDirectory(archiveRoot);
   fsyncDirectory(runRoot);
+  return finishDynamicExpansionRetryArchive(runRoot, archiveDir);
+}
+
+function finishPendingDynamicExpansionRetryArchives(
+  runRoot: string,
+  archiveRoot: string
+): DynamicExpansionRetryArchive | undefined {
+  if (!fs.existsSync(archiveRoot)) return undefined;
+  assertNoSymlinkComponents(runRoot, archiveRoot, "dynamic expansion history");
+  const archiveRootStat = fs.lstatSync(archiveRoot);
+  if (!archiveRootStat.isDirectory() || archiveRootStat.isSymbolicLink()) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Dynamic expansion history is not a directory", {
+      archiveRoot
+    });
+  }
+  let recovered: DynamicExpansionRetryArchive | undefined;
+  for (const entry of fs
+    .readdirSync(archiveRoot, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const archiveDir = path.join(archiveRoot, entry.name);
+    const archivedManifestDir = path.join(archiveDir, "manifests");
+    if (fs.existsSync(archivedManifestDir) && !fs.existsSync(path.join(archiveDir, "retry.json"))) {
+      recovered = finishDynamicExpansionRetryArchive(runRoot, archiveDir);
+    }
+  }
+  return recovered;
+}
+
+function finishDynamicExpansionRetryArchive(runRoot: string, archiveDir: string): DynamicExpansionRetryArchive {
+  assertPathInside(runRoot, archiveDir, "dynamic expansion retry archive");
+  assertNoSymlinkComponents(runRoot, archiveDir, "dynamic expansion retry archive");
+  const archivedManifestDir = path.join(archiveDir, "manifests");
+  assertNoSymlinkComponents(runRoot, archivedManifestDir, "archived dynamic expansion manifests");
+  const manifests = readExpansionManifests(archivedManifestDir);
+  if (manifests.length === 0) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Dynamic expansion retry archive has no manifests", {
+      archiveDir
+    });
+  }
+  const pendingPath = path.join(archiveDir, "retry.pending.json");
+  const pending = fs.existsSync(pendingPath)
+    ? readDynamicExpansionRetryPending(pendingPath)
+    : {
+        archived_at: new Date().toISOString(),
+        source_node_ids: uniqueStrings(
+          manifests.flatMap((manifest) => [manifest.source.node_id, manifest.source.attempt_id])
+        ),
+        group_node_ids: manifests.map((manifest) => manifest.group_node_id)
+      };
+  const groupNodeIds = manifests.map((manifest) => manifest.group_node_id);
+  if (stableJson([...pending.group_node_ids].sort()) !== stableJson([...groupNodeIds].sort())) {
+    throw dynamicError(
+      "DYNAMIC_RETRY_EXPANSION_INVALID",
+      "Dynamic expansion retry metadata does not match its archived manifests",
+      { archiveDir }
+    );
+  }
+  const archivedAttemptPaths = archiveDynamicAttemptState(runRoot, archiveDir, manifests);
+  publishFileDurableExclusive(
+    archiveDir,
+    "retry.json",
+    `${JSON.stringify(
+      {
+        schema_version: "ultrafuzz.dynamic-expansion-retry.v1",
+        archived_at: pending.archived_at,
+        source_node_ids: pending.source_node_ids,
+        group_node_ids: groupNodeIds,
+        archived_attempt_paths: archivedAttemptPaths
+      },
+      null,
+      2
+    )}\n`
+  );
+  fs.rmSync(pendingPath, { force: true });
+  fsyncDirectory(archiveDir);
+  fsyncDirectory(path.dirname(archiveDir));
+  return { archive_path: archiveDir, group_node_ids: groupNodeIds };
+}
+
+function readDynamicExpansionRetryPending(filePath: string): {
+  archived_at: string;
+  source_node_ids: string[];
+  group_node_ids: string[];
+} {
+  let value: unknown;
+  try {
+    value = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+  } catch (error) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Invalid dynamic expansion retry metadata", {
+      filePath,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (
+    !isPlainRecord(value) ||
+    value.schema_version !== "ultrafuzz.dynamic-expansion-retry.v1" ||
+    typeof value.archived_at !== "string" ||
+    !Array.isArray(value.source_node_ids) ||
+    !value.source_node_ids.every((entry) => typeof entry === "string") ||
+    !Array.isArray(value.group_node_ids) ||
+    !value.group_node_ids.every((entry) => typeof entry === "string")
+  ) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Invalid dynamic expansion retry metadata", {
+      filePath
+    });
+  }
   return {
-    archive_path: archiveDir,
-    group_node_ids: manifests.map((manifest) => manifest.group_node_id)
+    archived_at: value.archived_at,
+    source_node_ids: value.source_node_ids,
+    group_node_ids: value.group_node_ids
   };
+}
+
+function archiveDynamicAttemptState(
+  runRoot: string,
+  archiveDir: string,
+  manifests: readonly DynamicExpansionManifest[]
+): string[] {
+  const storageIds = new Set(manifests.flatMap((manifest) => manifest.items.map((item) => item.storage_id)));
+  const ownsAttempt = (attemptId: string): boolean =>
+    [...storageIds].some((storageId) => attemptId === storageId || attemptId.startsWith(`${storageId}__model_`));
+  const archivedPaths: string[] = [];
+  const roots = [
+    { name: "artifacts", kind: "directory", suffix: "" },
+    { name: "workspaces", kind: "directory", suffix: "" },
+    { name: "invariant-suite-workspace-snapshots", kind: "directory", suffix: "" },
+    { name: ".ultrafuzz-verification", kind: "file", suffix: ".json" }
+  ] as const;
+  for (const root of roots) {
+    const sourceRoot = path.join(runRoot, root.name);
+    if (!fs.existsSync(sourceRoot)) continue;
+    assertNoSymlinkComponents(runRoot, sourceRoot, `dynamic retry ${root.name} root`);
+    const sourceRootStat = fs.lstatSync(sourceRoot);
+    if (!sourceRootStat.isDirectory() || sourceRootStat.isSymbolicLink()) {
+      throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", `Dynamic retry ${root.name} root is not a directory`, {
+        sourceRoot
+      });
+    }
+    const matching = fs.readdirSync(sourceRoot, { withFileTypes: true }).filter((entry) => {
+      if (root.suffix !== "" && !entry.name.endsWith(root.suffix)) return false;
+      const attemptId = root.suffix === "" ? entry.name : entry.name.slice(0, -root.suffix.length);
+      return ownsAttempt(attemptId);
+    });
+    if (matching.length === 0) continue;
+    const destinationRoot = path.join(archiveDir, root.name);
+    fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+    assertNoSymlinkComponents(runRoot, destinationRoot, `archived dynamic retry ${root.name} root`);
+    for (const entry of matching) {
+      if (entry.isSymbolicLink() || (root.kind === "directory" ? !entry.isDirectory() : !entry.isFile())) {
+        throw dynamicError(
+          "DYNAMIC_RETRY_EXPANSION_INVALID",
+          `Dynamic retry ${root.name} entry has an unexpected file type`,
+          { entry: entry.name }
+        );
+      }
+      const source = path.join(sourceRoot, entry.name);
+      const destination = path.join(destinationRoot, entry.name);
+      if (fs.existsSync(destination)) {
+        throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Dynamic retry archive destination already exists", {
+          destination
+        });
+      }
+      fs.renameSync(source, destination);
+      archivedPaths.push(path.relative(runRoot, destination).split(path.sep).join("/"));
+    }
+    fsyncDirectory(sourceRoot);
+    fsyncDirectory(destinationRoot);
+  }
+  return archivedPaths.sort();
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
 }
 
 export function dynamicStorageId(groupNodeId: string, generatedNodeId: string): string {
