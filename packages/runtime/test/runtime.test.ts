@@ -24940,6 +24940,53 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   );
 });
 
+test("ordinary resume restores missing static presentation prompts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-ordinary-resume-prompt-run",
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "failed", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "ordinary-resume-prompt-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const plan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
+  };
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery")!;
+  const snapshotPath = path.join(run.value!.run_root, plannedPrompt.rendered_prompt_snapshot_path);
+  const expectedPrompt = fs.readFileSync(snapshotPath);
+  fs.rmSync(plannedPrompt.rendered_prompt_path);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "ordinary-resume-prompt-run",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /^timetravel /mu, "ordinary resume must not reset any node");
+  assert.match(
+    commands,
+    /up .*ultrafuzz-ordinary-resume-prompt-run\.tsx --resume ultrafuzz-ordinary-resume-prompt-run --run-id ultrafuzz-ordinary-resume-prompt-run --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
+  );
+});
+
 testWhen(realSmithersGraphUnavailable() === false)(
   "compiled Smithers workflow passes a real non-executing graph smoke",
   async () => {

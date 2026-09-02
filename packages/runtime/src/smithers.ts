@@ -5066,10 +5066,10 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
 
 /**
  * Restore missing presentation prompts from immutable plan snapshots before Smithers renders a
- * reset continuation. `timetravel` owns task artifact directories and can remove these launch-time
- * copies even though persisted frames still refer to them. A later reset renders the whole graph,
- * so a prompt removed by any earlier reset must be available too. Only static agent tasks have plan
- * rows here; dynamic tasks keep their runtime materialization path.
+ * continuation. `timetravel` owns task artifact directories and can remove these launch-time copies
+ * even though persisted frames still refer to them. Any later resume renders the whole graph, so a
+ * prompt removed by an earlier reset must be available too. Only static agent tasks have plan rows
+ * here; dynamic tasks keep their runtime materialization path.
  */
 function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
   const runRoot = path.resolve(input.runRoot);
@@ -5419,6 +5419,13 @@ export async function runSmithersLifecycleCommand(input: {
       command: resumeResult.command,
       workflowRunId: forkedRunId
     };
+  }
+
+  if (input.action === "resume" && input.relaunchPaths !== undefined) {
+    restoreMissingRenderedPrompts({
+      projectRoot: input.projectRoot,
+      runRoot: input.relaunchPaths.runRoot
+    });
   }
 
   const command =
