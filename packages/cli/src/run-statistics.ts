@@ -332,7 +332,20 @@ function assertEvidenceBindings(evidence: StatisticsEvidence): void {
     ) {
       throw new Error("run metadata workflow IDs do not exactly identify the active workflow");
     }
-    if (!sameStrings(graphWorkflowTaskIds, metadataWorkflowTaskIds)) {
+    const metadataWorkflowTaskIdSet = new Set(metadataWorkflowTaskIds);
+    const dynamicWorkflowTaskIdSet = new Set(
+      evidence.graph.nodes.flatMap((node) =>
+        node.dynamic_generated === undefined ? [] : (node.workflow?.task_node_ids ?? [])
+      )
+    );
+    const addedGraphWorkflowTaskIds = graphWorkflowTaskIds.filter(
+      (taskNodeId) => !metadataWorkflowTaskIdSet.has(taskNodeId)
+    );
+    const matchesAdditiveDynamicExpansion =
+      addedGraphWorkflowTaskIds.length > 0 &&
+      metadataWorkflowTaskIds.every((taskNodeId) => graphWorkflowTaskIds.includes(taskNodeId)) &&
+      addedGraphWorkflowTaskIds.every((taskNodeId) => dynamicWorkflowTaskIdSet.has(taskNodeId));
+    if (!sameStrings(graphWorkflowTaskIds, metadataWorkflowTaskIds) && !matchesAdditiveDynamicExpansion) {
       throw new Error("planned graph workflow task IDs do not match run metadata");
     }
     const provenance = evidence.state.provenance?.workflow;
