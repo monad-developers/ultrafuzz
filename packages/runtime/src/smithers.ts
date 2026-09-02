@@ -66,7 +66,7 @@ import {
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
-import { archiveDynamicExpansionsForRetry } from "./dynamic-expansion.js";
+import { archiveDynamicExpansionsForRetry } from "./dynamic-expansion-retry.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,

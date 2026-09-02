@@ -278,7 +278,9 @@ test("explicit source retry archives a complete expansion generation and rejects
     nodeIdTemplate: "dynamic:other:{{ item.id }}",
     templateFingerprint: digest("fingerprint:second")
   });
-  const attemptId = first.items[0]!.storage_id;
+  const [firstItem] = first.items;
+  assert.ok(firstItem);
+  const attemptId = firstItem.storage_id;
   execFileSync("git", ["init", "-q"], { cwd: fixture.runRoot });
   execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: fixture.runRoot });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: fixture.runRoot });
