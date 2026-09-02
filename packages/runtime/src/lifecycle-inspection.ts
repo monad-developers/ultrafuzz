@@ -410,10 +410,17 @@ export async function listRunSnapshots(input: WorkflowRunQueryInput) {
 
 export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    observeOnly: true,
+    tolerateControlDivergence: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
   }
+  const controlDiagnostics = workflowControlDivergenceDiagnostics(
+    evidence.verifiedControl.divergences,
+    evidence.verifiedControl.paths.integrityPath
+  );
   const limit = boundedEventLimit(input.limit);
   const events: WorkflowLifecycleEvent[] = [];
   let previousSequence: number | undefined;
@@ -446,13 +453,17 @@ export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
     return runtimeFailure<WorkflowEventsValue>([streamFailure]);
   }
   const truncated = stream.truncated && stream.lines > limit;
-  return runtimeResult<WorkflowEventsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    events: events.slice(0, limit),
-    limit,
-    truncated: truncated || events.length > limit
-  });
+  return runtimeResult<WorkflowEventsValue>(
+    true,
+    {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      events: events.slice(0, limit),
+      limit,
+      truncated: truncated || events.length > limit
+    },
+    controlDiagnostics
+  );
 }
 
 /**
@@ -463,10 +474,17 @@ export async function watchWorkflowEvents(
   input: WorkflowEventsQueryInput & { intervalSeconds?: number; onEvent: (event: WorkflowLifecycleEvent) => void }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    observeOnly: true,
+    tolerateControlDivergence: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
   }
+  const controlDiagnostics = workflowControlDivergenceDiagnostics(
+    evidence.verifiedControl.divergences,
+    evidence.verifiedControl.paths.integrityPath
+  );
   const limit = boundedEventLimit(input.limit);
   let observed = 0;
   let previousSequence: number | undefined;
@@ -501,13 +519,30 @@ export async function watchWorkflowEvents(
   if (streamFailure !== undefined) {
     return runtimeFailure<WorkflowEventsValue>([streamFailure]);
   }
-  return runtimeResult<WorkflowEventsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    events: [],
-    limit: observed,
-    truncated: stream.truncated
-  });
+  return runtimeResult<WorkflowEventsValue>(
+    true,
+    {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      events: [],
+      limit: observed,
+      truncated: stream.truncated
+    },
+    controlDiagnostics
+  );
+}
+
+function workflowControlDivergenceDiagnostics(
+  divergences: readonly string[],
+  integrityPath: string
+): RuntimeDiagnostic[] {
+  return divergences.map((message) => ({
+    code: "WORKFLOW_CONTROL_EVIDENCE_DIVERGED",
+    message,
+    severity: "warning",
+    source: "workflow",
+    path: integrityPath
+  }));
 }
 
 export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
