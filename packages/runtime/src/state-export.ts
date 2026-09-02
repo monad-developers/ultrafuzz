@@ -34,6 +34,7 @@ import type {
   PublicRunState,
   WorkflowCommandSummary
 } from "./types.js";
+import { retryTransientSnapshotRead } from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
@@ -264,7 +265,7 @@ export async function getRunHealth(input: {
     ]);
   }
   const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
-  const state = readRunState(evidence.layout);
+  const state = retryTransientSnapshotRead(() => readRunState(evidence.layout));
   const metadata = readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId);
   const auditProfile = metadata.audit_profile;
   const lifecycleDivergence = workflowLifecycleDivergenceDiagnostic(
@@ -383,7 +384,7 @@ function checkedRunLayout(runsRoot: string, runId: string) {
 function readRunListEntry(runRoot: string, runId: string): RunListEntry {
   const layout = layoutForRunRoot(runRoot, runId);
   const metadata = readRunMetadataDocument(layout.runMetadataPath, runId);
-  const state = readRunState(layout);
+  const state = retryTransientSnapshotRead(() => readRunState(layout));
   return {
     run_id: runId,
     run_root: runRoot,
