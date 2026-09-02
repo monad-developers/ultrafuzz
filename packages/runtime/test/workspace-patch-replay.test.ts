@@ -201,7 +201,7 @@ test("#312 an unrecognised worktree tree replays everything and lets the patch c
  */
 function loadMaterializer(
   collaborators: Record<string, unknown>
-): (task: unknown, workspaceRoot: string, replay: boolean) => void {
+): (task: unknown, workspaceRoot: string, replay: boolean, evidenceMode?: "create" | "require") => void {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const slice = (name: string): string => {
     const start = source.indexOf(`\nfunction ${name}(`);
@@ -227,6 +227,7 @@ function loadMaterializer(
     slice("decodeStrictUtf8Snapshot"),
     slice("parseStrictJsonSnapshot"),
     slice("firstDependencyRequiringReplay"),
+    slice("supersededPreparationDependencyBase"),
     // The production helper receives this projection from the sealed dependency
     // admission established during input verification. Rebuild the same minimal
     // projection from the real fixture files so these replay tests keep exercising
@@ -315,7 +316,8 @@ function loadMaterializer(
   return new Function(...names, emitted)(...Object.values(injected)) as (
     task: unknown,
     workspaceRoot: string,
-    replay: boolean
+    replay: boolean,
+    evidenceMode?: "create" | "require"
   ) => void;
 }
 
@@ -394,6 +396,7 @@ function materializerCollaborators(overrides: Record<string, unknown>): Record<s
     applyWorkspacePatch: () => undefined,
     workspacePatchPreparationTrees: new Map<string, string>(),
     workspacePatchBaselineTrees: new Map<string, string>(),
+    restoreWorkspaceTreeForDependencyReplay: () => undefined,
     readWorkspacePatchPreparation: () => "preparation-tree",
     writeWorkspacePatchPreparation: () => undefined,
     readWorkspacePatchBaseline: () => undefined,
@@ -407,7 +410,7 @@ function materializerCollaborators(overrides: Record<string, unknown>): Record<s
 function loadFixtureMaterializer(
   entries: readonly DependencyFixtureEntry[],
   overrides: Record<string, unknown> = {}
-): (task: unknown, workspaceRoot: string, replay: boolean) => void {
+): (task: unknown, workspaceRoot: string, replay: boolean, evidenceMode?: "create" | "require") => void {
   return loadMaterializer(
     materializerCollaborators({
       taskSpecs: entries.map((entry) => ({ attemptId: entry.attemptId })),
@@ -480,6 +483,106 @@ test("#312 replay resumes mid-chain from the first dependency the worktree does 
     "patch for /dep/stateful-invariant-handlers",
     "patch for /dep/stateful-invariant-coverage"
   ]);
+});
+
+test("#1081 replacement dependency authority rebinds a reopened producer preparation", () => {
+  const replacementResult = "51a86473d9a816b082fea049ce1501a8921feaf6";
+  const replacement = { attemptId: "setup-dependency", base_tree: PRISTINE, result_tree: replacementResult };
+  withDependencyFixture([replacement], (fixture) => {
+    let currentTree = SETUP_FOUNDRY;
+    const calls: string[] = [];
+    const preparationTrees = new Map([[fixture.task.attemptId, SETUP_FOUNDRY]]);
+    const baselineTrees = new Map<string, string>();
+    const materialize = loadFixtureMaterializer([replacement], {
+      captureWorkspaceTree: () => currentTree,
+      restoreWorkspaceTreeForDependencyReplay: (_root: string, tree: string) => {
+        calls.push(`restore:${tree}`);
+        currentTree = tree;
+      },
+      applyWorkspacePatch: (_root: string, capture: { manifest: { base_tree: string; result_tree: string } }) => {
+        assert.equal(currentTree, capture.manifest.base_tree, "strict patch replay must still begin at its base");
+        calls.push(`apply:${capture.manifest.result_tree}`);
+        currentTree = capture.manifest.result_tree;
+      },
+      workspacePatchPreparationTrees: preparationTrees,
+      workspacePatchBaselineTrees: baselineTrees,
+      readWorkspacePatchPreparation: () => SETUP_FOUNDRY,
+      readWorkspacePatchBaseline: () => SETUP_FOUNDRY,
+      writeWorkspacePatchBaseline: (_task: unknown, tree: string, options: { supersedes?: string }) => {
+        assert.equal(options.supersedes, SETUP_FOUNDRY);
+        calls.push(`baseline:${tree}`);
+      },
+      writeWorkspacePatchPreparation: (_task: unknown, tree: string, options: { supersedes?: string }) => {
+        assert.equal(options.supersedes, SETUP_FOUNDRY);
+        calls.push(`preparation:${tree}`);
+      },
+      taskPublishesWorkspacePatch: () => true
+    });
+
+    materialize(fixture.task, fixture.workspaceRoot, true, "create");
+
+    assert.equal(currentTree, replacementResult);
+    assert.deepEqual(calls, [
+      `restore:${PRISTINE}`,
+      `apply:${replacementResult}`,
+      `baseline:${replacementResult}`,
+      `preparation:${replacementResult}`
+    ]);
+    assert.equal(preparationTrees.get(fixture.task.attemptId), replacementResult);
+    assert.equal(baselineTrees.get(fixture.task.attemptId), replacementResult);
+  });
+});
+
+test("#1081 replacement preparation fails closed before mutation when its authority is inconsistent", () => {
+  const replacementResult = "51a86473d9a816b082fea049ce1501a8921feaf6";
+  const replacement = { attemptId: "setup-dependency", base_tree: PRISTINE, result_tree: replacementResult };
+  withDependencyFixture([replacement], (fixture) => {
+    let mutated = false;
+    const materialize = loadFixtureMaterializer([replacement], {
+      captureWorkspaceTree: () => SETUP_FOUNDRY,
+      restoreWorkspaceTreeForDependencyReplay: () => {
+        mutated = true;
+      },
+      applyWorkspacePatch: () => {
+        mutated = true;
+      },
+      workspacePatchPreparationTrees: new Map([[fixture.task.attemptId, SETUP_FOUNDRY]]),
+      readWorkspacePatchPreparation: () => SETUP_FOUNDRY,
+      readWorkspacePatchBaseline: () => "deadbeef".repeat(5),
+      taskPublishesWorkspacePatch: () => true
+    });
+
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true, "create"),
+      /workspace patch baseline was modified/u
+    );
+    assert.equal(mutated, false);
+  });
+
+  const siblingResult = "e1507a29".padEnd(40, "0");
+  const nonChain = [
+    { attemptId: "sibling-a", base_tree: PRISTINE, result_tree: replacementResult },
+    { attemptId: "sibling-b", base_tree: PRISTINE, result_tree: siblingResult }
+  ];
+  withDependencyFixture(nonChain, (fixture) => {
+    let mutated = false;
+    const materialize = loadFixtureMaterializer(nonChain, {
+      captureWorkspaceTree: () => SETUP_FOUNDRY,
+      restoreWorkspaceTreeForDependencyReplay: () => {
+        mutated = true;
+      },
+      applyWorkspacePatch: () => {
+        mutated = true;
+      },
+      workspacePatchPreparationTrees: new Map([[fixture.task.attemptId, SETUP_FOUNDRY]]),
+      readWorkspacePatchPreparation: () => SETUP_FOUNDRY
+    });
+    assert.throws(
+      () => materialize(fixture.task, fixture.workspaceRoot, true, "create"),
+      /replacement dependency workspace patch chain is not linear/u
+    );
+    assert.equal(mutated, false);
+  });
 });
 
 test("#949 a reopened producer restores stale task-local source before dependency replay and on prepare retry", () => {
