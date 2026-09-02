@@ -26,6 +26,25 @@ export function reconcileSmithersAttemptAgentSelection(
   nodeDetailValue: unknown,
   attemptNumber: number
 ): SmithersAttemptAgentSelection {
+  const selection = inspectSmithersAttemptAgentSelection(task, nodeDetailValue, attemptNumber);
+  if (selection === undefined) {
+    throw new Error(
+      `Smithers attempt authority has no sealed agent-chain selection for attempt ${attemptNumber} of ${JSON.stringify(task.smithersNodeId)}`
+    );
+  }
+  return selection;
+}
+
+/**
+ * Inspect one terminal Smithers attempt without treating a pre-agent failure as
+ * an executed model attempt. Partial or contradictory selection metadata still
+ * fails closed, as does missing selection metadata for a successful attempt.
+ */
+export function inspectSmithersAttemptAgentSelection(
+  task: SmithersTaskManifestTask,
+  nodeDetailValue: unknown,
+  attemptNumber: number
+): SmithersAttemptAgentSelection | undefined {
   if (!Number.isSafeInteger(attemptNumber) || attemptNumber <= 0) {
     throw new Error("Smithers attempt authority requested an invalid attempt number");
   }
@@ -54,6 +73,11 @@ export function reconcileSmithersAttemptAgentSelection(
   }
   const meta = recordField(attempt, "meta");
   const chainIndex = meta?.agentChainIndex;
+  const hasSelectionMetadata =
+    meta !== undefined && ["agentChainIndex", "agentId", "agentModel"].some((field) => Object.hasOwn(meta, field));
+  if (!hasSelectionMetadata && (attempt.state === "failed" || attempt.state === "cancelled")) {
+    return undefined;
+  }
   if (!Number.isSafeInteger(chainIndex) || Number(chainIndex) < 0 || Number(chainIndex) >= task.agentChain.length) {
     throw new Error(
       `Smithers attempt authority has no sealed agent-chain selection for attempt ${attemptNumber} of ${JSON.stringify(task.smithersNodeId)}`

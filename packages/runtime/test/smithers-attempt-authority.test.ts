@@ -3,7 +3,11 @@ import test from "node:test";
 
 import type { SmithersTaskManifestTask } from "@ultrafuzz/artifacts";
 
-import { reconcileSmithersAttemptAgentSelection, smithersTaskAgentId } from "../src/smithers-attempt-authority.js";
+import {
+  inspectSmithersAttemptAgentSelection,
+  reconcileSmithersAttemptAgentSelection,
+  smithersTaskAgentId
+} from "../src/smithers-attempt-authority.js";
 
 function sealedTask(
   agentChain: Array<{
@@ -146,5 +150,40 @@ test("Smithers authority fails closed when durable selection metadata is missing
         1
       ),
     /agent ID does not match sealed chain rung 1/u
+  );
+});
+
+test("Smithers authority distinguishes a pre-agent terminal failure from an executed attempt", () => {
+  const task = sealedTask([
+    { profileId: "primary", agentRef: "CodexAgent", modelName: "gpt-primary", role: "primary" }
+  ]);
+  const failedBeforeSelection = {
+    node: { nodeId: task.smithersNodeId, lastAttempt: 1 },
+    attempts: [{ nodeId: task.smithersNodeId, attempt: 1, state: "failed", meta: {} }]
+  };
+
+  assert.equal(inspectSmithersAttemptAgentSelection(task, failedBeforeSelection, 1), undefined);
+  assert.throws(
+    () => reconcileSmithersAttemptAgentSelection(task, failedBeforeSelection, 1),
+    /no sealed agent-chain selection/u
+  );
+  assert.throws(
+    () =>
+      inspectSmithersAttemptAgentSelection(
+        task,
+        {
+          node: { nodeId: task.smithersNodeId, lastAttempt: 1 },
+          attempts: [
+            {
+              nodeId: task.smithersNodeId,
+              attempt: 1,
+              state: "failed",
+              meta: { agentId: smithersTaskAgentId(task, 0) }
+            }
+          ]
+        },
+        1
+      ),
+    /no sealed agent-chain selection/u
   );
 });

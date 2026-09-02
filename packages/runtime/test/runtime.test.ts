@@ -20824,6 +20824,50 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   );
 });
 
+test("syncRun excludes a pre-agent terminal failure from the model-attempt ledger", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-pre-agent-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "workspace preparation failed before agent launch" }
+      }
+    ]),
+    nodeDetails: {
+      "node:project-discovery": {
+        node: { nodeId: "node:project-discovery", lastAttempt: 1 },
+        attempts: [{ nodeId: "node:project-discovery", attempt: 1, state: "failed", meta: {} }]
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "pre-agent-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "pre-agent-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; retry_count?: number }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.equal(state.nodes?.["project-discovery"]?.retry_count, 0);
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+});
+
 test("syncRun keeps redacted failure state and attempt evidence stable across credential rotation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
