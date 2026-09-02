@@ -191,7 +191,7 @@ export function rehydrateCompatibleDynamicAttempt(
   assertPathInside(runRoot, artifactDir, "rehydrated dynamic artifact directory");
   if (
     activeMarkerBytes === undefined
-      ? !activeArtifactCanAcceptRecovery(runRoot, artifactDir, candidate.files)
+      ? !activeArtifactDoesNotConflict(runRoot, artifactDir, candidate.files)
       : !activeArtifactContainsRecovery(runRoot, artifactDir, candidate.files)
   ) {
     return undefined;
@@ -346,7 +346,7 @@ function expectedArtifactAuthority(outputs: readonly SmithersTaskManifestOutput[
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function activeArtifactCanAcceptRecovery(
+function activeArtifactDoesNotConflict(
   runRoot: string,
   artifactDir: string,
   expectedFiles: ReadonlyMap<string, Buffer>
@@ -362,7 +362,11 @@ function activeArtifactCanAcceptRecovery(
   const observed = listRegularArtifactFiles(runRoot, artifactDir);
   for (const relativePath of observed) {
     const expected = expectedFiles.get(relativePath);
-    if (expected === undefined) return false;
+    // A stopped replacement attempt may have produced runtime-owned or agent
+    // sidecars. They are not part of the recovered verification authority and
+    // are never returned to dependents, so only a conflicting authoritative
+    // path can make reuse unsafe.
+    if (expected === undefined) continue;
     let current: Buffer;
     try {
       current = readCheckedFile(

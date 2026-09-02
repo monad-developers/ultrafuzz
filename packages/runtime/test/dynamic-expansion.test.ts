@@ -429,6 +429,8 @@ test("identical dynamic generations rehydrate only exact verified publications",
     sourceNodeIds: ["planner"]
   });
   const regenerated = fixture.invoke();
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "interrupted-attempt-sidecar.txt"), "partial\n");
   const recovered = rehydrateCompatibleDynamicAttempt({
     runRoot: fixture.runRoot,
     attemptId,
