@@ -19,7 +19,16 @@ import {
   type RunState
 } from "@ultrafuzz/artifacts";
 
-import { initProject, materializeDynamicRuntime, readLinkedWorkflowEvidence, startRun, syncRun } from "../src/index.js";
+import {
+  initProject,
+  materializeDynamicRuntime,
+  queryWorkflowEvents,
+  readLinkedWorkflowEvidence,
+  startRun,
+  syncRun,
+  watchWorkflowEvents,
+  type WorkflowLifecycleEvent
+} from "../src/index.js";
 import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import {
   refreshedSmithersControllerSnapshot,
@@ -656,6 +665,56 @@ test("a half-published dynamic expansion stays readable while execution stays cl
 
   // Reporting must never re-publish the missing prompt on the observer's behalf.
   assert.equal(fs.existsSync(generated.renderedPromptPath!), false);
+});
+
+test("event observers stay readable while a retried dynamic source is rematerialized", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-source-retry-events" });
+  const [firstTask] = fixture.generatedTasks;
+  assert.ok(firstTask);
+  const eventNodeId = firstTask.smithersNodeId;
+  setLifecycle(fixture, [], [{ type: "NodeStarted", nodeId: eventNodeId, attempt: 2 }]);
+  const sourcePath = path.join(fixture.runRoot, "artifacts", "planner", "plan.json");
+  fs.rmSync(sourcePath);
+
+  const strict = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(strict.ok, false);
+  if (!strict.ok) {
+    assert.match(strict.diagnostics[0]?.message ?? "", /dynamic source artifact does not exist/u);
+  }
+
+  const queried = await queryWorkflowEvents({
+    projectRoot: fixture.project,
+    runId: fixture.runId,
+    env: fixture.env
+  });
+  assert.equal(queried.ok, true, JSON.stringify(queried.diagnostics));
+  assert.equal(queried.value?.events[0]?.category, "NodeStarted");
+  assert.equal(queried.value?.events[0]?.node_id, eventNodeId);
+  assert.ok(
+    queried.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED" &&
+        /dynamic source artifact does not exist/u.test(diagnostic.message)
+    ),
+    JSON.stringify(queried.diagnostics)
+  );
+
+  const streamed: WorkflowLifecycleEvent[] = [];
+  const watched = await watchWorkflowEvents({
+    projectRoot: fixture.project,
+    runId: fixture.runId,
+    env: fixture.env,
+    onEvent: (event) => streamed.push(event)
+  });
+  assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
+  assert.equal(streamed[0]?.category, "NodeStarted");
+  assert.ok(
+    watched.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED"),
+    JSON.stringify(watched.diagnostics)
+  );
+
+  // Observation must not recreate or otherwise repair the dynamic source on the controller's behalf.
+  assert.equal(fs.existsSync(sourcePath), false);
 });
 
 test("controller refresh preserves the sealed dynamic base after runtime materialization", async () => {
