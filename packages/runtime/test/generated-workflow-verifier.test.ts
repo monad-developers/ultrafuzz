@@ -3773,12 +3773,11 @@ test("canonical property parity is exact and JSON-safe for every schema-valid de
     )
   );
 
+  // Blank lines are spacing, not content. The grammar documented to the agent
+  // forbids bullets, tables, bare tokens, indented multiline values, aliases,
+  // and extra, duplicate or unknown fields -- it never forbids a blank line.
   const blankLine = markdown.replace('priority: "high"', 'priority: "high"\n');
-  assert.ok(
-    canonicalPropertiesMarkdownParityIssues(catalog, blankLine, "properties.md").some(
-      (issue) => issue.code === "PROPERTY_MARKDOWN_PARITY_MISSING"
-    )
-  );
+  assert.deepEqual(canonicalPropertiesMarkdownParityIssues(catalog, blankLine, "properties.md"), []);
 });
 
 test("canonical property parity rejects explicit empty optional Markdown arrays", () => {
@@ -3863,11 +3862,15 @@ test("invariant Markdown parity assigns exact fields and rejects duplicate or ex
   );
 
   const blankEntryLine = valid.replace('kind: "invariant"', 'kind: "invariant"\n');
-  assert.ok(
-    invariantLedgerMarkdownParityIssues(ledger, blankEntryLine, "discovery.md").some(
-      (issue) => issue.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING"
-    )
-  );
+  assert.deepEqual(invariantLedgerMarkdownParityIssues(ledger, blankEntryLine, "discovery.md"), []);
+
+  // The shape a real agent produced: a blank line after the heading and before
+  // the closing delimiter. Every entry in a document carries the same spacing,
+  // so rejecting it failed all of them at once and killed the campaign.
+  const blankAroundBlock = valid
+    .replace('### Ledger entry: "evidence-one"\n', '### Ledger entry: "evidence-one"\n\n')
+    .replace('\n### End ledger entry: "evidence-one"', '\n\n### End ledger entry: "evidence-one"');
+  assert.deepEqual(invariantLedgerMarkdownParityIssues(ledger, blankAroundBlock, "discovery.md"), []);
 
   const duplicate = `${valid}\n${entryBlock}`;
   const duplicateIssues = invariantLedgerMarkdownParityIssues(ledger, duplicate, "discovery.md");

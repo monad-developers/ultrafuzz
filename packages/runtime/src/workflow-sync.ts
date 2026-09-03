@@ -115,7 +115,11 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
-import { reconcileSmithersAttemptAgentSelection, smithersTaskAgentId } from "./smithers-attempt-authority.js";
+import {
+  inspectSmithersAttemptAgentSelection,
+  reconcileSmithersAttemptAgentSelection,
+  smithersTaskAgentId
+} from "./smithers-attempt-authority.js";
 import { isRecord } from "@ultrafuzz/artifacts";
 
 type StoredWorkflowTask = SmithersTaskManifestTask;
@@ -1818,7 +1822,7 @@ async function inspectTerminalAttemptAuthorities(input: {
     }
     const task = tasksByNodeId.get(first.nodeId)!;
     for (const attempt of attempts) {
-      reconcileSmithersAttemptAgentSelection(task, snapshot.json, attempt.retry);
+      inspectSmithersAttemptAgentSelection(task, snapshot.json, attempt.retry);
     }
     authorities.set(key, snapshot.json);
   }
@@ -4747,7 +4751,7 @@ function appendTerminalTaskAttempts(input: {
   forbiddenSecretValues: readonly string[];
 }): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
   const allExisting = replayNodeAttempts(input.layout).entries;
-  const terminalAttempts = terminalWorkflowAttempts(input.events, {
+  const observedTerminalAttempts = terminalWorkflowAttempts(input.events, {
     recordedTerminalSequences: recordedTerminalAttemptSequencesFromEntries(allExisting, input.workflowRunId),
     authorizeUnrecordedSuperseded: (attempt, context) =>
       context.crossedRunActivation &&
@@ -4760,6 +4764,20 @@ function appendTerminalTaskAttempts(input: {
         context
       )
   });
+  const terminalAttempts =
+    input.task.execution.mode === "local"
+      ? observedTerminalAttempts.filter((attempt) => {
+          const detail = input.attemptAuthorities.get(
+            smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration)
+          );
+          if (detail === undefined) {
+            throw new Error(
+              `Smithers attempt authority is unavailable for attempt ${String(attempt.retry)} of ${JSON.stringify(attempt.nodeId)}`
+            );
+          }
+          return inspectSmithersAttemptAgentSelection(input.task, detail, attempt.retry) !== undefined;
+        })
+      : observedTerminalAttempts;
   const state = readRunState(input.layout);
   const inputManifestDigest = manifestDigest(
     JSON.stringify({

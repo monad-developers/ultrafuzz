@@ -13,12 +13,22 @@ export default class Ps extends Command {
     emitCommandResult(
       this,
       "ps",
-      commandFromRuntime(
-        "ps",
-        result,
-        (value) =>
-          `${value.runs.map((run) => `${run.ultrafuzz_run_id ?? "-"}\t${run.workflow_run_id}\t${run.workflow_status ?? run.ultrafuzz_status ?? "-"}\t${run.run_root ?? ""}`).join("\n")}\n`
-      ),
+      commandFromRuntime("ps", result, (value) => {
+        const listed = new Set(value.runs.map((run) => run.ultrafuzz_run_id).filter((id) => id !== undefined));
+        // A run that never reached a workflow -- a failed launch, or a
+        // directory this build cannot read -- has no row in `runs`. Listing
+        // only that view hides exactly the runs an operator is looking for
+        // when something went wrong, and hides the id `clean` needs.
+        const productOnly = value.product_runs.filter((run) => !listed.has(run.run_id));
+        const rows = [
+          ...value.runs.map(
+            (run) =>
+              `${run.ultrafuzz_run_id ?? "-"}\t${run.workflow_run_id}\t${run.workflow_status ?? run.ultrafuzz_status ?? "-"}\t${run.run_root ?? ""}`
+          ),
+          ...productOnly.map((run) => `${run.run_id}\t-\t${run.status}\t${run.run_root}`)
+        ];
+        return `${rows.join("\n")}\n`;
+      }),
       flags.json === true
     );
   }
