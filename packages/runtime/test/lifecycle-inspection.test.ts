@@ -901,6 +901,56 @@ test("getWorkflowNode returns focused status without attempt or tool detail by d
   assert.match(smithersLog(project), /node node:project-discovery --run-id ultrafuzz-inspect-run --format json/u);
 });
 
+test("getWorkflowNode accepts a reset current attempt below retained history", async () => {
+  const detail = nodeDetailFixture() as {
+    node: { lastAttempt: number };
+    attempts: Array<{
+      attempt: number;
+      state: string;
+      tokenUsage: Record<string, unknown>;
+      toolCalls: Array<{ attempt: number }>;
+    }>;
+    toolCalls: Array<{ attempt: number }>;
+    tokenUsage: { byAttempt: Array<{ attempt: number; usage: Record<string, unknown> }> };
+  };
+  const [historical, current] = detail.attempts;
+  assert.ok(historical);
+  assert.ok(current);
+  // The runner presents retained attempts in numeric order, while lastAttempt
+  // identifies the current occurrence after a reset reuses the counter.
+  const retained = {
+    ...historical,
+    attempt: 2,
+    toolCalls: historical.toolCalls.map((call) => ({ ...call, attempt: 2 }))
+  };
+  detail.attempts = [{ ...current, attempt: 1 }, retained];
+  detail.toolCalls = retained.toolCalls;
+  detail.tokenUsage.byAttempt = detail.attempts.map((attempt) => ({
+    attempt: attempt.attempt,
+    usage: attempt.tokenUsage
+  }));
+  detail.node.lastAttempt = 1;
+  const { project, env } = await launchedProject({ node: detail });
+
+  const node = await getWorkflowNode({
+    projectRoot: project,
+    runId: "inspect-run",
+    nodeId: "node:project-discovery",
+    attempts: true,
+    env
+  });
+
+  assert.equal(node.ok, true, JSON.stringify(node.diagnostics));
+  assert.deepEqual(
+    node.value?.attempts.map((attempt) => attempt.attempt),
+    [1, 2]
+  );
+  assert.deepEqual(
+    node.value?.attempts.map((attempt) => attempt.state),
+    ["finished", "failed"]
+  );
+});
+
 test("getWorkflowNode includes attempts on request and tool payloads only with --tools", async () => {
   const { project, env } = await launchedProject({ node: nodeDetailFixture() });
 

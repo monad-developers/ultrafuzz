@@ -392,6 +392,72 @@ test("stats rejects evidence that is not bound to the requested run or graph con
   assert.throws(() => deriveRunStatistics(unlinked), /unlinked run evidence cannot carry node attempts/iu);
 });
 
+test("stats accepts only additive workflow tasks from dynamic graph expansion", () => {
+  const baselineTaskId = "node:node";
+  const generatedTaskId = "node:generated";
+  const base = evidence();
+  const template = base.graph.nodes[0];
+  assert.ok(template);
+  const generatedNode = structuredClone(template);
+  generatedNode.id = "generated";
+  generatedNode.logical_id = "generated";
+  generatedNode.display_name = "generated";
+  generatedNode.artifact_dir = "artifacts/generated";
+  generatedNode.artifact_dirs = ["artifacts/generated"];
+  generatedNode.prompt_id = "generated";
+  generatedNode.prompt_path = ".ultrafuzz/prompts/generated.mdx";
+  generatedNode.dynamic_generated = {
+    group_node_id: "synthetic-group",
+    source_node_id: "synthetic-source",
+    source_attempt_id: "synthetic-source",
+    expansion_key: "generated",
+    item_sha256: "d".repeat(64),
+    storage_id: "generated",
+    manifest_path: "dynamic-expansions/synthetic-group.json"
+  };
+  generatedNode.workflow = { node_id: generatedTaskId, task_node_ids: [generatedTaskId] };
+
+  const expandedGraph = { ...base.graph, nodes: [...base.graph.nodes, generatedNode] };
+  const expandedState = runState([
+    terminalNodeState("node", "node", "gpt-test", {
+      run_id: WORKFLOW_RUN_ID,
+      task_id: baselineTaskId,
+      agent_task_id: baselineTaskId,
+      verifier_task_id: "verify:node",
+      state: "finished",
+      attempt: 1
+    }),
+    terminalNodeState("generated", "generated", "gpt-test", {
+      run_id: WORKFLOW_RUN_ID,
+      task_id: generatedTaskId,
+      agent_task_id: generatedTaskId,
+      verifier_task_id: "verify:generated",
+      state: "finished",
+      attempt: 1
+    })
+  ]);
+  const expanded = deriveRunStatistics({ ...base, graph: expandedGraph, state: expandedState });
+  assert.deepEqual(
+    expanded.value.nodes.map((node) => node.node_id),
+    ["node", "generated"]
+  );
+
+  const staticExtraGraph = structuredClone(expandedGraph);
+  const staticNode = staticExtraGraph.nodes[1];
+  assert.ok(staticNode);
+  delete staticNode.dynamic_generated;
+  assert.throws(
+    () => deriveRunStatistics({ ...base, graph: staticExtraGraph, state: expandedState }),
+    /planned graph workflow task IDs do not match run metadata/iu
+  );
+
+  const missingBaselineGraph = { ...expandedGraph, nodes: [generatedNode] };
+  assert.throws(
+    () => deriveRunStatistics({ ...base, graph: missingBaselineGraph, state: expandedState }),
+    /planned graph workflow task IDs do not match run metadata/iu
+  );
+});
+
 test("stats authenticates usage content, generation, lineage, and present-empty evidence", () => {
   const base = evidence();
   const changedUsage = structuredClone(base.usage!);
