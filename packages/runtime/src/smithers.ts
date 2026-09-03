@@ -362,13 +362,28 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_UNSCOPED_HELPER_PREDECESSOR_PATCH =
     RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
     "[...ultrafuzzBunStartupArgsFor(snapshotChildRoot), ...args.map(rewriteSnapshotArgument)]"
   );
-// resume-detached.js is a separate module, so its Bun startup arguments must be
-// self-contained rather than depending on helpers patched into src/index.js.
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH =
-  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
-    RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
-    '[...(process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]'
-  );
+// resume-detached.js is a separate ES module, so nothing the process anchor
+// patch declares in src/index.js is in scope there: the descriptor-root helpers
+// and the Bun startup arguments must both be spelled out inside this text. The
+// helpers restate the src/index.js ones exactly. `fstatSync` is reached through
+// `process.getBuiltinModule` because the module's `node:fs` import lacks it and
+// its import line lies outside this patch's anchor.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_LOCAL_ROOT_HELPERS = `    // resume-detached.js is its own module: the descriptor-root helpers patched
+    // into src/index.js are out of scope here, so their Linux /proc and darwin
+    // volfs spellings are restated locally.
+    const ultrafuzzVolfsRoot = (descriptor) => {
+      const opened = process.getBuiltinModule("node:fs").fstatSync(descriptor);
+      return "/.vol/" + opened.dev + "/" + opened.ino;
+    };
+    const ultrafuzzDescriptorRootPath = (descriptor) =>
+      process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/" + process.pid + "/fd/" + descriptor;
+    const ultrafuzzChildRootPath = (descriptor) =>
+      process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/3";`;
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `${SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_LOCAL_ROOT_HELPERS}
+${SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
+  RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
+  '[...(process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]'
+)}`;
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS = [
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH,

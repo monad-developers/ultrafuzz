@@ -14709,6 +14709,40 @@ test("compatibility patcher rewrites every described workaround", async () => {
   }
 });
 
+test("compatibility patches declare every ultrafuzz helper inside the module they patch", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  // Patches land in separate ES modules, so a helper one module's patch declares
+  // is out of scope for another module's patch even though both are always
+  // applied together: resume-detached.js once called helpers that only the
+  // src/index.js anchor declared and threw ReferenceError at resume time.
+  const patchedByModule = new Map<string, string>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const module = `${patch.packageName}/${patch.sourceRelativePath}`;
+    patchedByModule.set(module, `${patchedByModule.get(module) ?? ""}\n${patch.patched}`);
+  }
+  assert.ok(patchedByModule.has("@smthrs/cli/src/resume-detached.js"));
+  for (const [module, patched] of patchedByModule) {
+    const declared = new Set(
+      [...patched.matchAll(/(?<=\b(?:const|let|var|function|class)\s+)ultrafuzz[A-Za-z0-9_]+\b/gu)].map(
+        (match) => match[0]
+      )
+    );
+    const undeclared = [...patched.matchAll(/\bultrafuzz[A-Za-z0-9_]+\b/gu)]
+      .filter(
+        // An object-literal key names a field on the value it travels with, not a
+        // binding in the module, so it is the one non-reference form allowed here.
+        (match) =>
+          !(
+            /[{,]\s*$/u.test(patched.slice(0, match.index)) &&
+            /^\s*:(?!:)/u.test(patched.slice(match.index + match[0].length))
+          )
+      )
+      .map((match) => match[0])
+      .filter((name) => !declared.has(name));
+    assert.deepEqual([...new Set(undeclared)], [], `${module} uses ultrafuzz helpers its patched text never declares`);
+  }
+});
+
 type OwnedUsageRow = {
   inputTokens?: number;
   freshInputTokens?: number | null;
@@ -23635,9 +23669,12 @@ test("controller refresh authenticates newly required sealed runner patches and 
   );
   assert.ok(resumeTransferPatch);
   assert.ok(processAnchorPatch);
-  const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
+  const [predecessorResumeTransferPatch, preserveSymlinksResumeTransferPatch, unscopedHelperResumeTransferPatch] =
+    resumeTransferPatch.predecessors ?? [];
   assert.ok(predecessorResumeTransferPatch);
-  assert.equal(resumeTransferPatch.predecessors?.length, 2);
+  assert.ok(preserveSymlinksResumeTransferPatch);
+  assert.ok(unscopedHelperResumeTransferPatch);
+  assert.equal(resumeTransferPatch.predecessors?.length, 3);
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
