@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
-import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,15 +8,16 @@ import test from "node:test";
 import { createInitialRunState, createNodeState } from "@ultrafuzz/artifacts";
 
 import {
-  archiveDynamicExpansionsForRetry,
   DynamicExpansionError,
   dynamicStorageId,
   dynamicRuntimeFingerprint,
   loadOrCreateDynamicExpansion,
   materializeDynamicRuntime,
   planDynamicExpansion,
+  verifyDynamicRuntimeMaterialization,
   type PlannedGraph
 } from "../src/index.js";
+import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "../src/dynamic-expansion-retry.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "../src/smithers.js";
 import { projectWorkflowControlState } from "../src/workflow-control.js";
 
@@ -281,17 +281,7 @@ test("explicit source retry archives a complete expansion generation and rejects
   const [firstItem] = first.items;
   assert.ok(firstItem);
   const attemptId = firstItem.storage_id;
-  execFileSync("git", ["init", "-q"], { cwd: fixture.runRoot });
-  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: fixture.runRoot });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: fixture.runRoot });
-  fs.writeFileSync(path.join(fixture.runRoot, "tracked.txt"), "base\n", "utf8");
-  execFileSync("git", ["add", "tracked.txt"], { cwd: fixture.runRoot });
-  execFileSync("git", ["commit", "-qm", "fixture"], { cwd: fixture.runRoot });
-  const workspacePath = path.join(fixture.runRoot, "workspaces", attemptId);
-  fs.mkdirSync(path.dirname(workspacePath), { recursive: true });
-  execFileSync("git", ["worktree", "add", "-qb", "retry-attempt", workspacePath], { cwd: fixture.runRoot });
-  fs.writeFileSync(path.join(workspacePath, "retained.txt"), "workspaces result\n", "utf8");
-  for (const root of ["artifacts", "invariant-suite-workspace-snapshots"]) {
+  for (const root of ["artifacts", "invariant-suite-workspace-snapshots", "workspaces"]) {
     const attemptPath = path.join(fixture.runRoot, root, attemptId);
     fs.mkdirSync(attemptPath, { recursive: true });
     fs.writeFileSync(path.join(attemptPath, "retained.txt"), `${root} result\n`, "utf8");
@@ -299,43 +289,60 @@ test("explicit source retry archives a complete expansion generation and rejects
   const verificationRoot = path.join(fixture.runRoot, ".ultrafuzz-verification");
   fs.mkdirSync(verificationRoot);
   fs.writeFileSync(path.join(verificationRoot, `${attemptId}.json`), '{"verified":true}\n', "utf8");
+  const manifestDir = path.join(fixture.runRoot, "dynamic-expansions");
+  const retry = { projectRoot: fixture.runRoot, runRoot: fixture.runRoot };
 
-  const archived = archiveDynamicExpansionsForRetry({
-    projectRoot: fixture.runRoot,
-    runRoot: fixture.runRoot,
-    sourceNodeIds: ["node:planner"]
-  });
-  assert.ok(archived);
+  // A retried node that owns no manifest leaves the generation alone.
+  assert.equal(planDynamicExpansionRetryArchive({ ...retry, sourceNodeIds: ["node:join"] }), undefined);
+  const plan = planDynamicExpansionRetryArchive({ ...retry, sourceNodeIds: ["node:planner"] });
+  assert.ok(plan);
+  // Planning validates but mutates nothing; the rename happens only after the Smithers reset.
+  assert.deepEqual(fs.readdirSync(manifestDir).sort(), ["fanout.json", "second.json"]);
+
+  const archived = archiveDynamicExpansionsForRetry(plan);
   assert.deepEqual(archived.group_node_ids.sort(), ["fanout", "second"]);
-  assert.deepEqual(fs.readdirSync(path.join(fixture.runRoot, "dynamic-expansions")), []);
+  assert.deepEqual(fs.readdirSync(manifestDir), []);
   assert.deepEqual(fs.readdirSync(archived.archive_path).sort(), [
     ".ultrafuzz-verification",
     "artifacts",
     "invariant-suite-workspace-snapshots",
     "manifests",
-    "retry.json",
-    "workspaces"
+    "retry.json"
   ]);
   assert.deepEqual(fs.readdirSync(path.join(archived.archive_path, "manifests")).sort(), [
     "fanout.json",
     "second.json"
   ]);
-  for (const root of ["artifacts", "workspaces", "invariant-suite-workspace-snapshots"]) {
+  for (const root of ["artifacts", "invariant-suite-workspace-snapshots"]) {
     assert.equal(fs.existsSync(path.join(fixture.runRoot, root, attemptId)), false);
     assert.equal(
       fs.readFileSync(path.join(archived.archive_path, root, attemptId, "retained.txt"), "utf8"),
       `${root} result\n`
     );
   }
+  // A durable worktree stays where Smithers registered it.
+  assert.equal(
+    fs.readFileSync(path.join(fixture.runRoot, "workspaces", attemptId, "retained.txt"), "utf8"),
+    "workspaces result\n"
+  );
   assert.equal(fs.existsSync(path.join(verificationRoot, `${attemptId}.json`)), false);
   assert.equal(
     fs.readFileSync(path.join(archived.archive_path, ".ultrafuzz-verification", `${attemptId}.json`), "utf8"),
     '{"verified":true}\n'
   );
-  assert.doesNotMatch(
-    execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: fixture.runRoot, encoding: "utf8" }),
-    new RegExp(attemptId, "u")
-  );
+  const record = JSON.parse(fs.readFileSync(path.join(archived.archive_path, "retry.json"), "utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(record.schema_version, "ultrafuzz.dynamic-expansion-retry.v1");
+  assert.deepEqual(record.source_node_ids, ["node:planner"]);
+  assert.deepEqual(record.group_node_ids, ["fanout", "second"]);
+  const archiveRelative = path.relative(fixture.runRoot, archived.archive_path);
+  assert.deepEqual(record.archived_attempt_paths, [
+    `${archiveRelative}/.ultrafuzz-verification/${attemptId}.json`,
+    `${archiveRelative}/artifacts/${attemptId}`,
+    `${archiveRelative}/invariant-suite-workspace-snapshots/${attemptId}`
+  ]);
 
   const mixed = expansionFixture({ runId: "retry-archive-mixed", items: [item(0)] });
   mixed.invoke();
@@ -348,7 +355,8 @@ test("explicit source retry archives a complete expansion generation and rejects
   });
   assert.throws(
     () =>
-      archiveDynamicExpansionsForRetry({
+      planDynamicExpansionRetryArchive({
+        projectRoot: mixed.runRoot,
         runRoot: mixed.runRoot,
         sourceNodeIds: ["planner"]
       }),
@@ -359,13 +367,111 @@ test("explicit source retry archives a complete expansion generation and rejects
     "second.json"
   ]);
 
-  fs.rmSync(mixed.sourcePath);
-  const recovered = archiveDynamicExpansionsForRetry({
-    runRoot: mixed.runRoot,
-    requireMissingSources: true
-  });
-  assert.ok(recovered);
-  assert.deepEqual(recovered.group_node_ids.sort(), ["fanout", "second"]);
+  // Unrecognized manifest state is refused before anything is reset or moved.
+  const locked = expansionFixture({ runId: "retry-archive-locked", items: [item(0)] });
+  locked.invoke();
+  fs.writeFileSync(path.join(locked.runRoot, "dynamic-expansions", ".expansion.lock"), "other-owner\n", "utf8");
+  assert.throws(
+    () =>
+      planDynamicExpansionRetryArchive({
+        projectRoot: locked.runRoot,
+        runRoot: locked.runRoot,
+        sourceNodeIds: ["node:planner"]
+      }),
+    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_RETRY_EXPANSION_INVALID"
+  );
+  assert.deepEqual(fs.readdirSync(path.join(locked.runRoot, "dynamic-expansions")).sort(), [
+    ".expansion.lock",
+    "fanout.json"
+  ]);
+});
+
+test("explicit source retry re-derives the base runtime controls after archiving an expansion", () => {
+  const runId = "retry-rematerialize";
+  const projectRoot = tempDirectory();
+  const runRoot = path.join(projectRoot, "runs", runId);
+  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
+  const templatePath = path.join(runRoot, "templates", "worker.md");
+  const graphPath = path.join(runRoot, "graph.json");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
+  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
+  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
+  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
+  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(0)] })}\n`, "utf8");
+  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
+  const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
+  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
+  const group: CompiledSmithersDynamicGroup = {
+    groupNodeId: "fanout",
+    logicalNodeId: "fanout",
+    source: {
+      concreteNodeId: "planner",
+      attemptId: "planner",
+      verifierSmithersNodeId: "verify:planner",
+      artifactPath: sourceArtifactPath
+    },
+    sourcePath: "$.goals",
+    keyPath: "id",
+    nodeIdTemplate: "dynamic:item:{{ item.id }}",
+    templatePath,
+    templateDigest: digest(fs.readFileSync(templatePath)),
+    templateFingerprint: digest("template-fingerprint"),
+    continueOnFail: true,
+    maxDynamicNodes: 100,
+    reservedNodeIds: ["planner", "fanout", "join"],
+    taskTemplates: [templateTask],
+    promptContext: promptContext(projectRoot, runRoot)
+  };
+  // The seal keeps byte copies of the pre-expansion controls beside the mutable ones.
+  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
+  fs.writeFileSync(
+    tasksPath,
+    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
+    "utf8"
+  );
+  fs.copyFileSync(graphPath, baseGraphPath);
+  fs.copyFileSync(tasksPath, baseTasksPath);
+  const controls = {
+    runId,
+    projectRoot,
+    runRoot,
+    graphPath,
+    tasksPath,
+    baseGraphPath,
+    baseTasksPath,
+    baseTasks: [joinTask],
+    groups: [group]
+  };
+  const expanded = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(expanded.expandedGroupIds, ["fanout"]);
+  const generated = expanded.tasks.find((task) => task.metadata.node.dynamic !== undefined);
+  assert.ok(generated?.renderedPromptPath);
+  assert.equal(fs.existsSync(generated.renderedPromptPath), true);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"]);
+
+  const plan = planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] });
+  assert.ok(plan);
+  const archived = archiveDynamicExpansionsForRetry(plan);
+  assert.equal(fs.existsSync(generated.artifactDir), false);
+  assert.equal(
+    fs.existsSync(path.join(archived.archive_path, "artifacts", generated.attemptId, "prompt.rendered.md")),
+    true
+  );
+  // The admission check must re-derive the withdrawn controls from the sealed base with no ready
+  // group, before any render republishes them.
+  const verified = verifyDynamicRuntimeMaterialization(controls);
+  assert.deepEqual(verified.expandedGroupIds, []);
+  assert.deepEqual(verified.unresolvedGroupIds, ["fanout"]);
+  assert.deepEqual(
+    verified.tasks.map((task) => task.attemptId),
+    ["join"]
+  );
+  assert.deepEqual(
+    verified.graph.nodes.map((node) => node.id),
+    ["planner", "fanout", "join"]
+  );
 });
 
 test("dynamic expansion retries when a contended lock disappears before inspection", () => {

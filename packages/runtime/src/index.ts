@@ -7,7 +7,6 @@ export * from "./canonical-properties-markdown.js";
 export * from "./data-governance.js";
 export * from "./doctor.js";
 export * from "./dynamic-expansion.js";
-export * from "./dynamic-expansion-retry.js";
 export * from "./dynamic-runtime.js";
 export * from "./final-report-markdown.js";
 export * from "./init.js";

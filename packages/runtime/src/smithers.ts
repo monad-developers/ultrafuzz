@@ -66,7 +66,7 @@ import {
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
-import { archiveDynamicExpansionsForRetry } from "./dynamic-expansion-retry.js";
+import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -5169,6 +5169,20 @@ export async function runSmithersLifecycleCommand(input: {
       const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
       return producer === undefined ? [] : [producer];
     });
+    // A reopened dynamic source owns the published expansion generation, which
+    // lives outside Smithers state. Decide and validate its withdrawal before
+    // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
+    // closed while nothing has been reset. The rename itself waits until after
+    // the reset: the dependent set Smithers resolves at reset time must still
+    // see the materialized generation (#1063).
+    const retryArchivePlan =
+      retryProducers.length > 0 && input.relaunchPaths !== undefined
+        ? planDynamicExpansionRetryArchive({
+            projectRoot: input.projectRoot,
+            runRoot: input.relaunchPaths.runRoot,
+            sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
+          })
+        : undefined;
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
@@ -5201,39 +5215,7 @@ export async function runSmithersLifecycleCommand(input: {
       }
       preResumeStderr = resetStderr.join("\n");
     }
-    if (input.retryFailed === true && input.relaunchPaths !== undefined) {
-      if (retryProducers.length > 0) {
-        archiveDynamicExpansionsForRetry({
-          projectRoot: input.projectRoot,
-          runRoot: input.relaunchPaths.runRoot,
-          sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
-        });
-      } else if (
-        smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
-        smithersSnapshotHasErrorMessage(inspection, "runtime rendered prompt changed for dynamic-")
-      ) {
-        // The source can already have been republished while attempt-owned
-        // state from the prior generation still occupies the new attempt
-        // paths. The runner's exact render failure proves that conflict; an
-        // explicit retry may archive the complete generation and its attempt
-        // state before rematerializing it.
-        archiveDynamicExpansionsForRetry({
-          projectRoot: input.projectRoot,
-          runRoot: input.relaunchPaths.runRoot,
-          archiveCompleteGeneration: true
-        });
-      } else if (failedTasks.length === 0 && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
-        // A previous retry can have crossed the producer/verifier handoff gap
-        // before this fix was installed. The explicit retry is also the
-        // recovery boundary: withdraw a complete generation only when every
-        // manifest points at a source that is currently absent.
-        archiveDynamicExpansionsForRetry({
-          projectRoot: input.projectRoot,
-          runRoot: input.relaunchPaths.runRoot,
-          requireMissingSources: true
-        });
-      }
-    }
+    if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
     if (
       failedTasks.length === 0 &&
       input.retryFailed === true &&
@@ -5535,22 +5517,6 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   if (snapshot.json.ok !== true || !isObjectRecord(snapshot.json.data)) return false;
   const run = snapshot.json.data.run;
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
-}
-
-function smithersSnapshotHasErrorMessage(snapshot: SmithersCommandSnapshot, fragment: string): boolean {
-  if (!isObjectRecord(snapshot.json)) return false;
-  const error =
-    snapshot.json.ok === false && isObjectRecord(snapshot.json.error)
-      ? snapshot.json.error
-      : snapshot.json.ok === true && isObjectRecord(snapshot.json.data) && isObjectRecord(snapshot.json.data.run)
-        ? snapshot.json.data.run.error
-        : undefined;
-  let current = isObjectRecord(error) ? error : undefined;
-  for (let depth = 0; current !== undefined && depth < 8; depth += 1) {
-    if (typeof current.message === "string" && current.message.includes(fragment)) return true;
-    current = isObjectRecord(current.cause) ? current.cause : undefined;
-  }
-  return false;
 }
 
 export function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {

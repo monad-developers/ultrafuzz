@@ -24721,8 +24721,17 @@ test("resume retries a failed artifact verifier from its agent producer and depe
     /^timetravel .* --node-id node:project-discovery .* --no-deps(?: |$)/mu,
     "the producer retry must also reset its zero-retry verifier and downstream dependents"
   );
+  // The reopened producer owns the published expansion generation, so the retry withdraws it into
+  // the history directory instead of leaving it active for the next render (#1063).
   assert.deepEqual(fs.readdirSync(expansionDir), []);
-  assert.equal(fs.readdirSync(path.join(runRoot, "dynamic-expansion-history")).length, 1);
+  const archivedGenerations = fs.readdirSync(path.join(runRoot, "dynamic-expansion-history"));
+  assert.equal(archivedGenerations.length, 1);
+  const [archivedGeneration] = archivedGenerations;
+  assert.ok(archivedGeneration);
+  assert.deepEqual(fs.readdirSync(path.join(runRoot, "dynamic-expansion-history", archivedGeneration)).sort(), [
+    "manifests",
+    "retry.json"
+  ]);
 });
 
 // Smithers 0.35.0 parks a node that livelocked on an identical-error streak in
@@ -24815,20 +24824,13 @@ test("resume continues a run-level render failure in place without a no-op rewin
       workflowRunId: "ultrafuzz-render-recovery-run",
       status: "failed",
       state: "failed",
-      error: {
-        code: "WORKFLOW_RENDER_FAILED",
-        message: "runtime rendered prompt changed for dynamic-fanout-synthetic",
-        cause: { code: "EEXIST" }
-      },
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
     }),
     timeline: { timeline: { frames: [{ frameNo: 2 }, { frameNo: 4 }] } }
   });
   const run = await startRun({ projectRoot: project, runId: "render-recovery-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.ok(run.value);
-  const runRoot = run.value.run_root;
-  const expansionDir = writeSyntheticDynamicManifest(runRoot, "render-recovery-run", "planner");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const resumed = await resumeRun({
@@ -24845,20 +24847,11 @@ test("resume continues a run-level render failure in place without a no-op rewin
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   // A jump to the latest frame returns early upstream, so reading the timeline and rewinding to it
   // spends two subprocesses per recovery generation and mutates nothing.
-  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
+  assert.doesNotMatch(commands, /timeline|rewind|retry-task|timetravel/u);
   assert.match(
     commands,
     /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
-  assert.deepEqual(fs.readdirSync(expansionDir), []);
-  const archivedGenerations = fs.readdirSync(path.join(runRoot, "dynamic-expansion-history"));
-  assert.equal(archivedGenerations.length, 1);
-  const [archivedGeneration] = archivedGenerations;
-  assert.ok(archivedGeneration);
-  assert.deepEqual(fs.readdirSync(path.join(runRoot, "dynamic-expansion-history", archivedGeneration)).sort(), [
-    "manifests",
-    "retry.json"
-  ]);
 });
 
 test("unverified dependency detection reads a dependent prepare failure off the run row", async () => {
