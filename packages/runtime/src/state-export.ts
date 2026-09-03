@@ -44,7 +44,11 @@ import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
-import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import {
+  describeObservationSynchronizationDeadline,
+  observationSynchronizationDeadline,
+  synchronizeLinkedWorkflowRun
+} from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
 const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -150,13 +154,13 @@ export async function getRunStatus(input: {
       }
     ]);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-  const syncDiagnostics = sync.ok
-    ? sync.diagnostics
-    : sync.diagnostics.map((diagnostic) => ({
-        ...diagnostic,
-        severity: "warning" as const
-      }));
+  const sync = await synchronizeLinkedWorkflowRun(
+    { projectRoot, runId: input.runId, env: input.env },
+    { deadlineMs: observationSynchronizationDeadline(input.env) }
+  );
+  const syncDiagnostics = sync.diagnostics.map((diagnostic) =>
+    describeObservationSynchronizationDeadline(sync.ok ? diagnostic : { ...diagnostic, severity: "warning" as const })
+  );
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   const base = readRunListEntry(layout.root, layout.runId);
   const state = readRunState(layout);
@@ -331,13 +335,22 @@ export async function getRunHealth(input: {
  * budget. Once that budget is spent the run is still reported: health comes from the workflow runner
  * and local run state is simply the last coherent snapshot, which is said in a warning, the way a
  * skipped synchronization is reported. Every other failure propagates unchanged.
+ *
+ * The refresh is also bounded by the observation deadline. Health below comes from the direct runner
+ * query, so an exceeded deadline is a warning about possibly stale local state, not a failure. One
+ * absolute deadline spans every retry, so racing reads cannot extend the observer's wall-clock budget.
  */
 async function synchronizeObservedWorkflowRun(input: SyncRunInput, runRoot: string): Promise<RuntimeDiagnostic[]> {
+  const deadlineMs = observationSynchronizationDeadline(input.env);
   try {
     const sync = await retryTransientSnapshotObservation(() =>
-      synchronizeLinkedWorkflowRun(input, { observeOnly: true })
+      synchronizeLinkedWorkflowRun(input, { observeOnly: true, deadlineMs })
     );
-    return sync.diagnostics;
+    return sync.diagnostics.map((diagnostic) =>
+      diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
+        ? describeObservationSynchronizationDeadline({ ...diagnostic, severity: "warning" as const })
+        : diagnostic
+    );
   } catch (error) {
     if (!isTransientSnapshotRace(error)) throw error;
     return [

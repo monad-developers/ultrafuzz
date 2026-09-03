@@ -12390,6 +12390,49 @@ test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", asy
   );
 });
 
+test("getRunHealth returns live runner health when observation synchronization exceeds its deadline", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "health-sync-deadline";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env: Record<string, string | undefined> = {
+    ...fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+      }),
+      status: currentStatusEnvelope(workflowRunId)
+    }),
+    ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS: "1"
+  };
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value !== undefined);
+  const commandLogPath = env.SMITHERS_FAKE_LOG;
+  assert.ok(typeof commandLogPath === "string");
+  const statePath = path.join(run.value.run_root, "state.json");
+  const stateBefore = fs.readFileSync(statePath);
+
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.workflow_status, "running");
+  assert.ok(
+    health.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED" &&
+        diagnostic.severity === "warning" &&
+        /ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS=off/u.test(diagnostic.message)
+    ),
+    JSON.stringify(health.diagnostics)
+  );
+  assert.match(fs.readFileSync(commandLogPath, "utf8"), /status ultrafuzz-health-sync-deadline/u);
+  assert.deepEqual(fs.readFileSync(statePath), stateBefore);
+});
+
 test("getRunHealth stays readable while execution holds the workflow control lock", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

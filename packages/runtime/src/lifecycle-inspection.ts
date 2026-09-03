@@ -44,7 +44,11 @@ import type {
   WorkflowRunQueryInput
 } from "./types.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
-import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import {
+  describeObservationSynchronizationDeadline,
+  observationSynchronizationDeadline,
+  synchronizeLinkedWorkflowRun
+} from "./workflow-sync.js";
 
 const DEFAULT_EVENT_LIMIT = 200;
 const MAX_EVENT_LIMIT = 2_000;
@@ -291,7 +295,10 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
   if (!evidence.ok) {
     return runtimeFailure<DiagnoseRunValue>(evidence.diagnostics);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+  const sync = await synchronizeLinkedWorkflowRun(
+    { projectRoot, runId: input.runId, env: input.env },
+    { deadlineMs: observationSynchronizationDeadline(input.env) }
+  );
   const syncDiagnostics = downgradedSyncDiagnostics(sync);
   const snapshot = await runSmithersInspectionCommand({
     // `--full-output` is what makes the runner emit the `{ok, data, meta}` envelope
@@ -1816,7 +1823,9 @@ function adaptToolCall(row: CurrentNodeToolCall, includePayloads: boolean): Work
 
 function downgradedSyncDiagnostics(sync: { ok: boolean; diagnostics: RuntimeDiagnostic[] }): RuntimeDiagnostic[] {
   return sync.diagnostics.map((entry) =>
-    entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+    describeObservationSynchronizationDeadline(
+      entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+    )
   );
 }
 

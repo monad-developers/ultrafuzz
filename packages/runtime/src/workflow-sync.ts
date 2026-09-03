@@ -380,6 +380,49 @@ export interface WorkflowSynchronizationControl {
   observeOnly?: boolean;
 }
 
+const DEFAULT_OBSERVATION_SYNC_TIMEOUT_MS = 15_000;
+const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
+const OBSERVATION_SYNC_TIMEOUT_DISABLED_VALUES: ReadonlySet<string> = new Set(["0", "off"]);
+
+/**
+ * Bound the optional state refresh performed before read-only observer queries.
+ * The direct runner query remains authoritative for live health, while a slow
+ * history scan may leave the local projection stale and surface a warning.
+ * Observers are the only CLI path that converges local run state from runner
+ * evidence, so `ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS=0` or `off` disables the
+ * bound and lets a command wait for full synchronization.
+ */
+export function observationSynchronizationDeadline(
+  env: Record<string, string | undefined> = process.env,
+  nowMs = Date.now()
+): number | undefined {
+  const configured = env.ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS;
+  if (configured !== undefined && OBSERVATION_SYNC_TIMEOUT_DISABLED_VALUES.has(configured.toLowerCase())) {
+    return undefined;
+  }
+  const parsed = configured === undefined || !/^[1-9]\d*$/u.test(configured) ? undefined : Number(configured);
+  const timeoutMs =
+    parsed === undefined || !Number.isSafeInteger(parsed)
+      ? DEFAULT_OBSERVATION_SYNC_TIMEOUT_MS
+      : Math.min(parsed, MAX_OBSERVATION_SYNC_TIMEOUT_MS);
+  return nowMs + timeoutMs;
+}
+
+/**
+ * Observers downgrade an exceeded synchronization deadline to a warning and
+ * answer from the direct runner query. Say what that costs and how to opt out,
+ * so the warning is actionable instead of a bare checkpoint message.
+ */
+export function describeObservationSynchronizationDeadline(diagnostic: RuntimeDiagnostic): RuntimeDiagnostic {
+  if (diagnostic.code !== "WORKFLOW_SYNC_DEADLINE_EXCEEDED") {
+    return diagnostic;
+  }
+  return {
+    ...diagnostic,
+    message: `${diagnostic.message}; local run state and counts may be stale; set ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS=off to wait for full synchronization`
+  };
+}
+
 export interface ControllerFailureRefinalizationInput {
   projectRoot: string;
   layout: RunLayout;
@@ -3789,16 +3832,21 @@ async function synchronizeTasks(input: {
     };
     const stateChanged = nodePatchChanges(previous, patch);
     if (stateChanged) {
+      // One budget check guards the whole node write group: the state patch,
+      // its finalization events, and the `node-synced` event below (a status
+      // change always changes the patch, so that event is part of this group).
+      // A deadline between those writes would leave `state.json` terminal with
+      // no events, and later passes skip a terminal node, so nothing would
+      // append them for the life of the run.
       assertSynchronizationBudget(input.control);
       updateNodeState(input.layout, task.attemptId, patch, undefined, {
         forbiddenSecretValues: input.forbiddenSecretValues
       });
-      appendNodeEvents(input.layout, task, finalization.events, input.control, input.forbiddenSecretValues);
+      appendNodeEvents(input.layout, task, finalization.events, input.forbiddenSecretValues);
       changed = true;
     }
     syncedNodes += 1;
     if (previous?.status !== patchStatus) {
-      assertSynchronizationBudget(input.control);
       const eventProvenance = eventProvenanceForTask(task);
       appendEvent(input.layout, {
         eventType: "node-synced",
@@ -4708,12 +4756,10 @@ function appendNodeEvents(
   layout: RunLayout,
   task: StoredWorkflowTask,
   events: PendingNodeEvent[],
-  control: WorkflowSynchronizationControl,
   forbiddenSecretValues: readonly string[]
 ): void {
   const provenance = eventProvenanceForTask(task);
   for (const event of events) {
-    assertSynchronizationBudget(control);
     appendEvent(layout, {
       ...event,
       nodeId: task.attemptId,
