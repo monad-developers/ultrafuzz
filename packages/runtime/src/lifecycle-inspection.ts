@@ -1156,7 +1156,7 @@ function parseCurrentNodeDetail(
     detail.approval === null ? null : parseCurrentNodeApproval(detail.approval, runId, nodeId, iteration);
   const limits = parseCurrentNodeLimits(detail.limits);
   const lastAttempt = requiredNullableCount(nodeRow.lastAttempt, "workflow node detail node lastAttempt");
-  if (attempts.length > 0 && lastAttempt !== attempts.at(-1)!.attempt) {
+  if (attempts.length > 0 && !attempts.some((attempt) => attempt.attempt === lastAttempt)) {
     contractError("workflow node detail lastAttempt disagrees with the attempts array");
   }
   return {
