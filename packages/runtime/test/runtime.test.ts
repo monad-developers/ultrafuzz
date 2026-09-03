@@ -11838,6 +11838,31 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(durableState.controller_lease.status, "active");
 });
 
+test("listRuns reports an unreadable run directory instead of failing the whole listing", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runsRoot = path.join(project, ".ultrafuzz", "runs");
+
+  // A launch that fails during submission leaves the run directory behind
+  // without run.json. Reading it throws, and that used to escape the map in
+  // listRuns and abort the entire listing -- hiding every healthy run, and with
+  // them the run id that `clean` needs to remove the bad directory.
+  fs.mkdirSync(path.join(runsRoot, "broken-launch"), { recursive: true });
+
+  const list = await listRuns({ projectRoot: project, env: fakePsSmithersEnv(project, currentPsEnvelope([])) });
+
+  assert.equal(list.ok, true, JSON.stringify(list.diagnostics));
+  const broken = list.value?.product_runs.find((run) => run.run_id === "broken-launch");
+  assert.ok(broken, JSON.stringify(list.value));
+  assert.equal(broken.status, "unreadable");
+  assert.equal(broken.run_root, path.join(runsRoot, "broken-launch"));
+  assert.equal(
+    list.diagnostics.some((diagnostic) => diagnostic.code === "RUN_LIST_ENTRY_UNREADABLE"),
+    true,
+    JSON.stringify(list.diagnostics)
+  );
+});
+
 test("listRuns requires the exact current Smithers ps envelope and row shape", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
