@@ -26,8 +26,8 @@ function runGit(projectRoot: string, args: string[]): GitResult {
   });
   return {
     status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
+    stdout: result.stdout,
+    stderr: result.stderr,
     error: result.error
   };
 }
@@ -38,7 +38,7 @@ function parseWorktreeRegistrations(output: string): WorktreeRegistration[] {
     .map((block) => block.split(/\r?\n/u).filter((line) => line.length > 0))
     .filter((lines) => lines[0]?.startsWith("worktree ") === true)
     .map((lines) => ({
-      worktreePath: lines[0]!.slice("worktree ".length),
+      worktreePath: (lines[0] ?? "").slice("worktree ".length),
       branch: lines.find((line) => line.startsWith("branch "))?.slice("branch ".length),
       locked: lines.some((line) => line === "locked" || line.startsWith("locked ")),
       prunable: lines.some((line) => line === "prunable" || line.startsWith("prunable "))
