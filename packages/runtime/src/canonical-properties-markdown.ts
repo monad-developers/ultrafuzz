@@ -330,10 +330,15 @@ function parseJsonFields(block: MarkdownBlock): ParsedFields {
   const fieldNames: string[] = [];
   const invalidLineIndexes: number[] = [];
   for (const [offset, line] of block.lines.entries()) {
-    if (line === "") {
-      invalidLineIndexes.push(block.lineIndex + offset + 1);
-      continue;
-    }
+    // Blank and whitespace-only lines carry no field content, so they are
+    // skipped rather than rejected. A blank line after a Markdown heading is
+    // conventional -- several renderers need one -- and the companion grammar
+    // documented in the discovery prompt forbids bullets, tables, bare tokens,
+    // indented multiline values, aliases, and extra, duplicate, or unknown
+    // fields without ever forbidding blank lines. Treating them as invalid
+    // rejected agent output that was otherwise exactly correct, and did so for
+    // every block at once, since that spacing is uniform across a document.
+    if (line.trim() === "") continue;
     const match = FIELD_LINE.exec(line);
     if (match?.[1] === undefined || match[2] === undefined) {
       invalidLineIndexes.push(block.lineIndex + offset + 1);

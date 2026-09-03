@@ -7180,6 +7180,41 @@ bunAdapterTest(
         reportedCostUsd: 0.032
       });
 
+      // Some providers report reasoning separately from visible output even
+      // though Smithers models it as a subset of inclusive output. Telemetry
+      // must not terminate the invocation; clamp only the optional breakdown.
+      const separateReasoningInterpreter = agent.createOutputInterpreter();
+      const separateReasoningEvents = separateReasoningInterpreter.onStdoutLine?.(
+        JSON.stringify({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            responseId: "separate-reasoning-response",
+            content: [{ type: "text", text: "reasoning complete" }],
+            usage: {
+              input: 1,
+              output: 2,
+              cacheRead: 0,
+              cacheWrite: 0,
+              reasoning: 7,
+              totalTokens: 3,
+              cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 }
+            }
+          }
+        })
+      );
+      const separateReasoningUsage = (
+        Array.isArray(separateReasoningEvents) ? separateReasoningEvents : [separateReasoningEvents]
+      ).find((event) => event?.type === "usage") as { usage?: Record<string, unknown> } | undefined;
+      assert.deepEqual(separateReasoningUsage?.usage, {
+        inputTokens: 1,
+        inputTokenDetails: { noCacheTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        outputTokens: 2,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 2 },
+        totalTokens: 3,
+        reportedCostUsd: 0.003
+      });
+
       // A provider response becomes observable at message_end, before either
       // agent_end or process settlement. This is the ordering the engine uses
       // to durably checkpoint usage when a child then hangs or dies.
@@ -11838,6 +11873,31 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(durableState.controller_lease.status, "active");
 });
 
+test("listRuns reports an unreadable run directory instead of failing the whole listing", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runsRoot = path.join(project, ".ultrafuzz", "runs");
+
+  // A launch that fails during submission leaves the run directory behind
+  // without run.json. Reading it throws, and that used to escape the map in
+  // listRuns and abort the entire listing -- hiding every healthy run, and with
+  // them the run id that `clean` needs to remove the bad directory.
+  fs.mkdirSync(path.join(runsRoot, "broken-launch"), { recursive: true });
+
+  const list = await listRuns({ projectRoot: project, env: fakePsSmithersEnv(project, currentPsEnvelope([])) });
+
+  assert.equal(list.ok, true, JSON.stringify(list.diagnostics));
+  const broken = list.value?.product_runs.find((run) => run.run_id === "broken-launch");
+  assert.ok(broken, JSON.stringify(list.value));
+  assert.equal(broken.status, "unreadable");
+  assert.equal(broken.run_root, path.join(runsRoot, "broken-launch"));
+  assert.equal(
+    list.diagnostics.some((diagnostic) => diagnostic.code === "RUN_LIST_ENTRY_UNREADABLE"),
+    true,
+    JSON.stringify(list.diagnostics)
+  );
+});
+
 test("listRuns requires the exact current Smithers ps envelope and row shape", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -11899,6 +11959,227 @@ test("listRuns requires the exact current Smithers ps envelope and row shape", a
     fs.writeFileSync(env.SMITHERS_FAKE_PS!, `${JSON.stringify(invalid.value, null, 2)}\n`, "utf8");
     await assert.rejects(() => listRuns({ projectRoot: project, env }), invalid.message, invalid.label);
   }
+});
+
+/**
+ * Replaces a live run document by atomic rename at the one moment the strict reader is exposed to it:
+ * after the reader has consumed the bytes and before its second fstat, from inside the reading
+ * process. The rename is real and so is the reader's verdict; only the timing is controlled, which
+ * turns the race issue #1054 describes from a matter of chance into a deterministic reproduction.
+ * `node:fs`'s default export is the shared CommonJS module object, so the reader observes the wrapped
+ * calls. A read is armed only while replacements remain and, when `onlyWhen` is given, only when the
+ * reader's synchronous call stack satisfies it.
+ */
+async function observeWhileReplacingRunDocument<T>(
+  input: { documentPath: string; replacements: number; onlyWhen?: (synchronousFrames: string[]) => boolean },
+  observe: () => Promise<T>
+): Promise<{ value: T; replaced: number }> {
+  const bytes = fs.readFileSync(input.documentPath);
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const armed = new Set<number>();
+  let replaced = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const descriptor = originalOpenSync(...args);
+    if (
+      replaced < input.replacements &&
+      path.resolve(String(args[0])) === input.documentPath &&
+      (input.onlyWhen === undefined || input.onlyWhen(synchronousStackFrames()))
+    ) {
+      armed.add(descriptor);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+    const read = originalReadSync(...args);
+    if (armed.delete(args[0])) {
+      const temporary = `${input.documentPath}.replacement-${String(replaced)}`;
+      fs.writeFileSync(temporary, bytes);
+      fs.renameSync(temporary, input.documentPath);
+      replaced += 1;
+    }
+    return read;
+  }) as typeof fs.readSync;
+  fs.closeSync = ((descriptor: number) => {
+    armed.delete(descriptor);
+    originalCloseSync(descriptor);
+  }) as typeof fs.closeSync;
+  try {
+    const value = await observe();
+    return { value, replaced };
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+}
+
+/** The frames of the current synchronous call chain, without the `async` frames of awaiting callers. */
+function synchronousStackFrames(): string[] {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 40;
+  try {
+    return (new Error("stack").stack ?? "").split("\n").filter((frame) => !frame.includes("at async "));
+  } finally {
+    Error.stackTraceLimit = limit;
+  }
+}
+
+test("listRuns, observers and status re-read live run documents replaced while they were read", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "live-snapshot-replacement";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const statePath = path.join(run.value.run_root, "state.json");
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  const listed = async () => {
+    const list = await listRuns({ projectRoot: project, env });
+    assert.equal(list.ok, true, JSON.stringify(list.diagnostics));
+    return list.value?.product_runs.map((entry) => [entry.run_id, entry.status]);
+  };
+
+  // A live run's controller, and observe-only synchronization from a concurrent `status`, republish
+  // state.json and run.json by atomic rename. The strict reader detects a replacement it straddled
+  // and used to fail `ps` and `status` outright on it (issue #1054). Both documents are re-read.
+  const stateReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, listed);
+  assert.deepEqual(stateReplaced, { value: [[runId, "running"]], replaced: 1 });
+  const metadataReplaced = await observeWhileReplacingRunDocument(
+    { documentPath: metadataPath, replacements: 1 },
+    listed
+  );
+  assert.deepEqual(metadataReplaced, { value: [[runId, "running"]], replaced: 1 });
+  const twiceReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, listed);
+  assert.deepEqual(twiceReplaced, { value: [[runId, "running"]], replaced: 2 });
+
+  // The budget is bounded: a document that changes under three consecutive reads still fails, and the
+  // failure names the file, because `status` prints the message alone.
+  const exhausted = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 3 }, async () => {
+    try {
+      await listRuns({ projectRoot: project, env });
+      return undefined;
+    } catch (error: unknown) {
+      return error;
+    }
+  });
+  assert.ok(exhausted.value instanceof Error, "listRuns did not fail after three consecutive races");
+  assert.equal(
+    exhausted.value.message,
+    `run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}`
+  );
+  assert.equal(exhausted.replaced, 3);
+  assert.deepEqual(await listed(), [[runId, "running"]]);
+
+  // An observer derives the evidence again when a live document was replaced under one of its strict
+  // reads. The first such read is the completeness re-derivation inside the control snapshot
+  // verification, which a tolerant observer would otherwise record as a control divergence: the run
+  // must come back clean, not "diverged". An execution caller holds the control lock, so for it the
+  // same detection is a violation and still fails closed on the first read.
+  const observe = () =>
+    readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true, observeOnly: true });
+  const observed = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, observe);
+  assert.equal(observed.value.ok, true, JSON.stringify(observed.value.ok ? [] : observed.value.diagnostics));
+  if (observed.value.ok) assert.deepEqual(observed.value.verifiedControl.divergences, []);
+  assert.equal(observed.replaced, 1);
+  const observedTwice = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, observe);
+  assert.equal(
+    observedTwice.value.ok,
+    true,
+    JSON.stringify(observedTwice.value.ok ? [] : observedTwice.value.diagnostics)
+  );
+  assert.equal(observedTwice.replaced, 2);
+  const observationExhausted = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 3 },
+    observe
+  );
+  assert.equal(observationExhausted.value.ok, false);
+  if (!observationExhausted.value.ok) {
+    assert.deepEqual(observationExhausted.value.diagnostics, [
+      {
+        code: "WORKFLOW_CONTROL_EVIDENCE_INVALID",
+        message:
+          "run evidence changed during 3 consecutive snapshot read attempts: workflow control completeness binding could not be re-derived: run state changed while reading",
+        severity: "error",
+        source: "workflow",
+        path: metadataPath
+      }
+    ]);
+  }
+  assert.equal(observationExhausted.replaced, 3);
+  const executed = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, () =>
+    readLinkedWorkflowEvidence(project, runId)
+  );
+  assert.equal(executed.value.ok, false);
+  if (!executed.value.ok) {
+    assert.equal(executed.value.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.equal(
+      executed.value.diagnostics[0]?.message,
+      "workflow control completeness binding could not be re-derived: run state changed while reading"
+    );
+  }
+  assert.equal(executed.replaced, 1);
+
+  // `status` reads the same evidence first: a race there is re-read too, and neither reported as a
+  // divergence nor used as a reason to skip synchronization.
+  const healthAfterEvidenceRace = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 1 },
+    () => getRunHealth({ projectRoot: project, runId, env })
+  );
+  assert.equal(healthAfterEvidenceRace.value.ok, true, JSON.stringify(healthAfterEvidenceRace.value.diagnostics));
+  assert.equal(healthAfterEvidenceRace.value.value?.run_id, runId);
+  assert.equal(healthAfterEvidenceRace.replaced, 1);
+  assert.deepEqual(
+    healthAfterEvidenceRace.value.diagnostics.filter((diagnostic) =>
+      ["WORKFLOW_CONTROL_EVIDENCE_DIVERGED", "WORKFLOW_STATE_SYNC_SKIPPED", "WORKFLOW_STATE_SYNC_RACED"].includes(
+        diagnostic.code
+      )
+    ),
+    [],
+    JSON.stringify(healthAfterEvidenceRace.value.diagnostics)
+  );
+
+  // Observe-only synchronization reads state.json itself, outside any retry of its own. `status`
+  // retries the whole synchronization within the same budget, and once that is spent it still reports
+  // the run and says its local state may be stale, instead of failing.
+  const synchronizationOwnRead = (frames: string[]) =>
+    frames.some((frame) => frame.includes("workflow-sync.js")) &&
+    !frames.some((frame) => frame.includes("observation-snapshot.js"));
+  const recovered = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 1, onlyWhen: synchronizationOwnRead },
+    () => getRunHealth({ projectRoot: project, runId, env })
+  );
+  assert.equal(recovered.value.ok, true, JSON.stringify(recovered.value.diagnostics));
+  assert.equal(recovered.value.value?.run_id, runId);
+  assert.equal(recovered.replaced, 1);
+  assert.deepEqual(
+    recovered.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED"),
+    []
+  );
+  const raced = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 3, onlyWhen: synchronizationOwnRead },
+    () => getRunHealth({ projectRoot: project, runId, env })
+  );
+  assert.equal(raced.value.ok, true, JSON.stringify(raced.value.diagnostics));
+  assert.equal(raced.value.value?.run_id, runId);
+  assert.equal(raced.value.value?.verdict, "running-healthy");
+  assert.equal(raced.replaced, 3);
+  const warnings = raced.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED");
+  assert.equal(warnings.length, 1, JSON.stringify(raced.value.diagnostics));
+  assert.equal(warnings[0]?.severity, "warning");
+  assert.equal(warnings[0]?.path, run.value.run_root);
+  assert.equal(
+    warnings[0]?.message,
+    `run state synchronization was skipped because run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}; reported counts come from the workflow runner and local run state may be stale`
+  );
+  assert.equal(
+    raced.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
+    0,
+    JSON.stringify(raced.value.diagnostics)
+  );
 });
 
 test("getRunStatus uses only validated current runState and validates the events envelope", async () => {
@@ -14485,15 +14766,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
   {
     // Bun's startup controls are addressed relative to the inherited descriptor
     // root instead of a /proc literal, so the same patch works where /proc is
-    // absent. Both patches must route through that helper rather than spell the
-    // arguments themselves.
-    for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) {
-      const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
-      assert.ok(startup);
-      assert.match(startup.patched, /ultrafuzzBunStartupArgsFor/u);
-    }
+    // absent. The resume patch is a separate module and must not depend on the
+    // helper declared in the CLI entry module.
+    const resumeStartup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "resume_snapshot_transfer");
+    assert.ok(resumeStartup);
+    assert.doesNotMatch(resumeStartup.patched, /ultrafuzzBunStartupArgsFor/u);
+    assert.match(
+      resumeStartup.patched,
+      /"--config=" \+ snapshotChildRoot.*"--env-file=" \+ snapshotChildRoot.*"--preload=" \+ snapshotChildRoot/su
+    );
     const startupAnchor = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
     assert.ok(startupAnchor);
+    assert.match(startupAnchor.patched, /ultrafuzzBunStartupArgsFor/u);
     assert.match(
       startupAnchor.patched,
       /"--env-file=" \+ root \+ "\/controls\/bun-empty\.env".*"--no-addons".*"--preload=" \+ root \+ "\/controls\/bun-module-confinement\.js"/u
@@ -14563,6 +14847,22 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+
+    const unscopedHelperPredecessor = resumeTransfer.patch.predecessors?.find((candidate) =>
+      candidate.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)")
+    );
+    assert.ok(unscopedHelperPredecessor);
+    fs.writeFileSync(
+      resumeTransfer.source,
+      current.replace(resumeTransfer.patch.patched, unscopedHelperPredecessor),
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedUnscopedHelper = fs.readFileSync(resumeTransfer.source, "utf8");
+    assert.equal(migratedUnscopedHelper.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)"), false);
+    assert.equal(migratedUnscopedHelper.includes(resumeTransfer.patch.patched), true);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
@@ -14687,6 +14987,40 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
     assert.equal(fs.existsSync(trustedMarker), true);
     assert.equal(fs.existsSync(hostileMarker), false);
+  }
+});
+
+test("compatibility patches declare every ultrafuzz helper inside the module they patch", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  // Patches land in separate ES modules, so a helper one module's patch declares
+  // is out of scope for another module's patch even though both are always
+  // applied together: resume-detached.js once called helpers that only the
+  // src/index.js anchor declared and threw ReferenceError at resume time.
+  const patchedByModule = new Map<string, string>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const module = `${patch.packageName}/${patch.sourceRelativePath}`;
+    patchedByModule.set(module, `${patchedByModule.get(module) ?? ""}\n${patch.patched}`);
+  }
+  assert.ok(patchedByModule.has("@smthrs/cli/src/resume-detached.js"));
+  for (const [module, patched] of patchedByModule) {
+    const declared = new Set(
+      [...patched.matchAll(/(?<=\b(?:const|let|var|function|class)\s+)ultrafuzz[A-Za-z0-9_]+\b/gu)].map(
+        (match) => match[0]
+      )
+    );
+    const undeclared = [...patched.matchAll(/\bultrafuzz[A-Za-z0-9_]+\b/gu)]
+      .filter(
+        // An object-literal key names a field on the value it travels with, not a
+        // binding in the module, so it is the one non-reference form allowed here.
+        (match) =>
+          !(
+            /[{,]\s*$/u.test(patched.slice(0, match.index)) &&
+            /^\s*:(?!:)/u.test(patched.slice(match.index + match[0].length))
+          )
+      )
+      .map((match) => match[0])
+      .filter((name) => !declared.has(name));
+    assert.deepEqual([...new Set(undeclared)], [], `${module} uses ultrafuzz helpers its patched text never declares`);
   }
 });
 
@@ -20824,6 +21158,61 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   );
 });
 
+test("syncRun excludes a pre-agent terminal failure from the model-attempt ledger", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-pre-agent-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "workspace preparation failed before agent launch" }
+      }
+    ]),
+    nodeDetails: {
+      "node:project-discovery": {
+        node: { nodeId: "node:project-discovery", lastAttempt: 1 },
+        attempts: [
+          {
+            nodeId: "node:project-discovery",
+            attempt: 1,
+            state: "failed",
+            // Persisted Smithers 0.35 shape: selection fields are initialized to
+            // null at attempt creation and agentChainIndex is never written when
+            // the attempt fails before an agent-chain rung is selected.
+            meta: { kind: "agent", agentId: null, agentModel: null, agentEngine: null, agentResume: null }
+          }
+        ]
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "pre-agent-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "pre-agent-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(run.value);
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; retry_count?: number }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.equal(state.nodes?.["project-discovery"]?.retry_count, 0);
+  assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
+});
+
 test("syncRun keeps redacted failure state and attempt evidence stable across credential rotation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -23616,9 +24005,12 @@ test("controller refresh authenticates newly required sealed runner patches and 
   );
   assert.ok(resumeTransferPatch);
   assert.ok(processAnchorPatch);
-  const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
+  const [predecessorResumeTransferPatch, preserveSymlinksResumeTransferPatch, unscopedHelperResumeTransferPatch] =
+    resumeTransferPatch.predecessors ?? [];
   assert.ok(predecessorResumeTransferPatch);
-  assert.equal(resumeTransferPatch.predecessors?.length, 2);
+  assert.ok(preserveSymlinksResumeTransferPatch);
+  assert.ok(unscopedHelperResumeTransferPatch);
+  assert.equal(resumeTransferPatch.predecessors?.length, 3);
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
