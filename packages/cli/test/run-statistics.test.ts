@@ -396,7 +396,9 @@ test("stats accepts only additive workflow tasks from dynamic graph expansion", 
   const baselineTaskId = "node:node";
   const generatedTaskId = "node:generated";
   const base = evidence();
-  const generatedNode = structuredClone(base.graph.nodes[0]!);
+  const template = base.graph.nodes[0];
+  assert.ok(template);
+  const generatedNode = structuredClone(template);
   generatedNode.id = "generated";
   generatedNode.logical_id = "generated";
   generatedNode.display_name = "generated";
@@ -441,7 +443,9 @@ test("stats accepts only additive workflow tasks from dynamic graph expansion", 
   );
 
   const staticExtraGraph = structuredClone(expandedGraph);
-  delete staticExtraGraph.nodes[1]!.dynamic_generated;
+  const staticNode = staticExtraGraph.nodes[1];
+  assert.ok(staticNode);
+  delete staticNode.dynamic_generated;
   assert.throws(
     () => deriveRunStatistics({ ...base, graph: staticExtraGraph, state: expandedState }),
     /planned graph workflow task IDs do not match run metadata/iu
