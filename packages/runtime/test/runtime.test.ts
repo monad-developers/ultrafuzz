@@ -11852,9 +11852,10 @@ test("listRuns reports an unreadable run directory instead of failing the whole 
   const list = await listRuns({ projectRoot: project, env: fakePsSmithersEnv(project, currentPsEnvelope([])) });
 
   assert.equal(list.ok, true, JSON.stringify(list.diagnostics));
-  const broken = list.value!.product_runs.find((run) => run.run_id === "broken-launch");
-  assert.equal(broken?.status, "unreadable");
-  assert.equal(broken?.run_root, path.join(runsRoot, "broken-launch"));
+  const broken = list.value?.product_runs.find((run) => run.run_id === "broken-launch");
+  assert.ok(broken, JSON.stringify(list.value));
+  assert.equal(broken.status, "unreadable");
+  assert.equal(broken.run_root, path.join(runsRoot, "broken-launch"));
   assert.equal(
     list.diagnostics.some((diagnostic) => diagnostic.code === "RUN_LIST_ENTRY_UNREADABLE"),
     true,
