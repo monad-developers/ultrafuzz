@@ -14731,15 +14731,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
   {
     // Bun's startup controls are addressed relative to the inherited descriptor
     // root instead of a /proc literal, so the same patch works where /proc is
-    // absent. Both patches must route through that helper rather than spell the
-    // arguments themselves.
-    for (const id of ["process_snapshot_anchor", "resume_snapshot_transfer"] as const) {
-      const startup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === id);
-      assert.ok(startup);
-      assert.match(startup.patched, /ultrafuzzBunStartupArgsFor/u);
-    }
+    // absent. The resume patch is a separate module and must not depend on the
+    // helper declared in the CLI entry module.
+    const resumeStartup = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "resume_snapshot_transfer");
+    assert.ok(resumeStartup);
+    assert.doesNotMatch(resumeStartup.patched, /ultrafuzzBunStartupArgsFor/u);
+    assert.match(
+      resumeStartup.patched,
+      /"--config=" \+ snapshotChildRoot.*"--env-file=" \+ snapshotChildRoot.*"--preload=" \+ snapshotChildRoot/su
+    );
     const startupAnchor = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "process_snapshot_anchor");
     assert.ok(startupAnchor);
+    assert.match(startupAnchor.patched, /ultrafuzzBunStartupArgsFor/u);
     assert.match(
       startupAnchor.patched,
       /"--env-file=" \+ root \+ "\/controls\/bun-empty\.env".*"--no-addons".*"--preload=" \+ root \+ "\/controls\/bun-module-confinement\.js"/u
@@ -14809,6 +14812,22 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+
+    const unscopedHelperPredecessor = resumeTransfer.patch.predecessors?.find((candidate) =>
+      candidate.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)")
+    );
+    assert.ok(unscopedHelperPredecessor);
+    fs.writeFileSync(
+      resumeTransfer.source,
+      current.replace(resumeTransfer.patch.patched, unscopedHelperPredecessor),
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedUnscopedHelper = fs.readFileSync(resumeTransfer.source, "utf8");
+    assert.equal(migratedUnscopedHelper.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)"), false);
+    assert.equal(migratedUnscopedHelper.includes(resumeTransfer.patch.patched), true);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
@@ -14933,6 +14952,40 @@ test("compatibility patcher rewrites every described workaround", async () => {
     );
     assert.equal(fs.existsSync(trustedMarker), true);
     assert.equal(fs.existsSync(hostileMarker), false);
+  }
+});
+
+test("compatibility patches declare every ultrafuzz helper inside the module they patch", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  // Patches land in separate ES modules, so a helper one module's patch declares
+  // is out of scope for another module's patch even though both are always
+  // applied together: resume-detached.js once called helpers that only the
+  // src/index.js anchor declared and threw ReferenceError at resume time.
+  const patchedByModule = new Map<string, string>();
+  for (const patch of SMITHERS_COMPATIBILITY_PATCHES) {
+    const module = `${patch.packageName}/${patch.sourceRelativePath}`;
+    patchedByModule.set(module, `${patchedByModule.get(module) ?? ""}\n${patch.patched}`);
+  }
+  assert.ok(patchedByModule.has("@smthrs/cli/src/resume-detached.js"));
+  for (const [module, patched] of patchedByModule) {
+    const declared = new Set(
+      [...patched.matchAll(/(?<=\b(?:const|let|var|function|class)\s+)ultrafuzz[A-Za-z0-9_]+\b/gu)].map(
+        (match) => match[0]
+      )
+    );
+    const undeclared = [...patched.matchAll(/\bultrafuzz[A-Za-z0-9_]+\b/gu)]
+      .filter(
+        // An object-literal key names a field on the value it travels with, not a
+        // binding in the module, so it is the one non-reference form allowed here.
+        (match) =>
+          !(
+            /[{,]\s*$/u.test(patched.slice(0, match.index)) &&
+            /^\s*:(?!:)/u.test(patched.slice(match.index + match[0].length))
+          )
+      )
+      .map((match) => match[0])
+      .filter((name) => !declared.has(name));
+    assert.deepEqual([...new Set(undeclared)], [], `${module} uses ultrafuzz helpers its patched text never declares`);
   }
 });
 
@@ -23862,9 +23915,12 @@ test("controller refresh authenticates newly required sealed runner patches and 
   );
   assert.ok(resumeTransferPatch);
   assert.ok(processAnchorPatch);
-  const [predecessorResumeTransferPatch] = resumeTransferPatch.predecessors ?? [];
+  const [predecessorResumeTransferPatch, preserveSymlinksResumeTransferPatch, unscopedHelperResumeTransferPatch] =
+    resumeTransferPatch.predecessors ?? [];
   assert.ok(predecessorResumeTransferPatch);
-  assert.equal(resumeTransferPatch.predecessors?.length, 2);
+  assert.ok(preserveSymlinksResumeTransferPatch);
+  assert.ok(unscopedHelperResumeTransferPatch);
+  assert.equal(resumeTransferPatch.predecessors?.length, 3);
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
