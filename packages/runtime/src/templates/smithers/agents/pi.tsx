@@ -211,14 +211,15 @@ function observePiLine(totals: PiInvocationUsage, line: string): PiLineObservati
   const outputTokens = piUsageCount(usage.output, "output");
   const cacheReadTokens = piUsageCount(usage.cacheRead, "cacheRead");
   const cacheWriteTokens = piUsageCount(usage.cacheWrite, "cacheWrite");
-  const reasoningTokens = usage.reasoning === undefined ? 0 : piUsageCount(usage.reasoning, "reasoning");
+  const reportedReasoningTokens = usage.reasoning === undefined ? 0 : piUsageCount(usage.reasoning, "reasoning");
+  // Some providers report reasoning separately from visible output, while
+  // Smithers' usage contract treats reasoning as a subset of output. Preserve
+  // the inclusive output total and clamp only the optional detail field.
+  const reasoningTokens = Math.min(reportedReasoningTokens, outputTokens);
   const reportedTotal = piUsageCount(usage.totalTokens, "totalTokens");
   const calculatedTotal = freshInputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   if (!Number.isSafeInteger(calculatedTotal) || reportedTotal !== calculatedTotal) {
     throw new Error("Pi assistant usage totalTokens does not equal its token component sum");
-  }
-  if (reasoningTokens > outputTokens) {
-    throw new Error("Pi assistant reasoning usage exceeds its inclusive output usage");
   }
   const cost = objectRecord(usage.cost);
   if (cost === undefined) throw new Error("Pi assistant usage omitted its adapter-recorded cost breakdown");
