@@ -5079,22 +5079,22 @@ function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: st
     const promptPath = path.isAbsolute(planned.rendered_prompt_path)
       ? path.resolve(planned.rendered_prompt_path)
       : path.resolve(input.projectRoot, planned.rendered_prompt_path);
+    if (fs.existsSync(promptPath)) continue;
     const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
     if (promptPath !== expectedPromptPath) {
-      throw new Error(`persisted rendered prompt path does not match reset task ${nodeId}`);
+      throw new Error(`persisted rendered prompt path does not match task ${nodeId}`);
     }
-    assertPathInside(runRoot, promptPath, `rendered prompt for reset task ${nodeId}`);
-    if (fs.existsSync(promptPath)) continue;
+    assertPathInside(runRoot, promptPath, `rendered prompt for task ${nodeId}`);
     const snapshotPath = safeResolveInside(
       runRoot,
       planned.rendered_prompt_snapshot_path,
-      `retained rendered prompt snapshot for reset task ${nodeId}`
+      `retained rendered prompt snapshot for task ${nodeId}`
     );
-    assertRegularFileInside(runRoot, snapshotPath, `retained rendered prompt snapshot for reset task ${nodeId}`);
-    assertNoSymlinkComponents(runRoot, snapshotPath, `retained rendered prompt snapshot for reset task ${nodeId}`);
+    assertRegularFileInside(runRoot, snapshotPath, `retained rendered prompt snapshot for task ${nodeId}`);
+    assertNoSymlinkComponents(runRoot, snapshotPath, `retained rendered prompt snapshot for task ${nodeId}`);
     const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
     if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
-      throw new Error(`retained rendered prompt snapshot does not match reset task ${nodeId}`);
+      throw new Error(`retained rendered prompt snapshot does not match task ${nodeId}`);
     }
     const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
     publishFileDurableExclusive(runRoot, relativePromptPath, contents);

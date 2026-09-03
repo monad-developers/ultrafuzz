@@ -24854,23 +24854,29 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   });
   const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
-  const plan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
+  assert.ok(run.value !== undefined);
+  const runRoot = run.value.run_root;
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog !== undefined);
+  const markerPath = path.join(runRoot, "smithers", "reset-node-applied.json");
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
     rendered_prompts: Array<{
       attempt_id: string;
       rendered_prompt_path: string;
       rendered_prompt_snapshot_path: string;
     }>;
   };
-  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows")!;
-  const priorPlannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery")!;
-  const snapshotPath = path.join(run.value!.run_root, plannedPrompt.rendered_prompt_snapshot_path);
-  const priorSnapshotPath = path.join(run.value!.run_root, priorPlannedPrompt.rendered_prompt_snapshot_path);
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows");
+  assert.ok(plannedPrompt !== undefined, "plan must record the reset node prompt");
+  const priorPlannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery");
+  assert.ok(priorPlannedPrompt !== undefined, "plan must record the finished node prompt");
+  const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
+  const priorSnapshotPath = path.join(runRoot, priorPlannedPrompt.rendered_prompt_snapshot_path);
   const expectedPrompt = fs.readFileSync(snapshotPath);
   const expectedPriorPrompt = fs.readFileSync(priorSnapshotPath);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
   fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.writeFileSync(commandLog, "", "utf8");
 
   const detached = await resumeRun({
     projectRoot: project,
@@ -24893,12 +24899,12 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
     expectedPriorPrompt,
     "reset continuation must restore a presentation prompt removed by an earlier reset"
   );
-  const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  const failedCommands = fs.readFileSync(commandLog, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
   fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
   fs.writeFileSync(priorSnapshotPath, "mismatched retained prompt\n", "utf8");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.writeFileSync(commandLog, "", "utf8");
 
   const rejected = await resumeRun({
     projectRoot: project,
@@ -24908,8 +24914,8 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   });
 
   assert.equal(rejected.ok, false);
-  assert.match(rejected.diagnostics[0]?.message ?? "", /snapshot does not match reset task/u);
-  const rejectedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(rejected.diagnostics[0]?.message ?? "", /snapshot does not match task/u);
+  const rejectedCommands = fs.readFileSync(commandLog, "utf8");
   assert.match(rejectedCommands, /^inspect /mu);
   assert.doesNotMatch(
     rejectedCommands,
@@ -24918,7 +24924,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   );
   assert.equal(fs.existsSync(markerPath), true, "rejected recovery must retain the reset marker");
   fs.writeFileSync(priorSnapshotPath, expectedPriorPrompt);
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.writeFileSync(commandLog, "", "utf8");
 
   const retried = await resumeRun({
     projectRoot: project,
@@ -24932,7 +24938,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
   assert.deepEqual(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path), expectedPriorPrompt);
-  const retriedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  const retriedCommands = fs.readFileSync(commandLog, "utf8");
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
     retriedCommands,
@@ -24957,18 +24963,23 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   });
   const run = await startRun({ projectRoot: project, runId: "ordinary-resume-prompt-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const plan = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "plan.json"), "utf8")) as {
+  assert.ok(run.value !== undefined);
+  const runRoot = run.value.run_root;
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog !== undefined);
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
     rendered_prompts: Array<{
       attempt_id: string;
       rendered_prompt_path: string;
       rendered_prompt_snapshot_path: string;
     }>;
   };
-  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery")!;
-  const snapshotPath = path.join(run.value!.run_root, plannedPrompt.rendered_prompt_snapshot_path);
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery");
+  assert.ok(plannedPrompt !== undefined, "plan must record the finished node prompt");
+  const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
   const expectedPrompt = fs.readFileSync(snapshotPath);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.writeFileSync(commandLog, "", "utf8");
 
   const resumed = await resumeRun({
     projectRoot: project,
@@ -24979,7 +24990,7 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  const commands = fs.readFileSync(commandLog, "utf8");
   assert.doesNotMatch(commands, /^timetravel /mu, "ordinary resume must not reset any node");
   assert.match(
     commands,
