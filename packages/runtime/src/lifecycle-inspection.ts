@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   SMITHERS_NODE_STATES,
   SMITHERS_RUN_STATUSES,
+  StrictJsonError,
   appendEvent,
   parseStrictJsonBytes,
   readRunState,
@@ -12,6 +13,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 
+import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagnostics.js";
 import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
@@ -43,10 +45,15 @@ import type {
   WorkflowRunQueryInput
 } from "./types.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
-import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import {
+  describeObservationSynchronizationDeadline,
+  observationSynchronizationDeadline,
+  synchronizeLinkedWorkflowRun
+} from "./workflow-sync.js";
 
 const DEFAULT_EVENT_LIMIT = 200;
 const MAX_EVENT_LIMIT = 2_000;
+const MAX_EVENT_SNAPSHOT_ATTEMPTS = 3;
 const MAX_WATCH_LINES = 100_000;
 const EVENT_DETAIL_LIMIT_CHARACTERS = 512;
 const SMITHERS_DOCUMENT_MAX_BYTES = 128 * 1024 * 1024;
@@ -289,7 +296,10 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
   if (!evidence.ok) {
     return runtimeFailure<DiagnoseRunValue>(evidence.diagnostics);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+  const sync = await synchronizeLinkedWorkflowRun(
+    { projectRoot, runId: input.runId, env: input.env },
+    { deadlineMs: observationSynchronizationDeadline(input.env) }
+  );
   const syncDiagnostics = downgradedSyncDiagnostics(sync);
   const snapshot = await runSmithersInspectionCommand({
     // `--full-output` is what makes the runner emit the `{ok, data, meta}` envelope
@@ -410,49 +420,94 @@ export async function listRunSnapshots(input: WorkflowRunQueryInput) {
 
 export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    observeOnly: true,
+    tolerateControlDivergence: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
   }
+  const controlDiagnostics = workflowControlDivergenceDiagnostics(
+    evidence.verifiedControl.divergences,
+    evidence.verifiedControl.paths.integrityPath
+  );
   const limit = boundedEventLimit(input.limit);
-  const events: WorkflowLifecycleEvent[] = [];
-  let previousSequence: number | undefined;
-  let stream: SmithersStreamResult;
-  try {
-    stream = await streamSmithersCommand({
-      args: workflowEventsArgs(evidence.smithersRunId, input, { watch: false, limit }),
-      projectRoot,
-      env: linkedWorkflowExecutionEnvironment(evidence, input.env),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      // One line past the limit so an exact-limit result is not called truncated.
-      maxLines: limit + 1,
-      onLine: (line) => {
-        const record = parseCurrentEventLine(line, evidence.smithersRunId);
-        if (previousSequence !== undefined && record.seq <= previousSequence) {
-          contractError("workflow event sequences must be strictly increasing");
-        }
-        previousSequence = record.seq;
-        events.push(adaptEvent(record));
+  for (let snapshotAttempt = 1; snapshotAttempt <= MAX_EVENT_SNAPSHOT_ATTEMPTS; snapshotAttempt += 1) {
+    const events: WorkflowLifecycleEvent[] = [];
+    let previousSequence: number | undefined;
+    let pendingLine: string | undefined;
+    const appendLine = (line: string): void => {
+      const record = parseCurrentEventLine(line, evidence.smithersRunId);
+      if (previousSequence !== undefined && record.seq <= previousSequence) {
+        contractError("workflow event sequences must be strictly increasing");
       }
-    });
-  } catch (error) {
-    if (error instanceof SmithersInspectionContractError) {
-      return runtimeFailure<WorkflowEventsValue>([invalidPayloadDiagnostic("WORKFLOW_EVENTS_INVALID", error)]);
+      previousSequence = record.seq;
+      events.push(adaptEvent(record));
+    };
+    let stream: SmithersStreamResult;
+    try {
+      stream = await streamSmithersCommand({
+        args: workflowEventsArgs(evidence.smithersRunId, input, { watch: false, limit }),
+        projectRoot,
+        env: linkedWorkflowExecutionEnvironment(evidence, input.env),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        // One line past the limit so an exact-limit result is not called truncated.
+        maxLines: limit + 1,
+        onLine: (line) => {
+          // Keep one record pending so only a syntax failure proven to be the
+          // successful command's final stdout line can qualify for a retry.
+          if (pendingLine !== undefined) appendLine(pendingLine);
+          pendingLine = line;
+        }
+      });
+    } catch (error) {
+      if (error instanceof SmithersInspectionContractError) {
+        return runtimeFailure<WorkflowEventsValue>([invalidPayloadDiagnostic("WORKFLOW_EVENTS_INVALID", error)]);
+      }
+      return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_QUERY_FAILED")]);
     }
-    return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_QUERY_FAILED")]);
+    const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_QUERY_FAILED");
+    if (streamFailure !== undefined) {
+      return runtimeFailure<WorkflowEventsValue>([streamFailure]);
+    }
+    try {
+      if (pendingLine !== undefined) appendLine(pendingLine);
+    } catch (error) {
+      if (
+        isTransientFinalEventAppendRace(error) &&
+        !stream.truncated &&
+        snapshotAttempt < MAX_EVENT_SNAPSHOT_ATTEMPTS
+      ) {
+        continue;
+      }
+      if (error instanceof SmithersInspectionContractError) {
+        return runtimeFailure<WorkflowEventsValue>([invalidPayloadDiagnostic("WORKFLOW_EVENTS_INVALID", error)]);
+      }
+      return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_QUERY_FAILED")]);
+    }
+    const truncated = stream.truncated && stream.lines > limit;
+    return runtimeResult<WorkflowEventsValue>(
+      true,
+      {
+        run_id: input.runId,
+        workflow_run_id: evidence.smithersRunId,
+        events: events.slice(0, limit),
+        limit,
+        truncated: truncated || events.length > limit
+      },
+      controlDiagnostics
+    );
   }
-  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_QUERY_FAILED");
-  if (streamFailure !== undefined) {
-    return runtimeFailure<WorkflowEventsValue>([streamFailure]);
-  }
-  const truncated = stream.truncated && stream.lines > limit;
-  return runtimeResult<WorkflowEventsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    events: events.slice(0, limit),
-    limit,
-    truncated: truncated || events.length > limit
-  });
+  throw new Error("unreachable event snapshot retry state");
+}
+
+function isTransientFinalEventAppendRace(error: unknown): boolean {
+  return (
+    error instanceof SmithersInspectionContractError &&
+    error.message === "workflow event record is not strict JSON" &&
+    error.cause instanceof StrictJsonError &&
+    error.cause.kind === "syntax"
+  );
 }
 
 /**
@@ -463,10 +518,17 @@ export async function watchWorkflowEvents(
   input: WorkflowEventsQueryInput & { intervalSeconds?: number; onEvent: (event: WorkflowLifecycleEvent) => void }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    observeOnly: true,
+    tolerateControlDivergence: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
   }
+  const controlDiagnostics = workflowControlDivergenceDiagnostics(
+    evidence.verifiedControl.divergences,
+    evidence.verifiedControl.paths.integrityPath
+  );
   const limit = boundedEventLimit(input.limit);
   let observed = 0;
   let previousSequence: number | undefined;
@@ -501,13 +563,17 @@ export async function watchWorkflowEvents(
   if (streamFailure !== undefined) {
     return runtimeFailure<WorkflowEventsValue>([streamFailure]);
   }
-  return runtimeResult<WorkflowEventsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    events: [],
-    limit: observed,
-    truncated: stream.truncated
-  });
+  return runtimeResult<WorkflowEventsValue>(
+    true,
+    {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      events: [],
+      limit: observed,
+      truncated: stream.truncated
+    },
+    controlDiagnostics
+  );
 }
 
 export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
@@ -1156,7 +1222,7 @@ function parseCurrentNodeDetail(
     detail.approval === null ? null : parseCurrentNodeApproval(detail.approval, runId, nodeId, iteration);
   const limits = parseCurrentNodeLimits(detail.limits);
   const lastAttempt = requiredNullableCount(nodeRow.lastAttempt, "workflow node detail node lastAttempt");
-  if (attempts.length > 0 && lastAttempt !== attempts.at(-1)!.attempt) {
+  if (attempts.length > 0 && !attempts.some((attempt) => attempt.attempt === lastAttempt)) {
     contractError("workflow node detail lastAttempt disagrees with the attempts array");
   }
   return {
@@ -1780,7 +1846,9 @@ function adaptToolCall(row: CurrentNodeToolCall, includePayloads: boolean): Work
 
 function downgradedSyncDiagnostics(sync: { ok: boolean; diagnostics: RuntimeDiagnostic[] }): RuntimeDiagnostic[] {
   return sync.diagnostics.map((entry) =>
-    entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+    describeObservationSynchronizationDeadline(
+      entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+    )
   );
 }
 
