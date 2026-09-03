@@ -5070,6 +5070,12 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
  * even though persisted frames still refer to them. Any later resume renders the whole graph, so a
  * prompt removed by an earlier reset must be available too. Only static agent tasks have plan rows
  * here; dynamic tasks keep their runtime materialization path.
+ *
+ * A row whose retained snapshot is gone as well has nothing to restore from and is skipped: the
+ * continuation then proceeds exactly as it did before this recovery existed, and Smithers reports
+ * the missing prompt itself when it renders the task. Every other check gates a write, so a
+ * snapshot that is present but wrong (digest, symlink, non-regular file, escaping path) still fails
+ * the continuation.
  */
 function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
   const runRoot = path.resolve(input.runRoot);
@@ -5080,24 +5086,36 @@ function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: st
       ? path.resolve(planned.rendered_prompt_path)
       : path.resolve(input.projectRoot, planned.rendered_prompt_path);
     if (fs.existsSync(promptPath)) continue;
+    const snapshotLabel = `retained rendered prompt snapshot for task ${nodeId}`;
+    const snapshotPath = safeResolveInside(runRoot, planned.rendered_prompt_snapshot_path, snapshotLabel);
+    if (!retainedSnapshotEntryExists(snapshotPath)) continue;
     const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
     if (promptPath !== expectedPromptPath) {
       throw new Error(`persisted rendered prompt path does not match task ${nodeId}`);
     }
     assertPathInside(runRoot, promptPath, `rendered prompt for task ${nodeId}`);
-    const snapshotPath = safeResolveInside(
-      runRoot,
-      planned.rendered_prompt_snapshot_path,
-      `retained rendered prompt snapshot for task ${nodeId}`
-    );
-    assertRegularFileInside(runRoot, snapshotPath, `retained rendered prompt snapshot for task ${nodeId}`);
-    assertNoSymlinkComponents(runRoot, snapshotPath, `retained rendered prompt snapshot for task ${nodeId}`);
+    assertRegularFileInside(runRoot, snapshotPath, snapshotLabel);
+    assertNoSymlinkComponents(runRoot, snapshotPath, snapshotLabel);
     const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
     if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
       throw new Error(`retained rendered prompt snapshot does not match task ${nodeId}`);
     }
     const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
     publishFileDurableExclusive(runRoot, relativePromptPath, contents);
+  }
+}
+
+/**
+ * `lstat` semantics on purpose: a dangling symlink or a non-file entry counts as present so it
+ * reaches the fail-closed checks above. Any lookup failure is classified the way
+ * `assertRegularFileInside` classifies it, as no retained file, which is the case that skips.
+ */
+function retainedSnapshotEntryExists(snapshotPath: string): boolean {
+  try {
+    fs.lstatSync(snapshotPath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
