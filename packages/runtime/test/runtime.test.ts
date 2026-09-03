@@ -12056,22 +12056,37 @@ test("listRuns, observers and status re-read live run documents replaced while t
   const twiceReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, listed);
   assert.deepEqual(twiceReplaced, { value: [[runId, "running"]], replaced: 2 });
 
-  // The budget is bounded: a document that changes under three consecutive reads still fails, and the
-  // failure names the file, because `status` prints the message alone.
-  const exhausted = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 3 }, async () => {
-    try {
-      await listRuns({ projectRoot: project, env });
-      return undefined;
-    } catch (error: unknown) {
-      return error;
-    }
-  });
-  assert.ok(exhausted.value instanceof Error, "listRuns did not fail after three consecutive races");
-  assert.equal(
-    exhausted.value.message,
-    `run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}`
+  // The budget is bounded: a document that changes under three consecutive reads exhausts it, and the
+  // last race names the file. One run that cannot be read must not fail the whole listing (#1080), so
+  // `ps` still lists the run, as unreadable, and reports the exhausted race as the reason in a warning.
+  // The run reads normally again once its documents hold still.
+  const exhausted = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 3 }, () =>
+    listRuns({ projectRoot: project, env })
   );
+  assert.equal(exhausted.value.ok, true, JSON.stringify(exhausted.value.diagnostics));
   assert.equal(exhausted.replaced, 3);
+  const unreadable = exhausted.value.value?.product_runs.find((entry) => entry.run_id === runId);
+  assert.ok(unreadable, JSON.stringify(exhausted.value.value));
+  assert.equal(unreadable.status, "unreadable");
+  assert.equal(unreadable.run_root, run.value.run_root);
+  assert.deepEqual(unreadable.workflow_ids, []);
+  const unreadableWarnings = exhausted.value.diagnostics.filter(
+    (diagnostic) => diagnostic.code === "RUN_LIST_ENTRY_UNREADABLE"
+  );
+  assert.equal(unreadableWarnings.length, 1, JSON.stringify(exhausted.value.diagnostics));
+  assert.equal(unreadableWarnings[0]?.severity, "warning");
+  assert.equal(unreadableWarnings[0]?.path, run.value.run_root);
+  assert.ok(
+    unreadableWarnings[0]?.message.includes(
+      `run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}`
+    ),
+    unreadableWarnings[0]?.message
+  );
+  assert.equal(
+    exhausted.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
+    0,
+    JSON.stringify(exhausted.value.diagnostics)
+  );
   assert.deepEqual(await listed(), [[runId, "running"]]);
 
   // An observer derives the evidence again when a live document was replaced under one of its strict
