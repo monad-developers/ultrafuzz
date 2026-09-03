@@ -38,7 +38,11 @@ import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
-import { observationSynchronizationDeadline, synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import {
+  describeObservationSynchronizationDeadline,
+  observationSynchronizationDeadline,
+  synchronizeLinkedWorkflowRun
+} from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
 const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -126,12 +130,9 @@ export async function getRunStatus(input: {
     { projectRoot, runId: input.runId, env: input.env },
     { deadlineMs: observationSynchronizationDeadline(input.env) }
   );
-  const syncDiagnostics = sync.ok
-    ? sync.diagnostics
-    : sync.diagnostics.map((diagnostic) => ({
-        ...diagnostic,
-        severity: "warning" as const
-      }));
+  const syncDiagnostics = sync.diagnostics.map((diagnostic) =>
+    describeObservationSynchronizationDeadline(sync.ok ? diagnostic : { ...diagnostic, severity: "warning" as const })
+  );
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   const base = readRunListEntry(layout.root, layout.runId);
   const state = readRunState(layout);
@@ -220,10 +221,12 @@ export async function getRunHealth(input: {
       { projectRoot, runId: input.runId, env: input.env },
       { observeOnly: true, deadlineMs: observationSynchronizationDeadline(input.env) }
     );
+    // Health below comes from the direct runner query, so an exceeded refresh
+    // deadline is a warning about possibly stale local state, not a failure.
     syncDiagnostics.push(
       ...sync.diagnostics.map((diagnostic) =>
         diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
-          ? { ...diagnostic, severity: "warning" as const }
+          ? describeObservationSynchronizationDeadline({ ...diagnostic, severity: "warning" as const })
           : diagnostic
       )
     );

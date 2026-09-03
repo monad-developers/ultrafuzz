@@ -43,7 +43,11 @@ import type {
   WorkflowRunQueryInput
 } from "./types.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
-import { observationSynchronizationDeadline, synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import {
+  describeObservationSynchronizationDeadline,
+  observationSynchronizationDeadline,
+  synchronizeLinkedWorkflowRun
+} from "./workflow-sync.js";
 
 const DEFAULT_EVENT_LIMIT = 200;
 const MAX_EVENT_LIMIT = 2_000;
@@ -1783,7 +1787,9 @@ function adaptToolCall(row: CurrentNodeToolCall, includePayloads: boolean): Work
 
 function downgradedSyncDiagnostics(sync: { ok: boolean; diagnostics: RuntimeDiagnostic[] }): RuntimeDiagnostic[] {
   return sync.diagnostics.map((entry) =>
-    entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+    describeObservationSynchronizationDeadline(
+      entry.severity === "error" ? { ...entry, severity: "warning" as const } : entry
+    )
   );
 }
 

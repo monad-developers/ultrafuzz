@@ -17,6 +17,7 @@ import {
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import {
+  describeObservationSynchronizationDeadline,
   observationSynchronizationDeadline,
   runsRootForProject,
   synchronizeLinkedWorkflowRun,
@@ -170,7 +171,9 @@ async function loadLocalEvidence(
   }
   const diagnostics = synchronized.ok
     ? synchronized.diagnostics
-    : synchronized.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }));
+    : synchronized.diagnostics.map((diagnostic) =>
+        describeObservationSynchronizationDeadline({ ...diagnostic, severity: "warning" as const })
+      );
   return {
     evidence: {
       runId,

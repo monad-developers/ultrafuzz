@@ -12126,7 +12126,10 @@ test("getRunHealth returns live runner health when observation synchronization e
   assert.equal(health.value?.workflow_status, "running");
   assert.ok(
     health.diagnostics.some(
-      (diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED" && diagnostic.severity === "warning"
+      (diagnostic) =>
+        diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED" &&
+        diagnostic.severity === "warning" &&
+        /ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS=off/u.test(diagnostic.message)
     ),
     JSON.stringify(health.diagnostics)
   );
