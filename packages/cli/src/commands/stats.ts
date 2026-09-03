@@ -110,13 +110,7 @@ export default class Stats extends Command {
           : loadBundleEvidence(path.resolve(cliIo().cwd, flags.bundle));
       const derived = deriveRunStatistics(loaded.evidence);
       const diagnostics = [...loaded.diagnostics, ...derived.diagnostics];
-      const result: CommandResult = {
-        ok: true,
-        command: commandName,
-        data: derived.value,
-        text: renderStatistics(derived.value, diagnostics),
-        diagnostics
-      };
+      const result = buildStatisticsCommandResult(derived.value, diagnostics);
       emitCommandResult(this, commandName, result, flags.json === true);
     } catch (error) {
       emitCommandResult(
@@ -127,6 +121,19 @@ export default class Stats extends Command {
       );
     }
   }
+}
+
+export function buildStatisticsCommandResult(
+  value: RunStatisticsValue,
+  diagnostics: RuntimeDiagnostic[]
+): CommandResult {
+  return {
+    ok: !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+    command: "stats",
+    data: value,
+    text: renderStatistics(value, diagnostics),
+    diagnostics
+  };
 }
 
 async function loadLocalEvidence(
