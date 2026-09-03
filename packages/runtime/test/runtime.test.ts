@@ -11901,6 +11901,227 @@ test("listRuns requires the exact current Smithers ps envelope and row shape", a
   }
 });
 
+/**
+ * Replaces a live run document by atomic rename at the one moment the strict reader is exposed to it:
+ * after the reader has consumed the bytes and before its second fstat, from inside the reading
+ * process. The rename is real and so is the reader's verdict; only the timing is controlled, which
+ * turns the race issue #1054 describes from a matter of chance into a deterministic reproduction.
+ * `node:fs`'s default export is the shared CommonJS module object, so the reader observes the wrapped
+ * calls. A read is armed only while replacements remain and, when `onlyWhen` is given, only when the
+ * reader's synchronous call stack satisfies it.
+ */
+async function observeWhileReplacingRunDocument<T>(
+  input: { documentPath: string; replacements: number; onlyWhen?: (synchronousFrames: string[]) => boolean },
+  observe: () => Promise<T>
+): Promise<{ value: T; replaced: number }> {
+  const bytes = fs.readFileSync(input.documentPath);
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const armed = new Set<number>();
+  let replaced = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const descriptor = originalOpenSync(...args);
+    if (
+      replaced < input.replacements &&
+      path.resolve(String(args[0])) === input.documentPath &&
+      (input.onlyWhen === undefined || input.onlyWhen(synchronousStackFrames()))
+    ) {
+      armed.add(descriptor);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+    const read = originalReadSync(...args);
+    if (armed.delete(args[0])) {
+      const temporary = `${input.documentPath}.replacement-${String(replaced)}`;
+      fs.writeFileSync(temporary, bytes);
+      fs.renameSync(temporary, input.documentPath);
+      replaced += 1;
+    }
+    return read;
+  }) as typeof fs.readSync;
+  fs.closeSync = ((descriptor: number) => {
+    armed.delete(descriptor);
+    originalCloseSync(descriptor);
+  }) as typeof fs.closeSync;
+  try {
+    const value = await observe();
+    return { value, replaced };
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+}
+
+/** The frames of the current synchronous call chain, without the `async` frames of awaiting callers. */
+function synchronousStackFrames(): string[] {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 40;
+  try {
+    return (new Error("stack").stack ?? "").split("\n").filter((frame) => !frame.includes("at async "));
+  } finally {
+    Error.stackTraceLimit = limit;
+  }
+}
+
+test("listRuns, observers and status re-read live run documents replaced while they were read", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "live-snapshot-replacement";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const statePath = path.join(run.value.run_root, "state.json");
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  const listed = async () => {
+    const list = await listRuns({ projectRoot: project, env });
+    assert.equal(list.ok, true, JSON.stringify(list.diagnostics));
+    return list.value?.product_runs.map((entry) => [entry.run_id, entry.status]);
+  };
+
+  // A live run's controller, and observe-only synchronization from a concurrent `status`, republish
+  // state.json and run.json by atomic rename. The strict reader detects a replacement it straddled
+  // and used to fail `ps` and `status` outright on it (issue #1054). Both documents are re-read.
+  const stateReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, listed);
+  assert.deepEqual(stateReplaced, { value: [[runId, "running"]], replaced: 1 });
+  const metadataReplaced = await observeWhileReplacingRunDocument(
+    { documentPath: metadataPath, replacements: 1 },
+    listed
+  );
+  assert.deepEqual(metadataReplaced, { value: [[runId, "running"]], replaced: 1 });
+  const twiceReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, listed);
+  assert.deepEqual(twiceReplaced, { value: [[runId, "running"]], replaced: 2 });
+
+  // The budget is bounded: a document that changes under three consecutive reads still fails, and the
+  // failure names the file, because `status` prints the message alone.
+  const exhausted = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 3 }, async () => {
+    try {
+      await listRuns({ projectRoot: project, env });
+      return undefined;
+    } catch (error: unknown) {
+      return error;
+    }
+  });
+  assert.ok(exhausted.value instanceof Error, "listRuns did not fail after three consecutive races");
+  assert.equal(
+    exhausted.value.message,
+    `run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}`
+  );
+  assert.equal(exhausted.replaced, 3);
+  assert.deepEqual(await listed(), [[runId, "running"]]);
+
+  // An observer derives the evidence again when a live document was replaced under one of its strict
+  // reads. The first such read is the completeness re-derivation inside the control snapshot
+  // verification, which a tolerant observer would otherwise record as a control divergence: the run
+  // must come back clean, not "diverged". An execution caller holds the control lock, so for it the
+  // same detection is a violation and still fails closed on the first read.
+  const observe = () =>
+    readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true, observeOnly: true });
+  const observed = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, observe);
+  assert.equal(observed.value.ok, true, JSON.stringify(observed.value.ok ? [] : observed.value.diagnostics));
+  if (observed.value.ok) assert.deepEqual(observed.value.verifiedControl.divergences, []);
+  assert.equal(observed.replaced, 1);
+  const observedTwice = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, observe);
+  assert.equal(
+    observedTwice.value.ok,
+    true,
+    JSON.stringify(observedTwice.value.ok ? [] : observedTwice.value.diagnostics)
+  );
+  assert.equal(observedTwice.replaced, 2);
+  const observationExhausted = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 3 },
+    observe
+  );
+  assert.equal(observationExhausted.value.ok, false);
+  if (!observationExhausted.value.ok) {
+    assert.deepEqual(observationExhausted.value.diagnostics, [
+      {
+        code: "WORKFLOW_CONTROL_EVIDENCE_INVALID",
+        message:
+          "run evidence changed during 3 consecutive snapshot read attempts: workflow control completeness binding could not be re-derived: run state changed while reading",
+        severity: "error",
+        source: "workflow",
+        path: metadataPath
+      }
+    ]);
+  }
+  assert.equal(observationExhausted.replaced, 3);
+  const executed = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, () =>
+    readLinkedWorkflowEvidence(project, runId)
+  );
+  assert.equal(executed.value.ok, false);
+  if (!executed.value.ok) {
+    assert.equal(executed.value.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    assert.equal(
+      executed.value.diagnostics[0]?.message,
+      "workflow control completeness binding could not be re-derived: run state changed while reading"
+    );
+  }
+  assert.equal(executed.replaced, 1);
+
+  // `status` reads the same evidence first: a race there is re-read too, and neither reported as a
+  // divergence nor used as a reason to skip synchronization.
+  const healthAfterEvidenceRace = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 1 },
+    () => getRunHealth({ projectRoot: project, runId, env })
+  );
+  assert.equal(healthAfterEvidenceRace.value.ok, true, JSON.stringify(healthAfterEvidenceRace.value.diagnostics));
+  assert.equal(healthAfterEvidenceRace.value.value?.run_id, runId);
+  assert.equal(healthAfterEvidenceRace.replaced, 1);
+  assert.deepEqual(
+    healthAfterEvidenceRace.value.diagnostics.filter((diagnostic) =>
+      ["WORKFLOW_CONTROL_EVIDENCE_DIVERGED", "WORKFLOW_STATE_SYNC_SKIPPED", "WORKFLOW_STATE_SYNC_RACED"].includes(
+        diagnostic.code
+      )
+    ),
+    [],
+    JSON.stringify(healthAfterEvidenceRace.value.diagnostics)
+  );
+
+  // Observe-only synchronization reads state.json itself, outside any retry of its own. `status`
+  // retries the whole synchronization within the same budget, and once that is spent it still reports
+  // the run and says its local state may be stale, instead of failing.
+  const synchronizationOwnRead = (frames: string[]) =>
+    frames.some((frame) => frame.includes("workflow-sync.js")) &&
+    !frames.some((frame) => frame.includes("observation-snapshot.js"));
+  const recovered = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 1, onlyWhen: synchronizationOwnRead },
+    () => getRunHealth({ projectRoot: project, runId, env })
+  );
+  assert.equal(recovered.value.ok, true, JSON.stringify(recovered.value.diagnostics));
+  assert.equal(recovered.value.value?.run_id, runId);
+  assert.equal(recovered.replaced, 1);
+  assert.deepEqual(
+    recovered.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED"),
+    []
+  );
+  const raced = await observeWhileReplacingRunDocument(
+    { documentPath: statePath, replacements: 3, onlyWhen: synchronizationOwnRead },
+    () => getRunHealth({ projectRoot: project, runId, env })
+  );
+  assert.equal(raced.value.ok, true, JSON.stringify(raced.value.diagnostics));
+  assert.equal(raced.value.value?.run_id, runId);
+  assert.equal(raced.value.value?.verdict, "running-healthy");
+  assert.equal(raced.replaced, 3);
+  const warnings = raced.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED");
+  assert.equal(warnings.length, 1, JSON.stringify(raced.value.diagnostics));
+  assert.equal(warnings[0]?.severity, "warning");
+  assert.equal(warnings[0]?.path, run.value.run_root);
+  assert.equal(
+    warnings[0]?.message,
+    `run state synchronization was skipped because run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}; reported counts come from the workflow runner and local run state may be stale`
+  );
+  assert.equal(
+    raced.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
+    0,
+    JSON.stringify(raced.value.diagnostics)
+  );
+});
+
 test("getRunStatus uses only validated current runState and validates the events envelope", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

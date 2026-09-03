@@ -32,8 +32,14 @@ import type {
   RunProgressSummary,
   RunStatusValue,
   PublicRunState,
+  SyncRunInput,
   WorkflowCommandSummary
 } from "./types.js";
+import {
+  isTransientSnapshotRace,
+  retryTransientSnapshotObservation,
+  retryTransientSnapshotRead
+} from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
@@ -213,11 +219,12 @@ export async function getRunHealth(input: {
   // diverged and invalid. Skip it and say so instead.
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
-    const sync = await synchronizeLinkedWorkflowRun(
-      { projectRoot, runId: input.runId, env: input.env },
-      { observeOnly: true }
+    syncDiagnostics.push(
+      ...(await synchronizeObservedWorkflowRun(
+        { projectRoot, runId: input.runId, env: input.env },
+        evidence.layout.root
+      ))
     );
-    syncDiagnostics.push(...sync.diagnostics);
   } else {
     syncDiagnostics.push({
       code: "WORKFLOW_STATE_SYNC_SKIPPED",
@@ -264,8 +271,10 @@ export async function getRunHealth(input: {
     ]);
   }
   const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
-  const state = readRunState(evidence.layout);
-  const metadata = readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId);
+  const { state, metadata } = retryTransientSnapshotRead(() => ({
+    state: readRunState(evidence.layout),
+    metadata: readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId)
+  }));
   const auditProfile = metadata.audit_profile;
   const lifecycleDivergence = workflowLifecycleDivergenceDiagnostic(
     state.status,
@@ -291,6 +300,34 @@ export async function getRunHealth(input: {
     },
     diagnostics
   );
+}
+
+/**
+ * Observe-only synchronization reads state.json and run.json strictly while the run's controller, or
+ * another concurrent `status`, keeps replacing them by atomic rename, so it can hit the same transient
+ * snapshot race the direct reads in `getRunHealth` retry. It is retried within the same bounded
+ * budget. Once that budget is spent the run is still reported: health comes from the workflow runner
+ * and local run state is simply the last coherent snapshot, which is said in a warning, the way a
+ * skipped synchronization is reported. Every other failure propagates unchanged.
+ */
+async function synchronizeObservedWorkflowRun(input: SyncRunInput, runRoot: string): Promise<RuntimeDiagnostic[]> {
+  try {
+    const sync = await retryTransientSnapshotObservation(() =>
+      synchronizeLinkedWorkflowRun(input, { observeOnly: true })
+    );
+    return sync.diagnostics;
+  } catch (error) {
+    if (!isTransientSnapshotRace(error)) throw error;
+    return [
+      {
+        code: "WORKFLOW_STATE_SYNC_RACED",
+        message: `run state synchronization was skipped because ${error.message}; reported counts come from the workflow runner and local run state may be stale`,
+        severity: "warning",
+        source: "runtime",
+        path: runRoot
+      }
+    ];
+  }
 }
 
 function workflowLifecycleDivergenceDiagnostic(
@@ -382,8 +419,12 @@ function checkedRunLayout(runsRoot: string, runId: string) {
 
 function readRunListEntry(runRoot: string, runId: string): RunListEntry {
   const layout = layoutForRunRoot(runRoot, runId);
-  const metadata = readRunMetadataDocument(layout.runMetadataPath, runId);
-  const state = readRunState(layout);
+  // A live run's controller, and observe-only synchronization from a concurrent `status`, republish
+  // both documents by atomic rename, so both strict reads share one bounded retry.
+  const { metadata, state } = retryTransientSnapshotRead(() => ({
+    metadata: readRunMetadataDocument(layout.runMetadataPath, runId),
+    state: readRunState(layout)
+  }));
   return {
     run_id: runId,
     run_root: runRoot,
