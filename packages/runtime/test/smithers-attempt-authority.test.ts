@@ -157,33 +157,48 @@ test("Smithers authority distinguishes a pre-agent terminal failure from an exec
   const task = sealedTask([
     { profileId: "primary", agentRef: "CodexAgent", modelName: "gpt-primary", role: "primary" }
   ]);
-  const failedBeforeSelection = {
+  const detailWithMeta = (meta: unknown, state = "failed"): unknown => ({
     node: { nodeId: task.smithersNodeId, lastAttempt: 1 },
-    attempts: [{ nodeId: task.smithersNodeId, attempt: 1, state: "failed", meta: {} }]
+    attempts: [{ nodeId: task.smithersNodeId, attempt: 1, state, meta }]
+  });
+  // Smithers 0.35 initializes every attempt row with null selection fields and
+  // writes agentChainIndex/agentId only once an agent-chain rung is selected.
+  const persistedPreAgentMeta = {
+    kind: "agent",
+    agentId: null,
+    agentModel: null,
+    agentEngine: null,
+    agentResume: null
   };
+  const failedBeforeSelection = detailWithMeta(persistedPreAgentMeta);
 
   assert.equal(inspectSmithersAttemptAgentSelection(task, failedBeforeSelection, 1), undefined);
+  assert.equal(
+    inspectSmithersAttemptAgentSelection(task, detailWithMeta(persistedPreAgentMeta, "cancelled"), 1),
+    undefined
+  );
+  assert.equal(inspectSmithersAttemptAgentSelection(task, detailWithMeta({}), 1), undefined);
   assert.throws(
     () => reconcileSmithersAttemptAgentSelection(task, failedBeforeSelection, 1),
     /no sealed agent-chain selection/u
   );
+
+  // Partial selection metadata, successful attempts, and non-object metadata fail closed.
+  assert.throws(
+    () => inspectSmithersAttemptAgentSelection(task, detailWithMeta({ agentId: smithersTaskAgentId(task, 0) }), 1),
+    /no sealed agent-chain selection/u
+  );
+  assert.throws(
+    () => inspectSmithersAttemptAgentSelection(task, detailWithMeta({ agentChainIndex: 0, agentId: null }), 1),
+    /agent ID does not match sealed chain rung 0/u
+  );
   assert.throws(
     () =>
-      inspectSmithersAttemptAgentSelection(
-        task,
-        {
-          node: { nodeId: task.smithersNodeId, lastAttempt: 1 },
-          attempts: [
-            {
-              nodeId: task.smithersNodeId,
-              attempt: 1,
-              state: "failed",
-              meta: { agentId: smithersTaskAgentId(task, 0) }
-            }
-          ]
-        },
-        1
-      ),
+      inspectSmithersAttemptAgentSelection(task, detailWithMeta({ agentId: null, agentModel: null }, "finished"), 1),
+    /no sealed agent-chain selection/u
+  );
+  assert.throws(
+    () => inspectSmithersAttemptAgentSelection(task, detailWithMeta(null), 1),
     /no sealed agent-chain selection/u
   );
 });

@@ -91,11 +91,23 @@ function terminalAttempt(
 
 function selectionMetadata(attempt: Record<string, unknown>): Record<string, unknown> | undefined {
   const meta = recordField(attempt, "meta");
-  const hasSelectionMetadata =
-    meta !== undefined && ["agentChainIndex", "agentId", "agentModel"].some((field) => Object.hasOwn(meta, field));
+  // Smithers always persists attempt metadata as a JSON object, so anything
+  // else is corruption and must fail closed downstream.
+  if (meta === undefined) return {};
+  // Smithers initializes `agentId`/`agentModel` to null when the attempt row is
+  // created and writes `agentChainIndex`/`agentId` only once an agent-chain rung
+  // is selected. A terminal failure whose selection fields are still null or
+  // absent therefore never ran a model. `agentModel` is not a discriminator: a
+  // selected agent can legitimately persist `agentModel: null`.
   const state = String(attempt.state);
-  if (!hasSelectionMetadata && (state === "failed" || state === "cancelled")) return undefined;
-  return meta ?? {};
+  if ((state === "failed" || state === "cancelled") && isAbsent(meta.agentChainIndex) && isAbsent(meta.agentId)) {
+    return undefined;
+  }
+  return meta;
+}
+
+function isAbsent(value: unknown): boolean {
+  return value === null || value === undefined;
 }
 
 function reconcileSelectionMetadata(

@@ -20848,7 +20848,17 @@ test("syncRun excludes a pre-agent terminal failure from the model-attempt ledge
     nodeDetails: {
       "node:project-discovery": {
         node: { nodeId: "node:project-discovery", lastAttempt: 1 },
-        attempts: [{ nodeId: "node:project-discovery", attempt: 1, state: "failed", meta: {} }]
+        attempts: [
+          {
+            nodeId: "node:project-discovery",
+            attempt: 1,
+            state: "failed",
+            // Persisted Smithers 0.35 shape: selection fields are initialized to
+            // null at attempt creation and agentChainIndex is never written when
+            // the attempt fails before an agent-chain rung is selected.
+            meta: { kind: "agent", agentId: null, agentModel: null, agentEngine: null, agentResume: null }
+          }
+        ]
       }
     }
   });
