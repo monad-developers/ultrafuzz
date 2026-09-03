@@ -108,6 +108,7 @@ import {
   isTransientSnapshotRace,
   isTransientSnapshotRaceMessage
 } from "./observation-snapshot.js";
+import { repairPrunableRunWorktreeRegistrations } from "./stale-worktree-recovery.js";
 
 export interface LinkedWorkflowEvidence {
   ok: true;
@@ -607,6 +608,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     };
     if (config !== undefined && taskDocument !== undefined) {
       assertCurrentCloudAgentCredentialEnvironment(config, tasks, lifecycleEnvironment);
+    }
+    if (typeof metadata.source_revision === "string") {
+      repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
     }
     const result = await runSmithersLifecycleCommand({
       action: "resume",
