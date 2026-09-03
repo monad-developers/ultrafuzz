@@ -8,7 +8,10 @@ import {
   assertRegularFileInside,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
-  readRegularFileSnapshot
+  readRegularFileSnapshot,
+  readRunState,
+  writeRunState,
+  type RunState
 } from "@ultrafuzz/artifacts";
 
 import { DynamicExpansionError, readExpansionManifests, type DynamicExpansionManifest } from "./dynamic-expansion.js";
@@ -50,6 +53,7 @@ export interface DynamicExpansionRetryPlan {
 export interface DynamicExpansionRetryArchive {
   archive_path: string;
   group_node_ids: string[];
+  pruned_state_node_ids: string[];
 }
 
 /**
@@ -117,8 +121,10 @@ export function planDynamicExpansionRetryArchive(input: {
       { unexpectedEntries }
     );
   }
-  // Validate the attempt-owned entries now; the move itself waits for the reset.
+  // Validate the attempt-owned entries and the run state now; the move and the
+  // prune themselves wait for the reset.
   collectAttemptStateMoves(runRoot, manifests);
+  readArchivableRunState(runRoot);
   return {
     projectRoot,
     runRoot,
@@ -139,7 +145,11 @@ export function planDynamicExpansionRetryArchive(input: {
  * with a stable storage ID never meets a stale rendered prompt. The mutable
  * runtime graph and task plan are then re-derived from the sealed base with no
  * ready group, exactly as the next render would publish them, so the control
- * admission check re-derives cleanly before that render happens.
+ * admission check re-derives cleanly before that render happens. Finally the
+ * generation's node records leave `state.json`: the admission check refuses a
+ * run state that names a node outside the re-derived runtime graph, so leaving
+ * them would close every observer until the group re-expanded with identical
+ * storage IDs.
  */
 export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan): DynamicExpansionRetryArchive {
   const archiveRoot = path.join(plan.runRoot, "dynamic-expansion-history");
@@ -157,6 +167,7 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
     return path.relative(plan.runRoot, destination).split(path.sep).join("/");
   });
   rematerializeDynamicRuntimeBase(plan);
+  const prunedStateNodeIds = pruneArchivedRunStateNodes(plan.runRoot, plan.manifests);
   const groupNodeIds = plan.manifests.map((manifest) => manifest.group_node_id);
   publishFileDurableExclusive(
     archiveDir,
@@ -167,22 +178,62 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
         archived_at: archivedAt,
         source_node_ids: plan.sourceNodeIds,
         group_node_ids: groupNodeIds,
-        archived_attempt_paths: archivedAttemptPaths.sort()
+        archived_attempt_paths: archivedAttemptPaths.sort(),
+        pruned_state_node_ids: prunedStateNodeIds
       },
       null,
       2
     )}\n`
   );
-  return { archive_path: archiveDir, group_node_ids: groupNodeIds };
+  return { archive_path: archiveDir, group_node_ids: groupNodeIds, pruned_state_node_ids: prunedStateNodeIds };
+}
+
+/**
+ * A generated attempt is stored under its storage ID, or under
+ * `<storageId>__model_<i>__attempt_<j>` when the group fans out over models
+ * (`dynamicAttemptId` in dynamic-runtime.ts). Every attempt-owned file and
+ * every run state record of the generation is keyed by one of those IDs.
+ */
+function generationOwnsAttempt(manifests: readonly DynamicExpansionManifest[]): (attemptId: string) => boolean {
+  const storageIds = manifests.flatMap((manifest) => manifest.items.map((item) => item.storage_id));
+  return (attemptId) =>
+    storageIds.some((storageId) => attemptId === storageId || attemptId.startsWith(`${storageId}__model_`));
+}
+
+/**
+ * The synchronizer records a generated graph node under its storage ID and each
+ * generated task under its attempt ID; the human node ID never becomes a state
+ * key. Every other node and every other field is preserved, and the document
+ * goes through the validated durable writer the synchronizer uses. Returns the
+ * pruned node IDs, sorted.
+ */
+function pruneArchivedRunStateNodes(runRoot: string, manifests: readonly DynamicExpansionManifest[]): string[] {
+  const state = readArchivableRunState(runRoot);
+  if (state === undefined) return [];
+  const owned = generationOwnsAttempt(manifests);
+  const pruned = Object.keys(state.document.nodes).filter(owned).sort();
+  if (pruned.length === 0) return [];
+  writeRunState(state.statePath, {
+    ...state.document,
+    nodes: Object.fromEntries(Object.entries(state.document.nodes).filter(([nodeId]) => !owned(nodeId)))
+  });
+  return pruned;
+}
+
+/** Read and validate the run state, or `undefined` for a run root that has none. */
+function readArchivableRunState(runRoot: string): { statePath: string; document: RunState } | undefined {
+  const statePath = path.join(runRoot, "state.json");
+  if (!fs.existsSync(statePath)) return undefined;
+  assertNoSymlinkComponents(runRoot, statePath, "dynamic retry run state");
+  assertRegularFileInside(runRoot, statePath, "dynamic retry run state");
+  return { statePath, document: readRunState(statePath) };
 }
 
 function collectAttemptStateMoves(
   runRoot: string,
   manifests: readonly DynamicExpansionManifest[]
 ): Array<{ source: string; relativePath: string }> {
-  const storageIds = manifests.flatMap((manifest) => manifest.items.map((item) => item.storage_id));
-  const ownsAttempt = (attemptId: string): boolean =>
-    storageIds.some((storageId) => attemptId === storageId || attemptId.startsWith(`${storageId}__model_`));
+  const ownsAttempt = generationOwnsAttempt(manifests);
   const moves: Array<{ source: string; relativePath: string }> = [];
   for (const root of ATTEMPT_STATE_ROOTS) {
     const sourceRoot = path.join(runRoot, root.name);

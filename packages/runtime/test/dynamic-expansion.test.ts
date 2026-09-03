@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { createInitialRunState, createNodeState } from "@ultrafuzz/artifacts";
+import { createInitialRunState, createNodeState, readRunState, writeRunState } from "@ultrafuzz/artifacts";
 
 import {
   DynamicExpansionError,
@@ -301,6 +301,8 @@ test("explicit source retry archives a complete expansion generation and rejects
 
   const archived = archiveDynamicExpansionsForRetry(plan);
   assert.deepEqual(archived.group_node_ids.sort(), ["fanout", "second"]);
+  // This run root records no run state, so the archive has nothing to prune from it.
+  assert.deepEqual(archived.pruned_state_node_ids, []);
   assert.deepEqual(fs.readdirSync(manifestDir), []);
   assert.deepEqual(fs.readdirSync(archived.archive_path).sort(), [
     ".ultrafuzz-verification",
@@ -343,6 +345,7 @@ test("explicit source retry archives a complete expansion generation and rejects
     `${archiveRelative}/artifacts/${attemptId}`,
     `${archiveRelative}/invariant-suite-workspace-snapshots/${attemptId}`
   ]);
+  assert.deepEqual(record.pruned_state_node_ids, []);
 
   const mixed = expansionFixture({ runId: "retry-archive-mixed", items: [item(0)] });
   mixed.invoke();
@@ -451,10 +454,37 @@ test("explicit source retry re-derives the base runtime controls after archiving
   assert.equal(fs.existsSync(generated.renderedPromptPath), true);
   assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"]);
 
+  // The synchronizer keys a generated graph node by its storage ID and each generated attempt by
+  // its attempt ID. Record both shapes, one of them a model fan-out attempt, next to the base nodes.
+  const storageId = generated.metadata.node.storageId;
+  assert.ok(storageId);
+  const generationStateIds = [generated.attemptId, `${storageId}__model_1__attempt_1`].sort();
+  const statePath = path.join(runRoot, "state.json");
+  writeRunState(
+    statePath,
+    createInitialRunState({
+      runId,
+      graphFingerprint: "a".repeat(64),
+      configFingerprint: "b".repeat(64),
+      nodes: ["planner", "fanout", "join", ...generationStateIds].map((id) => ({ id }))
+    })
+  );
+
   const plan = planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] });
   assert.ok(plan);
   const archived = archiveDynamicExpansionsForRetry(plan);
   assert.equal(fs.existsSync(generated.artifactDir), false);
+  // Only the withdrawn generation leaves the run state; every base node and field stays.
+  assert.deepEqual(archived.pruned_state_node_ids, generationStateIds);
+  const prunedState = readRunState(statePath);
+  assert.deepEqual(Object.keys(prunedState.nodes).sort(), ["fanout", "join", "planner"]);
+  assert.equal(prunedState.run_id, runId);
+  assert.equal(prunedState.graph_fingerprint, "a".repeat(64));
+  assert.equal(prunedState.config_fingerprint, "b".repeat(64));
+  const retryRecord = JSON.parse(fs.readFileSync(path.join(archived.archive_path, "retry.json"), "utf8")) as {
+    pruned_state_node_ids?: string[];
+  };
+  assert.deepEqual(retryRecord.pruned_state_node_ids, generationStateIds);
   assert.equal(
     fs.existsSync(path.join(archived.archive_path, "artifacts", generated.attemptId, "prompt.rendered.md")),
     true

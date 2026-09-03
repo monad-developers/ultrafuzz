@@ -19,7 +19,15 @@ import {
   type RunState
 } from "@ultrafuzz/artifacts";
 
-import { initProject, materializeDynamicRuntime, readLinkedWorkflowEvidence, startRun, syncRun } from "../src/index.js";
+import {
+  getRunHealth,
+  initProject,
+  materializeDynamicRuntime,
+  readLinkedWorkflowEvidence,
+  resumeRun,
+  startRun,
+  syncRun
+} from "../src/index.js";
 import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import {
   refreshedSmithersControllerSnapshot,
@@ -71,6 +79,11 @@ interface LifecycleEvent {
   extra?: Record<string, unknown>;
 }
 
+interface WorkflowRunLifecycle {
+  status: string;
+  state: string;
+}
+
 interface DynamicFixture {
   project: string;
   runId: string;
@@ -79,6 +92,7 @@ interface DynamicFixture {
   env: Record<string, string | undefined>;
   inspectPath: string;
   eventsPath: string;
+  statusPath: string;
   plannerTask: CompiledSmithersTask;
   generatedTasks: CompiledSmithersTask[];
   joinTask: CompiledSmithersTask;
@@ -163,14 +177,17 @@ function lifecycleEnvironment(project: string): {
   env: Record<string, string | undefined>;
   inspectPath: string;
   eventsPath: string;
+  statusPath: string;
 } {
   const binDir = temporaryRoot("ufz-dynamic-lifecycle-runner-");
   const inspectPath = path.join(project, "workflow-inspect.json");
   const eventsPath = path.join(project, "workflow-events.ndjson");
+  const statusPath = path.join(project, "workflow-status.json");
   const smithers = path.join(binDir, "smithers");
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(inspectPath, "{}\n", "utf8");
   fs.writeFileSync(eventsPath, "", "utf8");
+  fs.writeFileSync(statusPath, "{}\n", "utf8");
   fs.writeFileSync(
     smithers,
     [
@@ -181,6 +198,9 @@ function lifecycleEnvironment(project: string): {
       "    ;;",
       "  events)",
       `    cat ${shellQuote(eventsPath)}`,
+      "    ;;",
+      "  status)",
+      `    cat ${shellQuote(statusPath)}`,
       "    ;;",
       "  node)",
       "    node_id=$2",
@@ -228,7 +248,8 @@ function lifecycleEnvironment(project: string): {
       project
     ),
     inspectPath,
-    eventsPath
+    eventsPath,
+    statusPath
   };
 }
 
@@ -292,6 +313,11 @@ async function createDynamicFixture(input: {
     tasks: CompiledSmithersTask[];
     dynamic_groups: CompiledSmithersDynamicGroup[];
   };
+  fs.writeFileSync(
+    lifecycle.statusPath,
+    `${JSON.stringify(workflowStatus(taskDocument.smithers_run_id), null, 2)}\n`,
+    "utf8"
+  );
   const canonicalGoal = {
     kind: "threat",
     id: "liquidation:overdue",
@@ -384,6 +410,7 @@ async function createDynamicFixture(input: {
     env: lifecycle.env,
     inspectPath: lifecycle.inspectPath,
     eventsPath: lifecycle.eventsPath,
+    statusPath: lifecycle.statusPath,
     plannerTask,
     generatedTasks,
     joinTask,
@@ -392,16 +419,25 @@ async function createDynamicFixture(input: {
   };
 }
 
-function setLifecycle(fixture: DynamicFixture, steps: LifecycleStep[], events: LifecycleEvent[]): void {
+function setLifecycle(
+  fixture: DynamicFixture,
+  steps: LifecycleStep[],
+  events: LifecycleEvent[],
+  run: WorkflowRunLifecycle = { status: "running", state: "running" }
+): void {
   fs.writeFileSync(
     fixture.inspectPath,
-    `${JSON.stringify(workflowInspect(fixture.workflowRunId, steps), null, 2)}\n`,
+    `${JSON.stringify(workflowInspect(fixture.workflowRunId, steps, run), null, 2)}\n`,
     "utf8"
   );
   fs.writeFileSync(fixture.eventsPath, workflowEvents(fixture.workflowRunId, events), "utf8");
 }
 
-function workflowInspect(workflowRunId: string, inputSteps: LifecycleStep[]): unknown {
+function workflowInspect(
+  workflowRunId: string,
+  inputSteps: LifecycleStep[],
+  run: WorkflowRunLifecycle = { status: "running", state: "running" }
+): unknown {
   const explicit = new Set(inputSteps.map((step) => step.id));
   const steps = inputSteps.flatMap((step) => {
     if (!step.id.startsWith("node:") || !isSucceededWorkflowState(step.state)) return [step];
@@ -414,14 +450,14 @@ function workflowInspect(workflowRunId: string, inputSteps: LifecycleStep[]): un
       run: {
         id: workflowRunId,
         workflow: workflowRunId,
-        status: "running",
+        status: run.status,
         started: "2026-08-04T00:00:00.000Z",
         elapsed: "3s"
       },
       runState: {
         runId: workflowRunId,
         computedAt: "2026-08-04T00:00:03.000Z",
-        state: "running"
+        state: run.state
       },
       steps,
       nodes: steps.map((step) => ({
@@ -432,6 +468,43 @@ function workflowInspect(workflowRunId: string, inputSteps: LifecycleStep[]): un
       }))
     },
     meta: { command: "inspect", duration: "1ms" }
+  };
+}
+
+/** The `status --format json --full-output` envelope the pinned runner emits for a live run. */
+function workflowStatus(workflowRunId: string): unknown {
+  return {
+    ok: true,
+    data: {
+      status: "running",
+      verdict: "running-healthy",
+      reason: "1 running, 1 finished in last 10m",
+      counts: {
+        finished: 1,
+        inProgress: 1,
+        pending: 2,
+        failed: 0,
+        stalled: 0,
+        waitingApproval: 0,
+        waitingEvent: 0,
+        waitingTimer: 0,
+        skipped: 0,
+        other: 0,
+        total: 4
+      },
+      modelMix: [],
+      throughput: { recentFinished: 1, windowMs: 600_000, totalFinished: 1, lastFinishedAtMs: 1_000 },
+      bottleneck: [],
+      bottleneckOmitted: 0,
+      quota: null,
+      runId: workflowRunId,
+      workflow: workflowRunId,
+      liveness: { state: "running" },
+      startedAtMs: 1_000,
+      finishedAtMs: null,
+      generatedAtMs: 2_000
+    },
+    meta: { command: "status", duration: "1ms" }
   };
 }
 
@@ -1216,6 +1289,160 @@ test("dynamic retries retain their immutable ledger and settle the generated gro
   assert.equal(state.nodes[generated.attemptId]?.retry_count, 1);
   assert.equal(state.nodes.fanout?.status, "succeeded");
   assert.equal(state.nodes["strict-join"]?.wait_reason, "ready");
+});
+
+/**
+ * Every observer of a run whose expansion generation was withdrawn: the control evidence reader,
+ * `status`, and a real synchronization pass over the runner's history, which still names the
+ * archived generation's nodes. None may refuse the run on its control evidence.
+ */
+async function assertObserversAdmitted(fixture: DynamicFixture): Promise<void> {
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId, {
+    tolerateControlDivergence: true,
+    observeOnly: true
+  });
+  assert.equal(evidence.ok, true, JSON.stringify(evidence.ok ? undefined : evidence.diagnostics));
+  if (!evidence.ok) return;
+  assert.deepEqual(evidence.verifiedControl.divergences, []);
+  const health = await getRunHealth({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  for (const diagnostic of [...health.diagnostics, ...synced.diagnostics]) {
+    assert.doesNotMatch(diagnostic.code, /^WORKFLOW_CONTROL_EVIDENCE_/u, JSON.stringify(diagnostic));
+  }
+}
+
+/**
+ * The reopened producer writes a plan whose only goal has a different key, and the next render
+ * re-expands the group from it under a different human node ID and a different storage ID. This is
+ * the gap #1063 describes: the source artifact exists, its verifier has not published yet, and the
+ * producer's finalized authority documents from the earlier attempt are untouched.
+ */
+function republishRetriedExpansion(fixture: DynamicFixture): CompiledSmithersTask[] {
+  const planPath = path.join(fixture.plannerTask.artifactDir, "plan.json");
+  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as {
+    modeled_threat_ids: string[];
+    threat_goals: Array<Record<string, unknown>>;
+    goal_lanes: Array<Record<string, unknown>>;
+  };
+  const goal = plan.threat_goals[0];
+  assert.ok(goal);
+  const retriedGoal = {
+    ...goal,
+    id: "liquidation:early",
+    node_id: "dynamic:threat:liquidation:early",
+    threat_ids: ["liquidation:early"],
+    attack_surface_ids: ["liquidation:early"]
+  };
+  plan.threat_goals = [retriedGoal];
+  plan.modeled_threat_ids = ["liquidation:early"];
+  plan.goal_lanes = plan.goal_lanes.map((lane) =>
+    lane.kind === "threat" ? { ...lane, lane_id: "liquidation:early", node_ids: [retriedGoal.node_id] } : lane
+  );
+  fs.writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  const baseTasksPath = path.join(fixture.runRoot, "smithers", "runtime-base-tasks.json");
+  const base = JSON.parse(fs.readFileSync(baseTasksPath, "utf8")) as {
+    tasks: CompiledSmithersTask[];
+    dynamic_groups: CompiledSmithersDynamicGroup[];
+  };
+  const materialized = materializeDynamicRuntime({
+    runId: fixture.runId,
+    projectRoot: fixture.project,
+    runRoot: fixture.runRoot,
+    graphPath: path.join(fixture.runRoot, "graph.json"),
+    tasksPath: path.join(fixture.runRoot, "smithers", "tasks.json"),
+    baseGraphPath: path.join(fixture.runRoot, "smithers", "runtime-base-graph.json"),
+    baseTasksPath,
+    baseTasks: base.tasks,
+    groups: base.dynamic_groups,
+    readyGroupIds: ["fanout"]
+  });
+  return materialized.tasks.filter((task) => task.metadata.node.dynamic?.groupNodeId === "fanout");
+}
+
+test("explicit source retry prunes the withdrawn generation from run state and keeps observers admitted", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-retry-archive", modelFanout: true });
+  const planner = plannerSuccessEvidence(fixture);
+  const finishedSteps = (tasks: CompiledSmithersTask[], attempt: number): LifecycleStep[] =>
+    tasks.map((task) => ({ id: task.smithersNodeId, state: "finished", attempt }));
+  const finishedEvents = (tasks: CompiledSmithersTask[], attempt: number): LifecycleEvent[] =>
+    tasks.flatMap((task) => [
+      { type: "NodeStarted", nodeId: task.smithersNodeId, attempt },
+      { type: "NodeFinished", nodeId: task.smithersNodeId, attempt }
+    ]);
+  for (const task of fixture.generatedTasks) writeFinding(task);
+  const generationEvents = [...planner.events, ...finishedEvents(fixture.generatedTasks, 1)];
+  setLifecycle(fixture, [...planner.steps, ...finishedSteps(fixture.generatedTasks, 1)], generationEvents);
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  // A model fan-out generation is recorded under its storage ID and under every attempt ID.
+  assert.ok(fixture.storageId);
+  const generationStateIds = [fixture.storageId, ...fixture.generatedTasks.map((task) => task.attemptId)].sort();
+  assert.equal(generationStateIds.length, 3);
+  const recorded = readState(fixture);
+  for (const nodeId of generationStateIds) assert.equal(recorded.nodes[nodeId]?.status, "succeeded", nodeId);
+
+  // The producer's verifier fails afterwards and the operator retries it. The reopened producer
+  // owns the published generation, so the resume withdraws it into the history directory (#1063).
+  setLifecycle(
+    fixture,
+    [
+      ...planner.steps,
+      { id: fixture.plannerTask.verifierSmithersNodeId, state: "failed", attempt: 1 },
+      ...finishedSteps(fixture.generatedTasks, 1)
+    ],
+    generationEvents,
+    { status: "failed", state: "failed" }
+  );
+  const resumed = await resumeRun({
+    projectRoot: fixture.project,
+    runId: fixture.runId,
+    force: true,
+    retryFailed: true,
+    env: fixture.env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.deepEqual(fs.readdirSync(path.join(fixture.runRoot, "dynamic-expansions")), []);
+  const historyRoot = path.join(fixture.runRoot, "dynamic-expansion-history");
+  const [archiveName, ...otherArchives] = fs.readdirSync(historyRoot);
+  assert.ok(archiveName);
+  assert.deepEqual(otherArchives, []);
+  const retryRecord = JSON.parse(fs.readFileSync(path.join(historyRoot, archiveName, "retry.json"), "utf8")) as {
+    group_node_ids?: string[];
+    pruned_state_node_ids?: string[];
+  };
+  assert.deepEqual(retryRecord.group_node_ids, ["fanout"]);
+  assert.deepEqual(retryRecord.pruned_state_node_ids, generationStateIds);
+  const pruned = readState(fixture);
+  for (const nodeId of generationStateIds) assert.equal(pruned.nodes[nodeId], undefined, nodeId);
+  for (const nodeId of [fixture.plannerTask.attemptId, "fanout", fixture.joinTask.attemptId]) {
+    assert.ok(pruned.nodes[nodeId], nodeId);
+  }
+
+  // The runner has reset the producer and is re-running it. Its history still names the withdrawn
+  // generation's nodes, and nothing has re-expanded the group yet.
+  setLifecycle(
+    fixture,
+    [{ id: fixture.plannerTask.smithersNodeId, state: "in-progress", attempt: 2 }],
+    [...generationEvents, { type: "NodeStarted", nodeId: fixture.plannerTask.smithersNodeId, attempt: 2 }]
+  );
+  await assertObserversAdmitted(fixture);
+  for (const nodeId of generationStateIds) assert.equal(readState(fixture).nodes[nodeId], undefined, nodeId);
+
+  // The reopened producer writes a different plan and the render re-expands the group under
+  // different storage IDs while the producer is still running. The withdrawn generation must not
+  // shadow the new one anywhere, and every observer stays admitted.
+  const regenerated = republishRetriedExpansion(fixture);
+  assert.equal(regenerated.length, 2);
+  const regeneratedStorageId = regenerated[0]?.metadata.node.storageId;
+  assert.ok(regeneratedStorageId);
+  assert.notEqual(regeneratedStorageId, fixture.storageId);
+  await assertObserversAdmitted(fixture);
+  const regeneratedState = readState(fixture);
+  assert.equal(regeneratedState.nodes[regeneratedStorageId]?.status, "pending");
+  for (const task of regenerated) assert.equal(regeneratedState.nodes[task.attemptId]?.status, "pending");
+  for (const nodeId of generationStateIds) assert.equal(regeneratedState.nodes[nodeId], undefined, nodeId);
 });
 
 test("empty dynamic groups terminate successfully and release their strict join", async () => {
