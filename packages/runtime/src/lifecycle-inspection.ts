@@ -12,6 +12,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 
+import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagnostics.js";
 import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
@@ -530,19 +531,6 @@ export async function watchWorkflowEvents(
     },
     controlDiagnostics
   );
-}
-
-function workflowControlDivergenceDiagnostics(
-  divergences: readonly string[],
-  integrityPath: string
-): RuntimeDiagnostic[] {
-  return divergences.map((message) => ({
-    code: "WORKFLOW_CONTROL_EVIDENCE_DIVERGED",
-    message,
-    severity: "warning",
-    source: "workflow",
-    path: integrityPath
-  }));
 }
 
 export async function getWorkflowNode(input: WorkflowNodeQueryInput) {

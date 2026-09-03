@@ -37,6 +37,7 @@ import type {
 import { summarizeRunProgress } from "./run-progress.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
+import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagnostics.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
@@ -200,13 +201,10 @@ export async function getRunHealth(input: {
   if (!evidence.ok) {
     return runtimeFailure<RunHealthValue>(evidence.diagnostics);
   }
-  const controlDiagnostics: RuntimeDiagnostic[] = evidence.verifiedControl.divergences.map((message) => ({
-    code: "WORKFLOW_CONTROL_EVIDENCE_DIVERGED",
-    message,
-    severity: "warning" as const,
-    source: "workflow",
-    path: evidence.verifiedControl.paths.integrityPath
-  }));
+  const controlDiagnostics = workflowControlDivergenceDiagnostics(
+    evidence.verifiedControl.divergences,
+    evidence.verifiedControl.paths.integrityPath
+  );
   // Synchronization reads the same evidence strictly, so it cannot succeed while a divergence stands.
   // Calling it anyway would re-report the one divergence a second time under
   // WORKFLOW_CONTROL_EVIDENCE_INVALID, so a healthy response would describe the same mismatch as both

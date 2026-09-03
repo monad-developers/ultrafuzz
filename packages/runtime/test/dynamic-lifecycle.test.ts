@@ -669,7 +669,9 @@ test("a half-published dynamic expansion stays readable while execution stays cl
 
 test("event observers stay readable while a retried dynamic source is rematerialized", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-source-retry-events" });
-  const eventNodeId = fixture.generatedTasks[0]!.smithersNodeId;
+  const [firstTask] = fixture.generatedTasks;
+  assert.ok(firstTask);
+  const eventNodeId = firstTask.smithersNodeId;
   setLifecycle(fixture, [], [{ type: "NodeStarted", nodeId: eventNodeId, attempt: 2 }]);
   const sourcePath = path.join(fixture.runRoot, "artifacts", "planner", "plan.json");
   fs.rmSync(sourcePath);
