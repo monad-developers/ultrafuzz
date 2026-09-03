@@ -102,6 +102,12 @@ import {
 } from "./workflow-run-link.js";
 import { smithersExecutableCapability } from "./smithers-executable-capability.js";
 import { hasWorkflowExecutionSnapshotCapability } from "./workflow-execution-snapshot-capability.js";
+import {
+  OBSERVATION_SNAPSHOT_ATTEMPTS,
+  exhaustedSnapshotRaceError,
+  isTransientSnapshotRace,
+  isTransientSnapshotRaceMessage
+} from "./observation-snapshot.js";
 import { repairPrunableRunWorktreeRegistrations } from "./stale-worktree-recovery.js";
 
 export interface LinkedWorkflowEvidence {
@@ -1178,10 +1184,20 @@ async function persistSmithersEvidence(
   return { verifiedControl, executionSnapshot, workflowLinkId: committedWorkflowLink.link_id };
 }
 
+/**
+ * run.json and state.json are republished by atomic rename while a run is live, by its controller and
+ * by observe-only synchronization from a concurrent `status`, and every strict reader below reports a
+ * replacement it straddled as a mid-read change. An observer holds no control lock, so for it that is
+ * a transient race, not evidence of anything: the evidence is derived again (`observationAttempt`
+ * counts the derivations), within the bounded observation budget, and only an exhausted budget is
+ * reported, as the race and naming the document. Execution callers hold the lock; for them the same
+ * detection is a violation and keeps failing closed on the first read.
+ */
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,
   runId: string,
-  options: ReadLinkedWorkflowEvidenceOptions = {}
+  options: ReadLinkedWorkflowEvidenceOptions = {},
+  observationAttempt = 1
 ): Promise<LinkedWorkflowEvidence | LinkedWorkflowEvidenceFailure> {
   const resolvedProjectRoot = path.resolve(projectRoot);
   const runsRoot = await runsRootForProject(resolvedProjectRoot);
@@ -1265,6 +1281,12 @@ export async function readLinkedWorkflowEvidence(
     // failing closed.
     const tolerateDivergence = options.tolerateControlDivergence === true;
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, { tolerateDivergence });
+    // A live document replaced under the completeness re-derivation is a transient race, not a
+    // divergence of the sealed controls. Recording it as one would have `status` report a healthy run
+    // as diverged and skip its synchronization; thrown instead, the observer derives the evidence again.
+    const racedDivergence =
+      options.observeOnly === true ? verifiedControl.divergences.find(isTransientSnapshotRaceMessage) : undefined;
+    if (racedDivergence !== undefined) throw new Error(racedDivergence);
     const sealedPlan = verifiedControl.executionFiles.find((file) => file.snapshotPath === "controls/plan.json");
     if (sealedPlan === undefined) throw new Error("sealed workflow is missing its run plan");
     const plan = assertRunPlanDocument(parseStrictJsonBytes(sealedPlan.contents), runId);
@@ -1372,21 +1394,31 @@ export async function readLinkedWorkflowEvidence(
       executionSnapshot
     };
   } catch (error) {
-    return {
-      ok: false,
-      diagnostics: [
-        {
-          code: "WORKFLOW_CONTROL_EVIDENCE_INVALID",
-          message: error instanceof Error ? error.message : String(error),
-          severity: "error",
-          source: "workflow",
-          path: metadataPath
-        }
-      ]
-    };
+    if (options.observeOnly === true && isTransientSnapshotRace(error)) {
+      if (observationAttempt < OBSERVATION_SNAPSHOT_ATTEMPTS) {
+        return await readLinkedWorkflowEvidence(projectRoot, runId, options, observationAttempt + 1);
+      }
+      return invalidLinkedWorkflowEvidence(metadataPath, exhaustedSnapshotRaceError(observationAttempt, error));
+    }
+    return invalidLinkedWorkflowEvidence(metadataPath, error);
   } finally {
     await releaseControlLock?.();
   }
+}
+
+function invalidLinkedWorkflowEvidence(metadataPath: string, error: unknown): LinkedWorkflowEvidenceFailure {
+  return {
+    ok: false,
+    diagnostics: [
+      {
+        code: "WORKFLOW_CONTROL_EVIDENCE_INVALID",
+        message: error instanceof Error ? error.message : String(error),
+        severity: "error",
+        source: "workflow",
+        path: metadataPath
+      }
+    ]
+  };
 }
 
 function missingLinkedWorkflowEvidenceDiagnostic(
