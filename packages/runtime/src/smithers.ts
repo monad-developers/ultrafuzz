@@ -5098,13 +5098,18 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
  *
  * A row whose retained snapshot is gone as well has nothing to restore from and is skipped: the
  * continuation then proceeds exactly as it did before this recovery existed, and Smithers reports
- * the missing prompt itself when it renders the task. Every other check gates a write, so a
- * snapshot that is present but wrong (digest, symlink, non-regular file, escaping path) still fails
- * the continuation.
+ * the missing prompt itself when it renders the task. A run without `plan.json` at all has no rows
+ * to begin with and is skipped the same way: `resumeRun` natively continues bare Smithers runs
+ * that ultrafuzz never planned (`run.json` and the persisted workflow only), and it treats every
+ * other launch document as optional for that run shape. Every other check gates a write, so a
+ * plan or snapshot that is present but wrong (digest, symlink, non-regular file, escaping path)
+ * still fails the continuation.
  */
 function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
   const runRoot = path.resolve(input.runRoot);
-  const plan = readRunPlanDocument(path.join(runRoot, "plan.json"), path.basename(runRoot));
+  const planPath = path.join(runRoot, "plan.json");
+  if (!runEntryExists(planPath)) return;
+  const plan = readRunPlanDocument(planPath, path.basename(runRoot));
   for (const planned of plan.rendered_prompts) {
     const nodeId = `node:${planned.attempt_id}`;
     const promptPath = path.isAbsolute(planned.rendered_prompt_path)
@@ -5113,7 +5118,7 @@ function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: st
     if (fs.existsSync(promptPath)) continue;
     const snapshotLabel = `retained rendered prompt snapshot for task ${nodeId}`;
     const snapshotPath = safeResolveInside(runRoot, planned.rendered_prompt_snapshot_path, snapshotLabel);
-    if (!retainedSnapshotEntryExists(snapshotPath)) continue;
+    if (!runEntryExists(snapshotPath)) continue;
     const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
     if (promptPath !== expectedPromptPath) {
       throw new Error(`persisted rendered prompt path does not match task ${nodeId}`);
@@ -5132,12 +5137,13 @@ function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: st
 
 /**
  * `lstat` semantics on purpose: a dangling symlink or a non-file entry counts as present so it
- * reaches the fail-closed checks above. Any lookup failure is classified the way
- * `assertRegularFileInside` classifies it, as no retained file, which is the case that skips.
+ * reaches the fail-closed checks above (`readRunPlanDocument` opens with `O_NOFOLLOW`). Any lookup
+ * failure is classified the way `assertRegularFileInside` classifies it, as no such file, which is
+ * the case that skips.
  */
-function retainedSnapshotEntryExists(snapshotPath: string): boolean {
+function runEntryExists(filePath: string): boolean {
   try {
-    fs.lstatSync(snapshotPath);
+    fs.lstatSync(filePath);
     return true;
   } catch {
     return false;
