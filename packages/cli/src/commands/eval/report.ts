@@ -3,7 +3,7 @@ import { TextDecoder } from "node:util";
 
 import { Args, Command } from "@oclif/core";
 import { readRegularFileSnapshot } from "@ultrafuzz/artifacts";
-import { evalRunRoot, readEvalScoreSummary } from "@ultrafuzz/evals";
+import { describeEvalError, evalRunRoot, readEvalScoreSummary } from "@ultrafuzz/evals";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
 
@@ -39,7 +39,7 @@ export default class EvalReport extends Command {
       emitCommandResult(
         this,
         "eval report",
-        commandFailure("eval report", error instanceof Error ? error.message : String(error), "EVAL_REPORT_FAILED"),
+        commandFailure("eval report", describeEvalError(error), "EVAL_REPORT_FAILED"),
         flags.json === true
       );
     }
