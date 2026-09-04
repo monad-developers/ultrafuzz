@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
+import { artifactMetadataCompletenessIssues, metadataOmission } from "./artifact-validation.js";
 import { findingNoteAssignmentIssue } from "./findings-schema.js";
 import { validateCoverageEvidence } from "./coverage-evidence.js";
 import {
@@ -296,11 +297,16 @@ export interface SemanticGateContext {
 export interface SemanticGateExecutionRequest {
   document: unknown;
   context?: SemanticGateContext;
+  /** CI/development may reject advisory defects without changing producer bytes. */
+  strict?: boolean;
 }
 
 export interface SemanticGateIssue {
   path: string;
   message: string;
+  severity?: "error" | "warning";
+  code?: string;
+  sourcePath?: string;
 }
 
 export interface SemanticGateRegistration<Name extends string = string> {
@@ -318,6 +324,12 @@ export type SemanticGateExecutionResult<Name extends string = string> =
     }
   | {
       status: "failed";
+      gate: Name;
+      scope: SemanticGateScope;
+      issues: readonly SemanticGateIssue[];
+    }
+  | {
+      status: "warning";
       gate: Name;
       scope: SemanticGateScope;
       issues: readonly SemanticGateIssue[];
@@ -681,6 +693,8 @@ function preservedArraySubsequence(actual: unknown, upstream: unknown): boolean 
   return upstreamIndex === upstream.length;
 }
 
+const FINDING_ADVISORY_FIELDS = new Set(["summary", "confidence", "severity_guess", "family_id"]);
+
 function triagedFindingPreservationIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const triaged = Array.isArray(document) ? document : [];
   const deduped = Array.isArray(context.artifactSet!.dedupedFindings) ? context.artifactSet!.dedupedFindings : [];
@@ -699,7 +713,11 @@ function triagedFindingPreservationIssues(document: unknown, context: SemanticGa
     }
     const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
     for (const field of fields) {
-      if (TRIAGE_OWNED_FIELDS.has(field)) continue;
+      if (
+        TRIAGE_OWNED_FIELDS.has(field) ||
+        (FINDING_ADVISORY_FIELDS.has(field) && (actual[field] === undefined || upstream[field] === undefined))
+      )
+        continue;
       if (!isDeepStrictEqual(actual[field], upstream[field])) {
         issues.push(issue(`$[${index}].${field}`, `Triage did not preserve upstream field ${JSON.stringify(field)}`));
       }
@@ -748,7 +766,11 @@ function severityClassificationPreservationIssues(
     }
     const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
     for (const field of fields) {
-      if (SEVERITY_CLASSIFICATION_OWNED_FIELDS.has(field)) continue;
+      if (
+        SEVERITY_CLASSIFICATION_OWNED_FIELDS.has(field) ||
+        (FINDING_ADVISORY_FIELDS.has(field) && (actual[field] === undefined || upstream[field] === undefined))
+      )
+        continue;
       if (!isDeepStrictEqual(actual[field], upstream[field])) {
         issues.push(
           issue(
@@ -972,6 +994,10 @@ function reportSeverityClassificationPreservationIssues(
     if (!isRecord(reportEntry.row)) continue;
     for (const field of Object.keys(finding)) {
       if (disposition === "promoted" && (field === "id" || field === "title")) continue;
+      if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
+        issues.push(metadataOmission(`${reportEntry.path}.${field}`));
+        continue;
+      }
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Report did not preserve severity field ${JSON.stringify(field)}`)
@@ -1259,6 +1285,10 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
       // against the authenticated ledger with the exact owned-field set, and
       // the row classification must equal the enriched lifecycle record's.
       if (field === "lifecycle" || field === "triage_classification") continue;
+      if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
+        issues.push(metadataOmission(`${reportEntry.path}.${field}`));
+        continue;
+      }
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Bounded report did not preserve dedupe field ${JSON.stringify(field)}`)
@@ -1809,9 +1839,28 @@ function strategyDetectionReviewStageIssues(document: unknown, context: Semantic
     if (!Array.isArray(review.upstreamStrategyDetections)) {
       return [issue("$", "Trusted dedupe strategy detections are unavailable")];
     }
-    return isDeepStrictEqual(document, review.upstreamStrategyDetections)
-      ? []
-      : [issue("$", "Severity classification did not exactly preserve dedupe strategy detections")];
+    const core = (rows: unknown) =>
+      Array.isArray(rows)
+        ? rows.map((row: unknown) => {
+            if (!isRecord(row)) return row;
+            const { family_id: _family, ...identityAndHits } = row;
+            return identityAndHits;
+          })
+        : rows;
+    if (!isDeepStrictEqual(core(document), core(review.upstreamStrategyDetections))) {
+      return [issue("$", "Severity classification did not exactly preserve dedupe strategy detections")];
+    }
+    const issues: SemanticGateIssue[] = [];
+    for (const [index, row] of arrayAt(document, []).entries()) {
+      const upstream = review.upstreamStrategyDetections[index];
+      if (!isRecord(row) || !isRecord(upstream) || row.family_id === upstream.family_id) continue;
+      issues.push(
+        row.family_id === undefined || upstream.family_id === undefined
+          ? metadataOmission(`$[${index}].family_id`)
+          : issue(`$[${index}].family_id`, "Severity classification changed a supplied strategy detection family_id")
+      );
+    }
+    return issues;
   }
   if (review.stage !== "dedupe") {
     return [issue("$", `Strategy detections are not declared for review stage ${review.stage}`)];
@@ -1844,7 +1893,11 @@ function strategyDetectionReviewStageIssues(document: unknown, context: Semantic
     if (detection.finding_id !== finding.id) {
       issues.push(issue(`${basePath}.finding_id`, "Strategy detection finding_id differs from its deduped finding"));
     }
-    if (detection.family_id !== finding.family_id) {
+    if (detection.family_id === undefined && finding.family_id !== undefined) {
+      issues.push(metadataOmission(`${basePath}.family_id`, `${review.findingsArtifactPath}#${basePath}.family_id`));
+    } else if (detection.family_id !== undefined && finding.family_id === undefined) {
+      issues.push(metadataOmission(`$context.artifactSet.reviewStage.findings[${index}].family_id`));
+    } else if (detection.family_id !== finding.family_id) {
       issues.push(issue(`${basePath}.family_id`, "Strategy detection family_id differs from its deduped finding"));
     }
     if (detection.dedupe_key !== lifecycle.dedupe_key) {
@@ -4106,6 +4159,31 @@ function dynamicRecommendationProjection(value: unknown): Readonly<Record<string
   return Object.fromEntries(dynamicRecommendationFields.map((field) => [field, value[field]]));
 }
 
+function sameDynamicRecommendation(
+  left: Readonly<Record<string, unknown>> | undefined,
+  right: Readonly<Record<string, unknown>> | undefined
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return dynamicRecommendationFields.every(
+    (field) =>
+      ((field === "rationale" || field === "coverage_gap") &&
+        (left[field] === undefined || right[field] === undefined)) ||
+      isDeepStrictEqual(left[field], right[field])
+  );
+}
+
+function dynamicRecommendationAuthority(
+  occurrences: readonly { recommendation: unknown }[]
+): Readonly<Record<string, unknown>> | undefined {
+  if (occurrences.length === 0) return undefined;
+  // A missing description in the first row must not conceal disagreement
+  // between later supplied values. This is a comparison projection only.
+  const projections = occurrences.map((entry) => dynamicRecommendationProjection(entry.recommendation));
+  return Object.fromEntries(
+    dynamicRecommendationFields.map((field) => [field, projections.find((row) => row?.[field] !== undefined)?.[field]])
+  );
+}
+
 const DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX = "boundary-recipe-";
 const DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID = "boundary-recipe-coordinator";
 
@@ -4354,12 +4432,12 @@ function dynamicStrategyArtifactReconciliationIssues(
       );
     }
     const occurrences = recommendationsById.get(strategyId) ?? [];
-    const expectedProjection = dynamicRecommendationProjection(occurrences[0]?.recommendation);
+    const expectedProjection = dynamicRecommendationAuthority(occurrences);
     if (
       expectedProjection === undefined ||
       occurrences.some(
         (occurrence) =>
-          !isDeepStrictEqual(dynamicRecommendationProjection(occurrence.recommendation), expectedProjection)
+          !sameDynamicRecommendation(dynamicRecommendationProjection(occurrence.recommendation), expectedProjection)
       )
     ) {
       issues.push(
@@ -4401,9 +4479,9 @@ function dynamicStrategyArtifactReconciliationIssues(
     if (strategyId === undefined) continue;
     const occurrences = recommendationsById.get(strategyId) ?? [];
     if (occurrences.length === 0) continue;
-    const expectedProjection = dynamicRecommendationProjection(occurrences[0]!.recommendation);
+    const expectedProjection = dynamicRecommendationAuthority(occurrences);
     const selectedProjection = dynamicRecommendationProjection(selectedRow);
-    if (expectedProjection !== undefined && !isDeepStrictEqual(selectedProjection, expectedProjection)) {
+    if (expectedProjection !== undefined && !sameDynamicRecommendation(selectedProjection, expectedProjection)) {
       issues.push(
         issue(
           `$.strategies[${selectedIndex}]`,
@@ -7163,6 +7241,16 @@ function usageSourceEventJoinIssues(document: unknown, context: SemanticGateCont
 }
 
 const gateSpecifications = {
+  "findings-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "triaged-findings-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "severity-classified-findings-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "threat-model-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "boundary-recipes-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "dependency-scope-matrix-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "admin-config-boundary-matrix-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "externalized-state-accounting-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "dynamic-enumerator-outputs-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "selected-strategies-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
   "admin-config-surface-id-uniqueness": documentGate(uniqueFieldGate([["surfaces"]], "surface_id", "admin surface ID")),
   "admin-config-surface-joins": documentGate(adminConfigJoinIssues),
   "agent-source-proof-commit-binding": contextualGate(
@@ -7755,10 +7843,18 @@ export function executeSemanticGate<Name extends SemanticGateName>(
   } catch (error) {
     issues = [issue("$", `Semantic gate could not execute: ${error instanceof Error ? error.message : String(error)}`)];
   }
+  if (request.strict) {
+    issues = issues.map((entry) => (entry.severity === "warning" ? { ...entry, severity: "error" } : entry));
+  }
   const boundedIssues = boundSemanticGateIssues(issues);
   return boundedIssues.length === 0
     ? { status: "passed", gate: name, scope: registration.scope }
-    : { status: "failed", gate: name, scope: registration.scope, issues: Object.freeze(boundedIssues) };
+    : {
+        status: boundedIssues.some((entry) => entry.severity !== "warning") ? "failed" : "warning",
+        gate: name,
+        scope: registration.scope,
+        issues: Object.freeze(boundedIssues)
+      };
 }
 
 function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): SemanticGateIssue[] {
@@ -7769,8 +7865,16 @@ function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): Semantic
     return [...issues];
   }
 
+  // Advisory volume cannot hide a fatal issue or itself fail a healthy campaign.
+  issues = [
+    ...issues.filter((entry) => entry.severity !== "warning"),
+    ...issues.filter((entry) => entry.severity === "warning")
+  ];
   const bounded: SemanticGateIssue[] = [];
-  const sentinelBudgetBytes = Buffer.byteLength(JSON.stringify(semanticGateTruncationIssue(issues.length)), "utf8");
+  const sentinelBudgetBytes = Buffer.byteLength(
+    JSON.stringify({ ...semanticGateTruncationIssue(issues.length), severity: "warning" }),
+    "utf8"
+  );
   let boundedIssueBytes = 0;
   const candidateLimit = Math.min(issues.length, MAX_SEMANTIC_GATE_ISSUES - 1);
   for (let index = 0; index < candidateLimit; index += 1) {
@@ -7784,7 +7888,11 @@ function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): Semantic
     bounded.push(candidate);
     boundedIssueBytes += candidateBytes;
   }
-  bounded.push(semanticGateTruncationIssue(issues.length - bounded.length));
+  const omitted = issues.slice(bounded.length);
+  bounded.push({
+    ...semanticGateTruncationIssue(omitted.length),
+    ...(omitted.every((entry) => entry.severity === "warning") ? { severity: "warning" as const } : {})
+  });
   return bounded;
 }
 
@@ -7817,7 +7925,8 @@ export function executeSchemaSemanticGates(
  */
 export function executeOfflineSchemaSemanticGates(
   schemaFilename: ArtifactSchemaFilename,
-  document: unknown
+  document: unknown,
+  options: { strict?: boolean } = {}
 ): SemanticGateExecutionResult[] {
-  return executeSchemaSemanticGates(schemaFilename, { document });
+  return executeSchemaSemanticGates(schemaFilename, { document, ...options });
 }

@@ -573,6 +573,10 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     ""
   );
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
+  appendArtifactValidationWarnings(
+    lines,
+    isRecord(report.run_metadata) ? report.run_metadata.artifact_validation_warnings : undefined
+  );
   appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   appendCoverageEvidence(lines, report.coverage_evidence);
@@ -595,6 +599,23 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+function appendArtifactValidationWarnings(lines: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  lines.push(
+    "",
+    "## Artifact validation warnings",
+    "",
+    "The run continued with partial metadata. Producer artifacts were preserved unchanged.",
+    ""
+  );
+  for (const warning of value.filter(isRecord)) {
+    lines.push(
+      `- ${inlineValue(warning.code)} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+    );
+    if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
+  }
 }
 
 function appendCoverageEvidence(lines: string[], value: unknown): void {

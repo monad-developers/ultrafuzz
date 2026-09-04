@@ -1057,17 +1057,7 @@
         "additionalProperties": false
       }
     },
-    "required": [
-      "schema_version",
-      "id",
-      "title",
-      "status",
-      "severity_guess",
-      "confidence",
-      "summary",
-      "triage_classification",
-      "notes"
-    ],
+    "required": ["schema_version", "id", "title", "status", "triage_classification", "notes"],
     "additionalProperties": false,
     "allOf": [
       {

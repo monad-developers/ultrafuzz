@@ -18,6 +18,8 @@ import {
   assertRegularFileInside,
   assertRunMetadataDocument,
   executeSchemaSemanticGates,
+  artifactValidationWarnings,
+  boundArtifactValidationWarnings,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
@@ -598,7 +600,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     tokens_used?: string;
     estimated_spend?: string;
     partial_pricing: boolean;
-  }
+  },
+  admissions: ReadonlyMap<string, unknown> = new Map()
 ): {
   normalize(remoteValue: string): string;
   latestElapsedThrough(...values: unknown[]): string | undefined;
@@ -608,6 +611,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
   authoritative(task: unknown): unknown;
   relativePath(task: unknown): string;
   prompt(prompt: string, authorityPath: string, reportPath: string): string;
+  warnings(task: unknown): unknown[];
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function declaredFinalReportOutputPair");
@@ -666,6 +670,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "untrustedContentBoundary",
     "workflowRuntime",
     "deriveCurrentTaskWorkflowMetrics",
+    "dependencyArtifactAdmissionsByTask",
+    "boundArtifactValidationWarnings",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
       latestElapsedThrough: finalReportLatestElapsedThrough,
@@ -674,7 +680,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
       assertUnchanged: assertFinalReportRunMetadataAuthorityUnchanged,
       authoritative: authoritativeFinalReportRunMetadata,
       relativePath: finalReportRunMetadataAuthorityRelativePath,
-      prompt: promptWithAuthoritativeFinalReportRunMetadata
+      prompt: promptWithAuthoritativeFinalReportRunMetadata,
+      warnings: finalReportArtifactValidationWarnings
     };`
   )(
     path,
@@ -714,7 +721,9 @@ function loadFinalReportRunMetadataAuthorityHarness(
       signal: new AbortController().signal,
       db: {}
     },
-    async () => workflowMetrics
+    async () => workflowMetrics,
+    admissions,
+    boundArtifactValidationWarnings
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
@@ -2040,6 +2049,8 @@ function loadVerifyArtifactsHarness(
     "dependencyArtifactAdmission",
     "assertDependencyArtifactAdmissionCurrent",
     "assertVerifiedDependency",
+    "artifactValidationWarnings",
+    "boundArtifactValidationWarnings",
     "executeSchemaSemanticGates",
     "normalizeNodeAttemptFailureMessage",
     "materializeInvariantSuiteCompanions",
@@ -2114,6 +2125,8 @@ function loadVerifyArtifactsHarness(
     dependencyAdmissionFor,
     assertDependencyAdmissionCurrentFor,
     authenticateDependency,
+    artifactValidationWarnings,
+    boundArtifactValidationWarnings,
     (...args: Parameters<typeof executeSchemaSemanticGates>) => {
       options.onSemanticGate?.();
       return executeSchemaSemanticGates(...args);
@@ -2235,6 +2248,122 @@ function singleOutputVerificationTask(root: string, contract: string): VerifyArt
     ]
   };
 }
+
+test("1091: generated verifier publishes 41 detections with six family omissions and durable warnings", () => {
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-partial-detections-"));
+  try {
+    const rawDir = path.join(root, "artifacts", "raw");
+    const dedupeDir = path.join(root, "artifacts", "dedupe");
+    fs.mkdirSync(rawDir, { recursive: true });
+    fs.mkdirSync(dedupeDir, { recursive: true });
+    const rawTask = singleOutputVerificationTask(rawDir, "ultrafuzz/findings@2");
+    rawTask.attemptId = "raw";
+    rawTask.runRoot = root;
+    rawTask.metadata.node = { logicalNodeId: "raw", concreteNodeId: "raw" };
+    rawTask.outputs[0]!.schemaFile = "findings.schema.json";
+    const task = singleOutputVerificationTask(dedupeDir, "ultrafuzz/findings@2");
+    task.attemptId = "dedupe";
+    task.runRoot = root;
+    task.metadata.node = { logicalNodeId: "dedupe", concreteNodeId: "dedupe" };
+    task.metadata.dependencies.attemptIds = ["raw"];
+    task.dependencyArtifactDirs = [rawDir];
+    task.outputs = [
+      { ...task.outputs[0]!, schemaFile: "findings.schema.json" },
+      {
+        path: "strategies.json",
+        contract: "ultrafuzz/strategy-detections@1",
+        contractDigest: "a".repeat(64),
+        primary: false,
+        schemaFile: "strategy-detections.schema.json"
+      },
+      {
+        path: "lifecycle.json",
+        contract: "ultrafuzz/finding-lifecycle-ledger@1",
+        contractDigest: "a".repeat(64),
+        primary: false,
+        schemaFile: "finding-lifecycle-ledger.schema.json"
+      }
+    ];
+    const raw = Array.from({ length: 41 }, (_, index) => ({
+      schema_version: "ultrafuzz.finding.v2",
+      id: `f-${index}`,
+      title: `Finding ${index}`,
+      status: "candidate",
+      summary: "Source-backed finding",
+      confidence: "high",
+      severity_guess: "High",
+      strategy: "review"
+    }));
+    const findings = raw.map((finding, index) => ({
+      ...finding,
+      dedupe_key: `key-${index}`,
+      family_id: `family-${index}`
+    }));
+    const detections = findings.map((finding, index) => ({
+      dedupe_key: finding.dedupe_key,
+      finding_id: finding.id,
+      title: finding.title,
+      ...(index < 6 ? {} : { family_id: finding.family_id }),
+      hits: [{ strategy: "review", attempt_index: 0 }]
+    }));
+    const lifecycle = {
+      schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
+      records: findings.map((finding, index) => ({
+        dedupe_key: finding.dedupe_key,
+        source_artifacts: [
+          {
+            path: "artifacts/raw/result.json",
+            node_id: "raw",
+            finding_id: finding.id,
+            title: finding.title,
+            relationship: "primary"
+          }
+        ],
+        strategy_hits: detections[index]!.hits,
+        stages: [
+          { stage: "raw", artifact_path: "artifacts/raw/result.json", finding_id: finding.id },
+          { stage: "deduped", artifact_path: "result.json", finding_id: finding.id }
+        ]
+      }))
+    };
+    fs.writeFileSync(path.join(rawDir, "result.json"), JSON.stringify(raw));
+    fs.writeFileSync(path.join(dedupeDir, "result.json"), JSON.stringify(findings));
+    fs.writeFileSync(path.join(dedupeDir, "strategies.json"), JSON.stringify(detections));
+    fs.writeFileSync(path.join(dedupeDir, "lifecycle.json"), JSON.stringify(lifecycle));
+    const harness = loadVerifyArtifactsHarness({ taskSpecs: [rawTask, task], authenticatedDependencyDirs: [rawDir] });
+    const result = harness.verifyArtifacts(task);
+    assert.equal(result.artifacts.length, 3);
+    assert.equal(harness.markerWrites.length, 1);
+    const warnings = (harness.markerWrites[0] as unknown[])[3] as Array<Record<string, unknown>>;
+    assert.equal(warnings.length, 6);
+    assert.equal(warnings[0]!.field_path, "$[0].family_id");
+    assert.equal(harness.publications.get("strategies.json")!.toString(), JSON.stringify(detections));
+    assert.equal(fs.readFileSync(path.join(dedupeDir, "strategies.json"), "utf8"), JSON.stringify(detections));
+    // The report receives the exact verifier diagnostics even before controller synchronization.
+    const admissions = new Map([
+      [
+        "final",
+        {
+          snapshotsByProducerAttempt: new Map([
+            [
+              "dedupe",
+              {
+                marker: { bytes: Buffer.from(JSON.stringify({ validation_warnings: warnings })) }
+              }
+            ]
+          ])
+        }
+      ]
+    ]);
+    const reporting = loadFinalReportRunMetadataAuthorityHarness(undefined, undefined, admissions);
+    const reportWarnings = reporting.warnings({ attemptId: "final" }) as Array<Record<string, unknown>>;
+    assert.equal(reportWarnings.length, 6);
+    assert.equal(reportWarnings[0]!.artifact_path, "artifacts/dedupe/strategies.json");
+    assert.deepEqual(reporting.warnings({ attemptId: "final" }), reportWarnings);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const generatedCampaignPaths = {
   corpus: "backends/recon-fuzzer/corpus",
@@ -9472,7 +9601,9 @@ test("generated Smithers verifier publishes the complete validated set before ta
   );
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
-      verifier.indexOf("const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications)")
+      verifier.indexOf(
+        "const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings)"
+      )
   );
   assert.ok(
     verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
@@ -9480,7 +9611,7 @@ test("generated Smithers verifier publishes the complete validated set before ta
   );
   assert.ok(
     verifier.indexOf("assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch)") <
-      verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications)")
+      verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings)")
   );
 });
 
@@ -9508,7 +9639,7 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(verifier, /beginVerifiedDependencySnapshotEpoch\(task\)/u);
   assert.match(verifier, /assertVerifiedDependencySnapshotEpochRemainedCurrent\(task, dependencySnapshotEpoch\)/u);
   assert.match(verifier, /endVerifiedDependencySnapshotEpoch\(task, dependencySnapshotEpoch\)/u);
-  assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications\)/u);
+  assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications, validationWarnings\)/u);
   assert.match(source, /publications: publicationEntries/u);
   assert.match(source, /rememberVerifiedPublication\(publications, INVARIANT_SUITE_MANIFEST_FILE/u);
   assert.match(source, /const expectedPublicationShas = new Map/u);
@@ -9524,7 +9655,7 @@ test("generated Smithers preparation requires a successful dependency artifact v
     verifier
   );
   assert.ok(
-    verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications)") >
+    verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings)") >
       verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)"),
     verifier
   );

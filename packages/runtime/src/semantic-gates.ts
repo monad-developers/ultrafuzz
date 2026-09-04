@@ -12,6 +12,7 @@ export interface RuntimeSemanticGateRequest {
   document: unknown;
   artifactPath: string;
   context?: SemanticGateContext;
+  strict?: boolean;
 }
 
 /**
@@ -22,7 +23,8 @@ export interface RuntimeSemanticGateRequest {
 export function runtimeSemanticGateDiagnostics(request: RuntimeSemanticGateRequest): RuntimeDiagnostic[] {
   return executeSchemaSemanticGates(request.schemaFilename, {
     document: request.document,
-    context: request.context
+    context: request.context,
+    strict: request.strict
   }).flatMap((result) => semanticGateResultDiagnostics(request, result));
 }
 
@@ -50,15 +52,17 @@ function semanticGateResultDiagnostics(
     ];
   }
   return result.issues.map((issue) => ({
-    code: "ARTIFACT_SEMANTIC_GATE_FAILED",
-    message: `Semantic gate ${result.gate} failed: ${issue.message}`,
-    severity: "error" as const,
+    code:
+      issue.code ?? (issue.severity === "warning" ? "ARTIFACT_SEMANTIC_GATE_WARNING" : "ARTIFACT_SEMANTIC_GATE_FAILED"),
+    message: `Semantic gate ${result.gate}${issue.severity === "warning" ? "" : " failed"}: ${issue.message}`,
+    severity: issue.severity ?? "error",
     source: "semantic-gates",
     path: `${request.artifactPath}#${issue.path}`,
     details: {
       schema_file: request.schemaFilename,
       gate: result.gate,
-      scope: result.scope
+      scope: result.scope,
+      ...(issue.sourcePath === undefined ? {} : { source_path: issue.sourcePath })
     }
   }));
 }

@@ -6391,7 +6391,7 @@ function appendExpectationCatalog(
       return;
     }
     const uniqueness = executeSemanticGate("reference-expectation-id-uniqueness", { document: parsed.value });
-    if (uniqueness.status !== "passed") {
+    if (uniqueness.status === "failed" || uniqueness.status === "requires-context") {
       diagnostics.push({
         code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
         message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} failed semantic validation`,

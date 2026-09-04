@@ -26,6 +26,7 @@ export default class ArtifactValidate extends Command {
   };
   static override flags = {
     ...globalFlags,
+    strict: Flags.boolean({ summary: "Fail on optional metadata warnings (CI/development)", default: false }),
     "run-id": Flags.string({
       summary: "Sealed current run ID for generated-test task-context validation"
     }),
@@ -80,6 +81,7 @@ export default class ArtifactValidate extends Command {
             schemaFilename: schemaFile as ArtifactSchemaFilename,
             document: validation.value,
             artifactPath,
+            strict: flags.strict,
             context: {
               filesystem: { rootDirectory: artifactRoot },
               artifactIdentity: {
@@ -90,10 +92,11 @@ export default class ArtifactValidate extends Command {
             }
           });
           if (diagnostics.length > 0) {
-            validation.ok = false;
+            validation.ok = !diagnostics.some((diagnostic) => diagnostic.severity === "error");
             validation.issues.push(
               ...diagnostics.map((diagnostic): ArtifactContractIssue => ({
                 code: diagnostic.code,
+                severity: diagnostic.severity === "warning" ? "warning" : "error",
                 message: diagnostic.message,
                 path: diagnostic.path ?? artifactPath
               }))
@@ -102,18 +105,22 @@ export default class ArtifactValidate extends Command {
         } else {
           const semanticIssues = executeOfflineSchemaSemanticGates(
             schemaFile as ArtifactSchemaFilename,
-            validation.value
+            validation.value,
+            { strict: flags.strict }
           ).flatMap((result): ArtifactContractIssue[] =>
-            result.status !== "failed"
+            result.status !== "failed" && result.status !== "warning"
               ? []
               : result.issues.map((issue) => ({
-                  code: "ARTIFACT_SEMANTIC_GATE_FAILED",
-                  message: `Semantic gate ${result.gate} failed: ${issue.message}`,
+                  code:
+                    issue.code ??
+                    (issue.severity === "warning" ? "ARTIFACT_SEMANTIC_GATE_WARNING" : "ARTIFACT_SEMANTIC_GATE_FAILED"),
+                  severity: issue.severity ?? "error",
+                  message: `Semantic gate ${result.gate}${issue.severity === "warning" ? "" : " failed"}: ${issue.message}`,
                   path: `${artifactPath}#${issue.path}`
                 }))
           );
           if (semanticIssues.length > 0) {
-            validation.ok = false;
+            validation.ok = !semanticIssues.some((issue) => issue.severity !== "warning");
             validation.issues.push(...semanticIssues);
           }
         }
@@ -122,7 +129,7 @@ export default class ArtifactValidate extends Command {
     const diagnostics = validation.issues.map((issue) => ({
       code: issue.code,
       message: issue.message,
-      severity: "error" as const,
+      severity: issue.severity ?? "error",
       source: "artifact-contracts",
       path: issue.path
     }));
@@ -133,7 +140,9 @@ export default class ArtifactValidate extends Command {
         ok: validation.ok,
         command: "artifact validate",
         data: { contract: args.contract, path: artifactPath },
-        text: validation.ok ? `Valid ${args.contract}: ${artifactPath}\n` : diagnosticsText(diagnostics),
+        text: validation.ok
+          ? `Valid ${args.contract}: ${artifactPath}\n${diagnosticsText(diagnostics)}`
+          : diagnosticsText(diagnostics),
         diagnostics
       },
       flags.json === true

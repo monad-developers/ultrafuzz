@@ -7,6 +7,30 @@ import test from "node:test";
 
 import { runCli } from "../src/index.js";
 
+test("artifact validate warns on partial metadata and --strict fails without rewriting input", async () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-partial-artifact-"));
+  try {
+    const file = path.join(root, "findings.json");
+    const bytes = JSON.stringify([
+      { schema_version: "ultrafuzz.finding.v2", id: "f-1", title: "Partial", status: "candidate" }
+    ]);
+    fs.writeFileSync(file, bytes);
+    const command = ["artifact", "validate", "ultrafuzz/findings@2", file, "--json"];
+    const permissive = await capture(command);
+    assert.equal(permissive.code, 0, permissive.stdout);
+    const accepted = JSON.parse(permissive.stdout);
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.diagnostics.length, 3);
+    assert.ok(accepted.diagnostics.every((entry: { severity: string }) => entry.severity === "warning"));
+    const strict = await capture([...command, "--strict"]);
+    assert.equal(strict.code, 1, strict.stdout);
+    assert.equal(JSON.parse(strict.stdout).ok, false);
+    assert.equal(fs.readFileSync(file, "utf8"), bytes);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 const coverageInputBytes = Buffer.from("TN:\nSF:src/Core.sol\nDA:1,1\nend_of_record\n", "utf8");
 const reconSelectionBytes = Buffer.from(
   `${JSON.stringify({ files: [{ path: "src/Core.sol", ranges: [{ start_line: 1, line_count: 1 }] }] })}\n`,

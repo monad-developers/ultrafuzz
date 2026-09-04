@@ -218,6 +218,47 @@
             "minLength": 1
           },
           "uniqueItems": true
+        },
+        "artifact_validation_warnings": {
+          "maxItems": 1000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "artifact_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 8192
+              },
+              "field_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "gate": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "source_path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 8192
+              }
+            },
+            "required": ["code", "artifact_path", "field_path", "message", "gate"],
+            "additionalProperties": false
+          }
         }
       },
       "required": [
@@ -1310,9 +1351,6 @@
           "id",
           "title",
           "status",
-          "severity_guess",
-          "confidence",
-          "summary",
           "severity",
           "impact",
           "likelihood",
@@ -2386,9 +2424,6 @@
           "id",
           "title",
           "status",
-          "severity_guess",
-          "confidence",
-          "summary",
           "triage_classification",
           "recommended_next_action",
           "lifecycle"

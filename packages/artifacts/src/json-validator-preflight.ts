@@ -149,7 +149,7 @@ export function parseJsonValidatorPreflightSuccessEnvelope(
       }
     }
   });
-  const rejected = gates.find((gate) => gate.status !== "passed");
+  const rejected = gates.find((gate) => gate.status === "failed" || gate.status === "requires-context");
   if (rejected !== undefined) {
     const detail = rejected.status === "failed" ? rejected.issues[0]?.message : rejected.missingContext.join(", ");
     throw new Error(

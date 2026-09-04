@@ -3689,6 +3689,7 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
   });
   const dedupedFinding = currentFinding("finding-lifecycle", {
     dedupe_key: "root-lifecycle",
+    family_id: "family-lifecycle",
     strategy: "boundary-tests"
   });
   const dedupedPath = artifactPaths.dedupedFindings;
@@ -3732,6 +3733,16 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
     authenticatedSnapshotsForNode(layout, dedupeNode, dedupeTask.attemptId)
   );
   assert.equal(validDedupe.ok, true, JSON.stringify(validDedupe.diagnostics));
+  const metadataWarnings = validDedupe.diagnostics.filter(
+    (diagnostic) => diagnostic.code === "ARTIFACT_OPTIONAL_METADATA_MISSING"
+  );
+  assert.equal(metadataWarnings.length, 1);
+  assert.equal(metadataWarnings[0]!.severity, "warning");
+  assert.ok(metadataWarnings[0]!.path?.endsWith("#$[0].family_id"));
+  assert.equal(
+    fs.readFileSync(path.join(dedupeTask.artifactDir, artifactPaths.dedupeStrategies), "utf8"),
+    JSON.stringify(strategyDetections)
+  );
 
   const dedupeLedgerPath = path.join(dedupeTask.artifactDir, artifactPaths.dedupeLifecycle);
   const assertRawClosureFailure = (record: typeof dedupeRecord, message: RegExp): void => {

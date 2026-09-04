@@ -499,16 +499,16 @@ test("finding schema accepts a canonical v2 finding and rejects malformed payloa
   assert.equal(findingsValidation.value, findings);
   assert.deepEqual(findings, before);
 
-  const missingSummary = { ...finding };
-  delete (missingSummary as Partial<typeof finding>).summary;
-  const invalid = validateFindingSchema(missingSummary);
+  const partial = { ...finding } as Partial<typeof finding>;
+  delete partial.summary;
+  delete partial.confidence;
+  delete partial.severity_guess;
+  const accepted = validateFindingSchema(partial);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.value, partial);
 
-  assert.equal(invalid.ok, false);
-  assert.ok(
-    invalid.issues.some(
-      (issue) => issue.path === "$" && issue.code === "FINDING_SCHEMA_INVALID" && issue.message.includes("summary")
-    )
-  );
+  delete partial.id;
+  assert.equal(validateFindingSchema(partial).ok, false);
 });
 
 test("property catalog schema accepts one source and preserves multiple deduplicated sources", () => {

@@ -101,6 +101,59 @@ destination uniqueness, exact destination-policy coverage, and canonical policy
 array ordering. Runtime parsing returns accepted values unchanged; it never
 trims or reorders them.
 
+## Partial Agent Artifacts
+
+Production artifact validation accepts missing optional metadata and preserves
+the producer's original bytes. The registered semantic gates report omissions
+as warnings; a warning does not fail publication, dependency admission, or the
+campaign. Agents can use the available sibling and ancestor artifacts as
+context without the runtime backfilling their output.
+
+The following agent-output fields are optional:
+
+- Findings, triaged findings, and severity-classified findings: `summary`,
+  `confidence`, and `severity_guess`. Finding identity, status, and stage-specific
+  classification decisions retain their requirements.
+- Threat models: scope/protocol summaries, capability rationales, entity
+  descriptions, asset value-at-risk descriptions, and unknown security-impact
+  descriptions. IDs, capability statuses, evidence requirements, collections,
+  and required joins retain their requirements.
+- Boundary recipes: coverage-priority rationales.
+- Dependency scope matrices: in-scope rationales, scope notes, harness notes,
+  and coverage notes. Admin/config boundary matrices and externalized-state
+  accounting also accept omitted coverage notes.
+- Dynamic enumerator recommendations and selected strategies: rationales and
+  coverage-gap descriptions. Commands, test paths, evidence paths, priority,
+  selection identity, and source joins retain their requirements.
+
+Strategy detection `family_id` was already optional in JSON Schema. Its dedupe
+reconciliation gate also accepts an omission, recording the exact field and the
+aligned finding's path when it supplies that context. Record counts, keys,
+finding identities, and strategy hits must still reconcile. Conflicting supplied
+values remain errors. Metadata omissions between review stages do not create
+an implicit required field through preservation checks.
+
+The verifier persists bounded warnings in the existing artifact-verification
+marker. The final report receives warnings from its authenticated ancestor
+markers through the run-metadata authority and renders an **Artifact validation
+warnings** section. Re-reading an artifact does not modify it or append duplicate
+repair records. Large warning sets are summarized without failing the campaign.
+
+Use opt-in strict artifact validation for producer development and CI:
+
+```bash
+ultrafuzz artifact validate ultrafuzz/findings@2 findings.json --strict --json
+```
+
+`--strict` fails on document-local metadata warnings. Trusted callers can also
+pass `strict: true` to semantic-gate execution to reject contextual warnings.
+The offline CLI cannot certify cross-artifact joins without trusted host context.
+The lower-level `ultrafuzz json validate` command continues to check JSON shape.
+
+Invalid JSON or UTF-8, unsafe filesystem data, invalid supplied field types,
+ambiguous identity, missing execution-critical fields, and impossible required
+joins remain errors in every mode.
+
 ## Breaking Contract Policy
 
 Each retained JSON handoff has one current versioned contract and one complete
