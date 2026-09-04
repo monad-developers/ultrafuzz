@@ -21,6 +21,7 @@ import {
   isArtifactContractId,
   MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   parseStrictJsonBytes,
+  publishFileDurableExclusive,
   promptArtifactAuthorityPathSelectorId,
   readRegularFileSnapshot,
   readRunPlanDocument,
@@ -5089,6 +5090,67 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
   return value.data;
 }
 
+/**
+ * Restore missing presentation prompts from immutable plan snapshots before Smithers renders a
+ * continuation. `timetravel` owns task artifact directories and can remove these launch-time copies
+ * even though persisted frames still refer to them. Any later resume renders the whole graph, so a
+ * prompt removed by an earlier reset must be available too. Only static agent tasks have plan rows
+ * here; dynamic tasks keep their runtime materialization path.
+ *
+ * A row whose retained snapshot is gone as well has nothing to restore from and is skipped: the
+ * continuation then proceeds exactly as it did before this recovery existed, and Smithers reports
+ * the missing prompt itself when it renders the task. A run without `plan.json` at all has no rows
+ * to begin with and is skipped the same way: `resumeRun` natively continues bare Smithers runs
+ * that ultrafuzz never planned (`run.json` and the persisted workflow only), and it treats every
+ * other launch document as optional for that run shape. Every other check gates a write, so a
+ * plan or snapshot that is present but wrong (digest, symlink, non-regular file, escaping path)
+ * still fails the continuation.
+ */
+function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
+  const runRoot = path.resolve(input.runRoot);
+  const planPath = path.join(runRoot, "plan.json");
+  if (!runEntryExists(planPath)) return;
+  const plan = readRunPlanDocument(planPath, path.basename(runRoot));
+  for (const planned of plan.rendered_prompts) {
+    const nodeId = `node:${planned.attempt_id}`;
+    const promptPath = path.isAbsolute(planned.rendered_prompt_path)
+      ? path.resolve(planned.rendered_prompt_path)
+      : path.resolve(input.projectRoot, planned.rendered_prompt_path);
+    if (fs.existsSync(promptPath)) continue;
+    const snapshotLabel = `retained rendered prompt snapshot for task ${nodeId}`;
+    const snapshotPath = safeResolveInside(runRoot, planned.rendered_prompt_snapshot_path, snapshotLabel);
+    if (!runEntryExists(snapshotPath)) continue;
+    const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
+    if (promptPath !== expectedPromptPath) {
+      throw new Error(`persisted rendered prompt path does not match task ${nodeId}`);
+    }
+    assertPathInside(runRoot, promptPath, `rendered prompt for task ${nodeId}`);
+    assertRegularFileInside(runRoot, snapshotPath, snapshotLabel);
+    assertNoSymlinkComponents(runRoot, snapshotPath, snapshotLabel);
+    const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
+      throw new Error(`retained rendered prompt snapshot does not match task ${nodeId}`);
+    }
+    const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
+    publishFileDurableExclusive(runRoot, relativePromptPath, contents);
+  }
+}
+
+/**
+ * `lstat` semantics on purpose: a dangling symlink or a non-file entry counts as present so it
+ * reaches the fail-closed checks above (`readRunPlanDocument` opens with `O_NOFOLLOW`). Any lookup
+ * failure is classified the way `assertRegularFileInside` classifies it, as no such file, which is
+ * the case that skips.
+ */
+function runEntryExists(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runSmithersLifecycleCommand(input: {
   action: "resume" | "replay" | "fork";
   smithersRunId: string;
@@ -5315,6 +5377,12 @@ export async function runSmithersLifecycleCommand(input: {
         );
       }
     }
+    if (input.relaunchPaths !== undefined) {
+      restoreMissingRenderedPrompts({
+        projectRoot: input.projectRoot,
+        runRoot: input.relaunchPaths.runRoot
+      });
+    }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
     try {
       resumeResult = await execSmithersCli({
@@ -5420,6 +5488,13 @@ export async function runSmithersLifecycleCommand(input: {
       command: resumeResult.command,
       workflowRunId: forkedRunId
     };
+  }
+
+  if (input.action === "resume" && input.relaunchPaths !== undefined) {
+    restoreMissingRenderedPrompts({
+      projectRoot: input.projectRoot,
+      runRoot: input.relaunchPaths.runRoot
+    });
   }
 
   const command =

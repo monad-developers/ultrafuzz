@@ -25334,24 +25334,48 @@ test("unverified dependency detection reads a dependent prepare failure off the 
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeOutOfOrderTopology(project);
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId: "ultrafuzz-reset-lifecycle-run",
       status: "failed",
       state: "failed",
-      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "failed", attempt: 1 }
+      ]
     })
   });
   const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  assert.ok(run.value !== undefined);
+  const runRoot = run.value.run_root;
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog !== undefined);
+  const markerPath = path.join(runRoot, "smithers", "reset-node-applied.json");
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
+  };
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows");
+  assert.ok(plannedPrompt !== undefined, "plan must record the reset node prompt");
+  const priorPlannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery");
+  assert.ok(priorPlannedPrompt !== undefined, "plan must record the finished node prompt");
+  const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
+  const priorSnapshotPath = path.join(runRoot, priorPlannedPrompt.rendered_prompt_snapshot_path);
+  const expectedPrompt = fs.readFileSync(snapshotPath);
+  const expectedPriorPrompt = fs.readFileSync(priorSnapshotPath);
+  fs.rmSync(plannedPrompt.rendered_prompt_path);
+  fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
+  fs.writeFileSync(commandLog, "", "utf8");
 
   const detached = await resumeRun({
     projectRoot: project,
     runId: "reset-lifecycle-run",
-    resetNode: "node:project-discovery",
+    resetNode: "node:actors-flows",
     env: { ...env, SMITHERS_FAKE_FAIL_UP: "1" }
   });
 
@@ -25359,25 +25383,112 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(detached.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
   assert.match(detached.diagnostics[0]?.message ?? "", /without repeating the reset/u);
   assert.equal(fs.existsSync(markerPath), true, "reset marker must persist after a failed continuation");
-  const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.deepEqual(
+    fs.readFileSync(plannedPrompt.rendered_prompt_path),
+    expectedPrompt,
+    "reset continuation must restore the authenticated presentation prompt"
+  );
+  assert.deepEqual(
+    fs.readFileSync(priorPlannedPrompt.rendered_prompt_path),
+    expectedPriorPrompt,
+    "reset continuation must restore a presentation prompt removed by an earlier reset"
+  );
+  const failedCommands = fs.readFileSync(commandLog, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.rmSync(plannedPrompt.rendered_prompt_path);
+  fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
+  fs.writeFileSync(priorSnapshotPath, "mismatched retained prompt\n", "utf8");
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  const rejected = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:actors-flows",
+    env
+  });
+
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.diagnostics[0]?.message ?? "", /snapshot does not match task/u);
+  const rejectedCommands = fs.readFileSync(commandLog, "utf8");
+  assert.match(rejectedCommands, /^inspect /mu);
+  assert.doesNotMatch(
+    rejectedCommands,
+    /^(?:timetravel|up) /mu,
+    "invalid snapshot must fail before mutation or launch"
+  );
+  assert.equal(fs.existsSync(markerPath), true, "rejected recovery must retain the reset marker");
+  fs.writeFileSync(priorSnapshotPath, expectedPriorPrompt);
+  fs.writeFileSync(commandLog, "", "utf8");
 
   const retried = await resumeRun({
     projectRoot: project,
     runId: "reset-lifecycle-run",
-    resetNode: "node:project-discovery",
+    resetNode: "node:actors-flows",
     env
   });
 
   assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
   assert.equal(retried.value?.submitted, true);
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
-  const retriedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
+  assert.deepEqual(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path), expectedPriorPrompt);
+  const retriedCommands = fs.readFileSync(commandLog, "utf8");
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
     retriedCommands,
     /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
+  );
+});
+
+test("ordinary resume restores missing static presentation prompts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-ordinary-resume-prompt-run",
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "node:actors-flows", state: "failed", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "ordinary-resume-prompt-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value !== undefined);
+  const runRoot = run.value.run_root;
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog !== undefined);
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
+  };
+  const plannedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "project-discovery");
+  assert.ok(plannedPrompt !== undefined, "plan must record the finished node prompt");
+  const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
+  const expectedPrompt = fs.readFileSync(snapshotPath);
+  fs.rmSync(plannedPrompt.rendered_prompt_path);
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "ordinary-resume-prompt-run",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
+  const commands = fs.readFileSync(commandLog, "utf8");
+  assert.doesNotMatch(commands, /^timetravel /mu, "ordinary resume must not reset any node");
+  assert.match(
+    commands,
+    /up .*ultrafuzz-ordinary-resume-prompt-run\.tsx --resume ultrafuzz-ordinary-resume-prompt-run --run-id ultrafuzz-ordinary-resume-prompt-run --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
 });
 
