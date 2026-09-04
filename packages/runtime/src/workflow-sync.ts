@@ -380,32 +380,32 @@ export interface WorkflowSynchronizationControl {
   observeOnly?: boolean;
 }
 
-const DEFAULT_OBSERVATION_SYNC_TIMEOUT_MS = 15_000;
 const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
-const OBSERVATION_SYNC_TIMEOUT_DISABLED_VALUES: ReadonlySet<string> = new Set(["0", "off"]);
 
 /**
- * Bound the optional state refresh performed before read-only observer queries.
- * The direct runner query remains authoritative for live health, while a slow
- * history scan may leave the local projection stale and surface a warning.
- * Observers are the only CLI path that converges local run state from runner
- * evidence, so `ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS=0` or `off` disables the
- * bound and lets a command wait for full synchronization.
+ * Optionally bound the state refresh performed before read-only observer
+ * queries. The deadline is opt-in: without `ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS`
+ * an observer waits for full synchronization, because observers are the only
+ * CLI path that converges local run state from runner evidence and a default
+ * bound that trips on slow disks or large histories would leave `status` and
+ * `stats` stale by default. A positive value in milliseconds (capped at 60
+ * seconds) bounds the refresh; the direct runner query then remains
+ * authoritative for live health while a slow history scan surfaces a warning.
+ * `0`, `off`, and unparseable values leave the deadline unset.
  */
 export function observationSynchronizationDeadline(
   env: Record<string, string | undefined> = process.env,
   nowMs = Date.now()
 ): number | undefined {
   const configured = env.ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS;
-  if (configured !== undefined && OBSERVATION_SYNC_TIMEOUT_DISABLED_VALUES.has(configured.toLowerCase())) {
+  if (configured === undefined || !/^[1-9]\d*$/u.test(configured)) {
     return undefined;
   }
-  const parsed = configured === undefined || !/^[1-9]\d*$/u.test(configured) ? undefined : Number(configured);
-  const timeoutMs =
-    parsed === undefined || !Number.isSafeInteger(parsed)
-      ? DEFAULT_OBSERVATION_SYNC_TIMEOUT_MS
-      : Math.min(parsed, MAX_OBSERVATION_SYNC_TIMEOUT_MS);
-  return nowMs + timeoutMs;
+  const parsed = Number(configured);
+  if (!Number.isSafeInteger(parsed)) {
+    return undefined;
+  }
+  return nowMs + Math.min(parsed, MAX_OBSERVATION_SYNC_TIMEOUT_MS);
 }
 
 /**

@@ -334,9 +334,10 @@ export async function getRunHealth(input: {
  * and local run state is simply the last coherent snapshot, which is said in a warning, the way a
  * skipped synchronization is reported. Every other failure propagates unchanged.
  *
- * The refresh is also bounded by the observation deadline. Health below comes from the direct runner
- * query, so an exceeded deadline is a warning about possibly stale local state, not a failure. One
- * absolute deadline spans every retry, so racing reads cannot extend the observer's wall-clock budget.
+ * The refresh is also bounded by the opt-in observation deadline when one is configured. Health below
+ * comes from the direct runner query, so an exceeded deadline is a warning about possibly stale local
+ * state, not a failure. One absolute deadline spans every retry, so racing reads cannot extend the
+ * observer's wall-clock budget.
  */
 async function synchronizeObservedWorkflowRun(input: SyncRunInput, runRoot: string): Promise<RuntimeDiagnostic[]> {
   const deadlineMs = observationSynchronizationDeadline(input.env);
