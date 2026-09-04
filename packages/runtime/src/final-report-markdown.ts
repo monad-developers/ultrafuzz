@@ -7,23 +7,30 @@ import {
   artifactValidationWarningsSchema,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
-  redactValue,
   safeResolveInside,
   validateArtifactContract,
   type ArtifactValidationWarning
 } from "@ultrafuzz/artifacts";
-import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
+import { redactSecretsInText, type SecretScanMode } from "@ultrafuzz/security";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
 const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
 /**
- * Secret placeholder for the public projection only. The security package's default `<redacted>`
- * is raw HTML to the final-review Markdown gate whenever it lands outside HTML-escaped prose (inline
- * code such as run summary values, coverage paths, or source nodes), so the public copy uses the
- * same bracketed shape as `[redacted-path]`. Every other redaction keeps the default placeholder.
+ * Secret placeholder for the public projection only. Two constraints pick it:
+ *
+ * - The public bundle re-projects the published report.json and requires the same bytes back, so
+ *   the placeholder must be a fixed point of the redaction pass. The key-name assignment rule's
+ *   unquoted value class stops at whitespace, `,`, `;`, `]`, and `}`, so a placeholder containing
+ *   any of those is re-redacted on the next pass (`token=[redacted]` becomes `token=[redacted]]`).
+ * - The final-review Markdown gate rejects raw HTML, images, and links outside fenced code, and
+ *   redacted values land unescaped in inline code (run summary values, coverage paths, source
+ *   nodes), so the placeholder must not read as HTML (`<redacted>`), a link (`[redacted](`),
+ *   an image, or emphasis (`*`, `_`).
+ *
+ * A bare uppercase word satisfies both. Every other redaction keeps the security package's default.
  */
-const PUBLIC_SECRET_REDACTION_PLACEHOLDER = "[redacted]";
+const PUBLIC_SECRET_REDACTION_PLACEHOLDER = "REDACTED";
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
@@ -120,7 +127,7 @@ export function projectPublicCanonicalFinalReport(
     containsPrivatePathInValue(projection.report) ||
     containsPrivatePath(projection.markdown) ||
     containsUnredactedSecretInValue(projection.report) ||
-    containsUnredactedSecret(projection.markdown)
+    containsUnredactedSecretInMarkdown(projection.markdown, projection.report)
   ) {
     throw new Error("public final-report projection contains private report content");
   }
@@ -1330,33 +1337,73 @@ function publicInlineCode(value: string): string {
   return value.replace(/\s+/gu, " ").trim().replaceAll("`", "'");
 }
 
-function redactSecrets(value: string): string {
-  return redactSecretsInText(value, PUBLIC_SECRET_REDACTION_PLACEHOLDER);
+function redactSecrets(value: string, mode: SecretScanMode = "all"): string {
+  return redactSecretsInText(value, PUBLIC_SECRET_REDACTION_PLACEHOLDER, [], mode);
 }
 
-function containsUnredactedSecret(value: string): boolean {
-  // The fail-closed check asks whether another redaction pass would change the text, so every
-  // placeholder spelling is folded back to the default one first: `&lt;redacted&gt;` is the
-  // HTML-escaped prose form, and the key-name assignment rule would otherwise re-redact
-  // `token=[redacted]` because `]` ends its value class. A leftover secret still differs after the
-  // pass regardless of which placeholder surrounds it.
-  const normalizedPlaceholders = value
-    .replaceAll("&lt;redacted&gt;", SENSITIVE_REDACTION_PLACEHOLDER)
-    .replaceAll(PUBLIC_SECRET_REDACTION_PLACEHOLDER, SENSITIVE_REDACTION_PLACEHOLDER);
-  return redactValue(normalizedPlaceholders) !== normalizedPlaceholders;
+/**
+ * `run_metadata.run_id` and `run_metadata.source_run_id` are machine-generated safe IDs
+ * (`validateSafeId`, so `[A-Za-z0-9._-]`) that the public bundle already publishes in its run
+ * records and then requires report.json to repeat. The speculative high-entropy pass redacts the
+ * bounded eval run IDs (`ci-<run>-1-smoke-...-<16 hex>`), which breaks that lineage check, so these
+ * two fields scan positive-only: a vendor-format credential or URL credential in the slot is still
+ * redacted (and the bundle then fails closed on lineage), while a high-entropy safe ID is kept.
+ */
+function secretScanModeForPath(keyPath: readonly string[]): SecretScanMode {
+  const isRetainedIdentifier =
+    keyPath.length === 2 &&
+    keyPath[0] === "run_metadata" &&
+    (keyPath[1] === "run_id" || keyPath[1] === "source_run_id");
+  return isRetainedIdentifier ? "positive-only" : "all";
 }
 
-function containsUnredactedSecretInValue(value: unknown): boolean {
-  if (typeof value === "string") return containsUnredactedSecret(value);
-  if (Array.isArray(value)) return value.some(containsUnredactedSecretInValue);
-  return isRecord(value) && Object.values(value).some(containsUnredactedSecretInValue);
+function containsUnredactedSecret(value: string, mode: SecretScanMode = "all"): boolean {
+  // The fail-closed check asks whether another pass with the public placeholder would change the
+  // text. The placeholder is a fixed point of that pass, so no folding is needed and a leftover
+  // secret is the only thing that can still differ.
+  return redactSecrets(value, mode) !== value;
 }
 
-function redactSecretsInStringValues(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return value.map(redactSecretsInStringValues);
+function containsUnredactedSecretInValue(value: unknown, keyPath: readonly string[] = []): boolean {
+  if (typeof value === "string") return containsUnredactedSecret(value, secretScanModeForPath(keyPath));
+  if (Array.isArray(value)) {
+    return value.some((entry, index) => containsUnredactedSecretInValue(entry, [...keyPath, String(index)]));
+  }
+  return (
+    isRecord(value) &&
+    Object.entries(value).some(([key, entry]) => containsUnredactedSecretInValue(entry, [...keyPath, key]))
+  );
+}
+
+/**
+ * The Markdown re-scan has no key path, so the retained identifiers (which the speculative pass
+ * would flag) are substituted with the placeholder before scanning. They were already scanned
+ * positive-only in the report walk; a leftover real secret anywhere else still changes under the pass.
+ */
+function containsUnredactedSecretInMarkdown(markdown: string, report: JsonRecord): boolean {
+  const scanned = retainedIdentifierValues(report).reduce(
+    (current, identifier) => current.replaceAll(identifier, PUBLIC_SECRET_REDACTION_PLACEHOLDER),
+    markdown
+  );
+  return containsUnredactedSecret(scanned);
+}
+
+function retainedIdentifierValues(report: JsonRecord): string[] {
+  const metadata = recordField(report, "run_metadata");
+  return [metadata?.run_id, metadata?.source_run_id].filter(
+    (value): value is string => typeof value === "string" && value !== ""
+  );
+}
+
+function redactSecretsInStringValues(value: unknown, keyPath: readonly string[] = []): unknown {
+  if (typeof value === "string") return redactSecrets(value, secretScanModeForPath(keyPath));
+  if (Array.isArray(value)) {
+    return value.map((entry, index) => redactSecretsInStringValues(entry, [...keyPath, String(index)]));
+  }
   if (!isRecord(value)) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactSecretsInStringValues(entry)]));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, redactSecretsInStringValues(entry, [...keyPath, key])])
+  );
 }
 
 function containsPrivatePath(value: string): boolean {
