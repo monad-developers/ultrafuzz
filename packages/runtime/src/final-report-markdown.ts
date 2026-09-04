@@ -12,10 +12,18 @@ import {
   validateArtifactContract,
   type ArtifactValidationWarning
 } from "@ultrafuzz/artifacts";
+import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
 const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
+/**
+ * Secret placeholder for the public projection only. The security package's default `<redacted>`
+ * is raw HTML to the final-review Markdown gate whenever it lands outside HTML-escaped prose (inline
+ * code such as run summary values, coverage paths, or source nodes), so the public copy uses the
+ * same bracketed shape as `[redacted-path]`. Every other redaction keeps the default placeholder.
+ */
+const PUBLIC_SECRET_REDACTION_PLACEHOLDER = "[redacted]";
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
@@ -1323,12 +1331,18 @@ function publicInlineCode(value: string): string {
 }
 
 function redactSecrets(value: string): string {
-  const redacted = redactValue(value);
-  return typeof redacted === "string" ? redacted : "<redacted>";
+  return redactSecretsInText(value, PUBLIC_SECRET_REDACTION_PLACEHOLDER);
 }
 
 function containsUnredactedSecret(value: string): boolean {
-  const normalizedPlaceholders = value.replaceAll("&lt;redacted&gt;", "<redacted>");
+  // The fail-closed check asks whether another redaction pass would change the text, so every
+  // placeholder spelling is folded back to the default one first: `&lt;redacted&gt;` is the
+  // HTML-escaped prose form, and the key-name assignment rule would otherwise re-redact
+  // `token=[redacted]` because `]` ends its value class. A leftover secret still differs after the
+  // pass regardless of which placeholder surrounds it.
+  const normalizedPlaceholders = value
+    .replaceAll("&lt;redacted&gt;", SENSITIVE_REDACTION_PLACEHOLDER)
+    .replaceAll(PUBLIC_SECRET_REDACTION_PLACEHOLDER, SENSITIVE_REDACTION_PLACEHOLDER);
   return redactValue(normalizedPlaceholders) !== normalizedPlaceholders;
 }
 

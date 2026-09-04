@@ -200,6 +200,63 @@ test("public final-report projection redacts private paths without changing inte
   assert.deepEqual(projectCanonicalFinalReport(published.report), published);
 });
 
+test("public final-report projection redacts secrets with a Markdown-safe placeholder", () => {
+  const token = "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  const cloneUrl = "https://deploy:hunter2hunter2@github.com/example/repository"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  const input = renderableReport();
+  const [issue] = input.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.description =
+    `A caller signed the transition with ${token} after cloning ${cloneUrl}; ` +
+    "token=synthetic-final-report-secret stays private and the reproducer is at /srv/customer/private/reproducer.sol.";
+  (issue.proof_of_concept as Record<string, unknown>).scenario = [
+    `Authenticate with ${token}.`,
+    "Execute the transition and observe the mismatch."
+  ];
+  // Run summary values render as inline code, which the final-review gate reads as prose, so the
+  // security package's `<redacted>` placeholder there is raw HTML and fails the public projection.
+  (input.run_metadata as Record<string, unknown>).repository = cloneUrl;
+  const before = structuredClone(input);
+
+  // Prose escapes Markdown punctuation such as the token's underscore, so the developer Markdown is
+  // checked on the token body while the JSON keeps the exact token.
+  const tokenBody = token.slice("ghp_".length);
+  const internal = projectCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  assert.deepEqual(internal.report, before);
+  assert.equal(JSON.stringify(internal.report).includes(token), true, "the developer report keeps the token");
+  assert.equal(internal.markdown.includes(tokenBody), true);
+  assert.equal(internal.markdown.includes(cloneUrl), true);
+  assert.doesNotMatch(internal.markdown, /\[redacted\]|<redacted>|\[redacted-path\]/u);
+
+  const published = projectPublicCanonicalFinalReport(input);
+  const publishedJson = JSON.stringify(published.report);
+  assert.deepEqual(input, before);
+  assert.equal(publishedJson.includes(tokenBody), false);
+  assert.equal(publishedJson.includes("hunter2hunter2"), false);
+  assert.doesNotMatch(publishedJson, /<redacted>|synthetic-final-report-secret|\/srv\/customer\/private/u);
+  assert.match(publishedJson, /\[redacted\]/u);
+  assert.match(publishedJson, /token=\[redacted\]/u);
+  assert.match(publishedJson, /\[redacted-path\]/u);
+  assert.equal(published.markdown.includes(tokenBody), false);
+  assert.equal(published.markdown.includes("hunter2hunter2"), false);
+  assert.doesNotMatch(published.markdown, /<redacted>|&lt;redacted&gt;|synthetic-final-report-secret/u);
+  assert.match(published.markdown, /^- Repository: `[^`]*\[redacted\][^`]*`$/mu);
+  assert.match(published.markdown, /signed the transition with \[redacted\] after cloning/u);
+  assert.match(published.markdown, /^1\. Authenticate with \[redacted\]\.$/mu);
+  assert.match(published.markdown, /\[redacted-path\]/u);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      published.markdown.replace("`[redacted]", "`<redacted>"),
+      published.report
+    ),
+    false,
+    "the raw-HTML gate still rejects the default placeholder in inline code"
+  );
+});
+
 test("canonical final-report validation rejects presentation drift instead of repairing it", () => {
   const legacyAlias = renderableReport();
   (legacyAlias.issues as Array<Record<string, unknown>>)[0]!.final_severity = "Low";
