@@ -8,7 +8,6 @@ import {
 } from "../src/workflow-sync.js";
 
 const NOW_MS = Date.parse("2026-07-31T12:00:00.000Z");
-const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 60_000;
 
 function deadline(value: string | undefined): number | undefined {
@@ -18,8 +17,9 @@ function deadline(value: string | undefined): number | undefined {
   );
 }
 
-test("observationSynchronizationDeadline defaults to 15 seconds after now", () => {
-  assert.equal(deadline(undefined), NOW_MS + DEFAULT_TIMEOUT_MS);
+test("observationSynchronizationDeadline is unset unless the environment opts in", () => {
+  assert.equal(deadline(undefined), undefined);
+  assert.equal(deadline(""), undefined);
 });
 
 test("observationSynchronizationDeadline honors an explicit positive override", () => {
@@ -34,9 +34,9 @@ test("observationSynchronizationDeadline caps positive overrides at 60 seconds",
   assert.equal(deadline("600000"), NOW_MS + MAX_TIMEOUT_MS);
 });
 
-test("observationSynchronizationDeadline falls back to the default for invalid overrides", () => {
-  for (const value of ["", " 15", "15 ", "abc", "-1", "1.5", "1e3", "0x10", "00", "+5", "9007199254740993"]) {
-    assert.equal(deadline(value), NOW_MS + DEFAULT_TIMEOUT_MS, JSON.stringify(value));
+test("observationSynchronizationDeadline leaves the deadline unset for invalid overrides", () => {
+  for (const value of [" 15", "15 ", "abc", "-1", "1.5", "1e3", "0x10", "00", "+5", "9007199254740993"]) {
+    assert.equal(deadline(value), undefined, JSON.stringify(value));
   }
 });
 
