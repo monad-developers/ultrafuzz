@@ -1235,7 +1235,8 @@ describe("public Modal benchmark configuration", () => {
     expect(persistedBundle).toBeGreaterThan(preflight);
     expect(readPersistedBundle).toBeGreaterThan(persistedBundle);
     expect(assertPersistedLineage).toBeGreaterThan(readPersistedBundle);
-    expect(source).toContain("await writePublicBundleAtomic(bundlePath, bundle)");
+    expect(source).toContain("await publishPublicBenchmarkBundle({");
+    expect(source).toContain("await writePublicBundleAtomic(input.bundlePath, bundle)");
     expect(source).not.toContain("writeFile(bundlePath");
   });
 
