@@ -66,6 +66,7 @@ import {
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
+import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -5189,6 +5190,24 @@ export async function runSmithersLifecycleCommand(input: {
       input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
         ? smithersFailedTasks(currentInspection)
         : [];
+    const retryProducers = failedTasks.flatMap((failedTask) => {
+      const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
+      return producer === undefined ? [] : [producer];
+    });
+    // A reopened dynamic source owns the published expansion generation, which
+    // lives outside Smithers state. Decide and validate its withdrawal before
+    // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
+    // closed while nothing has been reset. The rename itself waits until after
+    // the reset: the dependent set Smithers resolves at reset time must still
+    // see the materialized generation (#1063).
+    const retryArchivePlan =
+      retryProducers.length > 0 && input.relaunchPaths !== undefined
+        ? planDynamicExpansionRetryArchive({
+            projectRoot: input.projectRoot,
+            runRoot: input.relaunchPaths.runRoot,
+            sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
+          })
+        : undefined;
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
@@ -5221,6 +5240,7 @@ export async function runSmithersLifecycleCommand(input: {
       }
       preResumeStderr = resetStderr.join("\n");
     }
+    if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
     if (
       failedTasks.length === 0 &&
       input.retryFailed === true &&

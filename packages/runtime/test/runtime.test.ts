@@ -76,6 +76,7 @@ import {
   smithersDependencyInstallArgs
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
+import { planDynamicExpansion } from "../src/dynamic-expansion.js";
 
 import {
   forkRun as runtimeForkRun,
@@ -2299,6 +2300,35 @@ function workflowInspect(input: {
       duration: "1ms"
     }
   };
+}
+
+function writeSyntheticDynamicManifest(runRoot: string, runId: string, sourceNodeId: string): string {
+  const expansionDir = path.join(runRoot, "dynamic-expansions");
+  fs.mkdirSync(expansionDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(expansionDir, "fanout.json"),
+    `${JSON.stringify(
+      planDynamicExpansion({
+        runId,
+        groupNodeId: "fanout",
+        sourceNodeId,
+        sourceAttemptId: sourceNodeId,
+        sourceArtifactPath: `artifacts/${sourceNodeId}/plan.json`,
+        sourceDigest: crypto.createHash("sha256").update("missing source").digest("hex"),
+        sourcePath: "$.goals",
+        keyPath: "id",
+        nodeIdTemplate: "dynamic:item:{{ item.id }}",
+        templateDigest: crypto.createHash("sha256").update("template").digest("hex"),
+        templateFingerprint: crypto.createHash("sha256").update("fingerprint").digest("hex"),
+        maxDynamicNodes: 100,
+        sourceDocument: { goals: [] }
+      }),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  return expansionDir;
 }
 
 function missingSmithersInspect(
@@ -25119,6 +25149,9 @@ test("resume retries a failed artifact verifier from its agent producer and depe
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  const expansionDir = writeSyntheticDynamicManifest(runRoot, runId, "project-discovery");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const resumed = await resumeRun({
@@ -25138,6 +25171,17 @@ test("resume retries a failed artifact verifier from its agent producer and depe
     /^timetravel .* --node-id node:project-discovery .* --no-deps(?: |$)/mu,
     "the producer retry must also reset its zero-retry verifier and downstream dependents"
   );
+  // The reopened producer owns the published expansion generation, so the retry withdraws it into
+  // the history directory instead of leaving it active for the next render (#1063).
+  assert.deepEqual(fs.readdirSync(expansionDir), []);
+  const archivedGenerations = fs.readdirSync(path.join(runRoot, "dynamic-expansion-history"));
+  assert.equal(archivedGenerations.length, 1);
+  const [archivedGeneration] = archivedGenerations;
+  assert.ok(archivedGeneration);
+  assert.deepEqual(fs.readdirSync(path.join(runRoot, "dynamic-expansion-history", archivedGeneration)).sort(), [
+    "manifests",
+    "retry.json"
+  ]);
 });
 
 // Smithers 0.35.0 parks a node that livelocked on an identical-error streak in
@@ -25253,7 +25297,7 @@ test("resume continues a run-level render failure in place without a no-op rewin
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   // A jump to the latest frame returns early upstream, so reading the timeline and rewinding to it
   // spends two subprocesses per recovery generation and mutates nothing.
-  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
+  assert.doesNotMatch(commands, /timeline|rewind|retry-task|timetravel/u);
   assert.match(
     commands,
     /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
