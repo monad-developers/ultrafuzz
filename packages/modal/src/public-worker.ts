@@ -57,10 +57,12 @@ import {
   childExitFailureCause,
   createBoundedStderrTail,
   describeWorkerTermination,
+  sanitizeWorkerDiagnosticMessage,
   workerDiagnosticLogPayload,
   MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
   WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
   WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE,
+  type BoundedStderrTail,
   type WorkerDiagnostic
 } from "./worker-diagnostics.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
@@ -363,6 +365,7 @@ export async function runPublicBenchmarkWorker(input: {
               maxParallelRuns: prepared.maxParallelRuns
             }) * 1000,
           publicDiagnosticSecretValues: [...retainedForbiddenSecretValues],
+          evalFailureDiagnosticsFromStdout: true,
           env: {
             ULTRAFUZZ_EVAL_JUDGE_API_KEY: requiredEnv(judgeKeyEnv),
             ...(input.config.braintrust.judge_url === undefined
@@ -378,7 +381,8 @@ export async function runPublicBenchmarkWorker(input: {
           cwd: prepared.controlRoot,
           logPath,
           timeoutMs: PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS * 1000,
-          publicDiagnosticSecretValues: [...retainedForbiddenSecretValues]
+          publicDiagnosticSecretValues: [...retainedForbiddenSecretValues],
+          evalFailureDiagnosticsFromStdout: true
         }
       );
       const bundle = createPublicBenchmarkBundle({
@@ -1325,7 +1329,7 @@ async function mapLimitStable<T>(
   await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => runNext()));
 }
 
-async function runCommand(
+export async function runCommand(
   argv: string[],
   options: {
     label: string;
@@ -1336,60 +1340,22 @@ async function runCommand(
     timeoutCategory?: string;
     signal?: AbortSignal;
     publicDiagnosticSecretValues?: PublicDiagnosticSecretValues;
+    /** Whether stdout is a CLI `--json` result envelope whose error diagnostics belong in the collected log. */
     evalFailureDiagnosticsFromStdout?: boolean;
   }
 ): Promise<string> {
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-started\n`);
   throwIfAborted(options.signal);
-  const child = spawn(argv[0]!, argv.slice(1), {
-    cwd: options.cwd,
-    env: { ...process.env, ...options.env },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  const { stdout, stderr } = captureBoundedCommandOutput(child.stdout, child.stderr);
-  let timedOut = false;
-  let aborted = false;
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const terminateChild = (): void => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    child.kill("SIGTERM");
-    killTimer ??= setTimeout(() => child.kill("SIGKILL"), 10_000);
-    killTimer.unref();
-  };
-  const timer = setTimeout(() => {
-    timedOut = true;
-    terminateChild();
-  }, options.timeoutMs);
-  const abortHandler = (): void => {
-    if (aborted) return;
-    aborted = true;
-    terminateChild();
-  };
-  options.signal?.addEventListener("abort", abortHandler, { once: true });
-  if (options.signal?.aborted) abortHandler();
-  // `close` reports an exit code or a termination signal, never both, and the
-  // difference is the one this worker's readers turn on: a child that chose an
-  // exit code finished writing, a child something else killed did not. Folding
-  // a signal into `code ?? 1` would hand a reclaimed or OOM-killed eval command
-  // to `publicEvalCommandLeftFinalJournal` as one that returned.
-  const termination = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  }).finally(() => {
-    clearTimeout(timer);
-    if (killTimer !== undefined) clearTimeout(killTimer);
-    options.signal?.removeEventListener("abort", abortHandler);
-  });
+  const { termination, stdout, stderr, timedOut, aborted } = await spawnBoundedCommand(argv, options);
   const exitCode = termination.code ?? 1;
   const capturedStdout = Buffer.concat(stdout).toString("utf8");
-  const forbiddenSecretValues =
-    options.publicDiagnosticSecretValues === undefined
-      ? []
-      : typeof options.publicDiagnosticSecretValues === "function"
-        ? await options.publicDiagnosticSecretValues()
-        : options.publicDiagnosticSecretValues;
-  if (options.evalFailureDiagnosticsFromStdout === true) {
-    const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, forbiddenSecretValues);
+  const forbiddenSecretValues = await resolvePublicDiagnosticSecretValues(options.publicDiagnosticSecretValues);
+  const envelopeFailures =
+    options.evalFailureDiagnosticsFromStdout === true
+      ? publicEvalFailureEnvelopeDiagnostics(capturedStdout)
+      : undefined;
+  if (envelopeFailures !== undefined) {
+    const payload = workerDiagnosticLogPayload(envelopeFailures, forbiddenSecretValues);
     if (payload !== undefined) {
       await fs.promises.appendFile(
         options.logPath,
@@ -1428,7 +1394,13 @@ async function runCommand(
     // diagnostic string this worker emits rather than being embedded raw.
     const stderrTail = createBoundedStderrTail();
     stderrTail.append(Buffer.concat(stderr));
-    const cause = childExitFailureCause(options.label, exitCode, stderrTail, forbiddenSecretValues);
+    const cause = publicCommandExitFailureCause(
+      options.label,
+      exitCode,
+      envelopeFailures?.[0],
+      stderrTail,
+      forbiddenSecretValues
+    );
     // Nothing else collected carries the reason: `diagnostic_code` names a category and `operation-failed`
     // names nothing, so a reason that is not logged here is a reason no reader ever sees.
     appendPublicWorkerDiagnosticLogLine(
@@ -1441,6 +1413,73 @@ async function runCommand(
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
   return capturedStdout;
+}
+
+/**
+ * Spawn `argv` with bounded output capture and wait for it to close, terminating it on timeout or abort.
+ *
+ * `close` reports an exit code or a termination signal, never both, and the
+ * difference is the one this worker's readers turn on: a child that chose an
+ * exit code finished writing, a child something else killed did not. Folding
+ * a signal into `code ?? 1` would hand a reclaimed or OOM-killed eval command
+ * to `publicEvalCommandLeftFinalJournal` as one that returned.
+ */
+async function spawnBoundedCommand(
+  argv: string[],
+  options: { cwd: string; env?: Record<string, string>; timeoutMs: number; signal?: AbortSignal }
+): Promise<{
+  termination: { code: number | null; signal: NodeJS.Signals | null };
+  stdout: Buffer[];
+  stderr: Buffer[];
+  timedOut: boolean;
+  aborted: boolean;
+}> {
+  const [command, ...args] = argv;
+  if (command === undefined) throw new Error("a command needs a program to run");
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: { ...process.env, ...options.env },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const { stdout, stderr } = captureBoundedCommandOutput(child.stdout, child.stderr);
+  let timedOut = false;
+  let aborted = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const terminateChild = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    killTimer ??= setTimeout(() => child.kill("SIGKILL"), 10_000);
+    killTimer.unref();
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    terminateChild();
+  }, options.timeoutMs);
+  const abortHandler = (): void => {
+    if (aborted) return;
+    aborted = true;
+    terminateChild();
+  };
+  options.signal?.addEventListener("abort", abortHandler, { once: true });
+  if (options.signal?.aborted) abortHandler();
+  const termination = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      resolve({ code, signal });
+    });
+  }).finally(() => {
+    clearTimeout(timer);
+    if (killTimer !== undefined) clearTimeout(killTimer);
+    options.signal?.removeEventListener("abort", abortHandler);
+  });
+  return { termination, stdout, stderr, timedOut, aborted };
+}
+
+async function resolvePublicDiagnosticSecretValues(
+  values: PublicDiagnosticSecretValues | undefined
+): Promise<readonly string[]> {
+  if (values === undefined) return [];
+  return typeof values === "function" ? values() : values;
 }
 
 export function captureBoundedCommandOutput(
@@ -1484,10 +1523,40 @@ function interruptedCommandCause(input: {
   return new Error(input.timeoutCategory ?? "operation-timeout");
 }
 
-export function publicEvalFailureDiagnosticLogPayload(
-  stdout: string,
+/**
+ * The `cause` for a CLI command that exited non-zero.
+ *
+ * In `--json` mode the CLI writes its failure envelope to stdout and nothing to stderr, so a cause composed
+ * from the stderr tail alone reads `eval score exited 1` and stops -- what every Modal smoke run from
+ * 2026-08-31 on recorded while the scorer's own reason went uncollected. When the envelope carries an error
+ * diagnostic, that diagnostic is the reason the command gave, so it takes the detail budget
+ * `childExitFailureCause` otherwise gives the stderr tail, kept from the head so the code survives a message
+ * longer than the budget.
+ */
+export function publicCommandExitFailureCause(
+  label: string,
+  exitCode: number,
+  envelopeFailure: WorkerDiagnostic | undefined,
+  stderrTail: BoundedStderrTail,
   forbiddenSecretValues: readonly string[]
-): string | undefined {
+): Error {
+  if (envelopeFailure === undefined) {
+    return childExitFailureCause(label, exitCode, stderrTail, forbiddenSecretValues);
+  }
+  const prefix = `${label} exited ${String(exitCode)}`;
+  const detail = sanitizeWorkerDiagnosticMessage(`${envelopeFailure.code}: ${envelopeFailure.message}`, {
+    forbiddenSecretValues,
+    maxBytes: Math.max(0, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES - Buffer.byteLength(`${prefix}: `, "utf8")),
+    keep: "head"
+  });
+  return new Error(detail === "" ? prefix : `${prefix}: ${detail}`);
+}
+
+/**
+ * The error diagnostics of the CLI result envelope on `stdout`, in order, or `undefined` when stdout is not
+ * one. A success envelope carries none, so it yields an empty list and no log line.
+ */
+export function publicEvalFailureEnvelopeDiagnostics(stdout: string): WorkerDiagnostic[] | undefined {
   let parsed: unknown;
   try {
     parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
@@ -1495,43 +1564,45 @@ export function publicEvalFailureDiagnosticLogPayload(
     return undefined;
   }
   if (!isPlainRecord(parsed) || !Array.isArray(parsed.diagnostics)) return undefined;
-  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(parsed.diagnostics, forbiddenSecretValues);
+  return failedEvalDiagnostics(parsed.diagnostics);
+}
+
+export function publicEvalFailureDiagnosticLogPayload(
+  stdout: string,
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  const diagnostics = publicEvalFailureEnvelopeDiagnostics(stdout);
+  return diagnostics === undefined ? undefined : workerDiagnosticLogPayload(diagnostics, forbiddenSecretValues);
 }
 
 export function publicEvalFailureDiagnosticLogPayloadFromRecords(
   records: readonly EvalRunRecord[],
   forbiddenSecretValues: readonly string[]
 ): string | undefined {
-  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
-    records.flatMap((record) => record.diagnostics),
+  return workerDiagnosticLogPayload(
+    failedEvalDiagnostics(records.flatMap((record) => record.diagnostics)),
     forbiddenSecretValues
   );
 }
 
 /**
- * The eval's own failed diagnostics as one collectable payload.
+ * The eval's own failed diagnostics, reduced to what a log line carries.
  *
  * Only severity and shape are decided here. Which codes are expressible, how many entries a line carries and
  * how long a message may be belong to the collector's grammar, which `workerDiagnosticLogPayload` re-derives;
  * bounding the count before it filters would let one inexpressible entry consume a slot a reportable one
  * needs.
  */
-function publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
-  entries: readonly unknown[],
-  forbiddenSecretValues: readonly string[]
-): string | undefined {
-  return workerDiagnosticLogPayload(
-    entries
-      .filter(
-        (entry): entry is Record<string, unknown> =>
-          isPlainRecord(entry) &&
-          typeof entry.code === "string" &&
-          typeof entry.message === "string" &&
-          entry.severity === "error"
-      )
-      .map((entry) => ({ code: entry.code as string, message: entry.message as string })),
-    forbiddenSecretValues
-  );
+function failedEvalDiagnostics(entries: readonly unknown[]): WorkerDiagnostic[] {
+  return entries
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        isPlainRecord(entry) &&
+        typeof entry.code === "string" &&
+        typeof entry.message === "string" &&
+        entry.severity === "error"
+    )
+    .map((entry) => ({ code: entry.code as string, message: entry.message as string }));
 }
 
 function appendPublicEvalFailureDiagnosticLogPayload(logPath: string, payload: string): void {

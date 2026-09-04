@@ -49,12 +49,14 @@ import {
   publicEvalCommandTimeoutSeconds,
   publicEvalRunId,
   preparePublicEvalSuite,
+  publicCommandExitFailureCause,
   publicEvalFailureDiagnosticLogPayload,
   publicEvalFailureDiagnosticLogPayloadFromRecords,
   publicEvalModelWorkEvidence,
   publicEvalCommandLeftFinalJournal,
   publicEvalRunErrorCanBePublished,
   runAndCheckpointPublicEvalDiagnostics,
+  runCommand,
   runPublicBenchmarkWorker,
   runWithPublicPreparationTimeout,
   seedPublicBenchmarkSmithersDependencies,
@@ -64,6 +66,12 @@ import {
 import { createPublicBenchmarkBundle, type PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { assertSanitizedModalCollectedFiles, createExactCandidateSourceArchive } from "../src/runner.js";
 import { OperationalDispositionError } from "../src/terminal-disposition.js";
+import {
+  createBoundedStderrTail,
+  MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+  workerDiagnosticLogPayload
+} from "../src/worker-diagnostics.js";
 import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import {
@@ -1582,6 +1590,157 @@ it("names a pre-model command it cut short, and keeps that line collectable too"
     restorePath();
   }
 });
+
+it("records the scorer's own failure envelope instead of a bare exit code", async () => {
+  // Every Modal smoke run from 2026-08-31 on (run 33872940860 among them): `eval score --json` exited 1 with
+  // its failure envelope on stdout and nothing on stderr, so the only collected diagnostic was
+  // `eval score exited 1` and the scorer's reason never left the sandbox.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-score-envelope-"));
+  const logPath = path.join(root, "worker.log");
+  const reason = "no finished run report for row target-one";
+  const failure = await runFakeCliCommand("eval score", root, logPath, [
+    `process.stdout.write(${JSON.stringify(cliFailureEnvelope("eval score", "EVAL_SCORE_FAILED", reason))});`,
+    "process.exitCode = 1;"
+  ]);
+
+  expect(failure).toBeInstanceOf(OperationalDispositionError);
+  expect(failure).not.toBeInstanceOf(PublicWorkerCommandInterruptedError);
+  expect((failure as OperationalDispositionError).category).toBe("unreachable");
+  expect((failure as { cause: Error }).cause.message).toBe(`eval score exited 1: EVAL_SCORE_FAILED: ${reason}`);
+
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "EVAL_SCORE_FAILED", message: reason },
+    { code: "WORKER_COMMAND_FAILED", message: `eval score exited 1: EVAL_SCORE_FAILED: ${reason}` }
+  ]);
+  expect(written.trimEnd().split("\n")).toHaveLength(4);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 })
+  ).not.toThrow();
+});
+
+it("redacts a secret the scorer quoted in its failure envelope", async () => {
+  const secret = "opaque-fixture-judge-credential";
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-score-secret-"));
+  const logPath = path.join(root, "worker.log");
+  const failure = await runFakeCliCommand(
+    "eval score",
+    root,
+    logPath,
+    [
+      `process.stdout.write(${JSON.stringify(
+        cliFailureEnvelope("eval score", "EVAL_SCORE_FAILED", `judge rejected credential ${secret}`)
+      )});`,
+      "process.exitCode = 1;"
+    ],
+    [secret]
+  );
+
+  expect((failure as { cause: Error }).cause.message).toBe(
+    "eval score exited 1: EVAL_SCORE_FAILED: judge rejected credential <redacted>"
+  );
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(written).not.toContain(secret);
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "EVAL_SCORE_FAILED", message: "judge rejected credential <redacted>" },
+    {
+      code: "WORKER_COMMAND_FAILED",
+      message: "eval score exited 1: EVAL_SCORE_FAILED: judge rejected credential <redacted>"
+    }
+  ]);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 }, [secret])
+  ).not.toThrow();
+});
+
+it("records no failure diagnostics for a scorer that succeeded", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-score-success-"));
+  const logPath = path.join(root, "worker.log");
+  const stdout = cliEnvelope("eval score", {
+    ok: true,
+    diagnostics: [],
+    data: { summary_path: path.join(root, "summary.json") }
+  });
+
+  const result = await runFakeCliCommand("eval score", root, logPath, [
+    `process.stdout.write(${JSON.stringify(stdout)});`
+  ]);
+
+  expect(result).toBe(stdout);
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(written).not.toContain("eval-failure-diagnostics");
+  expect(
+    written
+      .trimEnd()
+      .split("\n")
+      .map((line) => line.slice("2026-01-01T00:00:00.000Z ".length))
+  ).toEqual(["operation-started", "operation-finished"]);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 })
+  ).not.toThrow();
+});
+
+it("falls back to the stderr tail when a failed command left no envelope on stdout", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-report-stderr-"));
+  const logPath = path.join(root, "worker.log");
+  const failure = await runFakeCliCommand("eval report", root, logPath, [
+    'process.stdout.write("Summary: partial\\n");',
+    'process.stderr.write("fatal: report input missing\\n");',
+    "process.exitCode = 2;"
+  ]);
+
+  expect((failure as { cause: Error }).cause.message).toBe("eval report exited 2: fatal: report input missing");
+  expect(decodedWorkerLogDiagnostics(fs.readFileSync(logPath, "utf8"))).toEqual([
+    { code: "WORKER_COMMAND_FAILED", message: "eval report exited 2: fatal: report input missing" }
+  ]);
+});
+
+it("keeps the envelope diagnostic code when its message outruns the collected bound", () => {
+  const cause = publicCommandExitFailureCause(
+    "eval score",
+    1,
+    { code: "EVAL_SCORE_FAILED", message: "x".repeat(5_000) },
+    createBoundedStderrTail(),
+    []
+  );
+
+  expect(cause.message).toMatch(/^eval score exited 1: EVAL_SCORE_FAILED: x+$/u);
+  expect(Buffer.byteLength(cause.message, "utf8")).toBeLessThanOrEqual(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES);
+  expect(
+    workerDiagnosticLogPayload([{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message: cause.message }])
+  ).toBeDefined();
+});
+
+/** Run `script` as the CLI child of one public worker command, returning its stdout or the rejection. */
+async function runFakeCliCommand(
+  label: string,
+  cwd: string,
+  logPath: string,
+  script: readonly string[],
+  forbiddenSecretValues: readonly string[] = []
+): Promise<unknown> {
+  return runCommand([process.execPath, "-e", script.join(" ")], {
+    label,
+    cwd,
+    logPath,
+    timeoutMs: 30_000,
+    publicDiagnosticSecretValues: [...forbiddenSecretValues],
+    evalFailureDiagnosticsFromStdout: true
+  }).catch((error: unknown) => error);
+}
+
+/** The envelope `emitCommandResult` writes to stdout in `--json` mode, pretty-printed the way the CLI does. */
+function cliEnvelope(command: string, result: { ok: boolean; diagnostics: unknown[]; data: unknown }): string {
+  return `${JSON.stringify({ schema_version: "ultrafuzz.cli.result.v2", command, ...result }, null, 2)}\n`;
+}
+
+function cliFailureEnvelope(command: string, code: string, message: string): string {
+  return cliEnvelope(command, {
+    ok: false,
+    diagnostics: [{ code, message, severity: "error", source: "cli" }],
+    data: null
+  });
+}
 
 /** Every `eval-failure-diagnostics` payload in a worker log, decoded in order. */
 function decodedWorkerLogDiagnostics(log: string): unknown[] {
