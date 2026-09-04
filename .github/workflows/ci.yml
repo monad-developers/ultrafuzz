@@ -58,9 +58,6 @@ jobs:
       - name: Test CI policy scripts
         run: pnpm -w test:ci-scripts
 
-      - name: Enforce production dependency advisory policy
-        run: pnpm -w security:dependency-advisories
-
       - name: Check formatting
         run: pnpm -w format:check
 
@@ -80,6 +77,12 @@ jobs:
 
       - name: Enforce dashboard bundle budgets
         run: pnpm -w size
+
+      # The advisory gate depends on the npm registry, which has been unavailable
+      # for hours at a time. Run the local gates first so an outage cannot hide
+      # formatting, lint, dead-code, build, or bundle-budget failures.
+      - name: Enforce production dependency advisory policy
+        run: pnpm -w security:dependency-advisories
 
       - name: Run PR runtime smoke tests
         if: github.event_name == 'pull_request'

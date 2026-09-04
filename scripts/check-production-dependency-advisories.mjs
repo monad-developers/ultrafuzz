@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as sleepFor } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createStrictAjv, parseStrictJsonBytes, runValidator } from "../packages/artifacts/dist/index.js";
@@ -23,6 +24,12 @@ const maximumAuditBytes = 16 * 1024 * 1024;
 const maximumExceptionBytes = 1024 * 1024;
 const maximumPackageManifestBytes = 1024 * 1024;
 const maximumAuditItems = 100_000;
+// The approved registry has been unreachable or answering 503 for hours at a
+// time. Retry only transport failures a bounded number of times; a registry
+// that never answers still fails the gate, and no registry verdict is retried.
+const defaultAuditAttempts = 3;
+const defaultAuditAttemptTimeoutMs = 60_000;
+const defaultAuditRetryDelaysMs = [5_000, 20_000];
 const exactPackageVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const cweIdentifier = /^CWE-[1-9]\d*$/u;
 const packageWhitespace = /\s/u;
@@ -649,22 +656,53 @@ export function strictProductionAuditFromBulkResponse(bulk, request) {
   return { schema_version: auditSchema, source: APPROVED_AUDIT_ENDPOINT, advisories };
 }
 
-export async function fetchApprovedProductionAudit(request, fetchImpl = fetch) {
+export async function fetchApprovedProductionAudit(request, fetchImpl = fetch, options = {}) {
   const body = JSON.stringify(request);
   if (Buffer.byteLength(body) > maximumAuditBytes) throw new Error("production dependency audit request is too large");
-  const response = await fetchImpl(APPROVED_AUDIT_ENDPOINT, {
-    method: "POST",
-    headers: { accept: "application/json", "content-type": "application/json" },
-    body,
-    redirect: "error",
-    signal: AbortSignal.timeout(120_000)
-  });
-  if (!(response instanceof Response) || response.status !== 200) {
-    throw new Error(`approved registry audit request failed with HTTP ${response?.status ?? "invalid response"}`);
+  const attempts = options.attempts ?? defaultAuditAttempts;
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? defaultAuditAttemptTimeoutMs;
+  const delays = options.delays ?? defaultAuditRetryDelaysMs;
+  const sleep = options.sleep ?? sleepFor;
+  let lastTransportFailure = "no attempt was made";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1) {
+      const delay = delays[Math.min(attempt - 2, delays.length - 1)];
+      if (delay !== undefined) await sleep(delay);
+    }
+    let response;
+    try {
+      response = await fetchImpl(APPROVED_AUDIT_ENDPOINT, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body,
+        redirect: "error",
+        signal: AbortSignal.timeout(attemptTimeoutMs)
+      });
+    } catch (error) {
+      lastTransportFailure = error instanceof Error ? error.message : String(error);
+      continue;
+    }
+    if (response instanceof Response && isTransientRegistryStatus(response.status)) {
+      lastTransportFailure = `HTTP ${response.status}`;
+      void response.body?.cancel(lastTransportFailure).catch(() => undefined);
+      continue;
+    }
+    if (!(response instanceof Response) || response.status !== 200) {
+      throw new Error(`approved registry audit request failed with HTTP ${response?.status ?? "invalid response"}`);
+    }
+    const bytes = await readBoundedResponse(response, maximumAuditBytes);
+    const bulk = parseStrictJsonDocument(
+      bytes,
+      maximumAuditBytes,
+      "approved registry audit response is not strict JSON"
+    );
+    return strictProductionAuditFromBulkResponse(bulk, request);
   }
-  const bytes = await readBoundedResponse(response, maximumAuditBytes);
-  const bulk = parseStrictJsonDocument(bytes, maximumAuditBytes, "approved registry audit response is not strict JSON");
-  return strictProductionAuditFromBulkResponse(bulk, request);
+  throw new Error(`approved registry audit request failed after ${attempts} attempts: ${lastTransportFailure}`);
+}
+
+function isTransientRegistryStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
 }
 
 async function runApprovedProductionAudit() {
