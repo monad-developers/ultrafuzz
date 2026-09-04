@@ -24815,6 +24815,40 @@ test("resume continues under a superseded generated manifest without changing ei
   if (before.ok && migrated.ok) assert.equal(migrated.smithersRunId, before.smithersRunId);
 });
 
+test("a run that has not finished launching reports a pending seal, not a missing one", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "still-launching";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  // Reproduce the state a run is in between creating its directory and
+  // completing submission: the control seal has not been written, and the run
+  // has not moved off `pending`. Reporting that as a missing seal told the
+  // operator a healthy run was unrecoverable and to start over, during the
+  // minutes when they are most likely to be checking on it.
+  const runRoot = run.value?.run_root;
+  assert.ok(runRoot);
+  fs.unlinkSync(path.join(runRoot, "smithers", "control-integrity.json"));
+  const statePath = path.join(runRoot, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(statePath, `${JSON.stringify({ ...state, status: "pending" }, null, 2)}\n`, "utf8");
+
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+
+  assert.equal(evidence.ok, false);
+  if (!evidence.ok) {
+    assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_PENDING");
+    assert.equal(evidence.diagnostics[0]?.severity, "warning");
+    assert.match(evidence.diagnostics[0]?.message ?? "", /has not finished launching/u);
+    // The old advice must not survive: nothing here should tell the operator
+    // the run is beyond recovery or that they should start a new one.
+    assert.doesNotMatch(evidence.diagnostics[0]?.message ?? "", /new run ID|cannot be safely upgraded/u);
+  }
+});
+
 test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {
   const cases = [
     {
