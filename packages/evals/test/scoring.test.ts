@@ -8,11 +8,11 @@ import { loadVerifiedNodeOutputSnapshot } from "@ultrafuzz/runtime";
 import {
   EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
   EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
-  evalLlmJudgeResultJsonSchema,
   validateEvalJsonSchema
 } from "../src/eval-schema-registry.js";
+import { ADJUDICATOR_RESPONSE_FORMAT } from "../src/evaluator/adjudicator-prompt.js";
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
-import type { GroundTruthBug } from "../src/types.js";
+import type { FindingJudge, GroundTruthBug } from "../src/types.js";
 import {
   cleanRecoveryEquivalence,
   currentEvalRunRecord,
@@ -204,6 +204,54 @@ async function scoreInMemory(
     ...scoreInput,
     record: currentEvalRunRecord({ row: scoreInput.row, runRoot, runId })
   });
+}
+
+const NO_SLEEP = { sleep: async () => {} };
+
+function judgeCompletion(content: string, status = 200): Response {
+  return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status });
+}
+
+function validJudgeContent(): string {
+  return JSON.stringify({
+    schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
+    matched_ground_truth_bug_id: "candidate-1",
+    score: 1,
+    signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+    rationale: "The finding matches the first candidate.",
+    confidence: 1
+  });
+}
+
+/** Gateway judge whose fetch answers from a scripted queue and records retry sleeps and request bodies. */
+function scriptedGatewayJudge(responses: Array<() => Promise<Response>>): {
+  judge: FindingJudge;
+  sleeps: number[];
+  bodies: string[];
+} {
+  const sleeps: number[] = [];
+  const bodies: string[] = [];
+  const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+    bodies.push(String(init?.body));
+    const next = responses[bodies.length - 1];
+    if (next === undefined) throw new Error("unexpected extra judge request");
+    return next();
+  }) as unknown as typeof fetch;
+  const judge = gatewayLlmJudge(
+    { ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key", ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true" },
+    fetchImpl,
+    {
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    }
+  );
+  return { judge, sleeps, bodies };
+}
+
+async function scoreWithSingleJudge(judge: FindingJudge) {
+  const suite = testSuite("/tmp/gt", { judge_panel: { total: 1, quorum: 1 } });
+  return scoreInMemory({ suite, row: testRow(suite), findings: [matchedFinding()], bugs: BUGS, llmJudge: judge });
 }
 
 function scoreRunFixture(overrides: { issues?: unknown[] } = {}): {
@@ -774,7 +822,7 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+        prompt_version: "ultrafuzz-eval-judge-v11-openai-strict-result-schema",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
@@ -898,7 +946,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+        prompt_version: "ultrafuzz-eval-judge-v11-openai-strict-result-schema",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -1138,7 +1186,7 @@ describe("deterministic scorer math", () => {
         availability: "available",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+          judge_prompt_version: "ultrafuzz-eval-judge-v11-openai-strict-result-schema",
           judge_models: ["gpt-5.5"],
           judge_panel: { total: 3, quorum: 2 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
@@ -1523,7 +1571,8 @@ describe("deterministic scorer math", () => {
         ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
         ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
       },
-      fetchImpl
+      fetchImpl,
+      NO_SLEEP
     );
     const suite = testSuite("/tmp/gt");
 
@@ -1537,21 +1586,28 @@ describe("deterministic scorer math", () => {
       })
     ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID" });
 
-    expect(requests).toHaveLength(3);
+    // Three panel members, each retried up to three times with the identical fresh-context request.
+    expect(requests).toHaveLength(9);
+    expect(new Set(requests.map((request) => JSON.stringify(request))).size).toBe(1);
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
-    const providerSchema: Record<string, unknown> = structuredClone(evalLlmJudgeResultJsonSchema);
-    delete providerSchema.$schema;
-    delete providerSchema.$id;
-    delete providerSchema.title;
+    expect(requests[0]?.response_format).toEqual(ADJUDICATOR_RESPONSE_FORMAT);
     expect(requests[0]?.response_format).toMatchObject({
       type: "json_schema",
       json_schema: {
         name: "ultrafuzz_eval_llm_judge_result_v1",
         strict: true,
-        schema: providerSchema
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            schema_version: { type: "string", const: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION },
+            matched_ground_truth_bug_id: { anyOf: [{ type: "string" }, { type: "null" }] }
+          }
+        }
       }
     });
     expect(requests[0]?.response_format).not.toHaveProperty("json_schema.schema.properties.classification");
+    expect(JSON.stringify(requests[0]?.response_format)).not.toMatch(/oneOf|minLength|maxLength|minimum|maximum/u);
     expect(requests[0]?.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
@@ -1596,7 +1652,8 @@ describe("deterministic scorer math", () => {
         (async () => {
           requests += 1;
           return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
-        }) as unknown as typeof fetch
+        }) as unknown as typeof fetch,
+        NO_SLEEP
       );
 
       await expect(
@@ -1607,9 +1664,95 @@ describe("deterministic scorer math", () => {
           bugs: BUGS,
           llmJudge: judge
         })
-      ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID" });
-      expect(requests).toBe(1);
+      ).rejects.toMatchObject({ code: "EVAL_LLM_JUDGE_INVALID", details: { attempts: 3 } });
+      expect(requests).toBe(3);
     }
+  });
+
+  it("does not retry a non-429 4xx gateway response", async () => {
+    const gateway = scriptedGatewayJudge([
+      async () => new Response(JSON.stringify({ error: { code: "invalid_json_schema" } }), { status: 400 })
+    ]);
+
+    await expect(scoreWithSingleJudge(gateway.judge)).rejects.toMatchObject({
+      code: "EVAL_LLM_JUDGE_REQUEST_FAILED",
+      details: { status: 400, attempts: 1, body: expect.stringContaining("invalid_json_schema") }
+    });
+    expect(gateway.bodies).toHaveLength(1);
+    expect(gateway.sleeps).toEqual([]);
+  });
+
+  it("retries a 429 gateway response once it succeeds", async () => {
+    const gateway = scriptedGatewayJudge([
+      async () => new Response("rate limited", { status: 429 }),
+      async () => judgeCompletion(validJudgeContent())
+    ]);
+
+    const scored = await scoreWithSingleJudge(gateway.judge);
+
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({
+      matched_ground_truth_bug_id: "BUG-1",
+      classification: "true-positive",
+      judge_kind: "llm"
+    });
+    expect(gateway.bodies).toHaveLength(2);
+    expect(gateway.sleeps).toEqual([1000]);
+  });
+
+  it("retries schema-invalid judge output with the identical request", async () => {
+    const gateway = scriptedGatewayJudge([
+      async () => judgeCompletion("not json"),
+      async () => judgeCompletion(validJudgeContent())
+    ]);
+
+    const scored = await scoreWithSingleJudge(gateway.judge);
+
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({ classification: "true-positive" });
+    expect(gateway.bodies).toHaveLength(2);
+    expect(gateway.bodies[0]).toBe(gateway.bodies[1]);
+    expect(gateway.sleeps).toEqual([1000]);
+  });
+
+  it("retries rejected fetches and 5xx responses before succeeding", async () => {
+    const gateway = scriptedGatewayJudge([
+      async () => Promise.reject(new DOMException("The operation was aborted", "AbortError")),
+      async () => new Response("bad gateway", { status: 502 }),
+      async () => judgeCompletion(validJudgeContent())
+    ]);
+
+    const scored = await scoreWithSingleJudge(gateway.judge);
+
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({ classification: "true-positive" });
+    expect(gateway.bodies).toHaveLength(3);
+    expect(gateway.sleeps).toEqual([1000, 3000]);
+  });
+
+  it("gives up after three schema-invalid judge responses", async () => {
+    const gateway = scriptedGatewayJudge([
+      async () => judgeCompletion(JSON.stringify({ score: 1 })),
+      async () => judgeCompletion(JSON.stringify({ score: 1 })),
+      async () => judgeCompletion(JSON.stringify({ score: 1 }))
+    ]);
+
+    await expect(scoreWithSingleJudge(gateway.judge)).rejects.toMatchObject({
+      code: "EVAL_LLM_JUDGE_INVALID",
+      details: { attempts: 3, issues: expect.any(Array) }
+    });
+    expect(gateway.bodies).toHaveLength(3);
+    expect(gateway.sleeps).toEqual([1000, 3000]);
+  });
+
+  it("surfaces a rejected fetch unchanged after the final attempt", async () => {
+    const failure = new TypeError("fetch failed");
+    const gateway = scriptedGatewayJudge([
+      async () => Promise.reject(failure),
+      async () => Promise.reject(failure),
+      async () => Promise.reject(failure)
+    ]);
+
+    await expect(scoreWithSingleJudge(gateway.judge)).rejects.toBe(failure);
+    expect(gateway.bodies).toHaveLength(3);
+    expect(gateway.sleeps).toEqual([1000, 3000]);
   });
 
   it("omits optional Claude reasoning parameters in structured-output mode", async () => {
