@@ -1,5 +1,5 @@
 import { Args, Command, Flags } from "@oclif/core";
-import { scoreEvalRun } from "@ultrafuzz/evals";
+import { describeEvalError, scoreEvalRun } from "@ultrafuzz/evals";
 
 import { cliIo, commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
 
@@ -39,7 +39,7 @@ export default class EvalScore extends Command {
       emitCommandResult(
         this,
         "eval score",
-        commandFailure("eval score", error instanceof Error ? error.message : String(error), "EVAL_SCORE_FAILED"),
+        commandFailure("eval score", describeEvalError(error), "EVAL_SCORE_FAILED"),
         flags.json === true
       );
     }
