@@ -26,10 +26,29 @@ test("final reports retain artifact warnings and their context without changing 
 import {
   isDirectiveConformingFinalReportMarkdown,
   projectCanonicalFinalReport,
+  projectPublicArtifactValidationWarnings,
   projectPublicCanonicalFinalReport,
   renderCoverageEvidenceMarkdownSection,
   supportsCanonicalFinalReportProjection
 } from "../src/final-report-markdown.js";
+
+test("public warning companions redact private context and retain the original diagnostics", () => {
+  const warnings = [
+    {
+      code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+      artifact_path: "artifacts/final/report.json",
+      field_path: "$.issues[0].summary",
+      gate: "report-severity-classification-preservation",
+      message: "Optional metadata is missing; token=synthetic-warning-secret",
+      source_path: "/srv/customer/private/classified.json#$.summary"
+    }
+  ];
+  const before = structuredClone(warnings);
+  const projection = projectPublicArtifactValidationWarnings(warnings);
+  assert.match(projection.markdown, /\$\.issues\[0\]\.summary/u);
+  assert.doesNotMatch(JSON.stringify(projection), /synthetic-warning-secret|\/srv\/customer/u);
+  assert.deepEqual(warnings, before);
+});
 
 function runMetadata(runId: string): Record<string, unknown> {
   return {

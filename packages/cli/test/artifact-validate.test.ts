@@ -12,7 +12,13 @@ test("artifact validate warns on partial metadata and --strict fails without rew
   try {
     const file = path.join(root, "findings.json");
     const bytes = JSON.stringify([
-      { schema_version: "ultrafuzz.finding.v2", id: "f-1", title: "Partial", status: "candidate" }
+      {
+        schema_version: "ultrafuzz.finding.v2",
+        id: "f-1",
+        title: "Partial",
+        status: "candidate",
+        summary: "A concrete defect remains under review"
+      }
     ]);
     fs.writeFileSync(file, bytes);
     const command = ["artifact", "validate", "ultrafuzz/findings@2", file, "--json"];
@@ -20,7 +26,7 @@ test("artifact validate warns on partial metadata and --strict fails without rew
     assert.equal(permissive.code, 0, permissive.stdout);
     const accepted = JSON.parse(permissive.stdout);
     assert.equal(accepted.ok, true);
-    assert.equal(accepted.diagnostics.length, 3);
+    assert.equal(accepted.diagnostics.length, 2);
     assert.ok(accepted.diagnostics.every((entry: { severity: string }) => entry.severity === "warning"));
     const strict = await capture([...command, "--strict"]);
     assert.equal(strict.code, 1, strict.stdout);

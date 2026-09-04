@@ -36,7 +36,7 @@ export function metadataOmission(path: string, sourcePath?: string): SemanticGat
 // Only agent-facing metadata belongs here. IDs, evidence, commands, statuses
 // used for execution, and final classification decisions retain their contracts.
 const preferredMetadata: Readonly<Record<string, readonly string[]>> = {
-  "ultrafuzz.finding.v2": ["summary", "severity_guess", "confidence"],
+  "ultrafuzz.finding.v2": ["severity_guess", "confidence"],
   "ultrafuzz.threat-model.v1": [
     "scope.summary",
     "protocol.summary",
@@ -69,7 +69,7 @@ const preferredMetadata: Readonly<Record<string, readonly string[]>> = {
 
 export function artifactMetadataCompletenessIssues(document: unknown): SemanticGateIssue[] {
   if (Array.isArray(document)) {
-    return document.flatMap((row, index) => metadataIssues(row, `$[${index}]`));
+    return document.flatMap((row, index) => metadataIssues(row, `$[${String(index)}]`));
   }
   return metadataIssues(document, "$");
 }
@@ -85,7 +85,9 @@ function missingMetadata(value: unknown, fields: readonly string[], path: string
   const [field, ...rest] = fields;
   if (field === undefined) return value === undefined ? [metadataOmission(path)] : [];
   if (field === "*") {
-    return Array.isArray(value) ? value.flatMap((row, index) => missingMetadata(row, rest, `${path}[${index}]`)) : [];
+    return Array.isArray(value)
+      ? value.flatMap((row, index) => missingMetadata(row, rest, `${path}[${String(index)}]`))
+      : [];
   }
   if (!isRecord(value)) return [];
   return missingMetadata(value[field], rest, `${path}.${field}`);
@@ -132,7 +134,7 @@ export function boundArtifactValidationWarnings(
         artifact_path: "$",
         field_path: "$",
         gate: warning.gate,
-        message: `${warnings.length - result.length} further validation warnings omitted from this summary; producer artifacts remain available`
+        message: `${String(warnings.length - result.length)} further validation warnings omitted from this summary; producer artifacts remain available`
       });
       break;
     }

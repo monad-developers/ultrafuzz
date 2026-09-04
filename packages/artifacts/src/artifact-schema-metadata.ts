@@ -20,7 +20,10 @@ function artifact(
     role: "artifact-contract",
     contractIds: [contractId],
     semanticGates: metadataAdvisoryContracts.has(contractId)
-      ? [...semanticGates, `${contractId.split("/")[1]!.split("@")[0]}-metadata-completeness`]
+      ? [
+          ...semanticGates,
+          `${contractId.slice("ultrafuzz/".length, contractId.lastIndexOf("@"))}-metadata-completeness`
+        ]
       : semanticGates,
     typescriptExport,
     ...(zodParser === undefined ? {} : { zodParser })

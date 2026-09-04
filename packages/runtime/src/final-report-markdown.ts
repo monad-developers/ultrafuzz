@@ -4,11 +4,13 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   assertRegularFileInside,
+  artifactValidationWarningsSchema,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   redactValue,
   safeResolveInside,
-  validateArtifactContract
+  validateArtifactContract,
+  type ArtifactValidationWarning
 } from "@ultrafuzz/artifacts";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
@@ -599,6 +601,24 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+/** Host diagnostics can accompany an immutable report without rewriting its JSON/Markdown pair. */
+export function renderArtifactValidationWarningsMarkdown(warnings: readonly ArtifactValidationWarning[]): string {
+  const lines: string[] = [];
+  appendArtifactValidationWarnings(lines, warnings);
+  return lines.length === 0 ? "" : `${lines.join("\n").trim()}\n`;
+}
+
+/** A separately named public companion uses the same privacy boundary as the report. */
+export function projectPublicArtifactValidationWarnings(warnings: readonly ArtifactValidationWarning[]): {
+  warnings: ArtifactValidationWarning[];
+  markdown: string;
+} {
+  const publicWarnings = artifactValidationWarningsSchema.parse(
+    redactSecretsInStringValues(redactPrivatePathsInValue(warnings))
+  );
+  return { warnings: publicWarnings, markdown: renderArtifactValidationWarningsMarkdown(publicWarnings) };
 }
 
 function appendArtifactValidationWarnings(lines: string[], value: unknown): void {

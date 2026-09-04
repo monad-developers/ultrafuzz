@@ -26,7 +26,11 @@ import {
   BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS
 } from "@ultrafuzz/evals";
 import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
-import { loadVerifiedFinalReportSnapshot, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
+import {
+  loadVerifiedFinalReportSnapshot,
+  projectPublicArtifactValidationWarnings,
+  projectPublicCanonicalFinalReport
+} from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -1227,6 +1231,20 @@ export function publicBundleSources(
         source: candidate.source,
         immutableContents: candidate.immutableContents
       });
+    }
+    if (report.validation_warnings.length > 0) {
+      const diagnostics = projectPublicArtifactValidationWarnings(report.validation_warnings);
+      for (const [name, contents] of [
+        ["artifact-validation-warnings.json", `${JSON.stringify(diagnostics.warnings, null, 2)}\n`],
+        ["artifact-validation-warnings.md", diagnostics.markdown]
+      ] as const) {
+        sources.push({
+          path: `reports/${row.id}/${name}`,
+          root: record.ultrafuzz_run_root,
+          source: report.artifacts.json_path,
+          immutableContents: Buffer.from(contents, "utf8")
+        });
+      }
     }
     sources.push(...optionalRowArtifactSources(record.ultrafuzz_run_root, row.id));
   }

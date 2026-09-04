@@ -2301,15 +2301,62 @@ function semanticArtifactSetForSchema(input: {
     input.schemaFilename === "strategy-detections.schema.json"
   ) {
     const reviewStage = semanticReviewStageContext(input);
-    return reviewStage === undefined ? {} : { reviewStage };
+    const dedupedFindings =
+      reviewStage?.stage === "severity-classification"
+        ? semanticDedupedFindings(input.layout, input.node, input.attemptAuthority, false)
+        : undefined;
+    return {
+      ...(reviewStage === undefined ? {} : { reviewStage }),
+      ...(dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: semanticRunRelativePath(
+              input.layout,
+              dedupedFindings.absolute_path,
+              "deduped findings"
+            )
+          })
+    };
   }
   if (input.schemaFilename === "triaged-findings.schema.json") {
     const dedupedFindings = semanticDedupedFindings(input.layout, input.node, input.attemptAuthority);
-    return dedupedFindings === undefined ? {} : { dedupedFindings };
+    return dedupedFindings === undefined
+      ? {}
+      : {
+          dedupedFindings: dedupedFindings.value,
+          dedupedFindingsArtifactPath: semanticRunRelativePath(
+            input.layout,
+            dedupedFindings.absolute_path,
+            "deduped findings"
+          )
+        };
   }
   if (input.schemaFilename === "severity-classified-findings.schema.json") {
     const triagedFindings = semanticTriagedFindings(input.layout, input.node, input.attemptAuthority);
-    return triagedFindings === undefined ? {} : { triagedFindings };
+    const dedupedFindings = semanticDedupedFindings(input.layout, input.node, input.attemptAuthority, false);
+    return {
+      ...(triagedFindings === undefined
+        ? {}
+        : {
+            triagedFindings: triagedFindings.value,
+            triagedFindingsArtifactPath: semanticRunRelativePath(
+              input.layout,
+              triagedFindings.absolute_path,
+              "triaged findings"
+            )
+          }),
+      ...(dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: semanticRunRelativePath(
+              input.layout,
+              dedupedFindings.absolute_path,
+              "deduped findings"
+            )
+          })
+    };
   }
   if (input.schemaFilename === "selected-strategies.schema.json") {
     return { dynamicStrategyArtifacts: semanticDynamicStrategyArtifacts(input) };
@@ -2352,7 +2399,7 @@ function semanticTriagedFindings(
   layout: RunLayout,
   consumer: PlannedGraphNode,
   attemptAuthority?: ArtifactGateAttemptAuthority
-): unknown | undefined {
+): VerifiedOutputArtifactSnapshot | undefined {
   return finalizedSingletonAncestorOutput(
     layout,
     consumer,
@@ -2360,7 +2407,7 @@ function semanticTriagedFindings(
     "triaged findings semantic context",
     attemptAuthority,
     { directOnly: true }
-  )?.value;
+  );
 }
 
 function semanticSiblingJsonArtifact(
@@ -2759,6 +2806,13 @@ function semanticReviewStageContext(input: {
   if (stage === "severity-classification") {
     const findings = sibling("ultrafuzz/severity-classified-findings@1", "severity findings");
     const strategyDetections = optionalSibling("ultrafuzz/strategy-detections@1", "severity strategy detections");
+    const upstreamStrategyDetections = finalizedSingletonAncestorOutput(
+      input.layout,
+      input.node,
+      "ultrafuzz/strategy-detections@1",
+      "dedupe strategy detections",
+      input.attemptAuthority
+    );
     return {
       stage: "severity-classification",
       findingsArtifactPath: findings.declaredPath,
@@ -2766,7 +2820,16 @@ function semanticReviewStageContext(input: {
       lifecycleLedger: sibling("ultrafuzz/finding-lifecycle-ledger@1", "severity lifecycle ledger").value,
       ...(strategyDetections === undefined ? {} : { strategyDetections }),
       upstreamLifecycleLedger: finalized("ultrafuzz/finding-lifecycle-ledger@1", "triage lifecycle ledger", true),
-      upstreamStrategyDetections: finalized("ultrafuzz/strategy-detections@1", "dedupe strategy detections", false)
+      upstreamStrategyDetections: upstreamStrategyDetections?.value,
+      ...(upstreamStrategyDetections === undefined
+        ? {}
+        : {
+            upstreamStrategyDetectionsArtifactPath: semanticRunRelativePath(
+              input.layout,
+              upstreamStrategyDetections.absolute_path,
+              "dedupe strategy detections"
+            )
+          })
     };
   }
   return undefined;
@@ -2775,16 +2838,17 @@ function semanticReviewStageContext(input: {
 function semanticDedupedFindings(
   layout: RunLayout,
   consumer: PlannedGraphNode,
-  attemptAuthority?: ArtifactGateAttemptAuthority
-): unknown | undefined {
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  directOnly = true
+): VerifiedOutputArtifactSnapshot | undefined {
   return finalizedSingletonAncestorOutput(
     layout,
     consumer,
     "ultrafuzz/findings@2",
     "deduped findings semantic context",
     attemptAuthority,
-    { directOnly: true }
-  )?.value;
+    directOnly ? { directOnly } : { requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1" }
+  );
 }
 
 function semanticFinalSeverityContext(
@@ -2794,6 +2858,7 @@ function semanticFinalSeverityContext(
 ): {
   severityClassifiedFindings: unknown | null | undefined;
   dedupedFindings?: unknown | null;
+  dedupedFindingsArtifactPath?: string;
   findingLifecycleLedger?: unknown | null;
 } {
   const producers = finalizedDeclaredContractProducers(
@@ -2861,6 +2926,7 @@ function semanticFinalSeverityContext(
   }
   const producer = producers[0]!;
   const severity = producer.outputs[0]!;
+  const deduped = semanticDedupedFindings(layout, consumer, attemptAuthority, false);
   const declaredLedgerPaths = producer.node.outputs
     .filter((output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1")
     .map((output) => output.path)
@@ -2884,6 +2950,12 @@ function semanticFinalSeverityContext(
       severity.absolute_path,
       "ultrafuzz/severity-classified-findings@1"
     ),
+    ...(deduped === undefined
+      ? {}
+      : {
+          dedupedFindings: assertContractDocument(deduped.value, deduped.absolute_path, "ultrafuzz/findings@2"),
+          dedupedFindingsArtifactPath: semanticRunRelativePath(layout, deduped.absolute_path, "deduped findings")
+        }),
     findingLifecycleLedger: assertContractDocument(
       ledgers[0]!.value,
       ledgers[0]!.absolute_path,
@@ -3459,7 +3531,7 @@ function finalizedSingletonAncestorOutput(
   contract: PlannedGraphNode["outputs"][number]["contract"],
   label: string,
   attemptAuthority?: ArtifactGateAttemptAuthority,
-  options: { directOnly?: boolean } = {}
+  options: { directOnly?: boolean; requiredSiblingContract?: PlannedGraphNode["outputs"][number]["contract"] } = {}
 ): VerifiedOutputArtifactSnapshot | undefined {
   const outputs = finalizedDeclaredContractProducers(layout, contract, consumer, attemptAuthority, options).flatMap(
     (producer) => producer.outputs.slice()

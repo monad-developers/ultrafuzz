@@ -10,7 +10,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import { commandFailure, diagnosticsText, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../report-artifacts.js";
 
 type AccountingField = "tokens_used" | "estimated_spend";
@@ -36,7 +36,23 @@ export default class Report extends Command {
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
       const loaded = loadValidatedReportSnapshot(layout.root);
-      const diagnostics = reportAccountingDiagnostics(layout.root, loaded);
+      const validationDiagnostics = loaded.validation_warnings.map((warning): RuntimeDiagnostic => ({
+        code: warning.code,
+        severity: "warning",
+        source: "artifact-validation",
+        message: `${warning.message} at ${warning.artifact_path}#${warning.field_path}${
+          warning.source_path === undefined ? "" : `; available context: ${warning.source_path}`
+        }`,
+        path: `${warning.artifact_path}#${warning.field_path}`,
+        details: {
+          gate: warning.gate,
+          ...(warning.source_path === undefined ? {} : { source_path: warning.source_path })
+        }
+      }));
+      const diagnostics: RuntimeDiagnostic[] = [
+        ...reportAccountingDiagnostics(layout.root, loaded),
+        ...validationDiagnostics
+      ];
       emitCommandResult(
         this,
         "report",
@@ -44,7 +60,7 @@ export default class Report extends Command {
           ok: true,
           command: "report",
           data: loaded.artifacts,
-          text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n`,
+          text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n${diagnosticsText(validationDiagnostics)}`,
           diagnostics
         },
         flags.json === true

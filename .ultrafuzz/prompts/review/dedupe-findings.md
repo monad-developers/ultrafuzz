@@ -222,9 +222,6 @@ the exact pinned `{{schema_path}}/strategy-detections.schema.json`; it alone
 defines the JSON shape. Emit one detection record per deduped root or family
 key. Its key, finding identity, title, optional family identity, and complete
 strategy-hit provenance must agree with the kept finding and lifecycle record.
-Optional metadata may be omitted when unavailable. In particular, a missing
-family identity does not invalidate an otherwise aligned detection record;
-downstream agents can consult the kept finding for that context.
 
 Count each strategy loop attempt only once for the same deduped bug. Do not
 rename this metric Temperature.

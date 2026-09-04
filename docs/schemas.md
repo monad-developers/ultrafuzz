@@ -109,15 +109,25 @@ as warnings; a warning does not fail publication, dependency admission, or the
 campaign. Agents can use the available sibling and ancestor artifacts as
 context without the runtime backfilling their output.
 
+Optional requiredness is a validation policy, not an instruction to discard
+known information. Producers must preserve supplied metadata and retain the
+substantive explanation, evidence, and decisions required by their task. A
+warning-bearing artifact is not proof of complete audit coverage or analysis
+quality. Missing required evidence or a final classification still blocks
+admission; the runtime must not invent it to make an artifact valid.
+
 The following agent-output fields are optional:
 
-- Findings, triaged findings, and severity-classified findings: `summary`,
-  `confidence`, and `severity_guess`. Finding identity, status, and stage-specific
+- Findings, triaged findings, and severity-classified findings: `confidence`
+  and `severity_guess`. Finding identity, summary, status, and stage-specific
   classification decisions retain their requirements.
 - Threat models: scope/protocol summaries, capability rationales, entity
   descriptions, asset value-at-risk descriptions, and unknown security-impact
   descriptions. IDs, capability statuses, evidence requirements, collections,
-  and required joins retain their requirements.
+  and required joins retain their requirements. When a modeled capability has
+  no rationale, goal-plan checks use the explicit attributed text
+  `Not recorded in the upstream threat model.` while retaining their own
+  decision rationale and copying the capability status and evidence unchanged.
 - Boundary recipes: coverage-priority rationales.
 - Dependency scope matrices: in-scope rationales, scope notes, harness notes,
   and coverage notes. Admin/config boundary matrices and externalized-state
@@ -131,13 +141,22 @@ reconciliation gate also accepts an omission, recording the exact field and the
 aligned finding's path when it supplies that context. Record counts, keys,
 finding identities, and strategy hits must still reconcile. Conflicting supplied
 values remain errors. Metadata omissions between review stages do not create
-an implicit required field through preservation checks.
+an implicit required field through preservation checks. Dropping a supplied
+family ID during triage or severity classification records a contextual warning
+and fails strict validation. Later supplied values are also checked against the
+original deduped finding so that an intermediate omission cannot conceal a
+conflict.
 
 The verifier persists bounded warnings in the existing artifact-verification
 marker. The final report receives warnings from its authenticated ancestor
 markers through the run-metadata authority and renders an **Artifact validation
 warnings** section. Re-reading an artifact does not modify it or append duplicate
 repair records. Large warning sets are summarized without failing the campaign.
+
+The final-report verifier also records omissions introduced by the report
+agent itself. These authenticated host diagnostics accompany the original
+report in CLI and dashboard views and in explicitly named public-bundle
+companions. They do not rewrite the producer's report JSON or Markdown.
 
 Use opt-in strict artifact validation for producer development and CI:
 
@@ -153,6 +172,21 @@ The lower-level `ultrafuzz json validate` command continues to check JSON shape.
 Invalid JSON or UTF-8, unsafe filesystem data, invalid supplied field types,
 ambiguous identity, missing execution-critical fields, and impossible required
 joins remain errors in every mode.
+
+### Recovery boundary
+
+This policy accepts selected metadata omissions; it does not repair malformed
+JSON or run automatic correction turns. A failed verifier can be retried with
+`resume --retry-failed`, which reopens its producer and affected dependents
+while retaining unrelated completed work. Current retries start a fresh agent
+session, so preserving prior output as correction context remains separate work.
+
+A future repair path must publish a separate, attributable revision, retain the
+original bytes, and repeat structural, identity, evidence, filesystem, and
+cross-artifact checks. Only unambiguous formatting corrections or values
+available from an authenticated join qualify for deterministic repair. Missing
+substantive reasoning or conflicting identities require producer correction;
+they cannot be fabricated by JSON repair.
 
 ## Breaking Contract Policy
 

@@ -1034,7 +1034,8 @@ class DashboardApp {
         markdown_path: posixRelativePath(context.runRoot, loaded.artifacts.markdown_path),
         markdown: loaded.markdown,
         json_path: posixRelativePath(context.runRoot, loaded.artifacts.json_path),
-        json: loaded.json
+        json: loaded.json,
+        host_validation_warnings: loaded.validation_warnings
       });
     } catch (error) {
       if (

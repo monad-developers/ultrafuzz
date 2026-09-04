@@ -3737,8 +3737,10 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
     (diagnostic) => diagnostic.code === "ARTIFACT_OPTIONAL_METADATA_MISSING"
   );
   assert.equal(metadataWarnings.length, 1);
-  assert.equal(metadataWarnings[0]!.severity, "warning");
-  assert.ok(metadataWarnings[0]!.path?.endsWith("#$[0].family_id"));
+  const [metadataWarning] = metadataWarnings;
+  assert.ok(metadataWarning);
+  assert.equal(metadataWarning.severity, "warning");
+  assert.ok(metadataWarning.path?.endsWith("#$[0].family_id"));
   assert.equal(
     fs.readFileSync(path.join(dedupeTask.artifactDir, artifactPaths.dedupeStrategies), "utf8"),
     JSON.stringify(strategyDetections)
@@ -3837,6 +3839,23 @@ test("review lifecycle and strategy gates authenticate every dedupe, triage, and
     authenticatedSnapshotsForNode(layout, triageNode, triageTask.attemptId)
   );
   assert.equal(validTriage.ok, true, JSON.stringify(validTriage.diagnostics));
+
+  const triagedWithoutFamily = { ...triagedFinding } as Record<string, unknown>;
+  Reflect.deleteProperty(triagedWithoutFamily, "family_id");
+  const triagedArtifactPath = path.join(triageTask.artifactDir, artifactPaths.triagedFindings);
+  fs.writeFileSync(triagedArtifactPath, JSON.stringify([triagedWithoutFamily]));
+  const partialTriage = verifyRequiredArtifactsForAttempt(
+    layout,
+    triageNode,
+    triageTask.attemptId,
+    { task: triageTask, tasks },
+    authenticatedSnapshotsForNode(layout, triageNode, triageTask.attemptId)
+  );
+  assert.equal(partialTriage.ok, true, JSON.stringify(partialTriage.diagnostics));
+  const familyWarning = partialTriage.diagnostics.find((diagnostic) => diagnostic.path?.endsWith("#$[0].family_id"));
+  assert.equal(familyWarning?.severity, "warning");
+  assert.equal(familyWarning?.details?.source_path, `artifacts/${dedupeTask.attemptId}/${dedupedPath}#$[0].family_id`);
+  fs.writeFileSync(triagedArtifactPath, JSON.stringify([triagedFinding]));
 
   fs.writeFileSync(
     triageLedgerPath,

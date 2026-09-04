@@ -1056,7 +1056,7 @@
         "additionalProperties": false
       }
     },
-    "required": ["schema_version", "id", "title", "status", "triage_classification"],
+    "required": ["schema_version", "id", "title", "status", "summary", "triage_classification"],
     "additionalProperties": false,
     "allOf": [
       {

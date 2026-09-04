@@ -571,7 +571,13 @@ express MUST remain explicit named semantic/context gates.
 After the producer returns, every declared agent-owned artifact byte MUST stay
 unchanged through host validation, synchronization, reporting, dashboard reads,
 publication, and bundling. Missing or invalid output MUST be a terminal
-post-agent failure. The runtime MUST NOT invoke a correction turn or full-node
+post-agent failure when it prevents safe artifact admission. Designated missing
+optional metadata MUST instead produce bounded, attributable warnings; supplied
+conflicts, ambiguous identity, and missing execution-critical data remain errors.
+Host-owned diagnostic presentations and explicitly named companions MAY expose
+authenticated verifier warnings, including warnings about the final report
+itself, without replacing or rewriting the producer artifacts.
+The runtime MUST NOT invoke a correction turn or full-node
 model retry, synthesize an empty artifact or Markdown from a final response,
 normalize or convert fields, reseal changed bytes, rebuild from dependencies,
 or fall back to a sibling or historical artifact. Exact byte copying and
@@ -583,8 +589,12 @@ JSON/JSONL plus query indexes are sufficient; SQLite events are not required.
 Findings MUST use `ultrafuzz/findings@2` and be arrays in `findings.json`.
 Each finding MUST include exact `schema_version` literal
 `ultrafuzz.finding.v2`, producer-authored `id`, `title`, canonical `status`,
-preliminary `severity_guess`, lowercase `confidence`, and `summary`. Missing IDs
-MUST NOT be synthesized.
+and a non-empty `summary`, plus any stage-specific required decisions and
+evidence. Preliminary `severity_guess` and lowercase `confidence` MAY be
+omitted with validation warnings; supplied metadata MUST be preserved through
+review stages. Missing IDs, summary, evidence, or decisions MUST NOT be
+synthesized. Schema conformance alone MUST NOT be presented as proof of
+substantive audit completeness.
 
 Finding `status` MUST be one of:
 

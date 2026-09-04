@@ -1,4 +1,4 @@
-import { loadVerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
+import { loadVerifiedFinalReportSnapshot, type VerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
 
 export interface ValidatedReportArtifacts {
   markdown_path: string;
@@ -12,6 +12,7 @@ export interface ValidatedReportSnapshot {
   json_bytes: Buffer;
   markdown: string;
   markdown_bytes: Buffer;
+  validation_warnings: VerifiedFinalReportSnapshot["validation_warnings"];
 }
 
 export function loadValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot {
@@ -21,6 +22,7 @@ export function loadValidatedReportSnapshot(runRoot: string): ValidatedReportSna
     json: report.json,
     json_bytes: report.json_bytes,
     markdown: report.markdown,
-    markdown_bytes: report.markdown_bytes
+    markdown_bytes: report.markdown_bytes,
+    validation_warnings: report.validation_warnings
   };
 }

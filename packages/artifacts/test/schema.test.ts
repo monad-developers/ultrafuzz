@@ -500,13 +500,15 @@ test("finding schema accepts a canonical v2 finding and rejects malformed payloa
   assert.deepEqual(findings, before);
 
   const partial = { ...finding } as Partial<typeof finding>;
-  delete partial.summary;
   delete partial.confidence;
   delete partial.severity_guess;
   const accepted = validateFindingSchema(partial);
   assert.equal(accepted.ok, true);
   assert.equal(accepted.value, partial);
 
+  delete partial.summary;
+  assert.equal(validateFindingSchema(partial).ok, false);
+  partial.summary = finding.summary;
   delete partial.id;
   assert.equal(validateFindingSchema(partial).ok, false);
 });

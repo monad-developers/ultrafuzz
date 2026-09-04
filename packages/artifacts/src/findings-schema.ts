@@ -895,7 +895,7 @@ export const findingSchema = z
     status: z.enum(FINDING_STATUSES),
     severity_guess: z.enum(FINDING_SEVERITIES).optional(),
     confidence: z.enum(FINDING_CONFIDENCE_LEVELS).optional(),
-    summary: nonEmptyString.optional(),
+    summary: nonEmptyString,
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
     producer_node_id: findingNodeReference.optional(),
     producer_attempt_id: findingNodeReference.optional(),

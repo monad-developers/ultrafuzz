@@ -1351,6 +1351,7 @@
           "id",
           "title",
           "status",
+          "summary",
           "severity",
           "impact",
           "likelihood",
@@ -2424,6 +2425,7 @@
           "id",
           "title",
           "status",
+          "summary",
           "triage_classification",
           "recommended_next_action",
           "lifecycle"

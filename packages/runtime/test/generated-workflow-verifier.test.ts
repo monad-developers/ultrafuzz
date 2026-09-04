@@ -2260,15 +2260,19 @@ test("1091: generated verifier publishes 41 detections with six family omissions
     rawTask.attemptId = "raw";
     rawTask.runRoot = root;
     rawTask.metadata.node = { logicalNodeId: "raw", concreteNodeId: "raw" };
-    rawTask.outputs[0]!.schemaFile = "findings.schema.json";
+    const rawOutput = rawTask.outputs[0];
+    assert.ok(rawOutput);
+    rawOutput.schemaFile = "findings.schema.json";
     const task = singleOutputVerificationTask(dedupeDir, "ultrafuzz/findings@2");
     task.attemptId = "dedupe";
     task.runRoot = root;
     task.metadata.node = { logicalNodeId: "dedupe", concreteNodeId: "dedupe" };
     task.metadata.dependencies.attemptIds = ["raw"];
     task.dependencyArtifactDirs = [rawDir];
+    const dedupedOutput = task.outputs[0];
+    assert.ok(dedupedOutput);
     task.outputs = [
-      { ...task.outputs[0]!, schemaFile: "findings.schema.json" },
+      { ...dedupedOutput, schemaFile: "findings.schema.json" },
       {
         path: "strategies.json",
         contract: "ultrafuzz/strategy-detections@1",
@@ -2308,23 +2312,27 @@ test("1091: generated verifier publishes 41 detections with six family omissions
     }));
     const lifecycle = {
       schema_version: "ultrafuzz.finding-lifecycle-ledger.v1",
-      records: findings.map((finding, index) => ({
-        dedupe_key: finding.dedupe_key,
-        source_artifacts: [
-          {
-            path: "artifacts/raw/result.json",
-            node_id: "raw",
-            finding_id: finding.id,
-            title: finding.title,
-            relationship: "primary"
-          }
-        ],
-        strategy_hits: detections[index]!.hits,
-        stages: [
-          { stage: "raw", artifact_path: "artifacts/raw/result.json", finding_id: finding.id },
-          { stage: "deduped", artifact_path: "result.json", finding_id: finding.id }
-        ]
-      }))
+      records: findings.map((finding, index) => {
+        const detection = detections[index];
+        assert.ok(detection);
+        return {
+          dedupe_key: finding.dedupe_key,
+          source_artifacts: [
+            {
+              path: "artifacts/raw/result.json",
+              node_id: "raw",
+              finding_id: finding.id,
+              title: finding.title,
+              relationship: "primary"
+            }
+          ],
+          strategy_hits: detection.hits,
+          stages: [
+            { stage: "raw", artifact_path: "artifacts/raw/result.json", finding_id: finding.id },
+            { stage: "deduped", artifact_path: "result.json", finding_id: finding.id }
+          ]
+        };
+      })
     };
     fs.writeFileSync(path.join(rawDir, "result.json"), JSON.stringify(raw));
     fs.writeFileSync(path.join(dedupeDir, "result.json"), JSON.stringify(findings));
@@ -2336,8 +2344,8 @@ test("1091: generated verifier publishes 41 detections with six family omissions
     assert.equal(harness.markerWrites.length, 1);
     const warnings = (harness.markerWrites[0] as unknown[])[3] as Array<Record<string, unknown>>;
     assert.equal(warnings.length, 6);
-    assert.equal(warnings[0]!.field_path, "$[0].family_id");
-    assert.equal(harness.publications.get("strategies.json")!.toString(), JSON.stringify(detections));
+    assert.equal(warnings[0]?.field_path, "$[0].family_id");
+    assert.equal(harness.publications.get("strategies.json")?.toString(), JSON.stringify(detections));
     assert.equal(fs.readFileSync(path.join(dedupeDir, "strategies.json"), "utf8"), JSON.stringify(detections));
     // The report receives the exact verifier diagnostics even before controller synchronization.
     const admissions = new Map([
@@ -2358,7 +2366,7 @@ test("1091: generated verifier publishes 41 detections with six family omissions
     const reporting = loadFinalReportRunMetadataAuthorityHarness(undefined, undefined, admissions);
     const reportWarnings = reporting.warnings({ attemptId: "final" }) as Array<Record<string, unknown>>;
     assert.equal(reportWarnings.length, 6);
-    assert.equal(reportWarnings[0]!.artifact_path, "artifacts/dedupe/strategies.json");
+    assert.equal(reportWarnings[0]?.artifact_path, "artifacts/dedupe/strategies.json");
     assert.deepEqual(reporting.warnings({ attemptId: "final" }), reportWarnings);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -4045,6 +4053,7 @@ test("invariant Markdown parity assigns exact fields and rejects duplicate or ex
 
 type PropertyLensHarnessProducer = {
   attemptId: string;
+  runRoot?: string;
   artifactDir: string;
   dependencyArtifactDirs: string[];
   metadata: { node: { logicalNodeId: string }; dependencies: { attemptIds: string[] } };
@@ -4061,7 +4070,7 @@ function loadVerifiedSingletonAncestorJsonArtifactHarness(
   contract: string,
   label: string,
   options?: { directOnly?: boolean }
-) => { path: string; value: unknown } | undefined {
+) => { path: string; runRelativePath: string; value: unknown } | undefined {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function semanticArtifactTaskDeclarations");
   const helperEnd = source.indexOf("\n\nfunction configuredInvariantPrioritySelection", helperStart);
@@ -4094,12 +4103,13 @@ function loadVerifiedSingletonAncestorJsonArtifactHarness(
     contract: string,
     label: string,
     options?: { directOnly?: boolean }
-  ) => { path: string; value: unknown } | undefined;
+  ) => { path: string; runRelativePath: string; value: unknown } | undefined;
 }
 
 test("generated Smithers resolves singleton JSON inputs by ancestor contract and custom path", () => {
   const producer = (attemptId: string, logicalNodeId: string, artifactPath: string): PropertyLensHarnessProducer => ({
     attemptId,
+    runRoot: "/run",
     artifactDir: path.join("/run/artifacts", attemptId),
     dependencyArtifactDirs: [],
     metadata: { node: { logicalNodeId }, dependencies: { attemptIds: [] } },
@@ -4109,6 +4119,7 @@ test("generated Smithers resolves singleton JSON inputs by ancestor contract and
   const unrelated = producer("catalog-unrelated", "same-logical-name-is-irrelevant", "properties.json");
   const consumer: PropertyLensHarnessTask = {
     attemptId: "report-current",
+    runRoot: "/run",
     artifactDir: "/run/artifacts/report-current",
     dependencyArtifactDirs: [selected.artifactDir],
     metadata: { node: { logicalNodeId: "renamed-report" }, dependencies: { attemptIds: [selected.attemptId] } },
@@ -4129,6 +4140,7 @@ test("generated Smithers resolves singleton JSON inputs by ancestor contract and
 
   assert.deepEqual(resolve(consumer, "ultrafuzz/properties@2", "canonical property catalog"), {
     path: "custom/current-properties.json",
+    runRelativePath: "artifacts/catalog-current/custom/current-properties.json",
     value: document
   });
   assert.equal(resolve(isolatedConsumer, "ultrafuzz/properties@2", "canonical property catalog"), undefined);
@@ -4277,6 +4289,7 @@ test("generated severity authority excludes unrelated transitive triaged outputs
     dependencies: readonly PropertyLensHarnessProducer[] = []
   ): PropertyLensHarnessProducer => ({
     attemptId,
+    runRoot: "/run",
     artifactDir: path.join("/run/artifacts", attemptId),
     dependencyArtifactDirs: dependencies.map((dependency) => dependency.artifactDir),
     metadata: {
@@ -4289,6 +4302,7 @@ test("generated severity authority excludes unrelated transitive triaged outputs
   const direct = producer("triaged-direct", "custom/direct-triaged.json", [transitive]);
   const severity: PropertyLensHarnessTask = {
     attemptId: "severity-current",
+    runRoot: "/run",
     artifactDir: "/run/artifacts/severity-current",
     dependencyArtifactDirs: [transitive.artifactDir, direct.artifactDir],
     metadata: {
@@ -4312,6 +4326,7 @@ test("generated severity authority excludes unrelated transitive triaged outputs
 
   assert.deepEqual(resolve(severity, "ultrafuzz/triaged-findings@1", "triaged findings", { directOnly: true }), {
     path: "custom/direct-triaged.json",
+    runRelativePath: "artifacts/triaged-direct/custom/direct-triaged.json",
     value: directDocument
   });
   assert.throws(
@@ -4656,7 +4671,7 @@ test("generated severity verification authenticates the triaged finding preserva
     /verifiedSingletonAncestorJsonArtifact\(\s*task,\s*"ultrafuzz\/triaged-findings@1",\s*"triaged findings",\s*\{ directOnly: true \}\s*\)/u
   );
   assert.doesNotMatch(helper, /"triage"|"triaged-findings\.json"/u);
-  assert.match(helper, /\{ triagedFindings: triagedFindings\.value \}/u);
+  assert.match(helper, /triagedFindingsArtifactPath: triagedFindings\.runRelativePath/u);
 });
 
 function loadGeneratedReviewContextProjectionHarness(): (
@@ -4700,13 +4715,24 @@ function loadGeneratedReviewContextProjectionHarness(): (
     `${emitted}; return semanticGateContextForVerifiedOutput;`
   )(
     (_task: unknown, contract: string) => {
-      if (contract === "ultrafuzz/findings@2") return { path: "custom/deduped.json", value: dedupedFindings };
+      if (contract === "ultrafuzz/findings@2") {
+        return {
+          path: "custom/deduped.json",
+          runRelativePath: "artifacts/dedupe/custom/deduped.json",
+          value: dedupedFindings
+        };
+      }
       if (contract === "ultrafuzz/triaged-findings@1") {
-        return { path: "custom/triaged.json", value: triagedFindings };
+        return {
+          path: "custom/triaged.json",
+          runRelativePath: "artifacts/triage/custom/triaged.json",
+          value: triagedFindings
+        };
       }
       if (contract === "ultrafuzz/campaign-summary@2") {
         return {
           path: "custom/campaign-summary.json",
+          runRelativePath: "artifacts/campaign/custom/campaign-summary.json",
           value: { outcome: "blocked", reason: "recon was unavailable" }
         };
       }
@@ -4737,9 +4763,15 @@ test("generated semantic context projects every required review authority field"
   const context = (schemaFile: string) =>
     contextFor(task, { path: "custom/output.json", schemaFile }, verifiedOutputs).artifactSet;
 
-  assert.deepEqual(context("triaged-findings.schema.json"), { dedupedFindings: [{ id: "deduped" }] });
+  assert.deepEqual(context("triaged-findings.schema.json"), {
+    dedupedFindings: [{ id: "deduped" }],
+    dedupedFindingsArtifactPath: "artifacts/dedupe/custom/deduped.json"
+  });
   assert.deepEqual(context("severity-classified-findings.schema.json"), {
-    triagedFindings: [{ id: "triaged" }]
+    triagedFindings: [{ id: "triaged" }],
+    triagedFindingsArtifactPath: "artifacts/triage/custom/triaged.json",
+    dedupedFindings: [{ id: "deduped" }],
+    dedupedFindingsArtifactPath: "artifacts/dedupe/custom/deduped.json"
   });
   for (const schemaFile of ["finding-lifecycle-ledger.schema.json", "strategy-detections.schema.json"]) {
     assert.deepEqual(context(schemaFile), {
@@ -4974,6 +5006,7 @@ test("generated review authority uses declared relative identity across snapshot
   const severityLedger = { records: [{ dedupe_key: "key-one", final_disposition: "promoted" }] };
   const severityDetections = [{ finding_id: "finding-dedupe" }];
   remember(raw, "custom/raw.json", "ultrafuzz/findings@2", rawFindings);
+  remember(dedupe, "custom/deduped.json", "ultrafuzz/findings@2", dedupedFindings);
   remember(dedupe, "custom/dedupe-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1", dedupeLedger);
   remember(dedupe, "custom/detections.json", "ultrafuzz/strategy-detections@1", dedupeDetections);
   remember(triage, "custom/triage-ledger.json", "ultrafuzz/finding-lifecycle-ledger@1", triageLedger);
@@ -5064,13 +5097,16 @@ test("generated review authority uses declared relative identity across snapshot
       lifecycleLedger: severityLedger,
       strategyDetections: severityDetections,
       upstreamLifecycleLedger: triageLedger,
-      upstreamStrategyDetections: dedupeDetections
+      upstreamStrategyDetections: dedupeDetections,
+      upstreamStrategyDetectionsArtifactPath: "artifacts/attempt-dedupe/custom/detections.json"
     }
   );
 
   const readCountBeforeFinal = harness.authenticatedReads.length;
   assert.deepEqual(harness.finalSeverity(report), {
     severityClassifiedFindings: severityFindings,
+    dedupedFindings,
+    dedupedFindingsArtifactPath: "artifacts/attempt-dedupe/custom/deduped.json",
     findingLifecycleLedger: severityLedger
   });
   assert.deepEqual(harness.authenticatedReads.slice(readCountBeforeFinal), [
@@ -5083,6 +5119,11 @@ test("generated review authority uses declared relative identity across snapshot
       producer: severity.attemptId,
       path: "custom/severity-ledger.json",
       contract: "ultrafuzz/finding-lifecycle-ledger@1"
+    },
+    {
+      producer: dedupe.attemptId,
+      path: "custom/deduped.json",
+      contract: "ultrafuzz/findings@2"
     }
   ]);
 
@@ -5320,6 +5361,7 @@ test("generated final-severity gates share one producer epoch and reject a cross
     "dependencyArtifactAdmission",
     "assertDependencyArtifactAdmissionCurrent",
     "declaredAncestorContractOutputs",
+    "verifiedSingletonAncestorJsonArtifact",
     `${emitted}; return {
       begin: beginVerifiedDependencySnapshotEpoch,
       recheck: assertVerifiedDependencySnapshotEpochRemainedCurrent,
@@ -5340,7 +5382,8 @@ test("generated final-severity gates share one producer epoch and reject a cross
       }
       return admission;
     },
-    declaredAncestorContractOutputs
+    declaredAncestorContractOutputs,
+    () => undefined
   ) as {
     begin: (task: ReviewAuthorityHarnessTask) => {
       snapshotsByProducerAttempt: Map<

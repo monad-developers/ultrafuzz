@@ -2119,9 +2119,15 @@ function verifiedSingletonAncestorJsonArtifact(
   task: (typeof taskSpecs)[number],
   expectedContract: string,
   label: string,
-  options: { directOnly?: boolean } = {}
-): { path: string; value: unknown } | undefined {
-  const outputs = declaredAncestorContractOutputs(task, expectedContract, options);
+  options: { directOnly?: boolean; requiredSiblingContract?: string } = {}
+): { path: string; runRelativePath: string; value: unknown } | undefined {
+  const outputs = declaredAncestorContractOutputs(task, expectedContract, options).filter(
+    (output) =>
+      options.requiredSiblingContract === undefined ||
+      taskSpecs
+        .find((candidate) => candidate.attemptId === output.attemptId)
+        ?.outputs.some((candidate) => candidate.contract === options.requiredSiblingContract)
+  );
   if (outputs.length === 0) return undefined;
   if (outputs.length !== 1) {
     throw new Error(
@@ -2134,7 +2140,11 @@ function verifiedSingletonAncestorJsonArtifact(
     throw new Error(`artifact-contract failure: declared ${label} producer is unavailable ${output.attemptId}`);
   }
   const verified = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
-  return { path: output.path, value: verified.value };
+  const runRelativePath = path
+    .relative(path.resolve(process.cwd(), task.runRoot), path.resolve(output.artifactDir, output.path))
+    .split(path.sep)
+    .join("/");
+  return { path: output.path, runRelativePath, value: verified.value };
 }
 
 function verifiedCanonicalPropertyCatalog(
@@ -2501,7 +2511,14 @@ function finalReportArtifactValidationWarnings(task: (typeof taskSpecs)[number])
       warnings.push({
         ...warning,
         artifact_path: `artifacts/${attemptId}/${warning.artifact_path}`,
-        ...(warning.source_path === undefined ? {} : { source_path: `artifacts/${attemptId}/${warning.source_path}` })
+        ...(warning.source_path === undefined
+          ? {}
+          : {
+              source_path:
+                warning.source_path.startsWith("artifacts/") || warning.source_path.startsWith("$context.")
+                  ? warning.source_path
+                  : `artifacts/${attemptId}/${warning.source_path}`
+            })
       });
     }
   }
@@ -7930,6 +7947,7 @@ type ReviewStageSemanticContext = {
   strategyDetections?: unknown;
   upstreamLifecycleLedger?: unknown;
   upstreamStrategyDetections?: unknown;
+  upstreamStrategyDetectionsArtifactPath?: string;
   rawFindingArtifacts?: Array<{ nodeId: string; path: string; findings: unknown }>;
 };
 
@@ -8029,6 +8047,7 @@ function reviewStageSemanticContext(
     );
     if (upstreamStrategyDetections !== undefined) {
       context.upstreamStrategyDetections = upstreamStrategyDetections.value;
+      context.upstreamStrategyDetectionsArtifactPath = upstreamStrategyDetections.runRelativePath;
     }
   }
   return context;
@@ -8037,6 +8056,7 @@ function reviewStageSemanticContext(
 function verifiedFinalSeverityReviewAuthority(task: (typeof taskSpecs)[number]): {
   severityClassifiedFindings: unknown | null;
   dedupedFindings?: unknown | null;
+  dedupedFindingsArtifactPath?: string;
   findingLifecycleLedger?: unknown | null;
 } {
   const severityOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/severity-classified-findings@1");
@@ -8123,8 +8143,17 @@ function verifiedFinalSeverityReviewAuthority(task: (typeof taskSpecs)[number]):
     lifecycleOutputs[0]!.path,
     lifecycleOutputs[0]!.contract
   );
+  const deduped = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+    requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+  });
   return {
     severityClassifiedFindings: severity.value,
+    ...(deduped === undefined
+      ? {}
+      : {
+          dedupedFindings: deduped.value,
+          dedupedFindingsArtifactPath: deduped.runRelativePath
+        }),
     findingLifecycleLedger: lifecycle.value
   };
 }
@@ -8375,7 +8404,9 @@ function semanticGateContextForVerifiedOutput(
     implementedProperties?: unknown;
     implementedPropertiesPath?: string;
     dedupedFindings?: unknown;
+    dedupedFindingsArtifactPath?: string;
     triagedFindings?: unknown;
+    triagedFindingsArtifactPath?: string;
     severityClassifiedFindings?: unknown;
     findingLifecycleLedger?: unknown;
     reviewStage?: ReviewStageSemanticContext;
@@ -8523,7 +8554,13 @@ function semanticGateContextForVerifiedOutput(
     const dedupedFindings = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
       directOnly: true
     });
-    context.artifactSet = dedupedFindings === undefined ? {} : { dedupedFindings: dedupedFindings.value };
+    context.artifactSet =
+      dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: dedupedFindings.runRelativePath
+          };
   } else if (output.schemaFile === "severity-classified-findings.schema.json") {
     const triagedFindings = verifiedSingletonAncestorJsonArtifact(
       task,
@@ -8531,12 +8568,43 @@ function semanticGateContextForVerifiedOutput(
       "triaged findings",
       { directOnly: true }
     );
-    context.artifactSet = triagedFindings === undefined ? {} : { triagedFindings: triagedFindings.value };
+    const dedupedFindings = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+      requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+    });
+    context.artifactSet = {
+      ...(triagedFindings === undefined
+        ? {}
+        : {
+            triagedFindings: triagedFindings.value,
+            triagedFindingsArtifactPath: triagedFindings.runRelativePath
+          }),
+      ...(dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: dedupedFindings.runRelativePath
+          })
+    };
   } else if (
     output.schemaFile === "finding-lifecycle-ledger.schema.json" ||
     output.schemaFile === "strategy-detections.schema.json"
   ) {
-    context.artifactSet = { reviewStage: reviewStageSemanticContext(task, verifiedOutputs) };
+    const reviewStage = reviewStageSemanticContext(task, verifiedOutputs);
+    const dedupedFindings =
+      reviewStage.stage === "severity-classification"
+        ? verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+            requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+          })
+        : undefined;
+    context.artifactSet = {
+      reviewStage,
+      ...(dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: dedupedFindings.runRelativePath
+          })
+    };
   } else if (output.schemaFile === "selected-strategies.schema.json") {
     context.artifactSet = {
       dynamicStrategyArtifacts: siblingDynamicStrategySemanticArtifacts(task, verifiedOutputs)

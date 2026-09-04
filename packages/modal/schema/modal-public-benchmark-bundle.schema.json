@@ -132,7 +132,7 @@
         },
         {
           "type": "string",
-          "pattern": "^(?:eval/(?:eval\\.json|matrix\\.json|runs\\.jsonl|run-summary\\.json|public-eval-diagnostics\\.json|scores\\.jsonl|summary\\.json|summary\\.md|review/new-findings\\.jsonl)|reports/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:report\\.(?:md|json)|artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:THREAT_MODEL\\.md|goal-plan\\.json|threat-model\\.json|vulnerability-db-manifest\\.json)))$"
+          "pattern": "^(?:eval/(?:eval\\.json|matrix\\.json|runs\\.jsonl|run-summary\\.json|public-eval-diagnostics\\.json|scores\\.jsonl|summary\\.json|summary\\.md|review/new-findings\\.jsonl)|reports/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:(?:report|artifact-validation-warnings)\\.(?:md|json)|artifacts/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/(?:THREAT_MODEL\\.md|goal-plan\\.json|threat-model\\.json|vulnerability-db-manifest\\.json)))$"
         }
       ]
     },
