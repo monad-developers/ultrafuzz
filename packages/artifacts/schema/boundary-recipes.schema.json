@@ -155,7 +155,7 @@
             "minLength": 1
           }
         },
-        "required": ["workflow", "priority", "rationale"],
+        "required": ["workflow", "priority"],
         "additionalProperties": false
       }
     }

@@ -2200,8 +2200,13 @@ function prepareWorkflowUsageEvents(
       artifactPath: layout.usageLedgerPath,
       context
     });
-    if (diagnostics.length > 0) {
-      throw new Error(diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+    if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+      throw new Error(
+        diagnostics
+          .filter((diagnostic) => diagnostic.severity === "error")
+          .map((diagnostic) => diagnostic.message)
+          .join("; ")
+      );
     }
   }
   return { inputs, entries, pendingEntries };
@@ -4965,8 +4970,13 @@ function appendTerminalTaskAttempts(input: {
       artifactPath: input.layout.attemptLedgerPath,
       context: gateContext
     });
-    if (diagnostics.length > 0) {
-      throw new Error(diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+    if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+      throw new Error(
+        diagnostics
+          .filter((diagnostic) => diagnostic.severity === "error")
+          .map((diagnostic) => diagnostic.message)
+          .join("; ")
+      );
     }
   }
   const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);

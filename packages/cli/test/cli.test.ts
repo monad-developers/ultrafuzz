@@ -24,6 +24,7 @@ import {
   updateRunStatus,
   writeArtifactManifest,
   writeRunMetadataDocument,
+  type ArtifactValidationWarning,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
@@ -905,7 +906,8 @@ function canonicalPromotedIssue(): Record<string, unknown> {
 function sealVerifiedFinalReport(
   runRoot: string,
   dedupedFindings: Record<string, unknown>[] = [],
-  lifecycleRecords: Record<string, unknown>[] = []
+  lifecycleRecords: Record<string, unknown>[] = [],
+  validationWarnings: readonly ArtifactValidationWarning[] = []
 ): void {
   const layout = layoutForRunRoot(runRoot, path.basename(runRoot));
   const graph = readPlannedGraphDocument(layout.graphPath);
@@ -916,7 +918,7 @@ function sealVerifiedFinalReport(
       [[], []],
       "bounded dedupe fixtures require a planned dedupe-findings producer"
     );
-    sealVerifiedNodeOutputs(runRoot, "final-report");
+    sealVerifiedNodeOutputs(runRoot, "final-report", [], validationWarnings);
     return;
   }
   assert.equal(dedupeNodes.length, 1, "report fixtures require at most one planned dedupe-findings attempt");
@@ -928,16 +930,22 @@ function sealVerifiedFinalReport(
     records: lifecycleRecords
   });
   sealVerifiedNodeOutputs(runRoot, "dedupe-findings");
-  sealVerifiedNodeOutputs(runRoot, "final-report");
+  sealVerifiedNodeOutputs(runRoot, "final-report", [], validationWarnings);
 }
 
 function sealVerifiedNodeOutputs(
   runRoot: string,
   logicalNodeId: string,
-  additionalPublicationPaths: readonly string[] = []
+  additionalPublicationPaths: readonly string[] = [],
+  validationWarnings: readonly ArtifactValidationWarning[] = []
 ): void {
   const authority = writeVerifierNodeAuthority(runRoot, logicalNodeId, additionalPublicationPaths);
   const { layout, plannedNode, attemptId, artifactDir, publications } = authority;
+  const markerPath = path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`);
+  if (validationWarnings.length > 0) {
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as Record<string, unknown>;
+    writeJsonRecord(markerPath, { ...marker, validation_warnings: validationWarnings });
+  }
   const runMetadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   assert.ok(runMetadata.workflow, "verified-output fixtures require an active workflow link");
   const workflowRunId = runMetadata.workflow.run_id;
@@ -964,6 +972,7 @@ function sealVerifiedNodeOutputs(
       agent_ref: "Codex",
       workflow_run_id: workflowRunId,
       workflow_task_id: agentTaskId,
+      ...(validationWarnings.length === 0 ? {} : { verification_marker_sha256: digest(fs.readFileSync(markerPath)) }),
       origin: "workflow",
       metadata: { concrete_node_id: plannedNode.id }
     }
@@ -2053,6 +2062,34 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
+});
+
+test("report displays authenticated final-verifier warnings while preserving the report files", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-host-warnings");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeCanonicalReportPair(reportDir, currentReport(runData.run_id));
+  sealVerifiedFinalReport(
+    runData.run_root,
+    [],
+    [],
+    [
+      {
+        code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+        artifact_path: "report.json",
+        field_path: "$.issues[0].confidence",
+        gate: "report-severity-classification-preservation",
+        message: "Optional metadata is missing; the original artifact is accepted unchanged"
+      }
+    ]
+  );
+  const before = snapshotFinalReport(reportDir);
+  const text = await cli(project, ["report", runData.run_id]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /ARTIFACT_OPTIONAL_METADATA_MISSING/u);
+  assert.match(text.stdout, /artifacts\/final-report\/report\.json#\$\.issues\[0\]\.confidence/u);
+  assertFinalReportUnchanged(reportDir, before);
 });
 
 test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {

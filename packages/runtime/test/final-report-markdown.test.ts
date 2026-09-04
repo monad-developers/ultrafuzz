@@ -1,13 +1,54 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+test("final reports retain artifact warnings and their context without changing the report JSON", () => {
+  const report = renderableReport();
+  (report.run_metadata as Record<string, unknown>).artifact_validation_warnings = [
+    {
+      code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+      artifact_path: "artifacts/dedupe/strategy-detections.json",
+      field_path: "$[5].family_id",
+      message: "Optional metadata is missing; the original artifact is accepted unchanged",
+      gate: "strategy-detection-review-stage-reconciliation",
+      source_path: "artifacts/dedupe/deduped-findings.json#$[5].family_id"
+    }
+  ];
+  const before = structuredClone(report);
+  const projection = projectCanonicalFinalReport(report);
+  assert.match(projection.markdown, /## Artifact validation warnings/u);
+  assert.match(projection.markdown, /strategy-detections\.json#\$\[5\]\.family_id/u);
+  assert.match(projection.markdown, /deduped-findings\.json/u);
+  assert.deepEqual(report, before);
+  assert.deepEqual(projection.report, before);
+  assert.match(projectPublicCanonicalFinalReport(report).markdown, /Artifact validation warnings/u);
+});
+
 import {
   isDirectiveConformingFinalReportMarkdown,
   projectCanonicalFinalReport,
+  projectPublicArtifactValidationWarnings,
   projectPublicCanonicalFinalReport,
   renderCoverageEvidenceMarkdownSection,
   supportsCanonicalFinalReportProjection
 } from "../src/final-report-markdown.js";
+
+test("public warning companions redact private context and retain the original diagnostics", () => {
+  const warnings = [
+    {
+      code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+      artifact_path: "artifacts/final/report.json",
+      field_path: "$.issues[0].summary",
+      gate: "report-severity-classification-preservation",
+      message: "Optional metadata is missing; token=synthetic-warning-secret",
+      source_path: "/srv/customer/private/classified.json#$.summary"
+    }
+  ];
+  const before = structuredClone(warnings);
+  const projection = projectPublicArtifactValidationWarnings(warnings);
+  assert.match(projection.markdown, /\$\.issues\[0\]\.summary/u);
+  assert.doesNotMatch(JSON.stringify(projection), /synthetic-warning-secret|\/srv\/customer/u);
+  assert.deepEqual(warnings, before);
+});
 
 function runMetadata(runId: string): Record<string, unknown> {
   return {

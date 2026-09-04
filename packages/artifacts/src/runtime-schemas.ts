@@ -4,6 +4,7 @@ import {
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
 import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
+import { artifactValidationWarningsJsonSchema, type ArtifactValidationWarning } from "./artifact-validation.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 
 export const ARTIFACT_VERIFICATION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:artifact-verification:2" as const;
@@ -126,6 +127,7 @@ export const artifactVerificationJsonSchema = {
       items: { type: "string", minLength: 1, maxLength: 128 }
     },
     artifacts: { type: "array", minItems: 1, items: artifactVerificationEntryJsonSchema },
+    validation_warnings: artifactValidationWarningsJsonSchema,
     publications: {
       type: "array",
       minItems: 1,
@@ -233,6 +235,7 @@ export interface ArtifactVerificationMarker {
   /** Exact ancestor attempt roots admitted by this consumer's preparation. */
   admitted_dependency_attempt_ids?: string[];
   artifacts: ArtifactVerificationEntry[];
+  validation_warnings?: ArtifactValidationWarning[];
   publications: Array<{ path: string; sha256: string }>;
 }
 

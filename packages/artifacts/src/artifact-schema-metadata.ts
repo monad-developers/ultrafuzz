@@ -19,7 +19,12 @@ function artifact(
   return {
     role: "artifact-contract",
     contractIds: [contractId],
-    semanticGates,
+    semanticGates: metadataAdvisoryContracts.has(contractId)
+      ? [
+          ...semanticGates,
+          `${contractId.slice("ultrafuzz/".length, contractId.lastIndexOf("@"))}-metadata-completeness`
+        ]
+      : semanticGates,
     typescriptExport,
     ...(zodParser === undefined ? {} : { zodParser })
   };
@@ -38,6 +43,19 @@ function runtime(
     ...(zodParser === undefined ? {} : { zodParser })
   };
 }
+
+const metadataAdvisoryContracts: ReadonlySet<string> = new Set([
+  "ultrafuzz/findings@2",
+  "ultrafuzz/triaged-findings@1",
+  "ultrafuzz/severity-classified-findings@1",
+  "ultrafuzz/threat-model@1",
+  "ultrafuzz/boundary-recipes@1",
+  "ultrafuzz/dependency-scope-matrix@1",
+  "ultrafuzz/admin-config-boundary-matrix@1",
+  "ultrafuzz/externalized-state-accounting@1",
+  "ultrafuzz/dynamic-enumerator-outputs@1",
+  "ultrafuzz/selected-strategies@1"
+]);
 
 export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "admin-config-boundary-matrix.schema.json": artifact(

@@ -4,11 +4,13 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   assertRegularFileInside,
+  artifactValidationWarningsSchema,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   redactValue,
   safeResolveInside,
-  validateArtifactContract
+  validateArtifactContract,
+  type ArtifactValidationWarning
 } from "@ultrafuzz/artifacts";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
@@ -573,6 +575,10 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     ""
   );
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
+  appendArtifactValidationWarnings(
+    lines,
+    isRecord(report.run_metadata) ? report.run_metadata.artifact_validation_warnings : undefined
+  );
   appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   appendCoverageEvidence(lines, report.coverage_evidence);
@@ -595,6 +601,41 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+/** Host diagnostics can accompany an immutable report without rewriting its JSON/Markdown pair. */
+export function renderArtifactValidationWarningsMarkdown(warnings: readonly ArtifactValidationWarning[]): string {
+  const lines: string[] = [];
+  appendArtifactValidationWarnings(lines, warnings);
+  return lines.length === 0 ? "" : `${lines.join("\n").trim()}\n`;
+}
+
+/** A separately named public companion uses the same privacy boundary as the report. */
+export function projectPublicArtifactValidationWarnings(warnings: readonly ArtifactValidationWarning[]): {
+  warnings: ArtifactValidationWarning[];
+  markdown: string;
+} {
+  const publicWarnings = artifactValidationWarningsSchema.parse(
+    redactSecretsInStringValues(redactPrivatePathsInValue(warnings))
+  );
+  return { warnings: publicWarnings, markdown: renderArtifactValidationWarningsMarkdown(publicWarnings) };
+}
+
+function appendArtifactValidationWarnings(lines: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  lines.push(
+    "",
+    "## Artifact validation warnings",
+    "",
+    "The run continued with partial metadata. Producer artifacts were preserved unchanged.",
+    ""
+  );
+  for (const warning of value.filter(isRecord)) {
+    lines.push(
+      `- ${inlineValue(warning.code)} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+    );
+    if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
+  }
 }
 
 function appendCoverageEvidence(lines: string[], value: unknown): void {

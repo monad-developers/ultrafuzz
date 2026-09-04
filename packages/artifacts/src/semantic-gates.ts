@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { ARTIFACT_SCHEMA_METADATA, type ArtifactSchemaFilename } from "./artifact-schema-metadata.js";
+import { artifactMetadataCompletenessIssues, metadataOmission } from "./artifact-validation.js";
 import { findingNoteAssignmentIssue } from "./findings-schema.js";
 import { validateCoverageEvidence } from "./coverage-evidence.js";
 import {
@@ -64,6 +65,7 @@ export interface SemanticReviewStageContext {
   strategyDetections?: unknown;
   upstreamLifecycleLedger?: unknown;
   upstreamStrategyDetections?: unknown;
+  upstreamStrategyDetectionsArtifactPath?: string;
   rawFindingArtifacts?: readonly SemanticRawFindingArtifactContext[];
 }
 
@@ -149,7 +151,9 @@ export interface SemanticArtifactSetContext {
   implementedProperties?: unknown;
   implementedPropertiesPath?: string;
   dedupedFindings?: unknown;
+  dedupedFindingsArtifactPath?: string;
   triagedFindings?: unknown;
+  triagedFindingsArtifactPath?: string;
   severityClassifiedFindings?: unknown;
   findingLifecycleLedger?: unknown;
   reviewStage?: SemanticReviewStageContext;
@@ -296,11 +300,16 @@ export interface SemanticGateContext {
 export interface SemanticGateExecutionRequest {
   document: unknown;
   context?: SemanticGateContext;
+  /** CI/development may reject advisory defects without changing producer bytes. */
+  strict?: boolean;
 }
 
 export interface SemanticGateIssue {
   path: string;
   message: string;
+  severity?: "error" | "warning";
+  code?: string;
+  sourcePath?: string;
 }
 
 export interface SemanticGateRegistration<Name extends string = string> {
@@ -318,6 +327,12 @@ export type SemanticGateExecutionResult<Name extends string = string> =
     }
   | {
       status: "failed";
+      gate: Name;
+      scope: SemanticGateScope;
+      issues: readonly SemanticGateIssue[];
+    }
+  | {
+      status: "warning";
       gate: Name;
       scope: SemanticGateScope;
       issues: readonly SemanticGateIssue[];
@@ -681,6 +696,32 @@ function preservedArraySubsequence(actual: unknown, upstream: unknown): boolean 
   return upstreamIndex === upstream.length;
 }
 
+const FINDING_ADVISORY_FIELDS = new Set(["summary", "confidence", "severity_guess", "family_id"]);
+
+function findingMetadataSourcePath(
+  context: SemanticGateContext,
+  stage: "dedupedFindings" | "triagedFindings",
+  index: number,
+  field: string
+): string {
+  const artifactPath = context.artifactSet?.[`${stage}ArtifactPath`];
+  const fieldPath = `[${String(index)}].${field}`;
+  return artifactPath === undefined ? `$context.artifactSet.${stage}${fieldPath}` : `${artifactPath}#$${fieldPath}`;
+}
+
+function findingMetadataOmission(
+  actual: Record<string, unknown>,
+  upstream: Record<string, unknown>,
+  field: string,
+  fieldPath: string,
+  sourcePath: string
+): SemanticGateIssue[] | undefined {
+  if (!FINDING_ADVISORY_FIELDS.has(field) || (actual[field] !== undefined && upstream[field] !== undefined)) {
+    return undefined;
+  }
+  return actual[field] === undefined && upstream[field] !== undefined ? [metadataOmission(fieldPath, sourcePath)] : [];
+}
+
 function triagedFindingPreservationIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const triaged = Array.isArray(document) ? document : [];
   const deduped = Array.isArray(context.artifactSet!.dedupedFindings) ? context.artifactSet!.dedupedFindings : [];
@@ -700,6 +741,17 @@ function triagedFindingPreservationIssues(document: unknown, context: SemanticGa
     const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
     for (const field of fields) {
       if (TRIAGE_OWNED_FIELDS.has(field)) continue;
+      const omission = findingMetadataOmission(
+        actual,
+        upstream,
+        field,
+        `$[${String(index)}].${field}`,
+        findingMetadataSourcePath(context, "dedupedFindings", index, field)
+      );
+      if (omission !== undefined) {
+        issues.push(...omission);
+        continue;
+      }
       if (!isDeepStrictEqual(actual[field], upstream[field])) {
         issues.push(issue(`$[${index}].${field}`, `Triage did not preserve upstream field ${JSON.stringify(field)}`));
       }
@@ -749,6 +801,17 @@ function severityClassificationPreservationIssues(
     const fields = new Set([...Object.keys(upstream), ...Object.keys(actual)]);
     for (const field of fields) {
       if (SEVERITY_CLASSIFICATION_OWNED_FIELDS.has(field)) continue;
+      const omission = findingMetadataOmission(
+        actual,
+        upstream,
+        field,
+        `$[${String(index)}].${field}`,
+        findingMetadataSourcePath(context, "triagedFindings", index, field)
+      );
+      if (omission !== undefined) {
+        issues.push(...omission);
+        continue;
+      }
       if (!isDeepStrictEqual(actual[field], upstream[field])) {
         issues.push(
           issue(
@@ -757,6 +820,75 @@ function severityClassificationPreservationIssues(
           )
         );
       }
+    }
+  }
+  issues.push(...severityDedupedMetadataPreservationIssues(classified, context));
+  return issues;
+}
+
+function severityDedupedMetadataPreservationIssues(
+  classified: readonly unknown[],
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  const deduped = arrayAt(context.artifactSet, ["dedupedFindings"]);
+  const triaged = arrayAt(context.artifactSet, ["triagedFindings"]);
+  const issues: SemanticGateIssue[] = [];
+  for (const [index, finding] of classified.entries()) {
+    if (!isRecord(finding)) continue;
+    const upstreamIndex = deduped.findIndex((row) => isRecord(row) && row.id === finding.id);
+    const upstream = deduped[upstreamIndex];
+    if (!isRecord(upstream)) continue;
+    const directUpstream = triaged.find((row) => isRecord(row) && row.id === finding.id);
+    for (const field of FINDING_ADVISORY_FIELDS) {
+      if (upstream[field] === undefined) continue;
+      const fieldPath = `$[${String(index)}].${field}`;
+      if (
+        isRecord(directUpstream) &&
+        directUpstream[field] !== undefined &&
+        !isDeepStrictEqual(directUpstream[field], upstream[field])
+      ) {
+        issues.push(issue(fieldPath, `Supplied triage metadata conflicts with dedupe field ${JSON.stringify(field)}`));
+        continue;
+      }
+      if (finding[field] === undefined) {
+        if (isRecord(directUpstream) && directUpstream[field] !== undefined) continue;
+        issues.push(
+          metadataOmission(fieldPath, findingMetadataSourcePath(context, "dedupedFindings", upstreamIndex, field))
+        );
+      } else if (!isDeepStrictEqual(finding[field], upstream[field])) {
+        issues.push(
+          issue(fieldPath, `Severity classification changed supplied dedupe metadata ${JSON.stringify(field)}`)
+        );
+      }
+    }
+  }
+  return issues;
+}
+
+function reportHistoricalMetadataIssues(
+  report: Readonly<Record<string, unknown>>,
+  direct: Readonly<Record<string, unknown>>,
+  context: SemanticGateContext,
+  reportPath: string
+): SemanticGateIssue[] {
+  if (!Array.isArray(context.artifactSet?.dedupedFindings)) return [];
+  const dedupeKey = stringField(direct, "dedupe_key");
+  const findingId = stringField(direct, "id");
+  const originals = context.artifactSet.dedupedFindings.filter(
+    (candidate) =>
+      isRecord(candidate) &&
+      ((dedupeKey !== undefined && candidate.dedupe_key === dedupeKey) ||
+        (findingId !== undefined && candidate.id === findingId))
+  );
+  if (originals.length !== 1 || !isRecord(originals[0])) return [];
+  const original = originals[0];
+  const issues: SemanticGateIssue[] = [];
+  for (const field of FINDING_ADVISORY_FIELDS) {
+    if (direct[field] !== undefined || original[field] === undefined || report[field] === undefined) continue;
+    if (!isDeepStrictEqual(report[field], original[field])) {
+      issues.push(
+        issue(`${reportPath}.${field}`, `Report metadata conflicts with supplied dedupe field ${JSON.stringify(field)}`)
+      );
     }
   }
   return issues;
@@ -970,8 +1102,13 @@ function reportSeverityClassificationPreservationIssues(
       );
     }
     if (!isRecord(reportEntry.row)) continue;
+    issues.push(...reportHistoricalMetadataIssues(reportEntry.row, finding, context, reportEntry.path));
     for (const field of Object.keys(finding)) {
       if (disposition === "promoted" && (field === "id" || field === "title")) continue;
+      if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
+        issues.push(metadataOmission(`${reportEntry.path}.${field}`));
+        continue;
+      }
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Report did not preserve severity field ${JSON.stringify(field)}`)
@@ -1239,6 +1376,7 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
         )
       );
     }
+    issues.push(...reportHistoricalMetadataIssues(reportEntry.row, finding, context, reportEntry.path));
 
     for (const field of Object.keys(finding)) {
       // Bounded classification mode instructs the report to author every
@@ -1259,6 +1397,10 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
       // against the authenticated ledger with the exact owned-field set, and
       // the row classification must equal the enriched lifecycle record's.
       if (field === "lifecycle" || field === "triage_classification") continue;
+      if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
+        issues.push(metadataOmission(`${reportEntry.path}.${field}`));
+        continue;
+      }
       if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
         issues.push(
           issue(`${reportEntry.path}.${field}`, `Bounded report did not preserve dedupe field ${JSON.stringify(field)}`)
@@ -1803,16 +1945,114 @@ function lifecycleReviewStageIssues(document: unknown, context: SemanticGateCont
   return issues;
 }
 
+function strategyDetectionCore(rows: unknown): unknown {
+  if (!Array.isArray(rows)) return rows;
+  return rows.map((row: unknown) =>
+    isRecord(row) ? Object.fromEntries(Object.entries(row).filter(([field]) => field !== "family_id")) : row
+  );
+}
+
+interface FamilyMetadataAuthority {
+  value: unknown;
+  fieldPath: string;
+  sourcePath: string;
+}
+
+function originalFamilyMetadataAuthority(context: SemanticGateContext, findingId: unknown): FamilyMetadataAuthority[] {
+  const deduped = arrayAt(context.artifactSet, ["dedupedFindings"]);
+  const index = deduped.findIndex((row) => isRecord(row) && row.id === findingId);
+  const finding = deduped[index];
+  if (!isRecord(finding) || finding.family_id === undefined) return [];
+  return [
+    {
+      value: finding.family_id,
+      fieldPath: `$context.artifactSet.dedupedFindings[${String(index)}].family_id`,
+      sourcePath: findingMetadataSourcePath(context, "dedupedFindings", index, "family_id")
+    }
+  ];
+}
+
+function severityDetectionFamilyIssues(
+  detection: Record<string, unknown>,
+  sources: readonly FamilyMetadataAuthority[],
+  index: number
+): SemanticGateIssue[] {
+  const fieldPath = `$[${String(index)}].family_id`;
+  const supplied = [detection.family_id, ...sources.map((source) => source.value)].filter(
+    (value) => value !== undefined
+  );
+  if (new Set(supplied).size > 1) {
+    return [
+      issue(fieldPath, "Severity strategy detection family_id conflicts with supplied upstream or finding metadata")
+    ];
+  }
+  if (supplied.length === 0) return [];
+  const source = sources.find((entry) => entry.value !== undefined);
+  if (detection.family_id === undefined) return [metadataOmission(fieldPath, source?.sourcePath)];
+  const missingSource = sources.find((entry) => entry.value === undefined);
+  return missingSource === undefined ? [] : [metadataOmission(missingSource.fieldPath, source?.sourcePath)];
+}
+
+function severityStrategyDetectionIssues(
+  document: unknown,
+  review: SemanticReviewStageContext,
+  context: SemanticGateContext
+): SemanticGateIssue[] {
+  if (!Array.isArray(review.upstreamStrategyDetections)) {
+    return [issue("$", "Trusted dedupe strategy detections are unavailable")];
+  }
+  if (!Array.isArray(review.findings)) return [issue("$", "Trusted classified findings context is unavailable")];
+  if (!isDeepStrictEqual(strategyDetectionCore(document), strategyDetectionCore(review.upstreamStrategyDetections))) {
+    return [issue("$", "Severity classification did not exactly preserve dedupe strategy detections")];
+  }
+  const detections = arrayAt(document, []);
+  const findings = arrayAt(review, ["findings"]);
+  const upstreamDetections = arrayAt(review, ["upstreamStrategyDetections"]);
+  const issues: SemanticGateIssue[] = [];
+  if (detections.length !== findings.length) {
+    issues.push(issue("$", "Severity strategy detection count differs from the classified finding count"));
+  }
+  for (const [index, detection] of detections.entries()) {
+    const upstream = upstreamDetections[index];
+    const finding = findings[index];
+    if (!isRecord(detection) || !isRecord(upstream) || !isRecord(finding)) continue;
+    if (detection.finding_id !== finding.id) {
+      issues.push(
+        issue(`$[${String(index)}].finding_id`, "Strategy detection differs from its classified finding identity")
+      );
+      continue;
+    }
+    const fieldPath = `$[${String(index)}].family_id`;
+    const upstreamContextPath = `$context.artifactSet.reviewStage.upstreamStrategyDetections[${String(index)}].family_id`;
+    issues.push(
+      ...severityDetectionFamilyIssues(
+        detection,
+        [
+          {
+            value: finding.family_id,
+            fieldPath: `$context.artifactSet.reviewStage.findings[${String(index)}].family_id`,
+            sourcePath: `${review.findingsArtifactPath}#${fieldPath}`
+          },
+          {
+            value: upstream.family_id,
+            fieldPath: upstreamContextPath,
+            sourcePath:
+              review.upstreamStrategyDetectionsArtifactPath === undefined
+                ? upstreamContextPath
+                : `${review.upstreamStrategyDetectionsArtifactPath}#${fieldPath}`
+          },
+          ...originalFamilyMetadataAuthority(context, detection.finding_id)
+        ],
+        index
+      )
+    );
+  }
+  return issues;
+}
+
 function strategyDetectionReviewStageIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
   const review = context.artifactSet!.reviewStage!;
-  if (review.stage === "severity-classification") {
-    if (!Array.isArray(review.upstreamStrategyDetections)) {
-      return [issue("$", "Trusted dedupe strategy detections are unavailable")];
-    }
-    return isDeepStrictEqual(document, review.upstreamStrategyDetections)
-      ? []
-      : [issue("$", "Severity classification did not exactly preserve dedupe strategy detections")];
-  }
+  if (review.stage === "severity-classification") return severityStrategyDetectionIssues(document, review, context);
   if (review.stage !== "dedupe") {
     return [issue("$", `Strategy detections are not declared for review stage ${review.stage}`)];
   }
@@ -1844,7 +2084,11 @@ function strategyDetectionReviewStageIssues(document: unknown, context: Semantic
     if (detection.finding_id !== finding.id) {
       issues.push(issue(`${basePath}.finding_id`, "Strategy detection finding_id differs from its deduped finding"));
     }
-    if (detection.family_id !== finding.family_id) {
+    if (detection.family_id === undefined && finding.family_id !== undefined) {
+      issues.push(metadataOmission(`${basePath}.family_id`, `${review.findingsArtifactPath}#${basePath}.family_id`));
+    } else if (detection.family_id !== undefined && finding.family_id === undefined) {
+      issues.push(metadataOmission(`$context.artifactSet.reviewStage.findings[${String(index)}].family_id`));
+    } else if (detection.family_id !== finding.family_id) {
       issues.push(issue(`${basePath}.family_id`, "Strategy detection family_id differs from its deduped finding"));
     }
     if (detection.dedupe_key !== lifecycle.dedupe_key) {
@@ -4106,6 +4350,31 @@ function dynamicRecommendationProjection(value: unknown): Readonly<Record<string
   return Object.fromEntries(dynamicRecommendationFields.map((field) => [field, value[field]]));
 }
 
+function sameDynamicRecommendation(
+  left: Readonly<Record<string, unknown>> | undefined,
+  right: Readonly<Record<string, unknown>> | undefined
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return dynamicRecommendationFields.every(
+    (field) =>
+      ((field === "rationale" || field === "coverage_gap") &&
+        (left[field] === undefined || right[field] === undefined)) ||
+      isDeepStrictEqual(left[field], right[field])
+  );
+}
+
+function dynamicRecommendationAuthority(
+  occurrences: readonly { recommendation: unknown }[]
+): Readonly<Record<string, unknown>> | undefined {
+  if (occurrences.length === 0) return undefined;
+  // A missing description in the first row must not conceal disagreement
+  // between later supplied values. This is a comparison projection only.
+  const projections = occurrences.map((entry) => dynamicRecommendationProjection(entry.recommendation));
+  return Object.fromEntries(
+    dynamicRecommendationFields.map((field) => [field, projections.find((row) => row?.[field] !== undefined)?.[field]])
+  );
+}
+
 const DYNAMIC_BOUNDARY_RECIPE_STRATEGY_PREFIX = "boundary-recipe-";
 const DYNAMIC_BOUNDARY_RECIPE_COORDINATOR_ID = "boundary-recipe-coordinator";
 
@@ -4354,12 +4623,12 @@ function dynamicStrategyArtifactReconciliationIssues(
       );
     }
     const occurrences = recommendationsById.get(strategyId) ?? [];
-    const expectedProjection = dynamicRecommendationProjection(occurrences[0]?.recommendation);
+    const expectedProjection = dynamicRecommendationAuthority(occurrences);
     if (
       expectedProjection === undefined ||
       occurrences.some(
         (occurrence) =>
-          !isDeepStrictEqual(dynamicRecommendationProjection(occurrence.recommendation), expectedProjection)
+          !sameDynamicRecommendation(dynamicRecommendationProjection(occurrence.recommendation), expectedProjection)
       )
     ) {
       issues.push(
@@ -4401,9 +4670,9 @@ function dynamicStrategyArtifactReconciliationIssues(
     if (strategyId === undefined) continue;
     const occurrences = recommendationsById.get(strategyId) ?? [];
     if (occurrences.length === 0) continue;
-    const expectedProjection = dynamicRecommendationProjection(occurrences[0]!.recommendation);
+    const expectedProjection = dynamicRecommendationAuthority(occurrences);
     const selectedProjection = dynamicRecommendationProjection(selectedRow);
-    if (expectedProjection !== undefined && !isDeepStrictEqual(selectedProjection, expectedProjection)) {
+    if (expectedProjection !== undefined && !sameDynamicRecommendation(selectedProjection, expectedProjection)) {
       issues.push(
         issue(
           `$.strategies[${selectedIndex}]`,
@@ -7163,6 +7432,16 @@ function usageSourceEventJoinIssues(document: unknown, context: SemanticGateCont
 }
 
 const gateSpecifications = {
+  "findings-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "triaged-findings-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "severity-classified-findings-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "threat-model-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "boundary-recipes-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "dependency-scope-matrix-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "admin-config-boundary-matrix-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "externalized-state-accounting-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "dynamic-enumerator-outputs-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
+  "selected-strategies-metadata-completeness": documentGate(artifactMetadataCompletenessIssues),
   "admin-config-surface-id-uniqueness": documentGate(uniqueFieldGate([["surfaces"]], "surface_id", "admin surface ID")),
   "admin-config-surface-joins": documentGate(adminConfigJoinIssues),
   "agent-source-proof-commit-binding": contextualGate(
@@ -7755,10 +8034,18 @@ export function executeSemanticGate<Name extends SemanticGateName>(
   } catch (error) {
     issues = [issue("$", `Semantic gate could not execute: ${error instanceof Error ? error.message : String(error)}`)];
   }
+  if (request.strict) {
+    issues = issues.map((entry) => (entry.severity === "warning" ? { ...entry, severity: "error" } : entry));
+  }
   const boundedIssues = boundSemanticGateIssues(issues);
   return boundedIssues.length === 0
     ? { status: "passed", gate: name, scope: registration.scope }
-    : { status: "failed", gate: name, scope: registration.scope, issues: Object.freeze(boundedIssues) };
+    : {
+        status: boundedIssues.some((entry) => entry.severity !== "warning") ? "failed" : "warning",
+        gate: name,
+        scope: registration.scope,
+        issues: Object.freeze(boundedIssues)
+      };
 }
 
 function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): SemanticGateIssue[] {
@@ -7769,8 +8056,16 @@ function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): Semantic
     return [...issues];
   }
 
+  // Advisory volume cannot hide a fatal issue or itself fail a healthy campaign.
+  issues = [
+    ...issues.filter((entry) => entry.severity !== "warning"),
+    ...issues.filter((entry) => entry.severity === "warning")
+  ];
   const bounded: SemanticGateIssue[] = [];
-  const sentinelBudgetBytes = Buffer.byteLength(JSON.stringify(semanticGateTruncationIssue(issues.length)), "utf8");
+  const sentinelBudgetBytes = Buffer.byteLength(
+    JSON.stringify({ ...semanticGateTruncationIssue(issues.length), severity: "warning" }),
+    "utf8"
+  );
   let boundedIssueBytes = 0;
   const candidateLimit = Math.min(issues.length, MAX_SEMANTIC_GATE_ISSUES - 1);
   for (let index = 0; index < candidateLimit; index += 1) {
@@ -7784,7 +8079,11 @@ function boundSemanticGateIssues(issues: readonly SemanticGateIssue[]): Semantic
     bounded.push(candidate);
     boundedIssueBytes += candidateBytes;
   }
-  bounded.push(semanticGateTruncationIssue(issues.length - bounded.length));
+  const omitted = issues.slice(bounded.length);
+  bounded.push({
+    ...semanticGateTruncationIssue(omitted.length),
+    ...(omitted.every((entry) => entry.severity === "warning") ? { severity: "warning" as const } : {})
+  });
   return bounded;
 }
 
@@ -7817,7 +8116,8 @@ export function executeSchemaSemanticGates(
  */
 export function executeOfflineSchemaSemanticGates(
   schemaFilename: ArtifactSchemaFilename,
-  document: unknown
+  document: unknown,
+  options: { strict?: boolean } = {}
 ): SemanticGateExecutionResult[] {
-  return executeSchemaSemanticGates(schemaFilename, { document });
+  return executeSchemaSemanticGates(schemaFilename, { document, ...options });
 }

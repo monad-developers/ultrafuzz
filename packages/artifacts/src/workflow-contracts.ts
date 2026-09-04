@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { artifactValidationWarningsSchema } from "./artifact-validation.js";
 
 import {
   MAX_FINDINGS,
@@ -364,7 +365,11 @@ export const boundaryRecipesSchema = withDocumentMetadata(
       z.strictObject({ id: nonEmptyString, reason: nonEmptyString, evidence_paths: uniqueStrings() })
     ),
     coverage_priorities: z.array(
-      z.strictObject({ workflow: nonEmptyString, priority: z.enum(PROPERTY_PRIORITIES), rationale: nonEmptyString })
+      z.strictObject({
+        workflow: nonEmptyString,
+        priority: z.enum(PROPERTY_PRIORITIES),
+        rationale: nonEmptyString.optional()
+      })
     )
   }),
   "boundary-recipes",
@@ -418,7 +423,7 @@ export const adminConfigBoundaryMatrixSchema = withDocumentMetadata(
       })
     ),
     generated_tests: z.array(z.strictObject({ path: nonEmptyString, checks: uniqueStrings(1) })),
-    coverage_notes: z.array(z.strictObject({ surface_id: nonEmptyString, reason: nonEmptyString }))
+    coverage_notes: z.array(z.strictObject({ surface_id: nonEmptyString, reason: nonEmptyString })).optional()
   }),
   "admin-config-boundary-matrix",
   1,
@@ -439,13 +444,13 @@ const dependencyRowSchema = z.strictObject({
   classification: dependencyClassification,
   source_evidence: uniqueStrings(1),
   source_backed_scope_claim: nonEmptyString,
-  in_scope_rationale: nonEmptyString.nullable(),
+  in_scope_rationale: nonEmptyString.nullable().optional(),
   selected_test_cases: uniqueStrings(),
   expected_classification_if_red: z
     .enum(["production-bug", "incomplete-spec", "harness-defect", "false-positive"])
     .nullable(),
-  scope_notes: stringList,
-  harness_notes: stringList
+  scope_notes: stringList.optional(),
+  harness_notes: stringList.optional()
 });
 
 export const dependencyScopeMatrixSchema = withDocumentMetadata(
@@ -462,7 +467,7 @@ export const dependencyScopeMatrixSchema = withDocumentMetadata(
         evidence_paths: uniqueStrings(1)
       })
     ),
-    coverage_notes: z.array(z.strictObject({ dependency_id: nonEmptyString, reason: nonEmptyString }))
+    coverage_notes: z.array(z.strictObject({ dependency_id: nonEmptyString, reason: nonEmptyString })).optional()
   }),
   "dependency-scope-matrix",
   1,
@@ -510,7 +515,7 @@ export const externalizedStateAccountingSchema = withDocumentMetadata(
     incomplete_specs: z.array(
       z.strictObject({ subject: nonEmptyString, reason: nonEmptyString, evidence_paths: uniqueStrings() })
     ),
-    coverage_notes: stringList
+    coverage_notes: stringList.optional()
   }),
   "externalized-state-accounting",
   1,
@@ -1254,8 +1259,8 @@ export const differentialReportReviewSchema = withDocumentMetadata(
 const dynamicRecommendationSchema = z.strictObject({
   strategy_id: nonEmptyString,
   title: nonEmptyString,
-  rationale: nonEmptyString,
-  coverage_gap: nonEmptyString,
+  rationale: nonEmptyString.optional(),
+  coverage_gap: nonEmptyString.optional(),
   evidence_paths: uniqueStrings(1),
   proposed_test_path: nonEmptyString,
   focused_command: nonEmptyString,
@@ -1665,6 +1670,7 @@ export const reportSchema = withDocumentMetadata(
       prompt_digest: z.union([sha256, z.literal("unavailable")]),
       expanded_graph_fingerprint: nonEmptyString,
       agent_execution: reportAgentExecutionSchema.optional(),
+      artifact_validation_warnings: artifactValidationWarningsSchema.optional(),
       source_run_ids: uniqueStrings().optional()
     }),
     campaign_outcome: z

@@ -37,7 +37,8 @@ incompatible controlled capabilities:
 - a required capability proven `absent` is a hard exclusion;
 - an incompatible capability proven `present` is a hard exclusion;
 - `unknown` is not a hard exclusion;
-- every exclusion must cite the threat-model capability rationale and evidence.
+- every exclusion must cite the threat-model capability status and evidence,
+  preserving its rationale when supplied.
 
 Copy every catalog record ID into `catalog_class_ids` and emit exactly one
 `applicability_decision` for each ID. Do not omit a class merely because it is
@@ -53,6 +54,13 @@ checks mechanically (for example with a small script that reads
 hand. If it was not modeled, record it as `unknown` with empty evidence and
 explain that it was not established by the upstream model. Do not infer
 `absent` from an omitted capability.
+
+If a modeled capability omits `rationale`, set the corresponding check's
+`rationale` to exactly `Not recorded in the upstream threat model.`. This
+attributed fallback records the missing explanation; still copy the capability's
+status and evidence exactly. Do not invent an upstream rationale or replace a
+supplied one. The applicability decision's own `rationale` remains required:
+explain the decision from the recorded capability statuses and evidence.
 
 ## MDX replacement contract
 
