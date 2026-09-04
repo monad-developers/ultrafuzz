@@ -21,6 +21,10 @@ const WORKER_DIAGNOSTIC_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 /** Codes both workers emit for their own children. Every reader greps these, so they are shared, not local. */
 export const WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE = "WORKER_COMMAND_FAILED";
 export const WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE = "WORKER_COMMAND_INTERRUPTED";
+/** Code both workers emit for a failure nothing else named; without it the contract alone calls it a sandbox death. */
+export const WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE = "WORKER_UNHANDLED_FAILURE";
+/** Message a failure diagnostic carries when its detail could not pass the collector's secret gate. */
+export const WORKER_FAILURE_DETAIL_WITHHELD_MESSAGE = "failure detail withheld by the secret gate";
 
 export interface WorkerDiagnostic {
   code: string;
@@ -145,6 +149,26 @@ export function workerDiagnosticLogPayload(
     if (payload.length <= MAX_WORKER_DIAGNOSTIC_LOG_PAYLOAD_CHARACTERS) return payload;
   }
   return undefined;
+}
+
+/**
+ * The diagnostic naming `error` under `code`: its described cause chain when the collector will carry that
+ * text, otherwise a fixed notice that the detail was withheld.
+ *
+ * `workerDiagnosticLogPayload` drops an entry the collected grammar cannot carry, which is right for a child's
+ * stderr tail -- the exit code still names the failure -- and wrong here, where the entry is the only trace
+ * the failure leaves: an empty line is the silent `sandbox-exited` misattribution again (#320). Withholding
+ * the detail keeps the code in the log and still fails closed on the text.
+ */
+export function workerFailureDiagnostic(
+  code: string,
+  error: unknown,
+  forbiddenSecretValues: readonly string[] = []
+): WorkerDiagnostic {
+  const message = describeWorkerTermination(error, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES);
+  return workerDiagnosticLogPayload([{ code, message }], forbiddenSecretValues) === undefined
+    ? { code, message: WORKER_FAILURE_DETAIL_WITHHELD_MESSAGE }
+    : { code, message };
 }
 
 /**

@@ -3,8 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   canScoreBenchmarkRow,
   classifyTerminalDisposition,
-  runBenchmarkExecutionOnce
+  OperationalDispositionError,
+  runBenchmarkExecutionOnce,
+  runNamingUnhandledFailure
 } from "../src/terminal-disposition.js";
+import { CheckpointIncompatibleError } from "../src/worker-lineage.js";
 
 function taskBinding(attemptId: string, concreteNodeId = attemptId) {
   return {
@@ -463,5 +466,66 @@ describe("terminal benchmark disposition", () => {
 
     expect(disposition).toEqual({ kind: "operational-failure", failedTasks: 0, operationalFailures: 1 });
     expect(canScoreBenchmarkRow("failed", disposition)).toBe(false);
+  });
+});
+
+describe("runNamingUnhandledFailure", () => {
+  it("names a failure that declared no disposition, and only that one", async () => {
+    const reported: unknown[] = [];
+    const report = (error: unknown): void => void reported.push(error);
+    const plain = new TypeError("Cannot read properties of undefined (reading 'path')");
+
+    const failure = await runNamingUnhandledFailure(
+      async () => {
+        throw plain;
+      },
+      { report }
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(OperationalDispositionError);
+    expect((failure as OperationalDispositionError).category).toBe("unreachable");
+    expect((failure as { cause: unknown }).cause).toBe(plain);
+    expect(reported).toEqual([plain]);
+
+    // An error that already carries its disposition, or one the caller's contract already names, passes by
+    // identity: renaming it would cost the code the terminal contract records for it.
+    const disposed = new OperationalDispositionError("capacity-unavailable");
+    await expect(
+      runNamingUnhandledFailure(
+        async () => {
+          throw disposed;
+        },
+        { report }
+      )
+    ).rejects.toBe(disposed);
+    const incompatible = new CheckpointIncompatibleError("persisted lineage attempt identity does not match");
+    await expect(
+      runNamingUnhandledFailure(
+        async () => {
+          throw incompatible;
+        },
+        { passthrough: (error) => error instanceof CheckpointIncompatibleError, report }
+      )
+    ).rejects.toBe(incompatible);
+    expect(reported).toEqual([plain]);
+    await expect(runNamingUnhandledFailure(async () => "finished", { report })).resolves.toBe("finished");
+  });
+
+  it("keeps the failure it is naming when the report itself fails", async () => {
+    const plain = new Error("sync exited 1");
+    const failure = await runNamingUnhandledFailure(
+      async () => {
+        throw plain;
+      },
+      {
+        report: () => {
+          throw new Error("the log is gone");
+        }
+      }
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(OperationalDispositionError);
+    expect((failure as OperationalDispositionError).category).toBe("unreachable");
+    expect((failure as { cause: unknown }).cause).toBe(plain);
   });
 });

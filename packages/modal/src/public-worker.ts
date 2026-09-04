@@ -63,15 +63,22 @@ import {
   describeWorkerTermination,
   sanitizeWorkerDiagnosticMessage,
   workerDiagnosticLogPayload,
+  workerFailureDiagnostic,
   MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
   WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
   WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE,
+  WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE,
   type BoundedStderrTail,
   type WorkerDiagnostic
 } from "./worker-diagnostics.js";
-import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
+import {
+  emptyWorkerCheckpoint,
+  runWithTerminalPersistence,
+  WorkerResultWriter,
+  type WorkerDiagnosticCode
+} from "./worker-result.js";
 import { guardCurrentPersistentWorkerLineage } from "./worker-lineage.js";
-import { OperationalDispositionError } from "./terminal-disposition.js";
+import { OperationalDispositionError, runNamingUnhandledFailure } from "./terminal-disposition.js";
 
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
@@ -132,6 +139,8 @@ export class PublicWorkerCommandInterruptedError extends OperationalDispositionE
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
 const MODEL_WORK_CORROBORATION_FAILED_DIAGNOSTIC_CODE = "MODEL_WORK_CORROBORATION_FAILED";
+/** The post-report bundle assembly failed: a gate or read in `publishPublicBenchmarkBundle` threw. */
+const PUBLIC_BUNDLE_FAILED_DIAGNOSTIC_CODE = "PUBLIC_BUNDLE_FAILED";
 
 /** Secret values every diagnostic a command emits is redacted against, resolved when the command runs. */
 type PublicDiagnosticSecretValues = readonly string[] | (() => Promise<readonly string[]>);
@@ -203,16 +212,33 @@ export async function runPublicBenchmarkWorker(input: {
       model_work_started: modelWorkStarted
     })
   });
+  const namedDiagnosticCode = (error: unknown): WorkerDiagnosticCode | undefined =>
+    input.isCheckpointIncompatible(error)
+      ? "checkpoint-incompatible"
+      : error instanceof PublicEvalDiagnosticsBuildError
+        ? "public-eval-diagnostics-invalid"
+        : undefined;
+  // Secret values resolved so far, kept outside `run` so a failure anywhere in it is redacted against them.
+  const retainedForbiddenSecretValues = new Set<string>();
+  // Set once this attempt's log exists. Until then a failure has nowhere to be named, so it propagates as it
+  // always has; the lineage faults preflight raises carry their own code regardless.
+  let logStarted = false;
   await runWithTerminalPersistence({
     writer,
     snapshot: () => Promise.resolve(emptyWorkerCheckpoint()),
     flush: flushFilesystem,
-    diagnosticCodeForError: (error) =>
-      input.isCheckpointIncompatible(error)
-        ? "checkpoint-incompatible"
-        : error instanceof PublicEvalDiagnosticsBuildError
-          ? "public-eval-diagnostics-invalid"
-          : undefined,
+    diagnosticCodeForError: namedDiagnosticCode,
+    unhandledFailure: {
+      passthrough: (error) => !logStarted || namedDiagnosticCode(error) !== undefined,
+      report: (error) => {
+        appendPublicWorkerFailureLogLine(
+          logPath,
+          WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE,
+          error,
+          retainedForbiddenSecretValues
+        );
+      }
+    },
     run: async () => {
       await input.preflight({
         workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath, diagnosticsPath],
@@ -232,10 +258,10 @@ export async function runPublicBenchmarkWorker(input: {
         resultGenerationFloor: writer.currentGeneration()
       });
       await writeFile(logPath, `${new Date().toISOString()} worker-started\n`, { mode: 0o600 });
+      logStarted = true;
       await writer.writePartial(emptyWorkerCheckpoint());
       await flushFilesystem();
       assertPublicWorkerInput(input.config, input.model);
-      const retainedForbiddenSecretValues = new Set<string>();
       const resolveForbiddenSecretValues = async (): Promise<string[]> => {
         for (const value of await publicBenchmarkWorkerSecretValues(input.config, input.model, input.dataRoot)) {
           retainedForbiddenSecretValues.add(value);
@@ -389,22 +415,27 @@ export async function runPublicBenchmarkWorker(input: {
           evalFailureDiagnosticsFromStdout: true
         }
       );
-      const bundle = createPublicBenchmarkBundle({
-        benchmark: input.config.public_benchmark.benchmark,
-        lane: input.config.public_benchmark.lane,
-        modelSlug: input.model.slug,
-        model: input.model.model,
-        reasoning: input.model.reasoning,
-        candidateCommit: input.config.public_benchmark.candidate_commit,
-        evalRunId: prepared.evalRunId,
-        lineage: input.lineage,
-        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
-          root: input.dataRoot,
-          source: diagnosticsPath
-        }),
-        forbiddenSecretValues: await resolveForbiddenSecretValues()
+      await publishPublicBenchmarkBundle({
+        logPath,
+        bundlePath,
+        forbiddenSecretValues: retainedForbiddenSecretValues,
+        assemble: async () =>
+          createPublicBenchmarkBundle({
+            benchmark: input.config.public_benchmark.benchmark,
+            lane: input.config.public_benchmark.lane,
+            modelSlug: input.model.slug,
+            model: input.model.model,
+            reasoning: input.model.reasoning,
+            candidateCommit: input.config.public_benchmark.candidate_commit,
+            evalRunId: prepared.evalRunId,
+            lineage: input.lineage,
+            files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
+              root: input.dataRoot,
+              source: diagnosticsPath
+            }),
+            forbiddenSecretValues: await resolveForbiddenSecretValues()
+          })
       });
-      await writePublicBundleAtomic(bundlePath, bundle);
       return "finished";
     }
   });
@@ -694,6 +725,38 @@ export function assertPublicWorkerBundleLineage(
   if (mismatches.length > 0) {
     throw new Error(`persisted public benchmark bundle has incompatible ${mismatches.join(", ")}`);
   }
+}
+
+/**
+ * Assemble and seal the public bundle, naming a failure in the worker log before it becomes this worker's fault.
+ *
+ * This is the last work the worker does, and every gate in it -- the verified report authority per row, the
+ * size bound, the secret gate -- throws a plain `Error`. Run 33904992917 finished `eval report` and then was
+ * collected as `sandbox-exited` with no diagnostics line, because nothing here wrote one (#320). The gates'
+ * decisions are unchanged; only their reasons now reach the log.
+ */
+export async function publishPublicBenchmarkBundle(input: {
+  logPath: string;
+  bundlePath: string;
+  forbiddenSecretValues: Iterable<string>;
+  assemble: () => Promise<PublicBenchmarkBundle>;
+}): Promise<void> {
+  await runNamingUnhandledFailure(
+    async () => {
+      const bundle = await input.assemble();
+      await writePublicBundleAtomic(input.bundlePath, bundle);
+    },
+    {
+      report: (error) => {
+        appendPublicWorkerFailureLogLine(
+          input.logPath,
+          PUBLIC_BUNDLE_FAILED_DIAGNOSTIC_CODE,
+          error,
+          input.forbiddenSecretValues
+        );
+      }
+    }
+  );
 }
 
 export async function writePublicBundleAtomic(filePath: string, bundle: PublicBenchmarkBundle): Promise<void> {
@@ -1670,6 +1733,17 @@ export function appendPublicWorkerDiagnosticLogLine(
   } catch {
     // A diagnostic that cannot be composed is evidence that is missing, not an outcome.
   }
+}
+
+/** Record `error` in the worker log under `code`, redacted against the secret values retained so far. */
+function appendPublicWorkerFailureLogLine(
+  logPath: string,
+  code: string,
+  error: unknown,
+  forbiddenSecretValues: Iterable<string>
+): void {
+  const secrets = [...forbiddenSecretValues];
+  appendPublicWorkerDiagnosticLogLine(logPath, [workerFailureDiagnostic(code, error, secrets)], secrets);
 }
 
 function requiredEnv(name: string, env: Record<string, string | undefined> = process.env): string {
