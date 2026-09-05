@@ -20,8 +20,13 @@ test("final reports retain artifact warnings and their context without changing 
   assert.match(projection.markdown, /deduped-findings\.json/u);
   assert.deepEqual(report, before);
   assert.deepEqual(projection.report, before);
-  assert.match(projectPublicCanonicalFinalReport(report).markdown, /Artifact validation warnings/u);
+  const published = projectPublicCanonicalFinalReport(report);
+  assert.match(published.markdown, /Artifact validation warnings/u);
+  assertPublicProjectionFixedPoint(published);
 });
+
+import { validateSafeId } from "@ultrafuzz/artifacts";
+import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
   isDirectiveConformingFinalReportMarkdown,
@@ -29,7 +34,8 @@ import {
   projectPublicArtifactValidationWarnings,
   projectPublicCanonicalFinalReport,
   renderCoverageEvidenceMarkdownSection,
-  supportsCanonicalFinalReportProjection
+  supportsCanonicalFinalReportProjection,
+  type CanonicalFinalReportProjection
 } from "../src/final-report-markdown.js";
 
 test("public warning companions redact private context and retain the original diagnostics", () => {
@@ -48,6 +54,11 @@ test("public warning companions redact private context and retain the original d
   assert.match(projection.markdown, /\$\.issues\[0\]\.summary/u);
   assert.doesNotMatch(JSON.stringify(projection), /synthetic-warning-secret|\/srv\/customer/u);
   assert.deepEqual(warnings, before);
+  assert.deepEqual(
+    projectPublicArtifactValidationWarnings(projection.warnings),
+    projection,
+    "the public bundle re-projects the companion and requires the same bytes back"
+  );
 });
 
 function runMetadata(runId: string): Record<string, unknown> {
@@ -67,6 +78,17 @@ function runMetadata(runId: string): Record<string, unknown> {
     prompt_digest: "c".repeat(64),
     expanded_graph_fingerprint: "d".repeat(64)
   };
+}
+
+/**
+ * The public bundle re-applies the public projection to the published report.json and requires the
+ * same JSON and the same report.md bytes back (packages/modal/src/public-bundle.ts), so every
+ * public fixture must be a fixed point of the projection.
+ */
+function assertPublicProjectionFixedPoint(published: CanonicalFinalReportProjection): void {
+  const reprojected = projectPublicCanonicalFinalReport(published.report);
+  assert.deepEqual(reprojected.report, published.report, "public report.json is not a fixed point of the projection");
+  assert.equal(reprojected.markdown, published.markdown, "public report.md changes when report.json is re-projected");
 }
 
 function renderableReport(): Record<string, unknown> {
@@ -198,6 +220,124 @@ test("public final-report projection redacts private paths without changing inte
   assert.match(JSON.stringify(published.report), /and this block comment/u);
   assert.doesNotMatch(published.markdown, /synthetic-public-report-secret|\/srv\/customer\/private/u);
   assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+  assertPublicProjectionFixedPoint(published);
+});
+
+test("public final-report projection redacts secrets with a placeholder the bundle can republish", () => {
+  const token = "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  const apiKey = "sk-abcdefghijklmnopqrstuvwx"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  const cloneUrl = "https://deploy:hunter2hunter2@github.com/example/repository"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  const input = renderableReport();
+  const [issue] = input.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  // Three shapes the earlier placeholders broke on: a key-name assignment (`token=[redacted]`
+  // re-projects to `token=[redacted]]` because `]` ends the value class), a positive secret directly
+  // followed by `(` (`[redacted](` reads as a Markdown link), and a positive secret in an inline-code
+  // run summary value (`<redacted>` reads as raw HTML).
+  issue.description =
+    `A caller signed the transition with ${token} after cloning ${cloneUrl}; ` +
+    `the key ${apiKey}(since rotated) was also accepted. ` +
+    "token=synthetic-final-report-secret stays private and the reproducer is at /srv/customer/private/reproducer.sol.";
+  (issue.proof_of_concept as Record<string, unknown>).scenario = [
+    `Authenticate with ${token}.`,
+    "Execute the transition and observe the mismatch."
+  ];
+  (input.run_metadata as Record<string, unknown>).repository =
+    `https://x-access-token:${token}@github.com/example/repository`;
+  const before = structuredClone(input);
+
+  // Prose escapes Markdown punctuation such as the token's underscore, so the developer Markdown is
+  // checked on the token body while the JSON keeps the exact token.
+  const tokenBody = token.slice("ghp_".length);
+  const internal = projectCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  assert.deepEqual(internal.report, before);
+  assert.equal(JSON.stringify(internal.report).includes(token), true, "the developer report keeps the token");
+  assert.equal(internal.markdown.includes(tokenBody), true);
+  assert.equal(internal.markdown.includes(apiKey), true);
+  assert.equal(internal.markdown.includes(cloneUrl), true);
+  assert.doesNotMatch(internal.markdown, /REDACTED|\[redacted\]|<redacted>|\[redacted-path\]/u);
+
+  const published = projectPublicCanonicalFinalReport(input);
+  const publishedJson = JSON.stringify(published.report);
+  assert.deepEqual(input, before);
+  assert.equal(publishedJson.includes(tokenBody), false);
+  assert.equal(publishedJson.includes(apiKey), false);
+  assert.equal(publishedJson.includes("hunter2hunter2"), false);
+  assert.doesNotMatch(publishedJson, /<redacted>|\[redacted\]|synthetic-final-report-secret|\/srv\/customer\/private/u);
+  assert.match(publishedJson, /token=REDACTED stays private/u);
+  assert.match(publishedJson, /the key REDACTED\(since rotated\)/u);
+  assert.match(publishedJson, /\[redacted-path\]/u);
+  assert.equal(published.markdown.includes(tokenBody), false);
+  assert.equal(published.markdown.includes(apiKey), false);
+  assert.equal(published.markdown.includes("hunter2hunter2"), false);
+  assert.doesNotMatch(published.markdown, /<redacted>|&lt;redacted&gt;|\[redacted\]|synthetic-final-report-secret/u);
+  // secretlint's basicauth rule replaces the whole `scheme://user:password@host` authority.
+  assert.match(published.markdown, /^- Repository: `REDACTED\/example\/repository`$/mu);
+  assert.match(published.markdown, /signed the transition with REDACTED after cloning/u);
+  assert.match(published.markdown, /the key REDACTED\(since rotated\) was also accepted/u);
+  assert.match(published.markdown, /^1\. Authenticate with REDACTED\.$/mu);
+  assert.match(published.markdown, /\[redacted-path\]/u);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+  assertPublicProjectionFixedPoint(published);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(published.markdown.replace("`REDACTED", "`<redacted>"), published.report),
+    false,
+    "the raw-HTML gate still rejects the default placeholder in inline code"
+  );
+});
+
+test("public final-report projection keeps machine-generated run IDs the entropy pass would redact", () => {
+  // Bounded eval run IDs from UltraFuzzBench smoke run 33918585561 (boundedEvalWorkflowRunId). The
+  // public bundle requires report.json to repeat the run ID from its run records, so redacting these
+  // fails publication for every smoke row.
+  const runId = "ci-33918585561-1-smoke-ultrafuzz-benc-3e994a685ad7bf44";
+  const sourceRunId = "ci-33918585561-1-smoke-ultrafuzz-benc-7d622d2207767a8d";
+  for (const id of [runId, sourceRunId]) {
+    assert.equal(validateSafeId(id), id);
+    assert.notEqual(
+      redactSecretsInText(id, "<redacted>", [], "all"),
+      id,
+      `${id} must be a speculative high-entropy candidate for this test to mean anything`
+    );
+    assert.equal(redactSecretsInText(id, "<redacted>", [], "positive-only"), id);
+  }
+  const input = renderableReport();
+  input.run_metadata = { ...runMetadata(runId), source_run_id: sourceRunId };
+  const before = structuredClone(input);
+
+  const published = projectPublicCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  const metadata = published.report.run_metadata as Record<string, unknown>;
+  assert.equal(metadata.run_id, runId);
+  assert.equal(metadata.source_run_id, sourceRunId);
+  assert.match(published.markdown, /^- Run ID: `ci-33918585561-1-smoke-ultrafuzz-benc-3e994a685ad7bf44`$/mu);
+  assert.match(published.markdown, /^- Source run ID: `ci-33918585561-1-smoke-ultrafuzz-benc-7d622d2207767a8d`$/mu);
+  assert.match(JSON.stringify(published.report), /token=REDACTED/u, "every other field still scans in full");
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+  assertPublicProjectionFixedPoint(published);
+});
+
+test("public final-report projection still redacts a vendor-format credential in a run ID slot", () => {
+  const credentialId = "sk-abcdefghijklmnopqrstuvwx"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  assert.equal(validateSafeId(credentialId), credentialId, "the ID slot accepts this shape");
+  const input = renderableReport();
+  input.run_metadata = runMetadata(credentialId);
+  const before = structuredClone(input);
+
+  const published = projectPublicCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  const metadata = published.report.run_metadata as Record<string, unknown>;
+  assert.equal(metadata.run_id, "REDACTED");
+  assert.equal(metadata.source_run_id, "REDACTED");
+  assert.equal(JSON.stringify(published.report).includes(credentialId), false);
+  assert.equal(published.markdown.includes(credentialId), false);
+  assert.match(published.markdown, /^- Run ID: `REDACTED`$/mu);
+  assert.match(published.markdown, /^- Source run ID: `REDACTED`$/mu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assertPublicProjectionFixedPoint(published);
 });
 
 test("canonical final-report validation rejects presentation drift instead of repairing it", () => {
