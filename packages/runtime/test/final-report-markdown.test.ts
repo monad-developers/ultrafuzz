@@ -340,6 +340,102 @@ test("public final-report projection still redacts a vendor-format credential in
   assertPublicProjectionFixedPoint(published);
 });
 
+test("public final-report projection collapses duplicates that redaction creates in unique arrays", () => {
+  // UltraFuzzBench smoke run 33933691679 (issue #1028): the internal report passed the schema and the
+  // public copy failed `issues/0/affected_files: must NOT have duplicate items`. Redaction maps every
+  // private path to `[redacted-path]` and every flagged string to the placeholder, so two distinct
+  // entries of one array collapse to one value and the schema's unique arrays reject the public copy.
+  const token = "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  const privateFiles = ["/root/workspace/target/src/Vault.sol", "/root/workspace/target/src/Token.sol"];
+  const privatePatches = [
+    "/root/workspace/target/patches/vault.patch",
+    "patches/fix.patch",
+    "/root/workspace/target/patches/token.patch"
+  ];
+  // Ordinary long repository paths and qualified function names that the speculative high-entropy
+  // pass flags in mode "all" (32+ characters, three character classes, entropy >= 4.3), around a
+  // short entry it keeps.
+  const keptFile = "src/Vault.sol";
+  const keptFunction = "Vault.deposit";
+  const flaggedFiles = [
+    "contracts/mocks/MockOracleAggregatorWithTimestampSkew.sol",
+    keptFile,
+    "contracts/mocks/MockOracleAggregatorWithoutTimestampSkew.sol"
+  ];
+  const flaggedFunctions = [
+    "UniswapV3TwapOracleAdapterWithFallback.consultTwapPrice",
+    keptFunction,
+    "MockOracleAggregatorWithTimestampSkew.latestRoundData"
+  ];
+  for (const value of [...flaggedFiles, ...flaggedFunctions]) {
+    const flagged = redactSecretsInText(value, "REDACTED", [], "all") !== value;
+    assert.equal(
+      flagged,
+      value !== keptFile && value !== keptFunction,
+      `the speculative high-entropy pass must ${flagged ? "keep" : "flag"} ${value} for this test to mean anything`
+    );
+  }
+
+  const input = renderableReport();
+  const [first] = input.issues as Array<Record<string, unknown>>;
+  if (first === undefined) throw new Error("missing issue fixture");
+  first.affected_files = [...privateFiles];
+  first.patch_refs = [...privatePatches];
+  first.affected_functions = ["deposit", "withdraw"];
+  const second = structuredClone(first);
+  delete second.patch_refs;
+  Object.assign(second, {
+    id: "L-02",
+    title: "[L-02] - Stale oracle round",
+    affected_files: [...flaggedFiles],
+    affected_functions: [...flaggedFunctions],
+    lifecycle: { ...(first.lifecycle as Record<string, unknown>), dedupe_key: "stale-oracle-round" },
+    proof_of_concept: {
+      ...(first.proof_of_concept as Record<string, unknown>),
+      // A step the producer repeated is not a redaction artifact and stays repeated.
+      scenario: ["Warp past the round deadline.", "Warp past the round deadline.", `Authenticate with ${token}.`]
+    }
+  });
+  input.issues = [first, second];
+  const before = structuredClone(input);
+
+  const internal = projectCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  assert.deepEqual(internal.report, before, "the developer projection keeps every original path");
+  const internalJson = JSON.stringify(internal.report);
+  for (const value of [...privateFiles, ...privatePatches, ...flaggedFiles, ...flaggedFunctions]) {
+    assert.equal(internalJson.includes(value), true, value);
+  }
+  assert.doesNotMatch(internalJson, /REDACTED|\[redacted-path\]/u);
+  assert.doesNotMatch(internal.markdown, /REDACTED|\[redacted-path\]/u);
+
+  const published = projectPublicCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  const [publicFirst, publicSecond] = published.report.issues as Array<Record<string, unknown>>;
+  assert.deepEqual(publicFirst?.affected_files, ["[redacted-path]"]);
+  assert.deepEqual(publicFirst?.patch_refs, ["[redacted-path]", "patches/fix.patch"], "first-occurrence order");
+  assert.deepEqual(
+    publicFirst?.affected_functions,
+    ["deposit", "withdraw"],
+    "an array the redaction passes do not change is returned as is"
+  );
+  assert.deepEqual(publicSecond?.affected_files, ["REDACTED", keptFile]);
+  assert.deepEqual(publicSecond?.affected_functions, ["REDACTED", keptFunction]);
+  assert.deepEqual(
+    (publicSecond?.proof_of_concept as Record<string, unknown>).scenario,
+    ["Warp past the round deadline.", "Warp past the round deadline.", "Authenticate with REDACTED."],
+    "a duplicate that existed before redaction is kept even when the pass changes a neighbour"
+  );
+  assert.deepEqual((published.report.run_metadata as Record<string, unknown>).models_used, ["model-a"]);
+  assert.doesNotMatch(
+    JSON.stringify(published.report),
+    /\/root\/workspace|MockOracleAggregatorWith|UniswapV3Twap|ghp_/u
+  );
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+  assertPublicProjectionFixedPoint(published);
+});
+
 test("canonical final-report validation rejects presentation drift instead of repairing it", () => {
   const legacyAlias = renderableReport();
   (legacyAlias.issues as Array<Record<string, unknown>>)[0]!.final_severity = "Low";
