@@ -104,6 +104,7 @@ const {
   hydratePinnedSubmodulesFromExecutionSnapshot,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
+  rehydrateCompatibleActiveAttempt,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
   reconcileSmithersAttemptAgentSelection,
@@ -317,6 +318,8 @@ const verificationOutput = z.strictObject({
   verification_marker_size_bytes: z.number().int().positive().max(MAX_ARTIFACT_VERIFICATION_MARKER_BYTES)
 });
 
+type RehydratedVerification = z.infer<typeof verificationOutput>;
+
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -343,6 +346,12 @@ type AgentFactory = (options: { model?: string; reasoningEffort?: string; addDir
 const agentFactories = projectAgentFactories as Record<string, AgentFactory>;
 const sourceProjectRoot = __ULTRAFUZZ_SOURCE_PROJECT_ROOT__;
 const dynamicRunRoot = path.resolve(process.cwd(), __ULTRAFUZZ_RUN_ROOT_RELATIVE__);
+// Controller-side recovery authority must not follow a task worktree cwd. Smithers may
+// re-render the workflow after a preparation task while its process cwd is that task's
+// worktree; resolving an active result from process.cwd() then makes the already-admitted
+// result disappear and silently swaps the pass-through node back to a live agent. Cloud
+// workers are relocated deliberately and never use this controller-owned authority.
+const controllerRunRoot = path.resolve(sourceProjectRoot, __ULTRAFUZZ_RUN_ROOT_RELATIVE__);
 const dynamicGraphPath = path.join(dynamicRunRoot, "graph.json");
 const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
@@ -1710,19 +1719,23 @@ function readCloudExecutionGeneration(): string {
   return parsed.generation;
 }
 
+function canonicalPromptForTask(
+  task: (typeof taskSpecs)[number],
+  inputTask?: { prompt?: string; prompt_path?: string }
+): string {
+  if (typeof inputTask?.prompt === "string") {
+    return inputTask.prompt;
+  }
+  if (task.prompt.length > 0) return task.prompt;
+  const promptPath = task.promptPath ?? inputTask?.prompt_path;
+  return promptPath ? readFileSync(promptPath, "utf8") : "";
+}
+
 function promptForTask(
   task: (typeof taskSpecs)[number],
   inputTask?: { prompt?: string; prompt_path?: string }
 ): string {
-  let prompt: string;
-  if (typeof inputTask?.prompt === "string") {
-    prompt = inputTask.prompt;
-  } else if (task.prompt.length > 0) {
-    prompt = task.prompt;
-  } else {
-    const promptPath = task.promptPath ?? inputTask?.prompt_path;
-    prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
-  }
+  let prompt = canonicalPromptForTask(task, inputTask);
   // A sealed prompt still names controller-host paths. Rebase that root first
   // so the now-local artifact path can then be narrowed to this task's mirror.
   // This order matters when either root contains an apostrophe because
@@ -9476,6 +9489,7 @@ export default smithers((ctx) => {
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   let availableTaskSpecs = taskSpecs;
+  let rehydratedAttempts = new Map<string, RehydratedVerification>();
   if (cloudWorker) {
     const hydratedTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
     const hydratedIds = new Set(hydratedTaskSpecs.map((task) => task.id));
@@ -9509,6 +9523,9 @@ export default smithers((ctx) => {
       taskSpecs,
       taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks)
     );
+    rehydratedAttempts = new Map(
+      materialized.rehydratedAttempts.map((entry) => [entry.attempt_id, entry.verification])
+    );
     availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
   }
   if (!cloudWorker) {
@@ -9529,11 +9546,70 @@ export default smithers((ctx) => {
       <Parallel id="ultrafuzz-agent-tasks">
         {selectedTaskSpecs.map((task) => {
           const inputTask = inputTasks.get(task.id);
+          const canonicalTaskPrompt = canonicalPromptForTask(task, inputTask);
+          const taskPrompt = promptForTask(task, inputTask);
           const fullTaskPrompt = renderAgentPrompt({
             runtimeContext: task.runtimeContext,
             operatorPrompt,
-            taskPrompt: promptForTask(task, inputTask)
+            taskPrompt
           });
+          const rehydratedVerification =
+            rehydratedAttempts.get(task.attemptId) ??
+            (!cloudWorker && task.metadata.node.dynamic === undefined
+              ? rehydrateCompatibleActiveAttempt({
+                  runRoot: controllerRunRoot,
+                  attemptId: task.attemptId,
+                  logicalNodeId: task.logicalNodeId,
+                  renderedPrompt: canonicalTaskPrompt,
+                  outputs: task.metadata.artifacts.outputs
+                })?.verification
+              : undefined);
+          if (rehydratedVerification !== undefined) {
+            return (
+              <Fragment key={task.id}>
+                <Task
+                  id={task.preparationId}
+                  output={outputs.preparation}
+                  dependsOn={task.dependsOn}
+                  continueOnFail={task.continueOnFail}
+                  retries={0}
+                  metadata={{
+                    category: "artifact-preparation",
+                    agentTaskId: task.id,
+                    attemptId: task.attemptId,
+                    recovery: "verified-result-rehydration"
+                  }}
+                >
+                  {() => ({ prepared: true as const })}
+                </Task>
+                <Task
+                  id={task.id}
+                  output={outputs.agentProcess}
+                  dependsOn={[task.preparationId]}
+                  continueOnFail={task.continueOnFail}
+                  retries={0}
+                  metadata={{ ...task.metadata, recovery: "verified-result-rehydration" }}
+                >
+                  {() => ({ completed: true as const })}
+                </Task>
+                <Task
+                  id={task.verifierId}
+                  output={outputs.verification}
+                  dependsOn={[task.id]}
+                  continueOnFail={task.continueOnFail}
+                  retries={0}
+                  metadata={{
+                    category: "artifact-contract",
+                    agentTaskId: task.id,
+                    attemptId: task.attemptId,
+                    recovery: "verified-result-rehydration"
+                  }}
+                >
+                  {() => structuredClone(rehydratedVerification)}
+                </Task>
+              </Fragment>
+            );
+          }
           if (task.execution.mode === "cloud" && !cloudWorker) {
             const dependencyVerificationAuthorities = dependencyVerificationAuthoritiesForTask(task, (producer) =>
               ctx.outputMaybe(outputs.verification, { nodeId: producer.verifierId })
