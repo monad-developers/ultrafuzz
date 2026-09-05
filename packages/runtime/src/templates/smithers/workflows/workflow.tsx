@@ -495,9 +495,12 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
           runtimePromptPath);
     return {
       id: task.smithersNodeId,
+      smithersNodeId: task.smithersNodeId,
+      smithersRunId: compiled?.smithersRunId ?? serializedTaskSpecs[0].smithersRunId,
       preparationId: `prepare:${task.attemptId}`,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
+      logicalNodeId: task.logicalNodeId,
       dependsOn: task.dependencySmithersNodeIds,
       dynamicDependencies: task.dynamicDependencies ?? [],
       agentRef: task.agentRef,
