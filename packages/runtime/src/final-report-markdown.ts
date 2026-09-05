@@ -1398,7 +1398,10 @@ function retainedIdentifierValues(report: JsonRecord): string[] {
 function redactSecretsInStringValues(value: unknown, keyPath: readonly string[] = []): unknown {
   if (typeof value === "string") return redactSecrets(value, secretScanModeForPath(keyPath));
   if (Array.isArray(value)) {
-    return value.map((entry, index) => redactSecretsInStringValues(entry, [...keyPath, String(index)]));
+    return collapseRedactionDuplicates(
+      value,
+      value.map((entry, index) => redactSecretsInStringValues(entry, [...keyPath, String(index)]))
+    );
   }
   if (!isRecord(value)) return value;
   return Object.fromEntries(
@@ -1418,9 +1421,32 @@ function containsPrivatePathInValue(value: unknown): boolean {
 
 function redactPrivatePathsInValue(value: unknown): unknown {
   if (typeof value === "string") return redactPrivatePaths(value);
-  if (Array.isArray(value)) return value.map(redactPrivatePathsInValue);
+  if (Array.isArray(value)) return collapseRedactionDuplicates(value, value.map(redactPrivatePathsInValue));
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactPrivatePathsInValue(entry)]));
+}
+
+/**
+ * Collapse the duplicates a redaction pass created in an array of strings.
+ *
+ * Redaction maps every private path to `[redacted-path]` and every flagged string to the secret
+ * placeholder, so two distinct entries of one array can come out identical. The report schema
+ * declares `affected_files`, `affected_functions`, `patch_refs`, `property_ids`, `fuzzer_backends`,
+ * `duplicate_finding_ids`, and `family_variant_keys` as unique arrays, so the public copy would then
+ * fail the validation the internal report passed (UltraFuzzBench smoke run 33933691679, issue #1028).
+ *
+ * Only duplicates the pass itself introduced are collapsed, keeping the first occurrence of each value
+ * in place: an array the pass did not change, an array that already repeated a value before the pass,
+ * and an array with a non-string entry are returned exactly as mapped. Every unredacted entry survives,
+ * and the result is a fixed point of the projection: a second pass changes nothing, so it collapses
+ * nothing.
+ */
+function collapseRedactionDuplicates(original: readonly unknown[], redacted: unknown[]): unknown[] {
+  if (!original.every((entry) => typeof entry === "string")) return redacted;
+  if (redacted.every((entry, index) => entry === original[index])) return redacted;
+  if (new Set(original).size !== original.length) return redacted;
+  if (new Set(redacted).size === redacted.length) return redacted;
+  return [...new Set(redacted)];
 }
 
 function redactPrivatePaths(value: string): string {
