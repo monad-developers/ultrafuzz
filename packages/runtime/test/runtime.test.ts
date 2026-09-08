@@ -16527,8 +16527,7 @@ function evidence(workflowArgument) {
   };
 }
 
-function closeAndReuseProcessDescriptor() {
-  const descriptor = Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR);
+function closeAndReuseProcessDescriptor(descriptor = Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR)) {
   if (!Number.isSafeInteger(descriptor) || descriptor < 0) throw new Error("missing process descriptor");
   closeSync(descriptor);
   const replacements = [];
@@ -16637,13 +16636,16 @@ if (phase === "supervisor") {
   const modules = await moduleProbe();
   process.env.UFZ_PARENT_PID = String(process.pid);
   const ownEvidence = evidence(undefined);
+  // The startup fd is independent of the process-owned anchor. Reuse it before
+  // either resume transfer, after the original launcher/controller have exited.
+  const reusedStartupDescriptor = closeAndReuseProcessDescriptor(3);
   const logged = launchResume("resume-logged", true);
   const ignored = launchResume("resume-ignored", false);
   const reusedDescriptor = closeAndReuseProcessDescriptor();
   writeFileSync(process.env.UFZ_RESUME_LAUNCH_PATH, JSON.stringify({ logged: logged.args, ignored: ignored.args }));
   writeFileSync(
     process.env.UFZ_SUPERVISOR_RECORD_PATH,
-    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor })
+    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor, reused_startup_descriptor: reusedStartupDescriptor })
   );
   process.exit(0);
 }
@@ -16767,6 +16769,11 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
       assert.equal(launcher.status, 0, launcher.stderr);
       const launcherEvidence = readTransferEvidence(launcherRecordPath);
       assertProcessOwnedSnapshotEvidence(launcherEvidence);
+      assert.equal(
+        launcherEvidence.source_root,
+        controllerRoot,
+        "top-level transfers must retain the controller source-root check"
+      );
       assert.equal(launcherEvidence.reused_descriptor, launcherEvidence.process_descriptor);
       addEvidencePids(pids, launcherEvidence, "engine_pid", "supervisor_pid");
 
@@ -16796,6 +16803,7 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
 
       const supervisorEvidence = readTransferEvidence(supervisorRecordPath);
       assertInheritedSnapshotEvidence(supervisorEvidence);
+      assert.equal(supervisorEvidence.reused_startup_descriptor, 3);
       assert.equal(supervisorEvidence.reused_descriptor, supervisorEvidence.process_descriptor);
       assert.equal(supervisorEvidence.relative_module, "sealed-relative");
       assert.match(String(supervisorEvidence.ambient_error), /outside its sealed snapshot/u);
@@ -24115,7 +24123,7 @@ test("controller refresh authenticates newly required sealed runner patches and 
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
-  assert.equal(processAnchorPatch.predecessors?.length, 2);
+  assert.equal(processAnchorPatch.predecessors?.length, 3);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
   const mainInvocation = enginePatches.find((candidate) => candidate.id === "engine_main_usage_invocation");
   assert.ok(newlyRequired);

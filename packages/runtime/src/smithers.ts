@@ -683,7 +683,7 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH =
     '    descriptor = openSync(acquisitionRoot, "r");'
   ).replace(
     "    process.env[ultrafuzzSnapshotSourceRootEnv] = sourceRoot;",
-    "    process.env[ultrafuzzSnapshotSourceRootEnv] = processRoot;"
+    "    process.env[ultrafuzzSnapshotSourceRootEnv] = inheritedDescriptor === undefined ? sourceRoot : processRoot;"
   );
 const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSORS = [
   SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
