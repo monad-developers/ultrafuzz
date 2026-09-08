@@ -6919,6 +6919,186 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated child environments preserve native continuation paths without exposing snapshot homes",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const externalBin = temporaryRoot("ultrafuzz-continuation-external-bin-");
+    const trustedBin = path.join(project, ".ultrafuzz", "runs", "continued", "trusted-bin");
+    const admittedPath = [trustedBin, externalBin].join(path.delimiter);
+    const piHome = path.join(project, ".ultrafuzz", "pi-coding-agent");
+    const source = {
+      PATH: admittedPath,
+      PI_CODING_AGENT_DIR: piHome,
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(project, ".smithers", "workflows", "continued.tsx"),
+      ULTRAFUZZ_CONFIG_PATH: path.join(project, ".ultrafuzz", "runs", "continued", "smithers", "resolved-config.json"),
+      CONTROL_ALIAS: path.join(project, ".smithers", "workflows", "continued.tsx"),
+      OPENAI_API_KEY: "unrelated-provider-key"
+    };
+    for (const additions of [{}, { PATH: admittedPath, PI_CODING_AGENT_DIR: piHome }]) {
+      const child = { ...source, ...workflowControlChildEnvironment(additions, source) };
+      assert.equal(child.PATH, admittedPath);
+      assert.equal(child.PI_CODING_AGENT_DIR, piHome);
+      assert.equal(child.CONTROL_ALIAS, "");
+      assert.equal(child.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, "");
+      assert.equal(child.OPENAI_API_KEY, "");
+    }
+    const snapshotRoot = path.join(
+      project,
+      ".ultrafuzz",
+      "runs",
+      "continued",
+      "smithers",
+      "execution-snapshots",
+      "a".repeat(64)
+    );
+    const snapshotHome = path.join(snapshotRoot, "controls");
+    const snapshotSource = {
+      ...source,
+      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, ".smithers", "workflows", "continued.tsx"),
+      ULTRAFUZZ_CONFIG_PATH: path.join(snapshotRoot, "controls", "ultrafuzz.toml"),
+      ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
+      PI_CODING_AGENT_DIR: snapshotHome
+    };
+    assert.equal(workflowControlChildEnvironment({}, snapshotSource).PI_CODING_AGENT_DIR, "");
+    assert.equal(
+      workflowControlChildEnvironment({ PI_CODING_AGENT_DIR: snapshotHome }, snapshotSource).PI_CODING_AGENT_DIR,
+      ""
+    );
+  }
+);
+
+bunAdapterTest(
+  "native reset-node continuation reaches Pi preflight and an external CLI in a detached child",
+  { timeout: 300_000 },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const configPath = path.join(project, "ultrafuzz.toml");
+    fs.writeFileSync(
+      configPath,
+      fs.readFileSync(configPath, "utf8").replaceAll('agent = "CodexAgent"', 'agent = "PiAgent"')
+    );
+    // The fixture supplies only Smithers' persisted control responses. The real
+    // Ultrafuzz resume/environment handoff, detached process, generated adapter,
+    // pinned Smithers preflight and external CLI invocation all execute.
+    const runId = "pi-detached-continuation";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId: "ultrafuzz-" + runId,
+        status: "failed",
+        state: "failed",
+        steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      })
+    });
+    const shim = env.SMITHERS_BIN;
+    const commandLog = env.SMITHERS_FAKE_LOG;
+    assert.ok(shim);
+    assert.ok(commandLog);
+    const externalBin = path.dirname(shim);
+    const targetBin = path.join(project, "untrusted-bin");
+    const targetMarker = path.join(project, "untrusted-pi-ran");
+    fs.mkdirSync(targetBin);
+    fs.writeFileSync(path.join(targetBin, "pi"), "#!/bin/sh\ntouch " + shellQuote(targetMarker) + "\nexit 91\n", {
+      mode: 0o755
+    });
+    fs.writeFileSync(path.join(externalBin, "pi"), '#!/bin/sh\nprintf "%s\\n" "$PI_CODING_AGENT_DIR"\n', {
+      mode: 0o755
+    });
+    fs.writeFileSync(path.join(externalBin, "forge"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    env.PATH = [targetBin, env.PATH].join(path.delimiter);
+    env.OPENROUTER_API_KEY = "fixture-openrouter-key";
+    env.OPENAI_API_KEY = "unrelated-provider-key";
+    env.ULTRAFUZZ_DATA_GOVERNANCE_POLICY = JSON.stringify({
+      ...JSON.parse(TEST_DATA_GOVERNANCE_POLICY),
+      openrouter_model_allowlist: ["gpt-5.5"]
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    await loadGeneratedPiAgent(project);
+    const fixture = path.join(project, "pi-agent-executable-test");
+    const resultPath = path.join(project, "detached-pi-result.json");
+    const logPath = path.join(project, "detached-pi.log");
+    const childPath = path.join(fixture, "continuation.mjs");
+    fs.writeFileSync(
+      childPath,
+      [
+        'import fs from "node:fs";',
+        'import { spawnSync } from "node:child_process";',
+        'import { createPiAgent } from "./pi.mjs";',
+        "const resultPath = " + JSON.stringify(resultPath) + ";",
+        "try {",
+        '  const agent = createPiAgent({ model: "fixture/model" });',
+        "  await agent.preflight({ rootDir: process.cwd() });",
+        '  const command = await agent.buildCommand({ prompt: "fixture", cwd: process.cwd(), options: {} });',
+        "  const childEnv = { ...process.env, ...agent.opts.env, ...command.env };",
+        '  const result = spawnSync(command.command, command.args, { env: childEnv, input: command.stdin, encoding: "utf8" });',
+        '  fs.writeFileSync(resultPath, JSON.stringify({ pid: process.pid, path: childEnv.PATH, home: childEnv.PI_CODING_AGENT_DIR, credential: childEnv.OPENROUTER_API_KEY === "fixture-openrouter-key", unrelatedCredential: childEnv.OPENAI_API_KEY, persisted: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, childPersisted: childEnv.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, status: result.status, stdout: result.stdout }));',
+        "} catch (error) { fs.writeFileSync(resultPath, JSON.stringify({ error: String(error) })); }"
+      ].join("\n")
+    );
+    const launcherPath = path.join(fixture, "launch-continuation.mjs");
+    fs.writeFileSync(
+      launcherPath,
+      [
+        'import { spawn } from "node:child_process";',
+        'import { closeSync, openSync } from "node:fs";',
+        "const fd = openSync(" + JSON.stringify(logPath) + ', "a");',
+        "const child = spawn(process.execPath, [" +
+          JSON.stringify(childPath) +
+          '], { detached: true, stdio: ["ignore", fd, fd], env: process.env, cwd: process.cwd() });',
+        "closeSync(fd); child.unref();"
+      ].join("\n")
+    );
+    const originalShim = fs.readFileSync(shim, "utf8");
+    fs.writeFileSync(
+      shim,
+      originalShim.replace(
+        "  up)\n",
+        '  up)\n    case " $* " in\n      *" --resume "*) ' +
+          shellQuote(process.execPath) +
+          " " +
+          shellQuote(launcherPath) +
+          " ;;\n    esac\n"
+      )
+    );
+    const resumed = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.equal(resumed.value?.submitted, true);
+    const deadline = Date.now() + 15_000;
+    while (!fs.existsSync(resultPath) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(
+      fs.existsSync(resultPath),
+      true,
+      fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "detached child did not start"
+    );
+    const evidence = JSON.parse(fs.readFileSync(resultPath, "utf8")) as Record<string, unknown>;
+    assert.equal(evidence.error, undefined, JSON.stringify(evidence));
+    assert.notEqual(evidence.pid, process.pid);
+    assert.equal(evidence.status, 0);
+    const home = path.join(project, ".ultrafuzz", "pi-coding-agent");
+    assert.equal(evidence.home, home);
+    assert.equal(evidence.stdout, home + "\n");
+    assert.equal(evidence.credential, true);
+    assert.equal(evidence.unrelatedCredential, "");
+    assert.equal(evidence.childPersisted, "");
+    assert.equal(evidence.persisted, path.join(project, ".smithers", "workflows", "ultrafuzz-" + runId + ".tsx"));
+    const commandPath = String(evidence.path).split(path.delimiter);
+    assert.ok(commandPath.includes(externalBin));
+    assert.ok(commandPath.includes(path.join(run.value.run_root, "trusted-bin")), JSON.stringify(evidence));
+    assert.equal(commandPath.includes(targetBin), false);
+    assert.equal(fs.existsSync(targetMarker), false);
+    const commands = fs.readFileSync(commandLog, "utf8");
+    assert.match(commands, /^timetravel .*--node-id node:project-discovery/mu);
+    assert.match(commands, /up .*--resume ultrafuzz-pi-detached-continuation.*--detach/u);
+  }
+);
+
+bunAdapterTest(
   "generated Pi adapter binds OpenRouter through env and keeps the credential out of argv",
   { timeout: 60_000 },
   async () => {
@@ -6932,13 +7112,10 @@ bunAdapterTest(
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       openRouter: process.env.OPENROUTER_API_KEY,
-      named: process.env.PI_OPENROUTER_KEY,
-      path: process.env.PATH
+      named: process.env.PI_OPENROUTER_KEY
     };
-    const externalPiBin = temporaryRoot("ultrafuzz-external-pi-bin-");
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     process.env.OPENROUTER_API_KEY = credential;
-    process.env.PATH = [externalPiBin, previous.path].filter(Boolean).join(path.delimiter);
     delete process.env.PI_OPENROUTER_KEY;
     try {
       const configDir = path.resolve(process.cwd(), ".ultrafuzz/pi-coding-agent");
@@ -7007,8 +7184,6 @@ bunAdapterTest(
       assert.equal(agent.opts.env.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(command.env?.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(childEnv.ULTRAFUZZ_CONFIG_PATH, "");
-      assert.equal(command.env?.PATH, process.env.PATH);
-      assert.equal(command.env?.PATH?.split(path.delimiter)[0], externalPiBin);
 
       // Pi names its NDJSON CLI mode `json`, but Smithers must treat that
       // transcript as `stream-json` so the interpreter's terminal answer wins
@@ -7419,8 +7594,6 @@ bunAdapterTest(
       else process.env.OPENROUTER_API_KEY = previous.openRouter;
       if (previous.named === undefined) delete process.env.PI_OPENROUTER_KEY;
       else process.env.PI_OPENROUTER_KEY = previous.named;
-      if (previous.path === undefined) delete process.env.PATH;
-      else process.env.PATH = previous.path;
     }
   }
 );

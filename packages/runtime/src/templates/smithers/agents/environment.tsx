@@ -93,8 +93,25 @@ export function workflowControlChildEnvironment(
     ].map((name) => [name, ""])
   );
   const roots = workflowExecutionSnapshotRoots(source);
+  // Native continuations name the target's workflow, not a sealed execution
+  // tree. Pi's configured home may live under that target. Continue rejecting
+  // homes that alias a real advertised snapshot or another controller root.
+  const piHomeRoots =
+    source.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT ||
+    source.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT ||
+    source.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT
+      ? roots
+      : workflowExecutionSnapshotRoots({ ...source, ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: undefined });
+  const aliasesControl = (name: string, value: string): boolean => {
+    // PATH has already passed the controller's command-path admission. Its
+    // trusted-bin/forge guard intentionally lives under the target; blanking
+    // the whole list also removes external CLIs admitted by the controller.
+    if (name === "PATH") return false;
+    const selectedRoots = name === "PI_CODING_AGENT_DIR" ? piHomeRoots : roots;
+    return selectedRoots.some((root) => environmentPath(value).includes(root));
+  };
   for (const [name, value] of Object.entries(source)) {
-    if (value !== undefined && roots.some((root) => environmentPath(value).includes(root))) child[name] = "";
+    if (value !== undefined && aliasesControl(name, value)) child[name] = "";
   }
   for (const [name, value] of Object.entries(additions)) {
     if (value !== undefined) child[name] = value;
@@ -102,7 +119,7 @@ export function workflowControlChildEnvironment(
   if (route !== undefined) restoreRouteScopedAllowlistedCredentials(child, source, route.agent);
   for (const name of CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) child[name] = "";
   for (const [name, value] of Object.entries(child)) {
-    if (roots.some((root) => environmentPath(value).includes(root))) child[name] = "";
+    if (aliasesControl(name, value)) child[name] = "";
   }
   if (route !== undefined) assertWorkflowDataRoute(route, { ...source, ...child }, source);
   return child;
