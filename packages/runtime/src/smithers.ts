@@ -8304,10 +8304,12 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
   const taskSpecs = JSON.stringify(
     controllerTasks.map((task) => ({
       id: task.smithersNodeId,
+      smithersNodeId: task.smithersNodeId,
       smithersRunId: compiled.smithersRunId,
       preparationId: task.preparationSmithersNodeId,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
+      logicalNodeId: task.logicalNodeId,
       continueOnFail: nonBlockingAttemptIds.has(task.attemptId),
       dependsOn: task.dependencySmithersNodeIds,
       agentRef: task.agentRef,
