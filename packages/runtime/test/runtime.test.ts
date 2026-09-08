@@ -15155,10 +15155,11 @@ test("compatibility patcher rewrites every described workaround", async () => {
   {
     const processAnchor = sources.find(({ patch }) => patch.id === "process_snapshot_anchor");
     assert.ok(processAnchor);
-    const [predecessor, nested] = processAnchor.patch.predecessors ?? [];
+    const [predecessor, nested, reusedInheritedDescriptor] = processAnchor.patch.predecessors ?? [];
     assert.ok(predecessor);
     assert.ok(nested);
-    assert.equal(processAnchor.patch.predecessors?.length, 2);
+    assert.ok(reusedInheritedDescriptor);
+    assert.equal(processAnchor.patch.predecessors?.length, 3);
     const current = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(current.split(processAnchor.patch.patched).length, 2);
 
@@ -15168,6 +15169,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const migratedPredecessor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedPredecessor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedPredecessor.includes(nested), false);
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+
+    fs.writeFileSync(
+      processAnchor.source,
+      current.replace(processAnchor.patch.patched, reusedInheritedDescriptor),
+      "utf8"
+    );
+    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    applySmithersCompatibilityPatches(project);
+    const migratedReusedInheritedDescriptor = fs.readFileSync(processAnchor.source, "utf8");
+    assert.equal(migratedReusedInheritedDescriptor.split(processAnchor.patch.patched).length, 2);
+    assert.equal(migratedReusedInheritedDescriptor.includes(reusedInheritedDescriptor), false);
     assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, nested), "utf8");
@@ -16694,8 +16707,7 @@ function evidence(workflowArgument) {
   };
 }
 
-function closeAndReuseProcessDescriptor() {
-  const descriptor = Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR);
+function closeAndReuseProcessDescriptor(descriptor = Number(process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR)) {
   if (!Number.isSafeInteger(descriptor) || descriptor < 0) throw new Error("missing process descriptor");
   closeSync(descriptor);
   const replacements = [];
@@ -16804,13 +16816,16 @@ if (phase === "supervisor") {
   const modules = await moduleProbe();
   process.env.UFZ_PARENT_PID = String(process.pid);
   const ownEvidence = evidence(undefined);
+  // The startup fd is independent of the process-owned anchor. Reuse it before
+  // either resume transfer, after the original launcher/controller have exited.
+  const reusedStartupDescriptor = closeAndReuseProcessDescriptor(3);
   const logged = launchResume("resume-logged", true);
   const ignored = launchResume("resume-ignored", false);
   const reusedDescriptor = closeAndReuseProcessDescriptor();
   writeFileSync(process.env.UFZ_RESUME_LAUNCH_PATH, JSON.stringify({ logged: logged.args, ignored: ignored.args }));
   writeFileSync(
     process.env.UFZ_SUPERVISOR_RECORD_PATH,
-    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor })
+    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor, reused_startup_descriptor: reusedStartupDescriptor })
   );
   process.exit(0);
 }
@@ -16934,6 +16949,11 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
       assert.equal(launcher.status, 0, launcher.stderr);
       const launcherEvidence = readTransferEvidence(launcherRecordPath);
       assertProcessOwnedSnapshotEvidence(launcherEvidence);
+      assert.equal(
+        launcherEvidence.source_root,
+        controllerRoot,
+        "top-level transfers must retain the controller source-root check"
+      );
       assert.equal(launcherEvidence.reused_descriptor, launcherEvidence.process_descriptor);
       addEvidencePids(pids, launcherEvidence, "engine_pid", "supervisor_pid");
 
@@ -16963,6 +16983,7 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
 
       const supervisorEvidence = readTransferEvidence(supervisorRecordPath);
       assertInheritedSnapshotEvidence(supervisorEvidence);
+      assert.equal(supervisorEvidence.reused_startup_descriptor, 3);
       assert.equal(supervisorEvidence.reused_descriptor, supervisorEvidence.process_descriptor);
       assert.equal(supervisorEvidence.relative_module, "sealed-relative");
       assert.match(String(supervisorEvidence.ambient_error), /outside its sealed snapshot/u);
@@ -17049,8 +17070,8 @@ function assertProcessOwnedSnapshotEvidence(evidence: TransferEvidence): void {
 
 function assertInheritedSnapshotEvidence(evidence: TransferEvidence): void {
   assertProcessOwnedSnapshotEvidence(evidence);
-  assert.equal(evidence.process_descriptor, 3);
-  assert.equal(evidence.source_root, "/proc/self/fd/3");
+  assert.notEqual(evidence.process_descriptor, 3);
+  assert.equal(evidence.source_root, evidence.process_root);
 }
 
 function addEvidencePids(pids: Set<number>, evidence: TransferEvidence, ...keys: string[]): void {
@@ -24282,7 +24303,7 @@ test("controller refresh authenticates newly required sealed runner patches and 
   const [predecessorProcessAnchorPatch, nestedProcessAnchorPatch] = processAnchorPatch.predecessors ?? [];
   assert.ok(predecessorProcessAnchorPatch);
   assert.ok(nestedProcessAnchorPatch);
-  assert.equal(processAnchorPatch.predecessors?.length, 2);
+  assert.equal(processAnchorPatch.predecessors?.length, 3);
   const newlyRequired = enginePatches.find((candidate) => candidate.id === "engine_refresh_path_acceptance");
   const mainInvocation = enginePatches.find((candidate) => candidate.id === "engine_main_usage_invocation");
   assert.ok(newlyRequired);

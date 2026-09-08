@@ -660,22 +660,36 @@ const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH =
     SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
     SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REALPATH_PATCH
   );
-const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH = SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REALPATH_PATCH.replace(
-  `const ultrafuzzSameDirectory = (left, right) => {
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REUSED_INHERITED_DESCRIPTOR_PREDECESSOR_PATCH =
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REALPATH_PATCH.replace(
+    `const ultrafuzzSameDirectory = (left, right) => {
   const a = statSync(left);
   const b = statSync(right);
   return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
 };`,
-  `const ultrafuzzSameDirectory = (left, right) => {
+    `const ultrafuzzSameDirectory = (left, right) => {
   const a = statSync(left);
   const b = statSync(right);
   return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
 };
 ${SMITHERS_WORKFLOW_FILE_IDENTITY_HELPER}`
-).replace(
-  "if (loadedWorkflow && realpathSync(loadedWorkflow) !== realpathSync(persistedWorkflowPath)) {",
-  "if (loadedWorkflow && !ultrafuzzSameWorkflowFile(loadedWorkflow, persistedWorkflowPath)) {"
-);
+  ).replace(
+    "if (loadedWorkflow && realpathSync(loadedWorkflow) !== realpathSync(persistedWorkflowPath)) {",
+    "if (loadedWorkflow && !ultrafuzzSameWorkflowFile(loadedWorkflow, persistedWorkflowPath)) {"
+  );
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH =
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REUSED_INHERITED_DESCRIPTOR_PREDECESSOR_PATCH.replace(
+    '    descriptor = inheritedDescriptor ?? openSync(acquisitionRoot, "r");',
+    '    descriptor = openSync(acquisitionRoot, "r");'
+  ).replace(
+    "    process.env[ultrafuzzSnapshotSourceRootEnv] = sourceRoot;",
+    "    process.env[ultrafuzzSnapshotSourceRootEnv] = inheritedDescriptor === undefined ? sourceRoot : processRoot;"
+  );
+const SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSORS = [
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH,
+  SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_REUSED_INHERITED_DESCRIPTOR_PREDECESSOR_PATCH
+] as const;
 const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `            launchPostFailureAutopsy({
               failedRunId: result.runId,
               workflowPath: resolvedWorkflowPath,
@@ -2790,10 +2804,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/index.js",
     patchable: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
     patched: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
-    predecessors: [
-      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
-      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH
-    ],
+    predecessors: SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSORS,
     patchedFamilyMarkers: ["anchorUltrafuzzExecutionSnapshotForProcess"],
     upstreamAbsent: ["anchorUltrafuzzExecutionSnapshotForProcess"]
   },
@@ -6829,10 +6840,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_SOURCE,
       SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PATCH,
       "process-owned execution snapshot",
-      [
-        SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSOR_PATCH,
-        SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_NESTED_PREDECESSOR_PATCH
-      ],
+      SMITHERS_CLI_PROCESS_SNAPSHOT_ANCHOR_PREDECESSORS,
       ["anchorUltrafuzzExecutionSnapshotForProcess"]
     ],
     [SMITHERS_CLI_MANIFEST_RELAUNCH_SOURCE, SMITHERS_CLI_MANIFEST_RELAUNCH_PATCH, "manifest-conflict relaunch"],
