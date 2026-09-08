@@ -3762,6 +3762,33 @@ test("strict final reports preserve dropped false positives as exactly one non-p
     "passed"
   );
 
+  const staleLifecycle = {
+    ...lifecycle,
+    stages: [{ stage: "deduplicated", artifact_path: "deduped-findings.json" }]
+  };
+  const staleContext = {
+    artifactSet: {
+      severityClassifiedFindings: [{ ...finding, lifecycle: staleLifecycle }],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const checkPreservation = (candidate: unknown) =>
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [], non_production_outcomes: [candidate] },
+      context: staleContext
+    });
+  assert.equal(checkPreservation(row).status, "passed", "the dedicated lifecycle ledger is authoritative");
+  assert.equal(
+    checkPreservation({ ...row, lifecycle: staleLifecycle }).status,
+    "failed",
+    "copying the stale embedded lifecycle must still fail"
+  );
+  assert.equal(
+    checkPreservation({ ...row, summary: "Changed source summary" }).status,
+    "failed",
+    "other severity fields must still be preserved"
+  );
+
   const omitted = executeSemanticGate("report-severity-classification-preservation", {
     document: { issues: [], non_production_outcomes: [] },
     context
