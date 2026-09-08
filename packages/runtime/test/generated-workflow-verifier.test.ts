@@ -6408,6 +6408,8 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   const validated: string[] = [];
   const preparationTrees = new Map<string, string>();
   const harness = new Function(
+    "createHash",
+    "writeWorkspacePreparationAuthority",
     "path",
     "taskSpecs",
     "artifactVerificationMarkerLocation",
@@ -6438,6 +6440,8 @@ test("generated dependency admission retains one exact snapshot epoch and never 
       hydrate: materializeWorkspacePatchDependencies
     };`
   )(
+    createHash,
+    () => undefined,
     path,
     [producer, consumer],
     () => undefined,

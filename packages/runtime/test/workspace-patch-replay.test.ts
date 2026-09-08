@@ -296,6 +296,8 @@ function loadMaterializer(
       return { directories, snapshotsByProducerAttempt };
     }`,
     slice("materializeWorkspacePatchDependencies"),
+    slice("authenticatedWorkspacePatchCaptures"),
+    slice("admittedWorkspacePreparationDependencyDigest"),
     "\nreturn materializeWorkspacePatchDependencies;"
   ].join("\n");
   const emitted = ts.transpileModule(declaration, {
