@@ -1104,6 +1104,10 @@ function reportSeverityClassificationPreservationIssues(
     if (!isRecord(reportEntry.row)) continue;
     issues.push(...reportHistoricalMetadataIssues(reportEntry.row, finding, context, reportEntry.path));
     for (const field of Object.keys(finding)) {
+      // Lifecycle has its own authenticated authority and exact-copy check above.
+      // A legacy embedded lifecycle can be stale; requiring both copies would
+      // make the report impossible to preserve against the dedicated ledger.
+      if (field === "lifecycle") continue;
       if (disposition === "promoted" && (field === "id" || field === "title")) continue;
       if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
         issues.push(metadataOmission(`${reportEntry.path}.${field}`));
