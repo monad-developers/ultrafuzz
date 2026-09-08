@@ -36,6 +36,77 @@ export function diagnosticFromError(error: unknown, fallbackCode = "EVAL_FAILED"
   };
 }
 
+const EVAL_ERROR_DETAILS_MAX_BYTES = 1500;
+const EVAL_ERROR_DETAILS_MAX_DEPTH = 8;
+const EVAL_ERROR_DETAILS_TRUNCATION_MARKER = "\u2026";
+const REDACTED_EVAL_ERROR_DETAIL = "[redacted]";
+const SENSITIVE_EVAL_ERROR_DETAIL_KEY_PATTERN = /key|token|secret|authorization|cookie|password/iu;
+/** A bearer credential or an "sk-" style provider key anywhere inside a string value. */
+const SECRET_LIKE_EVAL_ERROR_DETAIL_VALUE_PATTERN = /\bbearer\s+[A-Za-z0-9_\-.=+/]{8,}|\bsk-[A-Za-z0-9_-]{6,}/iu;
+
+/**
+ * Describe a failure in one line for a consumer that only sees a message. An
+ * EvalError contributes its code and a bounded JSON rendering of a redacted
+ * copy of its details, so the Modal smoke worker, which reads nothing but the
+ * CLI failure envelope, can still tell why an eval command failed. Every other
+ * value keeps its plain message.
+ */
+export function describeEvalError(error: unknown): string {
+  if (!(error instanceof EvalError)) return error instanceof Error ? error.message : String(error);
+  const details = renderEvalErrorDetails(error.details);
+  return details === undefined
+    ? `${error.code}: ${error.message}`
+    : `${error.code}: ${error.message} (details: ${details})`;
+}
+
+function renderEvalErrorDetails(details: Record<string, unknown> | undefined): string | undefined {
+  if (details === undefined || Object.keys(details).length === 0) return undefined;
+  let rendered: string;
+  try {
+    rendered = JSON.stringify(redactedEvalErrorDetail(details, 0));
+  } catch {
+    // This runs inside catch blocks: never let a rendering failure replace the real failure.
+    return "[unrenderable]";
+  }
+  return truncateUtf8(rendered, EVAL_ERROR_DETAILS_MAX_BYTES, EVAL_ERROR_DETAILS_TRUNCATION_MARKER);
+}
+
+function redactedEvalErrorDetail(value: unknown, depth: number): unknown {
+  if (typeof value === "string") {
+    return SECRET_LIKE_EVAL_ERROR_DETAIL_VALUE_PATTERN.test(value) ? REDACTED_EVAL_ERROR_DETAIL : value;
+  }
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Error) return redactedEvalErrorDetail(`${value.name}: ${value.message}`, depth);
+  if (depth >= EVAL_ERROR_DETAILS_MAX_DEPTH) return EVAL_ERROR_DETAILS_TRUNCATION_MARKER;
+  if (Array.isArray(value)) return value.map((entry) => redactedEvalErrorDetail(entry, depth + 1));
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        SENSITIVE_EVAL_ERROR_DETAIL_KEY_PATTERN.test(key)
+          ? REDACTED_EVAL_ERROR_DETAIL
+          : redactedEvalErrorDetail(entry, depth + 1)
+      ])
+    );
+  }
+  return value;
+}
+
+/** Cut on a code point boundary so the bounded text never ends in a split UTF-8 sequence. */
+function truncateUtf8(value: string, maxBytes: number, marker: string): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const budget = maxBytes - Buffer.byteLength(marker, "utf8");
+  let bytes = 0;
+  let end = 0;
+  for (const codePoint of value) {
+    const size = Buffer.byteLength(codePoint, "utf8");
+    if (bytes + size > budget) break;
+    bytes += size;
+    end += codePoint.length;
+  }
+  return `${value.slice(0, end)}${marker}`;
+}
+
 export function warningDiagnostic(code: string, message: string): RuntimeDiagnostic {
   return { code, message, severity: "warning", source: "evals" };
 }

@@ -24,7 +24,10 @@ jobs:
   draft-and-build-gates:
     name: "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The PR path also runs the serial runtime and CLI contract smoke suites.
+    # Under runner contention they completed successfully just after the former
+    # 15-minute ceiling, so keep a bounded two-times completion budget.
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -55,9 +58,6 @@ jobs:
       - name: Test CI policy scripts
         run: pnpm -w test:ci-scripts
 
-      - name: Enforce production dependency advisory policy
-        run: pnpm -w security:dependency-advisories
-
       - name: Check formatting
         run: pnpm -w format:check
 
@@ -77,6 +77,12 @@ jobs:
 
       - name: Enforce dashboard bundle budgets
         run: pnpm -w size
+
+      # The advisory gate depends on the npm registry, which has been unavailable
+      # for hours at a time. Run the local gates first so an outage cannot hide
+      # formatting, lint, dead-code, build, or bundle-budget failures.
+      - name: Enforce production dependency advisory policy
+        run: pnpm -w security:dependency-advisories
 
       - name: Run PR runtime smoke tests
         if: github.event_name == 'pull_request'

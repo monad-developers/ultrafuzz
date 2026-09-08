@@ -861,7 +861,9 @@ describe("public Modal benchmark configuration", () => {
     expect(draftAndBuild?.name).toBe(
       "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
     );
-    expect(draftAndBuild?.["timeout-minutes"]).toBe(15);
+    // The PR-only runtime and CLI smoke suites have reached the old 15-minute
+    // ceiling while still making progress, so pin the bounded completion budget.
+    expect(draftAndBuild?.["timeout-minutes"]).toBe(30);
     const steps = draftAndBuild?.steps ?? [];
     const bunSetup = steps.find((step) => step.name === "Set up Bun");
     expect(bunSetup?.uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
@@ -1233,7 +1235,8 @@ describe("public Modal benchmark configuration", () => {
     expect(persistedBundle).toBeGreaterThan(preflight);
     expect(readPersistedBundle).toBeGreaterThan(persistedBundle);
     expect(assertPersistedLineage).toBeGreaterThan(readPersistedBundle);
-    expect(source).toContain("await writePublicBundleAtomic(bundlePath, bundle)");
+    expect(source).toContain("await publishPublicBenchmarkBundle({");
+    expect(source).toContain("await writePublicBundleAtomic(input.bundlePath, bundle)");
     expect(source).not.toContain("writeFile(bundlePath");
   });
 

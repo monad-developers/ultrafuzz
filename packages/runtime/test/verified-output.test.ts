@@ -12,6 +12,8 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  artifactValidationWarnings,
+  executeSemanticGate,
   createRunLayout,
   getNodeArtifactDir,
   updateNodeState,
@@ -20,6 +22,7 @@ import {
   writeJsonDurable,
   type ArtifactManifest,
   type ArtifactManifestOutputContract,
+  type ArtifactValidationWarning,
   type ArtifactVerificationMarker,
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
@@ -28,7 +31,7 @@ import {
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 
-import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
+import { projectCanonicalFinalReport, renderArtifactValidationWarningsMarkdown } from "../src/final-report-markdown.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 import {
   assertVerifiedRunOutputAuthorityRemainedCurrent,
@@ -86,6 +89,46 @@ test("verified final-report reader binds immutable current bytes to verifier and
     runSnapshots[0]!.publications.map((publication) => publication.bytes),
     [fixture.markdownBytes, fixture.reportBytes]
   );
+});
+
+test("final-report omissions remain visible as authenticated host diagnostics without rewriting the report", () => {
+  const runId = "verified-report-own-warnings";
+  const issue = currentIssue();
+  issue.dedupe_key = "current-finding";
+  const lifecycle = issue.lifecycle as Record<string, unknown>;
+  lifecycle.final_disposition = "promoted";
+  const upstream = { ...issue };
+  delete upstream.lifecycle;
+  delete issue.confidence;
+  delete issue.severity_guess;
+  const report = currentReport(runId, [issue]);
+  const gate = executeSemanticGate("report-severity-classification-preservation", {
+    document: report,
+    context: {
+      artifactSet: { severityClassifiedFindings: [upstream], findingLifecycleLedger: { records: [lifecycle] } }
+    }
+  });
+  assert.equal(gate.status, "warning");
+  const warnings = artifactValidationWarnings(REPORT_JSON_PATH, [gate]);
+  assert.equal(warnings.length, 2);
+  // The verifier has already accepted the warning-bearing report bytes; this fixture isolates
+  // authentication and presentation of its host-owned marker diagnostics.
+  const fixture = createVerifiedReportFixture(runId, { validationWarnings: [...warnings, ...warnings] });
+  const loaded = loadVerifiedFinalReportSnapshot(fixture.layout.root);
+  assert.equal(loaded.validation_warnings.length, 2, "repeated diagnostics are summarized once");
+  assert.match(renderArtifactValidationWarningsMarkdown(loaded.validation_warnings), /\$\.issues\[0\]\.confidence/u);
+  assert.equal(loaded.validation_warnings[0]?.artifact_path, `artifacts/${REPORT_ATTEMPT_ID}/${REPORT_JSON_PATH}`);
+  assert.doesNotMatch(loaded.markdown, /## Artifact validation warnings/u);
+  assert.deepEqual(loaded.json_bytes, fixture.reportBytes);
+  assert.deepEqual(loaded.markdown_bytes, fixture.markdownBytes);
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
+  assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
+
+  const markerPath = path.join(fixture.layout.root, ".ultrafuzz-verification", `${fixture.attemptId}.json`);
+  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as ArtifactVerificationMarker;
+  marker.validation_warnings = [];
+  writeJsonDurable(markerPath, marker);
+  assert.throws(() => loadVerifiedFinalReportSnapshot(fixture.layout.root), /verification marker does not match/u);
 });
 
 test("verified output readers reject authenticated historical publications containing secrets", () => {
@@ -1135,6 +1178,7 @@ function createVerifiedReportFixture(
     optionalPrerequisite?: boolean;
     admitOptionalPrerequisite?: boolean;
     indirectOptionalPrerequisite?: boolean;
+    validationWarnings?: ArtifactValidationWarning[];
   } = {}
 ): ReportFixture {
   const outputRoot = temporaryRoot("ultrafuzz-verified-output-");
@@ -1315,6 +1359,7 @@ function createVerifiedReportFixture(
     schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
     attempt_id: attemptId,
     node_id: REPORT_LOGICAL_ID,
+    ...(override.validationWarnings === undefined ? {} : { validation_warnings: override.validationWarnings }),
     admitted_dependency_attempt_ids:
       withPrerequisite && (!optionalPrerequisite || override.admitOptionalPrerequisite === true)
         ? override.indirectOptionalPrerequisite === true
@@ -1356,7 +1401,9 @@ function createVerifiedReportFixture(
       agent_ref: "Codex",
       workflow_run_id: WORKFLOW_RUN_ID,
       workflow_task_id: `node:${attemptId}`,
-      ...(optionalPrerequisite ? { verification_marker_sha256: digest(markerBytes) } : {}),
+      ...(optionalPrerequisite || override.validationWarnings !== undefined
+        ? { verification_marker_sha256: digest(markerBytes) }
+        : {}),
       origin: "workflow",
       metadata: { concrete_node_id: REPORT_ATTEMPT_ID }
     }

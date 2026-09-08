@@ -435,7 +435,7 @@ function resolveItemPath(item: Record<string, unknown>, itemPath: string): unkno
   return current;
 }
 
-function readExpansionManifests(directory: string): DynamicExpansionManifest[] {
+export function readExpansionManifests(directory: string): DynamicExpansionManifest[] {
   const manifestEntries = fs
     .readdirSync(directory, { withFileTypes: true })
     .filter((entry) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$/u.test(entry.name));

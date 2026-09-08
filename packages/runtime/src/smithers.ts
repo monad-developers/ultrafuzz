@@ -21,6 +21,7 @@ import {
   isArtifactContractId,
   MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   parseStrictJsonBytes,
+  publishFileDurableExclusive,
   promptArtifactAuthorityPathSelectorId,
   readRegularFileSnapshot,
   readRunPlanDocument,
@@ -66,6 +67,7 @@ import {
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
+import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -254,8 +256,9 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
 // The replacement still overrides all three, and still supplies the fd-3
 // execution-snapshot descriptor upstream has no equivalent of.
 // The bun startup arguments 0.35.0 leaves inline in the resume patch. The
-// darwin-capable patch swaps the whole expression for a descriptor-rooted
-// helper call, so it is named here to keep that substitution checkable.
+// darwin-capable patch swaps the /proc literal for the descriptor-rooted child
+// path, so the whole expression is named here to keep that substitution
+// checkable.
 const RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS =
   '[...(process.versions.bun ? ["--config=/proc/self/fd/3/controls/bunfig.toml", "--env-file=/proc/self/fd/3/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=/proc/self/fd/3/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]';
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE = `    const runtime = options.executable ? { command: options.executable, args } : smithersRuntimeSpawn(args);
@@ -353,14 +356,41 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH 
     '"--no-addons", "--preserve-symlinks", "--preserve-symlinks-main"',
     '"--no-addons", "--preserve-symlinks-main"'
   );
-// The form Ultrafuzz wrote while the child root was the /proc literal. An
-// installation patched by that release is still recognized through the
-// predecessor list below rather than being rewritten in place.
-const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH =
+// The first descriptor-rooted form accidentally called a helper declared in
+// src/index.js from the separate resume-detached.js module. Keep it as a
+// predecessor so controller refresh repairs already-patched installations.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_UNSCOPED_HELPER_PREDECESSOR_PATCH =
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
     RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
     "[...ultrafuzzBunStartupArgsFor(snapshotChildRoot), ...args.map(rewriteSnapshotArgument)]"
   );
+// resume-detached.js is a separate ES module, so nothing the process anchor
+// patch declares in src/index.js is in scope there: the descriptor-root helpers
+// and the Bun startup arguments must both be spelled out inside this text. The
+// helpers restate the src/index.js ones exactly. `fstatSync` is reached through
+// `process.getBuiltinModule` because the module's `node:fs` import lacks it and
+// its import line lies outside this patch's anchor.
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_LOCAL_ROOT_HELPERS = `    // resume-detached.js is its own module: the descriptor-root helpers patched
+    // into src/index.js are out of scope here, so their Linux /proc and darwin
+    // volfs spellings are restated locally.
+    const ultrafuzzVolfsRoot = (descriptor) => {
+      const opened = process.getBuiltinModule("node:fs").fstatSync(descriptor);
+      return "/.vol/" + opened.dev + "/" + opened.ino;
+    };
+    const ultrafuzzDescriptorRootPath = (descriptor) =>
+      process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/" + process.pid + "/fd/" + descriptor;
+    const ultrafuzzChildRootPath = (descriptor) =>
+      process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/3";`;
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `${SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_LOCAL_ROOT_HELPERS}
+${SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
+  RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
+  '[...(process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]'
+)}`;
+const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS = [
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH,
+  SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_UNSCOPED_HELPER_PREDECESSOR_PATCH
+] as const;
 // 0.35.0 reflowed this import across multiple lines and added `watch`;
 // `realpathSync` is still absent, so the CLI still cannot compare a workflow
 // path against its persisted generation without this patch.
@@ -2502,10 +2532,7 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     sourceRelativePath: "src/resume-detached.js",
     patchable: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
     patched: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
-    predecessors: [
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH
-    ],
+    predecessors: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
     patchedFamilyMarkers: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
   },
@@ -5074,6 +5101,67 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
   return value.data;
 }
 
+/**
+ * Restore missing presentation prompts from immutable plan snapshots before Smithers renders a
+ * continuation. `timetravel` owns task artifact directories and can remove these launch-time copies
+ * even though persisted frames still refer to them. Any later resume renders the whole graph, so a
+ * prompt removed by an earlier reset must be available too. Only static agent tasks have plan rows
+ * here; dynamic tasks keep their runtime materialization path.
+ *
+ * A row whose retained snapshot is gone as well has nothing to restore from and is skipped: the
+ * continuation then proceeds exactly as it did before this recovery existed, and Smithers reports
+ * the missing prompt itself when it renders the task. A run without `plan.json` at all has no rows
+ * to begin with and is skipped the same way: `resumeRun` natively continues bare Smithers runs
+ * that ultrafuzz never planned (`run.json` and the persisted workflow only), and it treats every
+ * other launch document as optional for that run shape. Every other check gates a write, so a
+ * plan or snapshot that is present but wrong (digest, symlink, non-regular file, escaping path)
+ * still fails the continuation.
+ */
+function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
+  const runRoot = path.resolve(input.runRoot);
+  const planPath = path.join(runRoot, "plan.json");
+  if (!runEntryExists(planPath)) return;
+  const plan = readRunPlanDocument(planPath, path.basename(runRoot));
+  for (const planned of plan.rendered_prompts) {
+    const nodeId = `node:${planned.attempt_id}`;
+    const promptPath = path.isAbsolute(planned.rendered_prompt_path)
+      ? path.resolve(planned.rendered_prompt_path)
+      : path.resolve(input.projectRoot, planned.rendered_prompt_path);
+    if (fs.existsSync(promptPath)) continue;
+    const snapshotLabel = `retained rendered prompt snapshot for task ${nodeId}`;
+    const snapshotPath = safeResolveInside(runRoot, planned.rendered_prompt_snapshot_path, snapshotLabel);
+    if (!runEntryExists(snapshotPath)) continue;
+    const expectedPromptPath = path.join(runRoot, "artifacts", planned.attempt_id, "prompt.rendered.md");
+    if (promptPath !== expectedPromptPath) {
+      throw new Error(`persisted rendered prompt path does not match task ${nodeId}`);
+    }
+    assertPathInside(runRoot, promptPath, `rendered prompt for task ${nodeId}`);
+    assertRegularFileInside(runRoot, snapshotPath, snapshotLabel);
+    assertNoSymlinkComponents(runRoot, snapshotPath, snapshotLabel);
+    const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
+    if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
+      throw new Error(`retained rendered prompt snapshot does not match task ${nodeId}`);
+    }
+    const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
+    publishFileDurableExclusive(runRoot, relativePromptPath, contents);
+  }
+}
+
+/**
+ * `lstat` semantics on purpose: a dangling symlink or a non-file entry counts as present so it
+ * reaches the fail-closed checks above (`readRunPlanDocument` opens with `O_NOFOLLOW`). Any lookup
+ * failure is classified the way `assertRegularFileInside` classifies it, as no such file, which is
+ * the case that skips.
+ */
+function runEntryExists(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runSmithersLifecycleCommand(input: {
   action: "resume" | "replay" | "fork";
   smithersRunId: string;
@@ -5175,6 +5263,24 @@ export async function runSmithersLifecycleCommand(input: {
       input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
         ? smithersFailedTasks(currentInspection)
         : [];
+    const retryProducers = failedTasks.flatMap((failedTask) => {
+      const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
+      return producer === undefined ? [] : [producer];
+    });
+    // A reopened dynamic source owns the published expansion generation, which
+    // lives outside Smithers state. Decide and validate its withdrawal before
+    // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
+    // closed while nothing has been reset. The rename itself waits until after
+    // the reset: the dependent set Smithers resolves at reset time must still
+    // see the materialized generation (#1063).
+    const retryArchivePlan =
+      retryProducers.length > 0 && input.relaunchPaths !== undefined
+        ? planDynamicExpansionRetryArchive({
+            projectRoot: input.projectRoot,
+            runRoot: input.relaunchPaths.runRoot,
+            sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
+          })
+        : undefined;
     if (failedTasks.length > 0) {
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
@@ -5207,6 +5313,7 @@ export async function runSmithersLifecycleCommand(input: {
       }
       preResumeStderr = resetStderr.join("\n");
     }
+    if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
     if (
       failedTasks.length === 0 &&
       input.retryFailed === true &&
@@ -5280,6 +5387,12 @@ export async function runSmithersLifecycleCommand(input: {
           "cloud execution generation evidence"
         );
       }
+    }
+    if (input.relaunchPaths !== undefined) {
+      restoreMissingRenderedPrompts({
+        projectRoot: input.projectRoot,
+        runRoot: input.relaunchPaths.runRoot
+      });
     }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
     try {
@@ -5386,6 +5499,13 @@ export async function runSmithersLifecycleCommand(input: {
       command: resumeResult.command,
       workflowRunId: forkedRunId
     };
+  }
+
+  if (input.action === "resume" && input.relaunchPaths !== undefined) {
+    restoreMissingRenderedPrompts({
+      projectRoot: input.projectRoot,
+      runRoot: input.relaunchPaths.runRoot
+    });
   }
 
   const command =
@@ -6754,7 +6874,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
       SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
       "detached resume execution snapshot transfer",
-      [SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH],
+      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
       ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
     )
   );

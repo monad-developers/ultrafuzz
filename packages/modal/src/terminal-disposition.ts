@@ -49,6 +49,47 @@ export function operationalDispositionForError(error: unknown): OperationalFailu
   return error instanceof OperationalDispositionError ? error.category : "sandbox-exited";
 }
 
+/** How a worker names a failure that declared no disposition; see `runNamingUnhandledFailure`. */
+export interface UnhandledFailureNaming {
+  /** Errors to rethrow exactly as they were, beyond every `OperationalDispositionError`. */
+  passthrough?: (error: unknown) => boolean;
+  /** Record the failure somewhere a reader will find it; runs before the failure is renamed and rethrown. */
+  report: (error: unknown) => void | Promise<void>;
+}
+
+/**
+ * Run `operation`, naming a failure that declared no disposition before the terminal contract can misname it.
+ *
+ * `operationalDispositionForError` maps every error that is not an `OperationalDispositionError` to
+ * `sandbox-exited`, and nothing on that path writes to the worker log. A `TypeError` in the worker's own code,
+ * or a gate that threw a plain `Error` after the last child command had returned, is therefore collected as a
+ * sandbox death with no reason: run 33904992917 logged `operation-finished` for `eval report` and then died
+ * `sandbox-exited` with an unknown exit code, because the bundle assembly that followed threw a plain `Error`
+ * and no line recorded it (#320). `report` records the failure while the worker is still alive to do so, and
+ * the rethrow carries the worker's own `unreachable` disposition with the original error as its cause.
+ *
+ * Errors `passthrough` accepts -- the ones a caller's `diagnosticCodeForError` already gives a code, or ones
+ * thrown before there is anywhere to name them -- are rethrown unchanged, as is every
+ * `OperationalDispositionError`; renaming those would cost them the code the contract records. `report` is
+ * evidence, not an outcome: its own failure never displaces the one being named.
+ */
+export async function runNamingUnhandledFailure<T>(
+  operation: () => Promise<T>,
+  options: UnhandledFailureNaming
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof OperationalDispositionError || options.passthrough?.(error) === true) throw error;
+    try {
+      await options.report(error);
+    } catch {
+      // The diagnostic is evidence, not an outcome.
+    }
+    throw new OperationalDispositionError("unreachable", { cause: error });
+  }
+}
+
 interface TaskBinding {
   attemptId: string;
   concreteNodeId: string;

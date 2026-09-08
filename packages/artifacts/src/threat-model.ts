@@ -67,7 +67,7 @@ const capabilitySchema = z
   .strictObject({
     id: capabilityId,
     status: z.enum(CAPABILITY_STATUSES),
-    rationale: nonEmptyString,
+    rationale: nonEmptyString.optional(),
     evidence: z.array(evidenceReferenceSchema)
   })
   .superRefine((value, context) => {
@@ -83,8 +83,8 @@ const capabilitySchema = z
 const assetSchema = z.strictObject({
   id: hierarchicalId,
   name: nonEmptyString,
-  description: nonEmptyString,
-  value_at_risk: nonEmptyString,
+  description: nonEmptyString.optional(),
+  value_at_risk: nonEmptyString.optional(),
   evidence: z.array(evidenceReferenceSchema)
 });
 const actorSchema = z.strictObject({
@@ -98,14 +98,14 @@ const actorSchema = z.strictObject({
 const trustBoundarySchema = z.strictObject({
   id: hierarchicalId,
   name: nonEmptyString,
-  description: nonEmptyString,
+  description: nonEmptyString.optional(),
   actor_ids: uniqueStrings,
   evidence: z.array(evidenceReferenceSchema)
 });
 const attackSurfaceSchema = z.strictObject({
   id: hierarchicalId,
   name: nonEmptyString,
-  description: nonEmptyString,
+  description: nonEmptyString.optional(),
   entry_points: oneOrMoreStrings,
   asset_ids: uniqueStrings,
   actor_ids: uniqueStrings,
@@ -116,7 +116,7 @@ const attackSurfaceSchema = z.strictObject({
 const valueFlowSchema = z.strictObject({
   id: hierarchicalId,
   name: nonEmptyString,
-  description: nonEmptyString,
+  description: nonEmptyString.optional(),
   steps: oneOrMoreStrings,
   asset_ids: oneOrMoreStrings,
   actor_ids: uniqueStrings,
@@ -150,20 +150,20 @@ const assumptionSchema = z.strictObject({
 const unknownSchema = z.strictObject({
   id: hierarchicalId,
   name: nonEmptyString,
-  description: nonEmptyString,
-  security_impact: nonEmptyString,
+  description: nonEmptyString.optional(),
+  security_impact: nonEmptyString.optional(),
   evidence_needed: nonEmptyString
 });
 const coverageGapSchema = z.strictObject({
   id: hierarchicalId,
   name: nonEmptyString,
-  description: nonEmptyString,
+  description: nonEmptyString.optional(),
   reason: nonEmptyString
 });
 const threatSchema = z.strictObject({
   id: threatId,
   title: nonEmptyString,
-  description: nonEmptyString,
+  description: nonEmptyString.optional(),
   preconditions: oneOrMoreStrings,
   impact: nonEmptyString,
   asset_ids: uniqueStrings,
@@ -182,12 +182,12 @@ export const threatModelSchema = z
     schema_version: z.literal(THREAT_MODEL_SCHEMA_VERSION),
     title: nonEmptyString,
     scope: z.strictObject({
-      summary: nonEmptyString,
+      summary: nonEmptyString.optional(),
       repository_evidence: z.array(evidenceReferenceSchema),
       exclusions: uniqueStrings
     }),
     protocol: z.strictObject({
-      summary: nonEmptyString,
+      summary: nonEmptyString.optional(),
       archetypes: oneOrMoreStrings
     }),
     capabilities: z.array(capabilitySchema).min(1),
@@ -293,11 +293,11 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
     "",
     "## Scope",
     "",
-    model.scope.summary,
+    model.scope.summary ?? "Not recorded.",
     "",
     "Protocol archetypes: " + inlineList(model.protocol.archetypes) + ".",
     "",
-    model.protocol.summary,
+    model.protocol.summary ?? "Not recorded.",
     "",
     "### Repository evidence",
     ""
@@ -314,7 +314,7 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
         " | " +
         capability.status +
         " | " +
-        escapeTable(capability.rationale) +
+        escapeTable(capability.rationale ?? "Not recorded.") +
         " | " +
         escapeTable(evidenceSummary(capability.evidence)) +
         " |"
@@ -322,8 +322,8 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
   }
 
   appendNamedEntries(lines, "Assets and value stores", model.assets, (entry) => [
-    entry.description,
-    "Value at risk: " + entry.value_at_risk,
+    entry.description ?? "Not recorded.",
+    "Value at risk: " + (entry.value_at_risk ?? "Not recorded."),
     "Evidence: " + evidenceSummary(entry.evidence)
   ]);
   appendNamedEntries(lines, "Actors and roles", model.actors, (entry) => [
@@ -333,12 +333,12 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
     "Evidence: " + evidenceSummary(entry.evidence)
   ]);
   appendNamedEntries(lines, "Trust boundaries", model.trust_boundaries, (entry) => [
-    entry.description,
+    entry.description ?? "Not recorded.",
     "Actors: " + inlineCodeList(entry.actor_ids),
     "Evidence: " + evidenceSummary(entry.evidence)
   ]);
   appendNamedEntries(lines, "Attack surfaces", model.attack_surfaces, (entry) => [
-    entry.description,
+    entry.description ?? "Not recorded.",
     "Entry points: " + inlineList(entry.entry_points),
     "Assets: " + inlineCodeList(entry.asset_ids),
     "Actors: " + inlineCodeList(entry.actor_ids),
@@ -347,7 +347,7 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
     "Evidence: " + evidenceSummary(entry.evidence)
   ]);
   appendNamedEntries(lines, "Value and accounting flows", model.value_flows, (entry) => [
-    entry.description,
+    entry.description ?? "Not recorded.",
     "Assets: " + inlineCodeList(entry.asset_ids),
     "Actors: " + inlineCodeList(entry.actor_ids),
     ...entry.steps.map((step, index) => "Step " + String(index + 1) + ": " + step),
@@ -372,7 +372,7 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
     lines.push(
       "### " + threat.title + " (" + code(threat.id) + ")",
       "",
-      threat.description,
+      threat.description ?? "Not recorded.",
       "",
       "- Preconditions: " + inlineList(threat.preconditions),
       "- Impact: " + threat.impact,
@@ -393,12 +393,12 @@ export function renderThreatModelMarkdown(input: ThreatModel): string {
     "Evidence: " + evidenceSummary(entry.evidence)
   ]);
   appendNamedEntries(lines, "Unknowns", model.unknowns, (entry) => [
-    entry.description,
-    "Security impact: " + entry.security_impact,
+    entry.description ?? "Not recorded.",
+    "Security impact: " + (entry.security_impact ?? "Not recorded."),
     "Evidence needed: " + entry.evidence_needed
   ]);
   appendNamedEntries(lines, "Coverage gaps", model.coverage_gaps, (entry) => [
-    entry.description,
+    entry.description ?? "Not recorded.",
     "Reason: " + entry.reason
   ]);
   return trimTrailingBlankLines(lines).join("\n") + "\n";

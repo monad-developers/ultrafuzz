@@ -76,8 +76,6 @@
               "required": [
                 "strategy_id",
                 "title",
-                "rationale",
-                "coverage_gap",
                 "evidence_paths",
                 "proposed_test_path",
                 "focused_command",

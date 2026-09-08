@@ -488,7 +488,9 @@ describe("production dependency advisory policy", () => {
     expect(observedUrl).toBe(APPROVED_AUDIT_ENDPOINT);
     expect(audit).toEqual(auditWith([highAdvisory]));
     await expect(
-      fetchApprovedProductionAudit(request, async () => new Response("unavailable", { status: 503 }))
+      fetchApprovedProductionAudit(request, async () => new Response("unavailable", { status: 503 }), {
+        sleep: noSleep
+      })
     ).rejects.toThrow("HTTP 503");
     await expect(
       fetchApprovedProductionAudit(request, async () => new Response("not-json", { status: 200 }))
@@ -512,6 +514,140 @@ describe("production dependency advisory policy", () => {
     await expect(
       fetchApprovedProductionAudit(request, async () => new Response(invalidUtf8, { status: 200 }))
     ).rejects.toThrow("not strict JSON");
+  });
+
+  it("retries transient registry transport failures with bounded backoff", async () => {
+    const request = { "synthetic-package": ["1.0.0"] };
+    const healthy = () => new Response(JSON.stringify({ "synthetic-package": [rawAdvisory()] }), { status: 200 });
+    const sleeps: number[] = [];
+    const sleep = async (ms: number) => {
+      sleeps.push(ms);
+    };
+    const inits: RequestInit[] = [];
+    let calls = 0;
+
+    const afterTwoOutages = await fetchApprovedProductionAudit(
+      request,
+      async (url, init) => {
+        calls += 1;
+        expect(String(url)).toBe(APPROVED_AUDIT_ENDPOINT);
+        inits.push(init ?? {});
+        return calls <= 2 ? new Response("unavailable", { status: 503 }) : healthy();
+      },
+      { sleep }
+    );
+    expect(afterTwoOutages).toEqual(auditWith([highAdvisory]));
+    expect(calls).toBe(3);
+    expect(sleeps).toEqual([5_000, 20_000]);
+    for (const init of inits) {
+      expect(init.method).toBe("POST");
+      expect(init.redirect).toBe("error");
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+    }
+
+    calls = 0;
+    sleeps.length = 0;
+    const afterRejectedFetch = await fetchApprovedProductionAudit(
+      request,
+      async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return healthy();
+      },
+      { sleep }
+    );
+    expect(afterRejectedFetch).toEqual(auditWith([highAdvisory]));
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([5_000]);
+
+    calls = 0;
+    sleeps.length = 0;
+    const afterRateLimit = await fetchApprovedProductionAudit(
+      request,
+      async () => {
+        calls += 1;
+        return calls === 1 ? new Response("slow down", { status: 429 }) : healthy();
+      },
+      { sleep }
+    );
+    expect(afterRateLimit).toEqual(auditWith([highAdvisory]));
+    expect(calls).toBe(2);
+
+    calls = 0;
+    sleeps.length = 0;
+    await expect(
+      fetchApprovedProductionAudit(
+        request,
+        async () => {
+          calls += 1;
+          return new Response("unavailable", { status: 503 });
+        },
+        { sleep }
+      )
+    ).rejects.toThrow("approved registry audit request failed after 3 attempts: HTTP 503");
+    expect(calls).toBe(3);
+    expect(sleeps).toEqual([5_000, 20_000]);
+
+    calls = 0;
+    await expect(
+      fetchApprovedProductionAudit(
+        request,
+        async () => {
+          calls += 1;
+          throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        },
+        { sleep }
+      )
+    ).rejects.toThrow(
+      "approved registry audit request failed after 3 attempts: The operation was aborted due to timeout"
+    );
+    expect(calls).toBe(3);
+  });
+
+  it("does not retry registry verdicts or malformed responses", async () => {
+    const request = { "synthetic-package": ["1.0.0"] };
+    const sleep = async () => {
+      throw new Error("sleep must not be called for a non-transient failure");
+    };
+    let calls = 0;
+
+    await expect(
+      fetchApprovedProductionAudit(
+        request,
+        async () => {
+          calls += 1;
+          return new Response("missing", { status: 404 });
+        },
+        { sleep }
+      )
+    ).rejects.toThrow("approved registry audit request failed with HTTP 404");
+    expect(calls).toBe(1);
+
+    calls = 0;
+    await expect(
+      fetchApprovedProductionAudit(
+        request,
+        async () => {
+          calls += 1;
+          return new Response("not-json", { status: 200 });
+        },
+        { sleep }
+      )
+    ).rejects.toThrow("not strict JSON");
+    expect(calls).toBe(1);
+
+    calls = 0;
+    await expect(
+      fetchApprovedProductionAudit(
+        request,
+        async () => {
+          calls += 1;
+          return new Response(null, { status: 204 });
+        },
+        { sleep }
+      )
+    ).rejects.toThrow("approved registry audit request failed with HTTP 204");
+    expect(calls).toBe(1);
   });
 
   it("reports production dependency enumeration process, exit, and JSON failures explicitly", () => {
@@ -566,6 +702,10 @@ describe("production dependency advisory policy", () => {
     ).toThrow("strict JSON");
   });
 });
+
+async function noSleep(): Promise<void> {
+  // Retry backoff is injected so the fail-closed registry cases do not wait.
+}
 
 function auditWith(advisories: Array<Record<string, unknown>>) {
   return {

@@ -4,16 +4,33 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   assertRegularFileInside,
+  artifactValidationWarningsSchema,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
-  redactValue,
   safeResolveInside,
-  validateArtifactContract
+  validateArtifactContract,
+  type ArtifactValidationWarning
 } from "@ultrafuzz/artifacts";
+import { redactSecretsInText, type SecretScanMode } from "@ultrafuzz/security";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
 const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
+/**
+ * Secret placeholder for the public projection only. Two constraints pick it:
+ *
+ * - The public bundle re-projects the published report.json and requires the same bytes back, so
+ *   the placeholder must be a fixed point of the redaction pass. The key-name assignment rule's
+ *   unquoted value class stops at whitespace, `,`, `;`, `]`, and `}`, so a placeholder containing
+ *   any of those is re-redacted on the next pass (`token=[redacted]` becomes `token=[redacted]]`).
+ * - The final-review Markdown gate rejects raw HTML, images, and links outside fenced code, and
+ *   redacted values land unescaped in inline code (run summary values, coverage paths, source
+ *   nodes), so the placeholder must not read as HTML (`<redacted>`), a link (`[redacted](`),
+ *   an image, or emphasis (`*`, `_`).
+ *
+ * A bare uppercase word satisfies both. Every other redaction keeps the security package's default.
+ */
+const PUBLIC_SECRET_REDACTION_PLACEHOLDER = "REDACTED";
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
@@ -110,7 +127,7 @@ export function projectPublicCanonicalFinalReport(
     containsPrivatePathInValue(projection.report) ||
     containsPrivatePath(projection.markdown) ||
     containsUnredactedSecretInValue(projection.report) ||
-    containsUnredactedSecret(projection.markdown)
+    containsUnredactedSecretInMarkdown(projection.markdown, projection.report)
   ) {
     throw new Error("public final-report projection contains private report content");
   }
@@ -573,6 +590,10 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     ""
   );
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
+  appendArtifactValidationWarnings(
+    lines,
+    isRecord(report.run_metadata) ? report.run_metadata.artifact_validation_warnings : undefined
+  );
   appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   appendCoverageEvidence(lines, report.coverage_evidence);
@@ -595,6 +616,41 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+/** Host diagnostics can accompany an immutable report without rewriting its JSON/Markdown pair. */
+export function renderArtifactValidationWarningsMarkdown(warnings: readonly ArtifactValidationWarning[]): string {
+  const lines: string[] = [];
+  appendArtifactValidationWarnings(lines, warnings);
+  return lines.length === 0 ? "" : `${lines.join("\n").trim()}\n`;
+}
+
+/** A separately named public companion uses the same privacy boundary as the report. */
+export function projectPublicArtifactValidationWarnings(warnings: readonly ArtifactValidationWarning[]): {
+  warnings: ArtifactValidationWarning[];
+  markdown: string;
+} {
+  const publicWarnings = artifactValidationWarningsSchema.parse(
+    redactSecretsInStringValues(redactPrivatePathsInValue(warnings))
+  );
+  return { warnings: publicWarnings, markdown: renderArtifactValidationWarningsMarkdown(publicWarnings) };
+}
+
+function appendArtifactValidationWarnings(lines: string[], value: unknown): void {
+  if (!Array.isArray(value) || value.length === 0) return;
+  lines.push(
+    "",
+    "## Artifact validation warnings",
+    "",
+    "The run continued with partial metadata. Producer artifacts were preserved unchanged.",
+    ""
+  );
+  for (const warning of value.filter(isRecord)) {
+    lines.push(
+      `- ${inlineValue(warning.code)} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+    );
+    if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
+  }
 }
 
 function appendCoverageEvidence(lines: string[], value: unknown): void {
@@ -1281,27 +1337,76 @@ function publicInlineCode(value: string): string {
   return value.replace(/\s+/gu, " ").trim().replaceAll("`", "'");
 }
 
-function redactSecrets(value: string): string {
-  const redacted = redactValue(value);
-  return typeof redacted === "string" ? redacted : "<redacted>";
+function redactSecrets(value: string, mode: SecretScanMode = "all"): string {
+  return redactSecretsInText(value, PUBLIC_SECRET_REDACTION_PLACEHOLDER, [], mode);
 }
 
-function containsUnredactedSecret(value: string): boolean {
-  const normalizedPlaceholders = value.replaceAll("&lt;redacted&gt;", "<redacted>");
-  return redactValue(normalizedPlaceholders) !== normalizedPlaceholders;
+/**
+ * `run_metadata.run_id` and `run_metadata.source_run_id` are machine-generated safe IDs
+ * (`validateSafeId`, so `[A-Za-z0-9._-]`) that the public bundle already publishes in its run
+ * records and then requires report.json to repeat. The speculative high-entropy pass redacts the
+ * bounded eval run IDs (`ci-<run>-1-smoke-...-<16 hex>`), which breaks that lineage check, so these
+ * two fields scan positive-only: a vendor-format credential or URL credential in the slot is still
+ * redacted (and the bundle then fails closed on lineage), while a high-entropy safe ID is kept.
+ */
+function secretScanModeForPath(keyPath: readonly string[]): SecretScanMode {
+  const isRetainedIdentifier =
+    keyPath.length === 2 &&
+    keyPath[0] === "run_metadata" &&
+    (keyPath[1] === "run_id" || keyPath[1] === "source_run_id");
+  return isRetainedIdentifier ? "positive-only" : "all";
 }
 
-function containsUnredactedSecretInValue(value: unknown): boolean {
-  if (typeof value === "string") return containsUnredactedSecret(value);
-  if (Array.isArray(value)) return value.some(containsUnredactedSecretInValue);
-  return isRecord(value) && Object.values(value).some(containsUnredactedSecretInValue);
+function containsUnredactedSecret(value: string, mode: SecretScanMode = "all"): boolean {
+  // The fail-closed check asks whether another pass with the public placeholder would change the
+  // text. The placeholder is a fixed point of that pass, so no folding is needed and a leftover
+  // secret is the only thing that can still differ.
+  return redactSecrets(value, mode) !== value;
 }
 
-function redactSecretsInStringValues(value: unknown): unknown {
-  if (typeof value === "string") return redactSecrets(value);
-  if (Array.isArray(value)) return value.map(redactSecretsInStringValues);
+function containsUnredactedSecretInValue(value: unknown, keyPath: readonly string[] = []): boolean {
+  if (typeof value === "string") return containsUnredactedSecret(value, secretScanModeForPath(keyPath));
+  if (Array.isArray(value)) {
+    return value.some((entry, index) => containsUnredactedSecretInValue(entry, [...keyPath, String(index)]));
+  }
+  return (
+    isRecord(value) &&
+    Object.entries(value).some(([key, entry]) => containsUnredactedSecretInValue(entry, [...keyPath, key]))
+  );
+}
+
+/**
+ * The Markdown re-scan has no key path, so the retained identifiers (which the speculative pass
+ * would flag) are substituted with the placeholder before scanning. They were already scanned
+ * positive-only in the report walk; a leftover real secret anywhere else still changes under the pass.
+ */
+function containsUnredactedSecretInMarkdown(markdown: string, report: JsonRecord): boolean {
+  const scanned = retainedIdentifierValues(report).reduce(
+    (current, identifier) => current.replaceAll(identifier, PUBLIC_SECRET_REDACTION_PLACEHOLDER),
+    markdown
+  );
+  return containsUnredactedSecret(scanned);
+}
+
+function retainedIdentifierValues(report: JsonRecord): string[] {
+  const metadata = recordField(report, "run_metadata");
+  return [metadata?.run_id, metadata?.source_run_id].filter(
+    (value): value is string => typeof value === "string" && value !== ""
+  );
+}
+
+function redactSecretsInStringValues(value: unknown, keyPath: readonly string[] = []): unknown {
+  if (typeof value === "string") return redactSecrets(value, secretScanModeForPath(keyPath));
+  if (Array.isArray(value)) {
+    return collapseRedactionDuplicates(
+      value,
+      value.map((entry, index) => redactSecretsInStringValues(entry, [...keyPath, String(index)]))
+    );
+  }
   if (!isRecord(value)) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactSecretsInStringValues(entry)]));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, redactSecretsInStringValues(entry, [...keyPath, key])])
+  );
 }
 
 function containsPrivatePath(value: string): boolean {
@@ -1316,9 +1421,32 @@ function containsPrivatePathInValue(value: unknown): boolean {
 
 function redactPrivatePathsInValue(value: unknown): unknown {
   if (typeof value === "string") return redactPrivatePaths(value);
-  if (Array.isArray(value)) return value.map(redactPrivatePathsInValue);
+  if (Array.isArray(value)) return collapseRedactionDuplicates(value, value.map(redactPrivatePathsInValue));
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactPrivatePathsInValue(entry)]));
+}
+
+/**
+ * Collapse the duplicates a redaction pass created in an array of strings.
+ *
+ * Redaction maps every private path to `[redacted-path]` and every flagged string to the secret
+ * placeholder, so two distinct entries of one array can come out identical. The report schema
+ * declares `affected_files`, `affected_functions`, `patch_refs`, `property_ids`, `fuzzer_backends`,
+ * `duplicate_finding_ids`, and `family_variant_keys` as unique arrays, so the public copy would then
+ * fail the validation the internal report passed (UltraFuzzBench smoke run 33933691679, issue #1028).
+ *
+ * Only duplicates the pass itself introduced are collapsed, keeping the first occurrence of each value
+ * in place: an array the pass did not change, an array that already repeated a value before the pass,
+ * and an array with a non-string entry are returned exactly as mapped. Every unredacted entry survives,
+ * and the result is a fixed point of the projection: a second pass changes nothing, so it collapses
+ * nothing.
+ */
+function collapseRedactionDuplicates(original: readonly unknown[], redacted: unknown[]): unknown[] {
+  if (!original.every((entry) => typeof entry === "string")) return redacted;
+  if (redacted.every((entry, index) => entry === original[index])) return redacted;
+  if (new Set(original).size !== original.length) return redacted;
+  if (new Set(redacted).size === redacted.length) return redacted;
+  return [...new Set(redacted)];
 }
 
 function redactPrivatePaths(value: string): string {

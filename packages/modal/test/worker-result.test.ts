@@ -102,6 +102,67 @@ describe("strict worker result contracts", () => {
     });
   });
 
+  it("lets the worker name an unclassified failure before the contract is written", async () => {
+    // Run 33904992917: the public worker finished `eval report` and then threw a plain Error from the bundle
+    // assembly. Nothing named it, so the contract said `sandbox-exited` and the log said nothing (#320).
+    const harness = await terminalHarness();
+    const failure = new Error("public benchmark file is too large: reports/target-one/report.json");
+    const order: string[] = [];
+    harness.flush.mockImplementation(async () => {
+      order.push("flush");
+    });
+
+    const rejection = await runWithTerminalPersistence({
+      ...harness.input,
+      diagnosticCodeForError: (error) => (error instanceof RangeError ? "checkpoint-incompatible" : undefined),
+      unhandledFailure: {
+        passthrough: (error) => error instanceof RangeError,
+        report: (error) => {
+          order.push(`report:${(error as Error).message}`);
+        }
+      },
+      run: async () => {
+        throw failure;
+      }
+    }).catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(OperationalDispositionError);
+    expect((rejection as OperationalDispositionError).category).toBe("unreachable");
+    expect((rejection as { cause: unknown }).cause).toBe(failure);
+    expect(order).toEqual([`report:${failure.message}`, "flush"]);
+    expect(readContract(harness.resultPath)).toMatchObject({
+      exit_category: "unreachable",
+      diagnostic_code: "dependency-unreachable"
+    });
+
+    // A failure the contract already codes, or one that carries its own disposition, is neither reported nor
+    // renamed: the code it would have recorded is the whole point of leaving it alone.
+    for (const [named, diagnosticCode] of [
+      [new RangeError("persisted lineage attempt identity does not match"), "checkpoint-incompatible"],
+      [new OperationalDispositionError("capacity-unavailable"), "capacity-unavailable"]
+    ] as const) {
+      const kept = await terminalHarness();
+      const reported: unknown[] = [];
+      await expect(
+        runWithTerminalPersistence({
+          ...kept.input,
+          diagnosticCodeForError: (error) => (error instanceof RangeError ? "checkpoint-incompatible" : undefined),
+          unhandledFailure: {
+            passthrough: (error) => error instanceof RangeError,
+            report: (error) => {
+              reported.push(error);
+            }
+          },
+          run: async () => {
+            throw named;
+          }
+        })
+      ).rejects.toBe(named);
+      expect(reported).toEqual([]);
+      expect(readContract(kept.resultPath)).toMatchObject({ diagnostic_code: diagnosticCode });
+    }
+  });
+
   it("persists the sanitized non-resumable terminal diagnostic without private failure text", async () => {
     const harness = await terminalHarness();
     const failure = new Error("private terminal artifact detail");

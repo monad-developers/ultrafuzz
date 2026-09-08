@@ -346,18 +346,29 @@ rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
 
 ## Environment Overrides
 
-| Variable                        | Effect                                                                            |
-| ------------------------------- | --------------------------------------------------------------------------------- |
-| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer override for `run.max_parallel_agents`.                          |
-| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Extra workflow inputs; credential-like names or values are provider-route scoped. |
-| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.                                      |
-| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.                                       |
-| `ULTRAFUZZ_EVAL_PROVIDER`       | Override for `eval.provider`.                                                     |
-| `ULTRAFUZZ_EVAL_CONFIG`         | Override for `eval.eval_config`.                                                  |
-| `ULTRAFUZZ_PRICING_CATALOG_URL` | Live model-pricing catalog URL, or `disabled`, `none`, or `off`.                  |
-| `ULTRAFUZZ_PRICING_TIMEOUT_MS`  | Positive catalog request timeout in milliseconds, capped at 60 seconds.           |
+| Variable                                | Effect                                                                                                                                                                                                                                                         |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ULTRAFUZZ_MAX_PARALLEL_AGENTS`         | Positive integer override for `run.max_parallel_agents`.                                                                                                                                                                                                       |
+| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST`         | Extra workflow inputs; credential-like names or values are provider-route scoped.                                                                                                                                                                              |
+| `ULTRAFUZZ_OUTPUT_DIR`                  | Project-local override for `run.output_dir`.                                                                                                                                                                                                                   |
+| `ULTRAFUZZ_KEEP_WORKSPACES`             | Boolean override for `run.keep_workspaces`.                                                                                                                                                                                                                    |
+| `ULTRAFUZZ_EVAL_PROVIDER`               | Override for `eval.provider`.                                                                                                                                                                                                                                  |
+| `ULTRAFUZZ_EVAL_CONFIG`                 | Override for `eval.eval_config`.                                                                                                                                                                                                                               |
+| `ULTRAFUZZ_PRICING_CATALOG_URL`         | Live model-pricing catalog URL, or `disabled`, `none`, or `off`.                                                                                                                                                                                               |
+| `ULTRAFUZZ_PRICING_TIMEOUT_MS`          | Positive catalog request timeout in milliseconds, capped at 60 seconds.                                                                                                                                                                                        |
+| `ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS` | Optional deadline in milliseconds for the run-state refresh before `status`, `inspect`, `why`, and `stats`. Unset means no deadline (observers wait for full synchronization); a positive value bounds it, capped at 60000; `0` or `off` is the same as unset. |
 
 Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
+
+`ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS` optionally bounds the run-state
+synchronization that `status`, `inspect`, `why`, and `stats` perform before
+their direct runner query. When it is unset there is no deadline: the command
+waits for full synchronization, which is the only CLI path that converges local
+run state from runner evidence. Set it to a positive number of milliseconds to
+bound the refresh; values above 60000 are capped at 60000, and `0` or `off` is
+the same as unset. When a configured deadline passes, the command reports a
+`WORKFLOW_SYNC_DEADLINE_EXCEEDED` warning and continues with the local run
+state, whose node states, attempt ledgers, and usage counts may then be stale.
 
 Custom pricing catalogs must use HTTPS without credentials, query parameters,
 or fragments and must resolve entirely to public addresses. The validated DNS

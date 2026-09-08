@@ -35,6 +35,7 @@ export interface ArtifactContractDefinition {
 }
 
 export interface ArtifactContractIssue {
+  severity?: "error" | "warning";
   code: string;
   message: string;
   path: string;

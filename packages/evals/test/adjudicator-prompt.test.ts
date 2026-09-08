@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { EVAL_JUDGE_PROMPT_VERSION, buildAdjudicatorPrompt } from "../src/evaluator/adjudicator-prompt.js";
+import {
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_ID,
+  EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
+  evalLlmJudgeResultJsonSchema,
+  validateEvalJsonSchema
+} from "../src/eval-schema-registry.js";
+import {
+  ADJUDICATOR_RESPONSE_FORMAT,
+  EVAL_JUDGE_PROMPT_VERSION,
+  buildAdjudicatorPrompt,
+  providerStrictSchema
+} from "../src/evaluator/adjudicator-prompt.js";
 import type { FindingJudgeInput, FindingJudgeResult } from "../src/types.js";
 import { testRow, testSuite } from "./helpers.js";
 
@@ -51,7 +62,7 @@ describe("adjudicator prompt assets", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v10-registered-result-schema");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v11-openai-strict-result-schema");
     expect(rendered).toContain("ultrafuzz.eval.llm-judge-result.v1");
     expect(rendered).toContain("Decide solely from the supplied finding, candidates, evidence, and rubric");
     expect(rendered).toContain("Do not anticipate, defer to, infer, or simulate any other evaluator's decision");
@@ -89,5 +100,192 @@ describe("adjudicator prompt assets", () => {
     expect(rendered).toContain("authorization-identity collision is outside a canonical accounting-conversion issue");
     expect(rendered).toContain("supported actions execute atomically");
     expect(rendered).toContain("correctly rejects an unauthorized caller");
+  });
+});
+
+const STRIPPED_PROVIDER_KEYWORDS = [
+  "$schema",
+  "$id",
+  "title",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "format",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf"
+];
+
+function schemaRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/** Every schema node reachable through the keywords the projection may emit. */
+function schemaNodes(node: Record<string, unknown>, location = "#"): Array<[string, Record<string, unknown>]> {
+  const nodes: Array<[string, Record<string, unknown>]> = [[location, node]];
+  for (const keyword of ["properties", "$defs"]) {
+    for (const [name, child] of Object.entries(schemaRecord(node[keyword]) ?? {})) {
+      nodes.push(...schemaNodes(schemaRecord(child) ?? {}, `${location}/${keyword}/${name}`));
+    }
+  }
+  const items = schemaRecord(node.items);
+  if (items !== undefined) nodes.push(...schemaNodes(items, `${location}/items`));
+  for (const keyword of ["anyOf", "oneOf", "allOf"]) {
+    (Array.isArray(node[keyword]) ? (node[keyword] as unknown[]) : []).forEach((child, index) => {
+      nodes.push(...schemaNodes(schemaRecord(child) ?? {}, `${location}/${keyword}/${index}`));
+    });
+  }
+  return nodes;
+}
+
+function validJudgeResult(): Record<string, unknown> {
+  return {
+    schema_version: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION,
+    matched_ground_truth_bug_id: "candidate-1",
+    score: 1,
+    signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+    rationale: "The finding matches the first candidate.",
+    confidence: 1
+  };
+}
+
+describe("provider strict response schema", () => {
+  it("sends exactly the OpenAI-strict projection of the registry schema", () => {
+    const unitMetric = { $ref: "#/$defs/unitMetric" };
+    expect(ADJUDICATOR_RESPONSE_FORMAT).toEqual({
+      type: "json_schema",
+      json_schema: {
+        name: "ultrafuzz_eval_llm_judge_result_v1",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["schema_version", "matched_ground_truth_bug_id", "score", "signals", "rationale", "confidence"],
+          properties: {
+            schema_version: { type: "string", const: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION },
+            matched_ground_truth_bug_id: { anyOf: [{ type: "string" }, { type: "null" }] },
+            score: unitMetric,
+            signals: {
+              type: "object",
+              additionalProperties: false,
+              required: ["root_cause", "affected_area", "impact", "evidence"],
+              properties: {
+                root_cause: unitMetric,
+                affected_area: unitMetric,
+                impact: unitMetric,
+                evidence: unitMetric
+              }
+            },
+            rationale: { type: "string" },
+            confidence: unitMetric
+          },
+          $defs: { unitMetric: { type: "number" } }
+        }
+      }
+    });
+  });
+
+  it("satisfies the strict structured-output invariants at every schema node", () => {
+    const schema = ADJUDICATOR_RESPONSE_FORMAT.json_schema.schema;
+    const definitions = schemaRecord(schema.$defs) ?? {};
+    const nodes = schemaNodes(schema);
+
+    expect(nodes.length).toBeGreaterThan(8);
+    for (const [location, node] of nodes) {
+      expect(node, location).not.toHaveProperty("oneOf");
+      for (const keyword of STRIPPED_PROVIDER_KEYWORDS) expect(node, location).not.toHaveProperty(keyword);
+      if (typeof node.$ref === "string") {
+        expect(node.$ref, location).toMatch(/^#\/\$defs\/[A-Za-z]+$/u);
+        expect(definitions, location).toHaveProperty(node.$ref.slice("#/$defs/".length));
+      } else if (Array.isArray(node.anyOf)) {
+        expect(node.anyOf.length, location).toBeGreaterThan(0);
+      } else {
+        expect(typeof node.type, location).toBe("string");
+      }
+      if (node.type === "object") {
+        expect(node.additionalProperties, location).toBe(false);
+        expect(node.required, location).toEqual(Object.keys(schemaRecord(node.properties) ?? {}));
+      }
+    }
+  });
+
+  it("leaves the registry document and the local response validator untouched", () => {
+    expect(evalLlmJudgeResultJsonSchema).toHaveProperty("$id", EVAL_LLM_JUDGE_RESULT_SCHEMA_ID);
+    expect(evalLlmJudgeResultJsonSchema).toHaveProperty("properties.schema_version", {
+      const: EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION
+    });
+    expect(evalLlmJudgeResultJsonSchema).toHaveProperty("properties.matched_ground_truth_bug_id.oneOf");
+    expect(evalLlmJudgeResultJsonSchema).toHaveProperty("properties.rationale.minLength", 1);
+    expect(evalLlmJudgeResultJsonSchema).toHaveProperty("$defs.unitMetric.maximum", 1);
+
+    const valid = validJudgeResult();
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, valid)).toMatchObject({ ok: true });
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, { ...valid, rationale: "" })).toMatchObject({
+      ok: false
+    });
+    expect(
+      validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, { ...valid, matched_ground_truth_bug_id: "" })
+    ).toMatchObject({ ok: false });
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, { ...valid, score: 1.5 })).toMatchObject({
+      ok: false
+    });
+    expect(validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, { ...valid, extra: true })).toMatchObject({
+      ok: false
+    });
+  });
+
+  it("projects const types, composition, bounds, and object strictness without mutating its input", () => {
+    const input = Object.freeze({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      $id: "urn:test:schema",
+      title: "test",
+      type: "object",
+      required: ["flag"],
+      properties: {
+        flag: { const: true },
+        count: { const: 3, description: "how many" },
+        nothing: { const: null },
+        choice: {
+          oneOf: [
+            { type: "integer", minimum: 0, maximum: 9 },
+            { type: "string", pattern: "^x$" }
+          ]
+        },
+        list: { type: "array", items: { type: "string", format: "uri", maxLength: 10 } },
+        nested: { type: "object", properties: { inner: { type: "number", multipleOf: 0.5 } } }
+      }
+    });
+    const before = JSON.stringify(input);
+
+    expect(providerStrictSchema(input)).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["flag", "count", "nothing", "choice", "list", "nested"],
+      properties: {
+        flag: { const: true, type: "boolean" },
+        count: { const: 3, description: "how many", type: "number" },
+        nothing: { const: null, type: "null" },
+        choice: { anyOf: [{ type: "integer" }, { type: "string" }] },
+        list: { type: "array", items: { type: "string" } },
+        nested: {
+          type: "object",
+          additionalProperties: false,
+          required: ["inner"],
+          properties: { inner: { type: "number" } }
+        }
+      }
+    });
+    expect(JSON.stringify(input)).toBe(before);
+    expect(() => providerStrictSchema({ type: "object", allOf: [] })).toThrowError(/cannot express allOf at #$/u);
+    expect(() => providerStrictSchema({ properties: { bad: { const: { nested: true } } } })).toThrowError(
+      /const at #\/properties\/bad$/u
+    );
+    expect(() => providerStrictSchema({ oneOf: [{ type: "string" }], anyOf: [{ type: "null" }] })).toThrowError(
+      /cannot combine oneOf and anyOf/u
+    );
   });
 });

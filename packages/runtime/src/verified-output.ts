@@ -11,6 +11,7 @@ import {
   assertRegularFileInside,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  boundArtifactValidationWarnings,
   layoutForRunRoot,
   parseStrictJsonBytes,
   readPlannedGraphDocument,
@@ -25,6 +26,7 @@ import {
   type ArtifactContractId,
   type ArtifactManifest,
   type ArtifactManifestOutputContract,
+  type ArtifactValidationWarning,
   type ArtifactVerificationEntry,
   type ArtifactVerificationMarker,
   type PropertyCampaignArtifact,
@@ -121,6 +123,8 @@ export interface VerifiedFinalReportSnapshot {
   json_bytes: Buffer;
   markdown: string;
   markdown_bytes: Buffer;
+  /** Host diagnostics from the report and its authenticated verifier marker; producer bytes stay separate. */
+  validation_warnings: readonly ArtifactValidationWarning[];
 }
 
 export interface LoadVerifiedNodeOutputInput {
@@ -764,11 +768,12 @@ function assertSealedAttemptGateAuthorityRemainedCurrent(layout: RunLayout, seal
 /** Read the one authoritative final report and require an exact canonical JSON/Markdown pair. */
 export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalReportSnapshot {
   const producer = declaredFinalReportProducer(runRoot);
-  const authority = loadVerifiedNodeOutputSnapshot({
+  const verified = loadVerifiedNodeOutputAuthority({
     runRoot,
     logicalNodeId: producer.logicalNodeId,
     attemptId: producer.attemptId
   });
+  const authority = verified.snapshot;
   const report = requiredContractOutput(authority, "ultrafuzz/report@3", "JSON report");
   const markdown = requiredContractOutput(authority, "ultrafuzz/nonempty-markdown@1", "Markdown report");
   const layout = layoutForRunRoot(authority.run_root);
@@ -802,8 +807,51 @@ export function loadVerifiedFinalReportSnapshot(runRoot: string): VerifiedFinalR
     json: report.value,
     json_bytes: Buffer.from(report.bytes),
     markdown: markdown.value,
-    markdown_bytes: Buffer.from(markdown.bytes)
+    markdown_bytes: Buffer.from(markdown.bytes),
+    validation_warnings: Object.freeze(finalReportValidationWarnings(report.value, verified))
   });
+}
+
+function finalReportValidationWarnings(
+  report: Record<string, unknown>,
+  verified: FinalizedNodeOutputAuthority
+): ArtifactValidationWarning[] {
+  const metadata = report.run_metadata as { artifact_validation_warnings?: ArtifactValidationWarning[] };
+  // Legacy manifests without a marker digest authenticate producer bytes only.
+  // Their replaceable marker must not supply host diagnostics.
+  const markerWarnings =
+    verified.documents.manifest.provenance.verification_marker_sha256 === undefined
+      ? []
+      : (verified.documents.marker.validation_warnings ?? []);
+  const warnings = [
+    ...(metadata.artifact_validation_warnings ?? []),
+    ...markerWarnings.map((warning) => ({
+      ...warning,
+      artifact_path: `artifacts/${verified.snapshot.attempt_id}/${warning.artifact_path}`,
+      ...(warning.source_path === undefined
+        ? {}
+        : {
+            source_path:
+              warning.source_path.startsWith("artifacts/") || warning.source_path.startsWith("$context")
+                ? warning.source_path
+                : `artifacts/${verified.snapshot.attempt_id}/${warning.source_path}`
+          })
+    }))
+  ];
+  const unique = new Map(
+    warnings.map((warning) => [
+      JSON.stringify([
+        warning.code,
+        warning.artifact_path,
+        warning.field_path,
+        warning.message,
+        warning.gate,
+        warning.source_path
+      ]),
+      warning
+    ])
+  );
+  return boundArtifactValidationWarnings([...unique.values()]);
 }
 
 /** Fail if a previously captured final-report snapshot is no longer the exact current authority. */

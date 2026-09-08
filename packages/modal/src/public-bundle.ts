@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactContractSchemaBinding,
+  artifactValidationWarningsSchema,
   executeOfflineSchemaSemanticGates,
   parseStrictJsonBytes,
   readSinglyLinkedRegularFileSnapshotInside,
@@ -19,7 +20,7 @@ import {
   publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
 import { containsSensitiveSecrets } from "@ultrafuzz/security";
-import { projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
+import { projectPublicArtifactValidationWarnings, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
@@ -471,9 +472,27 @@ function parseTerminalReports(
     if (!markdown.equals(Buffer.from(projection.markdown, "utf8"))) {
       throw new Error(`public benchmark row ${rowId} report.md is not the canonical projection of report.json`);
     }
+    validateArtifactWarningCompanions(rowId, contentsByPath);
     reports.set(rowId, report);
   }
   return reports;
+}
+
+function validateArtifactWarningCompanions(rowId: string, contentsByPath: ReadonlyMap<string, Buffer>): void {
+  const warningJson = contentsByPath.get(`reports/${rowId}/artifact-validation-warnings.json`);
+  const warningMarkdown = contentsByPath.get(`reports/${rowId}/artifact-validation-warnings.md`);
+  if (warningJson === undefined && warningMarkdown === undefined) return;
+  if (warningJson === undefined || warningMarkdown === undefined) {
+    throw new Error(`public benchmark row ${rowId} requires both artifact validation warning companions`);
+  }
+  const warnings = artifactValidationWarningsSchema.parse(parseStrictJsonBytes(warningJson));
+  const projection = projectPublicArtifactValidationWarnings(warnings);
+  if (
+    !isDeepStrictEqual(projection.warnings, warnings) ||
+    !warningMarkdown.equals(Buffer.from(projection.markdown, "utf8"))
+  ) {
+    throw new Error(`public benchmark row ${rowId} artifact validation warnings are not the canonical public pair`);
+  }
 }
 
 interface PublicBundleRunRecord {
@@ -1053,7 +1072,9 @@ function isAllowedBundlePath(value: string): boolean {
     "eval/review/new-findings.jsonl"
   ]);
   if (evalFiles.has(value)) return true;
-  if (/^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report\.md|report\.json)$/u.test(value)) {
+  if (
+    /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report|artifact-validation-warnings)\.(?:md|json)$/u.test(value)
+  ) {
     return true;
   }
   return /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/artifacts\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:THREAT_MODEL\.md|goal-plan\.json|threat-model\.json|vulnerability-db-manifest\.json)$/u.test(

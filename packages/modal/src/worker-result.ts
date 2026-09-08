@@ -17,7 +17,9 @@ import { readModalDocument, writeModalDocumentAtomic } from "./modal-documents.j
 import {
   OperationalDispositionError,
   operationalDispositionForError,
-  type OperationalDispositionCategory
+  runNamingUnhandledFailure,
+  type OperationalDispositionCategory,
+  type UnhandledFailureNaming
 } from "./terminal-disposition.js";
 
 export const WORKER_RESULT_SCHEMA_VERSION = "ultrafuzz.modal.worker-result.v2" as const;
@@ -258,12 +260,22 @@ export async function runWithTerminalPersistence(input: {
   flush: () => Promise<void>;
   run: () => Promise<TerminalCompletionCategory>;
   diagnosticCodeForError?: (error: unknown) => WorkerDiagnosticCode | undefined;
+  /**
+   * Name a failure `run` throws that nothing else named. Its `report` runs before the terminal contract is
+   * written and flushed, so what it records is on disk ahead of the contract, and the failure is then
+   * recorded and rethrown as the worker's own `unreachable` fault rather than the `sandbox-exited` an
+   * unclassified error falls back to (#320). See `runNamingUnhandledFailure` for what passes through.
+   */
+  unhandledFailure?: UnhandledFailureNaming;
 }): Promise<TerminalCompletionCategory> {
   let category: Exclude<OperationalDispositionCategory, "live"> = "sandbox-exited";
   let workerFailure: unknown;
   let finalizationFailure: unknown;
   try {
-    category = await input.run();
+    category =
+      input.unhandledFailure === undefined
+        ? await input.run()
+        : await runNamingUnhandledFailure(input.run, input.unhandledFailure);
   } catch (error) {
     workerFailure = error;
     category = operationalDispositionForError(error);

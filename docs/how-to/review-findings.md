@@ -27,8 +27,9 @@ files:
 ```
 
 Each finding requires `schema_version: "ultrafuzz.finding.v2"`, a
-producer-authored `id`, `title`, canonical `status`, `severity_guess`, lowercase
-`confidence`, and `summary`. Status is one of `candidate`, `needs-review`,
+producer-authored `id`, `title`, canonical `status`, and `summary`.
+`severity_guess` and lowercase `confidence` are optional preliminary metadata.
+Status is one of `candidate`, `needs-review`,
 `duplicate`, `false-positive`, `confirmed`, `fixed`, or `wont-fix`. Evidence
 uses the exact array/string-or-closed-object shape in the current schema. Keep
 selectors out of `path`: put a section anchor in `fragment`, use positive

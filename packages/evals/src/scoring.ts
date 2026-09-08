@@ -67,6 +67,7 @@ import {
   type EvalUnboundRowScore,
   type EvalVariantScoreSummary,
   type FindingJudge,
+  type FindingJudgeInput,
   type FindingJudgeResult,
   type FindingMatchSignalScores,
   type GroundTruthBug,
@@ -76,6 +77,8 @@ import { EvalError, evalRunRoot, isRecord, mean, resolveTerminalReportPath, roun
 
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
+/** Backoff before each retry of a transient judge failure; attempts total this length plus one. */
+const LLM_JUDGE_RETRY_BACKOFF_MS: readonly number[] = [1_000, 3_000];
 const MIN_CONCRETE_EVIDENCE_TEXT_LENGTH = 8;
 export const EVAL_LLM_JUDGE_RESULT_ALIAS_CONTEXT_GATE = "eval-llm-judge-result-alias-membership" as const;
 
@@ -947,14 +950,30 @@ async function bestMatch(
   };
 }
 
+export interface GatewayLlmJudgeOptions {
+  /** Injectable retry delay so tests do not wait on the real backoff. */
+  sleep?: (milliseconds: number) => Promise<void>;
+}
+
+interface JudgeGatewayRequest {
+  endpoint: URL;
+  apiKey: string;
+  body: string;
+  timeoutMs: number;
+  fetchImpl: typeof fetch;
+}
+
 /**
  * Default optional LLM judge. Talks to an OpenAI-compatible chat-completions
  * gateway; nothing in the scoring loop depends on it (grading is deterministic
- * unless a judge is explicitly enabled).
+ * unless a judge is explicitly enabled). Transient failures (network errors,
+ * timeouts, 429/5xx responses, schema-invalid output) are retried a bounded
+ * number of times with the identical fresh-context request.
  */
 export function gatewayLlmJudge(
   env: Record<string, string | undefined>,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: GatewayLlmJudgeOptions = {}
 ): FindingJudge {
   const apiKey = env.ULTRAFUZZ_EVAL_JUDGE_API_KEY;
   if (!apiKey) {
@@ -964,6 +983,7 @@ export function gatewayLlmJudge(
     );
   }
   const endpoint = validatedJudgeEndpoint(env.ULTRAFUZZ_EVAL_JUDGE_URL ?? DEFAULT_EVAL_JUDGE_ENDPOINT);
+  const sleep = options.sleep ?? defaultSleep;
   return async (input) => {
     if (input.row.target.sensitivity === "private" && env[PRIVATE_DATA_JUDGE_ACK] !== "true") {
       throw new EvalError(
@@ -979,54 +999,110 @@ export function gatewayLlmJudge(
         judgeProfileId: input.row.judge_model_profile
       });
     }
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), Math.max(1, profile?.timeout_seconds ?? 1800) * 1000);
-    try {
-      const response = await fetchImpl(endpoint.href, {
-        method: "POST",
-        redirect: "error",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          messages: buildAdjudicatorPrompt(input),
-          ...judgeReasoningParameters(model, input.row.judge_reasoning),
-          response_format: ADJUDICATOR_RESPONSE_FORMAT
-        }),
-        signal: controller.signal
-      });
-      const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
-      if (!response.ok) {
-        throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
-          status: response.status,
-          body: bodyText.slice(0, 1000)
-        });
-      }
-      let content = "";
-      try {
-        content = chatCompletionContent(bodyText);
-        const value = parseStrictJson(content);
-        const validation = validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, value);
-        if (!validation.ok) {
-          throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-            issues: validation.issues.map((issue) => ({ path: issue.instancePath, message: issue.message })),
-            content: content.slice(0, 1000)
-          });
-        }
-        return normalizeLlmJudgeResult(value as EvalLlmJudgeResultDocument, input);
-      } catch (error) {
-        if (error instanceof EvalError && error.code === "EVAL_LLM_JUDGE_INVALID") throw error;
-        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-          cause: error instanceof Error ? error.message : String(error),
-          content: content.slice(0, 1000)
-        });
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
+    const request: JudgeGatewayRequest = {
+      endpoint,
+      apiKey,
+      body: JSON.stringify({
+        model,
+        messages: buildAdjudicatorPrompt(input),
+        ...judgeReasoningParameters(model, input.row.judge_reasoning),
+        response_format: ADJUDICATOR_RESPONSE_FORMAT
+      }),
+      timeoutMs: Math.max(1, profile?.timeout_seconds ?? 1800) * 1000,
+      fetchImpl
+    };
+    return withTransientJudgeRetries(async () => requestJudgeOnce(request, input), sleep);
   };
+}
+
+async function withTransientJudgeRetries<T>(
+  attempt: () => Promise<T>,
+  sleep: (milliseconds: number) => Promise<void>
+): Promise<T> {
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      const backoffMs = LLM_JUDGE_RETRY_BACKOFF_MS[attemptNumber - 1];
+      if (backoffMs === undefined || !isTransientJudgeFailure(error)) {
+        throw judgeFailureWithAttempts(error, attemptNumber);
+      }
+      await sleep(backoffMs);
+    }
+  }
+}
+
+/**
+ * Rejected fetches (network failures, timeout aborts), 429/5xx gateway
+ * responses, and schema-invalid judge output are transient. Every other 4xx
+ * and every local policy failure (oversized response, missing model) is final.
+ */
+function isTransientJudgeFailure(error: unknown): boolean {
+  if (!(error instanceof EvalError)) return true;
+  if (error.code === "EVAL_LLM_JUDGE_INVALID") return true;
+  if (error.code !== "EVAL_LLM_JUDGE_REQUEST_FAILED") return false;
+  const status = error.details?.status;
+  return status === 429 || (typeof status === "number" && status >= 500);
+}
+
+function judgeFailureWithAttempts(error: unknown, attempts: number): unknown {
+  if (!(error instanceof EvalError)) return error;
+  return new EvalError(error.code, error.message, { ...error.details, attempts });
+}
+
+function defaultSleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function requestJudgeOnce(request: JudgeGatewayRequest, input: FindingJudgeInput): Promise<FindingJudgeResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, request.timeoutMs);
+  try {
+    const response = await request.fetchImpl(request.endpoint.href, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        authorization: `Bearer ${request.apiKey}`,
+        "content-type": "application/json"
+      },
+      body: request.body,
+      signal: controller.signal
+    });
+    const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
+    if (!response.ok) {
+      throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
+        status: response.status,
+        body: bodyText.slice(0, 1000)
+      });
+    }
+    return parseJudgeCompletion(bodyText, input);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseJudgeCompletion(bodyText: string, input: FindingJudgeInput): FindingJudgeResult {
+  let content = "";
+  try {
+    content = chatCompletionContent(bodyText);
+    const value = parseStrictJson(content);
+    const validation = validateEvalJsonSchema(EVAL_LLM_JUDGE_RESULT_SCHEMA_ID, value);
+    if (!validation.ok) {
+      throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+        issues: validation.issues.map((issue) => ({ path: issue.instancePath, message: issue.message })),
+        content: content.slice(0, 1000)
+      });
+    }
+    return normalizeLlmJudgeResult(value as EvalLlmJudgeResultDocument, input);
+  } catch (error) {
+    if (error instanceof EvalError && error.code === "EVAL_LLM_JUDGE_INVALID") throw error;
+    throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+      cause: error instanceof Error ? error.message : String(error),
+      content: content.slice(0, 1000)
+    });
+  }
 }
 
 function judgeReasoningParameters(model: string, reasoning: string | undefined): Record<string, unknown> {

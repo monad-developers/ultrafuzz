@@ -137,6 +137,7 @@ interface FakeInspectionFixtures {
   snapshots?: unknown;
   node?: unknown;
   events?: string;
+  eventsFirstRead?: string;
   cancelStatus?: string;
   cancelExitCode?: number;
 }
@@ -193,7 +194,9 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     timeline: path.join(project, "fake-timeline.json"),
     snapshots: path.join(project, "fake-snapshots.json"),
     node: path.join(project, "fake-node.json"),
-    events: path.join(project, "fake-events.ndjson")
+    events: path.join(project, "fake-events.ndjson"),
+    eventsFirstRead: path.join(project, "fake-events-first-read.ndjson"),
+    eventsFirstReadMarker: path.join(project, "fake-events-first-read-complete")
   };
   fs.writeFileSync(
     files.why,
@@ -224,6 +227,9 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     "utf8"
   );
   fs.writeFileSync(files.events, fixtures.events ?? "", "utf8");
+  if (fixtures.eventsFirstRead !== undefined) {
+    fs.writeFileSync(files.eventsFirstRead, fixtures.eventsFirstRead, "utf8");
+  }
   const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   if (fixtures.nodeWatchLines !== undefined) {
     fs.writeFileSync(nodeWatchPath, fixtures.nodeWatchLines, "utf8");
@@ -254,7 +260,16 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(fixtures.nodeWatchLines === undefined ? files.node : nodeWatchPath)}`,
       "    ;;",
       "  events)",
-      `    cat ${shellQuote(files.events)}`,
+      ...(fixtures.eventsFirstRead === undefined
+        ? [`    cat ${shellQuote(files.events)}`]
+        : [
+            `    if [ ! -f ${shellQuote(files.eventsFirstReadMarker)} ]; then`,
+            `      : > ${shellQuote(files.eventsFirstReadMarker)}`,
+            `      cat ${shellQuote(files.eventsFirstRead)}`,
+            "    else",
+            `      cat ${shellQuote(files.events)}`,
+            "    fi"
+          ]),
       "    ;;",
       "  cancel)",
       `    if [ -f ${shellQuote(fakeInspectionControlPath(project, "cancel-terminal"))} ]; then`,
@@ -721,6 +736,52 @@ test("queryWorkflowEvents rejects malformed, aliased, mismatched, extra-field, d
   }
 });
 
+test("queryWorkflowEvents retries an unterminated final record from a live append snapshot", async () => {
+  const exactLine = smithersEventLine({
+    seq: 1,
+    timestampMs: 1_700_000_000_000,
+    type: "NodeStarted",
+    payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
+  });
+  const { project, env } = await launchedProject({
+    eventsFirstRead: exactLine.slice(0, -1),
+    events: `${exactLine}\n`
+  });
+
+  const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(events.ok, true, JSON.stringify(events.diagnostics));
+  assert.equal(events.value?.events.length, 1);
+  assert.equal(events.value?.events[0]?.sequence, 1);
+  assert.equal(smithersLog(project).match(/events ultrafuzz-inspect-run/gu)?.length, 2);
+});
+
+test("queryWorkflowEvents does not retry malformed non-final records", async () => {
+  const exactLine = smithersEventLine({
+    seq: 2,
+    timestampMs: 1_700_000_000_001,
+    type: "NodeFinished",
+    payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
+  });
+  const { project, env } = await launchedProject({ events: `{"unterminated":"value\n${exactLine}\n` });
+
+  const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(events.ok, false);
+  assert.equal(events.diagnostics[0]?.code, "WORKFLOW_EVENTS_INVALID");
+  assert.equal(smithersLog(project).match(/events ultrafuzz-inspect-run/gu)?.length, 1);
+});
+
+test("queryWorkflowEvents bounds retries for a persistently malformed final record", async () => {
+  const { project, env } = await launchedProject({ events: '{"unterminated":"value' });
+
+  const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(events.ok, false);
+  assert.equal(events.diagnostics[0]?.code, "WORKFLOW_EVENTS_INVALID");
+  assert.equal(smithersLog(project).match(/events ultrafuzz-inspect-run/gu)?.length, 3);
+});
+
 test("queryWorkflowEvents caps the limit and reports truncation", async () => {
   const lines = Array.from({ length: 5 }, (_, index) =>
     smithersEventLine({
@@ -899,6 +960,56 @@ test("getWorkflowNode returns focused status without attempt or tool detail by d
   assert.equal(node.value?.tool_details_included, false);
   assertNoEngineBranding(node.value);
   assert.match(smithersLog(project), /node node:project-discovery --run-id ultrafuzz-inspect-run --format json/u);
+});
+
+test("getWorkflowNode accepts a reset current attempt below retained history", async () => {
+  const detail = nodeDetailFixture() as {
+    node: { lastAttempt: number };
+    attempts: Array<{
+      attempt: number;
+      state: string;
+      tokenUsage: Record<string, unknown>;
+      toolCalls: Array<{ attempt: number }>;
+    }>;
+    toolCalls: Array<{ attempt: number }>;
+    tokenUsage: { byAttempt: Array<{ attempt: number; usage: Record<string, unknown> }> };
+  };
+  const [historical, current] = detail.attempts;
+  assert.ok(historical);
+  assert.ok(current);
+  // The runner presents retained attempts in numeric order, while lastAttempt
+  // identifies the current occurrence after a reset reuses the counter.
+  const retained = {
+    ...historical,
+    attempt: 2,
+    toolCalls: historical.toolCalls.map((call) => ({ ...call, attempt: 2 }))
+  };
+  detail.attempts = [{ ...current, attempt: 1 }, retained];
+  detail.toolCalls = retained.toolCalls;
+  detail.tokenUsage.byAttempt = detail.attempts.map((attempt) => ({
+    attempt: attempt.attempt,
+    usage: attempt.tokenUsage
+  }));
+  detail.node.lastAttempt = 1;
+  const { project, env } = await launchedProject({ node: detail });
+
+  const node = await getWorkflowNode({
+    projectRoot: project,
+    runId: "inspect-run",
+    nodeId: "node:project-discovery",
+    attempts: true,
+    env
+  });
+
+  assert.equal(node.ok, true, JSON.stringify(node.diagnostics));
+  assert.deepEqual(
+    node.value?.attempts.map((attempt) => attempt.attempt),
+    [1, 2]
+  );
+  assert.deepEqual(
+    node.value?.attempts.map((attempt) => attempt.state),
+    ["finished", "failed"]
+  );
 });
 
 test("getWorkflowNode includes attempts on request and tool payloads only with --tools", async () => {

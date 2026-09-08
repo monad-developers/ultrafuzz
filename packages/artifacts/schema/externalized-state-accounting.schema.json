@@ -273,8 +273,7 @@
     "scenarios",
     "accounting_oracles",
     "generated_tests",
-    "incomplete_specs",
-    "coverage_notes"
+    "incomplete_specs"
   ],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:externalized-state-accounting:1",

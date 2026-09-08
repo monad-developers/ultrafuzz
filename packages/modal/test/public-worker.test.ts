@@ -49,12 +49,15 @@ import {
   publicEvalCommandTimeoutSeconds,
   publicEvalRunId,
   preparePublicEvalSuite,
+  publicCommandExitFailureCause,
   publicEvalFailureDiagnosticLogPayload,
   publicEvalFailureDiagnosticLogPayloadFromRecords,
   publicEvalModelWorkEvidence,
   publicEvalCommandLeftFinalJournal,
   publicEvalRunErrorCanBePublished,
+  publishPublicBenchmarkBundle,
   runAndCheckpointPublicEvalDiagnostics,
+  runCommand,
   runPublicBenchmarkWorker,
   runWithPublicPreparationTimeout,
   seedPublicBenchmarkSmithersDependencies,
@@ -63,7 +66,13 @@ import {
 } from "../src/public-worker.js";
 import { createPublicBenchmarkBundle, type PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { assertSanitizedModalCollectedFiles, createExactCandidateSourceArchive } from "../src/runner.js";
-import { OperationalDispositionError } from "../src/terminal-disposition.js";
+import { OperationalDispositionError, runNamingUnhandledFailure } from "../src/terminal-disposition.js";
+import {
+  createBoundedStderrTail,
+  MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+  workerDiagnosticLogPayload
+} from "../src/worker-diagnostics.js";
 import { ensurePersistentWorkerLineage } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
 import {
@@ -286,13 +295,17 @@ it("rejects a present dangling public bundle without starting replacement model 
   expect(preflightCalls).toBe(1);
   expect(JSON.parse(fs.readFileSync(path.join(dataRoot, "status.json"), "utf8"))).toMatchObject({
     result_type: "terminal",
+    exit_category: "unreachable",
     model_work_started: false,
     diagnostic_code: "checkpoint-incompatible"
   });
+  // A fault the contract already names keeps its own code: the unhandled-failure net neither renames it nor
+  // adds a line for it.
+  expect(decodedWorkerLogDiagnostics(fs.readFileSync(path.join(dataRoot, "worker.log"), "utf8"))).toEqual([]);
   expect(fs.readlinkSync(path.join(dataRoot, "public-results.json"))).toBe("missing-public-results.json");
 }, 30_000);
 
-it("accepts the bounded full lane before reading paid-run credentials", async () => {
+it("accepts the bounded full lane, then names the missing paid-run credential as its own fault", async () => {
   const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-full-lane-"));
   const model: ModalModelSpec = {
     slug: "benchmark-full-gpt-5-6-luna-high",
@@ -334,27 +347,46 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
 
   const previous = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
+  let failure: unknown;
   try {
-    await expect(
-      runPublicBenchmarkWorker({
-        config,
-        model,
-        lineage,
-        dataRoot,
-        preflight: (context) =>
-          ensurePersistentWorkerLineage({
-            lineagePath: path.join(dataRoot, "lineage.json"),
-            lineage,
-            ...context
-          }),
-        isCheckpointIncompatible: () => false,
-        checkpointIncompatibleError: (message) => new Error(message)
-      })
-    ).rejects.toThrow(/OPENAI_API_KEY/u);
+    failure = await runPublicBenchmarkWorker({
+      config,
+      model,
+      lineage,
+      dataRoot,
+      preflight: (context) =>
+        ensurePersistentWorkerLineage({
+          lineagePath: path.join(dataRoot, "lineage.json"),
+          lineage,
+          ...context
+        }),
+      isCheckpointIncompatible: () => false,
+      checkpointIncompatibleError: (message) => new Error(message)
+    }).catch((error: unknown) => error);
   } finally {
     if (previous === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previous;
   }
+
+  // `requiredEnv` throws a plain Error, which used to leave the sandbox as `sandbox-exited` with no line in the
+  // log. The worker was alive to see it, so it names the fault and records the reason first.
+  expect(failure).toBeInstanceOf(OperationalDispositionError);
+  expect((failure as OperationalDispositionError).category).toBe("unreachable");
+  expect((failure as { cause: Error }).cause.message).toMatch(/OPENAI_API_KEY/u);
+  const written = fs.readFileSync(path.join(dataRoot, "worker.log"), "utf8");
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "WORKER_UNHANDLED_FAILURE", message: "Error: OPENAI_API_KEY is required" }
+  ]);
+  expect(written.trimEnd().split("\n")).toHaveLength(2);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 1 })
+  ).not.toThrow();
+  expect(JSON.parse(fs.readFileSync(path.join(dataRoot, "result.json"), "utf8"))).toMatchObject({
+    result_type: "terminal",
+    exit_category: "unreachable",
+    diagnostic_code: "dependency-unreachable",
+    model_work_started: false
+  });
 }, 30_000);
 
 it("allows only API-key public workers plus Kimi subscription workers", () => {
@@ -1583,6 +1615,197 @@ it("names a pre-model command it cut short, and keeps that line collectable too"
   }
 });
 
+it("records the scorer's own failure envelope instead of a bare exit code", async () => {
+  // Every Modal smoke run from 2026-08-31 on (run 33872940860 among them): `eval score --json` exited 1 with
+  // its failure envelope on stdout and nothing on stderr, so the only collected diagnostic was
+  // `eval score exited 1` and the scorer's reason never left the sandbox.
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-score-envelope-"));
+  const logPath = path.join(root, "worker.log");
+  const reason = "no finished run report for row target-one";
+  const failure = await runFakeCliCommand("eval score", root, logPath, [
+    `process.stdout.write(${JSON.stringify(cliFailureEnvelope("eval score", "EVAL_SCORE_FAILED", reason))});`,
+    "process.exitCode = 1;"
+  ]);
+
+  expect(failure).toBeInstanceOf(OperationalDispositionError);
+  expect(failure).not.toBeInstanceOf(PublicWorkerCommandInterruptedError);
+  expect((failure as OperationalDispositionError).category).toBe("unreachable");
+  expect((failure as { cause: Error }).cause.message).toBe(`eval score exited 1: EVAL_SCORE_FAILED: ${reason}`);
+
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "EVAL_SCORE_FAILED", message: reason },
+    { code: "WORKER_COMMAND_FAILED", message: `eval score exited 1: EVAL_SCORE_FAILED: ${reason}` }
+  ]);
+  expect(written.trimEnd().split("\n")).toHaveLength(4);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 })
+  ).not.toThrow();
+});
+
+it("redacts a secret the scorer quoted in its failure envelope", async () => {
+  const secret = "opaque-fixture-judge-credential";
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-score-secret-"));
+  const logPath = path.join(root, "worker.log");
+  const failure = await runFakeCliCommand(
+    "eval score",
+    root,
+    logPath,
+    [
+      `process.stdout.write(${JSON.stringify(
+        cliFailureEnvelope("eval score", "EVAL_SCORE_FAILED", `judge rejected credential ${secret}`)
+      )});`,
+      "process.exitCode = 1;"
+    ],
+    [secret]
+  );
+
+  expect((failure as { cause: Error }).cause.message).toBe(
+    "eval score exited 1: EVAL_SCORE_FAILED: judge rejected credential <redacted>"
+  );
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(written).not.toContain(secret);
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "EVAL_SCORE_FAILED", message: "judge rejected credential <redacted>" },
+    {
+      code: "WORKER_COMMAND_FAILED",
+      message: "eval score exited 1: EVAL_SCORE_FAILED: judge rejected credential <redacted>"
+    }
+  ]);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 }, [secret])
+  ).not.toThrow();
+});
+
+it("records no failure diagnostics for a scorer that succeeded", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-score-success-"));
+  const logPath = path.join(root, "worker.log");
+  const stdout = cliEnvelope("eval score", {
+    ok: true,
+    diagnostics: [],
+    data: { summary_path: path.join(root, "summary.json") }
+  });
+
+  const result = await runFakeCliCommand("eval score", root, logPath, [
+    `process.stdout.write(${JSON.stringify(stdout)});`
+  ]);
+
+  expect(result).toBe(stdout);
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(written).not.toContain("eval-failure-diagnostics");
+  expect(
+    written
+      .trimEnd()
+      .split("\n")
+      .map((line) => line.slice("2026-01-01T00:00:00.000Z ".length))
+  ).toEqual(["operation-started", "operation-finished"]);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 2 })
+  ).not.toThrow();
+});
+
+it("falls back to the stderr tail when a failed command left no envelope on stdout", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-report-stderr-"));
+  const logPath = path.join(root, "worker.log");
+  const failure = await runFakeCliCommand("eval report", root, logPath, [
+    'process.stdout.write("Summary: partial\\n");',
+    'process.stderr.write("fatal: report input missing\\n");',
+    "process.exitCode = 2;"
+  ]);
+
+  expect((failure as { cause: Error }).cause.message).toBe("eval report exited 2: fatal: report input missing");
+  expect(decodedWorkerLogDiagnostics(fs.readFileSync(logPath, "utf8"))).toEqual([
+    { code: "WORKER_COMMAND_FAILED", message: "eval report exited 2: fatal: report input missing" }
+  ]);
+});
+
+it("keeps the envelope diagnostic code when its message outruns the collected bound", () => {
+  const cause = publicCommandExitFailureCause(
+    "eval score",
+    1,
+    { code: "EVAL_SCORE_FAILED", message: "x".repeat(5_000) },
+    createBoundedStderrTail(),
+    []
+  );
+
+  expect(cause.message).toMatch(/^eval score exited 1: EVAL_SCORE_FAILED: x+$/u);
+  expect(Buffer.byteLength(cause.message, "utf8")).toBeLessThanOrEqual(MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES);
+  expect(
+    workerDiagnosticLogPayload([{ code: WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE, message: cause.message }])
+  ).toBeDefined();
+});
+
+it("leaves a command's own failure line and disposition untouched under the unhandled-failure net", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-net-command-"));
+  const logPath = path.join(root, "worker.log");
+  fs.writeFileSync(logPath, "2026-09-04T19:18:13.000Z worker-started\n");
+  const reported: unknown[] = [];
+  const net = { report: (error: unknown) => void reported.push(error) };
+  const command = (label: string, script: string, timeoutMs: number) =>
+    runCommand([process.execPath, "-e", script], {
+      label,
+      cwd: root,
+      logPath,
+      timeoutMs,
+      publicDiagnosticSecretValues: [],
+      evalFailureDiagnosticsFromStdout: true
+    });
+
+  const exited = await runNamingUnhandledFailure(
+    () => command("eval report", "process.exitCode = 1;", 30_000),
+    net
+  ).catch((error: unknown) => error);
+  const interrupted = await runNamingUnhandledFailure(
+    () => command("eval run", "setTimeout(() => undefined, 60_000);", 250),
+    net
+  ).catch((error: unknown) => error);
+
+  expect(reported).toEqual([]);
+  expect(exited).toBeInstanceOf(OperationalDispositionError);
+  expect(exited).not.toBeInstanceOf(PublicWorkerCommandInterruptedError);
+  expect((exited as OperationalDispositionError).category).toBe("unreachable");
+  expect((exited as { cause: Error }).cause.message).toBe("eval report exited 1");
+  // The subclass is what the model-work corroboration gate keys on, so it has to come through by identity.
+  expect(interrupted).toBeInstanceOf(PublicWorkerCommandInterruptedError);
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([
+    { code: "WORKER_COMMAND_FAILED", message: "eval report exited 1" },
+    { code: "WORKER_COMMAND_INTERRUPTED", message: expect.stringMatching(/^eval run interrupted: /u) as string }
+  ]);
+  expect(written.trimEnd().split("\n")).toHaveLength(7);
+});
+
+/** Run `script` as the CLI child of one public worker command, returning its stdout or the rejection. */
+async function runFakeCliCommand(
+  label: string,
+  cwd: string,
+  logPath: string,
+  script: readonly string[],
+  forbiddenSecretValues: readonly string[] = []
+): Promise<unknown> {
+  return runCommand([process.execPath, "-e", script.join(" ")], {
+    label,
+    cwd,
+    logPath,
+    timeoutMs: 30_000,
+    publicDiagnosticSecretValues: [...forbiddenSecretValues],
+    evalFailureDiagnosticsFromStdout: true
+  }).catch((error: unknown) => error);
+}
+
+/** The envelope `emitCommandResult` writes to stdout in `--json` mode, pretty-printed the way the CLI does. */
+function cliEnvelope(command: string, result: { ok: boolean; diagnostics: unknown[]; data: unknown }): string {
+  return `${JSON.stringify({ schema_version: "ultrafuzz.cli.result.v2", command, ...result }, null, 2)}\n`;
+}
+
+function cliFailureEnvelope(command: string, code: string, message: string): string {
+  return cliEnvelope(command, {
+    ok: false,
+    diagnostics: [{ code, message, severity: "error", source: "cli" }],
+    data: null
+  });
+}
+
 /** Every `eval-failure-diagnostics` payload in a worker log, decoded in order. */
 function decodedWorkerLogDiagnostics(log: string): unknown[] {
   return log
@@ -2135,6 +2358,73 @@ it("atomically seals a public bundle with private permissions", async () => {
   expect(JSON.parse(fs.readFileSync(filePath, "utf8"))).toEqual(bundle);
   expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
   expect(fs.readdirSync(root).filter((entry) => entry.endsWith(".tmp"))).toEqual([]);
+});
+
+it("names a public bundle assembly failure in the worker log instead of reporting a sandbox exit", async () => {
+  // Run 33904992917 (2026-09-04): the smoke worker logged `operation-finished` for `eval report` at 19:18:13Z
+  // and was then collected as `sandbox-exited` with an unknown exit code and no diagnostics line. The only
+  // code left to run was the bundle assembly, whose gates throw plain Errors that nothing recorded (#320).
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-bundle-failure-"));
+  const logPath = path.join(root, "worker.log");
+  const bundlePath = path.join(root, "public-results.json");
+  const resultPath = path.join(root, "result.json");
+  const reportPath = path.join(root, "report.json");
+  const secret = "opaque-fixture-judge-credential";
+  fs.writeFileSync(logPath, "2026-09-04T19:18:13.000Z worker-started\n");
+  fs.writeFileSync(reportPath, `${JSON.stringify({ judge: secret })}\n`);
+  const writer = await WorkerResultWriter.create({ statusPath: path.join(root, "status.json"), resultPath });
+
+  const failure = await runWithTerminalPersistence({
+    writer,
+    snapshot: async () => emptyWorkerCheckpoint(),
+    flush: async () => undefined,
+    run: async () => {
+      await publishPublicBenchmarkBundle({
+        logPath,
+        bundlePath,
+        forbiddenSecretValues: new Set([secret]),
+        assemble: async () =>
+          createPublicBenchmarkBundle({
+            benchmark: "ultrafuzz-bench",
+            lane: "smoke",
+            modelSlug: "benchmark-smoke-gpt-5-6-luna-high",
+            model: "gpt-5.6-luna",
+            reasoning: "high",
+            candidateCommit: "a".repeat(40),
+            evalRunId: "eval-public-bundle-failure",
+            lineage: {
+              logical_run_id: "public-bundle-failure",
+              generation: 1,
+              attempt: 1,
+              attempt_id: "attempt-one",
+              fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
+              model_fingerprint: "e".repeat(64)
+            },
+            files: [{ path: "reports/target-one/report.json", root, source: reportPath }],
+            forbiddenSecretValues: [secret]
+          })
+      });
+      return "finished";
+    }
+  }).catch((error: unknown) => error);
+
+  const reason = "public benchmark file contains an injected secret value: reports/target-one/report.json";
+  expect(failure).toBeInstanceOf(OperationalDispositionError);
+  expect((failure as OperationalDispositionError).category).toBe("unreachable");
+  expect((failure as { cause: Error }).cause.message).toBe(reason);
+  // The line is appended inside `run`, so it is on disk before the terminal contract is written and flushed.
+  const written = fs.readFileSync(logPath, "utf8");
+  expect(decodedWorkerLogDiagnostics(written)).toEqual([{ code: "PUBLIC_BUNDLE_FAILED", message: `Error: ${reason}` }]);
+  expect(written.trimEnd().split("\n")).toHaveLength(2);
+  expect(() =>
+    assertSanitizedModalCollectedFiles({ "worker.log": written }, { generation: 1, attempt: 1 }, [secret])
+  ).not.toThrow();
+  expect(JSON.parse(fs.readFileSync(resultPath, "utf8"))).toMatchObject({
+    result_type: "terminal",
+    exit_category: "unreachable",
+    diagnostic_code: "dependency-unreachable"
+  });
+  expect(fs.existsSync(bundlePath)).toBe(false);
 });
 
 function execGit(cwd: string, args: string[]): string {
