@@ -7,6 +7,7 @@ import lockfile from "proper-lockfile";
 
 import {
   assertPlannedGraph,
+  assertRunPlanDocument,
   assertSealedPlannedGraph,
   assertSmithersTaskManifestMatchesPlannedGraph,
   assertNoSymlinkComponents,
@@ -437,6 +438,74 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
 
 export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
   return verifyWorkflowControlSnapshot(projectRoot, layout).generation;
+}
+
+/** Restore only the launch policy; native continuation does not reopen mutable control projections. */
+export function authenticatedContinuationGovernancePath(
+  projectRoot: string,
+  layout: RunLayout,
+  expectedGeneration: unknown
+): string | undefined {
+  const sealPath = workflowControlPaths(projectRoot, layout).integrityPath;
+  const sealContents = readBoundedRegularFile(layout.root, sealPath, "workflow control seal");
+  const seal = parseWorkflowControlIntegritySeal(sealContents);
+  const generation = digestBytes(sealContents).sha256;
+  if (seal.run_id !== layout.runId || (expectedGeneration !== undefined && expectedGeneration !== generation)) {
+    throw new Error("continuation governance does not match the run's sealed control generation");
+  }
+  const snapshotRoot = path.join(layout.root, "smithers", "execution-snapshots", generation);
+  const controlsRoot = path.join(snapshotRoot, "controls");
+  assertNoSymlinkComponents(layout.root, controlsRoot, "continuation governance snapshot");
+  const controls = fs.lstatSync(controlsRoot, { bigint: true });
+  if (!controls.isDirectory() || (controls.mode & 0o222n) !== 0n) {
+    throw new Error("continuation governance controls are not a sealed physical directory");
+  }
+  const hasGovernance = seal.execution_files.some((file) => file.snapshot_path === "controls/data-governance.json");
+  const relativePaths = ["controls/plan.json", ...(hasGovernance ? ["controls/data-governance.json"] : [])];
+  const protectedPaths = relativePaths.map((relative) => snapshotPath(snapshotRoot, relative, "sealed governance"));
+  const before = captureWorkflowControlSnapshotChangeTokens(snapshotRoot, protectedPaths);
+  const [planFile, governanceFile] = relativePaths.map((relative) => {
+    const entry = seal.execution_files.find((file) => file.snapshot_path === relative);
+    if (entry === undefined) throw new Error(`sealed continuation governance is missing ${relative}`);
+    const filePath = snapshotPath(snapshotRoot, relative, "sealed governance");
+    const bytes = readBoundedRegularFile(snapshotRoot, filePath, "sealed continuation governance");
+    const observed = digestBytes(bytes);
+    if (observed.sha256 !== entry.sha256 || observed.size_bytes !== entry.size_bytes) {
+      throw new Error(`sealed continuation governance changed: ${relative}`);
+    }
+    return { filePath, bytes };
+  });
+  if (planFile === undefined) throw new Error("sealed governance is incomplete");
+  assertContinuationGovernancePlan(planFile.bytes, governanceFile?.bytes, layout.runId);
+  const after = captureWorkflowControlSnapshotChangeTokens(snapshotRoot, protectedPaths);
+  assertNoSymlinkComponents(layout.root, controlsRoot, "continuation governance snapshot");
+  if (
+    !sameWorkflowControlSnapshotChangeTokens(before, after) ||
+    workflowControlSnapshotStatToken(controls) !==
+      workflowControlSnapshotStatToken(fs.lstatSync(controlsRoot, { bigint: true })) ||
+    !readBoundedRegularFile(layout.root, sealPath, "workflow control seal").equals(sealContents)
+  ) {
+    throw new Error("sealed continuation governance changed while it was authenticated");
+  }
+  return governanceFile?.filePath;
+}
+
+function assertContinuationGovernancePlan(planBytes: Buffer, governanceBytes: Buffer | undefined, runId: string): void {
+  const value = parseStrictJsonBytes(planBytes);
+  // Sealed run-plan v2 predates governance (#635). Its authenticated absence
+  // retains native legacy behavior; a current or partially governed plan cannot use this path.
+  if (
+    governanceBytes === undefined &&
+    isRecord(value) &&
+    value.schema_version === "ultrafuzz.run-plan.v2" &&
+    value.run_id === runId &&
+    !Object.hasOwn(value, "data_governance")
+  )
+    return;
+  const plan = assertRunPlanDocument(value, runId);
+  if (governanceBytes === undefined || digestBytes(governanceBytes).sha256 !== plan.data_governance.sha256) {
+    throw new Error("sealed continuation governance differs from the authenticated launch decision");
+  }
 }
 
 export function verifyWorkflowControlSnapshot(
