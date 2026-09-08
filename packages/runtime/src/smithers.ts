@@ -5174,6 +5174,8 @@ export async function runSmithersLifecycleCommand(input: {
   retryFailed?: boolean;
   label?: string;
   priorInspection?: SmithersResumeInspection;
+  /** Prepare launch authority only after ruling out an idempotent active attach. */
+  prepareContinuationEnvironment?: () => Record<string, string | undefined>;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -5246,19 +5248,24 @@ export async function runSmithersLifecycleCommand(input: {
     inspection = input.priorInspection.snapshot;
     currentInspection = input.priorInspection.inspect;
   }
+  if (
+    currentInspection !== undefined &&
+    inspection !== undefined &&
+    smithersRunStateIsActive(currentInspection) &&
+    input.resetNode === undefined &&
+    (input.force !== true || input.retryFailed === true)
+  ) {
+    return {
+      stdout: inspection.stdout,
+      stderr: inspection.stderr,
+      command: inspection.command,
+      alreadyRunning: true
+    };
+  }
+  if (input.action === "resume" && input.prepareContinuationEnvironment !== undefined) {
+    input.env = input.prepareContinuationEnvironment();
+  }
   if (currentInspection !== undefined && inspection !== undefined) {
-    if (
-      smithersRunStateIsActive(currentInspection) &&
-      input.resetNode === undefined &&
-      (input.force !== true || input.retryFailed === true)
-    ) {
-      return {
-        stdout: inspection.stdout,
-        stderr: inspection.stderr,
-        command: inspection.command,
-        alreadyRunning: true
-      };
-    }
     const failedTasks =
       input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
         ? smithersFailedTasks(currentInspection)

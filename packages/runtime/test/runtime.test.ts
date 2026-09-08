@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
+import { preGovernanceRunPlan } from "./fixtures/pre-governance-run-plan.js";
 import crypto from "node:crypto";
 import {
   execFileSync,
@@ -136,6 +137,7 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
+  "SMITHERS_FAKE_GOVERNANCE_LOG",
   "SMITHERS_FAKE_EXECUTED_AS_LOG",
   "SMITHERS_FAKE_FAIL_UP",
   "SMITHERS_FAKE_FORGE_GUARD_LOG",
@@ -1731,6 +1733,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" "$CLAUDE_CONFIG_DIR" "$SMITHERS_UNDOCUMENTED_SECRET" "$ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES" > "$SMITHERS_FAKE_ENV_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_GOVERNANCE_LOG" ]; then',
+      '  printf \'%s|%s\\n\' "$1" "$ULTRAFUZZ_DATA_GOVERNANCE_PATH" >> "$SMITHERS_FAKE_GOVERNANCE_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
@@ -25128,7 +25133,234 @@ test("launch observation rechecks a seal published while state remains pending",
   }
 });
 
-test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {
+test("native continuation restores only authenticated snapshot governance before launch", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "native-continuation-governance";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "run.json"), "utf8")) as {
+    workflow: { control_generation: string };
+  };
+  const expected = path.join(
+    run.value.run_root,
+    "smithers",
+    "execution-snapshots",
+    metadata.workflow.control_generation,
+    "controls",
+    "data-governance.json"
+  );
+  const original = fs.readFileSync(expected, "utf8");
+  const mutablePolicy = path.join(run.value.run_root, "data-governance.json");
+  fs.writeFileSync(mutablePolicy, '{"required_source_destinations":[]}\n');
+  env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = mutablePolicy;
+  env.SMITHERS_FAKE_GOVERNANCE_LOG = path.join(project, "governance-environment.log");
+  setFakeSmithersInspectState(project, "failed");
+  for (const options of [{}, { resetNode: "node:project-discovery" }, { refreshController: true }]) {
+    fs.writeFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "");
+    const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const launches: string[] = fs
+      .readFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "utf8")
+      .trim()
+      .split("\n")
+      .filter((line) => /^(?:resume|up|timetravel)\|/u.test(line));
+    assert.ok(launches.length > 0);
+    for (const launch of launches) assert.equal(launch.split("|")[1], expected);
+    assert.equal(fs.readFileSync(expected, "utf8"), original);
+  }
+});
+
+test("native continuation rejects substituted governance before reset but keeps active attach", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "native-continuation-governance-tamper";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  assert.ok(env.SMITHERS_FAKE_LOG);
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { workflow: { control_generation: string } };
+  const snapshot = path.join(
+    run.value.run_root,
+    "smithers",
+    "execution-snapshots",
+    metadata.workflow.control_generation
+  );
+  const policy = path.join(snapshot, "controls", "data-governance.json");
+  const original = fs.readFileSync(policy);
+  fs.chmodSync(policy, 0o644);
+  fs.writeFileSync(policy, "{}\n");
+  fs.chmodSync(policy, 0o444);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
+  const attached = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(attached.ok, true, JSON.stringify(attached.diagnostics));
+  assert.equal(attached.value?.submitted, false);
+  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+  setFakeSmithersInspectState(project, "failed");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
+  const rejected = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
+  assert.equal(rejected.ok, false);
+  assert.match(JSON.stringify(rejected.diagnostics), /sealed continuation governance changed/u);
+  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+  fs.chmodSync(policy, 0o644);
+  fs.writeFileSync(policy, original);
+  fs.chmodSync(policy, 0o444);
+});
+
+test("native continuation rejects governance symlinks and a mismatched control generation", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "native-continuation-governance-binding";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  assert.ok(env.SMITHERS_FAKE_LOG);
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  const originalMetadata = fs.readFileSync(metadataPath);
+  const metadata = JSON.parse(originalMetadata.toString("utf8")) as { workflow: { control_generation: string } };
+  const controls = path.join(
+    run.value.run_root,
+    "smithers",
+    "execution-snapshots",
+    metadata.workflow.control_generation,
+    "controls"
+  );
+  const policy = path.join(controls, "data-governance.json");
+  const seal = path.join(run.value.run_root, "smithers", "control-integrity.json");
+  setFakeSmithersInspectState(project, "failed");
+  for (const filePath of [policy, seal]) {
+    const parent = path.dirname(filePath);
+    const mode = fs.statSync(parent).mode & 0o777;
+    fs.chmodSync(parent, 0o755);
+    fs.renameSync(filePath, `${filePath}.retained`);
+    fs.symlinkSync(`${filePath}.retained`, filePath);
+    fs.chmodSync(parent, mode);
+    try {
+      fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
+      const rejected = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
+      assert.equal(rejected.ok, false, filePath);
+      assert.match(JSON.stringify(rejected.diagnostics), /symlink|symbolic|unsealed protected file/u);
+      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+    } finally {
+      fs.chmodSync(parent, 0o755);
+      fs.unlinkSync(filePath);
+      fs.renameSync(`${filePath}.retained`, filePath);
+      fs.chmodSync(parent, mode);
+    }
+  }
+  metadata.workflow.control_generation = "0".repeat(64);
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
+  const rejected = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
+  assert.equal(rejected.ok, false);
+  assert.match(JSON.stringify(rejected.diagnostics), /sealed control generation/u);
+  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+  fs.writeFileSync(metadataPath, originalMetadata);
+});
+
+test("native continuation preserves unsealed legacy launch without synthesizing governance", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const runId = "unsealed-legacy-continuation";
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+  const workflowPath = path.join(project, ".smithers", "workflows", `ultrafuzz-${runId}.tsx`);
+  fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
+  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
+  fs.writeFileSync(workflowPath, "export default {};\n");
+  fs.writeFileSync(
+    path.join(runRoot, "run.json"),
+    JSON.stringify({
+      run_id: runId,
+      workflow: { run_id: `ultrafuzz-${runId}`, path: path.relative(project, workflowPath) }
+    })
+  );
+  const env = fakeSmithersEnv(project);
+  assert.ok(env.SMITHERS_BIN);
+  const governanceLog = path.join(project, "legacy-governance.log");
+  fs.writeFileSync(
+    env.SMITHERS_BIN,
+    fs
+      .readFileSync(env.SMITHERS_BIN, "utf8")
+      .replace(
+        "#!/bin/sh\n",
+        `#!/bin/sh\nprintf '%s|%s\\n' "$1" "$ULTRAFUZZ_DATA_GOVERNANCE_PATH" >> ${shellQuote(governanceLog)}\n`
+      )
+  );
+  env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = undefined;
+  setFakeSmithersInspectState(project, "failed");
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.match(fs.readFileSync(governanceLog, "utf8"), /^(?:resume|up)\|$/mu);
+  assert.equal(fs.existsSync(path.join(runRoot, "smithers", "control-integrity.json")), false);
+});
+
+test("native continuation preserves authenticated pre-governance seals but rejects partial claims", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "sealed-pre-governance-continuation";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  assert.ok(env.SMITHERS_FAKE_LOG);
+  const sealPath = path.join(run.value.run_root, "smithers", "control-integrity.json");
+  const seal = JSON.parse(fs.readFileSync(sealPath, "utf8")) as {
+    execution_files: Array<{ snapshot_path: string; sha256: string; size_bytes: number }>;
+  };
+  seal.execution_files = seal.execution_files.filter(
+    (entry) => entry.snapshot_path !== "controls/data-governance.json"
+  );
+  const planEntry = seal.execution_files.find((entry) => entry.snapshot_path === "controls/plan.json");
+  assert.ok(planEntry);
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { workflow: { control_generation: string } };
+  env.SMITHERS_FAKE_GOVERNANCE_LOG = path.join(project, "old-sealed-governance.log");
+  env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = path.join(project, "untrusted-policy.json");
+  setFakeSmithersInspectState(project, "failed");
+  const legacyPlan = { ...preGovernanceRunPlan(), run_id: runId };
+  const cases = [
+    legacyPlan,
+    { ...legacyPlan, data_governance: null },
+    { ...legacyPlan, schema_version: "ultrafuzz.run-plan.v3" }
+  ];
+  for (const [index, plan] of cases.entries()) {
+    const bytes = Buffer.from(JSON.stringify(plan));
+    planEntry.sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    planEntry.size_bytes = bytes.length;
+    const sealBytes = Buffer.from(JSON.stringify(seal));
+    const generation = crypto.createHash("sha256").update(sealBytes).digest("hex");
+    const snapshotRoot = path.join(run.value.run_root, "smithers", "execution-snapshots", generation);
+    const controls = path.join(snapshotRoot, "controls");
+    fs.mkdirSync(controls, { recursive: true });
+    fs.writeFileSync(path.join(controls, "plan.json"), bytes, { mode: 0o444 });
+    fs.chmodSync(controls, 0o555);
+    fs.chmodSync(snapshotRoot, 0o555);
+    fs.writeFileSync(sealPath, sealBytes);
+    metadata.workflow.control_generation = generation;
+    fs.writeFileSync(metadataPath, JSON.stringify(metadata));
+    fs.writeFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "");
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, index === 0, JSON.stringify(resumed.diagnostics));
+    if (index === 0) {
+      assert.match(fs.readFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "utf8"), /^(?:resume|up)\|$/mu);
+    } else {
+      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+    }
+  }
+});
+
+test("ordinary resume tolerates link-journal gaps but refuses a missing claimed control seal", async () => {
   const cases = [
     {
       runId: "legacy-missing-control-seal",
@@ -25164,6 +25396,12 @@ test("ordinary resume bypasses legacy control-seal and link-journal gaps", async
       assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
     }
     const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, force: true, env });
+    if (entry.code === "WORKFLOW_CONTROL_SEAL_MISSING") {
+      assert.equal(resumed.ok, false, "a current sealed run cannot recover launch policy from its missing seal");
+      assert.ok(env.SMITHERS_FAKE_LOG);
+      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+      continue;
+    }
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
     assert.equal(resumed.value?.run_id, entry.runId);
     assert.equal(resumed.value?.workflow_run_id, `ultrafuzz-${entry.runId}`);

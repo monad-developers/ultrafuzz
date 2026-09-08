@@ -81,6 +81,7 @@ import { runsRootForProject } from "./validate.js";
 import {
   acquireWorkflowControlLock,
   acquireWorkflowLifecycleLock,
+  authenticatedContinuationGovernancePath,
   materializeWorkflowExecutionSnapshot,
   sealedBunStartupControlDrift,
   sealWorkflowControlFiles,
@@ -629,6 +630,21 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       keepWorkspaces: config?.run.keepWorkspaces ?? false,
       controllerLeaseSeconds: config?.run.controllerLeaseSeconds ?? 60,
       env: nativeSmithersContinuationEnvironment(lifecycleEnvironment),
+      prepareContinuationEnvironment: () => {
+        const claimsSealedControl =
+          workflow.control_generation !== undefined || workflow.control_integrity_path !== undefined;
+        if (!claimsSealedControl && pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)) {
+          return nativeSmithersContinuationEnvironment(lifecycleEnvironment);
+        }
+        return nativeSmithersContinuationEnvironment({
+          ...lifecycleEnvironment,
+          ULTRAFUZZ_DATA_GOVERNANCE_PATH: authenticatedContinuationGovernancePath(
+            projectRoot,
+            layout,
+            workflow.control_generation
+          )
+        });
+      },
       environmentVariableNames: mergeEnvironmentVariableNames(
         config === undefined ? [] : agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
