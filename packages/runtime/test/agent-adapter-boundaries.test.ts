@@ -103,7 +103,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
   "environment.tsx": {
-    classifiedSourceSha256: "7e14b4765af1fc7f53a9fd8483e169a9dac2beb62f0c8893ab80df19b15f45e5",
+    classifiedSourceSha256: "72d93b360e5b969e00646cfa39a24cac8a3720ce2aef1c7469c51038ef0206cd",
     responsibilities: [],
     upstreamIssues: []
   },
@@ -195,10 +195,11 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     sourceSha256: "ea7c6eec70883126e3ee9588b6d3349169652688756b519f1d49c3b5b794e887"
   },
   "environment.tsx": {
+    // Shared native-continuation PATH and Pi home filtering (#1035).
     maxLines: 425,
-    maxSyntaxNodes: 2_258,
+    maxSyntaxNodes: 2_325,
     purpose: "data-governance",
-    sourceSha256: "7e14b4765af1fc7f53a9fd8483e169a9dac2beb62f0c8893ab80df19b15f45e5"
+    sourceSha256: "72d93b360e5b969e00646cfa39a24cac8a3720ce2aef1c7469c51038ef0206cd"
   },
   "index.tsx": {
     maxLines: 30,
