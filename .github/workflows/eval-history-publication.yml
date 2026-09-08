@@ -268,8 +268,7 @@ jobs:
             echo "- Refusal: ${SKIP_REASON:-the classifier recorded no refusal reason}"
             echo
             echo "Refusing an incomplete generation is deliberate; this job stays green so an operational"
-            echo "pair failure does not turn main red. Persistent staleness escalates through the scheduled"
-            echo "Benchmark History Freshness monitor, not through this run."
+            echo "pair failure does not turn main red."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Attribute an unreached publication readiness verdict
