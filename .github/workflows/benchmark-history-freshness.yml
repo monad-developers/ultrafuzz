@@ -1,0 +1,167 @@
+name: Benchmark History Freshness
+
+# Check publication only when a main-branch push actually started new benchmark
+# work. A quiet repository has no publication deadline. Daily at 06:17 UTC: an
+# off-the-hour minute avoids the top-of-hour scheduled-run queue, and the alert
+# is waiting at the start of the European workday instead of arriving overnight.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: Days of publication silence tolerated before this monitor fails
+        required: false
+        default: "2"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-history-freshness
+  cancel-in-progress: false
+
+jobs:
+  assert_history_freshness:
+    name: Assert the published benchmark history advanced recently
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    # The `runner` context does not exist in a job-level `env:` block, so every
+    # `runner.temp` path below is declared on the step that reads it.
+    env:
+      HISTORY_PATH: benchmarks/ultrafuzzbench/history.json
+      MAX_AGE_DAYS: ${{ inputs.max_age_days || '2' }}
+      STALENESS_ISSUE_TITLE: Benchmark history has stopped advancing
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Build the eval history closure
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @ultrafuzz/evals... build
+
+      - name: Read main-branch benchmark producer runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUNS: ${{ runner.temp }}/benchmark-producer-runs.json
+        run: >-
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow eval-benchmarks.yml
+          --branch main --event push --limit 1000
+          --json databaseId,headSha,createdAt,event,headBranch > "$PRODUCER_RUNS"
+
+      # The freshness assertion needs the canonical eval-history parser, so a
+      # broken lockfile or build stops it from reporting an age at all. That is
+      # not a silent pass: the tracking-issue step below runs on `always()` and
+      # files the unevaluable-monitor body instead, because these outages are
+      # correlated with the ones this monitor watches for and an alert that
+      # arrives only when the toolchain is healthy is not an alert.
+      - name: Assert the published benchmark history advanced recently
+        id: freshness
+        env:
+          HISTORY_REPORT: ${{ runner.temp }}/benchmark-history-freshness.md
+          PRODUCER_RUNS: ${{ runner.temp }}/benchmark-producer-runs.json
+        run: >-
+          node scripts/ci/assert-benchmark-history-freshness.mjs
+          --history "$HISTORY_PATH"
+          --max-age-days "$MAX_AGE_DAYS"
+          --producer-runs "$PRODUCER_RUNS"
+          --report "$HISTORY_REPORT"
+
+      # A failed scheduled run only emails the last person to touch the workflow,
+      # which is how nothing noticed the outage this monitor was written for. Carry
+      # the same report into a single tracking issue, and comment on the open one
+      # instead of filing a fresh duplicate every day.
+      - name: Open or update the staleness tracking issue
+        if: always() && steps.freshness.outputs.status != 'fresh'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HISTORY_REPORT: ${{ runner.temp }}/benchmark-history-freshness.md
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          issue_body="$RUNNER_TEMP/benchmark-history-freshness-issue.md"
+          if [ -f "$HISTORY_REPORT" ]; then
+            cat "$HISTORY_REPORT" > "$issue_body"
+          else
+            {
+              echo "## Benchmark history freshness could not be evaluated"
+              echo
+              echo "The freshness assertion failed before it could compare \`$HISTORY_PATH\` against the"
+              echo "$MAX_AGE_DAYS-day budget. Either that document is unreadable or is not the shape the"
+              echo "canonical eval-history parser accepts, or this monitor is itself broken. Read the run"
+              echo "log: an unevaluable monitor is treated as an alert, never as a pass."
+            } > "$issue_body"
+          fi
+          {
+            echo
+            echo "Reported by [\`$GITHUB_WORKFLOW\` run $GITHUB_RUN_ID]($RUN_URL) at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+          } >> "$issue_body"
+          open_issues="$RUNNER_TEMP/benchmark-history-freshness-open-issues.tsv"
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+            --jq '.[] | select(.pull_request == null) | [.number, .title] | @tsv' \
+            > "$open_issues"
+          existing="$(awk -F'\t' -v title="$STALENESS_ISSUE_TITLE" '$2 == title { print $1; exit }' "$open_issues")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file "$issue_body"
+            echo "Commented on the open staleness issue #$existing."
+          else
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$STALENESS_ISSUE_TITLE" \
+              --body-file "$issue_body"
+          fi
+
+  # Keep the operator CLI's document/chart consistency check. Age alone is not
+  # an outage; publication timeliness is evaluated against producer work above.
+  corroborate_history_consistency:
+    name: Check consistency through the canonical eval history gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Build the eval history CLI closure
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @ultrafuzz/cli... build
+
+      - name: Assert history consistency through the eval history CLI
+        run: >-
+          node packages/cli/dist/index.js eval history --check --project .
