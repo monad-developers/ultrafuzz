@@ -237,15 +237,22 @@ export async function getRunHealth(input: {
   if (!evidence.ok && pendingDiagnostic !== undefined) {
     try {
       const pending = await readPendingRunHealth(projectRoot, input.runId, pendingDiagnostic, input.windowMinutes);
-      if (pending !== undefined) return runtimeResult(true, pending, evidence.diagnostics);
+      // Launch can publish its seal while state is still pending. Confirm the seal is still absent
+      // before returning the synthetic observation, and use any newly available evidence normally.
+      evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+        tolerateControlDivergence: true,
+        observeOnly: true
+      });
+      if (
+        pending !== undefined &&
+        !evidence.ok &&
+        evidence.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_SEAL_PENDING")
+      ) {
+        return runtimeResult(true, pending, evidence.diagnostics);
+      }
     } catch (error) {
       return runtimeFailure<RunHealthValue>([diagnosticFromError(error, "runtime", "RUN_LAUNCH_STATE_UNREADABLE")]);
     }
-    // Launch may have advanced between reading the missing seal and pending state.
-    evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
-      tolerateControlDivergence: true,
-      observeOnly: true
-    });
   }
   if (!evidence.ok) {
     return runtimeFailure<RunHealthValue>(evidence.diagnostics);

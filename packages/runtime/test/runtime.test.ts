@@ -24873,6 +24873,60 @@ test("incomplete launch is observable without granting execution authority or cl
   assert.equal(unreadable.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_MISSING");
 });
 
+test("launch observation rechecks a seal published while state remains pending", { concurrency: false }, async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "launch-seal-transition";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  const sealPath = path.join(layout.root, "smithers", "control-integrity.json");
+  const validSeal = fs.readFileSync(sealPath);
+
+  for (const seal of [validSeal, Buffer.from("{broken")]) {
+    writeRunState(layout, { ...readRunState(layout), status: "pending" });
+    fs.unlinkSync(sealPath);
+    const originalOpenSync = fs.openSync;
+    let restored = false;
+    // The first evidence read has observed the missing seal before it opens state.json. Restore
+    // the seal in that window, retaining pending state so only the evidence reread detects it.
+    fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+      const descriptor = originalOpenSync(...args);
+      if (!restored && path.resolve(String(args[0])) === layout.statePath) {
+        restored = true;
+        fs.writeFileSync(sealPath, seal);
+      }
+      return descriptor;
+    }) as typeof fs.openSync;
+    const health = await (async () => {
+      try {
+        return await getRunHealth({ projectRoot: project, runId, env });
+      } finally {
+        fs.openSync = originalOpenSync;
+      }
+    })();
+
+    assert.equal(restored, true, "the seal must arrive during the initial pending-state read");
+    assert.equal(
+      health.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_SEAL_PENDING"),
+      false,
+      JSON.stringify(health.diagnostics)
+    );
+    if (seal === validSeal) {
+      assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+      assert.equal(health.value?.workflow_run_id, `ultrafuzz-${runId}`);
+      assert.equal(health.value?.verdict, "running-healthy");
+      assert.equal(health.value?.counts.in_progress, 1);
+    } else {
+      assert.equal(health.ok, false);
+      assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+    }
+  }
+});
+
 test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {
   const cases = [
     {
