@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 
 import {
   OWASP_SCS_REQUIRED_PATHS,
@@ -10,6 +12,7 @@ import {
   materializeReferenceArtifacts,
   owaspScsGitTreePaths,
   parseReferenceCatalog,
+  parseVulnerabilityDatabaseGitTree,
   snapshotSelectedVulnerabilityDatabaseRecords,
   statusReferenceCatalog,
   syncReferenceCatalog,
@@ -18,6 +21,83 @@ import {
 import { fakeGitIsolationEnv, installFakeGit, withProcessEnv } from "./fake-git.js";
 
 const recordPath = "docs/SCWE/SCSVS-AUTH/SCWE-016.md";
+
+test("the shipped OWASP pin yields its complete stable catalog and exact selected sources offline", (t) => {
+  const pinned = JSON.parse(
+    gunzipSync(fs.readFileSync(new URL("../../test/fixtures/owasp-scs-fefd476b.json.gz", import.meta.url))).toString(
+      "utf8"
+    )
+  ) as {
+    repo: string;
+    commit: string;
+    git_tree: string;
+    files: { path: string; mode: string; type: string; git_blob: string; contents: string }[];
+  };
+  const reference = parseReferenceCatalog(defaultReferenceCatalogYaml()).references["vulnerability-database.owasp-scs"];
+  assert.ok(reference);
+  assert.equal(reference.repo, pinned.repo);
+  assert.equal(reference.commit, pinned.commit);
+  const entries = parseVulnerabilityDatabaseGitTree(Buffer.from(pinned.git_tree));
+  assert.deepEqual(
+    owaspScsGitTreePaths(entries),
+    pinned.files.map((file) => file.path)
+  );
+  assert.equal(pinned.files.length, 159);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-owasp-pin-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const upstream = path.join(root, "upstream");
+  for (const file of pinned.files) {
+    const bytes = Buffer.from(file.contents);
+    const blob = crypto.createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+    assert.equal(blob, file.git_blob, file.path);
+    assert.ok(pinned.git_tree.includes(`${file.mode} ${file.type} ${blob}\t${file.path}\0`));
+    const destination = path.join(upstream, file.path);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, bytes);
+  }
+  const catalog = { version: 1 as const, references: { "vulnerability-database.owasp-scs": reference } };
+  const cacheRoot = path.join(root, "cache");
+  const fake = installFakeGit(root);
+  const synced = withProcessEnv(fakeGitIsolationEnv(fake, upstream, "", "ambient"), () =>
+    syncReferenceCatalog(catalog, { cacheRoot })
+  );
+  assert.ok(synced.synced[0]);
+  assert.equal(statusReferenceCatalog(root, catalog, { cacheRoot }).ok, true);
+  const artifactDir = path.join(root, "artifacts");
+  materializeReferenceArtifacts({
+    id: "vulnerability-database.owasp-scs",
+    catalog,
+    artifactDir,
+    outputs: [{ path: "vulnerability-db/catalog.json", primary: true }],
+    cacheRoot
+  });
+  const database = validateVulnerabilityDatabaseDirectory(path.join(artifactDir, "vulnerability-db"), reference);
+  assert.equal(database.records.length, 156);
+  assert.equal(database.catalog.capabilities.length, 11);
+  assert.equal(database.catalogSha256, "d0d80cea8aa096938e9ee663a96046c75fa0e93eedbc4d12962dc0d08e8b0c01");
+  assert.equal(
+    database.catalog.database_aggregate_sha256,
+    "ec8f24f50bb6ee35d2333ef1fbefd1fb36d37df1bcb38884a7a3d54704cb17e4"
+  );
+  for (const record of database.records) {
+    assert.deepEqual(record.capabilities.required, []);
+    assert.deepEqual(record.capabilities.incompatible, []);
+  }
+  const selected = snapshotSelectedVulnerabilityDatabaseRecords({
+    database,
+    classIds: database.records.map((record) => record.id),
+    outputDir: path.join(root, "snapshot")
+  });
+  assert.equal(selected.manifest.selected_records.length, 156);
+  for (const record of selected.manifest.selected_records) {
+    assert.deepEqual(
+      fs.readFileSync(path.join(root, "snapshot", record.artifact_path)),
+      fs.readFileSync(path.join(upstream, record.path))
+    );
+  }
+});
+
 function fixture(root: string): void {
   const files = {
     "License.md": "Synthetic license\n",

@@ -81,6 +81,32 @@ validation rejects altered, added, or removed records. Runtime planning
 re-derives the catalog from the materialized source, and selected snapshots keep
 the exact original SCWE Markdown. No upstream code is executed.
 
+### Migrating from the former Web3 database
+
+The OWASP adapter is a breaking replacement. The former
+`vulnerability-database.web3` reference layout and database revisions `1` and `3`
+are no longer accepted. Existing run catalogs, selected-record snapshots, and
+goal plans are not converted. Keep the previous Ultrafuzz version available for
+ongoing or historical runs that use those artifacts.
+
+For an existing project, generate a clean scaffold in a temporary directory with
+the new CLI and review its changes against the project's configuration. Plain
+`ultrafuzz init` preserves existing project files; `init --force` can overwrite
+customizations and is not a migration command.
+
+1. Replace the former database stanza in `.ultrafuzz/references.yml` with the
+   `vulnerability-database.owasp-scs` stanza above, including its three paths.
+2. Update the database reference in `.ultrafuzz/topology.yml` and any custom
+   topologies. Review the new scaffold's setup prompts and artifact schemas,
+   incorporating OWASP guidance while preserving project-specific instructions.
+3. Run `ultrafuzz references sync` and `ultrafuzz references status` with the new
+   CLI, then start a fresh run. Preserve previous run directories and caches.
+
+Plan for 156 class goals from this pin, in addition to threat goals and the
+roaming hunter. Under the current goal-plan contract, optional SCSVS hints cannot
+exclude classes; source and target evidence guide the investigation. Account for
+this work when choosing run budgets and concurrency.
+
 ### Private references
 
 The shipped references are all public and need no credential. A project that
@@ -122,8 +148,9 @@ Each cache entry contains the requested source files plus:
 ```
 
 The cache manifest records provider, repo, commit, fetch time, file sizes, and
-SHA-256 digests. Third-party reference content is not committed to Ultrafuzz or
-to the target repository.
+SHA-256 digests. Synced reference content is not committed to the target
+repository. Ultrafuzz retains a licensed pinned-source fixture for offline
+adapter regression tests; production packages do not ship that fixture.
 
 ## Commands
 
