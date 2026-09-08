@@ -93,7 +93,11 @@ import {
   type PricingCatalogMetadata,
   type PricingHostnameLookup
 } from "./model-pricing.js";
-import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
+import {
+  linkedWorkflowExecutionEnvironment,
+  readLinkedWorkflowEvidence,
+  type LinkedWorkflowEvidence
+} from "./start-run.js";
 import {
   type PlannedGraph,
   type PlannedGraphNode,
@@ -1029,6 +1033,253 @@ function parseFinishedVerifierOutput(
   };
 }
 
+/**
+ * Preserve failed local executor occurrences while their exact selected-agent
+ * detail still exists. Only a stopped-run reset calls this checkpoint; normal
+ * continuation, active force resets and success publication keep their existing
+ * paths. It never finalizes artifacts, projects run state or resolves pricing.
+ */
+export async function preserveFailedWorkflowAttemptsBeforeReset(
+  input: SyncRunInput & { inspection: SmithersCommandSnapshot }
+): Promise<void> {
+  const projectRoot = path.resolve(input.projectRoot);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
+  if (!evidence.ok) throw new Error(evidence.diagnostics.map((entry) => entry.message).join("; "));
+  const loaded = loadSynchronizationInputs({
+    graph: evidence.verifiedControl.contents.graph,
+    tasks: evidence.verifiedControl.contents.tasks
+  });
+  if (!loaded.ok) throw new Error(loaded.diagnostics.map((entry) => entry.message).join("; "));
+  const environment = linkedWorkflowExecutionEnvironment(evidence, input.env);
+  const inspect = parseCurrentSmithersInspect(input.inspection, evidence.smithersRunId);
+  const readEvents = async (): Promise<SmithersCommandSnapshot> => {
+    const snapshot = await runSmithersInspectionCommand({
+      args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
+      projectRoot,
+      env: environment
+    });
+    if (!snapshot.ok) throw new Error(workflowSnapshotDiagnostic(snapshot, "WORKFLOW_EVENTS_FAILED").message);
+    return snapshot;
+  };
+  const eventsSnapshot = await readEvents();
+  const events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
+  const allExisting = replayNodeAttempts(evidence.layout).entries;
+  const recordedSequences = recordedTerminalAttemptSequencesFromEntries(allExisting, evidence.smithersRunId);
+  const tasksByNodeId = new Map(
+    loaded.tasks.filter((task) => task.execution.mode === "local").map((task) => [task.smithersNodeId, task])
+  );
+  const failures = resetTerminalFailureAttempts({
+    layout: evidence.layout,
+    workflowRunId: evidence.smithersRunId,
+    tasksByNodeId,
+    events,
+    recordedSequences
+  });
+  if (failures.length === 0) return;
+  const terminalSequences = new Set(
+    failures
+      .filter((attempt) => !recordedSequences.has(attempt.finishedSequence))
+      .map((attempt) => attempt.finishedSequence)
+  );
+  const authorities = await inspectTerminalAttemptAuthorities({
+    projectRoot,
+    workflowRunId: evidence.smithersRunId,
+    tasks: loaded.tasks,
+    events,
+    layout: evidence.layout,
+    env: environment,
+    control: {},
+    terminalSequences
+  });
+  const forbiddenSecretValues = sensitiveEnvironmentValues(
+    input.env ?? process.env,
+    loaded.tasks.flatMap((task) => [
+      ...task.execution.agentCredentialEnv,
+      ...(task.execution.modal?.credentialEnv ?? [])
+    ])
+  );
+  const pending = failedResetAttemptInputs({
+    layout: evidence.layout,
+    workflowRunId: evidence.smithersRunId,
+    controlGeneration: evidence.controlGeneration,
+    tasksByNodeId,
+    failures,
+    authorities,
+    allExisting,
+    forbiddenSecretValues
+  });
+  validateFailedResetAttemptInputs({ layout: evidence.layout, pending, allExisting, events });
+  await assertStoppedResetAuthorityUnchanged({
+    evidence,
+    projectRoot,
+    environment,
+    inspect,
+    events,
+    readEvents
+  });
+  appendNodeAttempts(evidence.layout, pending);
+}
+
+function resetTerminalFailureAttempts(input: {
+  layout: RunLayout;
+  workflowRunId: string;
+  tasksByNodeId: ReadonlyMap<string, StoredWorkflowTask>;
+  events: WorkflowEvent[];
+  recordedSequences: ReadonlySet<number>;
+}): TerminalWorkflowAttempt[] {
+  const relevantEvents = input.events.filter(
+    (event) => event.type === "RunStarted" || input.tasksByNodeId.has(stringField(event.payload, "nodeId") ?? "")
+  );
+  return terminalWorkflowAttempts(relevantEvents, {
+    recordedTerminalSequences: input.recordedSequences,
+    authorizeUnrecordedSuperseded: (attempt, context) => {
+      const task = input.tasksByNodeId.get(attempt.nodeId);
+      return (
+        context.crossedRunActivation &&
+        task !== undefined &&
+        supersededSuccessfulAttemptHasTraceAuthority(
+          input.layout,
+          input.workflowRunId,
+          task,
+          attempt,
+          input.events,
+          context
+        )
+      );
+    }
+  }).filter((attempt) => attempt.outcome === "failed" || attempt.outcome === "timed-out");
+}
+
+function failedResetAttemptInputs(input: {
+  layout: RunLayout;
+  workflowRunId: string;
+  controlGeneration: string;
+  tasksByNodeId: ReadonlyMap<string, StoredWorkflowTask>;
+  failures: readonly TerminalWorkflowAttempt[];
+  authorities: SmithersNodeAttemptAuthorities;
+  allExisting: readonly NodeAttemptLedgerEntry[];
+  forbiddenSecretValues: readonly string[];
+}): AppendNodeAttemptInput[] {
+  const existing = new Map(input.allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry]));
+  return input.failures.flatMap((attempt): AppendNodeAttemptInput[] => {
+    const task = input.tasksByNodeId.get(attempt.nodeId);
+    if (task === undefined) throw new Error("failed reset attempt has no sealed task authority");
+    const prior = existing.get(JSON.stringify([input.workflowRunId, attempt.finishedSequence]));
+    if (
+      prior === undefined &&
+      inspectSmithersAttemptAgentSelection(
+        task,
+        input.authorities.get(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration)),
+        attempt.retry
+      ) === undefined
+    )
+      return [];
+    return [
+      {
+        workflowRunId: input.workflowRunId,
+        // Recompute immutable authority; only an already-recorded agent selection
+        // can replace mutable detail removed by an interrupted reset.
+        controlGeneration: input.controlGeneration,
+        nodeId: task.metadata.node.storageId ?? task.concreteNodeId,
+        strategyAttemptId: task.attemptId,
+        iteration: attempt.iteration,
+        attempt: attempt.retry,
+        startedEventSequence: attempt.startedSequence,
+        sourceEventSequence: attempt.finishedSequence,
+        startedAt: attempt.startedAt,
+        finishedAt: attempt.finishedAt,
+        outcome: attempt.outcome,
+        inputManifestDigest: taskAttemptInputManifestDigest(input.layout, task),
+        ...(prior === undefined
+          ? { agent: nodeAttemptAgentProvenance(task, attempt, input.authorities) }
+          : prior.agent === undefined
+            ? {}
+            : { agent: prior.agent }),
+        ...(attempt.failureCategory === undefined ? {} : { failureCategory: attempt.failureCategory }),
+        ...(attempt.failureMessage === undefined ? {} : { failureMessage: attempt.failureMessage }),
+        forbiddenSecretValues: input.forbiddenSecretValues
+      }
+    ];
+  });
+}
+
+function validateFailedResetAttemptInputs(input: {
+  layout: RunLayout;
+  pending: readonly AppendNodeAttemptInput[];
+  allExisting: readonly NodeAttemptLedgerEntry[];
+  events: readonly WorkflowEvent[];
+}): void {
+  const existingByIdentity = new Map(input.allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry]));
+  const candidates = input.pending.map((entry) => {
+    const candidate = createNodeAttemptLedgerEntry(input.layout, entry);
+    const prior = existingByIdentity.get(nodeAttemptLedgerIdentity(candidate));
+    if (prior === undefined) return candidate;
+    const reconciled = reconcileNodeAttemptLedgerEntry(prior, candidate, { failureMessage: entry.failureMessage });
+    if (reconciled === undefined)
+      throw new Error("recorded failed attempt no longer matches its immutable event authority");
+    return reconciled;
+  });
+  const proposedEntries = [
+    ...input.allExisting,
+    ...candidates.filter((entry) => !existingByIdentity.has(nodeAttemptLedgerIdentity(entry)))
+  ];
+  for (const candidate of candidates) {
+    const diagnostics = runtimeSemanticGateDiagnostics({
+      schemaFilename: "node-attempt-ledger.schema.json",
+      document: candidate,
+      artifactPath: input.layout.attemptLedgerPath,
+      context: {
+        attemptLedger: { entries: proposedEntries, sourceEntries: [] },
+        eventLog: {
+          events: input.events.map((event) => ({
+            workflow_run_id: event.workflowRunId,
+            source_event_sequence: event.sourceEventSequence,
+            timestamp_ms: event.timestampMs,
+            type: event.type,
+            payload: event.payload
+          }))
+        }
+      }
+    });
+    const errors = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (errors.length > 0) throw new Error(errors.map((entry) => entry.message).join("; "));
+  }
+}
+
+async function assertStoppedResetAuthorityUnchanged(input: {
+  evidence: LinkedWorkflowEvidence;
+  projectRoot: string;
+  environment: Record<string, string | undefined>;
+  inspect: CurrentSmithersInspect;
+  events: readonly WorkflowEvent[];
+  readEvents: () => Promise<SmithersCommandSnapshot>;
+}): Promise<void> {
+  const currentEvents = await input.readEvents();
+  const currentInspect = await runSmithersInspectionCommand({
+    args: ["inspect", input.evidence.smithersRunId, "--format", "json", "--full-output"],
+    projectRoot: input.projectRoot,
+    env: input.environment
+  });
+  if (
+    !currentInspect.ok ||
+    !isDeepStrictEqual(parseCurrentSmithersInspect(currentInspect, input.evidence.smithersRunId), input.inspect) ||
+    !isDeepStrictEqual(parseWorkflowEvents(currentEvents.stdout, input.evidence.smithersRunId), input.events)
+  ) {
+    throw new Error("stopped workflow changed while preserving failed attempts before reset");
+  }
+  const currentEvidence = await readLinkedWorkflowEvidence(input.projectRoot, input.evidence.layout.runId, {
+    observeOnly: true
+  });
+  if (
+    !currentEvidence.ok ||
+    currentEvidence.smithersRunId !== input.evidence.smithersRunId ||
+    currentEvidence.controlGeneration !== input.evidence.controlGeneration ||
+    !currentEvidence.verifiedControl.contents.tasks.equals(input.evidence.verifiedControl.contents.tasks)
+  ) {
+    throw new Error("sealed workflow authority changed while preserving failed attempts before reset");
+  }
+}
+
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
   const result = await synchronizeLinkedWorkflowRun(input, control);
   if (!result.ok) {
@@ -1799,6 +2050,7 @@ async function inspectTerminalAttemptAuthorities(input: {
   layout: RunLayout;
   env: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
+  terminalSequences?: ReadonlySet<number>;
 }): Promise<SmithersNodeAttemptAuthorities> {
   const tasksByNodeId = new Map(input.tasks.map((task) => [task.smithersNodeId, task]));
   const localTaskNodeIds = new Set(
@@ -1828,7 +2080,11 @@ async function inspectTerminalAttemptAuthorities(input: {
         )
       );
     }
-  }).filter((attempt) => tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local");
+  }).filter(
+    (attempt) =>
+      tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local" &&
+      (input.terminalSequences === undefined || input.terminalSequences.has(attempt.finishedSequence))
+  );
   const grouped = new Map<string, TerminalWorkflowAttempt[]>();
   for (const attempt of pending) {
     const key = smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration);
@@ -4788,6 +5044,19 @@ function eventProvenanceForTask(task: StoredWorkflowTask): Record<string, unknow
   };
 }
 
+function taskAttemptInputManifestDigest(layout: RunLayout, task: StoredWorkflowTask): string {
+  const state = readRunState(layout);
+  return manifestDigest(
+    JSON.stringify({
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      strategy_attempt_id: task.attemptId,
+      workflow_task_id: task.smithersNodeId,
+      metadata: task.metadata
+    })
+  );
+}
+
 function appendTerminalTaskAttempts(input: {
   layout: RunLayout;
   task: StoredWorkflowTask;
@@ -4830,15 +5099,7 @@ function appendTerminalTaskAttempts(input: {
         })
       : observedTerminalAttempts;
   const state = readRunState(input.layout);
-  const inputManifestDigest = manifestDigest(
-    JSON.stringify({
-      graph_fingerprint: state.graph_fingerprint,
-      config_fingerprint: state.config_fingerprint,
-      strategy_attempt_id: input.task.attemptId,
-      workflow_task_id: input.task.smithersNodeId,
-      metadata: input.task.metadata
-    })
-  );
+  const inputManifestDigest = taskAttemptInputManifestDigest(input.layout, input.task);
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
   const existing = allExisting.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);

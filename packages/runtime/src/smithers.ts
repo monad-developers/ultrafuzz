@@ -5176,6 +5176,8 @@ export async function runSmithersLifecycleCommand(input: {
   priorInspection?: SmithersResumeInspection;
   /** Prepare launch authority only after ruling out an idempotent active attach. */
   prepareContinuationEnvironment?: () => Record<string, string | undefined>;
+  /** Preserve stopped-run failure evidence before its mutable attempt rows are reset. */
+  beforeStoppedReset?: (inspection: SmithersCommandSnapshot) => Promise<void>;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -5221,6 +5223,18 @@ export async function runSmithersLifecycleCommand(input: {
   let preResumeStderr = "";
   let currentInspection: CurrentSmithersInspect | undefined;
   let inspection: SmithersCommandSnapshot | undefined;
+  let stoppedResetPreserved = false;
+  const preserveStoppedReset = async (): Promise<void> => {
+    if (
+      stoppedResetPreserved ||
+      currentInspection === undefined ||
+      inspection === undefined ||
+      smithersRunStateIsActive(currentInspection)
+    )
+      return;
+    await input.beforeStoppedReset?.(inspection);
+    stoppedResetPreserved = true;
+  };
   // Detached admission renders the workflow before Smithers checks whether
   // this run already has an active owner. Inspect every resume first so an
   // idempotent attach cannot fail preflight or compete with that owner (#968).
@@ -5289,6 +5303,7 @@ export async function runSmithersLifecycleCommand(input: {
           })
         : undefined;
     if (failedTasks.length > 0) {
+      await preserveStoppedReset();
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
         const producerTask = retryProducerForFailedVerifier(currentInspection, failedTask);
@@ -5342,6 +5357,7 @@ export async function runSmithersLifecycleCommand(input: {
         : path.join(input.relaunchPaths.runRoot, "smithers", "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
+      await preserveStoppedReset();
       // A failure can be durable in the canonical node snapshot even when the
       // runner cannot resolve its implicit "latest attempt" lookup. Pinning the
       // iteration from that snapshot keeps --reset-node recoverable by node ID.

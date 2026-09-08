@@ -623,6 +623,18 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       force: input.force,
       retryFailed: input.retryFailed,
       priorInspection: refreshInspection,
+      beforeStoppedReset: async (inspection) => {
+        if (!hasRetainedResetControlAuthority(projectRoot, layout, workflow)) return;
+        // workflow-sync reads linked evidence through this module. Load the
+        // failure-only checkpoint after initialization, at an actual reset.
+        const { preserveFailedWorkflowAttemptsBeforeReset } = await import("./workflow-sync.js");
+        await preserveFailedWorkflowAttemptsBeforeReset({
+          projectRoot,
+          runId,
+          env: lifecycleEnvironment,
+          inspection
+        });
+      },
       relaunchPaths: {
         runRoot: layout.root,
         logsDir: path.join(smithersRoot, "logs")
@@ -668,6 +680,21 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
   } finally {
     await releaseLifecycleLock?.();
+  }
+}
+
+function hasRetainedResetControlAuthority(
+  projectRoot: string,
+  layout: RunLayout,
+  workflow: Record<string, unknown>
+): boolean {
+  if (Object.hasOwn(workflow, "control_generation") || Object.hasOwn(workflow, "control_integrity_path")) return true;
+  try {
+    fs.lstatSync(workflowControlPaths(projectRoot, layout).integrityPath);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
   }
 }
 
