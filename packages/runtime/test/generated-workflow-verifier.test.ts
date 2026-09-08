@@ -438,6 +438,7 @@ function loadFinalReportAgentExecutionAuthority(
     "parseStrictJsonBytes",
     "isPlainJsonRecord",
     "reconcileSmithersAttemptAgentSelection",
+    "inspectSmithersAttemptAgentSelection",
     "finalReportAgentExecution",
     `${helper}; return {
       remember: rememberFinalReportAgentExecutionAuthority,
@@ -457,6 +458,7 @@ function loadFinalReportAgentExecutionAuthority(
     },
     (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8")),
     (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
+    () => ({ chainIndex: options.chainIndex ?? 0 }),
     () => ({ chainIndex: options.chainIndex ?? 0 }),
     () => options.execution ?? {}
   ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown; budgetMs: number };
@@ -8675,7 +8677,7 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
   assert.match(verification, /authoritativeFinalReportAgentExecution\(task\)/u);
   assert.match(verification, /controller-observed producer/u);
   assert.doesNotMatch(source, /agent-execution|execution\.json|readFinalReportAgentExecutionRecord/u);
-  assert.match(source, /reconcileSmithersAttemptAgentSelection\(task, authorityDetail/u);
+  assert.match(source, /reconcileSmithersAttemptAgentSelection\(task, authority\.authorityDetail/u);
   assert.match(source, /detail\.ok === true && isPlainJsonRecord\(detail\.data\)/u);
   assert.match(source, /finalReportAgentExecutionAuthority\.get\(task\.attemptId\)/u);
 
@@ -8694,6 +8696,8 @@ test("a non-Codex fallback cannot forge final-report producer authority through 
   try {
     const task = {
       id: "node:final-report",
+      smithersNodeId: "node:final-report",
+      execution: { mode: "local" },
       attemptId: "final-report",
       runRoot: root,
       smithersRunId: "ultrafuzz-authority-recovery",
@@ -8756,7 +8760,10 @@ test("single-rung final-report authority survives a worker restart without a run
     producer: { attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }
   };
   const authority = loadFinalReportAgentExecutionAuthority({ execution });
-  assert.deepEqual(authority.read({ attemptId: "final-report", agentChain: [{ profileId: "primary" }] }), execution);
+  assert.deepEqual(
+    authority.read({ attemptId: "final-report", execution: { mode: "cloud" }, agentChain: [{ profileId: "primary" }] }),
+    execution
+  );
   assert.equal(authority.smithersReads(), 0);
 });
 
@@ -8766,6 +8773,7 @@ test("multi-rung report-producer authority budgets a contended Smithers read and
   const task = {
     attemptId: "final-report",
     id: "final-report",
+    execution: { mode: "local" },
     smithersRunId: "run-1",
     agentChain: [{ profileId: "primary" }, { profileId: "fallback" }]
   };

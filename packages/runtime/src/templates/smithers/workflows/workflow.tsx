@@ -103,6 +103,7 @@ const {
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   hasPendingWorkspacePreparationReplacement,
+  inspectSmithersAttemptAgentSelection,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
@@ -3074,13 +3075,7 @@ function rememberFinalReportAgentExecutionAuthority(
  */
 const SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS = 180_000;
 
-function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]): FinalReportAgentExecution {
-  const current = finalReportAgentExecutionAuthority.get(task.attemptId);
-  if (current !== undefined) return current;
-  // A single-rung chain has only one possible producer. This remains
-  // authoritative after a cloud-worker process restart without coupling the
-  // inner worker to the controller's distinct Smithers run ID.
-  if (task.agentChain.length === 1) return finalReportAgentExecution(task, 0);
+function readFinalReportSmithersAuthority(task: (typeof taskSpecs)[number]) {
   let stdout: string;
   const startedAt = Date.now();
   try {
@@ -3110,6 +3105,9 @@ function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]
     isPlainJsonRecord(detail) && detail.ok === true && isPlainJsonRecord(detail.data) ? detail.data : detail;
   const node =
     isPlainJsonRecord(authorityDetail) && isPlainJsonRecord(authorityDetail.node) ? authorityDetail.node : undefined;
+  if (node?.nodeId !== task.smithersNodeId) {
+    throw new Error("artifact-contract failure: Smithers report-producer node does not match the sealed task");
+  }
   const lastAttempt = node?.lastAttempt;
   if (!Number.isSafeInteger(lastAttempt) || Number(lastAttempt) <= 0) {
     throw new Error("artifact-contract failure: Smithers report-producer attempt is unavailable");
@@ -3121,19 +3119,85 @@ function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]
   if (attempts === undefined) {
     throw new Error("artifact-contract failure: Smithers report-producer attempts are unavailable");
   }
-  const observedSelections = attempts.map((attempt): FinalReportObservedAgentSelection => {
+  const attemptNumbers = attempts.map((attempt) => {
     if (!isPlainJsonRecord(attempt) || !Number.isSafeInteger(attempt.attempt) || Number(attempt.attempt) <= 0) {
       throw new Error("artifact-contract failure: Smithers report-producer attempt is malformed");
     }
-    const attemptNumber = Number(attempt.attempt);
-    const selection = reconcileSmithersAttemptAgentSelection(task, authorityDetail, attemptNumber);
-    return { attempt: attemptNumber, chainIndex: selection.chainIndex };
+    return Number(attempt.attempt);
   });
-  const producerSelection = observedSelections.find((selection) => selection.attempt === Number(lastAttempt));
-  if (producerSelection === undefined) {
-    throw new Error("artifact-contract failure: Smithers report-producer selection is unavailable");
+  if (
+    new Set(attemptNumbers).size !== attemptNumbers.length ||
+    !attemptNumbers.includes(Number(lastAttempt)) ||
+    attemptNumbers.some((attempt) => attempt > Number(lastAttempt))
+  ) {
+    throw new Error("artifact-contract failure: Smithers report-producer attempt history is inconsistent");
   }
-  const execution = finalReportAgentExecution(task, producerSelection.chainIndex, observedSelections);
+  return { authorityDetail, lastAttempt: Number(lastAttempt), attemptNumbers: attemptNumbers.sort((a, b) => a - b) };
+}
+
+function priorFinalReportAgentSelections(
+  task: (typeof taskSpecs)[number],
+  authority: ReturnType<typeof readFinalReportSmithersAuthority>,
+  currentAttempt: number
+): FinalReportObservedAgentSelection[] {
+  return authority.attemptNumbers
+    .filter((attempt) => attempt < currentAttempt)
+    .flatMap((attempt) => {
+      // A failed preflight has no executed model selection. The same strict
+      // reconciler rejects nonterminal, ambiguous, or contradictory history.
+      const selection = inspectSmithersAttemptAgentSelection(task, authority.authorityDetail, attempt);
+      return selection === undefined ? [] : [{ attempt, chainIndex: selection.chainIndex }];
+    });
+}
+
+function finalReportAgentSelectionsForAttempt(
+  task: (typeof taskSpecs)[number],
+  attempt: number,
+  chainIndex: number
+): FinalReportObservedAgentSelection[] {
+  const cached = finalReportAgentSelectionAuthority.get(task.attemptId);
+  const current = cached?.find((selection) => selection.attempt === attempt);
+  if (cached !== undefined && current !== undefined) {
+    if (current.chainIndex !== chainIndex || cached.at(-1) !== current) {
+      throw new Error("artifact-contract failure: report producer selection changed within an attempt");
+    }
+    return cached;
+  }
+  if (cached !== undefined && cached.some((selection) => selection.attempt >= attempt)) {
+    throw new Error("artifact-contract failure: report producer attempt moved behind its observed history");
+  }
+  let previous = cached ?? [];
+  // Cloud currently admits a single-rung, single-attempt worker. Its local
+  // Smithers identity is distinct from the controller's; do not query that
+  // controller from inside the worker. After a local controller restart, seed
+  // the lost process-local history from durable attempts before authoring the
+  // prompt. An existing cache already contains all locally observed selections.
+  if (cached === undefined && attempt > 1 && task.execution.mode !== "cloud") {
+    const authority = readFinalReportSmithersAuthority(task);
+    if (authority.lastAttempt !== attempt) {
+      throw new Error("artifact-contract failure: report retry does not match the current Smithers attempt");
+    }
+    previous = priorFinalReportAgentSelections(task, authority, attempt);
+  }
+  const selections = [...previous, { attempt, chainIndex }];
+  finalReportAgentSelectionAuthority.set(task.attemptId, selections);
+  return selections;
+}
+
+function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]): FinalReportAgentExecution {
+  const current = finalReportAgentExecutionAuthority.get(task.attemptId);
+  if (current !== undefined) return current;
+  // Cloud workers currently execute exactly one model attempt, independently
+  // of the controller's Smithers run. Local single-rung chains can still have
+  // quota-exempt physical retries and must recover their actual attempt IDs.
+  if (task.execution.mode === "cloud" && task.agentChain.length === 1) return finalReportAgentExecution(task, 0);
+  const authority = readFinalReportSmithersAuthority(task);
+  const producer = reconcileSmithersAttemptAgentSelection(task, authority.authorityDetail, authority.lastAttempt);
+  const observedSelections = [
+    ...priorFinalReportAgentSelections(task, authority, authority.lastAttempt),
+    { attempt: authority.lastAttempt, chainIndex: producer.chainIndex }
+  ];
+  const execution = finalReportAgentExecution(task, producer.chainIndex, observedSelections);
   finalReportAgentExecutionAuthority.set(task.attemptId, execution);
   return execution;
 }
@@ -3401,11 +3465,7 @@ function artifactAwareAgent(
       const reportOutputs = declaredFinalReportOutputPair(task);
       let observedSelections: FinalReportObservedAgentSelection[] | undefined;
       if (reportOutputs !== undefined) {
-        observedSelections = finalReportAgentSelectionAuthority.get(task.attemptId) ?? [];
-        if (firstGenerationForAttempt) {
-          observedSelections.push({ attempt: smithersAttempt, chainIndex });
-          finalReportAgentSelectionAuthority.set(task.attemptId, observedSelections);
-        }
+        observedSelections = finalReportAgentSelectionsForAttempt(task, smithersAttempt, chainIndex);
       }
       const execution = finalReportAgentExecution(task, chainIndex, observedSelections);
       rememberFinalReportAgentExecutionAuthority(task, execution);
