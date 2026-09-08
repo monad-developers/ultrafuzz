@@ -4232,12 +4232,23 @@ function authenticatedWorkspacePatchCaptures(task: (typeof taskSpecs)[number], w
   return captures;
 }
 
-function admittedWorkspacePreparationDependencyDigest(task: (typeof taskSpecs)[number]): string {
+function admittedWorkspacePreparationDependencyDigest(
+  task: (typeof taskSpecs)[number],
+  scope: "workspace-patches" | "all" = "workspace-patches"
+): string {
   const admission = assertDependencyArtifactAdmissionCurrent(task);
   return createHash("sha256")
     .update(
       JSON.stringify(
         [...admission.snapshotsByProducerAttempt]
+          // Only patch publishers determine whether source preparation changed.
+          // An in-progress replacement additionally binds every admitted marker.
+          .filter(
+            ([, snapshot]) =>
+              scope === "all" ||
+              snapshot.artifacts.has("workspace.patch") ||
+              snapshot.artifacts.has("workspace-patch.json")
+          )
           .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
           .map(([attemptId, snapshot]) => [attemptId, createHash("sha256").update(snapshot.marker.bytes).digest("hex")])
       )
@@ -4599,7 +4610,7 @@ function replaceSupersededWorkspacePreparation(
     runRoot,
     attemptId: task.attemptId,
     replacementTree,
-    dependencySha256,
+    dependencySha256: admittedWorkspacePreparationDependencyDigest(task, "all"),
     paths,
     replacementFiles,
     validatePrevious: () => {

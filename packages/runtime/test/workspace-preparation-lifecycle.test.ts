@@ -44,32 +44,32 @@ function dependencySnapshot(dependency: string) {
       identity: { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs }
     };
   };
-  const patch = read("workspace.patch");
-  const manifest = read("workspace-patch.json");
+  const publications = ["workspace.patch", "workspace-patch.json", "properties.json"]
+    .filter((filename) => fs.existsSync(path.join(dependency, filename)))
+    .map(read);
   return {
     attemptId: path.basename(dependency),
     artifactDir: dependency,
     marker: read("fixture-admission.json"),
-    artifacts: new Map([
-      [
-        "workspace.patch",
-        { ...patch, relativePath: "workspace.patch", contract: "ultrafuzz/text@1", value: patch.bytes.toString("utf8") }
-      ],
-      [
-        "workspace-patch.json",
-        {
-          ...manifest,
-          relativePath: "workspace-patch.json",
-          contract: "ultrafuzz/workspace-patch@1",
-          value: JSON.parse(manifest.bytes.toString("utf8")) as unknown
-        }
-      ]
-    ]),
+    artifacts: new Map(
+      publications.map((entry) => {
+        const relativePath = path.basename(entry.path);
+        return [
+          relativePath,
+          {
+            ...entry,
+            relativePath,
+            contract: relativePath === "workspace-patch.json" ? "ultrafuzz/workspace-patch@1" : "ultrafuzz/text@1",
+            value:
+              relativePath === "workspace-patch.json"
+                ? (JSON.parse(entry.bytes.toString("utf8")) as unknown)
+                : entry.bytes.toString("utf8")
+          }
+        ];
+      })
+    ),
     publications: new Map(
-      [patch, manifest].map((entry) => [
-        path.basename(entry.path),
-        createHash("sha256").update(entry.bytes).digest("hex")
-      ])
+      publications.map((entry) => [path.basename(entry.path), createHash("sha256").update(entry.bytes).digest("hex")])
     ),
     generatedTestBundles: []
   };
@@ -427,3 +427,103 @@ test("#1081 unchanged dependency epochs preserve duplicate-result fan-in and cha
       );
     });
 });
+
+test("#1115 property-only republishing preserves preparation with and without workspace patches", () => {
+  for (const mixed of [false, true])
+    for (const interrupted of [false, true])
+      lifecycleFixture((fixture) => {
+        const setup = fixture.tasks[0];
+        assert.ok(setup);
+        const directory = mixed ? path.join(fixture.task.runRoot, "artifacts/properties") : setup.artifactDir;
+        if (mixed) {
+          fs.mkdirSync(directory);
+          fixture.tasks.splice(1, 0, {
+            ...setup,
+            attemptId: "properties",
+            artifactDir: directory,
+            outputs: [{ path: "properties.json", contract: "ultrafuzz/text@1" }],
+            metadata: { ...setup.metadata, artifacts: { dir: directory } }
+          });
+          fixture.task.dependencyArtifactDirs.push(directory);
+          fixture.task.metadata.dependencies.attemptIds.push("properties");
+        } else {
+          setup.outputs = [{ path: "properties.json", contract: "ultrafuzz/text@1" }];
+          for (const filename of ["workspace.patch", "workspace-patch.json"])
+            fs.unlinkSync(path.join(directory, filename));
+        }
+        const properties = path.join(directory, "properties.json");
+        const marker = path.join(directory, "fixture-admission.json");
+        fs.writeFileSync(properties, "property generation 1\n");
+        fs.writeFileSync(marker, "generation 1\n");
+        const authority = runtime.workspacePreparationAuthorityPath(fixture.task.runRoot, fixture.task.attemptId);
+        const rename = fs.renameSync;
+        try {
+          if (interrupted)
+            fs.renameSync = ((source, destination) => {
+              rename(source, destination);
+              if (String(destination) === authority) throw new Error("interrupted initial authority");
+            }) as typeof fs.renameSync;
+          const prepare = () => preparationHarness(fixture.tasks).prepare(fixture.task);
+          if (interrupted) assert.throws(prepare, /interrupted initial authority/u);
+          else prepare();
+        } finally {
+          fs.renameSync = rename;
+        }
+        const previousAuthority = fs.readFileSync(authority);
+        fs.writeFileSync(properties, "property generation 2\n");
+        fs.writeFileSync(marker, "generation 2\n");
+        const reopened = preparationHarness(fixture.tasks);
+        reopened.prepare(fixture.task);
+        assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), mixed ? fixture.first : fixture.base);
+        assert.equal(reopened.preparation(fixture.task), mixed ? fixture.first : fixture.base);
+        assert.deepEqual(fs.readFileSync(authority), previousAuthority);
+        assert.equal(fs.existsSync(path.join(fixture.task.runRoot, "workspace-preparation-replacements")), false);
+        reopened.verifyBaseline(fixture.task);
+        reopened.verifyHandoff(fixture.task);
+      });
+});
+
+test("#1115 an interrupted workspace replacement still binds property-only dependency markers", () =>
+  lifecycleFixture((fixture) => {
+    const setup = fixture.tasks[0];
+    assert.ok(setup);
+    const directory = path.join(fixture.task.runRoot, "artifacts/properties");
+    fs.mkdirSync(directory);
+    fixture.tasks.splice(1, 0, {
+      ...setup,
+      attemptId: "properties",
+      artifactDir: directory,
+      outputs: [{ path: "properties.json", contract: "ultrafuzz/text@1" }],
+      metadata: { ...setup.metadata, artifacts: { dir: directory } }
+    });
+    fixture.task.dependencyArtifactDirs.push(directory);
+    fixture.task.metadata.dependencies.attemptIds.push("properties");
+    const marker = path.join(directory, "fixture-admission.json");
+    const properties = path.join(directory, "properties.json");
+    fs.writeFileSync(properties, "generation 1\n");
+    fs.writeFileSync(marker, "generation 1\n");
+    preparationHarness(fixture.tasks).prepare(fixture.task);
+    fixture.publishSecond();
+    const rename = fs.renameSync;
+    try {
+      fs.renameSync = ((source, destination) => {
+        rename(source, destination);
+        if (String(destination).includes("/pending/archive/")) throw new Error("interrupted archive");
+      }) as typeof fs.renameSync;
+      assert.throws(() => preparationHarness(fixture.tasks).prepare(fixture.task), /interrupted archive/u);
+    } finally {
+      fs.renameSync = rename;
+    }
+    fs.writeFileSync(properties, "generation 2\n");
+    fs.writeFileSync(marker, "generation 2\n");
+    const before = runtime.captureWorkspaceTree(fixture.task.workspacePath);
+    assert.throws(
+      () => preparationHarness(fixture.tasks).prepare(fixture.task),
+      /pending preparation replacement authority changed/u
+    );
+    assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), before);
+    fs.writeFileSync(properties, "generation 1\n");
+    fs.writeFileSync(marker, "generation 1\n");
+    preparationHarness(fixture.tasks).prepare(fixture.task);
+    assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), fixture.second);
+  }));
