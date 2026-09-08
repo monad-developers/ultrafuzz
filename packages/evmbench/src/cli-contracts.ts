@@ -41,6 +41,7 @@ export interface EvmbenchResumeData {
 }
 
 export type EvmbenchStatusVerdict =
+  | "launch-incomplete"
   | "done"
   | "degraded"
   | "running-healthy"
@@ -64,7 +65,7 @@ export interface EvmbenchStatusData {
   source_run_id?: string;
   audit_profile?: RunMetadataAuditProfile;
   workflow_ids: string[];
-  workflow_run_id: string;
+  workflow_run_id?: string;
   workflow_status: string;
   verdict: EvmbenchStatusVerdict;
   reason: string;

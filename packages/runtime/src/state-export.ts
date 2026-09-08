@@ -41,7 +41,7 @@ import {
   retryTransientSnapshotRead
 } from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
-import { runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagnostics.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
@@ -51,6 +51,7 @@ import {
   synchronizeLinkedWorkflowRun
 } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
+import { readPendingRunHealth } from "./pending-run-health.js";
 
 const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
   "running",
@@ -226,10 +227,33 @@ export async function getRunHealth(input: {
   // `status` reports on a run; it never executes one. Reading it must not require the authority to
   // resume it, or a single divergent control file makes an otherwise healthy run permanently
   // unobservable (issue #674). Divergences are surfaced as warnings below rather than suppressed.
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+  let evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
     tolerateControlDivergence: true,
     observeOnly: true
   });
+  const pendingDiagnostic = evidence.ok
+    ? undefined
+    : evidence.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_SEAL_PENDING");
+  if (!evidence.ok && pendingDiagnostic !== undefined) {
+    try {
+      const pending = await readPendingRunHealth(projectRoot, input.runId, pendingDiagnostic, input.windowMinutes);
+      // Launch can publish its seal while state is still pending. Confirm the seal is still absent
+      // before returning the synthetic observation, and use any newly available evidence normally.
+      evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+        tolerateControlDivergence: true,
+        observeOnly: true
+      });
+      if (
+        pending !== undefined &&
+        !evidence.ok &&
+        evidence.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_SEAL_PENDING")
+      ) {
+        return runtimeResult(true, pending, evidence.diagnostics);
+      }
+    } catch (error) {
+      return runtimeFailure<RunHealthValue>([diagnosticFromError(error, "runtime", "RUN_LAUNCH_STATE_UNREADABLE")]);
+    }
+  }
   if (!evidence.ok) {
     return runtimeFailure<RunHealthValue>(evidence.diagnostics);
   }

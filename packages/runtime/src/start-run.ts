@@ -1421,12 +1421,34 @@ function invalidLinkedWorkflowEvidence(metadataPath: string, error: unknown): Li
   };
 }
 
+/**
+ * A pending state records incomplete launch preparation, not launcher liveness.
+ * It also survives an interrupted launch. Unreadable state retains the strict
+ * missing-seal diagnostic.
+ */
+function runStatusIsPreSubmission(layout: RunLayout): boolean {
+  try {
+    return readRunState(layout).status === "pending";
+  } catch {
+    return false;
+  }
+}
+
 function missingLinkedWorkflowEvidenceDiagnostic(
   projectRoot: string,
   layout: RunLayout
 ): RuntimeDiagnostic | undefined {
   const controlSealPath = workflowControlPaths(projectRoot, layout).integrityPath;
   if (pathIsMissing(controlSealPath)) {
+    if (runStatusIsPreSubmission(layout)) {
+      return {
+        code: "WORKFLOW_CONTROL_SEAL_PENDING",
+        message: `run ${layout.runId} has incomplete launch preparation: its workflow control seal has not been written. Launcher liveness is unknown. If the original launch is still active, wait for it to finish; otherwise inspect its error before retrying`,
+        severity: "warning",
+        source: "workflow",
+        path: controlSealPath
+      };
+    }
     return {
       code: "WORKFLOW_CONTROL_SEAL_MISSING",
       message: `run ${layout.runId} lacks the required workflow control seal; it may predate sealed runs or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,

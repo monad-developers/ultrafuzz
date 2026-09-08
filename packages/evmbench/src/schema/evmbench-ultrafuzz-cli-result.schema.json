@@ -259,7 +259,6 @@
         "run_root",
         "status",
         "workflow_ids",
-        "workflow_run_id",
         "workflow_status",
         "verdict",
         "reason",
@@ -273,6 +272,23 @@
         "gating_omitted",
         "quota",
         "generated_at_ms"
+      ],
+      "allOf": [
+        {
+          "if": { "properties": { "verdict": { "const": "launch-incomplete" } } },
+          "then": {
+            "properties": {
+              "status": { "const": "pending" },
+              "workflow_status": { "const": "unsubmitted" },
+              "workflow_ids": { "type": "array", "maxItems": 0 },
+              "workflow_run_id": false
+            }
+          },
+          "else": {
+            "properties": { "workflow_run_id": {} },
+            "required": ["workflow_run_id"]
+          }
+        }
       ],
       "properties": {
         "run_id": {
@@ -310,6 +326,7 @@
         },
         "verdict": {
           "enum": [
+            "launch-incomplete",
             "done",
             "degraded",
             "running-healthy",
