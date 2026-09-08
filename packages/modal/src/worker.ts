@@ -69,7 +69,8 @@ import {
   emptyWorkerCheckpoint,
   readWorkerCheckpoint,
   runWithTerminalPersistence,
-  WorkerResultWriter
+  WorkerResultWriter,
+  type WorkerDiagnosticCode
 } from "./worker-result.js";
 import { modalTargetToml, tomlString } from "./workspace-config.js";
 import { runPublicBenchmarkWorker } from "./public-worker.js";
@@ -78,9 +79,11 @@ import {
   describeWorkerTermination,
   drainChildOutput,
   workerDiagnosticLogPayload,
+  workerFailureDiagnostic,
   workerTerminationStack,
   MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
   WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+  WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE,
   type WorkerDiagnostic
 } from "./worker-diagnostics.js";
 import {
@@ -151,16 +154,27 @@ async function main(): Promise<void> {
     })
   });
   let target: string | undefined;
+  const namedDiagnosticCode = (error: unknown): WorkerDiagnosticCode | undefined =>
+    error instanceof CheckpointIncompatibleError
+      ? "checkpoint-incompatible"
+      : error instanceof NonResumableTerminalRunError
+        ? "terminal-run-non-resumable"
+        : undefined;
+  // Set once this attempt's log exists. Until then a failure has nowhere to be named, so it propagates as it
+  // always has; the lineage faults preflight raises carry their own code regardless.
+  let logStarted = false;
   await runWithTerminalPersistence({
     writer,
     snapshot: () => (target === undefined ? Promise.resolve(emptyWorkerCheckpoint()) : readWorkerCheckpoint(target)),
     flush: flushVolume,
-    diagnosticCodeForError: (error) =>
-      error instanceof CheckpointIncompatibleError
-        ? "checkpoint-incompatible"
-        : error instanceof NonResumableTerminalRunError
-          ? "terminal-run-non-resumable"
-          : undefined,
+    diagnosticCodeForError: namedDiagnosticCode,
+    unhandledFailure: {
+      passthrough: (error) => !logStarted || namedDiagnosticCode(error) !== undefined,
+      report: (error) =>
+        appendDiagnosticLog([
+          workerFailureDiagnostic(WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE, error, [...DIAGNOSTIC_SECRET_VALUES])
+        ])
+    },
     run: async () => {
       assertWorkerInputLineage({
         config: CONFIG,
@@ -189,6 +203,7 @@ async function main(): Promise<void> {
       });
       await writeFile(LOG_PATH, "", { mode: 0o600 });
       await appendGenericLog("worker-started");
+      logStarted = true;
       await writer.writePartial(emptyWorkerCheckpoint());
 
       let control: string;

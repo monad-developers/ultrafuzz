@@ -26,7 +26,11 @@ import {
   BENCHMARK_THREAT_MODEL_RETAINED_ARTIFACTS
 } from "@ultrafuzz/evals";
 import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
-import { loadVerifiedFinalReportSnapshot, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
+import {
+  loadVerifiedFinalReportSnapshot,
+  projectPublicArtifactValidationWarnings,
+  projectPublicCanonicalFinalReport
+} from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -57,15 +61,24 @@ import {
   childExitFailureCause,
   createBoundedStderrTail,
   describeWorkerTermination,
+  sanitizeWorkerDiagnosticMessage,
   workerDiagnosticLogPayload,
+  workerFailureDiagnostic,
   MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
   WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
   WORKER_COMMAND_INTERRUPTED_DIAGNOSTIC_CODE,
+  WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE,
+  type BoundedStderrTail,
   type WorkerDiagnostic
 } from "./worker-diagnostics.js";
-import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
+import {
+  emptyWorkerCheckpoint,
+  runWithTerminalPersistence,
+  WorkerResultWriter,
+  type WorkerDiagnosticCode
+} from "./worker-result.js";
 import { guardCurrentPersistentWorkerLineage } from "./worker-lineage.js";
-import { OperationalDispositionError } from "./terminal-disposition.js";
+import { OperationalDispositionError, runNamingUnhandledFailure } from "./terminal-disposition.js";
 
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
@@ -126,6 +139,8 @@ export class PublicWorkerCommandInterruptedError extends OperationalDispositionE
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
 const MODEL_WORK_CORROBORATION_FAILED_DIAGNOSTIC_CODE = "MODEL_WORK_CORROBORATION_FAILED";
+/** The post-report bundle assembly failed: a gate or read in `publishPublicBenchmarkBundle` threw. */
+const PUBLIC_BUNDLE_FAILED_DIAGNOSTIC_CODE = "PUBLIC_BUNDLE_FAILED";
 
 /** Secret values every diagnostic a command emits is redacted against, resolved when the command runs. */
 type PublicDiagnosticSecretValues = readonly string[] | (() => Promise<readonly string[]>);
@@ -197,16 +212,33 @@ export async function runPublicBenchmarkWorker(input: {
       model_work_started: modelWorkStarted
     })
   });
+  const namedDiagnosticCode = (error: unknown): WorkerDiagnosticCode | undefined =>
+    input.isCheckpointIncompatible(error)
+      ? "checkpoint-incompatible"
+      : error instanceof PublicEvalDiagnosticsBuildError
+        ? "public-eval-diagnostics-invalid"
+        : undefined;
+  // Secret values resolved so far, kept outside `run` so a failure anywhere in it is redacted against them.
+  const retainedForbiddenSecretValues = new Set<string>();
+  // Set once this attempt's log exists. Until then a failure has nowhere to be named, so it propagates as it
+  // always has; the lineage faults preflight raises carry their own code regardless.
+  let logStarted = false;
   await runWithTerminalPersistence({
     writer,
     snapshot: () => Promise.resolve(emptyWorkerCheckpoint()),
     flush: flushFilesystem,
-    diagnosticCodeForError: (error) =>
-      input.isCheckpointIncompatible(error)
-        ? "checkpoint-incompatible"
-        : error instanceof PublicEvalDiagnosticsBuildError
-          ? "public-eval-diagnostics-invalid"
-          : undefined,
+    diagnosticCodeForError: namedDiagnosticCode,
+    unhandledFailure: {
+      passthrough: (error) => !logStarted || namedDiagnosticCode(error) !== undefined,
+      report: (error) => {
+        appendPublicWorkerFailureLogLine(
+          logPath,
+          WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE,
+          error,
+          retainedForbiddenSecretValues
+        );
+      }
+    },
     run: async () => {
       await input.preflight({
         workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath, diagnosticsPath],
@@ -226,10 +258,10 @@ export async function runPublicBenchmarkWorker(input: {
         resultGenerationFloor: writer.currentGeneration()
       });
       await writeFile(logPath, `${new Date().toISOString()} worker-started\n`, { mode: 0o600 });
+      logStarted = true;
       await writer.writePartial(emptyWorkerCheckpoint());
       await flushFilesystem();
       assertPublicWorkerInput(input.config, input.model);
-      const retainedForbiddenSecretValues = new Set<string>();
       const resolveForbiddenSecretValues = async (): Promise<string[]> => {
         for (const value of await publicBenchmarkWorkerSecretValues(input.config, input.model, input.dataRoot)) {
           retainedForbiddenSecretValues.add(value);
@@ -363,6 +395,7 @@ export async function runPublicBenchmarkWorker(input: {
               maxParallelRuns: prepared.maxParallelRuns
             }) * 1000,
           publicDiagnosticSecretValues: [...retainedForbiddenSecretValues],
+          evalFailureDiagnosticsFromStdout: true,
           env: {
             ULTRAFUZZ_EVAL_JUDGE_API_KEY: requiredEnv(judgeKeyEnv),
             ...(input.config.braintrust.judge_url === undefined
@@ -378,25 +411,31 @@ export async function runPublicBenchmarkWorker(input: {
           cwd: prepared.controlRoot,
           logPath,
           timeoutMs: PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS * 1000,
-          publicDiagnosticSecretValues: [...retainedForbiddenSecretValues]
+          publicDiagnosticSecretValues: [...retainedForbiddenSecretValues],
+          evalFailureDiagnosticsFromStdout: true
         }
       );
-      const bundle = createPublicBenchmarkBundle({
-        benchmark: input.config.public_benchmark.benchmark,
-        lane: input.config.public_benchmark.lane,
-        modelSlug: input.model.slug,
-        model: input.model.model,
-        reasoning: input.model.reasoning,
-        candidateCommit: input.config.public_benchmark.candidate_commit,
-        evalRunId: prepared.evalRunId,
-        lineage: input.lineage,
-        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
-          root: input.dataRoot,
-          source: diagnosticsPath
-        }),
-        forbiddenSecretValues: await resolveForbiddenSecretValues()
+      await publishPublicBenchmarkBundle({
+        logPath,
+        bundlePath,
+        forbiddenSecretValues: retainedForbiddenSecretValues,
+        assemble: async () =>
+          createPublicBenchmarkBundle({
+            benchmark: input.config.public_benchmark.benchmark,
+            lane: input.config.public_benchmark.lane,
+            modelSlug: input.model.slug,
+            model: input.model.model,
+            reasoning: input.model.reasoning,
+            candidateCommit: input.config.public_benchmark.candidate_commit,
+            evalRunId: prepared.evalRunId,
+            lineage: input.lineage,
+            files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
+              root: input.dataRoot,
+              source: diagnosticsPath
+            }),
+            forbiddenSecretValues: await resolveForbiddenSecretValues()
+          })
       });
-      await writePublicBundleAtomic(bundlePath, bundle);
       return "finished";
     }
   });
@@ -686,6 +725,38 @@ export function assertPublicWorkerBundleLineage(
   if (mismatches.length > 0) {
     throw new Error(`persisted public benchmark bundle has incompatible ${mismatches.join(", ")}`);
   }
+}
+
+/**
+ * Assemble and seal the public bundle, naming a failure in the worker log before it becomes this worker's fault.
+ *
+ * This is the last work the worker does, and every gate in it -- the verified report authority per row, the
+ * size bound, the secret gate -- throws a plain `Error`. Run 33904992917 finished `eval report` and then was
+ * collected as `sandbox-exited` with no diagnostics line, because nothing here wrote one (#320). The gates'
+ * decisions are unchanged; only their reasons now reach the log.
+ */
+export async function publishPublicBenchmarkBundle(input: {
+  logPath: string;
+  bundlePath: string;
+  forbiddenSecretValues: Iterable<string>;
+  assemble: () => Promise<PublicBenchmarkBundle>;
+}): Promise<void> {
+  await runNamingUnhandledFailure(
+    async () => {
+      const bundle = await input.assemble();
+      await writePublicBundleAtomic(input.bundlePath, bundle);
+    },
+    {
+      report: (error) => {
+        appendPublicWorkerFailureLogLine(
+          input.logPath,
+          PUBLIC_BUNDLE_FAILED_DIAGNOSTIC_CODE,
+          error,
+          input.forbiddenSecretValues
+        );
+      }
+    }
+  );
 }
 
 export async function writePublicBundleAtomic(filePath: string, bundle: PublicBenchmarkBundle): Promise<void> {
@@ -1228,6 +1299,20 @@ export function publicBundleSources(
         immutableContents: candidate.immutableContents
       });
     }
+    if (report.validation_warnings.length > 0) {
+      const diagnostics = projectPublicArtifactValidationWarnings(report.validation_warnings);
+      for (const [name, contents] of [
+        ["artifact-validation-warnings.json", `${JSON.stringify(diagnostics.warnings, null, 2)}\n`],
+        ["artifact-validation-warnings.md", diagnostics.markdown]
+      ] as const) {
+        sources.push({
+          path: `reports/${row.id}/${name}`,
+          root: record.ultrafuzz_run_root,
+          source: report.artifacts.json_path,
+          immutableContents: Buffer.from(contents, "utf8")
+        });
+      }
+    }
     sources.push(...optionalRowArtifactSources(record.ultrafuzz_run_root, row.id));
   }
   return sources;
@@ -1325,7 +1410,7 @@ async function mapLimitStable<T>(
   await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => runNext()));
 }
 
-async function runCommand(
+export async function runCommand(
   argv: string[],
   options: {
     label: string;
@@ -1336,60 +1421,22 @@ async function runCommand(
     timeoutCategory?: string;
     signal?: AbortSignal;
     publicDiagnosticSecretValues?: PublicDiagnosticSecretValues;
+    /** Whether stdout is a CLI `--json` result envelope whose error diagnostics belong in the collected log. */
     evalFailureDiagnosticsFromStdout?: boolean;
   }
 ): Promise<string> {
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-started\n`);
   throwIfAborted(options.signal);
-  const child = spawn(argv[0]!, argv.slice(1), {
-    cwd: options.cwd,
-    env: { ...process.env, ...options.env },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  const { stdout, stderr } = captureBoundedCommandOutput(child.stdout, child.stderr);
-  let timedOut = false;
-  let aborted = false;
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const terminateChild = (): void => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    child.kill("SIGTERM");
-    killTimer ??= setTimeout(() => child.kill("SIGKILL"), 10_000);
-    killTimer.unref();
-  };
-  const timer = setTimeout(() => {
-    timedOut = true;
-    terminateChild();
-  }, options.timeoutMs);
-  const abortHandler = (): void => {
-    if (aborted) return;
-    aborted = true;
-    terminateChild();
-  };
-  options.signal?.addEventListener("abort", abortHandler, { once: true });
-  if (options.signal?.aborted) abortHandler();
-  // `close` reports an exit code or a termination signal, never both, and the
-  // difference is the one this worker's readers turn on: a child that chose an
-  // exit code finished writing, a child something else killed did not. Folding
-  // a signal into `code ?? 1` would hand a reclaimed or OOM-killed eval command
-  // to `publicEvalCommandLeftFinalJournal` as one that returned.
-  const termination = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  }).finally(() => {
-    clearTimeout(timer);
-    if (killTimer !== undefined) clearTimeout(killTimer);
-    options.signal?.removeEventListener("abort", abortHandler);
-  });
+  const { termination, stdout, stderr, timedOut, aborted } = await spawnBoundedCommand(argv, options);
   const exitCode = termination.code ?? 1;
   const capturedStdout = Buffer.concat(stdout).toString("utf8");
-  const forbiddenSecretValues =
-    options.publicDiagnosticSecretValues === undefined
-      ? []
-      : typeof options.publicDiagnosticSecretValues === "function"
-        ? await options.publicDiagnosticSecretValues()
-        : options.publicDiagnosticSecretValues;
-  if (options.evalFailureDiagnosticsFromStdout === true) {
-    const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, forbiddenSecretValues);
+  const forbiddenSecretValues = await resolvePublicDiagnosticSecretValues(options.publicDiagnosticSecretValues);
+  const envelopeFailures =
+    options.evalFailureDiagnosticsFromStdout === true
+      ? publicEvalFailureEnvelopeDiagnostics(capturedStdout)
+      : undefined;
+  if (envelopeFailures !== undefined) {
+    const payload = workerDiagnosticLogPayload(envelopeFailures, forbiddenSecretValues);
     if (payload !== undefined) {
       await fs.promises.appendFile(
         options.logPath,
@@ -1428,7 +1475,13 @@ async function runCommand(
     // diagnostic string this worker emits rather than being embedded raw.
     const stderrTail = createBoundedStderrTail();
     stderrTail.append(Buffer.concat(stderr));
-    const cause = childExitFailureCause(options.label, exitCode, stderrTail, forbiddenSecretValues);
+    const cause = publicCommandExitFailureCause(
+      options.label,
+      exitCode,
+      envelopeFailures?.[0],
+      stderrTail,
+      forbiddenSecretValues
+    );
     // Nothing else collected carries the reason: `diagnostic_code` names a category and `operation-failed`
     // names nothing, so a reason that is not logged here is a reason no reader ever sees.
     appendPublicWorkerDiagnosticLogLine(
@@ -1441,6 +1494,73 @@ async function runCommand(
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
   return capturedStdout;
+}
+
+/**
+ * Spawn `argv` with bounded output capture and wait for it to close, terminating it on timeout or abort.
+ *
+ * `close` reports an exit code or a termination signal, never both, and the
+ * difference is the one this worker's readers turn on: a child that chose an
+ * exit code finished writing, a child something else killed did not. Folding
+ * a signal into `code ?? 1` would hand a reclaimed or OOM-killed eval command
+ * to `publicEvalCommandLeftFinalJournal` as one that returned.
+ */
+async function spawnBoundedCommand(
+  argv: string[],
+  options: { cwd: string; env?: Record<string, string>; timeoutMs: number; signal?: AbortSignal }
+): Promise<{
+  termination: { code: number | null; signal: NodeJS.Signals | null };
+  stdout: Buffer[];
+  stderr: Buffer[];
+  timedOut: boolean;
+  aborted: boolean;
+}> {
+  const [command, ...args] = argv;
+  if (command === undefined) throw new Error("a command needs a program to run");
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: { ...process.env, ...options.env },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const { stdout, stderr } = captureBoundedCommandOutput(child.stdout, child.stderr);
+  let timedOut = false;
+  let aborted = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const terminateChild = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    killTimer ??= setTimeout(() => child.kill("SIGKILL"), 10_000);
+    killTimer.unref();
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    terminateChild();
+  }, options.timeoutMs);
+  const abortHandler = (): void => {
+    if (aborted) return;
+    aborted = true;
+    terminateChild();
+  };
+  options.signal?.addEventListener("abort", abortHandler, { once: true });
+  if (options.signal?.aborted) abortHandler();
+  const termination = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      resolve({ code, signal });
+    });
+  }).finally(() => {
+    clearTimeout(timer);
+    if (killTimer !== undefined) clearTimeout(killTimer);
+    options.signal?.removeEventListener("abort", abortHandler);
+  });
+  return { termination, stdout, stderr, timedOut, aborted };
+}
+
+async function resolvePublicDiagnosticSecretValues(
+  values: PublicDiagnosticSecretValues | undefined
+): Promise<readonly string[]> {
+  if (values === undefined) return [];
+  return typeof values === "function" ? values() : values;
 }
 
 export function captureBoundedCommandOutput(
@@ -1484,10 +1604,40 @@ function interruptedCommandCause(input: {
   return new Error(input.timeoutCategory ?? "operation-timeout");
 }
 
-export function publicEvalFailureDiagnosticLogPayload(
-  stdout: string,
+/**
+ * The `cause` for a CLI command that exited non-zero.
+ *
+ * In `--json` mode the CLI writes its failure envelope to stdout and nothing to stderr, so a cause composed
+ * from the stderr tail alone reads `eval score exited 1` and stops -- what every Modal smoke run from
+ * 2026-08-31 on recorded while the scorer's own reason went uncollected. When the envelope carries an error
+ * diagnostic, that diagnostic is the reason the command gave, so it takes the detail budget
+ * `childExitFailureCause` otherwise gives the stderr tail, kept from the head so the code survives a message
+ * longer than the budget.
+ */
+export function publicCommandExitFailureCause(
+  label: string,
+  exitCode: number,
+  envelopeFailure: WorkerDiagnostic | undefined,
+  stderrTail: BoundedStderrTail,
   forbiddenSecretValues: readonly string[]
-): string | undefined {
+): Error {
+  if (envelopeFailure === undefined) {
+    return childExitFailureCause(label, exitCode, stderrTail, forbiddenSecretValues);
+  }
+  const prefix = `${label} exited ${String(exitCode)}`;
+  const detail = sanitizeWorkerDiagnosticMessage(`${envelopeFailure.code}: ${envelopeFailure.message}`, {
+    forbiddenSecretValues,
+    maxBytes: Math.max(0, MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES - Buffer.byteLength(`${prefix}: `, "utf8")),
+    keep: "head"
+  });
+  return new Error(detail === "" ? prefix : `${prefix}: ${detail}`);
+}
+
+/**
+ * The error diagnostics of the CLI result envelope on `stdout`, in order, or `undefined` when stdout is not
+ * one. A success envelope carries none, so it yields an empty list and no log line.
+ */
+export function publicEvalFailureEnvelopeDiagnostics(stdout: string): WorkerDiagnostic[] | undefined {
   let parsed: unknown;
   try {
     parsed = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
@@ -1495,43 +1645,45 @@ export function publicEvalFailureDiagnosticLogPayload(
     return undefined;
   }
   if (!isPlainRecord(parsed) || !Array.isArray(parsed.diagnostics)) return undefined;
-  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(parsed.diagnostics, forbiddenSecretValues);
+  return failedEvalDiagnostics(parsed.diagnostics);
+}
+
+export function publicEvalFailureDiagnosticLogPayload(
+  stdout: string,
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  const diagnostics = publicEvalFailureEnvelopeDiagnostics(stdout);
+  return diagnostics === undefined ? undefined : workerDiagnosticLogPayload(diagnostics, forbiddenSecretValues);
 }
 
 export function publicEvalFailureDiagnosticLogPayloadFromRecords(
   records: readonly EvalRunRecord[],
   forbiddenSecretValues: readonly string[]
 ): string | undefined {
-  return publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
-    records.flatMap((record) => record.diagnostics),
+  return workerDiagnosticLogPayload(
+    failedEvalDiagnostics(records.flatMap((record) => record.diagnostics)),
     forbiddenSecretValues
   );
 }
 
 /**
- * The eval's own failed diagnostics as one collectable payload.
+ * The eval's own failed diagnostics, reduced to what a log line carries.
  *
  * Only severity and shape are decided here. Which codes are expressible, how many entries a line carries and
  * how long a message may be belong to the collector's grammar, which `workerDiagnosticLogPayload` re-derives;
  * bounding the count before it filters would let one inexpressible entry consume a slot a reportable one
  * needs.
  */
-function publicEvalFailureDiagnosticLogPayloadFromDiagnostics(
-  entries: readonly unknown[],
-  forbiddenSecretValues: readonly string[]
-): string | undefined {
-  return workerDiagnosticLogPayload(
-    entries
-      .filter(
-        (entry): entry is Record<string, unknown> =>
-          isPlainRecord(entry) &&
-          typeof entry.code === "string" &&
-          typeof entry.message === "string" &&
-          entry.severity === "error"
-      )
-      .map((entry) => ({ code: entry.code as string, message: entry.message as string })),
-    forbiddenSecretValues
-  );
+function failedEvalDiagnostics(entries: readonly unknown[]): WorkerDiagnostic[] {
+  return entries
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        isPlainRecord(entry) &&
+        typeof entry.code === "string" &&
+        typeof entry.message === "string" &&
+        entry.severity === "error"
+    )
+    .map((entry) => ({ code: entry.code as string, message: entry.message as string }));
 }
 
 function appendPublicEvalFailureDiagnosticLogPayload(logPath: string, payload: string): void {
@@ -1581,6 +1733,17 @@ export function appendPublicWorkerDiagnosticLogLine(
   } catch {
     // A diagnostic that cannot be composed is evidence that is missing, not an outcome.
   }
+}
+
+/** Record `error` in the worker log under `code`, redacted against the secret values retained so far. */
+function appendPublicWorkerFailureLogLine(
+  logPath: string,
+  code: string,
+  error: unknown,
+  forbiddenSecretValues: Iterable<string>
+): void {
+  const secrets = [...forbiddenSecretValues];
+  appendPublicWorkerDiagnosticLogLine(logPath, [workerFailureDiagnostic(code, error, secrets)], secrets);
 }
 
 function requiredEnv(name: string, env: Record<string, string | undefined> = process.env): string {

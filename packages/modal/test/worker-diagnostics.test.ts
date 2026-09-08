@@ -12,9 +12,12 @@ import {
   drainChildOutput,
   sanitizeWorkerDiagnosticMessage,
   workerDiagnosticLogPayload,
+  workerFailureDiagnostic,
   workerTerminationStack,
   MAX_WORKER_DIAGNOSTIC_MESSAGE_BYTES,
-  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE
+  WORKER_COMMAND_FAILED_DIAGNOSTIC_CODE,
+  WORKER_FAILURE_DETAIL_WITHHELD_MESSAGE,
+  WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE
 } from "../src/worker-diagnostics.js";
 
 it("retains only the last bytes appended to a bounded stderr tail", () => {
@@ -259,4 +262,49 @@ it("appends nothing to the private worker log outside the two collected producti
   expect([...source.matchAll(/appendFile\(LOG_PATH,/gu)]).toHaveLength(2);
   expect(source).toContain("`${new Date().toISOString()} ${event}\\n`");
   expect(source).toContain("`${new Date().toISOString()} eval-failure-diagnostics ${payload}\\n`");
+});
+
+it("names an unhandled private worker failure in the log before the terminal contract records it", () => {
+  // Same module-scope constraint as above. The net arms right after `worker-started` -- the earliest point at
+  // which this attempt's log exists -- and leaves the two faults the contract already names, the checkpoint
+  // and resume incompatibilities, to their own codes.
+  const source = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+
+  expect(source).toMatch(/await appendGenericLog\("worker-started"\);\n\s*logStarted = true;\n/u);
+  expect(source).toContain("passthrough: (error) => !logStarted || namedDiagnosticCode(error) !== undefined");
+  expect(source).toContain(
+    "workerFailureDiagnostic(WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE, error, [...DIAGNOSTIC_SECRET_VALUES])"
+  );
+});
+
+it("names a failure by its cause chain, or says the detail was withheld when the collector would drop it", () => {
+  const gate = new Error("public benchmark file contains secret-like content: reports/target-one/report.json", {
+    cause: new Error("exact secret value present")
+  });
+  expect(workerFailureDiagnostic("PUBLIC_BUNDLE_FAILED", gate, ["opaque-fixture-secret-value"])).toEqual({
+    code: "PUBLIC_BUNDLE_FAILED",
+    message:
+      "Error: public benchmark file contains secret-like content: reports/target-one/report.json " +
+      "<- Error: exact secret value present"
+  });
+
+  // The collector refuses a message that still carries a forbidden value after redaction. A forbidden value
+  // that sits inside the placeholder itself is the shortest way to force that refusal; whatever forces it,
+  // the code has to reach the log and the text must not.
+  const withheld = workerFailureDiagnostic(WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE, new Error("the redacted report"), [
+    "redacted"
+  ]);
+  expect(withheld).toEqual({ code: "WORKER_UNHANDLED_FAILURE", message: WORKER_FAILURE_DETAIL_WITHHELD_MESSAGE });
+  const payload = workerDiagnosticLogPayload([withheld], ["redacted"]);
+  if (payload === undefined) throw new Error("the withheld notice emitted no diagnostics line");
+  expect(() =>
+    assertSanitizedModalCollectedFiles(
+      {
+        "worker.log":
+          "2026-09-04T19:18:13.000Z worker-started\n" + `2026-09-04T19:18:13.000Z eval-failure-diagnostics ${payload}\n`
+      },
+      { generation: 1, attempt: 1 },
+      ["redacted"]
+    )
+  ).not.toThrow();
 });

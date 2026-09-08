@@ -108,11 +108,8 @@
           "classification",
           "source_evidence",
           "source_backed_scope_claim",
-          "in_scope_rationale",
           "selected_test_cases",
-          "expected_classification_if_red",
-          "scope_notes",
-          "harness_notes"
+          "expected_classification_if_red"
         ],
         "additionalProperties": false
       }
@@ -228,8 +225,7 @@
     "in_scope_test_targets",
     "non_finding_rows",
     "generated_tests",
-    "source_backed_in_scope_rationales",
-    "coverage_notes"
+    "source_backed_in_scope_rationales"
   ],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:dependency-scope-matrix:1",

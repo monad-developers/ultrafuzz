@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { assertTargetRef } from "../src/utils.js";
+import { assertTargetRef, describeEvalError, EvalError } from "../src/utils.js";
 
 describe("held-out benchmark target refs", () => {
   const gitTarget = (root: string): string => {
@@ -48,5 +48,68 @@ describe("held-out benchmark target refs", () => {
     // A non-SHA ref must never prefix-match its way in.
     expect(() => assertTargetRef(root, "main")).toThrow(/is not present in/u);
     expect(() => assertTargetRef(root, "a".repeat(12))).toThrow(/is not present in/u);
+  });
+});
+
+describe("describeEvalError", () => {
+  const detailsOf = (described: string): unknown => {
+    const start = described.indexOf("(details: ");
+    expect(start).toBeGreaterThan(0);
+    expect(described.endsWith(")")).toBe(true);
+    return JSON.parse(described.slice(start + "(details: ".length, -1));
+  };
+
+  it("carries the code, the message, and a redacted copy of the details", () => {
+    const described = describeEvalError(
+      new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
+        status: 401,
+        body: '{"error":"invalid key sk-live-0123456789abcdef"}',
+        judge_api_key: "plain-looking-value",
+        nested: { Authorization: "Bearer abcdefghijklmnop", note: "kept", "Set-Cookie": "session=1" },
+        headers: ["Bearer abcdefghijklmnop", "kept-entry"]
+      })
+    );
+    expect(described.startsWith("EVAL_LLM_JUDGE_REQUEST_FAILED: LLM judge gateway request failed (details: ")).toBe(
+      true
+    );
+    expect(detailsOf(described)).toEqual({
+      status: 401,
+      body: "[redacted]",
+      judge_api_key: "[redacted]",
+      nested: { Authorization: "[redacted]", note: "kept", "Set-Cookie": "[redacted]" },
+      headers: ["[redacted]", "kept-entry"]
+    });
+    for (const secret of ["sk-live", "abcdefghijklmnop", "plain-looking-value", "session=1"]) {
+      expect(described).not.toContain(secret);
+    }
+  });
+
+  it("bounds the rendering on a code point boundary and marks truncation", () => {
+    const described = describeEvalError(new EvalError("EVAL_X", "boom", { blob: "\u00e9".repeat(4000) }));
+    const start = described.indexOf("(details: ") + "(details: ".length;
+    const rendered = described.slice(start, -1);
+    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(1500);
+    expect(Buffer.byteLength(rendered, "utf8")).toBeGreaterThan(1400);
+    expect(rendered.endsWith("\u2026")).toBe(true);
+    expect(Buffer.from(rendered, "utf8").toString("utf8")).toBe(rendered);
+    expect(described.startsWith("EVAL_X: boom (details: ")).toBe(true);
+  });
+
+  it("renders error causes and bigints, and leaves plain errors unchanged", () => {
+    expect(
+      describeEvalError(
+        new EvalError("EVAL_TERMINAL_REPORT_INVALID", "bad report", {
+          path: "/run/report.json",
+          cause: new Error("ENOENT: missing"),
+          bytes: 12n
+        })
+      )
+    ).toBe(
+      'EVAL_TERMINAL_REPORT_INVALID: bad report (details: {"path":"/run/report.json","cause":"Error: ENOENT: missing","bytes":"12"})'
+    );
+    expect(describeEvalError(new EvalError("EVAL_X", "no details"))).toBe("EVAL_X: no details");
+    expect(describeEvalError(new EvalError("EVAL_X", "empty details", {}))).toBe("EVAL_X: empty details");
+    expect(describeEvalError(new Error("plain failure"))).toBe("plain failure");
+    expect(describeEvalError("string failure")).toBe("string failure");
   });
 });

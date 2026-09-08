@@ -6,6 +6,8 @@ Before finishing, you MUST ensure every artifact below exists and satisfies its 
 
 {{schema_guidance}}Artifact writing is part of the task, not optional final-response metadata. Create parent directories before writing and write each artifact to the exact absolute path shown above. Also verify every path exists, is non-empty unless its contract explicitly allows an empty form, and matches its JSON or Markdown contract. Do not write required artifacts only under the repository root, a relative working directory, or a different similarly named path.
 
+Include optional metadata whenever it is available, and preserve supplied upstream values when the task requires copying them. Leave unavailable optional metadata absent instead of inventing it, unless the task defines an explicit attributed fallback. A validation warning accepts an omission; it does not authorize discarding known information. Task-specific evidence, identity, provenance, and classification requirements still apply. Consult declared sibling and ancestor artifacts for missing context without rewriting those source artifacts.
+
 For every schema-backed JSON artifact:
 
 1. Write the artifact in its canonical schema.

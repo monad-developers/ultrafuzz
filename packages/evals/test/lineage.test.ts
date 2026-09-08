@@ -179,7 +179,7 @@ describe("versioned eval lineage", { timeout: 15_000 }, () => {
     expect(dirtyScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     expect(cleanScoring).toMatchObject({
       judge_mode: "deterministic",
-      judge_prompt_version: "ultrafuzz-eval-judge-v10-registered-result-schema",
+      judge_prompt_version: "ultrafuzz-eval-judge-v11-openai-strict-result-schema",
       judge_models: ["gpt-5.5"],
       judge_panel: { total: 3, quorum: 2 },
       ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }

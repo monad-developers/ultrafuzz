@@ -24,6 +24,7 @@ import {
   updateRunStatus,
   writeArtifactManifest,
   writeRunMetadataDocument,
+  type ArtifactValidationWarning,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
@@ -741,7 +742,7 @@ function currentReportIssue(id = "M-01"): Record<string, unknown> {
     lifecycle: {
       dedupe_key: `dedupe-${id}`,
       source_artifacts: [],
-      strategy_hits: [],
+      strategy_hits: [{ strategy: "stateful-invariant" }],
       canonical_severity: "Medium"
     }
   };
@@ -876,7 +877,7 @@ function canonicalLifecycleRecord(): Record<string, unknown> {
   return {
     dedupe_key: CANONICAL_DEDUPE_KEY,
     source_artifacts: [],
-    strategy_hits: [],
+    strategy_hits: [{ strategy: "stateful-invariant" }],
     stages: [{ stage: "deduped", artifact_path: "findings.json", finding_id: "M-01" }],
     triage_classification: "true-positive",
     triage_reason: "The source-backed transition reproduces on the current revision.",
@@ -905,7 +906,8 @@ function canonicalPromotedIssue(): Record<string, unknown> {
 function sealVerifiedFinalReport(
   runRoot: string,
   dedupedFindings: Record<string, unknown>[] = [],
-  lifecycleRecords: Record<string, unknown>[] = []
+  lifecycleRecords: Record<string, unknown>[] = [],
+  validationWarnings: readonly ArtifactValidationWarning[] = []
 ): void {
   const layout = layoutForRunRoot(runRoot, path.basename(runRoot));
   const graph = readPlannedGraphDocument(layout.graphPath);
@@ -916,7 +918,7 @@ function sealVerifiedFinalReport(
       [[], []],
       "bounded dedupe fixtures require a planned dedupe-findings producer"
     );
-    sealVerifiedNodeOutputs(runRoot, "final-report");
+    sealVerifiedNodeOutputs(runRoot, "final-report", [], validationWarnings);
     return;
   }
   assert.equal(dedupeNodes.length, 1, "report fixtures require at most one planned dedupe-findings attempt");
@@ -928,16 +930,22 @@ function sealVerifiedFinalReport(
     records: lifecycleRecords
   });
   sealVerifiedNodeOutputs(runRoot, "dedupe-findings");
-  sealVerifiedNodeOutputs(runRoot, "final-report");
+  sealVerifiedNodeOutputs(runRoot, "final-report", [], validationWarnings);
 }
 
 function sealVerifiedNodeOutputs(
   runRoot: string,
   logicalNodeId: string,
-  additionalPublicationPaths: readonly string[] = []
+  additionalPublicationPaths: readonly string[] = [],
+  validationWarnings: readonly ArtifactValidationWarning[] = []
 ): void {
   const authority = writeVerifierNodeAuthority(runRoot, logicalNodeId, additionalPublicationPaths);
   const { layout, plannedNode, attemptId, artifactDir, publications } = authority;
+  const markerPath = path.join(layout.root, ".ultrafuzz-verification", `${attemptId}.json`);
+  if (validationWarnings.length > 0) {
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as Record<string, unknown>;
+    writeJsonRecord(markerPath, { ...marker, validation_warnings: validationWarnings });
+  }
   const runMetadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
   assert.ok(runMetadata.workflow, "verified-output fixtures require an active workflow link");
   const workflowRunId = runMetadata.workflow.run_id;
@@ -964,6 +972,7 @@ function sealVerifiedNodeOutputs(
       agent_ref: "Codex",
       workflow_run_id: workflowRunId,
       workflow_task_id: agentTaskId,
+      ...(validationWarnings.length === 0 ? {} : { verification_marker_sha256: digest(fs.readFileSync(markerPath)) }),
       origin: "workflow",
       metadata: { concrete_node_id: plannedNode.id }
     }
@@ -1333,16 +1342,25 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(psData.runs[0]?.ultrafuzz_run_id, "cli-run");
   assert.equal("smithers" in (psBody.data as Record<string, unknown>), false);
 
+  const runMetadataPath = path.join(runData.run_root, "run.json");
+  const runMetadata = readRunMetadataDocument(runMetadataPath, runData.run_id);
+  writeRunMetadataDocument(runMetadataPath, {
+    ...runMetadata,
+    source_revision: "a".repeat(40),
+    source_ref: `refs/ultrafuzz/runs/${runData.run_id}/source`
+  });
   const inspect = await cli(project, ["inspect", runData.run_id, "--json"], env);
   assert.equal(inspect.code, 0, `${inspect.stderr}\n${inspect.stdout}`);
   const inspectBody = parseJson(inspect);
   assertNoSmithersSurface(inspectBody);
   const inspectData = inspectBody.data as {
-    metadata: { workflow: { run_id: string } };
+    metadata: { workflow: { run_id: string }; source_ref?: string; source_revision?: string };
     state: { provenance?: { workflow?: Record<string, unknown> } };
     workflow: { run_id: string; inspect: { ok: boolean }; events: { ok: boolean } };
   };
   assert.equal(inspectData.metadata.workflow.run_id, "ultrafuzz-cli-run");
+  assert.equal(inspectData.metadata.source_ref, undefined);
+  assert.equal(inspectData.metadata.source_revision, undefined);
   assert.equal(inspectData.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.inspect.ok, true);
   assert.equal(inspectData.workflow.events.ok, true);
@@ -1481,9 +1499,14 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     resolveFirstStatusLine = resolve;
     rejectFirstStatusLine = reject;
   });
+  // This is a deadlock guard, not a product latency assertion. The release
+  // lane runs the CLI suite serially beside the runtime shards; on the merged
+  // main run, ordinary fake-runner commands in this same test took 40-110s
+  // under host contention and the 15s guard fired before a healthy watch could
+  // emit its first line. Keep the guard above that observed cold-start range.
   const firstStatusTimeout = setTimeout(
     () => rejectFirstStatusLine(new Error("status watch did not emit its initial sample")),
-    15_000
+    120_000
   );
   const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env, (stdout) => {
     if (!sawFirstStatusLine && stdout.includes("\n")) {
@@ -2039,6 +2062,34 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
+});
+
+test("report displays authenticated final-verifier warnings while preserving the report files", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-host-warnings");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeCanonicalReportPair(reportDir, currentReport(runData.run_id));
+  sealVerifiedFinalReport(
+    runData.run_root,
+    [],
+    [],
+    [
+      {
+        code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+        artifact_path: "report.json",
+        field_path: "$.issues[0].confidence",
+        gate: "report-severity-classification-preservation",
+        message: "Optional metadata is missing; the original artifact is accepted unchanged"
+      }
+    ]
+  );
+  const before = snapshotFinalReport(reportDir);
+  const text = await cli(project, ["report", runData.run_id]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /ARTIFACT_OPTIONAL_METADATA_MISSING/u);
+  assert.match(text.stdout, /artifacts\/final-report\/report\.json#\$\.issues\[0\]\.confidence/u);
+  assertFinalReportUnchanged(reportDir, before);
 });
 
 test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {

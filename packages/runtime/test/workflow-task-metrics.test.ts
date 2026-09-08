@@ -17,14 +17,6 @@ type TaskRuntime = {
   lastHeartbeat: null;
 };
 
-async function withTaskRuntime<T>(runtime: TaskRuntime, execute: () => T): Promise<T> {
-  const taskRuntimeModuleId: string = "@smthrs/driver/task-runtime";
-  const taskRuntime = (await import(taskRuntimeModuleId)) as {
-    withTaskRuntime<TValue>(value: TaskRuntime, callback: () => TValue): TValue;
-  };
-  return taskRuntime.withTaskRuntime(runtime, execute);
-}
-
 function usageRow(input: {
   model: string;
   inputTokens: number;
@@ -86,7 +78,7 @@ function runtimeWithEvidence(input: {
   };
 }
 
-test("current task workflow metrics project complete durable usage and final-report start time", async () => {
+test("current task workflow metrics use explicitly injected durable workflow evidence", async () => {
   const runtime = runtimeWithEvidence({
     usage: { attempts: 2, totalTokens: 1_234, pricedAttempts: 2, costUsd: 0.456 },
     usageRows: [
@@ -114,7 +106,7 @@ test("current task workflow metrics project complete durable usage and final-rep
     ]
   });
 
-  const metrics = await withTaskRuntime(runtime, deriveCurrentTaskWorkflowMetrics);
+  const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
 
   assert.deepEqual(metrics, {
     elapsed_through: "2026-08-20T01:00:00.000Z",
@@ -148,7 +140,7 @@ test("current task workflow metrics mark mixed recorded and unavailable pricing 
       ]
     });
 
-    const metrics = await withTaskRuntime(runtime, deriveCurrentTaskWorkflowMetrics);
+    const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
 
     assert.equal(metrics?.tokens_used, "300");
     assert.equal(metrics?.estimated_spend, "$0.05+");
@@ -173,7 +165,7 @@ test("current task workflow metrics keep a complete aggregate cost exact when ev
     ]
   });
 
-  const metrics = await withTaskRuntime(runtime, deriveCurrentTaskWorkflowMetrics);
+  const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
 
   assert.equal(metrics?.tokens_used, "300");
   assert.equal(metrics?.estimated_spend, "$0.40");
@@ -222,7 +214,7 @@ test("current task workflow metrics dedupe cumulative spend while preserving the
     ]
   });
 
-  const metrics = await withTaskRuntime(runtime, deriveCurrentTaskWorkflowMetrics);
+  const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
 
   // Smithers' aggregate is keyed by unique attempt and remains authoritative.
   // The deliberately inconsistent fresh/cache breakdown is used only to
@@ -234,15 +226,14 @@ test("current task workflow metrics dedupe cumulative spend while preserving the
 });
 
 test("current task workflow metrics distinguish absent evidence from timing-only evidence", async () => {
-  const absent = await withTaskRuntime(runtimeWithEvidence({}), deriveCurrentTaskWorkflowMetrics);
+  const absent = await deriveCurrentTaskWorkflowMetrics(runtimeWithEvidence({}));
   assert.equal(absent, undefined);
 
   const timestampMs = Date.parse("2026-08-20T01:00:00.000Z");
-  const timingOnly = await withTaskRuntime(
+  const timingOnly = await deriveCurrentTaskWorkflowMetrics(
     runtimeWithEvidence({
       nodeRows: [{ timestamp_ms: timestampMs, payload_json: JSON.stringify({ nodeId: "final-report", timestampMs }) }]
-    }),
-    deriveCurrentTaskWorkflowMetrics
+    })
   );
   assert.deepEqual(timingOnly, {
     elapsed_through: "2026-08-20T01:00:00.000Z",
@@ -255,8 +246,5 @@ test("current task workflow metrics reject fractional token evidence", async () 
   const runtime = runtimeWithEvidence({
     usage: { attempts: 1, totalTokens: 1.5, pricedAttempts: 0, costUsd: null }
   });
-  await assert.rejects(
-    () => withTaskRuntime(runtime, deriveCurrentTaskWorkflowMetrics),
-    /workflow total tokens is malformed/u
-  );
+  await assert.rejects(() => deriveCurrentTaskWorkflowMetrics(runtime), /workflow total tokens is malformed/u);
 });

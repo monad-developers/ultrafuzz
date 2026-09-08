@@ -146,6 +146,9 @@ test("compiled dynamic workflow defers templates and emits executable Smithers T
   assert.doesNotMatch(source, /__ULTRAFUZZ_/u);
   assert.match(source, /materializeDynamicRuntime/u);
   assert.match(source, /function taskSpecsFromCompiled[\s\S]*?\.\.\.compiledTaskSourceIdentity\(task\)/u);
+  assert.match(source, /smithersRunId: compiled\?\.smithersRunId \?\? serializedTaskSpecs\[0\]\.smithersRunId/u);
+  assert.match(source, /smithersNodeId: task\.smithersNodeId/u);
+  assert.match(source, /logicalNodeId: task\.logicalNodeId/u);
   assert.match(source, /ctx\.outputMaybe/u);
   const transpiled = ts.transpileModule(source, {
     fileName: compiled.workflowPath,

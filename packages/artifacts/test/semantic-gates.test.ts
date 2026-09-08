@@ -377,7 +377,51 @@ const validCoverageEvidence = {
   zero_coverage_components: []
 };
 
+const findingMetadataFixture = {
+  positive: [
+    { schema_version: "ultrafuzz.finding.v2", summary: "Summary", confidence: "high", severity_guess: "High" }
+  ],
+  negative: [{ schema_version: "ultrafuzz.finding.v2" }]
+};
+
 const fixtures = {
+  "findings-metadata-completeness": findingMetadataFixture,
+  "triaged-findings-metadata-completeness": findingMetadataFixture,
+  "severity-classified-findings-metadata-completeness": findingMetadataFixture,
+  "threat-model-metadata-completeness": {
+    positive: { schema_version: "ultrafuzz.threat-model.v1", scope: { summary: "Scope" } },
+    negative: { schema_version: "ultrafuzz.threat-model.v1", scope: {} }
+  },
+  "boundary-recipes-metadata-completeness": {
+    positive: { schema_version: "ultrafuzz.boundary-recipes.v1", coverage_priorities: [{ rationale: "Reason" }] },
+    negative: { schema_version: "ultrafuzz.boundary-recipes.v1", coverage_priorities: [{}] }
+  },
+  "dependency-scope-matrix-metadata-completeness": {
+    positive: { schema_version: "ultrafuzz.dependency-scope-matrix.v1", coverage_notes: [] },
+    negative: { schema_version: "ultrafuzz.dependency-scope-matrix.v1" }
+  },
+  "admin-config-boundary-matrix-metadata-completeness": {
+    positive: { schema_version: "ultrafuzz.admin-config-boundary-matrix.v1", coverage_notes: [] },
+    negative: { schema_version: "ultrafuzz.admin-config-boundary-matrix.v1" }
+  },
+  "externalized-state-accounting-metadata-completeness": {
+    positive: { schema_version: "ultrafuzz.externalized-state-accounting.v1", coverage_notes: [] },
+    negative: { schema_version: "ultrafuzz.externalized-state-accounting.v1" }
+  },
+  "dynamic-enumerator-outputs-metadata-completeness": {
+    positive: {
+      schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1",
+      enumerators: [{ recommendations: [{ rationale: "Reason", coverage_gap: "Gap" }] }]
+    },
+    negative: { schema_version: "ultrafuzz.dynamic-enumerator-outputs.v1", enumerators: [{ recommendations: [{}] }] }
+  },
+  "selected-strategies-metadata-completeness": {
+    positive: {
+      schema_version: "ultrafuzz.selected-strategies.v1",
+      strategies: [{ rationale: "Reason", coverage_gap: "Gap" }]
+    },
+    negative: { schema_version: "ultrafuzz.selected-strategies.v1", strategies: [{}] }
+  },
   "admin-config-surface-id-uniqueness": {
     positive: { surfaces: [{ surface_id: "a" }] },
     negative: { surfaces: [{ surface_id: "a" }, { surface_id: "a" }] }
@@ -1431,7 +1475,11 @@ test("every document-local gate has a passing and failing non-mutating fixture",
     const positiveBefore = structuredClone(fixture.positive);
     const negativeBefore = structuredClone(fixture.negative);
     assert.equal(executeSemanticGate(name, { document: fixture.positive }).status, "passed", `${name}:positive`);
-    assert.equal(executeSemanticGate(name, { document: fixture.negative }).status, "failed", `${name}:negative`);
+    assert.equal(
+      executeSemanticGate(name, { document: fixture.negative, strict: true }).status,
+      "failed",
+      `${name}:negative`
+    );
     assert.deepEqual(fixture.positive, positiveBefore, `${name}:positive mutated`);
     assert.deepEqual(fixture.negative, negativeBefore, `${name}:negative mutated`);
   }
@@ -3712,6 +3760,33 @@ test("strict final reports preserve dropped false positives as exactly one non-p
       context
     }).status,
     "passed"
+  );
+
+  const staleLifecycle = {
+    ...lifecycle,
+    stages: [{ stage: "deduplicated", artifact_path: "deduped-findings.json" }]
+  };
+  const staleContext = {
+    artifactSet: {
+      severityClassifiedFindings: [{ ...finding, lifecycle: staleLifecycle }],
+      findingLifecycleLedger: { records: [lifecycle] }
+    }
+  };
+  const checkPreservation = (candidate: unknown) =>
+    executeSemanticGate("report-severity-classification-preservation", {
+      document: { issues: [], non_production_outcomes: [candidate] },
+      context: staleContext
+    });
+  assert.equal(checkPreservation(row).status, "passed", "the dedicated lifecycle ledger is authoritative");
+  assert.equal(
+    checkPreservation({ ...row, lifecycle: staleLifecycle }).status,
+    "failed",
+    "copying the stale embedded lifecycle must still fail"
+  );
+  assert.equal(
+    checkPreservation({ ...row, summary: "Changed source summary" }).status,
+    "failed",
+    "other severity fields must still be preserved"
   );
 
   const omitted = executeSemanticGate("report-severity-classification-preservation", {

@@ -16,7 +16,13 @@ import {
   readRegularFileSnapshot,
   validateSafeId
 } from "@ultrafuzz/artifacts";
-import { runsRootForProject, synchronizeLinkedWorkflowRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import {
+  describeObservationSynchronizationDeadline,
+  observationSynchronizationDeadline,
+  runsRootForProject,
+  synchronizeLinkedWorkflowRun,
+  type RuntimeDiagnostic
+} from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import {
@@ -104,13 +110,7 @@ export default class Stats extends Command {
           : loadBundleEvidence(path.resolve(cliIo().cwd, flags.bundle));
       const derived = deriveRunStatistics(loaded.evidence);
       const diagnostics = [...loaded.diagnostics, ...derived.diagnostics];
-      const result: CommandResult = {
-        ok: true,
-        command: commandName,
-        data: derived.value,
-        text: renderStatistics(derived.value, diagnostics),
-        diagnostics
-      };
+      const result = buildStatisticsCommandResult(derived.value, diagnostics);
       emitCommandResult(this, commandName, result, flags.json === true);
     } catch (error) {
       emitCommandResult(
@@ -121,6 +121,19 @@ export default class Stats extends Command {
       );
     }
   }
+}
+
+export function buildStatisticsCommandResult(
+  value: RunStatisticsValue,
+  diagnostics: RuntimeDiagnostic[]
+): CommandResult {
+  return {
+    ok: !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+    command: "stats",
+    data: value,
+    text: renderStatistics(value, diagnostics),
+    diagnostics
+  };
 }
 
 async function loadLocalEvidence(
@@ -140,7 +153,10 @@ async function loadLocalEvidence(
     // Statistics are observational: malformed live event output must not
     // mutate the run or hide the last coherent durable snapshot. Ordinary
     // synchronization remains fail-closed and rethrows the parser error.
-    { tolerateInvalidEventStreams: true }
+    {
+      tolerateInvalidEventStreams: true,
+      deadlineMs: observationSynchronizationDeadline(env)
+    }
   );
   const snapshot = readCoherentLocalEvidenceSnapshot(layout);
   const runMetadata = assertRunMetadataDocument(parseLocalJson(snapshot.runMetadata, layout.runMetadataPath), runId);
@@ -162,7 +178,9 @@ async function loadLocalEvidence(
   }
   const diagnostics = synchronized.ok
     ? synchronized.diagnostics
-    : synchronized.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }));
+    : synchronized.diagnostics.map((diagnostic) =>
+        describeObservationSynchronizationDeadline({ ...diagnostic, severity: "warning" as const })
+      );
   return {
     evidence: {
       runId,

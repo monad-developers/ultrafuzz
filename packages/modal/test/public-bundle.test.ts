@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { parseEvalRunRecord, type EvalRunRecord } from "@ultrafuzz/evals";
-import { projectCanonicalFinalReport, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
+import {
+  projectCanonicalFinalReport,
+  projectPublicArtifactValidationWarnings,
+  projectPublicCanonicalFinalReport
+} from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
 import { MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID } from "../src/modal-contracts.js";
@@ -48,6 +52,46 @@ const TEST_BUNDLE_METADATA = {
 } as const;
 
 describe("public Modal benchmark bundles", () => {
+  it("publishes host warning companions separately and requires their exact canonical pair", () => {
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-warning-companions-"));
+    const rowId = "target-a-runner-trial-1";
+    const files = completePublicSources(root, [rowId]);
+    const reportSource = files.find((source) => source.path === `reports/${rowId}/report.json`);
+    if (reportSource === undefined) throw new Error("missing report fixture");
+    const original = fs.readFileSync(reportSource.source);
+    const diagnostics = projectPublicArtifactValidationWarnings([
+      {
+        code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+        artifact_path: "artifacts/final/report.json",
+        field_path: "$.issues[0].summary",
+        gate: "report-severity-classification-preservation",
+        message: "Optional metadata is missing; the original artifact is accepted unchanged"
+      }
+    ]);
+    const companions = (
+      [
+        ["artifact-validation-warnings.json", `${JSON.stringify(diagnostics.warnings, null, 2)}\n`],
+        ["artifact-validation-warnings.md", diagnostics.markdown]
+      ] as const
+    ).map(([name, contents]) => {
+      const source = path.join(root, name);
+      fs.writeFileSync(source, contents);
+      return { path: `reports/${rowId}/${name}`, root, source };
+    });
+    const bundle = createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files: [...files, ...companions] });
+    expect(bundleFileText(bundle, `reports/${rowId}/artifact-validation-warnings.md`)).toContain("$.issues[0].summary");
+    expect(bundleFileText(bundle, `reports/${rowId}/report.json`)).toBe(original.toString("utf8"));
+    expect(fs.readFileSync(reportSource.source)).toEqual(original);
+    expect(() =>
+      createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files: [...files, ...companions.slice(0, 1)] })
+    ).toThrow(/requires both artifact validation warning companions/u);
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, `reports/${rowId}/artifact-validation-warnings.md`, "Hidden warning\n")
+      )
+    ).toThrow(/not the canonical public pair/u);
+  });
+
   it("hashes, validates, and extracts the scored generation and public reports", () => {
     const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
@@ -888,7 +932,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
       lifecycle: {
         dedupe_key: `${row.id}-dedupe-key`,
         source_artifacts: [],
-        strategy_hits: []
+        strategy_hits: [{ strategy: "stateful-invariant" }]
       },
       summary: "A fixture finding used to exercise public bundle validation."
     });

@@ -326,8 +326,8 @@ Each finding must include:
 | `id`             | Required non-empty producer-authored finding ID. |
 | `title`          | Required non-empty title.                        |
 | `status`         | One current canonical lifecycle value.           |
-| `severity_guess` | Preliminary `High`, `Medium`, or `Low` estimate. |
-| `confidence`     | Lowercase `high`, `medium`, or `low`.            |
+| `severity_guess` | Optional preliminary `High`, `Medium`, or `Low`. |
+| `confidence`     | Optional lowercase `high`, `medium`, or `low`.   |
 | `summary`        | Required non-empty summary.                      |
 
 Canonical finding `status` values include:

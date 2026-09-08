@@ -22,6 +22,7 @@ import { isDeepStrictEqual } from "node:util";
 import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smthrs";
 import { z } from "zod/v4";
+import type { ArtifactValidationWarning } from "@ultrafuzz/artifacts";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
 // sibling .smithers/agents.ts, which bun's resolution would prefer over the
 // .smithers/agents/ directory this workflow needs.
@@ -53,6 +54,8 @@ const {
   checkInvariantSourcePinned,
   derivePropertyImplementationCoverage,
   executeSchemaSemanticGates,
+  artifactValidationWarnings,
+  boundArtifactValidationWarnings,
   invariantPinnedSourceRefExists,
   isCloudExecutionGeneration,
   materializeCanonicalThreatModelMarkdown,
@@ -492,9 +495,12 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
           runtimePromptPath);
     return {
       id: task.smithersNodeId,
+      smithersNodeId: task.smithersNodeId,
+      smithersRunId: compiled?.smithersRunId ?? serializedTaskSpecs[0].smithersRunId,
       preparationId: `prepare:${task.attemptId}`,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
+      logicalNodeId: task.logicalNodeId,
       dependsOn: task.dependencySmithersNodeIds,
       dynamicDependencies: task.dynamicDependencies ?? [],
       agentRef: task.agentRef,
@@ -2116,9 +2122,15 @@ function verifiedSingletonAncestorJsonArtifact(
   task: (typeof taskSpecs)[number],
   expectedContract: string,
   label: string,
-  options: { directOnly?: boolean } = {}
-): { path: string; value: unknown } | undefined {
-  const outputs = declaredAncestorContractOutputs(task, expectedContract, options);
+  options: { directOnly?: boolean; requiredSiblingContract?: string } = {}
+): { path: string; runRelativePath: string; value: unknown } | undefined {
+  const outputs = declaredAncestorContractOutputs(task, expectedContract, options).filter(
+    (output) =>
+      options.requiredSiblingContract === undefined ||
+      taskSpecs
+        .find((candidate) => candidate.attemptId === output.attemptId)
+        ?.outputs.some((candidate) => candidate.contract === options.requiredSiblingContract)
+  );
   if (outputs.length === 0) return undefined;
   if (outputs.length !== 1) {
     throw new Error(
@@ -2131,7 +2143,11 @@ function verifiedSingletonAncestorJsonArtifact(
     throw new Error(`artifact-contract failure: declared ${label} producer is unavailable ${output.attemptId}`);
   }
   const verified = verifiedDependencyJsonArtifact(task, output.artifactDir, producer, output.path, output.contract);
-  return { path: output.path, value: verified.value };
+  const runRelativePath = path
+    .relative(path.resolve(process.cwd(), task.runRoot), path.resolve(output.artifactDir, output.path))
+    .split(path.sep)
+    .join("/");
+  return { path: output.path, runRelativePath, value: verified.value };
 }
 
 function verifiedCanonicalPropertyCatalog(
@@ -2226,6 +2242,7 @@ type FinalReportRunMetadataProjection = {
   prompt_digest: string;
   expanded_graph_fingerprint: string;
   source_run_ids?: string[];
+  artifact_validation_warnings?: ArtifactValidationWarning[];
 };
 
 type FinalReportWorkflowMetricsProjection = {
@@ -2234,6 +2251,15 @@ type FinalReportWorkflowMetricsProjection = {
   tokens_used?: string;
   estimated_spend?: string;
   partial_pricing: boolean;
+};
+
+type FinalReportTaskRuntime = {
+  runId: string;
+  stepId: string;
+  attempt: number;
+  iteration: number;
+  signal: AbortSignal;
+  db: Record<string, unknown>;
 };
 
 type FinalReportRunMetadataAuthority = {
@@ -2426,11 +2452,80 @@ function finalReportStrategyLoops(
   return configured;
 }
 
+function finalReportTaskRuntimeFromAgentArgs(
+  task: (typeof taskSpecs)[number],
+  args: unknown
+): FinalReportTaskRuntime | undefined {
+  if (declaredFinalReportOutputPair(task) === undefined) return undefined;
+  if (args === null || typeof args !== "object") {
+    throw new Error("artifact-contract failure: final-report Smithers task runtime handoff is unavailable");
+  }
+  const runtime = Reflect.get(args, "ultrafuzzTaskRuntime") as Partial<FinalReportTaskRuntime> | undefined;
+  const context = Reflect.get(args, "taskContext") as
+    { runId?: unknown; nodeId?: unknown; attempt?: unknown; iteration?: unknown } | undefined;
+  if (
+    runtime === null ||
+    typeof runtime !== "object" ||
+    typeof runtime.runId !== "string" ||
+    runtime.runId.length === 0 ||
+    runtime.stepId !== task.id ||
+    !Number.isSafeInteger(runtime.attempt) ||
+    Number(runtime.attempt) <= 0 ||
+    !Number.isSafeInteger(runtime.iteration) ||
+    Number(runtime.iteration) < 0 ||
+    runtime.signal === null ||
+    typeof runtime.signal !== "object" ||
+    typeof runtime.signal.aborted !== "boolean" ||
+    typeof runtime.signal.addEventListener !== "function" ||
+    runtime.db === null ||
+    typeof runtime.db !== "object" ||
+    context === null ||
+    typeof context !== "object" ||
+    context.runId !== runtime.runId ||
+    context.nodeId !== runtime.stepId ||
+    context.attempt !== runtime.attempt ||
+    context.iteration !== runtime.iteration
+  ) {
+    throw new Error("artifact-contract failure: final-report Smithers task runtime handoff is invalid");
+  }
+  return runtime as FinalReportTaskRuntime;
+}
+
 async function deriveAuthoritativeFinalReportWorkflowMetrics(
-  task: (typeof taskSpecs)[number]
+  task: (typeof taskSpecs)[number],
+  runtime: FinalReportTaskRuntime
 ): Promise<FinalReportWorkflowMetricsProjection | undefined> {
   if (declaredFinalReportOutputPair(task) === undefined) return undefined;
-  return (await deriveCurrentTaskWorkflowMetrics()) as FinalReportWorkflowMetricsProjection | undefined;
+  return (await deriveCurrentTaskWorkflowMetrics(runtime)) as FinalReportWorkflowMetricsProjection | undefined;
+}
+
+function finalReportArtifactValidationWarnings(task: (typeof taskSpecs)[number]): ArtifactValidationWarning[] {
+  const admission = dependencyArtifactAdmissionsByTask.get(task.attemptId);
+  if (admission === undefined) return [];
+  const warnings: ArtifactValidationWarning[] = [];
+  for (const [attemptId, snapshot] of [...admission.snapshotsByProducerAttempt].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    // Preparation already authenticated these exact immutable marker bytes.
+    const marker = parseStrictJsonSnapshot(snapshot.marker, "verified dependency diagnostics") as {
+      validation_warnings?: ArtifactValidationWarning[];
+    };
+    for (const warning of marker.validation_warnings ?? []) {
+      warnings.push({
+        ...warning,
+        artifact_path: `artifacts/${attemptId}/${warning.artifact_path}`,
+        ...(warning.source_path === undefined
+          ? {}
+          : {
+              source_path:
+                warning.source_path.startsWith("artifacts/") || warning.source_path.startsWith("$context.")
+                  ? warning.source_path
+                  : `artifacts/${attemptId}/${warning.source_path}`
+            })
+      });
+    }
+  }
+  return boundArtifactValidationWarnings(warnings);
 }
 
 function deriveAuthoritativeFinalReportRunMetadata(
@@ -2479,6 +2574,7 @@ function deriveAuthoritativeFinalReportRunMetadata(
   // usage, so never replace missing lineage accounting with a current-run
   // subtotal that would look complete.
   const directWorkflowMetrics = metadata.source_run_id === undefined ? workflowMetrics : undefined;
+  const validationWarnings = finalReportArtifactValidationWarnings(task);
   const elapsedTime = finalReportElapsedTime(
     metadata.created_at,
     finalReportLatestElapsedThrough(accountingRoot.updated_at, workflowMetrics?.elapsed_through)
@@ -2508,7 +2604,8 @@ function deriveAuthoritativeFinalReportRunMetadata(
       auditProfile.expanded_graph_fingerprint,
       "expanded-graph fingerprint"
     ),
-    ...(sourceRunIds.length === 0 ? {} : { source_run_ids: sourceRunIds })
+    ...(sourceRunIds.length === 0 ? {} : { source_run_ids: sourceRunIds }),
+    ...(validationWarnings.length === 0 ? {} : { artifact_validation_warnings: validationWarnings })
   };
 }
 
@@ -2520,12 +2617,18 @@ function serializeFinalReportRunMetadataProjection(projection: FinalReportRunMet
   return bytes;
 }
 
-async function materializeFinalReportRunMetadataAuthority(task: (typeof taskSpecs)[number]): Promise<void> {
+async function materializeFinalReportRunMetadataAuthority(
+  task: (typeof taskSpecs)[number],
+  runtime?: FinalReportTaskRuntime
+): Promise<void> {
   if (declaredFinalReportOutputPair(task) === undefined) {
     finalReportRunMetadataAuthoritiesByTask.delete(task.attemptId);
     return;
   }
-  const workflowMetrics = await deriveAuthoritativeFinalReportWorkflowMetrics(task);
+  if (runtime === undefined) {
+    throw new Error("artifact-contract failure: final-report Smithers task runtime handoff is unavailable");
+  }
+  const workflowMetrics = await deriveAuthoritativeFinalReportWorkflowMetrics(task, runtime);
   const projection = deriveAuthoritativeFinalReportRunMetadata(task, workflowMetrics);
   const expected = serializeFinalReportRunMetadataProjection(projection);
   const workspaceRoot = realpathSync(task.workspacePath);
@@ -3235,7 +3338,7 @@ function artifactAwareAgent(
       // preflight side effects and prior outputs cannot cross producer bounds.
       if (firstGenerationForAttempt) {
         assertWorkspaceSourceRevision(task);
-        await resetTaskArtifactsForRetry(task);
+        await resetTaskArtifactsForRetry(task, finalReportTaskRuntimeFromAgentArgs(task, args));
       } else {
         assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
@@ -3318,6 +3421,9 @@ function artifactAwareAgent(
         // arbitrary or absent terminal text cannot become a second contract.
         const unstructuredArgs = { ...attemptArgs };
         Reflect.deleteProperty(unstructuredArgs, "outputSchema");
+        // This is a privileged engine-to-wrapper capability. It must never
+        // cross into an adapter, model process, callback, or serialized event.
+        Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
         const result = await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertPromptArtifactAuthorityUnchanged(task);
@@ -3360,7 +3466,7 @@ function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string 
   return path.dirname(candidate) === path.resolve(artifactDir) ? candidate : undefined;
 }
 
-function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): Promise<void> {
+function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number], runtime?: FinalReportTaskRuntime): Promise<void> {
   // A task-owned prompt may live directly in the task artifact root, so retry
   // cleanup must preserve it. A sealed prompt instead lives in the immutable
   // execution snapshot. That file is outside this cleanup root and is validated
@@ -3416,7 +3522,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): Promise<v
   restoreWorkspacePatchPreparation(task, workspaceRoot);
   prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
   materializePromptArtifactAuthority(task);
-  return materializeFinalReportRunMetadataAuthority(task);
+  return materializeFinalReportRunMetadataAuthority(task, runtime);
 }
 
 function resetTaskArtifactContents(
@@ -7844,6 +7950,7 @@ type ReviewStageSemanticContext = {
   strategyDetections?: unknown;
   upstreamLifecycleLedger?: unknown;
   upstreamStrategyDetections?: unknown;
+  upstreamStrategyDetectionsArtifactPath?: string;
   rawFindingArtifacts?: Array<{ nodeId: string; path: string; findings: unknown }>;
 };
 
@@ -7943,6 +8050,7 @@ function reviewStageSemanticContext(
     );
     if (upstreamStrategyDetections !== undefined) {
       context.upstreamStrategyDetections = upstreamStrategyDetections.value;
+      context.upstreamStrategyDetectionsArtifactPath = upstreamStrategyDetections.runRelativePath;
     }
   }
   return context;
@@ -7951,6 +8059,7 @@ function reviewStageSemanticContext(
 function verifiedFinalSeverityReviewAuthority(task: (typeof taskSpecs)[number]): {
   severityClassifiedFindings: unknown | null;
   dedupedFindings?: unknown | null;
+  dedupedFindingsArtifactPath?: string;
   findingLifecycleLedger?: unknown | null;
 } {
   const severityOutputs = declaredAncestorContractOutputs(task, "ultrafuzz/severity-classified-findings@1");
@@ -8037,8 +8146,17 @@ function verifiedFinalSeverityReviewAuthority(task: (typeof taskSpecs)[number]):
     lifecycleOutputs[0]!.path,
     lifecycleOutputs[0]!.contract
   );
+  const deduped = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+    requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+  });
   return {
     severityClassifiedFindings: severity.value,
+    ...(deduped === undefined
+      ? {}
+      : {
+          dedupedFindings: deduped.value,
+          dedupedFindingsArtifactPath: deduped.runRelativePath
+        }),
     findingLifecycleLedger: lifecycle.value
   };
 }
@@ -8289,7 +8407,9 @@ function semanticGateContextForVerifiedOutput(
     implementedProperties?: unknown;
     implementedPropertiesPath?: string;
     dedupedFindings?: unknown;
+    dedupedFindingsArtifactPath?: string;
     triagedFindings?: unknown;
+    triagedFindingsArtifactPath?: string;
     severityClassifiedFindings?: unknown;
     findingLifecycleLedger?: unknown;
     reviewStage?: ReviewStageSemanticContext;
@@ -8437,7 +8557,13 @@ function semanticGateContextForVerifiedOutput(
     const dedupedFindings = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
       directOnly: true
     });
-    context.artifactSet = dedupedFindings === undefined ? {} : { dedupedFindings: dedupedFindings.value };
+    context.artifactSet =
+      dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: dedupedFindings.runRelativePath
+          };
   } else if (output.schemaFile === "severity-classified-findings.schema.json") {
     const triagedFindings = verifiedSingletonAncestorJsonArtifact(
       task,
@@ -8445,12 +8571,43 @@ function semanticGateContextForVerifiedOutput(
       "triaged findings",
       { directOnly: true }
     );
-    context.artifactSet = triagedFindings === undefined ? {} : { triagedFindings: triagedFindings.value };
+    const dedupedFindings = verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+      requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+    });
+    context.artifactSet = {
+      ...(triagedFindings === undefined
+        ? {}
+        : {
+            triagedFindings: triagedFindings.value,
+            triagedFindingsArtifactPath: triagedFindings.runRelativePath
+          }),
+      ...(dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: dedupedFindings.runRelativePath
+          })
+    };
   } else if (
     output.schemaFile === "finding-lifecycle-ledger.schema.json" ||
     output.schemaFile === "strategy-detections.schema.json"
   ) {
-    context.artifactSet = { reviewStage: reviewStageSemanticContext(task, verifiedOutputs) };
+    const reviewStage = reviewStageSemanticContext(task, verifiedOutputs);
+    const dedupedFindings =
+      reviewStage.stage === "severity-classification"
+        ? verifiedSingletonAncestorJsonArtifact(task, "ultrafuzz/findings@2", "deduped findings", {
+            requiredSiblingContract: "ultrafuzz/finding-lifecycle-ledger@1"
+          })
+        : undefined;
+    context.artifactSet = {
+      reviewStage,
+      ...(dedupedFindings === undefined
+        ? {}
+        : {
+            dedupedFindings: dedupedFindings.value,
+            dedupedFindingsArtifactPath: dedupedFindings.runRelativePath
+          })
+    };
   } else if (output.schemaFile === "selected-strategies.schema.json") {
     context.artifactSet = {
       dynamicStrategyArtifacts: siblingDynamicStrategySemanticArtifacts(task, verifiedOutputs)
@@ -8507,8 +8664,9 @@ function verifyOutputSemanticGates(
   task: (typeof taskSpecs)[number],
   verifiedOutputs: ReadonlyMap<string, VerifiedOutputSnapshot>,
   campaignEvidence: ReadonlyMap<string, ImmutableFileSnapshot>
-): void {
+): ArtifactValidationWarning[] {
   const failures: string[] = [];
+  const warnings: ArtifactValidationWarning[] = [];
   for (const output of task.outputs) {
     if (output.schemaFile === undefined) continue;
     try {
@@ -8516,11 +8674,8 @@ function verifyOutputSemanticGates(
       const results = executeSchemaSemanticGates(output.schemaFile, {
         document,
         context: semanticGateContextForVerifiedOutput(task, output, verifiedOutputs, campaignEvidence)
-      }) as Array<
-        | { status: "passed"; gate: string }
-        | { status: "failed"; gate: string; issues: readonly { path: string; message: string }[] }
-        | { status: "requires-context"; gate: string; missingContext: readonly string[] }
-      >;
+      });
+      warnings.push(...artifactValidationWarnings(output.path, results));
       for (const result of results) {
         if (result.status === "failed") {
           failures.push(
@@ -8544,6 +8699,7 @@ function verifyOutputSemanticGates(
         "artifact-contract failure: semantic validation failed"
     );
   }
+  return boundArtifactValidationWarnings(warnings);
 }
 
 function requireCompleteInvariantCampaignOutputTuple(task: (typeof taskSpecs)[number]): void {
@@ -8662,7 +8818,7 @@ function verifyArtifacts(
     // Generated-test companions are agent-owned outputs. Verification reads the
     // exact declared files in the artifact root and never searches the workspace,
     // infers a source, or repairs an incomplete handoff after the agent exits.
-    verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence);
+    const validationWarnings = verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence);
 
     // These companions are not semantic inputs, so keep their durable creation
     // behind the complete registry gate set as well.
@@ -8710,7 +8866,7 @@ function verifyArtifacts(
     );
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
-    const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications);
+    const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings);
     return {
       artifacts,
       primary_artifact: primary.path,
@@ -9176,7 +9332,8 @@ function writeArtifactVerificationMarker(
     sha256: string;
     primary: boolean;
   }[],
-  publications: ReadonlyMap<string, Buffer>
+  publications: ReadonlyMap<string, Buffer>,
+  validationWarnings: readonly ArtifactValidationWarning[] = []
 ): { marker_sha256: string; size_bytes: number } {
   const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, true);
   if (location === undefined) {
@@ -9200,7 +9357,8 @@ function writeArtifactVerificationMarker(
     node_id: task.metadata.node.logicalNodeId,
     admitted_dependency_attempt_ids: admittedDependencyArtifactDirs(task).map((directory) => path.basename(directory)),
     artifacts,
-    publications: publicationEntries
+    publications: publicationEntries,
+    ...(validationWarnings.length === 0 ? {} : { validation_warnings: validationWarnings })
   };
   const markerShape = validateArtifactVerificationMarker(markerValue);
   if (!markerShape.ok) {

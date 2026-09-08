@@ -31,7 +31,11 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-supporting",
     description: "Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts",
     gates: "runtime-supporting",
-    timeout_minutes: 75,
+    // Once relocated cloud-worker tests run to completion, this lane also
+    // reaches the subprocess-heavy lifecycle suite. Shared-runner contention
+    // can push that complete pass beyond 75 minutes, so retain a bounded budget
+    // that covers the full fail-closed validation instead of canceling it late.
+    timeout_minutes: 120,
     pull_request: true,
     build_modal_dependencies: true
   },

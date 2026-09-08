@@ -56,7 +56,7 @@ export function currentReportIssue(overrides: Record<string, unknown> = {}): Rec
     lifecycle: {
       dedupe_key: "fixture-dedupe-key",
       source_artifacts: [],
-      strategy_hits: []
+      strategy_hits: [{ strategy: "stateful-invariant" }]
     },
     ...overrides
   });

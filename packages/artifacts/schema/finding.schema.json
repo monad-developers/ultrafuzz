@@ -1053,7 +1053,7 @@
       "additionalProperties": false
     }
   },
-  "required": ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"],
+  "required": ["schema_version", "id", "title", "status", "summary"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:finding:2",
   "title": "Ultrafuzz finding",

@@ -47,6 +47,11 @@ describe("release validation lane policy", () => {
     expect([...gates].sort()).toEqual([...PULL_REQUEST_REQUIRED_GATES].sort());
   });
 
+  it("gives the complete supporting runtime suite its proven shared-runner budget", () => {
+    const supporting = RELEASE_VALIDATION_LANES.find((lane) => lane.lane === "runtime-supporting");
+    expect(supporting?.timeout_minutes).toBe(120);
+  });
+
   it("covers every runtime test file on pull requests", () => {
     // runtime-1..runtime-4 shard packages/runtime/test/runtime.test.ts by test
     // name; runtime-supporting runs every other runtime test file. Nothing in

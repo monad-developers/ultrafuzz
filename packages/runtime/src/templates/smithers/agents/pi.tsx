@@ -77,7 +77,6 @@ export class CompatiblePiAgent extends SmithersPiAgent {
       args = args.slice(0, -1);
       stdin = params.prompt;
     }
-    const childPath = command.env?.PATH ?? process.env.PATH;
     return {
       ...command,
       args,
@@ -87,14 +86,7 @@ export class CompatiblePiAgent extends SmithersPiAgent {
       // select an earlier tool payload instead of the terminal interpreter
       // answer. Its `stream-json` format gives the interpreter precedence.
       outputFormat: command.outputFormat === "json" ? "stream-json" : command.outputFormat,
-      // Native continuations receive a target-filtered command PATH from the
-      // Ultrafuzz controller. Preserve it across the generated child boundary
-      // so Smithers can preflight an external Pi CLI after detaching.
-      env: workflowControlChildEnvironment({
-        ...this.opts.env,
-        ...command.env,
-        ...(childPath === undefined ? {} : { PATH: childPath })
-      })
+      env: workflowControlChildEnvironment({ ...this.opts.env, ...command.env })
     };
   }
 
@@ -219,14 +211,15 @@ function observePiLine(totals: PiInvocationUsage, line: string): PiLineObservati
   const outputTokens = piUsageCount(usage.output, "output");
   const cacheReadTokens = piUsageCount(usage.cacheRead, "cacheRead");
   const cacheWriteTokens = piUsageCount(usage.cacheWrite, "cacheWrite");
-  const reasoningTokens = usage.reasoning === undefined ? 0 : piUsageCount(usage.reasoning, "reasoning");
+  const reportedReasoningTokens = usage.reasoning === undefined ? 0 : piUsageCount(usage.reasoning, "reasoning");
+  // Some providers report reasoning separately from visible output, while
+  // Smithers' usage contract treats reasoning as a subset of output. Preserve
+  // the inclusive output total and clamp only the optional detail field.
+  const reasoningTokens = Math.min(reportedReasoningTokens, outputTokens);
   const reportedTotal = piUsageCount(usage.totalTokens, "totalTokens");
   const calculatedTotal = freshInputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   if (!Number.isSafeInteger(calculatedTotal) || reportedTotal !== calculatedTotal) {
     throw new Error("Pi assistant usage totalTokens does not equal its token component sum");
-  }
-  if (reasoningTokens > outputTokens) {
-    throw new Error("Pi assistant reasoning usage exceeds its inclusive output usage");
   }
   const cost = objectRecord(usage.cost);
   if (cost === undefined) throw new Error("Pi assistant usage omitted its adapter-recorded cost breakdown");

@@ -239,14 +239,7 @@
       }
     }
   },
-  "required": [
-    "schema_version",
-    "surfaces",
-    "selector_mismatches",
-    "ambiguous_or_incomplete_specs",
-    "generated_tests",
-    "coverage_notes"
-  ],
+  "required": ["schema_version", "surfaces", "selector_mismatches", "ambiguous_or_incomplete_specs", "generated_tests"],
   "additionalProperties": false,
   "$id": "urn:ultrafuzz:schema:artifacts:admin-config-boundary-matrix:1",
   "title": "Ultrafuzz admin and configuration boundary matrix"
