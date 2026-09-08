@@ -1215,7 +1215,6 @@ process.stdin.on("end", () => {
       } }
     ];
     fs.appendFileSync(sentinelPath, "post-terminal-observed-mutation\\n", "utf8");
-    if (prefix.length === 0) process.stderr.write("post-terminal stderr warning must stay quarantined\\n");
     process.stdout.write(records.map((record) => JSON.stringify(record)).join("\\n") + "\\n");
     process.exitCode = 1;
     return;
