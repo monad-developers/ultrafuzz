@@ -24815,38 +24815,62 @@ test("resume continues under a superseded generated manifest without changing ei
   if (before.ok && migrated.ok) assert.equal(migrated.smithersRunId, before.smithersRunId);
 });
 
-test("a run that has not finished launching reports a pending seal, not a missing one", async () => {
+test("incomplete launch is observable without granting execution authority or claiming liveness", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   writeSmallTopology(project);
-  const runId = "still-launching";
+  const runId = "incomplete-launch";
   const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  // Reproduce the state a run is in between creating its directory and
-  // completing submission: the control seal has not been written, and the run
-  // has not moved off `pending`. Reporting that as a missing seal told the
-  // operator a healthy run was unrecoverable and to start over, during the
-  // minutes when they are most likely to be checking on it.
-  const runRoot = run.value?.run_root;
-  assert.ok(runRoot);
-  fs.unlinkSync(path.join(runRoot, "smithers", "control-integrity.json"));
-  const statePath = path.join(runRoot, "state.json");
-  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
-  fs.writeFileSync(statePath, `${JSON.stringify({ ...state, status: "pending" }, null, 2)}\n`, "utf8");
-
-  const evidence = await readLinkedWorkflowEvidence(project, runId);
-
-  assert.equal(evidence.ok, false);
-  if (!evidence.ok) {
-    assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_PENDING");
-    assert.equal(evidence.diagnostics[0]?.severity, "warning");
-    assert.match(evidence.diagnostics[0]?.message ?? "", /has not finished launching/u);
-    // The old advice must not survive: nothing here should tell the operator
-    // the run is beyond recovery or that they should start a new one.
-    assert.doesNotMatch(evidence.diagnostics[0]?.message ?? "", /new run ID|cannot be safely upgraded/u);
+  // Execute the real planning phase. No workflow has been submitted, and this
+  // state also survives a launcher interruption immediately after planning.
+  const plan = await planRun({ projectRoot: project, runId, env });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  const layout = plan.value.layout;
+  const stored = [layout.statePath, layout.runMetadataPath, layout.graphPath, layout.eventsPath];
+  const before = stored.map((file) => fs.readFileSync(file));
+  for (let observation = 0; observation < 2; observation += 1) {
+    const health = await getRunHealth({ projectRoot: project, runId, env });
+    assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+    assert.equal(health.value?.verdict, "launch-incomplete");
+    assert.equal(health.value?.status, "pending");
+    assert.equal(health.value?.workflow_run_id, undefined);
+    assert.equal(health.value?.workflow_status, "unsubmitted");
+    assert.equal(health.value?.eta.available, false);
+    assert.match(health.value?.reason ?? "", /Launcher liveness is unknown/u);
+    assert.doesNotMatch(health.value?.reason ?? "", /new run ID|cannot be safely upgraded|when submission completes/u);
   }
+  assert.deepEqual(
+    stored.map((file) => fs.readFileSync(file)),
+    before
+  );
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, false);
+  if (!evidence.ok) assert.equal(evidence.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_PENDING");
+  const synchronization = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synchronization.ok, false);
+  assert.equal(fs.existsSync(path.join(layout.root, "smithers", "control-integrity.json")), false);
+  assert.deepEqual(
+    stored.map((file) => fs.readFileSync(file)),
+    before
+  );
+
+  fs.writeFileSync(layout.runMetadataPath, "{broken");
+  const invalidMetadata = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(invalidMetadata.ok, false);
+  assert.equal(invalidMetadata.diagnostics[0]?.code, "RUN_LAUNCH_STATE_UNREADABLE");
+  const originalMetadata = before[1];
+  assert.ok(originalMetadata);
+  fs.writeFileSync(layout.runMetadataPath, originalMetadata);
+  const state = readRunState(layout);
+  writeRunState(layout, { ...state, status: "running" });
+  const missing = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_MISSING");
+  fs.writeFileSync(layout.statePath, "{broken");
+  const unreadable = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(unreadable.ok, false);
+  assert.equal(unreadable.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_MISSING");
 });
 
 test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {

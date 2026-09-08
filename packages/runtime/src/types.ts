@@ -248,6 +248,7 @@ export interface RunStatusValue extends RunListEntry {
 }
 
 export type RunHealthVerdict =
+  | "launch-incomplete"
   | "done"
   | "degraded"
   | "running-healthy"
@@ -319,7 +320,8 @@ export interface RunProgressSummary {
 }
 
 export interface RunHealthValue extends RunListEntry, RunProgressSummary {
-  workflow_run_id: string;
+  // No authenticated workflow identity exists during incomplete launch preparation.
+  workflow_run_id?: string;
   // The run's recorded audit profile, typed rather than a loose record so a
   // reader gets the same shape the run metadata persisted.
   audit_profile?: RunMetadataAuditProfile;

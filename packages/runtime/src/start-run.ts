@@ -1422,13 +1422,9 @@ function invalidLinkedWorkflowEvidence(metadataPath: string, error: unknown): Li
 }
 
 /**
- * Whether a run has not been submitted yet.
- *
- * `createInitialRunState` writes `pending`, and the status only moves once the
- * workflow is submitted, so `pending` is the one state in which missing control
- * evidence means "not written yet" rather than "missing". An unreadable state
- * is treated as not-pending: if we cannot tell, the stricter diagnostic is the
- * safer answer.
+ * A pending state records incomplete launch preparation, not launcher liveness.
+ * It also survives an interrupted launch. Unreadable state retains the strict
+ * missing-seal diagnostic.
  */
 function runStatusIsPreSubmission(layout: RunLayout): boolean {
   try {
@@ -1444,19 +1440,10 @@ function missingLinkedWorkflowEvidenceDiagnostic(
 ): RuntimeDiagnostic | undefined {
   const controlSealPath = workflowControlPaths(projectRoot, layout).integrityPath;
   if (pathIsMissing(controlSealPath)) {
-    // A run directory is populated well before its control seal is written, so
-    // a run that is still launching looks exactly like one that will never be
-    // sealed. Reporting the second for the first told operators that a healthy
-    // run was unrecoverable, and to start over -- during the minutes when they
-    // are most likely to ask for status, having just launched something.
-    //
-    // A run that has not been submitted yet is still `pending`; anything that
-    // reached the workflow has moved past it. That separates "not sealed yet"
-    // from "never going to be".
     if (runStatusIsPreSubmission(layout)) {
       return {
         code: "WORKFLOW_CONTROL_SEAL_PENDING",
-        message: `run ${layout.runId} has not finished launching: its workflow control seal is written when submission completes. Wait for \`ultrafuzz run\` to return, then ask again`,
+        message: `run ${layout.runId} has incomplete launch preparation: its workflow control seal has not been written. Launcher liveness is unknown. If the original launch is still active, wait for it to finish; otherwise inspect its error before retrying`,
         severity: "warning",
         source: "workflow",
         path: controlSealPath

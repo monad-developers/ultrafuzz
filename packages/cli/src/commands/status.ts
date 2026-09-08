@@ -97,6 +97,9 @@ function shouldRefresh(value: RunHealthValue | undefined): boolean {
 }
 
 function renderHealth(value: RunHealthValue): string {
+  if (value.verdict === "launch-incomplete") {
+    return `Run: ${value.run_id}\nStatus: launch-incomplete (pending)\nReason: ${value.reason}\nWorkflow progress and ETA are unavailable until launch preparation completes.\n`;
+  }
   const progress = value.progress;
   const lines = [
     `Run: ${value.run_id}`,

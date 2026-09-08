@@ -303,6 +303,23 @@ test("known command failures can retain a valid typed data snapshot", () => {
   );
 });
 
+test("pending launch has no workflow identity while submitted status still requires one", () => {
+  const pending = {
+    ...statusData(),
+    status: "pending",
+    verdict: "launch-incomplete",
+    workflow_status: "unsubmitted",
+    workflow_ids: []
+  };
+  Reflect.deleteProperty(pending, "workflow_run_id");
+  assertParity("status", successEnvelope("status", pending), true);
+  assertParity("status", successEnvelope("status", { ...pending, workflow_run_id: "invented" }), false);
+  assertParity("status", successEnvelope("status", { ...pending, status: "running" }), false);
+  const submitted = statusData();
+  Reflect.deleteProperty(submitted, "workflow_run_id");
+  assertParity("status", successEnvelope("status", submitted), false);
+});
+
 test("EVMBench consumes the same registered CLI v2 definitions without a parallel shape authority", () => {
   const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
   for (const name of ["initData", "runData", "statusData", "reportData"] as const) {
