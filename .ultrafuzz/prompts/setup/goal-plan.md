@@ -31,6 +31,10 @@ emit its class goal with `threat_ids: []`, `coverage_gap: true`, and a general
 threat-model coverage-gap replacement. This missing mapping is a signal, not a
 reason to suppress the class.
 
+OWASP SCWE records use SCSVS security topics as optional routing hints. These
+are not prerequisite capabilities and cannot justify excluding a weakness.
+Use the supplied source guidance to focus each goal on relevant target code.
+
 Evaluate class applicability from the catalog's required, optional, and
 incompatible controlled capabilities:
 

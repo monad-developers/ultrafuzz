@@ -183,14 +183,14 @@ test("default catalog restores original pinned property references", () => {
   assert.equal(ids.filter((id) => id.startsWith("properties.")).length, 9);
   assert.deepEqual(
     ids.filter((id) => !id.startsWith("properties.")),
-    ["vulnerability-database.web3"]
+    ["vulnerability-database.owasp-scs"]
   );
-  const database = catalog.references["vulnerability-database.web3"];
+  const database = catalog.references["vulnerability-database.owasp-scs"];
   assert.equal(database?.kind, "vulnerability-database");
-  assert.equal(database?.repo, "aviggiano/web3-vulnerability-database");
-  assert.equal(database?.commit, "74c2a5114b7adbd208eb49e47c137daa49b4a395");
-  assert.deepEqual(database?.paths, ["database.yml", "capabilities.yml", "catalog.json"]);
-  assert.equal(database?.resolved_at, "2026-08-09T01:15:37Z");
+  assert.equal(database?.repo, "OWASP/owasp-scs");
+  assert.equal(database?.commit, "fefd476b83074666ada2d816f103436a18e1ece4");
+  assert.deepEqual(database?.paths, ["License.md", "docs/SCSVS/scsvs.yaml", "docs/SCWE/index.md"]);
+  assert.equal(database?.resolved_at, "2026-09-08T00:00:00Z");
   assert.deepEqual(catalog.references["properties.certora-thinking"]?.paths, [
     "06.Lesson_ThinkingProperties/README.md",
     "06.Lesson_ThinkingProperties/AuctionDemonstration/README.md",

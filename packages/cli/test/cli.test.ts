@@ -1179,8 +1179,8 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   // A clean shipped scaffold validates with no fixture mutation whatsoever: the pinned
   // vulnerability-database reference is part of the scaffolded catalog.
   const shippedReferences = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
-  assert.match(shippedReferences, /^ {2}vulnerability-database\.web3:$/mu);
-  assert.match(shippedReferences, /^ {4}commit: 74c2a5114b7adbd208eb49e47c137daa49b4a395$/mu);
+  assert.match(shippedReferences, /^ {2}vulnerability-database\.owasp-scs:$/mu);
+  assert.match(shippedReferences, /^ {4}commit: fefd476b83074666ada2d816f103436a18e1ece4$/mu);
   const validate = await cli(project, ["validate", "--json"]);
   const body = parseJson(validate);
   assert.equal(validate.code, 0, validate.stderr);
@@ -1199,7 +1199,7 @@ test("init and validate emit schema-versioned launch JSON", async () => {
     topologyPath,
     fs
       .readFileSync(topologyPath, "utf8")
-      .replace("reference: vulnerability-database.web3", "reference: absent.database"),
+      .replace("reference: vulnerability-database.owasp-scs", "reference: absent.database"),
     "utf8"
   );
   const tampered = await cli(project, ["validate", "--json"]);
@@ -1923,7 +1923,7 @@ test("references status is restored and reports offline cache state", async () =
       true
     );
     assert.equal(
-      data.references?.some((reference) => reference.id === "vulnerability-database.web3"),
+      data.references?.some((reference) => reference.id === "vulnerability-database.owasp-scs"),
       true
     );
     assert.equal(

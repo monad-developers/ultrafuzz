@@ -46,8 +46,10 @@ hunting artifact.
 
 Use lowercase stable hierarchical IDs. Threat IDs use colon-separated slugs,
 for example `liquidation:overdue`, `oracle:stale-price`, and
-`governance:upgrade-bypass`. Capability IDs use controlled dotted slugs, for
-example `lending.liquidation` and `oracle.external-price`.
+`governance:upgrade-bypass`. Capability IDs must exactly match the supplied registry, for example
+`scsvs-auth` in OWASP SCS. OWASP
+SCSVS groups identify security topics; assess whether the topic is relevant to
+the target, rather than treating it as a specific protocol feature.
 
 Every evidence reference contains `path` and may contain `line`, `end_line`,
 `symbol`, and `note`. `path` must be a canonical repository-relative POSIX path

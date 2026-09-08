@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replaces the shipped Web3 vulnerability database dependency with pinned OWASP SCS weakness entries, preserving digest-bound planning and exact selected Markdown snapshots (#1106).
+
 ### Breaking changes
 
 - **[runtime] [cli] [docs]** Restores native Smithers continuation as the normal `resume` behavior. Ordinary resume now sends the persisted workflow and same Smithers run ID directly to Smithers with workflow-change acceptance instead of requiring Ultrafuzz control seals, link journals, controller generations, current schema bindings, graph identity, or metadata projections. `--refresh-controller` renders the current controller beside the historical source and continues that same Smithers run; it no longer publishes an authenticated historical generation. Completed Smithers rows and artifact bytes are not reset, replayed, migrated, or rewritten, and missing optional final-report metadata renders as `unavailable`. Replay determinism after accepting changed workflow source is therefore Smithers' caller-visible responsibility. The controller re-finalization CLI option is removed; use native resume or the existing explicit reset/retry operations (#939).

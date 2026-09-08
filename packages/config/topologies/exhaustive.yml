@@ -52,7 +52,7 @@ nodes:
       - final-report
   - id: reference-vulnerability-database
     kind: reference
-    reference: vulnerability-database.web3
+    reference: vulnerability-database.owasp-scs
     group: references
     depends_on:
       - __start__
