@@ -33,6 +33,7 @@ import {
   loadGoalSearchCoverageSnapshot,
   loadVerifiedRunOutputSnapshots,
   projectCanonicalFinalReport,
+  planRun,
   syncRun
 } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
@@ -1742,6 +1743,29 @@ test("ps text prefers linked workflow terminal status over a stale local running
   };
   assert.equal(jsonData.runs[0]?.ultrafuzz_status, "running");
   assert.equal(jsonData.runs[0]?.workflow_status, "failed");
+});
+
+test("status observes an incomplete launch with a successful CLI envelope and unknown liveness", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
+  writeSmallTopology(project);
+  const runId = "cli-incomplete-launch";
+  const plan = await planRun({ projectRoot: project, runId, env });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const status = await cli(project, ["status", runId, "--json"], env);
+  assert.equal(status.code, 0, `${status.stderr}\n${status.stdout}`);
+  const body = parseJson(status);
+  assert.equal(body.ok, true);
+  const data = body.data as { verdict: string; workflow_run_id?: string; reason: string };
+  assert.equal(data.verdict, "launch-incomplete");
+  assert.equal(data.workflow_run_id, undefined);
+  assert.match(data.reason, /Launcher liveness is unknown/u);
+  const text = await cli(project, ["status", runId], env);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /Status: launch-incomplete \(pending\)/u);
+  assert.match(text.stdout, /progress and ETA are unavailable/u);
+  assert.doesNotMatch(text.stdout, /Progress: 0%|ETA: 0|running-healthy/u);
 });
 
 test("status surfaces a terminal product and live workflow lifecycle divergence", async () => {
