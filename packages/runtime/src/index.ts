@@ -43,5 +43,6 @@ export * from "./workflow-control.js";
 export * from "./workflow-controller-generation.js";
 export * from "./workflow-integrity.js";
 export * from "./workspace-handoff.js";
+export * from "./workspace-preparation-replacement.js";
 export * from "./audit-profile-policy.js";
 export * from "./topology-transform.js";

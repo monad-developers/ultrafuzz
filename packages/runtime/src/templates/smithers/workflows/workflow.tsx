@@ -102,12 +102,15 @@ const {
   GOAL_SEARCH_COVERAGE_FILE,
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
+  hasPendingWorkspacePreparationReplacement,
   inspectSmithersAttemptAgentSelection,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
   reconcileSmithersAttemptAgentSelection,
+  readWorkspacePreparationAuthority,
+  replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
   smithersTaskAgentId,
   targetIdentity,
@@ -119,7 +122,10 @@ const {
   parseRuntimeDocumentBytes,
   parsePromptArtifactAuthorityBytes,
   serializeRuntimeDocument,
+  serializeWorkspacePreparationAuthority,
   serializePromptArtifactAuthority,
+  workspacePreparationAuthorityPath,
+  writeWorkspacePreparationAuthority,
   CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
@@ -3910,6 +3916,9 @@ function prepareArtifactMirror(
   );
   if (options.replayWorkspacePatches !== false) {
     preparationStep(task.attemptId, "assert-workspace-source-revision", () => assertWorkspaceSourceRevision(task));
+    preparationStep(task.attemptId, "replace-superseded-workspace-preparation", () =>
+      replaceSupersededWorkspacePreparation(task, workspaceRoot, evidenceMode)
+    );
     preparationStep(task.attemptId, "restore-persisted-workspace-preparation", () =>
       restorePersistedWorkspacePatchPreparationBeforeReplay(task, workspaceRoot, evidenceMode)
     );
@@ -4177,6 +4186,69 @@ function materializeWorkspacePatchDependencies(
   if (expectedPreparation !== undefined && persistedPreparation !== expectedPreparation) {
     throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
   }
+  const captures = authenticatedWorkspacePatchCaptures(task, workspaceRoot);
+  // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so it
+  // can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
+  // already holds (issue #312). On a fresh run at the pinned baseline nothing normally matches, though a
+  // leading dependency that published a zero-file patch declares `base_tree === result_tree` and so can
+  // match; skipping that one is a no-op, since `applyWorkspacePatch` already early-returns on it.
+  const replayFrom =
+    replayWorkspacePatches && captures.length > 0
+      ? firstDependencyRequiringReplay(
+          captureWorkspaceTree(workspaceRoot),
+          captures.map((entry) => entry.manifest)
+        )
+      : 0;
+  for (const capture of captures.slice(replayFrom)) {
+    if (!replayWorkspacePatches) {
+      // Post-agent preparation may see a dirty worktree. Replay only when the
+      // exact dependency result tree is absent and the clean base tree is
+      // still present; otherwise the dependency patch is already represented
+      // by the dirty workspace and must not be applied over agent changes.
+      const currentTree = captureWorkspaceTree(workspaceRoot);
+      if (currentTree !== capture.manifest.base_tree) continue;
+    }
+    applyWorkspacePatch(workspaceRoot, capture, task.productionSourceRoots);
+  }
+  if (persistedPreparation === undefined && evidenceMode === "create") {
+    writeWorkspacePreparationAuthority(
+      task.runRoot,
+      task.attemptId,
+      captureWorkspaceTree(workspaceRoot),
+      admittedWorkspacePreparationDependencyDigest(task)
+    );
+  }
+  if (!workspacePatchPreparationTrees.has(task.attemptId)) {
+    if (persistedPreparation === undefined && evidenceMode === "require") {
+      throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
+    }
+    const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot);
+    workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
+    if (persistedPreparation === undefined && evidenceMode === "create") {
+      writeWorkspacePatchPreparation(task, preparationTree);
+    }
+  }
+  const persistedBaseline = taskPublishesWorkspacePatch(task) ? readWorkspacePatchBaseline(task) : undefined;
+  const expectedBaseline = workspacePatchBaselineTrees.get(task.attemptId);
+  if (taskPublishesWorkspacePatch(task) && evidenceMode === "require" && persistedBaseline === undefined) {
+    throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
+  }
+  if (expectedBaseline !== undefined && persistedBaseline !== expectedBaseline) {
+    throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
+  }
+  if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
+    if (persistedBaseline === undefined && evidenceMode === "require") {
+      throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
+    }
+    const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot);
+    workspacePatchBaselineTrees.set(task.attemptId, baselineTree);
+    if (persistedBaseline === undefined && evidenceMode === "create") {
+      writeWorkspacePatchBaseline(task, baselineTree);
+    }
+  }
+}
+
+function authenticatedWorkspacePatchCaptures(task: (typeof taskSpecs)[number], workspaceRoot: string) {
   const admission = assertDependencyArtifactAdmissionCurrent(task);
   const dependencies = admission.directories
     .flatMap((dependency) => {
@@ -4217,57 +4289,31 @@ function materializeWorkspacePatchDependencies(
   // skipping its validation entirely, and the skip decision reads `result_tree` from a manifest nothing
   // had checked was even well formed.
   for (const capture of captures) validateWorkspacePatchCapture(workspaceRoot, capture, task.productionSourceRoots);
-  // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so it
-  // can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
-  // already holds (issue #312). On a fresh run at the pinned baseline nothing normally matches, though a
-  // leading dependency that published a zero-file patch declares `base_tree === result_tree` and so can
-  // match; skipping that one is a no-op, since `applyWorkspacePatch` already early-returns on it.
-  const replayFrom =
-    replayWorkspacePatches && captures.length > 0
-      ? firstDependencyRequiringReplay(
-          captureWorkspaceTree(workspaceRoot),
-          captures.map((entry) => entry.manifest)
-        )
-      : 0;
-  for (const capture of captures.slice(replayFrom)) {
-    if (!replayWorkspacePatches) {
-      // Post-agent preparation may see a dirty worktree. Replay only when the
-      // exact dependency result tree is absent and the clean base tree is
-      // still present; otherwise the dependency patch is already represented
-      // by the dirty workspace and must not be applied over agent changes.
-      const currentTree = captureWorkspaceTree(workspaceRoot);
-      if (currentTree !== capture.manifest.base_tree) continue;
-    }
-    applyWorkspacePatch(workspaceRoot, capture, task.productionSourceRoots);
-  }
-  if (!workspacePatchPreparationTrees.has(task.attemptId)) {
-    if (persistedPreparation === undefined && evidenceMode === "require") {
-      throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
-    }
-    const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot);
-    workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
-    if (persistedPreparation === undefined && evidenceMode === "create") {
-      writeWorkspacePatchPreparation(task, preparationTree);
-    }
-  }
-  const persistedBaseline = taskPublishesWorkspacePatch(task) ? readWorkspacePatchBaseline(task) : undefined;
-  const expectedBaseline = workspacePatchBaselineTrees.get(task.attemptId);
-  if (taskPublishesWorkspacePatch(task) && evidenceMode === "require" && persistedBaseline === undefined) {
-    throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
-  }
-  if (expectedBaseline !== undefined && persistedBaseline !== expectedBaseline) {
-    throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
-  }
-  if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
-    if (persistedBaseline === undefined && evidenceMode === "require") {
-      throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
-    }
-    const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot);
-    workspacePatchBaselineTrees.set(task.attemptId, baselineTree);
-    if (persistedBaseline === undefined && evidenceMode === "create") {
-      writeWorkspacePatchBaseline(task, baselineTree);
-    }
-  }
+  return captures;
+}
+
+function admittedWorkspacePreparationDependencyDigest(
+  task: (typeof taskSpecs)[number],
+  scope: "workspace-patches" | "all" = "workspace-patches"
+): string {
+  const admission = assertDependencyArtifactAdmissionCurrent(task);
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        [...admission.snapshotsByProducerAttempt]
+          // Only patch publishers determine whether source preparation changed.
+          // An in-progress replacement additionally binds every admitted marker.
+          .filter(
+            ([, snapshot]) =>
+              scope === "all" ||
+              snapshot.artifacts.has("workspace.patch") ||
+              snapshot.artifacts.has("workspace-patch.json")
+          )
+          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+          .map(([attemptId, snapshot]) => [attemptId, createHash("sha256").update(snapshot.marker.bytes).digest("hex")])
+      )
+    )
+    .digest("hex");
 }
 
 function workspacePatchBaselinePath(task: (typeof taskSpecs)[number]): string {
@@ -4388,6 +4434,281 @@ function readWorkspacePatchPreparation(task: (typeof taskSpecs)[number]): string
     throw new Error(`artifact-contract failure: workspace preparation is invalid ${task.attemptId}`);
   }
   return parsed.preparation_tree;
+}
+
+function validateSupersededWorkspacePatchPairs(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  previousTree: string,
+  patchRoots: string[]
+): void {
+  // A self-consistent old pair grants no authority to reopen preparation.
+  // The protected prior epoch above makes that decision; these old bytes
+  // are only checked for malformed survivors before being archived.
+  for (const root of patchRoots) {
+    if (!pathEntryExists(root)) continue;
+    if (
+      (pathEntryExists(path.join(root, "workspace.patch")) ||
+        pathEntryExists(path.join(root, "workspace-patch.json"))) &&
+      !holdsSupersededWorkspacePatchPair(root, workspaceRoot, previousTree, task.productionSourceRoots)
+    ) {
+      throw new Error(`artifact-contract failure: workspace patch artifact was modified ${task.attemptId}`);
+    }
+  }
+}
+
+function validateSupersededWorkspacePreparation(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  previousTree: string | undefined,
+  paths: {
+    artifactRoot: string;
+    snapshotPath: string;
+    handoffPath: string;
+    protectedBaseline: string;
+    invariantBaseline: string;
+    markerPath: string;
+    patchRoots: string[];
+  }
+): void {
+  const { artifactRoot, snapshotPath, handoffPath, protectedBaseline, invariantBaseline, markerPath, patchRoots } =
+    paths;
+  const expected = workspacePatchPreparationTrees.get(task.attemptId);
+  if (previousTree === undefined || (expected !== undefined && expected !== previousTree)) {
+    throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+  }
+  const baseline = readWorkspacePatchBaseline(task);
+  const expectedBaseline = workspacePatchBaselineTrees.get(task.attemptId);
+  if (
+    (baseline !== undefined && baseline !== previousTree) ||
+    (expectedBaseline !== undefined && baseline !== expectedBaseline)
+  ) {
+    throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
+  }
+  if (pathEntryExists(snapshotPath)) {
+    const expectedSnapshot = invariantSuiteWorkspaceSnapshots.get(task.attemptId);
+    const snapshot = loadInvariantSuiteWorkspaceSnapshot(task, { createRoot: false });
+    if (snapshot === undefined || (expectedSnapshot !== undefined && !isDeepStrictEqual(expectedSnapshot, snapshot))) {
+      throw new Error(`artifact-contract failure: invariant workspace snapshot was modified ${task.attemptId}`);
+    }
+  }
+  let baselineBytes: Buffer | undefined;
+  for (const candidate of [invariantBaseline, protectedBaseline]) {
+    if (!pathEntryExists(candidate)) continue;
+    const snapshot = readAndValidateInvariantSuiteBaseline(path.dirname(candidate), candidate, task.attemptId);
+    const expectedBaselineSnapshot =
+      candidate === invariantBaseline
+        ? invariantSuiteBaselineSnapshots.get(artifactRoot)
+        : invariantSuiteProtectedBaselineSnapshots.get(protectedBaseline);
+    if (
+      expectedBaselineSnapshot !== undefined &&
+      expectedBaselineSnapshot.sha256 !== createHash("sha256").update(snapshot.bytes).digest("hex")
+    ) {
+      throw new Error(`artifact-contract failure: invariant suite baseline was modified ${task.attemptId}`);
+    }
+    if (baselineBytes !== undefined && !baselineBytes.equals(snapshot.bytes)) {
+      throw new Error(`artifact-contract failure: invariant suite baseline copies disagree ${task.attemptId}`);
+    }
+    baselineBytes = snapshot.bytes;
+  }
+  if (pathEntryExists(handoffPath)) loadInvariantSuiteDependencyHandoff(task, { createRoot: false });
+  validateSupersededWorkspacePatchPairs(task, workspaceRoot, previousTree, patchRoots);
+  if (pathEntryExists(markerPath)) {
+    const marker = parseStrictJsonSnapshot(
+      readBoundedRegularArtifactSnapshot(
+        realpathSync(task.runRoot),
+        markerPath,
+        "artifact-contract failure: unsafe prior verification marker",
+        MAX_VERIFIED_COMPANION_BYTES,
+        true
+      ),
+      "prior verification marker"
+    ) as { attempt_id?: string };
+    if (!validateArtifactVerificationMarker(marker).ok || marker.attempt_id !== task.attemptId) {
+      throw new Error(`artifact-contract failure: invalid prior verification marker ${task.attemptId}`);
+    }
+  }
+}
+
+function restoreIncompleteWorkspacePreparation(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  persistedTree: string | undefined,
+  previousAuthority: ReturnType<typeof readWorkspacePreparationAuthority>,
+  dependencySha256: string
+): void {
+  if (persistedTree === undefined && previousAuthority !== undefined) {
+    if (previousAuthority.dependency_sha256 !== dependencySha256) {
+      throw new Error(
+        `artifact-contract failure: incomplete workspace preparation dependency authority changed ${task.attemptId}`
+      );
+    }
+    // The protected record is published before mutable preparation files.
+    // A restart in that window can restore only this exact admitted tree.
+    restoreWorkspaceTreeWithIndexLockRecovery(workspaceRoot, previousAuthority.preparation_tree);
+    removeStaleWorkspaceFiles(workspaceRoot, previousAuthority.preparation_tree);
+  }
+}
+
+function workspacePatchCapturesFormLinearChain(
+  captures: ReturnType<typeof authenticatedWorkspacePatchCaptures>
+): boolean {
+  return captures.every(
+    (capture, index) => index === 0 || capture.manifest.base_tree === captures[index - 1]?.manifest.result_tree
+  );
+}
+
+function workspacePreparationReplacementEpoch(task: (typeof taskSpecs)[number], workspaceRoot: string) {
+  const pending = hasPendingWorkspacePreparationReplacement(task.runRoot, task.attemptId);
+  const previousAuthority = pending ? undefined : readWorkspacePreparationAuthority(task.runRoot, task.attemptId);
+  const persistedTree = pending ? undefined : readWorkspacePatchPreparation(task);
+  const previousTree = persistedTree ?? previousAuthority?.preparation_tree;
+  if (!pending && previousTree === undefined) return;
+  if (
+    previousAuthority !== undefined &&
+    persistedTree !== undefined &&
+    previousAuthority.preparation_tree !== persistedTree
+  ) {
+    throw new Error(
+      `artifact-contract failure: workspace preparation differs from protected authority ${task.attemptId}`
+    );
+  }
+  assertTaskDependencyInputs(task);
+  const admission = assertDependencyArtifactAdmissionCurrent(task);
+  const captures = authenticatedWorkspacePatchCaptures(task, workspaceRoot);
+  const replacementTree = captures.at(-1)?.manifest.result_tree;
+  const dependencySha256 = admittedWorkspacePreparationDependencyDigest(task);
+  if (
+    !pending &&
+    (previousAuthority?.dependency_sha256 === dependencySha256 ||
+      (previousAuthority === undefined &&
+        (replacementTree === undefined ||
+          replacementTree === previousTree ||
+          !workspacePatchCapturesFormLinearChain(captures))))
+  ) {
+    restoreIncompleteWorkspacePreparation(task, workspaceRoot, persistedTree, previousAuthority, dependencySha256);
+    return;
+  }
+  if (!pending && (previousAuthority === undefined || previousAuthority.dependency_sha256 === dependencySha256)) {
+    throw new Error(
+      `artifact-contract failure: replacement workspace preparation requires protected prior dependency authority ${task.attemptId}; start a new run for legacy preparation evidence`
+    );
+  }
+  const firstCapture = captures[0];
+  if (replacementTree === undefined || firstCapture === undefined || !workspacePatchCapturesFormLinearChain(captures)) {
+    throw new Error(
+      `artifact-contract failure: replacement dependency workspace patch chain is not linear ${task.attemptId}`
+    );
+  }
+  return { previousTree, admission, captures, replacementTree, dependencySha256, firstCapture };
+}
+
+function replaceSupersededWorkspacePreparation(
+  task: (typeof taskSpecs)[number],
+  workspaceRoot: string,
+  evidenceMode: "create" | "require"
+): void {
+  if (evidenceMode !== "create") return;
+  const epoch = workspacePreparationReplacementEpoch(task, workspaceRoot);
+  if (epoch === undefined) return;
+  const { previousTree, admission, captures, replacementTree, dependencySha256, firstCapture } = epoch;
+  const runRoot = realpathSync(task.runRoot);
+  const artifactRoot = realpathSync(task.metadata.artifacts.dir);
+  const relative = (candidate: string) => path.relative(runRoot, candidate).split(path.sep).join("/");
+  const baselinePath = workspacePatchBaselinePath(task);
+  const preparationPath = workspacePatchPreparationPath(task);
+  const snapshotPath = path.join(runRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR, task.attemptId);
+  const handoffPath = path.join(runRoot, INVARIANT_SUITE_HANDOFF_DIR, task.attemptId);
+  const protectedBaseline = path.join(runRoot, "invariant-suite-baselines", `${task.attemptId}.json`);
+  const invariantBaseline = path.join(artifactRoot, INVARIANT_SUITE_BASELINE_FILE);
+  const markerPath = path.join(runRoot, ARTIFACT_VERIFICATION_DIRECTORY, `${task.attemptId}.json`);
+  const authorityPath = workspacePreparationAuthorityPath(runRoot, task.attemptId);
+  const patchRoots = [artifactRoot, path.join(workspaceRoot, "artifacts", task.attemptId)];
+  const paths = [
+    markerPath,
+    authorityPath,
+    preparationPath,
+    baselinePath,
+    invariantBaseline,
+    protectedBaseline,
+    snapshotPath,
+    handoffPath,
+    ...patchRoots.flatMap((root) => [path.join(root, "workspace.patch"), path.join(root, "workspace-patch.json")])
+  ].map(relative);
+  const replacementFiles = [
+    {
+      path: relative(authorityPath),
+      bytes: serializeWorkspacePreparationAuthority(task.attemptId, replacementTree, dependencySha256)
+    },
+    {
+      path: relative(preparationPath),
+      bytes: serializeRuntimeDocument(
+        WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID,
+        {
+          schema_version: WORKSPACE_PATCH_PREPARATION_SCHEMA_VERSION,
+          attempt_id: task.attemptId,
+          preparation_tree: replacementTree
+        },
+        "workspace patch preparation"
+      )
+    }
+  ];
+  if (taskPublishesWorkspacePatch(task))
+    replacementFiles.unshift({
+      path: relative(baselinePath),
+      bytes: serializeRuntimeDocument(
+        WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID,
+        {
+          schema_version: WORKSPACE_PATCH_BASELINE_SCHEMA_VERSION,
+          attempt_id: task.attemptId,
+          baseline_tree: replacementTree
+        },
+        "workspace patch baseline"
+      )
+    });
+  replaceWorkspacePreparationEvidence({
+    runRoot,
+    attemptId: task.attemptId,
+    replacementTree,
+    dependencySha256: admittedWorkspacePreparationDependencyDigest(task, "all"),
+    paths,
+    replacementFiles,
+    validatePrevious: () => {
+      validateSupersededWorkspacePreparation(task, workspaceRoot, previousTree, {
+        artifactRoot,
+        snapshotPath,
+        handoffPath,
+        protectedBaseline,
+        invariantBaseline,
+        markerPath,
+        patchRoots
+      });
+      assertDependencyArtifactAdmissionCurrent(task, admission);
+    },
+    rebuild: () => {
+      assertDependencyArtifactAdmissionCurrent(task, admission);
+      workspacePatchPreparationTrees.delete(task.attemptId);
+      workspacePatchBaselineTrees.delete(task.attemptId);
+      invariantSuiteWorkspaceSnapshots.delete(task.attemptId);
+      invariantSuiteDependencySnapshots.delete(task.attemptId);
+      invariantSuitePublicationSnapshots.delete(task.attemptId);
+      invariantSuiteBaselineSnapshots.delete(artifactRoot);
+      invariantSuiteProtectedBaselineSnapshots.delete(protectedBaseline);
+      invariantSuiteTombstones.delete(workspaceRoot);
+      const base = firstCapture.manifest.base_tree;
+      restoreWorkspaceTreeWithIndexLockRecovery(workspaceRoot, base);
+      removeStaleWorkspaceFiles(workspaceRoot, base);
+      for (const capture of captures) applyWorkspacePatch(workspaceRoot, capture, task.productionSourceRoots);
+      if (captureWorkspaceTree(workspaceRoot) !== replacementTree) {
+        throw new Error(
+          `artifact-contract failure: replacement workspace preparation result changed ${task.attemptId}`
+        );
+      }
+      assertDependencyArtifactAdmissionCurrent(task, admission);
+    }
+  });
+  workspacePatchPreparationTrees.set(task.attemptId, replacementTree);
+  if (taskPublishesWorkspacePatch(task)) workspacePatchBaselineTrees.set(task.attemptId, replacementTree);
 }
 
 function restorePersistedWorkspacePatchPreparationBeforeReplay(
@@ -5197,6 +5518,10 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
   if (task.promptPath !== undefined) {
     assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
   }
+  assertTaskDependencyInputs(task);
+}
+
+function assertTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {
   const existingAdmission = dependencyArtifactAdmissionsByTask.get(task.attemptId);
   if (existingAdmission !== undefined) {
     assertDependencyArtifactAdmissionCurrent(task, existingAdmission);
