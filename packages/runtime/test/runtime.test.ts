@@ -649,6 +649,33 @@ async function loadGeneratedOpenCodeAgent(project: string): Promise<{
   };
 }
 
+let openRouterPatchedSmithersUrl: Promise<string> | undefined;
+
+function loadOpenRouterPatchedSmithersUrl(): Promise<string> {
+  return (openRouterPatchedSmithersUrl ??= (async () => {
+    const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === "agents_ordered_stdout");
+    assert.ok(patch);
+    const pinnedRoot = path.dirname(pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent"));
+    const isolatedRoot = path.join(tempProject(), "agents");
+    fs.cpSync(pinnedRoot, isolatedRoot, { recursive: true });
+    fs.rmSync(path.join(isolatedRoot, "node_modules"), { recursive: true, force: true });
+    fs.symlinkSync(path.dirname(path.dirname(pinnedRoot)), path.join(isolatedRoot, "node_modules"), "dir");
+    const sourcePath = path.join(isolatedRoot, patch.sourceRelativePath);
+    const source = fs.readFileSync(sourcePath, "utf8");
+    assert.equal(source.split(patch.patchable).length, 2, "ordered stdout must uniquely anchor in pinned Smithers");
+    fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched));
+    const shim = path.join(isolatedRoot, "openrouter-smithers.mjs");
+    const smithersUrl = pathToFileURL(createRequire(import.meta.url).resolve("smthrs")).href;
+    const codexUrl = pathToFileURL(path.join(isolatedRoot, "src", "CodexAgent.js")).href;
+    fs.writeFileSync(
+      shim,
+      `export * from ${JSON.stringify(smithersUrl)};\nexport { CodexAgent } from ${JSON.stringify(codexUrl)};\n`
+    );
+    return pathToFileURL(shim).href;
+  })());
+}
+
 async function loadGeneratedOpenRouterAgent(
   project: string,
   retryPolicy?: {
@@ -744,9 +771,7 @@ async function loadGeneratedOpenRouterAgent(
   const fixture = path.join(project, "openrouter-agent-executable-test");
   fs.mkdirSync(fixture, { recursive: true });
   const agentsDir = path.join(project, ".smithers", "agents");
-  const smithersUrl = pathToFileURL(
-    fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
-  ).href;
+  const smithersUrl = await loadOpenRouterPatchedSmithersUrl();
   const transpile = (source: string): string =>
     ts.transpileModule(source, {
       compilerOptions: {
@@ -1171,6 +1196,28 @@ process.stdin.on("end", () => {
       item: { id: "resume-message", type: "agent_message", text: "resume began" }
     }) + "\\n");
     setInterval(() => {}, 1_000);
+    return;
+  }
+  if (mode.startsWith("stdout-coalesced") && count === 1) {
+    const prefix = mode.endsWith("-prefix") ? [
+      { type: "message", role: "assistant", content: "valid progress" },
+      { type: "item.completed", item: { id: "valid-progress", type: "agent_message", text: "valid progress" } }
+    ] : [];
+    const rateLimitMessage = "HTTP 429 Too Many Requests request id: coalesced";
+    const records = [
+      ...prefix,
+      { type: "error", message: rateLimitMessage },
+      { type: "turn.failed", error: { message: rateLimitMessage } },
+      { type: "message", role: "assistant", content: "post-terminal stdout must stay quarantined" },
+      { type: "item.started", item: {
+        id: "post-terminal", type: "command_execution",
+        command: "post-terminal event must stay quarantined", status: "in_progress"
+      } }
+    ];
+    fs.appendFileSync(sentinelPath, "post-terminal-observed-mutation\\n", "utf8");
+    if (prefix.length === 0) process.stderr.write("post-terminal stderr warning must stay quarantined\\n");
+    process.stdout.write(records.map((record) => JSON.stringify(record)).join("\\n") + "\\n");
+    process.exitCode = 1;
     return;
   }
   if (mode === "substantive-updates" && resumed) {
@@ -5285,6 +5332,74 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated OpenRouter adapter quarantines coalesced terminal output and preserves its prefix",
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const fixture = installOpenRouterRetryCodexFixture(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
+      retryWindowMs: 5_000,
+      initialDelayMs: 1,
+      maxDelayMs: 2,
+      jitterFraction: 0
+    });
+    const additions = {
+      ULTRAFUZZ_CONFIG_PATH: path.join(project, "ultrafuzz.toml"),
+      OPENROUTER_API_KEY: "fixture-key",
+      PATH: `${fixture.bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      OPENROUTER_RETRY_FIXTURE_COUNTER: fixture.counter,
+      OPENROUTER_RETRY_FIXTURE_JOURNAL: fixture.journal,
+      OPENROUTER_RETRY_FIXTURE_SENTINEL: fixture.sentinel,
+      OPENROUTER_RETRY_FIXTURE_MODE: "stdout-coalesced"
+    };
+    const previous = Object.fromEntries(Object.keys(additions).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, additions);
+    try {
+      for (const operation of ["generate", "stream"] as const) {
+        for (const prefix of [false, true]) {
+          fs.writeFileSync(fixture.counter, "0");
+          fs.writeFileSync(fixture.journal, "");
+          fs.rmSync(fixture.sentinel, { force: true });
+          process.env.OPENROUTER_RETRY_FIXTURE_MODE = prefix ? "stdout-coalesced-prefix" : "stdout-coalesced";
+          let stdout = "";
+          let stderr = "";
+          const events: Record<string, unknown>[] = [];
+          const result = await createOpenRouterAgent({ model: "openai/gpt-5.6-luna" })[operation]({
+            prompt: "Continue after a terminal provider failure without replaying mutations",
+            onStdout: (text: string) => {
+              stdout += text;
+            },
+            onStderr: (text: string) => {
+              stderr += text;
+            },
+            onEvent: (event: Record<string, unknown>) => {
+              events.push(event);
+            }
+          });
+          assert.equal(await result.text, "OK");
+          assert.equal(stdout, prefix ? "valid progressOK" : "OK");
+          assert.doesNotMatch(stderr, /post-terminal/u);
+          assert.doesNotMatch(JSON.stringify(events), /post-terminal/u);
+          assert.equal(JSON.stringify(events).includes("valid progress"), prefix);
+          const journal = readOpenRouterRetryFixtureJournal(fixture.journal);
+          assert.deepEqual(
+            journal.map((entry) => entry.invocation),
+            ["fresh", "resume"]
+          );
+          assert.equal(journal[1]?.resumeSession, "fixture-session");
+          assert.equal(fs.readFileSync(fixture.sentinel, "utf8"), "post-terminal-observed-mutation\n");
+        }
+      }
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+bunAdapterTest(
   "generated OpenRouter adapter retries before output and resumes exact sessions after substantive work",
   { timeout: 60_000 },
   async () => {
@@ -5887,18 +6002,20 @@ bunAdapterTest(
       assert.doesNotMatch(substantiveCallbackStderr, /retrying|resuming/u);
 
       resetFixture("resume-hang");
-      const hangingCallbackStartedAt = performance.now();
+      let hangingCallbackStartedAt: number | undefined;
       await assert.rejects(
         createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
           prompt: "Stop a resumed process after a callback failure",
           onEvent: (event) => {
             if (JSON.stringify(event).includes("resume began")) {
+              hangingCallbackStartedAt = performance.now();
               throw new Error("caller callback stopped resumed process");
             }
           }
         }),
         /caller callback stopped resumed process/u
       );
+      assert.ok(hangingCallbackStartedAt !== undefined);
       assert.equal(performance.now() - hangingCallbackStartedAt < 1_000, true);
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
@@ -14979,6 +15096,84 @@ test("startRun ignores target-local Smithers in favor of an operator install", a
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
   assert.equal(fs.existsSync(executedAsLogPath), false);
+});
+
+test("OpenRouter stdout compatibility preserves record order for every pipe split", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === "agents_ordered_stdout");
+  assert.ok(patch);
+  const sourceRoot = pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent");
+  const { createAgentStdoutTextEmitter } = (await import(
+    pathToFileURL(path.join(sourceRoot, "BaseCliAgent", "index.js")).href
+  )) as {
+    createAgentStdoutTextEmitter(options: { outputFormat: string; onText(text: string): void }): {
+      push(chunk: string): void;
+      flush(finalText?: string): void;
+    };
+  };
+  const { CodexAgent } = (await import(pathToFileURL(path.join(sourceRoot, "CodexAgent.js")).href)) as {
+    CodexAgent: new () => {
+      createOutputInterpreter(): { onStdoutLine(line: string): Array<{ type: string; ok?: boolean }> };
+    };
+  };
+  const dispatchFactory = async (snippet: string) => {
+    const module = (await import(
+      `data:text/javascript,${encodeURIComponent(
+        `export function dispatch(commandSpec, stdoutEmitter, handleInterpreterChunk) { return ({${snippet}}).onStdout; }`
+      )}`
+    )) as {
+      dispatch(
+        command: { orderedStdoutRecords?: boolean },
+        emitter: { push(chunk: string): void },
+        interpret: (stream: string, chunk: string) => void
+      ): (chunk: string) => void;
+    };
+    return module.dispatch;
+  };
+  const patched = await dispatchFactory(patch.patched);
+  const upstream = await dispatchFactory(patch.patchable);
+  const transcript = [
+    { type: "message", role: "assistant", content: "prefix" },
+    { type: "error", message: "HTTP 429 Too Many Requests" },
+    { type: "message", role: "assistant", content: "trailing" }
+  ]
+    .map((record) => JSON.stringify(record))
+    .join("\n");
+  const observe = (dispatch: typeof patched, enabled: boolean, chunks: string[]) => {
+    const observed: string[] = [];
+    const emitter = createAgentStdoutTextEmitter({
+      outputFormat: "stream-json",
+      onText: (text) => observed.push(text)
+    });
+    const interpreter = new CodexAgent().createOutputInterpreter();
+    let pending = "";
+    const interpret = (line: string) => {
+      for (const event of interpreter.onStdoutLine(line)) {
+        if (event.type === "completed" && event.ok === false) observed.push("terminal");
+      }
+    };
+    const accept = dispatch({ orderedStdoutRecords: enabled }, emitter, (_stream, chunk) => {
+      pending += chunk;
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const line of lines) interpret(line);
+    });
+    for (const chunk of chunks) accept(chunk);
+    interpret(pending);
+    emitter.flush("fallback");
+    return observed;
+  };
+  const expected = ["prefix", "terminal", "trailing"];
+  for (const suffix of ["", "\n"]) {
+    const complete = transcript + suffix;
+    assert.deepEqual(observe(patched, true, [complete]), expected);
+    for (let split = 0; split <= complete.length; split += 1) {
+      assert.deepEqual(observe(patched, true, [complete.slice(0, split), complete.slice(split)]), expected);
+    }
+    assert.deepEqual(observe(patched, true, [...complete]), expected);
+    assert.deepEqual(observe(patched, false, [complete]), observe(upstream, false, [complete]));
+  }
+  assert.deepEqual(observe(upstream, true, [transcript + "\n"]), ["prefix", "trailing", "terminal"]);
 });
 
 test("compatibility patcher rewrites every described workaround", async () => {
