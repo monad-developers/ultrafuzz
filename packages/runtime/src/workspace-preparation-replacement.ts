@@ -6,6 +6,7 @@ import { z } from "zod/v4";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
+  fsyncDirectory as syncDirectory,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   validateSafeId,
@@ -108,15 +109,6 @@ export function hasPendingWorkspacePreparationReplacement(runRoot: string, attem
   const record = path.join(replacementRoot(runRoot, attemptId), "pending", "replacement.json");
   assertNoSymlinkComponents(runRoot, record, "workspace preparation replacement record");
   return fs.existsSync(record);
-}
-
-function syncDirectory(root: string): void {
-  const descriptor = fs.openSync(root, "r");
-  try {
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
 }
 
 function syncDirectoryParents(root: string, leaf: string): void {

@@ -680,7 +680,7 @@ function isUnsupportedDirectoryFsyncError(error: unknown): boolean {
   );
 }
 
-function fsyncDirectory(directory: string): void {
+export function fsyncDirectory(directory: string): void {
   let fd: number;
   try {
     fd = fs.openSync(directory, "r");

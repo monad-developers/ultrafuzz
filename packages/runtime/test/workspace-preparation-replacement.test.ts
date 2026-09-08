@@ -6,7 +6,8 @@ import test from "node:test";
 import { temporaryRoot } from "./temporary-root.js";
 import {
   hasPendingWorkspacePreparationReplacement,
-  replaceWorkspacePreparationEvidence
+  replaceWorkspacePreparationEvidence,
+  writeWorkspacePreparationAuthority
 } from "../src/workspace-preparation-replacement.js";
 
 function replacementFixture(
@@ -192,4 +193,60 @@ test("preparation replacement preserves an interrupted uncommitted plan and retr
     assert.throws(() => replaceWorkspacePreparationEvidence(input), /unrecognized pending/u);
     assert.equal(fs.readFileSync(path.join(root, "artifacts/worker/baseline.json"), "utf8"), "old baseline\n");
   });
+});
+
+test("preparation durability retains existing unsupported-directory fsync behavior", () => {
+  for (const code of ["EINVAL", "ENOTSUP", "EOPNOTSUPP"])
+    replacementFixture((root, input) => {
+      const fsync = fs.fsyncSync;
+      let directories = 0;
+      let files = 0;
+      try {
+        fs.fsyncSync = (descriptor) => {
+          if (fs.fstatSync(descriptor).isDirectory()) {
+            directories += 1;
+            throw Object.assign(new Error("unsupported directory fsync"), { code });
+          }
+          files += 1;
+          fsync(descriptor);
+        };
+        writeWorkspacePreparationAuthority(root, "worker", input.replacementTree, input.dependencySha256);
+        replaceWorkspacePreparationEvidence(input);
+      } finally {
+        fs.fsyncSync = fsync;
+      }
+      assert.ok(directories > 0);
+      assert.ok(files > 0);
+      assert.equal(hasPendingWorkspacePreparationReplacement(root, "worker"), false);
+      assert.equal(fs.readFileSync(path.join(root, "artifacts/worker/baseline.json"), "utf8"), "new baseline\n");
+    });
+});
+
+test("preparation durability still rejects directory IO errors and every file-fsync failure", () => {
+  for (const [directory, code] of [
+    [true, "EIO"],
+    [false, "EIO"],
+    [false, "EINVAL"],
+    [false, "ENOTSUP"],
+    [false, "EOPNOTSUPP"]
+  ] as const)
+    replacementFixture((root, input) => {
+      const fsync = fs.fsyncSync;
+      try {
+        fs.fsyncSync = (descriptor) => {
+          if (fs.fstatSync(descriptor).isDirectory() === directory)
+            throw Object.assign(new Error("failed fsync"), { code });
+          fsync(descriptor);
+        };
+        assert.throws(
+          () => writeWorkspacePreparationAuthority(root, "worker", input.replacementTree, input.dependencySha256),
+          { code }
+        );
+        assert.throws(() => replaceWorkspacePreparationEvidence(input), { code });
+      } finally {
+        fs.fsyncSync = fsync;
+      }
+      assert.equal(fs.readFileSync(path.join(root, "artifacts/worker/baseline.json"), "utf8"), "old baseline\n");
+      assert.equal(fs.readFileSync(path.join(root, "artifacts/worker/preparation.json"), "utf8"), "old preparation\n");
+    });
 });
