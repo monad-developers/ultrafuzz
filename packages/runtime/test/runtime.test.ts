@@ -689,6 +689,7 @@ async function loadGeneratedOpenRouterAgent(
   },
   testInstrumentation?: {
     acknowledgeProvisionalRateLimit?: boolean;
+    acknowledgeTerminalRateLimit?: boolean;
     expireRetryDeadlineBeforeReplacementBuild?: number;
   }
 ): Promise<{
@@ -846,6 +847,19 @@ async function loadGeneratedOpenRouterAgent(
     }`
     );
     assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter provisional transition source");
+    openRouterSource = replaced;
+  }
+  if (testInstrumentation?.acknowledgeTerminalRateLimit === true) {
+    const from = "    this.#sawTerminalRateLimit = true;";
+    const replaced = openRouterSource.replace(
+      from,
+      `${from}
+    if (["stderr-post-terminal", "stdout-post-terminal"].includes(process.env.OPENROUTER_RETRY_FIXTURE_MODE ?? "")) {
+      const counterPath = process.env.OPENROUTER_RETRY_FIXTURE_COUNTER;
+      if (counterPath !== undefined) writeFileSync(counterPath + ".terminal-ack", "observed\\n", "utf8");
+    }`
+    );
+    assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter terminal transition source");
     openRouterSource = replaced;
   }
   const expirationBuild = testInstrumentation?.expireRetryDeadlineBeforeReplacementBuild;
@@ -1333,13 +1347,15 @@ process.stdin.on("end", () => {
       return;
     }
     if (mode === "stderr-post-terminal" || mode === "stdout-post-terminal") {
+      const terminalAckPath = counterPath + ".terminal-ack";
+      fs.rmSync(terminalAckPath, { force: true });
       if (mode === "stderr-post-terminal") {
         process.stderr.write(rateLimitMessage + "\\n");
       } else {
         process.stdout.write(JSON.stringify({ type: "error", message: rateLimitMessage }) + "\\n");
         process.stdout.write(JSON.stringify({ type: "turn.failed", error: { message: rateLimitMessage } }) + "\\n");
       }
-      setTimeout(() => {
+      const emitTrailing = () => {
         fs.appendFileSync(sentinelPath, "post-terminal-observed-mutation\\n", "utf8");
         process.stdout.write(JSON.stringify({
           type: "message",
@@ -1357,7 +1373,20 @@ process.stdin.on("end", () => {
         }) + "\\n");
         process.stderr.write("post-terminal stderr warning must stay quarantined\\n");
         process.exitCode = 1;
-      }, 20);
+      };
+      // The pipes have no shared delivery order. Wait until the adapter has
+      // observed the terminal boundary before emitting trailing stdout/stderr.
+      const deadline = setTimeout(() => {
+        clearInterval(ackTimer);
+        process.stderr.write("terminal acknowledgement timed out\\n");
+        process.exitCode = 1;
+      }, 5_000);
+      const ackTimer = setInterval(() => {
+        if (!fs.existsSync(terminalAckPath)) return;
+        clearInterval(ackTimer);
+        clearTimeout(deadline);
+        emitTrailing();
+      }, 1);
       return;
     }
     if (mode === "stderr-oversized") {
@@ -5415,7 +5444,7 @@ bunAdapterTest(
         maxDelayMs: 2,
         jitterFraction: 0
       },
-      { acknowledgeProvisionalRateLimit: true }
+      { acknowledgeProvisionalRateLimit: true, acknowledgeTerminalRateLimit: true }
     );
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -6236,12 +6265,11 @@ bunAdapterTest(
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
     const fixture = installOpenRouterRetryCodexFixture(project);
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, {
-      retryWindowMs: 1_000,
-      initialDelayMs: 100,
-      maxDelayMs: 100,
-      jitterFraction: 0
-    });
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 1_000, initialDelayMs: 100, maxDelayMs: 100, jitterFraction: 0 },
+      { acknowledgeTerminalRateLimit: true }
+    );
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       key: process.env.OPENROUTER_API_KEY,
