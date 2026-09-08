@@ -10017,14 +10017,14 @@ test("a clean scaffold pins the reviewed vulnerability database verbatim", () =>
   const scaffoldedYaml = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
   assert.deepEqual(parseReferenceCatalog(scaffoldedYaml), shippedReferenceCatalog());
 
-  const pinned = loadReferenceCatalog(project).references["vulnerability-database.web3"];
-  assert.ok(pinned, "the shipped scaffold must define vulnerability-database.web3");
+  const pinned = loadReferenceCatalog(project).references["vulnerability-database.owasp-scs"];
+  assert.ok(pinned, "the shipped scaffold must define vulnerability-database.owasp-scs");
   assert.equal(pinned.kind, "vulnerability-database");
   assert.equal(pinned.provider, "github");
-  assert.equal(pinned.repo, "aviggiano/web3-vulnerability-database");
-  assert.equal(pinned.commit, "74c2a5114b7adbd208eb49e47c137daa49b4a395");
-  assert.deepEqual([...pinned.paths], ["database.yml", "capabilities.yml", "catalog.json"]);
-  assert.equal(pinned.resolved_at, "2026-08-09T01:15:37Z");
+  assert.equal(pinned.repo, "OWASP/owasp-scs");
+  assert.equal(pinned.commit, "fefd476b83074666ada2d816f103436a18e1ece4");
+  assert.deepEqual([...pinned.paths], ["License.md", "docs/SCSVS/scsvs.yaml", "docs/SCWE/index.md"]);
+  assert.equal(pinned.resolved_at, "2026-09-08T00:00:00Z");
 });
 
 test("a clean scaffold publishes the canonical artifact schema files the prompts reference", () => {

@@ -1529,7 +1529,7 @@ nodes:
     depends_on: []
   - id: reference-vulnerability-database
     kind: reference
-    reference: vulnerability-database.web3
+    reference: vulnerability-database.owasp-scs
     depends_on: [__start__]
     outputs:
       - path: vulnerability-db/catalog.json

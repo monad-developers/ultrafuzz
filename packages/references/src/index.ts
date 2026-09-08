@@ -40,11 +40,10 @@ import {
   VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH,
   VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY,
   VULNERABILITY_DATABASE_REFERENCE_KIND,
-  VULNERABILITY_DATABASE_REQUIRED_PATHS,
-  parseVulnerabilityDatabaseCatalog,
+  OWASP_SCS_REQUIRED_PATHS,
+  owaspScsGitTreePaths,
   parseVulnerabilityDatabaseGitTree,
   validateVulnerabilityDatabaseDirectory,
-  validateVulnerabilityDatabaseGitTree,
   vulnerabilityDatabaseReferencePaths,
   type VulnerabilityDatabaseGitTreeEntry
 } from "./vulnerability-database.js";
@@ -425,6 +424,8 @@ export function materializeReferenceArtifacts(input: {
       writeFileDurable(destination, fs.readFileSync(source));
       artifactFiles.push(manifestFileForPath(artifactDir, artifactPath));
     }
+    writeFileDurable(referenceArtifact, database.catalogBytes);
+    artifactFiles.push(manifestFileForPath(artifactDir, primaryArtifact));
     validateVulnerabilityDatabaseDirectory(path.join(artifactDir, VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY), {
       provider: reference.provider,
       repo: reference.repo,
@@ -607,12 +608,12 @@ function validateReference(id: string, reference: ReferenceEntry): void {
     seen.add(referencePath);
   }
   if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
-    const required = [...VULNERABILITY_DATABASE_REQUIRED_PATHS].sort();
+    const required = [...OWASP_SCS_REQUIRED_PATHS].sort();
     const actual = [...reference.paths].sort();
     if (JSON.stringify(actual) !== JSON.stringify(required)) {
       throw referenceError(
         "INVALID_VULNERABILITY_DATABASE_PATHS",
-        `reference \`${id}\` must list exactly ${required.join(", ")}; record paths are discovered from catalog.json`,
+        `reference \`${id}\` must list exactly ${required.join(", ")}; record paths are discovered from the pinned source`,
         { id }
       );
     }
@@ -707,7 +708,14 @@ function cachedReferenceOk(id: string, reference: ReferenceEntry, cacheDir: stri
     );
   }
   const manifestFiles = new Map(manifest.files.map((file) => [file.path, file]));
-  for (const referencePath of effectiveCachedReferencePaths(reference, cacheDir)) {
+  const effectivePaths = effectiveCachedReferencePaths(reference, cacheDir);
+  if (
+    referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND &&
+    JSON.stringify([...manifestFiles.keys()].sort()) !== JSON.stringify([...effectivePaths].sort())
+  ) {
+    throw referenceError("INVALID_CACHE_MANIFEST", `cached SCWE file set does not match manifest for ${id}`);
+  }
+  for (const referencePath of effectivePaths) {
     const cachePath = safeResolveInside(cacheDir, referencePath, "cached reference path");
     if (!fs.existsSync(cachePath) || !fs.statSync(cachePath).isFile()) {
       throw referenceError(
@@ -965,18 +973,12 @@ function referencePathsAtCommit(
   credential?: ReferenceGitCredential
 ): string[] {
   if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
-  const catalog = parseVulnerabilityDatabaseCatalog(
-    gitBlob(id, checkout, reference.commit, "catalog.json", gitEnv, credential)
-  );
-  const entries = gitTreeEntries(checkout, reference.commit, gitEnv, credential);
-  validateVulnerabilityDatabaseGitTree(entries, catalog);
-  return vulnerabilityDatabaseReferencePaths(catalog);
+  return owaspScsGitTreePaths(gitTreeEntries(checkout, reference.commit, gitEnv, credential));
 }
 
 function effectiveCachedReferencePaths(reference: ReferenceEntry, cacheDir: string): string[] {
   if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
-  const catalogPath = safeResolveInside(cacheDir, "catalog.json", "cached vulnerability database catalog");
-  return vulnerabilityDatabaseReferencePaths(parseVulnerabilityDatabaseCatalog(fs.readFileSync(catalogPath)));
+  return vulnerabilityDatabaseReferencePaths(validateVulnerabilityDatabaseDirectory(cacheDir).catalog);
 }
 
 function gitTreeEntries(

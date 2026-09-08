@@ -237,7 +237,7 @@ declares its machine-readable catalog as the primary output:
 ```yaml
 - id: reference-vulnerability-database
   kind: reference
-  reference: vulnerability-database.web3
+  reference: vulnerability-database.owasp-scs
   group: references
   depends_on:
     - __start__
@@ -250,9 +250,9 @@ declares its machine-readable catalog as the primary output:
 ```
 
 The reference catalog entry's `kind: vulnerability-database` makes the runtime
-materialize and validate `database.yml`, `capabilities.yml`, `catalog.json`, and
-the catalog-declared class tree (`classes/**/*.md` for schema v1 or
-`classes/**/*.yml` for schema v3) instead of concatenating it.
+materialize and validate the pinned OWASP SCS registry, index, license, and
+SCWE Markdown entries. It derives a planner catalog while retaining the exact
+source files.
 
 ## Loop Expansion
 

@@ -47,7 +47,7 @@ test("a credential is only ever attached to a remote its allowlist names", () =>
   // The security property: a token minted for one private repository must not be sent to any other
   // remote, even though every reference in the catalog shares the github.com host. The shipped
   // vulnerability database is public, so it must stay anonymous even while a credential is present.
-  for (const other of ["crytic/properties", "monad-developers/ultrafuzz", "aviggiano/web3-vulnerability-database"]) {
+  for (const other of ["crytic/properties", "monad-developers/ultrafuzz", "OWASP/owasp-scs"]) {
     assert.equal(referenceGitCredentialCoversRepo(credential, other), false, other);
     const env = referenceGitCredentialEnv(credential, other, `https://github.com/${other}.git`, {});
     assert.equal(env.GIT_CONFIG_COUNT, "1", `${other} must be fetched anonymously`);

@@ -673,7 +673,7 @@
       "vulnerability_database": {
         "planner_catalog_schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
         "snapshot_manifest_schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
-        "database_schema_version": 1,
+        "database_schema_version": 4,
         "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
@@ -734,7 +734,7 @@
       "vulnerability_database": {
         "planner_catalog_schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
         "snapshot_manifest_schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
-        "database_schema_version": 1,
+        "database_schema_version": 4,
         "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
@@ -1450,26 +1450,26 @@
     "schema_file": "vulnerability-database-planner-catalog.schema.json",
     "valid": {
       "schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
-      "database_schema_version": 3,
+      "database_schema_version": 4,
       "database_aggregate_algorithm": "sha256",
       "database_aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "capabilities": [
         {
-          "id": "accounting.shares",
+          "id": "scsvs-auth",
           "title": "Share accounting",
           "description": "Tracks share accounting."
         }
       ],
       "records": [
         {
-          "id": "accounting.share-rounding",
+          "id": "scwe-016",
           "title": "Share rounding",
           "domain": "accounting",
           "primary_category": "accounting",
           "secondary_categories": [],
           "capabilities": {
-            "required": ["accounting.shares"],
+            "required": ["scsvs-auth"],
             "optional": [],
             "incompatible": []
           },
@@ -1481,35 +1481,35 @@
             }
           ],
           "review_status": "reviewed",
-          "source_path": "classes/accounting/share-rounding.yml",
+          "source_path": "docs/SCWE/SCSVS-AUTH/SCWE-016.md",
           "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "source_size_bytes": 1,
-          "selected_artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml"
+          "selected_artifact_path": "vulnerability-db/selected/docs/SCWE/SCSVS-AUTH/SCWE-016.md"
         }
       ]
     },
     "invalid": {
       "schema_version": "ultrafuzz.vulnerability-db.planner-catalog.v1",
-      "database_schema_version": 3,
+      "database_schema_version": 4,
       "database_aggregate_algorithm": "sha256",
       "database_aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "capabilities": [
         {
-          "id": "accounting.shares",
+          "id": "scsvs-auth",
           "title": "Share accounting",
           "description": "Tracks share accounting."
         }
       ],
       "records": [
         {
-          "id": "accounting.share-rounding",
+          "id": "scwe-016",
           "title": "Share rounding",
           "domain": "accounting",
           "primary_category": "accounting",
           "secondary_categories": [],
           "capabilities": {
-            "required": ["accounting.shares"],
+            "required": ["scsvs-auth"],
             "optional": [],
             "incompatible": []
           },
@@ -1521,10 +1521,10 @@
             }
           ],
           "review_status": "reviewed",
-          "source_path": "classes/accounting/share-rounding.yml",
+          "source_path": "docs/SCWE/SCSVS-AUTH/SCWE-016.md",
           "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "source_size_bytes": 1,
-          "selected_artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml"
+          "selected_artifact_path": "vulnerability-db/selected/docs/SCWE/SCSVS-AUTH/SCWE-016.md"
         }
       ],
       "__unexpected_fixture_field": true
@@ -1536,44 +1536,44 @@
       "schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
       "source": {
         "provider": "github",
-        "repo": "example/vulnerability-database",
+        "repo": "OWASP/owasp-scs",
         "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "resolved_at": "2026-01-01T00:00:00Z"
       },
-      "database_schema_version": 3,
+      "database_schema_version": 4,
       "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "files": {
         "metadata": {
-          "path": "database.yml",
+          "path": "License.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         },
         "capabilities": {
-          "path": "capabilities.yml",
+          "path": "docs/SCSVS/scsvs.yaml",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         },
         "catalog": {
-          "path": "catalog.json",
+          "path": "docs/SCWE/index.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         }
       },
       "records": [
         {
-          "id": "accounting.share-rounding",
-          "path": "classes/accounting/share-rounding.yml",
+          "id": "scwe-016",
+          "path": "docs/SCWE/SCSVS-AUTH/SCWE-016.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         }
       ],
       "selected_records": [
         {
-          "id": "accounting.share-rounding",
-          "path": "classes/accounting/share-rounding.yml",
-          "artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml",
+          "id": "scwe-016",
+          "path": "docs/SCWE/SCSVS-AUTH/SCWE-016.md",
+          "artifact_path": "vulnerability-db/selected/docs/SCWE/SCSVS-AUTH/SCWE-016.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         }
@@ -1583,44 +1583,44 @@
       "schema_version": "ultrafuzz.vulnerability-db.snapshot.v1",
       "source": {
         "provider": "github",
-        "repo": "example/vulnerability-database",
+        "repo": "OWASP/owasp-scs",
         "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "resolved_at": "2026-01-01T00:00:00Z"
       },
-      "database_schema_version": 3,
+      "database_schema_version": 4,
       "aggregate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "upstream_catalog_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "files": {
         "metadata": {
-          "path": "database.yml",
+          "path": "License.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         },
         "capabilities": {
-          "path": "capabilities.yml",
+          "path": "docs/SCSVS/scsvs.yaml",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         },
         "catalog": {
-          "path": "catalog.json",
+          "path": "docs/SCWE/index.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         }
       },
       "records": [
         {
-          "id": "accounting.share-rounding",
-          "path": "classes/accounting/share-rounding.yml",
+          "id": "scwe-016",
+          "path": "docs/SCWE/SCSVS-AUTH/SCWE-016.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         }
       ],
       "selected_records": [
         {
-          "id": "accounting.share-rounding",
-          "path": "classes/accounting/share-rounding.yml",
-          "artifact_path": "vulnerability-db/selected/accounting/share-rounding.yml",
+          "id": "scwe-016",
+          "path": "docs/SCWE/SCSVS-AUTH/SCWE-016.md",
+          "artifact_path": "vulnerability-db/selected/docs/SCWE/SCSVS-AUTH/SCWE-016.md",
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "size_bytes": 1
         }
