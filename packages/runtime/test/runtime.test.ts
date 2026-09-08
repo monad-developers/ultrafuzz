@@ -666,7 +666,9 @@ function loadOpenRouterPatchedSmithersUrl(): Promise<string> {
     assert.equal(source.split(patch.patchable).length, 2, "ordered stdout must uniquely anchor in pinned Smithers");
     fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched));
     const shim = path.join(isolatedRoot, "openrouter-smithers.mjs");
-    const smithersUrl = pathToFileURL(createRequire(import.meta.url).resolve("smthrs")).href;
+    const smithersUrl = pathToFileURL(
+      fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
+    ).href;
     const codexUrl = pathToFileURL(path.join(isolatedRoot, "src", "CodexAgent.js")).href;
     fs.writeFileSync(
       shim,
