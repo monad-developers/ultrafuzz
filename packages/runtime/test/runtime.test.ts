@@ -25357,6 +25357,15 @@ test("native continuation preserves authenticated pre-governance seals but rejec
     } else {
       assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
     }
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
+    const reset = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
+    assert.equal(reset.ok, index === 0, JSON.stringify(reset.diagnostics));
+    if (index === 0) {
+      assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^timetravel /mu);
+      assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
+    } else {
+      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
+    }
   }
 });
 

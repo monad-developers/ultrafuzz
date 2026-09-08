@@ -625,6 +625,10 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       priorInspection: refreshInspection,
       beforeStoppedReset: async (inspection) => {
         if (!hasRetainedResetControlAuthority(projectRoot, layout, workflow)) return;
+        // Authenticated original v2 plans predate governance and the current
+        // linked-evidence contract; retain their native legacy reset behavior.
+        if (authenticatedContinuationGovernancePath(projectRoot, layout, workflow.control_generation) === undefined)
+          return;
         // workflow-sync reads linked evidence through this module. Load the
         // failure-only checkpoint after initialization, at an actual reset.
         const { preserveFailedWorkflowAttemptsBeforeReset } = await import("./workflow-sync.js");
