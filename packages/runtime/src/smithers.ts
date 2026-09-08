@@ -1900,6 +1900,26 @@ const SMITHERS_ENGINE_FINAL_USAGE_PATCH = `          const agentId =
             "unknown";
           await persistOwnedAgentUsage(usage, reportedModelId, agentId, null, true);`;
 
+// Only the generated OpenRouter adapter opts into record-ordered stdout. Its
+// retry relay must observe a terminal JSONL event before text from later records
+// in the same pipe chunk. Keep Smithers' parsers, partial-line buffers, final
+// output fallback, and the default dispatch path intact.
+const SMITHERS_AGENTS_ORDERED_STDOUT_SOURCE = `              onStdout: (chunk) => {
+                stdoutEmitter?.push(chunk);
+                handleInterpreterChunk("stdout", chunk);
+              },`;
+const SMITHERS_AGENTS_ORDERED_STDOUT_PATCH = `              onStdout: (chunk) => {
+                let start = 0;
+                do {
+                  const newline = commandSpec.orderedStdoutRecords === true ? chunk.indexOf("\\n", start) : -1;
+                  const end = newline === -1 ? chunk.length : newline + 1;
+                  const part = chunk.slice(start, end);
+                  stdoutEmitter?.push(part);
+                  handleInterpreterChunk("stdout", part);
+                  start = end;
+                } while (start < chunk.length);
+              },`;
+
 // Smithers 0.35.0 flattens several CLI-specific token formats into one shape
 // before the engine sees them. The providers disagree about whether their
 // input counter includes or excludes cache reads/writes, so inference in the
@@ -2427,6 +2447,7 @@ export type SmithersCompatibilityPatchId =
   | "engine_final_usage_ownership"
   | "engine_reported_cost_normalize"
   | "engine_reported_cost_price"
+  | "agents_ordered_stdout"
   | "agents_completed_usage"
   | "agents_usage_accumulator"
   | "agents_claude_usage"
@@ -2645,6 +2666,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_REPORTED_COST_PRICE_PATCH,
     predecessors: [SMITHERS_ENGINE_REPORTED_COST_PRICE_PREDECESSOR_PATCH],
     upstreamAbsent: []
+  },
+  {
+    id: "agents_ordered_stdout",
+    packageName: "@smthrs/agents",
+    sourceRelativePath: "src/BaseCliAgent/BaseCliAgent.js",
+    patchable: SMITHERS_AGENTS_ORDERED_STDOUT_SOURCE,
+    patched: SMITHERS_AGENTS_ORDERED_STDOUT_PATCH,
+    upstreamAbsent: ["commandSpec.orderedStdoutRecords"]
   },
   {
     id: "agents_completed_usage",

@@ -132,7 +132,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "openrouter.tsx": {
-    classifiedSourceSha256: "433001409ef01f6e51742669515dece37c15dd27a34817df35a2f086b0d7180e",
+    classifiedSourceSha256: "834b8d1893f1a6b7da9667cd5f55ecd7fd5e7dc9179ab2b307562a9913f410b4",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/1006",
@@ -226,7 +226,7 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxLines: 1_750,
     maxSyntaxNodes: 9_075,
     purpose: "adapter",
-    sourceSha256: "433001409ef01f6e51742669515dece37c15dd27a34817df35a2f086b0d7180e"
+    sourceSha256: "834b8d1893f1a6b7da9667cd5f55ecd7fd5e7dc9179ab2b307562a9913f410b4"
   },
   "pi.tsx": {
     // Raised for cumulative per-response usage, session-aware progress, and

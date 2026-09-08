@@ -155,6 +155,9 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     }
     return {
       ...command,
+      // The pinned compatibility patch preserves JSONL record order between
+      // text and events, including a terminal 429 followed by trailing output.
+      orderedStdoutRecords: true,
       // Smithers versions differ in whether Codex's generic `env` option is
       // copied into the command. Apply it at the final boundary so the managed
       // provider route and credential isolation are invariant across versions.
