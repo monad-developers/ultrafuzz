@@ -386,6 +386,22 @@ test("EVMBench consumes the same registered CLI v2 definitions without a paralle
   assertParity("init", successfulError, false);
 });
 
+test("report results expose runtime publication and terminal completion in both CLI contract readers", () => {
+  const report = {
+    markdown_path: "/run/review/runtime-report/digest/report.md",
+    json_path: "/run/review/runtime-report/digest/report.json",
+    source: "verified-runtime-report",
+    completion: "partial",
+    terminal: true
+  };
+  assertParity("report", successEnvelope("report", report), true);
+  assertParity("report", successEnvelope("report", { ...report, completion: "complete" }), true);
+  assertParity("report", successEnvelope("report", { ...report, completion: "succeeded" }), false);
+  assertParity("report", successEnvelope("report", { ...report, terminal: "true" }), false);
+  assertParity("report", successEnvelope("report", { ...report, source: "unverified-report" }), false);
+  assertParity("report", successEnvelope("report", { ...report, unexpected: true }), false);
+});
+
 function successEnvelope(command: EvmbenchCliCommand, data: Record<string, unknown>): Record<string, unknown> {
   return {
     schema_version: CLI_SCHEMA_VERSION,

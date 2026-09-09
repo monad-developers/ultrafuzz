@@ -37,6 +37,8 @@ const PARTIAL_REPORT_WARNING =
   "> **PARTIAL REPORT — coverage is incomplete.** This run did not complete successfully. The findings below cover the available verified results; missing results are coverage gaps, and an empty findings list is not a clean result. See [Run completion](#run-completion).";
 const PARTIAL_EMPTY_FINDINGS_NOTICE =
   "No production issues were reported from the available verified results. This partial report is not a clean result and does not establish that uncompleted work found no issues. See [Run completion](#run-completion).";
+const UNAVAILABLE_FINAL_REVIEW_NOTICE =
+  "**No verified report agent output is available; final review was not completed.** Property implementation coverage is unknown. This report does not claim that no properties were planned or implemented.";
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
@@ -219,6 +221,12 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (completionViolation !== undefined) return completionViolation;
   if (!markdown.includes("\n## Property implementation coverage\n")) {
     return "missing property implementation coverage";
+  }
+  if (
+    recordField(report, "property_implementation_coverage")?.status === "unavailable" &&
+    !markdownOutsideFencedCode(markdown).includes(UNAVAILABLE_FINAL_REVIEW_NOTICE)
+  ) {
+    return "missing unavailable final-review disclosure";
   }
   // A current-run projection always states its goal-search coverage, even when that statement is
   // "coverage is unknown". Requiring the heading keeps a future edit from turning a partial hunt back
@@ -982,6 +990,15 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
   if (value.status === "not-planned") {
     lines.push("- Status: `not-planned`");
     lines.push("- Reason: `property-implementation-track-not-declared`");
+    return;
+  }
+  if (value.status === "unavailable") {
+    lines.push(
+      "- Status: `unavailable`",
+      "- Reason: `final-review-not-completed`",
+      "",
+      UNAVAILABLE_FINAL_REVIEW_NOTICE
+    );
     return;
   }
   const priorities = Array.isArray(value.priorities) ? value.priorities : [];

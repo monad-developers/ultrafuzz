@@ -87,6 +87,7 @@ import {
   getRunStatus,
   initProject,
   listRuns,
+  loadCurrentFinalReportSnapshot,
   planRun,
   pauseRun,
   prepareControllerGeneration,
@@ -19038,6 +19039,86 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
   assert.equal(state.nodes?.["actors-flows"]?.status, "succeeded");
 });
 
+test("syncRun automatically publishes a partial report after an ordinary report task stops failed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: final-report
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on: [__start__]
+    outputs:
+      - path: report.json
+        contract: ultrafuzz/report@3
+        primary: true
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [final-report]
+`,
+    "utf8"
+  );
+  const runId = "sync-terminal-partial-report";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:final-report", state: "failed", attempt: 1 }],
+      includeVerifierSteps: false
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:final-report", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:final-report",
+        attempt: 1,
+        error: { message: "Synthetic report task failure" }
+      },
+      { type: "RunFailed" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const sync = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.equal(
+    sync.diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+    false,
+    JSON.stringify(sync.diagnostics)
+  );
+  assert.ok(run.value);
+  const report = loadCurrentFinalReportSnapshot(run.value.run_root);
+  assert.equal(report.artifacts.source, "verified-runtime-report");
+  assert.equal(report.terminal, true);
+  assert.equal(report.completion?.outcome, "partial");
+  assert.equal(report.completion?.counts.failed, 1);
+  assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+  assert.equal(readRunState(path.join(run.value.run_root, "state.json")).nodes["final-report"]?.status, "failed");
+  assert.equal(
+    fs.existsSync(path.join(run.value.run_root, "artifacts", "final-report", "artifact-manifest.json")),
+    false
+  );
+});
+
 test("syncRun reports a typed diagnostic when a terminal workflow failure has no failed durable node", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -23176,6 +23257,15 @@ test("syncRun cancels a nonterminal workflow at its durable workflow deadline", 
   assert.equal(acknowledged.ok, true, JSON.stringify(acknowledged.diagnostics));
   assert.equal(acknowledged.value?.status, "timed-out");
   assert.equal((fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").match(/^cancel /gmu) ?? []).length, 1);
+  assert.ok(run.value);
+  const latestSync = replayEvents(layoutForRunRoot(run.value.run_root), Number.MAX_SAFE_INTEGER)
+    .records.filter((event) => event.event_type === "workflow-synced")
+    .at(-1);
+  assert.equal(
+    latestSync?.payload.workflow_state,
+    "cancelled",
+    "terminal acknowledgement is persisted even when product status is unchanged"
+  );
 });
 
 test("syncRun records model fan-out attempts independently", async () => {

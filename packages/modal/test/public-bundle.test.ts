@@ -345,6 +345,75 @@ describe("public Modal benchmark bundles", () => {
     expect(() => parsePublicBenchmarkBundle(twoFailures)).toThrow(/not ready for scoring/u);
   });
 
+  it("assembles partial reports with verified repository lineage and rejects unavailable fallback identity", () => {
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-partial-lineage-"));
+    try {
+      const rowId = "example-row";
+      const files = completePublicSources(root, [rowId]);
+      const sourcePath = (name: string) => {
+        const file = files.find((entry) => entry.path === name);
+        if (file === undefined) throw new Error(`missing fixture file ${name}`);
+        return file.source;
+      };
+      const reportPath = sourcePath(`reports/${rowId}/report.json`);
+      const report = JSON.parse(fs.readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+      const metadata = report.run_metadata as Record<string, unknown>;
+      report.completion = {
+        schema_version: "ultrafuzz.report-completion.v1",
+        run_id: metadata.run_id,
+        outcome: "partial",
+        counts: { planned: 1, succeeded: 0, failed: 1, timed_out: 0, skipped: 0, cancelled: 0, unverified: 0 },
+        incomplete_nodes: [{ node_id: "report", outcome: "failed", failure_category: "task-failure" }],
+        incomplete_nodes_omitted: 0
+      };
+      report.issues = [];
+      report.non_production_outcomes = [];
+      report.property_provenance = [];
+      const writeProjection = () => {
+        const projection = projectPublicCanonicalFinalReport(report);
+        fs.writeFileSync(reportPath, `${JSON.stringify(projection.report, null, 2)}\n`);
+        fs.writeFileSync(sourcePath(`reports/${rowId}/report.md`), projection.markdown);
+      };
+      writeProjection();
+      const summaryPath = sourcePath("eval/summary.json");
+      const summary = JSON.parse(fs.readFileSync(summaryPath, "utf8")) as { rows: Array<{ finding_count: number }> };
+      const score = summary.rows[0];
+      if (score === undefined) throw new Error("missing score fixture");
+      score.finding_count = 0;
+      fs.writeFileSync(summaryPath, `${JSON.stringify(summary)}\n`);
+      const diagnosticsPath = sourcePath("eval/public-eval-diagnostics.json");
+      const diagnostics = JSON.parse(fs.readFileSync(diagnosticsPath, "utf8")) as {
+        summary: Record<string, unknown>;
+        rows: Array<Record<string, unknown>>;
+      };
+      Object.assign(diagnostics.summary, { workflow_succeeded: 0, workflow_failed: 1 });
+      const diagnostic = diagnostics.rows[0];
+      if (diagnostic === undefined) throw new Error("missing diagnostics fixture");
+      Object.assign(diagnostic, {
+        final_status: "failed",
+        workflow_status: "failed",
+        terminal_disposition: "operational-failure"
+      });
+      fs.writeFileSync(diagnosticsPath, `${JSON.stringify(diagnostics)}\n`);
+      const bundle = createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files });
+      expect(parsePublicBenchmarkBundle(bundle).status).toBe("failed");
+      expect(bundleFileText(bundle, `reports/${rowId}/report.md`)).toMatch(/^# Ultrafuzz report — PARTIAL/u);
+      metadata.repository = "https://github.com/example/different-repository";
+      writeProjection();
+      expect(() => createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files })).toThrow(
+        /does not match its target repository/u
+      );
+      metadata.repository = "unavailable";
+      report.property_implementation_coverage = { status: "unavailable", reason: "final-review-not-completed" };
+      writeProjection();
+      expect(() => createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files })).toThrow(
+        /does not match its target repository/u
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects malformed entries instead of counting them as smoke findings", () => {
     const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-invalid-finding-"));
     const rowId = "target-a-runner-trial-1";

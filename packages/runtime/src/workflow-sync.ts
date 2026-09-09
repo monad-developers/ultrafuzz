@@ -55,6 +55,7 @@ import {
   type ArtifactProvenance,
   type ArtifactVerificationEntry,
   type ArtifactVerificationMarker,
+  type EventRecord,
   type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
   type NodeAttemptAgentProvenance,
@@ -107,6 +108,7 @@ import {
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
+import { publishTerminalReport } from "./terminal-report.js";
 import {
   parseCurrentSmithersInspect,
   requestSmithersCancel,
@@ -1657,12 +1659,23 @@ export async function synchronizeLinkedWorkflowRun(
       forbiddenSecretValues
     });
   }
+  // A stopped-run acknowledgement is reporting authority even when an earlier
+  // deadline already terminalized product state and no task row changed.
+  const stoppedObservationChanged =
+    ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState) &&
+    replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter(
+        (event): event is Extract<EventRecord, { event_type: "workflow-synced" }> =>
+          event.event_type === "workflow-synced" && event.payload.workflow_run_id === evidence.smithersRunId
+      )
+      .at(-1)?.payload.workflow_state !== inspect.runState;
   if (
     runStatusChanged ||
     syncResult.changed ||
     accountingResult.changed ||
     workflowControl.transitioned ||
-    deadlineApplied
+    deadlineApplied ||
+    stoppedObservationChanged
   ) {
     const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
     if (preEventWriteBudgetDiagnostic !== undefined) {
@@ -1712,6 +1725,24 @@ export async function synchronizeLinkedWorkflowRun(
         payload,
         forbiddenSecretValues
       });
+    }
+  }
+
+  if (
+    ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState) &&
+    inspect.exhaustedLoops.length === 0 &&
+    !diagnostics.some((diagnostic) => diagnostic.severity === "error")
+  ) {
+    try {
+      assertSynchronizationBudget(control);
+      publishTerminalReport(layout.root, {
+        workflowRunId: evidence.smithersRunId,
+        workflowState: inspect.runState as "succeeded" | "succeeded-with-failures" | "failed" | "cancelled"
+      });
+    } catch (error) {
+      const interrupted = synchronizationInterruptionDiagnostic(error);
+      if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+      diagnostics.push(diagnosticFromError(error, "report", "TERMINAL_REPORT_UNAVAILABLE"));
     }
   }
 

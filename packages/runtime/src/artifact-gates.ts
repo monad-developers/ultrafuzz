@@ -2379,7 +2379,8 @@ function semanticArtifactSetForSchema(input: {
     const severity = semanticFinalSeverityContext(input.layout, input.node, input.attemptAuthority);
     const campaignSummary = semanticCampaignSummary(input.layout, input.node, input.attemptAuthority);
     return {
-      // No runtime-authenticated whole-run completion producer is defined yet.
+      // Whole-run completion is added by the terminal controller presentation,
+      // after this report task settles; agent output cannot attest its own census.
       reportCompletion: null,
       ...(campaignSummary === undefined ? {} : { campaignSummary: campaignSummary.value }),
       ...(campaignSummary?.path === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),

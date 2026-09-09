@@ -8,14 +8,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  appendEvent,
   createEventRecord,
+  parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
+  readRunMetadataDocument,
   readRunState,
   sha256Bytes,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  writeRunMetadataDocument,
+  writeRunState,
   type ArtifactVerificationMarker,
   type PlannedGraphNodeDocument,
   type RunLayout
@@ -25,6 +30,7 @@ import {
   loadVerifiedRunOutputAuthoritySnapshot,
   planRun,
   projectCanonicalFinalReport,
+  publishTerminalReport,
   sealWorkflowControlFiles
 } from "@ultrafuzz/runtime";
 
@@ -621,6 +627,135 @@ test("dashboard does not hide unavailable custom report authority after the rena
       String(error.error),
       /claims succeeded without complete current verification\/finalization authority/iu
     );
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard rejects a malformed runtime report receipt instead of serving an older agent report", async () => {
+  const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
+  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  try {
+    const valid = await fetch(apiUrl(handle.url, "/api/report"));
+    assert.equal(valid.status, 200, await valid.text());
+    const receiptPath = path.join(fixture.layout.root, "review", "runtime-report", "current.json");
+    fs.mkdirSync(path.dirname(receiptPath), { recursive: true });
+    fs.writeFileSync(receiptPath, "{", "utf8");
+
+    const response = await fetch(apiUrl(handle.url, "/api/report"));
+    assert.equal(response.status, 500);
+    const error = await parseHttpResponse(response, "errorResponse");
+    assert.match(String(error.error), /terminal report receipt|JSON|parse|object-property/iu);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard serves the current partial report while retaining the failed run state", async () => {
+  const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
+  const { layout } = fixture;
+  const manifest = parseSmithersTaskManifestBytes(fs.readFileSync(path.join(layout.root, "smithers", "tasks.json")));
+  const task = manifest.tasks.find((candidate) => candidate.attemptId === fixture.attemptId);
+  assert.ok(task);
+  const workflowRunId = manifest.smithers_run_id;
+  const generation = sha256Bytes(fs.readFileSync(path.join(layout.root, "smithers", "control-integrity.json")));
+  const linkId = "123e4567-e89b-42d3-a456-426614174000";
+  const executionSnapshot = `smithers/execution-snapshots/${generation}`;
+  updateNodeState(layout, fixture.attemptId, {
+    status: "failed",
+    provenance: {
+      workflow: {
+        run_id: workflowRunId,
+        task_id: task.smithersNodeId,
+        agent_task_id: task.smithersNodeId,
+        verifier_task_id: task.verifierSmithersNodeId,
+        state: "failed",
+        attempt: 1
+      },
+      failure: {
+        category: "agent-failure",
+        causal_task_id: task.smithersNodeId,
+        causal_failure_category: "agent-failure",
+        dependent_task_ids: []
+      }
+    }
+  });
+  const state = readRunState(layout);
+  state.status = "failed";
+  state.finished_at = new Date().toISOString();
+  state.provenance = {
+    workflow: {
+      inspection: { runId: workflowRunId },
+      runId: workflowRunId,
+      compiledRunId: workflowRunId,
+      name: manifest.workflow_name,
+      controlGeneration: generation,
+      linkId,
+      executionSnapshot
+    }
+  };
+  writeRunState(layout, state);
+  const metadata = readRunMetadataDocument(layout.runMetadataPath);
+  writeRunMetadataDocument(layout.runMetadataPath, {
+    ...metadata,
+    workflow_ids: [workflowRunId],
+    workflow: {
+      run_id: workflowRunId,
+      compiled_run_id: workflowRunId,
+      name: manifest.workflow_name,
+      path: "smithers/workflow.tsx",
+      evidence_path: "smithers/evidence.json",
+      expanded_graph_path: "smithers/expanded-graph.json",
+      config_path: "smithers/config.json",
+      input_path: "smithers/input.json",
+      tasks_path: "smithers/tasks.json",
+      control_integrity_path: "smithers/control-integrity.json",
+      control_generation: generation,
+      workflow_link_id: linkId,
+      execution_snapshot_path: executionSnapshot,
+      task_node_ids: manifest.tasks.map((entry) => entry.smithersNodeId)
+    }
+  });
+  appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: fixture.attemptId,
+    status: "failed",
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_task_id: task.smithersNodeId,
+      workflow_state: "failed",
+      attempt: 1
+    }
+  });
+  appendEvent(layout, {
+    eventType: "workflow-synced",
+    status: "failed",
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_status: "failed",
+      workflow_state: "failed",
+      exhausted_loops: [],
+      synced_nodes: manifest.tasks.length,
+      accounting_available: false,
+      recovery_due: false,
+      deadline_exceeded: false
+    }
+  });
+  const snapshot = publishTerminalReport(layout.root, { workflowRunId, workflowState: "failed" });
+  assert.ok(snapshot);
+  const stateBytes = fs.readFileSync(layout.statePath);
+  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  try {
+    const report = await getJson<{
+      markdown: string;
+      json_path: string;
+      json: { completion: { outcome: string; counts: { failed: number } } };
+    }>(apiUrl(handle.url, "/api/report"), "reportResponse");
+    assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+    assert.match(report.json_path, /^review\/runtime-report\/[0-9a-f]{64}\/report.json$/u);
+    assert.equal(report.json.completion.outcome, "partial");
+    assert.equal(report.json.completion.counts.failed, 1);
+    assert.deepEqual(fs.readFileSync(layout.statePath), stateBytes);
   } finally {
     await handle.close();
   }

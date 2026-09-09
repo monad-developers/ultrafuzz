@@ -17,6 +17,7 @@ export const CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:cloud-execution-generation:1" as const;
 export const SMITHERS_SUBMISSION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-submission:1" as const;
 export const SMITHERS_RESET_NODE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-reset-node:1" as const;
+export const TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:terminal-report-receipt:1" as const;
 export const PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2" as const;
 export const PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID =
@@ -36,6 +37,7 @@ export const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-
 export const CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION = "ultrafuzz.cloud.execution-generation.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
 export const SMITHERS_RESET_NODE_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
+export const TERMINAL_REPORT_RECEIPT_SCHEMA_VERSION = "ultrafuzz.terminal-report-receipt.v1" as const;
 export const PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION = "ultrafuzz.pinned-submodules.v2" as const;
 export const PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION = "ultrafuzz.pinned-submodules-expectation.v1" as const;
 
@@ -48,6 +50,7 @@ export const RUNTIME_DOCUMENT_SCHEMA_IDS = Object.freeze([
   PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
   SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+  TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID,
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
   WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
   WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
@@ -217,6 +220,20 @@ export interface SmithersResetNodeDocument {
   applied_at: string;
 }
 
+/** A publication receipt; readers must rederive it from independent controller authority. */
+export interface TerminalReportReceiptDocument {
+  schema_version: typeof TERMINAL_REPORT_RECEIPT_SCHEMA_VERSION;
+  run_id: string;
+  workflow_run_id: string;
+  workflow_state: "succeeded" | "succeeded-with-failures" | "failed" | "cancelled";
+  control_generation: string;
+  sync_event_id: string;
+  source_sha256: string;
+  completion_sha256: string;
+  json_sha256: string;
+  markdown_sha256: string;
+}
+
 export interface PinnedSubmoduleGitlinkDocument {
   path: string;
   commit: string;
@@ -279,6 +296,7 @@ export interface RuntimeDocumentBySchemaId {
   [CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID]: CloudExecutionGenerationDocument;
   [SMITHERS_SUBMISSION_JSON_SCHEMA_ID]: SmithersSubmissionDocument;
   [SMITHERS_RESET_NODE_JSON_SCHEMA_ID]: SmithersResetNodeDocument;
+  [TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID]: TerminalReportReceiptDocument;
   [PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID]: PinnedSubmoduleSnapshotDocument;
   [PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID]: PinnedSubmoduleExpectationDocument;
 }

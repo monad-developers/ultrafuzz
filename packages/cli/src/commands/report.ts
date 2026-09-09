@@ -22,7 +22,7 @@ interface ExpectedAccounting {
 }
 
 export default class Report extends Command {
-  static override summary = "Show the agent-written final report for a run";
+  static override summary = "Show the verified final report for a run";
   static override args = { runId: Args.string({ required: true, description: "Ultrafuzz run ID" }) };
   static override flags = globalFlags;
 
@@ -59,8 +59,14 @@ export default class Report extends Command {
         {
           ok: true,
           command: "report",
-          data: loaded.artifacts,
-          text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n${diagnosticsText(validationDiagnostics)}`,
+          data: {
+            ...loaded.artifacts,
+            ...(loaded.completion === undefined ? {} : { completion: loaded.completion.outcome }),
+            terminal: loaded.terminal
+          },
+          text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n${
+            loaded.completion === undefined ? "" : `Completion: ${loaded.completion.outcome}\n`
+          }${diagnosticsText(validationDiagnostics)}`,
           diagnostics
         },
         flags.json === true

@@ -61,7 +61,7 @@ import {
   modelProfilesForTopology,
   isVerifiedOutputAuthorityUnavailable,
   loadGoalSearchCoverageSnapshot,
-  loadVerifiedFinalReportSnapshot,
+  loadCurrentFinalReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   projectCanonicalFinalReport,
   verifySealedTaskManifestSnapshot,
@@ -1029,7 +1029,7 @@ class DashboardApp {
     }
     const declaration = dashboardDeclaredReportAvailability(context.runRoot);
     try {
-      const loaded = loadVerifiedFinalReportSnapshot(context.runRoot);
+      const loaded = loadCurrentFinalReportSnapshot(context.runRoot);
       return dashboardHttpDocument("report", {
         markdown_path: posixRelativePath(context.runRoot, loaded.artifacts.markdown_path),
         markdown: loaded.markdown,

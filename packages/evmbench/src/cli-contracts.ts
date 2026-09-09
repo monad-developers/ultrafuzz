@@ -149,7 +149,9 @@ export interface EvmbenchStatusData {
 export interface EvmbenchReportData {
   markdown_path: string;
   json_path: string;
-  source: "verified-agent-report";
+  source: "verified-agent-report" | "verified-runtime-report";
+  completion?: "complete" | "partial";
+  terminal?: boolean;
 }
 
 export interface EvmbenchCliDataMap {

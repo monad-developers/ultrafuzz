@@ -13,13 +13,16 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactValidationWarnings,
+  appendEvent,
   executeSemanticGate,
   createRunLayout,
   getNodeArtifactDir,
+  readRunState,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  writeRunState,
   type ArtifactManifest,
   type ArtifactManifestOutputContract,
   type ArtifactValidationWarning,
@@ -41,6 +44,11 @@ import {
   loadVerifiedRunOutputSnapshots,
   VerifiedOutputError
 } from "../src/verified-output.js";
+import {
+  assertCurrentFinalReportSnapshotRemainedCurrent,
+  loadCurrentFinalReportSnapshot,
+  publishTerminalReport
+} from "../src/terminal-report.js";
 
 const WORKFLOW_RUN_ID = "workflow-current";
 const REPORT_ATTEMPT_ID = "release-summary";
@@ -61,6 +69,264 @@ interface CampaignAuthorityFixture {
   layout: RunLayout;
   evidencePath: string;
   evidenceBytes: Buffer;
+}
+
+test("terminal controller report adds authenticated complete census without changing agent output", () => {
+  const fixture = createVerifiedReportFixture("terminal-report-complete");
+  recordStoppedReportFixture(fixture, "succeeded");
+  const stateBefore = fs.readFileSync(fixture.layout.statePath);
+  const published = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "succeeded"
+  });
+  assert.ok(published);
+  assert.equal(published.artifacts.source, "verified-runtime-report");
+  assert.equal(published.completion?.outcome, "complete");
+  assert.equal(published.completion?.counts.planned, 1);
+  assert.equal(published.completion?.counts.succeeded, 1);
+  assert.equal(published.terminal, true);
+  assert.deepEqual(loadCurrentFinalReportSnapshot(fixture.layout.root), published);
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
+  assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
+  assert.deepEqual(fs.readFileSync(fixture.layout.statePath), stateBefore);
+  assert.deepEqual(
+    publishTerminalReport(fixture.layout.root, { workflowRunId: WORKFLOW_RUN_ID, workflowState: "succeeded" }),
+    published
+  );
+  const state = readRunState(fixture.layout);
+  state.concurrency.observed_at = new Date(Date.now() + 1_000).toISOString();
+  writeRunState(fixture.layout, state);
+  assert.deepEqual(
+    loadCurrentFinalReportSnapshot(fixture.layout.root),
+    published,
+    "heartbeat observations do not change report generations"
+  );
+});
+
+test("terminal fallback excludes report bytes belonging to a failed agent", () => {
+  const fixture = createVerifiedReportFixture("terminal-report-failed-agent");
+  recordStoppedReportFixture(fixture, "failed");
+  const stateBefore = fs.readFileSync(fixture.layout.statePath);
+  const published = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "failed"
+  });
+  assert.ok(published);
+  assert.equal(published.completion?.outcome, "partial");
+  assert.equal(published.completion?.counts.failed, 1);
+  assert.match(published.markdown, /^# Ultrafuzz report — PARTIAL/u);
+  assert.match(published.markdown, /not a clean result/u);
+  assert.match(published.markdown, /final review was not completed/iu);
+  assert.deepEqual((published.json as Record<string, unknown>).issues, []);
+  assert.deepEqual(loadCurrentFinalReportSnapshot(fixture.layout.root), published);
+  assert.deepEqual(fs.readFileSync(fixture.layout.statePath), stateBefore);
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
+});
+
+test("terminal presentation discloses tolerated failures and preserves verified report output", () => {
+  const fixture = createVerifiedReportFixture("terminal-report-tolerated-failure", {
+    withPrerequisite: true,
+    optionalPrerequisite: true
+  });
+  failReportFixtureNode(fixture.layout, "producer");
+  recordStoppedReportFixture(fixture, "succeeded", "succeeded-with-failures");
+  const published = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "succeeded-with-failures"
+  });
+  assert.ok(published);
+  assert.equal(published.completion?.counts.planned, 2);
+  assert.equal(published.completion?.counts.succeeded, 1);
+  assert.equal(published.completion?.counts.failed, 1);
+  assert.equal(published.completion?.outcome, "partial");
+  const expected = JSON.parse(fixture.reportBytes.toString("utf8")) as Record<string, unknown>;
+  assert.deepEqual(published.json, { ...expected, completion: published.completion });
+  assert.match(published.markdown, /producer/u);
+});
+
+test("terminal report publication blocks unattributed, active, exhausted, and contradictory workflow evidence", () => {
+  for (const failure of ["active", "exhausted", "cancelled", "unattributed", "wrong-generation"] as const) {
+    const fixture = createVerifiedReportFixture(`terminal-report-${failure}`);
+    recordStoppedReportFixture(fixture, "succeeded");
+    if (failure === "active" || failure === "wrong-generation") {
+      const state = readRunState(fixture.layout);
+      if (failure === "active") state.status = "running";
+      else {
+        assert.ok(state.provenance);
+        state.provenance.workflow.controlGeneration = "0".repeat(64);
+      }
+      writeRunState(fixture.layout, state);
+    } else if (failure === "unattributed") {
+      appendEvent(fixture.layout, {
+        eventType: "workflow-failure-unattributed",
+        status: "failed",
+        payload: {
+          workflow_run_id: WORKFLOW_RUN_ID,
+          workflow_state: "failed",
+          failed_workflow_tasks: ["controller"],
+          durable_node_statuses: ["succeeded"]
+        }
+      });
+    } else {
+      appendEvent(fixture.layout, {
+        eventType: "workflow-synced",
+        status: "succeeded",
+        payload: {
+          workflow_run_id: WORKFLOW_RUN_ID,
+          workflow_status: "finished",
+          workflow_state: failure === "cancelled" ? "cancelled" : "succeeded",
+          exhausted_loops: failure === "exhausted" ? [{ id: "controller-loop", iteration: 1, max_iterations: 1 }] : [],
+          synced_nodes: 1,
+          accounting_available: false,
+          recovery_due: false,
+          deadline_exceeded: false
+        }
+      });
+    }
+    assert.throws(() =>
+      publishTerminalReport(fixture.layout.root, { workflowRunId: WORKFLOW_RUN_ID, workflowState: "succeeded" })
+    );
+    assert.equal(fs.existsSync(path.join(fixture.layout.root, "review/runtime-report/current.json")), false);
+  }
+});
+
+test("terminal reports fail closed on altered publications, receipts, and post-publication retries", () => {
+  for (const mutation of ["json", "markdown", "receipt", "missing-receipt", "retry"] as const) {
+    const fixture = createVerifiedReportFixture(`terminal-report-mutation-${mutation}`);
+    recordStoppedReportFixture(fixture, "failed");
+    const published = publishTerminalReport(fixture.layout.root, {
+      workflowRunId: WORKFLOW_RUN_ID,
+      workflowState: "failed"
+    });
+    assert.ok(published);
+    if (mutation === "retry") {
+      const state = readRunState(fixture.layout);
+      const node = state.nodes[fixture.attemptId];
+      assert.ok(node);
+      node.status = "pending";
+      node.wait_since = new Date().toISOString();
+      node.wait_reason = "dependency";
+      node.next_eligible_action = "dependency-complete";
+      state.status = "running";
+      writeRunState(fixture.layout, state);
+    } else if (mutation === "missing-receipt") {
+      fs.unlinkSync(path.join(fixture.layout.root, "review/runtime-report/current.json"));
+    } else {
+      const file =
+        mutation === "json"
+          ? published.artifacts.json_path
+          : mutation === "markdown"
+            ? published.artifacts.markdown_path
+            : path.join(fixture.layout.root, "review/runtime-report/current.json");
+      fs.writeFileSync(file, "{}\n");
+    }
+    assert.throws(() => loadCurrentFinalReportSnapshot(fixture.layout.root));
+    assert.throws(() => assertCurrentFinalReportSnapshotRemainedCurrent(published));
+  }
+});
+
+test("fallback cannot downgrade verifier failure or changed successful report authority", () => {
+  for (const failure of ["artifact-contract", "changed-success", "missing-success-marker"] as const) {
+    const fixture = createVerifiedReportFixture(`terminal-report-integrity-${failure}`);
+    recordStoppedReportFixture(fixture, failure === "artifact-contract" ? "failed" : "succeeded");
+    if (failure === "artifact-contract") {
+      const state = readRunState(fixture.layout);
+      const node = state.nodes[fixture.attemptId];
+      assert.ok(node);
+      node.provenance = {
+        ...node.provenance,
+        failure: {
+          category: "artifact-contract",
+          causal_task_id: `verify:${fixture.attemptId}`,
+          causal_failure_category: "artifact-contract",
+          dependent_task_ids: []
+        }
+      };
+      writeRunState(fixture.layout, state);
+    } else if (failure === "changed-success") {
+      fs.writeFileSync(fixture.reportPath, "{}\n");
+    } else {
+      fs.unlinkSync(path.join(fixture.layout.root, ".ultrafuzz-verification", `${fixture.attemptId}.json`));
+    }
+    assert.throws(() =>
+      publishTerminalReport(fixture.layout.root, {
+        workflowRunId: WORKFLOW_RUN_ID,
+        workflowState: failure === "artifact-contract" ? "failed" : "succeeded"
+      })
+    );
+    assert.equal(fs.existsSync(path.join(fixture.layout.root, "review/runtime-report/current.json")), false);
+  }
+});
+
+function failReportFixtureNode(layout: RunLayout, attemptId: string): void {
+  updateNodeState(layout, attemptId, {
+    status: "failed",
+    timed_out: false,
+    provenance: {
+      workflow: {
+        run_id: WORKFLOW_RUN_ID,
+        task_id: `node:${attemptId}`,
+        agent_task_id: `node:${attemptId}`,
+        verifier_task_id: `verify:${attemptId}`,
+        state: "failed",
+        attempt: 1
+      },
+      failure: {
+        category: "agent-failure",
+        causal_task_id: `node:${attemptId}`,
+        causal_failure_category: "agent-failure",
+        dependent_task_ids: []
+      }
+    }
+  });
+  appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: attemptId,
+    status: "failed",
+    payload: {
+      workflow_run_id: WORKFLOW_RUN_ID,
+      workflow_task_id: `node:${attemptId}`,
+      workflow_state: "failed",
+      attempt: 1
+    }
+  });
+}
+
+function recordStoppedReportFixture(
+  fixture: ReportFixture,
+  status: "succeeded" | "failed",
+  workflowState: "succeeded" | "succeeded-with-failures" | "failed" = status
+): void {
+  if (status === "failed") failReportFixtureNode(fixture.layout, fixture.attemptId);
+  const state = readRunState(fixture.layout);
+  state.status = status;
+  state.finished_at = new Date().toISOString();
+  state.provenance = {
+    workflow: {
+      inspection: { runId: WORKFLOW_RUN_ID },
+      runId: WORKFLOW_RUN_ID,
+      compiledRunId: `ultrafuzz-${fixture.layout.runId}`,
+      name: WORKFLOW_RUN_ID,
+      controlGeneration: digest(fs.readFileSync(path.join(fixture.layout.root, "smithers/control-integrity.json"))),
+      linkId: crypto.randomUUID(),
+      executionSnapshot: `smithers/execution-snapshots/${digest(fs.readFileSync(path.join(fixture.layout.root, "smithers/control-integrity.json")))}`
+    }
+  };
+  writeRunState(fixture.layout, state);
+  appendEvent(fixture.layout, {
+    eventType: "workflow-synced",
+    status,
+    payload: {
+      workflow_run_id: WORKFLOW_RUN_ID,
+      workflow_status: status === "succeeded" ? "finished" : "failed",
+      workflow_state: workflowState,
+      exhausted_loops: [],
+      synced_nodes: Object.keys(state.nodes).length,
+      accounting_available: false,
+      recovery_due: false,
+      deadline_exceeded: false
+    }
+  });
 }
 
 test("verified final-report reader binds immutable current bytes to verifier and controller authority", () => {

@@ -691,7 +691,13 @@
           "type": "string"
         },
         "source": {
-          "const": "verified-agent-report"
+          "enum": ["verified-agent-report", "verified-runtime-report"]
+        },
+        "completion": {
+          "enum": ["complete", "partial"]
+        },
+        "terminal": {
+          "type": "boolean"
         }
       }
     }

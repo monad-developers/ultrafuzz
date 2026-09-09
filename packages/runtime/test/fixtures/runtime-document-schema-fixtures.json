@@ -91,6 +91,18 @@
     "stderr": "",
     "submitted_at": "2026-08-09T12:00:00.000Z"
   },
+  "terminal-report-receipt.schema.json": {
+    "schema_version": "ultrafuzz.terminal-report-receipt.v1",
+    "run_id": "example-run",
+    "workflow_run_id": "workflow-example",
+    "workflow_state": "failed",
+    "control_generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sync_event_id": "evt-bbbbbbbbbbbbbbbbbbbbbbbb",
+    "source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "completion_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "json_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "markdown_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
   "workflow-control-integrity.schema.json": {
     "schema_version": "ultrafuzz.workflow-control-integrity.v2",
     "run_id": "example-run",

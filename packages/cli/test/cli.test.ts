@@ -11,6 +11,7 @@ import {
   REPORT_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactSchemaDirectory,
+  appendEvent,
   appendNodeAttempt,
   appendUsageEvents,
   createInitialRunState,
@@ -18,6 +19,7 @@ import {
   createRunLayout,
   layoutForRunRoot,
   manifestDigest,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunMetadataDocument,
   updateNodeState,
@@ -34,6 +36,7 @@ import {
   loadVerifiedRunOutputSnapshots,
   projectCanonicalFinalReport,
   planRun,
+  publishTerminalReport,
   syncRun
 } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
@@ -1149,6 +1152,71 @@ async function createReportRun(
   return parseJson(run).data as { run_id: string; run_root: string };
 }
 
+async function createTerminalPartialReport(project: string, runId: string) {
+  const run = await createReportRun(project, runId, writeCustomReportTopology);
+  const layout = layoutForRunRoot(run.run_root, run.run_id);
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, run.run_id);
+  assert.ok(metadata.workflow);
+  const workflowRunId = metadata.workflow.run_id;
+  const tasks = parseSmithersTaskManifestBytes(fs.readFileSync(path.join(run.run_root, "smithers", "tasks.json")));
+  for (const task of tasks.tasks) {
+    updateNodeState(layout, task.attemptId, {
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      wait_since: undefined,
+      wait_reason: undefined,
+      next_eligible_action: undefined,
+      provenance: {
+        workflow: {
+          run_id: workflowRunId,
+          task_id: task.smithersNodeId,
+          agent_task_id: task.smithersNodeId,
+          verifier_task_id: task.verifierSmithersNodeId,
+          state: "failed",
+          attempt: 1
+        },
+        failure: {
+          category: "agent-failure",
+          causal_task_id: task.smithersNodeId,
+          causal_failure_category: "agent-failure",
+          dependent_task_ids: []
+        }
+      }
+    });
+    appendEvent(layout, {
+      eventType: "node-synced",
+      nodeId: task.attemptId,
+      status: "failed",
+      payload: {
+        workflow_run_id: workflowRunId,
+        workflow_task_id: task.smithersNodeId,
+        workflow_state: "failed",
+        attempt: 1
+      }
+    });
+  }
+  updateRunStatus(layout, "failed");
+  appendEvent(layout, {
+    eventType: "workflow-synced",
+    status: "failed",
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_status: "failed",
+      workflow_state: "failed",
+      exhausted_loops: [],
+      synced_nodes: tasks.tasks.length,
+      accounting_available: false,
+      recovery_due: false,
+      deadline_exceeded: false
+    }
+  });
+  const stateBytes = fs.readFileSync(layout.statePath);
+  const report = publishTerminalReport(run.run_root, { workflowRunId, workflowState: "failed" });
+  assert.ok(report);
+  assert.deepEqual(fs.readFileSync(layout.statePath), stateBytes, "publication must preserve failed run state");
+  return { run, report, stateBytes };
+}
+
 function bundleFixtureEvent(runId: string) {
   return createEventRecord(
     { runId },
@@ -1554,11 +1622,20 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     partialPricing: true,
     unpricedEventCount: 1
   });
+  const terminalReport = publishTerminalReport(runData.run_root, {
+    workflowRunId: "ultrafuzz-cli-run",
+    workflowState: "succeeded"
+  });
+  assert.ok(terminalReport);
   const report = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(report.code, 0, report.stderr);
+  assert.equal(report.code, 0, `${report.stderr}\n${report.stdout}`);
   const reportBody = parseJson(report);
   assertNoSmithersSurface(reportBody);
-  assert.equal((reportBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
+  assert.deepEqual(reportBody.data, {
+    ...terminalReport.artifacts,
+    completion: "complete",
+    terminal: true
+  });
   assert.equal(accountingMismatchCount(reportBody), 0);
   const reportMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(reportMarkdown, /- Tokens used: `123`/u);
@@ -2079,10 +2156,18 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
   assert.equal(result.code, 0, result.stderr);
-  const data = parseJson(result).data as { json_path: string; markdown_path: string; source: string };
+  const data = parseJson(result).data as {
+    json_path: string;
+    markdown_path: string;
+    source: string;
+    terminal: boolean;
+    completion?: string;
+  };
   assert.equal(data.json_path, reportPath);
   assert.equal(data.markdown_path, markdownPath);
   assert.equal(data.source, "verified-agent-report");
+  assert.equal(data.terminal, false, "an available report does not imply the workflow has stopped");
+  assert.equal(data.completion, undefined, "agent report availability does not authenticate whole-run coverage");
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
@@ -2114,6 +2199,60 @@ test("report displays authenticated final-verifier warnings while preserving the
   assert.match(text.stdout, /ARTIFACT_OPTIONAL_METADATA_MISSING/u);
   assert.match(text.stdout, /artifacts\/final-report\/report\.json#\$\.issues\[0\]\.confidence/u);
   assertFinalReportUnchanged(reportDir, before);
+});
+
+test("report exposes terminal partial coverage and bundles only the authenticated runtime publication", async () => {
+  const project = tempProject();
+  const { run, report, stateBytes } = await createTerminalPartialReport(project, "report-runtime-partial");
+  const staleDirectory = path.join(run.run_root, "review", "runtime-report", "unverified-generation");
+  fs.mkdirSync(staleDirectory, { recursive: true });
+  fs.writeFileSync(path.join(staleDirectory, "report.json"), '{"unverified":true}\n');
+
+  const result = await cli(project, ["report", run.run_id, "--json"]);
+  assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+  assert.deepEqual(parseJson(result).data, {
+    ...report.artifacts,
+    completion: "partial",
+    terminal: true
+  });
+  assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+
+  const bundled = await cli(project, ["report", "bundle", run.run_id, "--json"]);
+  assert.equal(bundled.code, 0, `${bundled.stderr}\n${bundled.stdout}`);
+  const bundlePath = (parseJson(bundled).data as { zip_path: string }).zip_path;
+  const zip = new AdmZip(bundlePath);
+  assert.ok(report.publications);
+  const publicationPaths = report.publications.map((publication) =>
+    path.relative(run.run_root, publication.path).split(path.sep).join("/")
+  );
+  assert.deepEqual(
+    zip
+      .getEntries()
+      .map((entry) => entry.entryName)
+      .filter((name) => name.startsWith("review/runtime-report/"))
+      .sort(),
+    [...publicationPaths].sort()
+  );
+  for (const publication of report.publications) {
+    assert.deepEqual(zip.readFile(path.relative(run.run_root, publication.path)), publication.bytes);
+  }
+  assert.deepEqual(fs.readFileSync(path.join(run.run_root, "state.json")), stateBytes);
+});
+
+test("report bundle rejects receipt bytes changed only during archive capture", async () => {
+  const project = tempProject();
+  const { run, report } = await createTerminalPartialReport(project, "report-runtime-receipt-change");
+  const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
+  assert.ok(receipt);
+  const bundled = await withInjectedBundleCollectionRead(
+    receipt.path,
+    Buffer.alloc(receipt.bytes.byteLength, 0x78),
+    () => cli(project, ["report", "bundle", run.run_id, "--json"])
+  );
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /validated report changed/iu);
+  assert.deepEqual(fs.readFileSync(receipt.path), receipt.bytes);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${run.run_id}-report-bundle.zip`)), false);
 });
 
 test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {

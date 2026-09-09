@@ -1611,6 +1611,11 @@ const reportCoverageNotPlannedSchema = z.strictObject({
   reason: z.literal("property-implementation-track-not-declared")
 });
 
+const reportCoverageUnavailableSchema = z.strictObject({
+  status: z.literal("unavailable"),
+  reason: z.literal("final-review-not-completed")
+});
+
 const reportIssueSchema = findingSchema.safeExtend({
   notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   description: nonEmptyString,
@@ -1686,7 +1691,36 @@ export const reportSchema = withDocumentMetadata(
       non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
       coverage_evidence: coverageEvidenceSchema.optional(),
       property_provenance: z.array(reportPropertyProvenanceSchema),
-      property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
+      property_implementation_coverage: z.union([
+        reportCoverageNotPlannedSchema,
+        reportCoverageUnavailableSchema,
+        reportCoverageSchema
+      ])
+    })
+    .meta({
+      allOf: [
+        {
+          if: {
+            properties: {
+              property_implementation_coverage: {
+                type: "object",
+                properties: { status: { const: "unavailable" } },
+                required: ["status"]
+              }
+            },
+            required: ["property_implementation_coverage"]
+          },
+          then: {
+            required: ["completion"],
+            properties: {
+              completion: { type: "object", properties: { outcome: { const: "partial" } } },
+              issues: { type: "array", maxItems: 0 },
+              non_production_outcomes: { type: "array", maxItems: 0 },
+              property_provenance: { type: "array", maxItems: 0 }
+            }
+          }
+        }
+      ]
     })
     .superRefine((report, context) => {
       if (report.completion !== undefined && report.completion.run_id !== report.run_metadata.run_id) {
@@ -1694,6 +1728,20 @@ export const reportSchema = withDocumentMetadata(
           code: "custom",
           message: "Completion run ID must equal report run_metadata.run_id",
           path: ["completion", "run_id"]
+        });
+      }
+      if (
+        "status" in report.property_implementation_coverage &&
+        report.property_implementation_coverage.status === "unavailable" &&
+        (report.completion?.outcome !== "partial" ||
+          report.issues.length > 0 ||
+          report.non_production_outcomes.length > 0 ||
+          report.property_provenance.length > 0)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Unavailable final review requires a partial report without final-review assertions",
+          path: ["property_implementation_coverage"]
         });
       }
     }),

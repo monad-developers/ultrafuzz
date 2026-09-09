@@ -478,6 +478,11 @@ current topology; it is not a historical fallback. The Markdown projection
 renders the same two fields, and omission or the former `"unavailable"` string
 is schema-invalid.
 
+A runtime fallback whose final review did not complete uses the typed value
+`{ "status": "unavailable", "reason": "final-review-not-completed" }` with its
+authenticated partial census. This records unknown implementation coverage
+without claiming that a planned track was absent.
+
 ### Campaign outcome
 
 An invariant campaign that never fuzzed and one that fuzzed and found nothing
@@ -522,29 +527,49 @@ report gate; the host does not synthesize it from older handoffs.
 
 ## Final Report
 
-Final reporting is agentic. The report command reads agent-written final report
-artifacts from:
+The report command reads a verified final report. The final-report agent
+normally writes:
 
 ```text
 artifacts/final-report/report.md
 artifacts/final-report/report.json
 ```
 
-If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
 `report.json` must satisfy `ultrafuzz/report@3` with the exact
-`ultrafuzz.report.v3` version literal. Reporting reads the agent-authored bytes;
-it does not reconstruct, reorder, normalize, or rewrite them.
+`ultrafuzz.report.v3` version literal. Agent-authored report bytes remain
+immutable. After an eligible run stops, the runtime publishes a separate
+canonical report pair with authenticated whole-run completion metadata:
+
+```text
+review/runtime-report/<authority-digest>/report.json
+review/runtime-report/<authority-digest>/report.md
+review/runtime-report/<authority-digest>/terminal.json
+review/runtime-report/current.json
+```
+
+This runtime publication preserves an available verified final report. If an
+ordinary task failure prevented final review or reporting, it produces a minimal
+PARTIAL report with a failure census and no synthesized findings. An empty
+findings list in that report does not establish a clean result. Reporting does
+not mark the failed report agent successful or overwrite its output directory.
+
+`ultrafuzz report <run-id>` selects the current authenticated runtime report
+when available, otherwise the verified agent report. If neither is available,
+the command fails. Its JSON result includes `source` (`verified-agent-report`
+or `verified-runtime-report`), `terminal`, and the `completion` outcome when an
+authenticated census is available. Automation can distinguish a terminal
+partial report from complete coverage without inferring success from the
+presence of report files. `terminal` is true only with authenticated stopped
+workflow evidence; an agent report alone returns false. The primary run status
+remains separate.
 
 ### Whole-run completion contract
 
 The optional `report.json.completion` object describes whole-run completeness,
-separately from the invariant-specific `campaign_outcome`. This is a reporting
-contract foundation for issue #1119. The runtime does not yet produce an
-authenticated whole-run census or automatically publish reports after task
-failures. Current runtime reports omit this field. Completion remains optional
-because requiring it before the runtime can provide that authority would reject
-every generated report. This staging does not require backward compatibility;
-the eventual integration may make breaking changes without a migration fallback.
+separately from the invariant-specific `campaign_outcome`. The runtime derives
+the census from a stopped run's authenticated task and output evidence.
+Completion remains optional on agent-authored reports; their producers cannot
+assert whole-run completion on their own authority.
 
 A completion object uses `ultrafuzz.report-completion.v1` and binds `run_id` to
 `run_metadata.run_id`. Its `counts` object contains `planned`, `succeeded`,
@@ -558,6 +583,11 @@ any identities beyond that limit; omitted identities never reduce the counts.
 The contract does not accept control-plane or integrity failures as ordinary
 task failures.
 
+Counts cover each concrete sealed task slot once, including the reporting task.
+Retries and logical/model aggregates do not add planned work. An unexpanded
+dynamic group contributes one incomplete scope of unknown size; its future
+tasks are not guessed. Only current verified outputs count as successful.
+
 Canonical rendering of a partial census starts with
 `# Ultrafuzz report — PARTIAL`, puts a prominent incompleteness warning before
 findings, and shows the counts and incomplete scope. An empty partial report
@@ -566,20 +596,45 @@ report title. A report without a runtime census retains its previous rendering;
 absence of the field is not evidence of whole-run completeness.
 
 Offline schema validation and `ultrafuzz report render` establish document
-consistency and presentation only. The report authority gate additionally
-requires exact equality with an independently authenticated runtime census.
-Until that producer exists, both runtime verifier paths supply an explicit
-no-authority sentinel and reject agent-authored completion claims, even when
-the report's publication digests match. Adding this field does not change
-execution policy, artifact admission, terminal status, or sealed-run resume
-semantics, and does not enable a fallback report producer.
+consistency and presentation only. Runtime report publication additionally
+requires authenticated terminal evidence, the sealed graph and task manifest,
+and current verification/finalization authority for successful outputs. The
+runtime reader rederives the census and canonical report and requires exact
+agreement with the stored publication. Agent verifier paths continue to reject
+unauthenticated completion claims, even when publication digests match.
+
+Fallback publication admits ordinary task failures and their dependent coverage
+gaps. Artifact-contract, schema, seal, controller, and other integrity failures
+remain blocking. Missing or changed evidence is not treated as an ordinary task
+failure. Unstarted work remains visible as incomplete coverage; reporting does
+not reset or run it.
+
+This reporting behavior leaves the existing `halt` and `continue` execution
+policies, artifact admission, retry behavior, primary run statuses, and
+sealed-run resume semantics unchanged. It applies after the workflow has
+stopped and does not enable continuation past failed nodes. Portable report
+bundles include the runtime publication and recheck both its report authority
+and the current verified run snapshot before writing the archive. Only the
+authenticated current runtime generation and its pointer are included; older
+generations and unverified files in that directory are excluded.
+
+Runtime fallback reports use `unavailable` for repository identity because
+sealed run metadata does not retain an authenticated repository URL. Verified
+agent reports preserve their recorded identity. Reading either report does not
+depend on the source checkout or its current Git origin. Public bundles still
+require matching repository identity and a bound terminal report record, so a
+host fallback can be rendered locally but cannot supply a matching public
+benchmark result. Runtime fallback reports do not create scoring authority for
+failed agents.
 
 ### Internal authority and public projection
 
-The paths above are the private, run-local report authority. Verification,
-scoring, and lifecycle consumers continue to use that immutable internal
-`report.json` and its canonical `report.md`; public publication neither mutates
-those files nor promotes a published copy to run authority.
+The agent artifacts and the separate runtime publication are private, run-local
+reports with distinct authority. Existing strict agent-report verification and
+lifecycle APIs retain their immutable agent-report authority; a runtime
+fallback does not grant a failed task successful finalization. Public
+publication neither mutates those files nor promotes a published copy to run
+authority.
 
 Public benchmark publication crosses a separate privacy boundary. It first
 validates the internal report, deep-copies its canonical JSON, redacts private
@@ -593,9 +648,11 @@ parity without changing the trusted internal report authority.
 
 ### Coverage evidence
 
-When coverage is planned, `report.json.coverage_evidence` is the exact finalized
-`ultrafuzz/coverage-evidence@1` handoff. Measured evidence authenticates its raw
-`coverage-input.lcov` and `recon-coverage.json` sibling outputs by path and
+In a verified agent report, planned `report.json.coverage_evidence` is the exact
+finalized `ultrafuzz/coverage-evidence@1` handoff. A runtime fallback records
+coverage as unavailable because final review did not complete. Measured
+evidence authenticates its raw `coverage-input.lcov` and `recon-coverage.json`
+sibling outputs by path and
 SHA-256. Unavailable evidence carries typed blockers and no measurement.
 
 `report.md` and the coverage producer's Markdown use exactly one canonical
@@ -635,9 +692,9 @@ Blockers:
   - Evidence: `<path>`
 ```
 
-Repeat blocker and evidence rows in artifact order. Runtime publication compares
-this section with the typed handoff and rejects missing, duplicated, reordered,
-or bare coverage scores. Raw `covg-eval` output is for iteration only and
+Repeat blocker and evidence rows in artifact order. Agent-report verification
+compares this section with the typed handoff and rejects missing, duplicated,
+reordered, or bare coverage scores. Raw `covg-eval` output is for iteration only and
 defines neither published declaration-completeness view.
 
 Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
@@ -657,11 +714,11 @@ data.
 If cumulative metadata has not synchronized when the final-report producer
 starts, its live Smithers fallback is a snapshot through that producer's start.
 It includes earlier attempts but cannot include the producer's own eventual
-duration, model fallback, tokens, or cost. Report v3 has no metric-scope field,
-so closed-run accounting should be read from `ultrafuzz stats` after terminal
-synchronization. A future report-contract version should carry an explicit
-scope/completeness marker before controller-owned post-production metrics are
-published into the canonical report pair.
+duration, model fallback, tokens, or cost. A terminal presentation of an existing
+verified agent report preserves those accounting values. When final review is
+missing, the runtime fallback instead uses the stopped run's metadata for
+accounting and elapsed time. Report v3 has no metric-scope field, so use
+`ultrafuzz stats` after terminal synchronization for closed-run accounting.
 
 `accounting.segments` publishes one rollup per checkpoint generation, and
 `accounting.current` identifies the latest segment. Each segment retains every

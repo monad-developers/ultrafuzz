@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:terminal-report-receipt:1",
+  "title": "Ultrafuzz terminal report receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "workflow_run_id",
+    "workflow_state",
+    "control_generation",
+    "sync_event_id",
+    "source_sha256",
+    "completion_sha256",
+    "json_sha256",
+    "markdown_sha256"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.terminal-report-receipt.v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "workflow_run_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "workflow_state": { "enum": ["succeeded", "succeeded-with-failures", "failed", "cancelled"] },
+    "control_generation": { "$ref": "#/$defs/digest" },
+    "sync_event_id": { "type": "string", "pattern": "^evt-[0-9a-f]{24}$" },
+    "source_sha256": { "$ref": "#/$defs/digest" },
+    "completion_sha256": { "$ref": "#/$defs/digest" },
+    "json_sha256": { "$ref": "#/$defs/digest" },
+    "markdown_sha256": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": { "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+}

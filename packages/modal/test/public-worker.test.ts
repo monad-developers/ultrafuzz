@@ -7,6 +7,16 @@ import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 
 import {
+  appendEvent,
+  layoutForRunRoot,
+  readRunState,
+  sha256Bytes,
+  writeRunMetadataDocument,
+  writeRunState
+} from "@ultrafuzz/artifacts";
+import { publishTerminalReport } from "@ultrafuzz/runtime";
+
+import {
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -2062,6 +2072,143 @@ it("projects private paths out of public report JSON without changing verified i
   }
 });
 
+it("rejects a malformed runtime report receipt instead of publishing an older agent report", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-runtime-report-"));
+  try {
+    const controlRoot = path.join(root, "control");
+    const evalRunId = "eval-runtime-report";
+    const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+    const runRoot = path.join(root, "example-run");
+    const rowId = "example-row";
+    fs.mkdirSync(evalRoot, { recursive: true });
+    const reportPath = writeCurrentTerminalReport(runRoot);
+    fs.writeFileSync(
+      path.join(evalRoot, "runs.jsonl"),
+      `${JSON.stringify({
+        row_id: rowId,
+        ultrafuzz_run_id: "example-run",
+        ultrafuzz_run_root: runRoot,
+        report_json_path: reportPath,
+        final_status: "succeeded",
+        workflow: { status: "succeeded", terminal: true }
+      })}\n`
+    );
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+    const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+    fs.writeFileSync(diagnosticsPath, "{}\n");
+    const diagnostics = { root, source: diagnosticsPath };
+    expect(
+      publicBundleSources(controlRoot, evalRunId, diagnostics).some(
+        (source) => source.path === `reports/${rowId}/report.json`
+      )
+    ).toBe(true);
+
+    const receiptPath = path.join(runRoot, "review", "runtime-report", "current.json");
+    fs.mkdirSync(path.dirname(receiptPath), { recursive: true });
+    fs.writeFileSync(receiptPath, "{", "utf8");
+    expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(
+      /no verified terminal report authority/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("publishes an authenticated partial runtime report when the report agent failed", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-partial-report-"));
+  try {
+    const runRoot = path.join(root, "example-run");
+    const partial = writeRuntimeReportFixture(runRoot, true);
+    const layout = layoutForRunRoot(runRoot);
+    const stateBytes = fs.readFileSync(layout.statePath);
+
+    const controlRoot = path.join(root, "control");
+    const evalRunId = "eval-partial-report";
+    const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+    const rowId = "example-row";
+    fs.mkdirSync(evalRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(evalRoot, "runs.jsonl"),
+      `${JSON.stringify({ row_id: rowId, ultrafuzz_run_id: "example-run", ultrafuzz_run_root: runRoot, report_json_path: partial.artifacts.json_path, final_status: "failed", workflow: { status: "failed", terminal: true } })}\n`
+    );
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+    const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+    fs.writeFileSync(diagnosticsPath, "{}\n");
+    const sources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath });
+    const json = sources.find((source) => source.path === `reports/${rowId}/report.json`);
+    const markdown = sources.find((source) => source.path === `reports/${rowId}/report.md`);
+    expect(json?.source).toBe(partial.artifacts.json_path);
+    const reportBytes = json?.immutableContents;
+    if (reportBytes === undefined) throw new Error("missing public runtime report fixture");
+    expect(JSON.parse(reportBytes.toString())).toMatchObject({
+      completion: { outcome: "partial" },
+      run_metadata: { repository: "unavailable" }
+    });
+    expect(markdown?.immutableContents?.toString()).toMatch(/^# Ultrafuzz report — PARTIAL/u);
+    expect(markdown?.immutableContents?.toString()).toContain("final review was not completed");
+    expect(fs.readFileSync(layout.statePath)).toEqual(stateBytes);
+    const recordPath = path.join(evalRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(
+      recordPath,
+      `${JSON.stringify({ ...record, report_json_path: path.join(runRoot, "artifacts/final-report/report.json") })}\n`
+    );
+    expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
+      /no current scored report authority/u
+    );
+    fs.writeFileSync(recordPath, `${JSON.stringify({ ...record, report_json_path: undefined })}\n`);
+    expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
+      /missing its terminal report authority binding/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("preserves scored agent report lineage when publishing its runtime completion presentation", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-scored-report-"));
+  try {
+    const runRoot = path.join(root, "example-run");
+    const current = writeRuntimeReportFixture(runRoot, false);
+    const agentPath = path.join(runRoot, "artifacts", "final-report", "report.json");
+    const controlRoot = path.join(root, "control");
+    const evalRunId = "eval-scored-report";
+    const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+    const rowId = "example-row";
+    fs.mkdirSync(evalRoot, { recursive: true });
+    const record = {
+      row_id: rowId,
+      ultrafuzz_run_id: "example-run",
+      ultrafuzz_run_root: runRoot,
+      report_json_path: agentPath,
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true }
+    };
+    fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(record)}\n`);
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+    const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+    fs.writeFileSync(diagnosticsPath, "{}\n");
+    const diagnostics = { root, source: diagnosticsPath };
+    const sources = publicBundleSources(controlRoot, evalRunId, diagnostics);
+    const report = sources.find((source) => source.path === `reports/${rowId}/report.json`);
+    expect(report?.source).toBe(current.artifacts.json_path);
+    expect(report?.source).not.toBe(agentPath);
+    const reportBytes = report?.immutableContents;
+    if (reportBytes === undefined) throw new Error("missing public runtime report fixture");
+    expect(JSON.parse(reportBytes.toString())).toMatchObject({
+      completion: { outcome: "complete" },
+      run_metadata: { repository: JSON.parse(fs.readFileSync(agentPath, "utf8")).run_metadata.repository }
+    });
+    fs.writeFileSync(
+      path.join(evalRoot, "runs.jsonl"),
+      `${JSON.stringify({ ...record, report_json_path: path.join(runRoot, "unrelated.json") })}\n`
+    );
+    expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/different terminal report/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("uses report.json as the sole public finding authority", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-smoke-"));
   const controlRoot = path.join(root, "control");
@@ -2429,6 +2576,112 @@ it("names a public bundle assembly failure in the worker log instead of reportin
 
 function execGit(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+function writeRuntimeReportFixture(runRoot: string, failedReport: boolean) {
+  writeCurrentTerminalReport(runRoot);
+  const layout = layoutForRunRoot(runRoot);
+  const state = readRunState(layout);
+  const timestamp = "2026-09-01T00:00:00.000Z";
+  const workflowRunId = "workflow-one";
+  const controlGeneration = sha256Bytes(fs.readFileSync(path.join(runRoot, "smithers", "control-integrity.json")));
+  const linkId = "123e4567-e89b-42d3-a456-426614174000";
+  const executionSnapshot = `smithers/execution-snapshots/${controlGeneration}`;
+  const status = failedReport ? "failed" : "succeeded";
+  state.status = status;
+  state.finished_at = timestamp;
+  state.provenance = {
+    workflow: {
+      inspection: { runId: workflowRunId },
+      runId: workflowRunId,
+      compiledRunId: workflowRunId,
+      name: "fixture-workflow",
+      controlGeneration,
+      linkId,
+      executionSnapshot
+    }
+  };
+  if (failedReport) {
+    const reportNode = state.nodes["final-report"];
+    if (reportNode === undefined) throw new Error("missing final-report fixture state");
+    state.nodes["final-report"] = {
+      ...reportNode,
+      status: "failed",
+      finished_at: timestamp,
+      provenance: {
+        workflow: {
+          run_id: workflowRunId,
+          task_id: "node:final-report",
+          agent_task_id: "node:final-report",
+          verifier_task_id: "verify:final-report",
+          state: "failed",
+          attempt: 1
+        },
+        failure: {
+          category: "agent-failure",
+          causal_task_id: "node:final-report",
+          causal_failure_category: "agent-failure",
+          dependent_task_ids: []
+        }
+      }
+    };
+  }
+  writeRunState(layout, state);
+  writeRunMetadataDocument(layout.runMetadataPath, {
+    schema_version: "ultrafuzz.run-metadata.v2",
+    run_id: "example-run",
+    created_at: state.created_at,
+    mode: "run",
+    workflow_ids: [workflowRunId],
+    redacted_config_fingerprint: state.config_fingerprint,
+    forge_guard: { enabled: false, active: false, virtual_memory_limit_kb: 1_048_576, rayon_threads: 4 },
+    workflow: {
+      run_id: workflowRunId,
+      compiled_run_id: workflowRunId,
+      name: "fixture-workflow",
+      path: "smithers/workflow.tsx",
+      evidence_path: "smithers/evidence.json",
+      expanded_graph_path: "smithers/expanded-graph.json",
+      config_path: "smithers/config.json",
+      input_path: "smithers/input.json",
+      tasks_path: "smithers/tasks.json",
+      control_integrity_path: "smithers/control-integrity.json",
+      control_generation: controlGeneration,
+      workflow_link_id: linkId,
+      execution_snapshot_path: executionSnapshot,
+      task_node_ids: ["node:final-report"]
+    }
+  });
+  if (failedReport) {
+    appendEvent(layout, {
+      eventType: "node-synced",
+      nodeId: "final-report",
+      status: "failed",
+      payload: {
+        workflow_run_id: workflowRunId,
+        workflow_task_id: "node:final-report",
+        workflow_state: "failed",
+        attempt: 1
+      }
+    });
+  }
+  appendEvent(layout, {
+    eventType: "workflow-synced",
+    status,
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_status: failedReport ? "failed" : "finished",
+      workflow_state: status,
+      exhausted_loops: [],
+      synced_nodes: 1,
+      accounting_available: false,
+      recovery_due: false,
+      deadline_exceeded: false
+    }
+  });
+  const partial = publishTerminalReport(runRoot, { workflowRunId, workflowState: status });
+  if (partial === undefined) throw new Error("missing terminal report fixture");
+  return partial;
 }
 
 function writeGenuineTaskFailureFixture(runRoot: string): void {

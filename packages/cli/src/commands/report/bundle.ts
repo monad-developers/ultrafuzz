@@ -20,6 +20,7 @@ import {
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import {
+  assertCurrentFinalReportSnapshotRemainedCurrent,
   assertVerifiedRunOutputAuthorityRemainedCurrent,
   isVerifiedOutputAuthorityUnavailable,
   loadVerifiedRunOutputAuthoritySnapshot,
@@ -130,10 +131,15 @@ export default class ReportBundle extends Command {
       const verifiedRunAuthority = loadVerifiedRunOutputAuthoritySnapshot(layout.root);
       const validatedReport = loadDeclaredValidatedReportSnapshot(layout.root);
       const eventJournal = loadValidatedEventJournalSnapshot(layout.root, layout.eventsPath, runId);
-      const files = collectBundleFiles(layout.root, diagnostics, eventJournal);
+      const files = collectBundleFiles(layout.root, diagnostics, eventJournal, validatedReport);
       assertVerifiedRunAuthorityBundleSnapshots(files, verifiedRunAuthority);
       if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
       assertVerifiedRunOutputAuthorityRemainedCurrent(verifiedRunAuthority);
+      if (validatedReport !== undefined) {
+        assertCurrentFinalReportSnapshotRemainedCurrent(validatedReport);
+      } else if (loadDeclaredValidatedReportSnapshot(layout.root) !== undefined) {
+        throw new Error("report authority appeared while bundle inputs were being captured");
+      }
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
       }
@@ -210,7 +216,8 @@ export default class ReportBundle extends Command {
 function assertValidatedReportBundleSnapshot(files: readonly BundleFile[], report: ValidatedReportSnapshot): void {
   const expected = [
     { path: report.artifacts.json_path, contents: report.json_bytes },
-    { path: report.artifacts.markdown_path, contents: report.markdown_bytes }
+    { path: report.artifacts.markdown_path, contents: report.markdown_bytes },
+    ...(report.publications ?? []).map((publication) => ({ path: publication.path, contents: publication.bytes }))
   ];
   for (const entry of expected) {
     const captured = files.find((file) => file.absolutePath === entry.path);
@@ -396,7 +403,8 @@ function eventJournalCodec(expectedRunId: string): StrictJsonlCodec<EventRecord>
 function collectBundleFiles(
   runRoot: string,
   diagnostics: RuntimeDiagnostic[],
-  eventJournal: BundleFile | undefined
+  eventJournal: BundleFile | undefined,
+  report: ValidatedReportSnapshot | undefined
 ): BundleFile[] {
   const files: BundleFile[] = eventJournal === undefined ? [] : [eventJournal];
 
@@ -425,6 +433,20 @@ function collectBundleFiles(
     }
   }
 
+  const runtimeReportRoot = path.join(runRoot, "review", "runtime-report");
+  if (report?.artifacts.source === "verified-runtime-report") {
+    const publications = report.publications;
+    if (publications === undefined || publications.length === 0) {
+      throw new Error("runtime report has no authenticated publication files");
+    }
+    for (const publication of publications) {
+      assertPathInside(runtimeReportRoot, publication.path, "runtime report publication");
+      addBundleFile(runRoot, publication.path, displayRelativePath(runRoot, publication.path), files, diagnostics);
+    }
+  } else if (lstatIfPresent(runtimeReportRoot) !== undefined) {
+    throw new Error("runtime report directory has no authenticated current publication");
+  }
+
   const totalBytes = files.reduce((total, file) => total + file.contents.byteLength, 0);
   if (totalBytes > MAX_BUNDLE_TOTAL_BYTES) {
     throw new Error(`report bundle inputs exceed the ${MAX_BUNDLE_TOTAL_BYTES}-byte limit`);
@@ -444,6 +466,9 @@ function collectDirectory(
   diagnostics: RuntimeDiagnostic[],
   rename?: ArchiveRename
 ): void {
+  // Runtime publication generations are admitted only by the current report
+  // snapshot. Recursive enumeration must not publish stale or unverified copies.
+  if (displayRelativePath(runRoot, absoluteDirectory) === "review/runtime-report") return;
   assertPathInside(runRoot, absoluteDirectory, "bundle directory");
   assertNoSymlinkComponents(runRoot, absoluteDirectory, "bundle directory");
   for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {

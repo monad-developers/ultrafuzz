@@ -9025,7 +9025,8 @@ function semanticGateContextForVerifiedOutput(
     );
     const finalSeverityAuthority = verifiedFinalSeverityReviewAuthority(task);
     context.artifactSet = {
-      // No runtime-authenticated whole-run completion producer is defined yet.
+      // Whole-run completion is added by the terminal controller presentation,
+      // after this report task settles; agent output cannot attest its own census.
       reportCompletion: null,
       campaignSummary: campaignSummary?.value ?? null,
       ...(campaignSummary === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),
