@@ -11,6 +11,7 @@ import {
   REPORT_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactSchemaDirectory,
+  appendEvent,
   appendNodeAttempt,
   appendUsageEvents,
   createInitialRunState,
@@ -18,6 +19,7 @@ import {
   createRunLayout,
   layoutForRunRoot,
   manifestDigest,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunMetadataDocument,
   updateNodeState,
@@ -34,6 +36,7 @@ import {
   loadVerifiedRunOutputSnapshots,
   projectCanonicalFinalReport,
   planRun,
+  publishTerminalReport,
   syncRun
 } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
@@ -1149,6 +1152,75 @@ async function createReportRun(
   return parseJson(run).data as { run_id: string; run_root: string };
 }
 
+async function createTerminalPartialReport(project: string, runId: string) {
+  const run = await createReportRun(project, runId, writeReportTopology);
+  const layout = layoutForRunRoot(run.run_root, run.run_id);
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, run.run_id);
+  assert.ok(metadata.workflow);
+  const workflowRunId = metadata.workflow.run_id;
+  const tasks = parseSmithersTaskManifestBytes(fs.readFileSync(path.join(run.run_root, "smithers", "tasks.json")));
+  const reportDir = path.join(run.run_root, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeCanonicalReportPair(reportDir, currentReport(run.run_id));
+  sealVerifiedFinalReport(run.run_root);
+  for (const task of tasks.tasks.filter((task) => task.concreteNodeId !== "final-report")) {
+    updateNodeState(layout, task.attemptId, {
+      status: "failed",
+      finished_at: new Date().toISOString(),
+      wait_since: undefined,
+      wait_reason: undefined,
+      next_eligible_action: undefined,
+      provenance: {
+        workflow: {
+          run_id: workflowRunId,
+          task_id: task.smithersNodeId,
+          agent_task_id: task.smithersNodeId,
+          verifier_task_id: task.verifierSmithersNodeId,
+          state: "failed",
+          attempt: 1
+        },
+        failure: {
+          category: "agent-failure",
+          causal_task_id: task.smithersNodeId,
+          causal_failure_category: "agent-failure",
+          dependent_task_ids: []
+        }
+      }
+    });
+    appendEvent(layout, {
+      eventType: "node-synced",
+      nodeId: task.attemptId,
+      status: "failed",
+      payload: {
+        workflow_run_id: workflowRunId,
+        workflow_task_id: task.smithersNodeId,
+        workflow_state: "failed",
+        attempt: 1
+      }
+    });
+  }
+  updateRunStatus(layout, "failed");
+  appendEvent(layout, {
+    eventType: "workflow-synced",
+    status: "failed",
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_status: "failed",
+      workflow_state: "failed",
+      exhausted_loops: [],
+      synced_nodes: tasks.tasks.length,
+      accounting_available: false,
+      recovery_due: false,
+      deadline_exceeded: false
+    }
+  });
+  const stateBytes = fs.readFileSync(layout.statePath);
+  const report = publishTerminalReport(run.run_root, { workflowRunId, workflowState: "failed" });
+  assert.ok(report);
+  assert.deepEqual(fs.readFileSync(layout.statePath), stateBytes, "publication must preserve failed run state");
+  return { run, report, stateBytes };
+}
+
 function bundleFixtureEvent(runId: string) {
   return createEventRecord(
     { runId },
@@ -1287,7 +1359,7 @@ test("run reads a bounded immutable workflow-input file", async () => {
 
   const run = await cli(
     project,
-    ["run", "--run-id", "cli-file-input", "--input-file", "operator-input.json", "--json"],
+    ["run", "--run-id", "cli-file-input", "--require-complete", "--input-file", "operator-input.json", "--json"],
     fakeSmithersEnv(project)
   );
   assert.equal(run.code, 0, run.stderr);
@@ -1296,6 +1368,11 @@ test("run reads a bounded immutable workflow-input file", async () => {
     operator_input?: { ticket?: number };
   };
   assert.equal(smithersInput.operator_input?.ticket, 3);
+  const savedConfig = JSON.parse(
+    fs.readFileSync(path.join(runData.run_root, "smithers", "resolved-config.json"), "utf8")
+  ) as { run: { completionPolicy: string }; retry: { sameAgentAttempts: number } };
+  assert.equal(savedConfig.run.completionPolicy, "require-complete");
+  assert.equal(savedConfig.retry.sameAgentAttempts, 3);
 });
 
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
@@ -1332,6 +1409,10 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   };
   assert.equal(smithersInput.operator_prompt, "Operator prompt");
   assert.equal(smithersInput.operator_input?.ticket, 2);
+  const savedConfig = JSON.parse(
+    fs.readFileSync(path.join(runData.run_root, "smithers", "resolved-config.json"), "utf8")
+  ) as { run: { completionPolicy: string } };
+  assert.equal(savedConfig.run.completionPolicy, "best-effort");
 
   const ps = await cli(project, ["ps", "--json"], env);
   assert.equal(ps.code, 0, ps.stderr);
@@ -1373,6 +1454,8 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(statusBody);
   const statusData = statusBody.data as {
     run_id: string;
+    ended: boolean | null;
+    report: { status: string; completion: string };
     verdict: string;
     counts: { in_progress: number };
     gating: Array<{ node_id: string }>;
@@ -1381,6 +1464,9 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     current_step: { running_count: number; elapsed_seconds: number | null };
   };
   assert.equal(statusData.run_id, "cli-run");
+  assert.equal(statusData.ended, false);
+  assert.equal(statusData.report.status, "pending");
+  assert.equal(statusData.report.completion, "unknown");
   assert.equal(statusData.verdict, "running-healthy");
   assert.equal(statusData.counts.in_progress, 1);
   assert.equal(statusData.gating[0]?.node_id, "project-discovery");
@@ -1438,6 +1524,8 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(statusText.code, 0, statusText.stderr);
   assert.doesNotMatch(statusText.stdout, /smithers/iu);
   assert.match(statusText.stdout, /^Status: running-healthy \(running\)$/mu);
+  assert.match(statusText.stdout, /^Run ended: no$/mu);
+  assert.match(statusText.stdout, /^Report: pending$/mu);
   assert.match(statusText.stdout, /^Progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu);
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
   assert.match(statusText.stdout, /^Time on current step: \d+ minutes on project-discovery$/mu);
@@ -1534,6 +1622,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
   fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "succeeded\n", "utf8");
+  setFakeSmithersStatus(project, fakeStatusEnvelope("done"));
   const watched = await watching;
   assert.equal(watched.code, 0, `${watched.stderr}\n${watched.stdout}`);
   const watchedLines = watched.stdout.split("\n").filter(Boolean);
@@ -1546,6 +1635,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   }
   assert.equal((watchedEnvelopes[0]!.data as { status: string }).status, "running");
   assert.equal((watchedEnvelopes[1]!.data as { status: string }).status, "succeeded");
+  assert.equal((watchedEnvelopes[1]?.data as { ended?: boolean } | undefined)?.ended, true);
 
   writeRunAccounting(runData.run_root, {
     totalTokens: 123,
@@ -1554,11 +1644,21 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     partialPricing: true,
     unpricedEventCount: 1
   });
+  const terminalReport = publishTerminalReport(runData.run_root, {
+    workflowRunId: "ultrafuzz-cli-run",
+    workflowState: "succeeded"
+  });
+  assert.ok(terminalReport);
   const report = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(report.code, 0, report.stderr);
+  assert.equal(report.code, 0, `${report.stderr}\n${report.stdout}`);
   const reportBody = parseJson(report);
   assertNoSmithersSurface(reportBody);
-  assert.equal((reportBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
+  assert.deepEqual(reportBody.data, {
+    ...terminalReport.artifacts,
+    verification: "verified",
+    completion: "complete",
+    terminal: true
+  });
   assert.equal(accountingMismatchCount(reportBody), 0);
   const reportMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(reportMarkdown, /- Tokens used: `123`/u);
@@ -1757,8 +1857,16 @@ test("status observes an incomplete launch with a successful CLI envelope and un
   assert.equal(status.code, 0, `${status.stderr}\n${status.stdout}`);
   const body = parseJson(status);
   assert.equal(body.ok, true);
-  const data = body.data as { verdict: string; workflow_run_id?: string; reason: string };
+  const data = body.data as {
+    verdict: string;
+    workflow_run_id?: string;
+    reason: string;
+    ended: boolean;
+    report: { status: string };
+  };
   assert.equal(data.verdict, "launch-incomplete");
+  assert.equal(data.ended, false);
+  assert.equal(data.report.status, "pending");
   assert.equal(data.workflow_run_id, undefined);
   assert.match(data.reason, /Launcher liveness is unknown/u);
   const text = await cli(project, ["status", runId], env);
@@ -1782,9 +1890,10 @@ test("status surfaces a terminal product and live workflow lifecycle divergence"
 
   assert.equal(jsonStatus.code, 1, `${jsonStatus.stderr}\n${jsonStatus.stdout}`);
   const jsonBody = parseJson(jsonStatus);
-  const jsonData = jsonBody.data as { status?: string; workflow_status?: string };
+  const jsonData = jsonBody.data as { status?: string; workflow_status?: string; ended?: boolean | null };
   assert.equal(jsonData.status, "failed");
   assert.equal(jsonData.workflow_status, "running");
+  assert.equal(jsonData.ended, null);
   assert.equal(jsonBody.ok, false);
   const diagnostics = jsonBody.diagnostics as Array<{ code?: string; severity?: string }>;
   assert.equal(
@@ -1822,8 +1931,12 @@ test("status --watch stops immediately on a degraded verdict even while product 
   assert.equal(watched.code, 0, watched.stderr);
   const lines = watched.stdout.split("\n").filter(Boolean);
   assert.equal(lines.length, 1);
-  const body = JSON.parse(lines[0]!) as { data?: { verdict?: string } };
+  const body = JSON.parse(lines[0] ?? "") as {
+    data?: { verdict?: string; ended?: boolean | null; report?: { status: string } };
+  };
   assert.equal(body.data?.verdict, "degraded");
+  assert.equal(body.data?.ended, null);
+  assert.equal(body.data?.report?.status, "unknown");
 });
 
 test("status surfaces quota parking with preserved attempts and the resume remediation", async () => {
@@ -2061,6 +2174,17 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
   assertFinalReportUnchanged(reportDir, estimatedSnapshot);
+
+  const metadataPath = path.join(runData.run_root, "run.json");
+  fs.writeFileSync(metadataPath, "{", "utf8");
+  const unavailableAccounting = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(unavailableAccounting.code, 0, `${unavailableAccounting.stderr}\n${unavailableAccounting.stdout}`);
+  assert.equal((parseJson(unavailableAccounting).data as { source: string }).source, "verified-agent-report");
+  assert.match(JSON.stringify(parseJson(unavailableAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
+  const strictAccounting = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
+  assert.equal(strictAccounting.code, 1, strictAccounting.stderr);
+  assertFinalReportUnchanged(reportDir, estimatedSnapshot);
+  assert.equal(fs.readFileSync(metadataPath, "utf8"), "{");
 });
 
 test("report validates current artifacts without rewriting agent-owned bytes", async () => {
@@ -2079,10 +2203,18 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   const result = await cli(project, ["report", runData.run_id, "--json"]);
 
   assert.equal(result.code, 0, result.stderr);
-  const data = parseJson(result).data as { json_path: string; markdown_path: string; source: string };
+  const data = parseJson(result).data as {
+    json_path: string;
+    markdown_path: string;
+    source: string;
+    terminal: boolean;
+    completion?: string;
+  };
   assert.equal(data.json_path, reportPath);
   assert.equal(data.markdown_path, markdownPath);
   assert.equal(data.source, "verified-agent-report");
+  assert.equal(data.terminal, false, "an available report does not imply the workflow has stopped");
+  assert.equal(data.completion, undefined, "agent report availability does not authenticate whole-run coverage");
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
@@ -2114,6 +2246,119 @@ test("report displays authenticated final-verifier warnings while preserving the
   assert.match(text.stdout, /ARTIFACT_OPTIONAL_METADATA_MISSING/u);
   assert.match(text.stdout, /artifacts\/final-report\/report\.json#\$\.issues\[0\]\.confidence/u);
   assertFinalReportUnchanged(reportDir, before);
+});
+
+test("report exposes terminal partial coverage and bundles only the authenticated runtime publication", async () => {
+  const project = tempProject();
+  const { run, report, stateBytes } = await createTerminalPartialReport(project, "report-runtime-partial");
+  const staleDirectory = path.join(run.run_root, "review", "runtime-report", "unverified-generation");
+  fs.mkdirSync(staleDirectory, { recursive: true });
+  fs.writeFileSync(path.join(staleDirectory, "report.json"), '{"unverified":true}\n');
+
+  const result = await cli(project, ["report", run.run_id, "--json"]);
+  assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+  assert.deepEqual(parseJson(result).data, {
+    ...report.artifacts,
+    verification: "verified",
+    completion: "partial",
+    terminal: true
+  });
+  assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+
+  const bundled = await cli(project, ["report", "bundle", run.run_id, "--json"]);
+  assert.equal(bundled.code, 0, `${bundled.stderr}\n${bundled.stdout}`);
+  const bundlePath = (parseJson(bundled).data as { zip_path: string }).zip_path;
+  const zip = new AdmZip(bundlePath);
+  assert.ok(report.publications);
+  const publicationPaths = report.publications.map((publication) =>
+    path.relative(run.run_root, publication.path).split(path.sep).join("/")
+  );
+  assert.deepEqual(
+    zip
+      .getEntries()
+      .map((entry) => entry.entryName)
+      .filter((name) => name.startsWith("review/runtime-report/"))
+      .sort(),
+    [...publicationPaths].sort()
+  );
+  for (const publication of report.publications) {
+    assert.deepEqual(zip.readFile(path.relative(run.run_root, publication.path)), publication.bytes);
+  }
+  assert.deepEqual(fs.readFileSync(path.join(run.run_root, "state.json")), stateBytes);
+});
+
+test("report verification is optional and unchecked bundles contain only the labeled report pair", async () => {
+  const project = tempProject();
+  const { run, report, stateBytes } = await createTerminalPartialReport(project, "report-optional-verification");
+  const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
+  assert.ok(receipt);
+  fs.rmSync(receipt.path);
+
+  const strict = await cli(project, ["report", run.run_id, "--require-verified", "--json"]);
+  assert.equal(strict.code, 1, strict.stderr);
+  const result = await cli(project, ["report", run.run_id, "--json"]);
+  assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+  const data = parseJson(result).data as {
+    source: string;
+    verification: string;
+    completion: string;
+    markdown_path: string;
+    json_path: string;
+  };
+  assert.equal(data.source, "unverified-runtime-report");
+  assert.equal(data.verification, "not-checked");
+  assert.equal(data.completion, "partial");
+  assert.match(fs.readFileSync(data.markdown_path, "utf8"), /^# Ultrafuzz report — PARTIAL/u);
+  assert.match(fs.readFileSync(data.markdown_path, "utf8"), /not checked|not-checked/iu);
+
+  const strictBundle = await cli(project, ["report", "bundle", run.run_id, "--require-verified", "--json"]);
+  assert.equal(strictBundle.code, 1, strictBundle.stderr);
+  const bundled = await cli(project, ["report", "bundle", run.run_id, "--json"]);
+  assert.equal(bundled.code, 0, `${bundled.stderr}\n${bundled.stdout}`);
+  const bundleData = parseJson(bundled).data as { zip_path: string; scope: string; verification: string };
+  assert.equal(bundleData.scope, "report-only");
+  assert.equal(bundleData.verification, "not-checked");
+  const zip = new AdmZip(bundleData.zip_path);
+  assert.deepEqual(
+    zip
+      .getEntries()
+      .map((entry) => entry.entryName)
+      .sort(),
+    ["bundle-manifest.json", "report.json", "report.md"]
+  );
+  const manifest = JSON.parse(zip.readAsText("bundle-manifest.json"));
+  assert.equal(manifest.scope, "report-only");
+  assert.equal(manifest.verification, "not-checked");
+  assert.equal(validateReportBundleManifest(manifest).ok, true);
+  assert.deepEqual(zip.readFile("report.json"), fs.readFileSync(data.json_path));
+  const stats = await cli(project, ["stats", "--bundle", bundleData.zip_path, "--json"]);
+  assert.equal(stats.code, 1, stats.stderr);
+  assert.match(
+    JSON.stringify(parseJson(stats).diagnostics),
+    /report-only bundles do not contain verified run statistics/u
+  );
+  assert.deepEqual(fs.readFileSync(path.join(run.run_root, "state.json")), stateBytes);
+  assert.equal(fs.existsSync(receipt.path), false);
+  fs.writeFileSync(path.join(run.run_root, "run.json"), "{", "utf8");
+  const withoutAccounting = await cli(project, ["report", run.run_id, "--json"]);
+  assert.equal(withoutAccounting.code, 0, `${withoutAccounting.stderr}\n${withoutAccounting.stdout}`);
+  assert.match(JSON.stringify(parseJson(withoutAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
+});
+
+test("report bundle --require-verified rejects receipt bytes changed only during archive capture", async () => {
+  const project = tempProject();
+  const { run, report } = await createTerminalPartialReport(project, "report-runtime-receipt-change");
+  const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
+  assert.ok(receipt);
+  const bundled = await withInjectedBundleCollectionRead(
+    receipt.path,
+    Buffer.alloc(receipt.bytes.byteLength, 0x78),
+    () => cli(project, ["report", "bundle", run.run_id, "--require-verified", "--json"])
+  );
+  assert.equal(bundled.code, 1, bundled.stderr);
+  assert.match(JSON.stringify(parseJson(bundled).diagnostics), /validated report changed/iu);
+  assert.deepEqual(fs.readFileSync(receipt.path), receipt.bytes);
+  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${run.run_id}-report-bundle.zip`)), false);
 });
 
 test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {
@@ -2205,7 +2450,7 @@ test("eval report validates the registered summary and never synthesizes missing
   assert.equal((parseJson(valid).data as { eval_run_id: string }).eval_run_id, evalRunId);
 });
 
-test("report rejects final_severity compatibility aliases without rewriting artifacts", async () => {
+test("report --require-verified rejects final_severity compatibility aliases without rewriting artifacts", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-rejects-severity-alias");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2219,7 +2464,7 @@ test("report rejects final_severity compatibility aliases without rewriting arti
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID|additional propert/iu);
@@ -2228,7 +2473,7 @@ test("report rejects final_severity compatibility aliases without rewriting arti
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report does not synthesize missing Markdown", async () => {
+test("report --require-verified does not synthesize missing Markdown", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-missing-markdown");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2239,7 +2484,7 @@ test("report does not synthesize missing Markdown", async () => {
   const jsonBefore = fs.readFileSync(reportPath);
   const jsonSha256Before = digest(jsonBefore);
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(
@@ -2275,7 +2520,7 @@ test("report accepts canonical severity and complete proof without rewriting eit
   assert.equal(Object.hasOwn(report.issues[0] ?? {}, "final_severity"), false);
 });
 
-test("current reports with malformed issues fail closed without preserving stale bytes", async () => {
+test("report --require-verified rejects malformed issues without rewriting stale bytes", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-current-malformed");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2302,7 +2547,7 @@ test("current reports with malformed issues fail closed without preserving stale
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*required/iu);
@@ -2311,7 +2556,7 @@ test("current reports with malformed issues fail closed without preserving stale
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("legacy report versions are rejected without a compatibility reader", async () => {
+test("report --require-verified rejects legacy report versions without a compatibility reader", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-legacy-version");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2325,7 +2570,7 @@ test("legacy report versions are rejected without a compatibility reader", async
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*constant/iu);
@@ -2707,7 +2952,7 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report bundle rejects a changed authenticated publication from any finalized producer", async () => {
+test("report bundle --require-verified rejects a changed authenticated publication from any finalized producer", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-mutated-publication");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
@@ -2720,7 +2965,7 @@ test("report bundle rejects a changed authenticated publication from any finaliz
 
   const changedBytes = Buffer.from("post-finalization mutation!!!!\n", "utf8");
   fs.writeFileSync(supportPublication, changedBytes);
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /verified publication.*changed/iu);
@@ -2731,7 +2976,7 @@ test("report bundle rejects a changed authenticated publication from any finaliz
   );
 });
 
-test("report bundle rejects manifest bytes injected only into the recursive archive read", async () => {
+test("report bundle --require-verified rejects manifest bytes injected only into the recursive archive read", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-manifest-read-injection");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
@@ -2743,7 +2988,7 @@ test("report bundle rejects manifest bytes injected only into the recursive arch
   const bundled = await withInjectedBundleCollectionRead(
     manifestPath,
     Buffer.alloc(manifestBytes.byteLength, 0x78),
-    () => cli(project, ["report", "bundle", runData.run_id, "--json"])
+    () => cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"])
   );
 
   assert.equal(bundled.code, 1, bundled.stderr);
@@ -2755,7 +3000,7 @@ test("report bundle rejects manifest bytes injected only into the recursive arch
   );
 });
 
-test("report bundle rejects graph-fingerprint bytes injected only into the archive read", async () => {
+test("report bundle --require-verified rejects graph-fingerprint bytes injected only into the archive read", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-fingerprint-read-injection");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
@@ -2767,7 +3012,7 @@ test("report bundle rejects graph-fingerprint bytes injected only into the archi
   const bundled = await withInjectedBundleCollectionRead(
     fingerprintPath,
     Buffer.alloc(fingerprintBytes.byteLength, 0x61),
-    () => cli(project, ["report", "bundle", runData.run_id, "--json"])
+    () => cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"])
   );
 
   assert.equal(bundled.code, 1, bundled.stderr);
@@ -2779,14 +3024,14 @@ test("report bundle rejects graph-fingerprint bytes injected only into the archi
   );
 });
 
-test("report bundle rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async () => {
+test("report bundle --require-verified rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-fingerprint-persistent-tamper");
   const fingerprintPath = path.join(runData.run_root, "graph.fingerprint");
   const tamperedBytes = Buffer.from(`${"a".repeat(64)}\n`, "utf8");
   fs.writeFileSync(fingerprintPath, tamperedBytes);
 
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /graph fingerprint.*sealed workflow control/iu);
@@ -2797,7 +3042,7 @@ test("report bundle rejects a persistently tampered sealed graph fingerprint bef
   );
 });
 
-test("report bundle rejects a declared report producer that claims success without finalization authority", async () => {
+test("report bundle --require-verified rejects a declared report producer that claims success without finalization authority", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-invalid-success-claim");
   const layout = layoutForRunRoot(runData.run_root, runData.run_id);
@@ -2810,7 +3055,7 @@ test("report bundle rejects a declared report producer that claims success witho
     provenance: undefined
   });
 
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /lacks current finalization authority/iu);
@@ -2820,7 +3065,7 @@ test("report bundle rejects a declared report producer that claims success witho
   );
 });
 
-test("report bundle applies canonical report-pair validation to custom declarations", async () => {
+test("report bundle --require-verified applies canonical report-pair validation to custom declarations", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeCustomReportTopology(project);
@@ -2845,7 +3090,7 @@ test("report bundle applies canonical report-pair validation to custom declarati
   fs.writeFileSync(path.join(reportDir, "current-audit.md"), `${projection.markdown}\n<!-- drift -->\n`, "utf8");
   sealVerifiedNodeOutputs(runData.run_root, "audit-delivery");
 
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, `${bundled.stderr}\n${bundled.stdout}`);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /canonical projection/iu);
@@ -2887,7 +3132,7 @@ test("report bundle treats only an absent event journal as optional", async () =
   assert.equal(zip.readAsText("graph.fingerprint"), fs.readFileSync(path.join(runRoot, "graph.fingerprint"), "utf8"));
 });
 
-test("report bundle rejects historical runs without current sealed workflow authority", async () => {
+test("report bundle --require-verified rejects historical runs without current sealed workflow authority", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const runId = "report-bundle-historical-unsealed";
@@ -2895,14 +3140,14 @@ test("report bundle rejects historical runs without current sealed workflow auth
   fs.mkdirSync(runRoot, { recursive: true });
   fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:historical\n", "utf8");
 
-  const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runId, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /historical or unsealed runs is unsupported/iu);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runId}-report-bundle.zip`)), false);
 });
 
-test("report bundle fails closed on every present invalid event journal", async (context) => {
+test("report bundle --require-verified fails closed on every present invalid event journal", async (context) => {
   const project = tempProject();
   const cases: Array<{
     name: string;
@@ -2972,7 +3217,7 @@ test("report bundle fails closed on every present invalid event journal", async 
       fs.rmSync(path.join(runRoot, "events.jsonl"), { force: true });
       invalidCase.prepare(path.join(runRoot, "events.jsonl"), runId);
 
-      const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+      const bundled = await cli(project, ["report", "bundle", runId, "--require-verified", "--json"]);
 
       assert.equal(bundled.code, 1, bundled.stderr);
       assert.match(JSON.stringify(parseJson(bundled).diagnostics), invalidCase.diagnostic);

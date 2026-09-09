@@ -24,7 +24,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz references update`           | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
 | `ultrafuzz ps`                          | List Ultrafuzz runs and linked workflow status.                                                                |
 | `ultrafuzz inspect <run-id>`            | Show product evidence and linked workflow details for a run.                                                   |
-| `ultrafuzz status <run-id>`             | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
+| `ultrafuzz status <run-id>`             | Show run health, progress, whether execution ended, and final report availability.                             |
 | `ultrafuzz stats <run-id>`              | Derive per-node timing, token usage, cost, retry, outcome, and completeness statistics.                        |
 | `ultrafuzz pause <run-id>`              | Gracefully pause an active run after its in-flight tasks finish.                                               |
 | `ultrafuzz why <run-id>`                | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                           |
@@ -336,6 +336,11 @@ auditing a continuation.
 ```text
 Run: <run-id>
 Status: running-healthy (running)
+Run ended: no
+Report: pending
+Report reason: The run has not ended.
+Report completion: UNKNOWN
+Report verification: unknown
 Reason: 1 running, 2 finished in last 10m
 Progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
 ETA: 20 minutes
@@ -344,8 +349,8 @@ Pace: 4 finished in the last 10m
 ```
 
 `--watch` re-polls every `--interval` seconds (default 30) until the run
-reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`)
-or the poll fails. With `--json --watch`, every poll writes one
+reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`),
+needs attention, is paused, or the poll fails. With `--json --watch`, every poll writes one
 newline-delimited `ultrafuzz.cli.result.v2` envelope so the stream pipes into
 `jq` and other line-oriented tools; without `--watch`, `--json` keeps the
 existing pretty-printed single envelope.
@@ -397,6 +402,18 @@ attestation of workflow-link history.
 The JSON envelope carries stable machine-readable fields alongside the existing
 counts:
 
+- `ended`: `true` when local and workflow records agree that execution ended,
+  `false` while the run is active, pending, or paused, and `null` when the records
+  do not establish a consistent outcome. A cancellation request is not completion.
+- `report`: `status` (`available`, `unavailable`, `pending`, or `unknown`),
+  `reason`, `completion` (`complete`, `partial`, or `unknown`), `verification`
+  (`verified`, `not-checked`, or `unknown`), `json_path`, and `markdown_path`.
+  A failed run may have an available PARTIAL report. If the report agent did not
+  produce usable output, the report is unavailable; status does not create a
+  replacement. Missing or unreadable publication records leave availability
+  unknown. Unavailable and unknown reports expose no stale report paths.
+  Verification records the check made when that report was published. Use
+  `report --require-verified` when current verification is required.
 - `progress`: `percent`, `finished`, `in_progress`, `pending`, `failed`,
   `skipped`, `remaining`, and `total`. `remaining` is every node that is not
   finished, failed, or skipped, and `percent` is the share of nodes that are
@@ -423,9 +440,19 @@ preparation and verification work that has no durable node, while
 completion and `current_step` as what is executing right now.
 
 `--watch` re-synchronizes linked workflow evidence on every poll, exactly as a
-single `status` call does, so it is not a read-only command. It stops only at a
-terminal run status or a failed poll: `paused` is a deliberate steady state, so
-a watch on a paused run keeps polling until interrupted.
+single `status` call does. Final report publication is recorded once for the
+current stopped run. Later polls read a small saved summary and inspect its
+report file identities; they do not rebuild reports, run agents, or retry tasks.
+Resuming work invalidates the prior final summary. If a published report file
+changes or disappears, status shows unknown availability.
+
+The watch prints the final publication result, including unavailable, and stops.
+It may also stop for attention or a pause, so scripts must read `ended` rather
+than treating watch exit as proof of completion. A successful status query exits
+with code 0 even when the observed run failed or its report is unavailable;
+query errors remain nonzero. Use the execution status and report fields to decide
+whether your job meets its requirements. Use `ultrafuzz report <run-id>` to read
+an available agent-written report.
 
 `pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
 finish, and the run settles in the resumable `paused` state. `resume` reports

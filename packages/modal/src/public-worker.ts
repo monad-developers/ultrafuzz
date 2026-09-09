@@ -27,6 +27,8 @@ import {
 } from "@ultrafuzz/evals";
 import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
 import {
+  assertCurrentFinalReportSnapshotRemainedCurrent,
+  loadCurrentFinalReportSnapshot,
   loadVerifiedFinalReportSnapshot,
   projectPublicArtifactValidationWarnings,
   projectPublicCanonicalFinalReport
@@ -1251,9 +1253,9 @@ export function publicBundleSources(
     ) {
       throw new Error(`public benchmark row is missing its terminal report authority binding: ${row.id}`);
     }
-    let report: ReturnType<typeof loadVerifiedFinalReportSnapshot>;
+    let report: ReturnType<typeof loadCurrentFinalReportSnapshot>;
     try {
-      report = loadVerifiedFinalReportSnapshot(record.ultrafuzz_run_root);
+      report = loadCurrentFinalReportSnapshot(record.ultrafuzz_run_root);
     } catch (error) {
       throw new Error(`public benchmark row has no verified terminal report authority: ${row.id}`, { cause: error });
     }
@@ -1269,7 +1271,24 @@ export function publicBundleSources(
       throw new Error(`public benchmark row verified report belongs to another run: ${row.id}`);
     }
     if (path.resolve(record.report_json_path) !== path.resolve(report.artifacts.json_path)) {
-      throw new Error(`public benchmark row record names a different terminal report: ${row.id}`);
+      // Existing score records bind the immutable agent report. A controller
+      // presentation may add completion metadata while preserving that same
+      // independently verified finding authority.
+      let agentReport: ReturnType<typeof loadVerifiedFinalReportSnapshot>;
+      try {
+        agentReport = loadVerifiedFinalReportSnapshot(record.ultrafuzz_run_root);
+      } catch (error) {
+        throw new Error(`public benchmark row record has no current scored report authority: ${row.id}`, {
+          cause: error
+        });
+      }
+      if (
+        report.artifacts.source !== "verified-runtime-report" ||
+        path.resolve(record.report_json_path) !== path.resolve(agentReport.artifacts.json_path)
+      ) {
+        throw new Error(`public benchmark row record names a different terminal report: ${row.id}`);
+      }
+      assertCurrentFinalReportSnapshotRemainedCurrent(report);
     }
     // The verified report remains the immutable internal scoring/lifecycle
     // authority. Only this separately validated, privacy-safe projection crosses

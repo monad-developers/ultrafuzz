@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:config:resolved-config:3",
-  "title": "Ultrafuzz Resolved Configuration v3",
+  "$id": "urn:ultrafuzz:schema:config:resolved-config:4",
+  "title": "Ultrafuzz Resolved Configuration v4",
   "description": "Closed camelCase runtime contract for the exact resolved Ultrafuzz configuration published to a workflow execution snapshot.",
   "type": "object",
   "additionalProperties": false,
@@ -23,7 +23,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "ultrafuzz.resolved-config.v3"
+      "const": "ultrafuzz.resolved-config.v4"
     },
     "auditProfile": {
       "$ref": "#/$defs/auditProfileId"
@@ -99,6 +99,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "completionPolicy",
         "outputDir",
         "maxParallelAgents",
         "maxDynamicNodes",
@@ -112,6 +113,9 @@
         "controllerLeaseSeconds"
       ],
       "properties": {
+        "completionPolicy": {
+          "enum": ["best-effort", "require-complete"]
+        },
         "outputDir": {
           "$ref": "#/$defs/projectLocalPath"
         },

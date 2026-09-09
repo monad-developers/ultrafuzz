@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { parseResolvedConfigJsonBytes } from "@ultrafuzz/config";
 
 import {
   ARTIFACT_MANIFEST_FILE,
@@ -55,6 +56,7 @@ import {
   type ArtifactProvenance,
   type ArtifactVerificationEntry,
   type ArtifactVerificationMarker,
+  type EventRecord,
   type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
   type NodeAttemptAgentProvenance,
@@ -107,6 +109,9 @@ import {
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
+import { publishBestEffortTerminalReport } from "./unverified-report.js";
+import { hasCurrentReportPublicationStatus, writeReportPublicationStatus } from "./report-publication-status.js";
+import { recoverySubmissionAuthority } from "./workflow-recovery-authority.js";
 import {
   parseCurrentSmithersInspect,
   requestSmithersCancel,
@@ -1478,18 +1483,22 @@ export async function synchronizeLinkedWorkflowRun(
   reconcilePreparedRecoveryProvenance(layout);
   const recoveryState = readRunState(layout);
   const recovery = recoveryState.provenance?.recovery;
+  const recoveryRecords =
+    recovery?.submission_status === "submitted" ? replayEvents(layout, Number.MAX_SAFE_INTEGER).records : [];
   const recoveryDispositionAuthorized =
     recoverySubmissionAuthority({
-      layout,
+      records: recoveryRecords,
       state: recoveryState,
       workflowRunId: evidence.smithersRunId,
       workflowLinkId: evidence.workflowLinkId,
       controlGeneration: evidence.controlGeneration
     }) !== undefined;
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
-  const nonBlockingNodeIds = nonBlockingRuntimeNodeIds(loaded.graph);
+  const nonBlockingNodeIds = requiresCompleteRun(evidence)
+    ? new Set<string>()
+    : nonBlockingRuntimeNodeIds(loaded.graph);
   const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
-    layout,
+    records: recoveryRecords,
     state: recoveryState,
     inspect,
     nodeStatuses: syncResult.nodeStatuses,
@@ -1657,12 +1666,23 @@ export async function synchronizeLinkedWorkflowRun(
       forbiddenSecretValues
     });
   }
+  // A stopped-run acknowledgement is reporting authority even when an earlier
+  // deadline already terminalized product state and no task row changed.
+  const stoppedObservationChanged =
+    ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState) &&
+    replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter(
+        (event): event is Extract<EventRecord, { event_type: "workflow-synced" }> =>
+          event.event_type === "workflow-synced" && event.payload.workflow_run_id === evidence.smithersRunId
+      )
+      .at(-1)?.payload.workflow_state !== inspect.runState;
   if (
     runStatusChanged ||
     syncResult.changed ||
     accountingResult.changed ||
     workflowControl.transitioned ||
-    deadlineApplied
+    deadlineApplied ||
+    stoppedObservationChanged
   ) {
     const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
     if (preEventWriteBudgetDiagnostic !== undefined) {
@@ -1715,6 +1735,52 @@ export async function synchronizeLinkedWorkflowRun(
     }
   }
 
+  if (
+    ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState) &&
+    !hasCurrentReportPublicationStatus(layout.root, readRunState(layout))
+  ) {
+    try {
+      assertSynchronizationBudget(control);
+      // Publish only an existing agent-written report. Missing agent output is
+      // a terminal reporting result, not a reason to rerun analysis.
+      const report = publishBestEffortTerminalReport(layout.root, {
+        workflowRunId: evidence.smithersRunId,
+        workflowState: inspect.runState as "succeeded" | "succeeded-with-failures" | "failed" | "cancelled"
+      });
+      writeReportPublicationStatus({
+        runRoot: layout.root,
+        state: readRunState(layout),
+        ...(report === undefined ? { unavailableReason: "report-agent-output-unavailable" as const } : { report })
+      });
+    } catch (error) {
+      const interrupted = synchronizationInterruptionDiagnostic(error);
+      if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+      diagnostics.push({
+        code: "TERMINAL_REPORT_UNAVAILABLE",
+        message: "No current agent-written final report is available, or report publication failed.",
+        severity: "warning",
+        source: "report"
+      });
+      try {
+        writeReportPublicationStatus({
+          runRoot: layout.root,
+          state: readRunState(layout),
+          unavailableReason:
+            error instanceof Error && error.name === "ReportUnavailableError"
+              ? "report-agent-output-unavailable"
+              : "report-publication-failed"
+        });
+      } catch {
+        diagnostics.push({
+          code: "REPORT_STATUS_UNAVAILABLE",
+          message: "The final report availability record could not be saved.",
+          severity: "warning",
+          source: "report"
+        });
+      }
+    }
+  }
+
   return {
     ok: true,
     diagnostics,
@@ -1728,8 +1794,16 @@ export async function synchronizeLinkedWorkflowRun(
   };
 }
 
+function requiresCompleteRun(evidence: LinkedWorkflowEvidence): boolean {
+  const saved = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  if (saved === undefined) throw new Error("sealed completion policy is unavailable");
+  return parseResolvedConfigJsonBytes(saved.contents).run.completionPolicy === "require-complete";
+}
+
 function recoveryAuthorizesTerminalAggregate(input: {
-  layout: RunLayout;
+  records: readonly EventRecord[];
   state: ReturnType<typeof readRunState>;
   inspect: WorkflowInspect;
   nodeStatuses: Map<string, NodeStatus>;
@@ -1743,7 +1817,7 @@ function recoveryAuthorizesTerminalAggregate(input: {
 }): boolean {
   const recovery = input.state.provenance?.recovery;
   const submissionAuthority = recoverySubmissionAuthority({
-    layout: input.layout,
+    records: input.records,
     state: input.state,
     workflowRunId: input.workflowRunId,
     workflowLinkId: input.workflowLinkId,
@@ -1814,96 +1888,6 @@ function recoveryAuthorizesTerminalAggregate(input: {
   }
 
   return true;
-}
-
-function recoverySubmissionAuthority(input: {
-  layout: RunLayout;
-  state: ReturnType<typeof readRunState>;
-  workflowRunId: string;
-  workflowLinkId: string;
-  controlGeneration: string;
-}): { attemptEpoch: "continued" | "recreated" } | undefined {
-  const recovery = input.state.provenance?.recovery;
-  if (
-    recovery?.submission_status !== "submitted" ||
-    recovery.prior_status !== "failed" ||
-    recovery.workflow_run_id !== input.workflowRunId ||
-    recovery.workflow_link_id !== input.workflowLinkId ||
-    recovery.control_generation !== input.controlGeneration ||
-    recovery.lifecycle_result_event_id === undefined ||
-    recovery.lifecycle_result_at === undefined ||
-    recovery.lifecycle_submission_event_id === undefined ||
-    recovery.lifecycle_submitted_at === undefined
-  ) {
-    return undefined;
-  }
-
-  const records = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records;
-  const uniqueRecord = (eventId: string) => {
-    const matches = records
-      .map((record, index) => ({ record, index }))
-      .filter(({ record }) => record.event_id === eventId);
-    return matches.length === 1 ? matches[0] : undefined;
-  };
-  const invocation = uniqueRecord(recovery.controller_invocation_id);
-  const result = uniqueRecord(recovery.lifecycle_result_event_id);
-  const submission = uniqueRecord(recovery.lifecycle_submission_event_id);
-  if (
-    invocation === undefined ||
-    result === undefined ||
-    submission === undefined ||
-    !(invocation.index < result.index && result.index < submission.index) ||
-    invocation.record.timestamp !== recovery.controller_invoked_at ||
-    result.record.timestamp !== recovery.lifecycle_result_at ||
-    submission.record.timestamp !== recovery.lifecycle_submitted_at
-  ) {
-    return undefined;
-  }
-
-  const invocationPayload = invocation.record.payload as Record<string, unknown>;
-  const resultPayload = result.record.payload as Record<string, unknown>;
-  const submissionPayload = submission.record.payload as Record<string, unknown>;
-  if (
-    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
-    invocationPayload.action !== "resume" ||
-    invocationPayload.retry_failed !== true ||
-    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
-    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
-    invocationPayload.control_generation !== recovery.control_generation ||
-    result.record.event_type !== "workflow-lifecycle-result" ||
-    resultPayload.action !== "resume" ||
-    resultPayload.retry_failed !== true ||
-    resultPayload.source_workflow_run_id !== recovery.source_workflow_run_id ||
-    resultPayload.source_workflow_link_id !== recovery.source_workflow_link_id ||
-    resultPayload.workflow_run_id !== recovery.workflow_run_id ||
-    resultPayload.control_generation !== recovery.control_generation ||
-    resultPayload.controller_invocation_id !== recovery.controller_invocation_id ||
-    resultPayload.controller_invoked_at !== recovery.controller_invoked_at ||
-    submission.record.event_type !== "workflow-lifecycle-submitted" ||
-    submissionPayload.action !== "resume" ||
-    submissionPayload.retry_failed !== true ||
-    submissionPayload.workflow_run_id !== recovery.workflow_run_id ||
-    submissionPayload.workflow_link_id !== recovery.workflow_link_id ||
-    submissionPayload.control_generation !== recovery.control_generation ||
-    submissionPayload.controller_invocation_id !== recovery.controller_invocation_id ||
-    submissionPayload.controller_invoked_at !== recovery.controller_invoked_at ||
-    (resultPayload.recovered_missing_workflow_run === true) !==
-      (submissionPayload.recovered_missing_workflow_run === true)
-  ) {
-    return undefined;
-  }
-
-  // A completed recovery remains stable across read-only synchronization, but
-  // any later lifecycle action consumes its authority. A new retry-failed
-  // action must establish a new exact recovery disposition of its own.
-  if (
-    records.some((record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking")
-  ) {
-    return undefined;
-  }
-  return {
-    attemptEpoch: resultPayload.recovered_missing_workflow_run === true ? "recreated" : "continued"
-  };
 }
 
 function reconcilePreparedRecoveryProvenance(layout: RunLayout): void {
@@ -5874,7 +5858,7 @@ function completionEvidenceForTask(
     preparationEvidence !== undefined &&
     PREPARATION_FAILURE_STATUSES.has(preparationEvidence.status) &&
     preparationWorkflowStateIsFailure(preparationEvidence) &&
-    (agentEvidence === undefined || !terminalStatus(agentEvidence.status))
+    (agentEvidence === undefined || agentEvidence.status === "skipped" || !terminalStatus(agentEvidence.status))
   ) {
     return {
       evidence: preparationEvidence,
@@ -6060,7 +6044,7 @@ function finalRunStatus(
   if (
     inspect.exhaustedLoops.length > 0 ||
     (workflowStatus === "failed" && options.recoveredAggregateAuthorized !== true) ||
-    statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
+    statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
   }
@@ -6238,7 +6222,7 @@ function monotonicReplayedLastError(
 }
 
 function preparationWorkflowStateIsFailure(evidence: NodeWorkflowEvidence): boolean {
-  return evidence.workflowState === "failed" || evidence.timedOut === true;
+  return evidence.workflowState === "failed" || evidence.workflowState === "stalled" || evidence.timedOut === true;
 }
 
 function finishedAtForStatus(

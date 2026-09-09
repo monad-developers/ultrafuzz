@@ -75,14 +75,18 @@ export type AgentAuthMode = "api-key" | "subscription";
 export const PROJECT_CONFIG_SCHEMA_VERSION = "ultrafuzz.config.v2" as const;
 
 /** Closed persisted resolved-config JSON contract. */
-export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.resolved-config.v3" as const;
+export const RESOLVED_CONFIG_SCHEMA_VERSION = "ultrafuzz.resolved-config.v4" as const;
 
 export interface ProjectConfig {
   repo: string;
   name?: string;
 }
 
+export type RunCompletionPolicy = "best-effort" | "require-complete";
+
 export interface RunConfig {
+  /** Required terminal coverage; independent of retries and report verification. */
+  completionPolicy: RunCompletionPolicy;
   outputDir: string;
   maxParallelAgents: number;
   maxDynamicNodes: number;

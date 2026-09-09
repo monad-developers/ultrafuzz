@@ -59,6 +59,15 @@ export interface EvmbenchStatusData {
   run_id: string;
   run_root: string;
   status: string;
+  ended: boolean | null;
+  report: {
+    status: "available" | "unavailable" | "pending" | "unknown";
+    reason: string | null;
+    completion: "complete" | "partial" | "unknown";
+    verification: "verified" | "not-checked" | "unknown";
+    json_path: string | null;
+    markdown_path: string | null;
+  };
   created_at?: string;
   started_at?: string;
   finished_at?: string;
@@ -149,7 +158,10 @@ export interface EvmbenchStatusData {
 export interface EvmbenchReportData {
   markdown_path: string;
   json_path: string;
-  source: "verified-agent-report";
+  source: "verified-agent-report" | "verified-runtime-report" | "unverified-runtime-report";
+  verification?: "verified" | "not-checked";
+  completion?: "complete" | "partial";
+  terminal?: boolean;
 }
 
 export interface EvmbenchCliDataMap {

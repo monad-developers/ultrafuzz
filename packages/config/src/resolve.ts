@@ -138,6 +138,7 @@ export function serializeResolvedConfigToml(
     name: clone.project.name
   });
   pushTable(lines, "run", {
+    completion_policy: clone.run.completionPolicy,
     output_dir: clone.run.outputDir,
     max_parallel_agents: omitProfileSettings ? undefined : clone.run.maxParallelAgents,
     max_dynamic_nodes: clone.run.maxDynamicNodes,

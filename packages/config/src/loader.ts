@@ -16,6 +16,7 @@ import {
   type LoadedProjectConfig,
   type ModelProfile,
   type ProjectConfigInput,
+  type RunCompletionPolicy,
   PROJECT_CONFIG_SCHEMA_VERSION,
   type WorkspaceMode
 } from "./types.js";
@@ -40,6 +41,7 @@ const TOP_LEVEL_KEYS = new Set([
 
 const PROJECT_KEYS = ["repo", "name"] as const;
 const RUN_KEYS = [
+  "completion_policy",
   "output_dir",
   "max_parallel_agents",
   "max_dynamic_nodes",
@@ -256,6 +258,16 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         }
       }
     ]);
+    readEnum(
+      run,
+      "completion_policy",
+      ["run", "completion_policy"],
+      diagnostics,
+      normalizeRunCompletionPolicy,
+      (value) => {
+        runConfig.completionPolicy = value;
+      }
+    );
     readEnum(run, "workspace_mode", ["run", "workspace_mode"], diagnostics, normalizeWorkspaceMode, (value) => {
       runConfig.workspaceMode = value;
     });
@@ -949,6 +961,10 @@ function normalizeWorkspaceMode(value: string): WorkspaceMode | undefined {
     default:
       return undefined;
   }
+}
+
+function normalizeRunCompletionPolicy(value: string): RunCompletionPolicy | undefined {
+  return value === "best-effort" || value === "require-complete" ? value : undefined;
 }
 
 function normalizeExecutionMode(value: string): ExecutionMode | undefined {

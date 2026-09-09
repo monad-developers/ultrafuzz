@@ -377,6 +377,8 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "report-finding-id-uniqueness",
     "report-finding-report-vocabulary",
     "report-coverage-evidence-reconciliation",
+    "report-completion-reconciliation",
+    "report-completion-authority",
     "report-campaign-outcome-authority",
     "report-severity-classification-preservation",
     "report-property-provenance-join"

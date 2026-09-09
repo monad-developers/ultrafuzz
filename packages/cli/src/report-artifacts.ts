@@ -1,28 +1,19 @@
-import { loadVerifiedFinalReportSnapshot, type VerifiedFinalReportSnapshot } from "@ultrafuzz/runtime";
+import { loadReportSnapshot, type ReportSnapshot } from "@ultrafuzz/runtime";
 
-export interface ValidatedReportArtifacts {
+export interface ReportArtifacts {
   markdown_path: string;
   json_path: string;
-  source: "verified-agent-report";
+  source: "verified-agent-report" | "verified-runtime-report" | "unverified-runtime-report";
+  verification?: "verified" | "not-checked";
+  completion?: "complete" | "partial";
+  terminal?: boolean;
 }
 
-export interface ValidatedReportSnapshot {
-  artifacts: ValidatedReportArtifacts;
-  json: unknown;
-  json_bytes: Buffer;
-  markdown: string;
-  markdown_bytes: Buffer;
-  validation_warnings: VerifiedFinalReportSnapshot["validation_warnings"];
-}
+export type ReportArtifactsSnapshot = ReportSnapshot;
 
-export function loadValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot {
-  const report = loadVerifiedFinalReportSnapshot(runRoot);
-  return {
-    artifacts: report.artifacts,
-    json: report.json,
-    json_bytes: report.json_bytes,
-    markdown: report.markdown,
-    markdown_bytes: report.markdown_bytes,
-    validation_warnings: report.validation_warnings
-  };
+export function loadReportArtifactsSnapshot(
+  runRoot: string,
+  options?: { requireVerified?: boolean }
+): ReportArtifactsSnapshot {
+  return loadReportSnapshot(runRoot, options);
 }

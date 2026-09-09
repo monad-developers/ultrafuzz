@@ -3,7 +3,21 @@ import { readFileSync } from "node:fs";
 
 const namedTests = new Map([
   ["test/cli.test.ts", ["status surfaces a terminal product and live workflow lifecycle divergence"]],
-  ["test/cli-contracts.test.ts", ["known command failures can retain a valid typed data snapshot"]]
+  [
+    "test/cli-contracts.test.ts",
+    [
+      "known command failures can retain a valid typed data snapshot",
+      "status separates successful queries, partial reports, unavailable reports, and unknown completion"
+    ]
+  ],
+  [
+    "test/status-report.test.ts",
+    [
+      "watch stops at ended runs with unavailable reports and distinguishes attention stops",
+      "status shows complete execution with a partial unchecked report without changing the execution verdict",
+      "status shows report failure and unknown coverage without presenting a false report path"
+    ]
+  ]
 ]);
 const selectedTestNames = [...namedTests.values()].flat();
 

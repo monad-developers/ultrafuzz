@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "ultrafuzz.resolved-config.v3",
+  "schemaVersion": "ultrafuzz.resolved-config.v4",
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
@@ -36,6 +36,7 @@
     "repo": "."
   },
   "run": {
+    "completionPolicy": "best-effort",
     "outputDir": ".ultrafuzz/runs",
     "maxParallelAgents": 4,
     "maxDynamicNodes": 2048,

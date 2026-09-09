@@ -25,6 +25,26 @@ interface GateFixture {
   negative: unknown;
 }
 
+const completeReportCompletion = {
+  schema_version: "ultrafuzz.report-completion.v1",
+  run_id: "run-a",
+  outcome: "complete",
+  counts: { planned: 2, succeeded: 2, failed: 0, timed_out: 0, skipped: 0, cancelled: 0, unverified: 0 },
+  incomplete_nodes: [],
+  incomplete_nodes_omitted: 0
+};
+
+const partialReportCompletion = {
+  ...completeReportCompletion,
+  outcome: "partial",
+  counts: { ...completeReportCompletion.counts, succeeded: 1, failed: 1 },
+  incomplete_nodes: [{ node_id: "node-a", outcome: "failed", failure_category: "task-failure" }]
+};
+
+function reportWithCompletion(completion: unknown, runId = "run-a"): unknown {
+  return { run_metadata: { run_id: runId }, completion };
+}
+
 const validPlannedOutput = {
   path: "report.md",
   contract: "ultrafuzz/nonempty-markdown@1",
@@ -1244,6 +1264,13 @@ const fixtures = {
     positive: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "b" }] },
     negative: { issues: [{ id: "a" }], non_production_outcomes: [{ id: "a" }] }
   },
+  "report-completion-reconciliation": {
+    positive: reportWithCompletion(completeReportCompletion),
+    negative: reportWithCompletion({
+      ...completeReportCompletion,
+      counts: { ...completeReportCompletion.counts, planned: 3 }
+    })
+  },
   "report-finding-evidence-span-consistency": {
     positive: {
       issues: [{ evidence: [{ line: 1, end_line: 2 }] }],
@@ -1800,6 +1827,146 @@ test("offline schema execution never claims contextual gates passed", () => {
         assert.deepEqual(result.missingContext, registration.requiredContext);
       }
     }
+  }
+});
+
+test("report completion reconciliation validates census shape, arithmetic, and run identity", () => {
+  assert.equal(executeSemanticGate("report-completion-reconciliation", { document: {} }).status, "passed");
+  for (const completion of [completeReportCompletion, partialReportCompletion]) {
+    const result = executeOfflineSchemaSemanticGates("report.schema.json", reportWithCompletion(completion)).find(
+      (entry) => entry.gate === "report-completion-reconciliation"
+    );
+    assert.equal(result?.status, "passed");
+  }
+  const invalidCompletions = [
+    ["null census", null, "$.completion"],
+    ["wrong schema version", { ...completeReportCompletion, schema_version: "unknown" }, "$.completion.schema_version"],
+    [
+      "negative count",
+      { ...completeReportCompletion, counts: { ...completeReportCompletion.counts, succeeded: -1 } },
+      "$.completion.counts.succeeded"
+    ],
+    [
+      "inconsistent planned count",
+      { ...completeReportCompletion, counts: { ...completeReportCompletion.counts, planned: 3 } },
+      "$.completion.counts"
+    ],
+    ["false complete outcome", { ...partialReportCompletion, outcome: "complete" }, "$.completion.outcome"],
+    [
+      "missing incomplete node",
+      { ...partialReportCompletion, incomplete_nodes: [] },
+      "$.completion.incomplete_nodes_omitted"
+    ],
+    [
+      "mismatched incomplete outcome",
+      {
+        ...partialReportCompletion,
+        incomplete_nodes: [{ node_id: "node-a", outcome: "unverified", failure_category: "unverified" }]
+      },
+      "$.completion.counts.failed"
+    ],
+    [
+      "duplicate incomplete identities",
+      {
+        ...partialReportCompletion,
+        counts: { ...partialReportCompletion.counts, planned: 3, failed: 2 },
+        incomplete_nodes: [...partialReportCompletion.incomplete_nodes, ...partialReportCompletion.incomplete_nodes]
+      },
+      "$.completion.incomplete_nodes[1].node_id"
+    ],
+    ["foreign run", { ...completeReportCompletion, run_id: "run-b" }, "$.completion.run_id"]
+  ] as const;
+  for (const [label, completion, expectedPath] of invalidCompletions) {
+    const result = executeSemanticGate("report-completion-reconciliation", {
+      document: reportWithCompletion(completion)
+    });
+    assert.equal(result.status, "failed", label);
+    assert.ok(result.status === "failed" && result.issues.some((entry) => entry.path === expectedPath), label);
+  }
+});
+
+test("report completion authority requires trusted context and prohibits unsupported claims", () => {
+  for (const document of [{}, reportWithCompletion(completeReportCompletion)]) {
+    const missing = executeSemanticGate("report-completion-authority", { document });
+    assert.equal(missing.status, "requires-context");
+    assert.deepEqual(missing.status === "requires-context" ? missing.missingContext : [], [
+      "artifactSet.reportCompletion"
+    ]);
+  }
+  assert.equal(
+    executeSemanticGate("report-completion-authority", {
+      document: {},
+      context: { artifactSet: { reportCompletion: null } }
+    }).status,
+    "passed"
+  );
+  for (const completion of [completeReportCompletion, partialReportCompletion]) {
+    const result = executeSemanticGate("report-completion-authority", {
+      document: reportWithCompletion(completion),
+      context: { artifactSet: { reportCompletion: null } }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(
+      result.status === "failed" && result.issues.some((entry) => /without an authoritative/u.test(entry.message))
+    );
+  }
+});
+
+test("report-only unchecked metadata cannot enter the verified agent artifact path", () => {
+  for (const field of ["verification", "observed_completion"]) {
+    const result = executeSemanticGate("report-completion-authority", {
+      document: { [field]: {} },
+      context: { artifactSet: { reportCompletion: null } }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(result.status === "failed" && result.issues.some((entry) => entry.path === `$.${field}`));
+  }
+});
+
+test("report completion authority rejects omissions, changed census facts, invalid context, and foreign runs", () => {
+  const context: SemanticGateContext = {
+    artifactSet: { reportCompletion: partialReportCompletion },
+    artifactIdentity: { runId: "run-a", nodeId: "final-report" }
+  };
+  assert.equal(
+    executeSemanticGate("report-completion-authority", {
+      document: reportWithCompletion(structuredClone(partialReportCompletion)),
+      context
+    }).status,
+    "passed"
+  );
+  for (const document of [
+    { run_metadata: { run_id: "run-a" } },
+    reportWithCompletion(completeReportCompletion),
+    reportWithCompletion({
+      ...partialReportCompletion,
+      incomplete_nodes: [{ node_id: "different-node", outcome: "failed", failure_category: "task-failure" }]
+    })
+  ]) {
+    assert.equal(executeSemanticGate("report-completion-authority", { document, context }).status, "failed");
+  }
+  const invalidCensus = {
+    ...partialReportCompletion,
+    counts: { ...partialReportCompletion.counts, planned: 3 }
+  };
+  const invalid = executeSemanticGate("report-completion-authority", {
+    document: reportWithCompletion(invalidCensus),
+    context: { artifactSet: { reportCompletion: invalidCensus } }
+  });
+  assert.equal(invalid.status, "failed");
+  assert.deepEqual(invalid.status === "failed" ? invalid.issues : [], [
+    { path: "$context.artifactSet.reportCompletion", message: "Authoritative report completion context is invalid" }
+  ]);
+  const foreignCensus = { ...partialReportCompletion, run_id: "run-b" };
+  for (const document of [reportWithCompletion(foreignCensus), reportWithCompletion(foreignCensus, "run-b")]) {
+    const result = executeSemanticGate("report-completion-authority", {
+      document,
+      context: { ...context, artifactSet: { reportCompletion: foreignCensus } }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(
+      result.status === "failed" && result.issues.some((entry) => /belongs to another run/u.test(entry.message))
+    );
   }
 });
 
@@ -3201,6 +3368,11 @@ test("every contextual registration executes real positive and negative checks",
             }
           }
         }
+      },
+      "report-completion-authority": {
+        positive: reportWithCompletion(partialReportCompletion),
+        negative: reportWithCompletion(completeReportCompletion),
+        context: { artifactSet: { reportCompletion: partialReportCompletion } }
       },
       "report-campaign-outcome-authority": {
         positive: {

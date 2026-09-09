@@ -549,9 +549,14 @@ test("dynamic expansion never steals an old lock owned by another materializer",
   assert.equal(fs.statSync(lockPath).mtimeMs, old.getTime());
 });
 
-test("runtime materialization lowers one-item and empty joins and preserves resume fingerprints", () => {
-  for (const count of [0, 1]) {
-    const runId = `materialize-${count}`;
+test("runtime materialization preserves required inputs and allows partial review joins", () => {
+  for (const [count, consumerGroup] of [
+    [0, "review"],
+    [1, "review"],
+    [0, "strategies"],
+    [1, "strategies"]
+  ] as const) {
+    const runId = `materialize-${count}-${consumerGroup}`;
     const projectRoot = tempDirectory();
     const runRoot = path.join(projectRoot, "runs", runId);
     const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
@@ -572,6 +577,8 @@ test("runtime materialization lowers one-item and empty joins and preserves resu
     fs.writeFileSync(tasksPath, `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [] })}\n`, "utf8");
     const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
     const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
+    joinTask.metadata.node.group = consumerGroup;
+    if (count === 0) joinTask.optionalDependencyArtifactDirs = [path.join(runRoot, "artifacts", "planner")];
     const group: CompiledSmithersDynamicGroup = {
       groupNodeId: "fanout",
       logicalNodeId: "fanout",
@@ -621,7 +628,7 @@ test("runtime materialization lowers one-item and empty joins and preserves resu
       assert.deepEqual(join.depends_on, ["planner"]);
       assert.deepEqual(storedJoin.dependencies, ["planner"]);
       assert.deepEqual(storedJoin.dependencySmithersNodeIds, ["verify:planner"]);
-      assert.deepEqual(storedJoin.optionalDependencyArtifactDirs, [path.join(runRoot, "artifacts", "planner")]);
+      assert.deepEqual(storedJoin.optionalDependencyArtifactDirs, []);
     } else {
       assert.deepEqual(join.depends_on, ["dynamic:item:goal-0"]);
       const generated = materialized.tasks.find((task) => task.metadata.node.producerNodeId === "dynamic:item:goal-0")!;
@@ -629,7 +636,10 @@ test("runtime materialization lowers one-item and empty joins and preserves resu
       assert.ok(!generated.attemptId.includes(":"));
       assert.deepEqual(storedJoin.dependencies, [generated.attemptId]);
       assert.deepEqual(storedJoin.dependencySmithersNodeIds, [generated.verifierSmithersNodeId]);
-      assert.deepEqual(storedJoin.optionalDependencyArtifactDirs, [generated.artifactDir]);
+      assert.deepEqual(
+        storedJoin.optionalDependencyArtifactDirs,
+        consumerGroup === "review" ? [generated.artifactDir] : []
+      );
       assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /goal 0 using context 0/u);
     }
   }

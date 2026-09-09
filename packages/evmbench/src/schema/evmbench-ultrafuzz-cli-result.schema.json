@@ -258,6 +258,8 @@
         "run_id",
         "run_root",
         "status",
+        "ended",
+        "report",
         "workflow_ids",
         "workflow_status",
         "verdict",
@@ -300,6 +302,8 @@
         "status": {
           "type": "string"
         },
+        "ended": { "type": ["boolean", "null"] },
+        "report": { "$ref": "#/$defs/reportStatus" },
         "created_at": {
           "type": "string"
         },
@@ -691,9 +695,93 @@
           "type": "string"
         },
         "source": {
-          "const": "verified-agent-report"
+          "enum": ["verified-agent-report", "verified-runtime-report", "unverified-runtime-report"]
+        },
+        "verification": {
+          "enum": ["verified", "not-checked"]
+        },
+        "completion": {
+          "enum": ["complete", "partial"]
+        },
+        "terminal": {
+          "type": "boolean"
         }
       }
+    },
+    "reportStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "completion", "verification", "json_path", "markdown_path"],
+      "properties": {
+        "status": {
+          "enum": ["available", "unavailable", "pending", "unknown"]
+        },
+        "reason": {
+          "type": ["string", "null"]
+        },
+        "completion": {
+          "enum": ["complete", "partial", "unknown"]
+        },
+        "verification": {
+          "enum": ["verified", "not-checked", "unknown"]
+        },
+        "json_path": {
+          "type": ["string", "null"]
+        },
+        "markdown_path": {
+          "type": ["string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "available"
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              },
+              "verification": {
+                "enum": ["verified", "not-checked"]
+              },
+              "json_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "markdown_path": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "completion": {
+                "const": "unknown"
+              },
+              "verification": {
+                "const": "unknown"
+              },
+              "json_path": {
+                "type": "null"
+              },
+              "markdown_path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

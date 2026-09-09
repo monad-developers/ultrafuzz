@@ -15,29 +15,48 @@
     "entry_count_without_manifest"
   ],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.report-bundle-manifest.v3" },
-    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "created_at": { "type": "string", "format": "date-time" },
+    "schema_version": {
+      "const": "ultrafuzz.report-bundle-manifest.v3"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "included_roots": {
-      "const": [
-        "attempts.jsonl",
-        "config.redactions.json",
-        "config.resolved.toml",
-        "events.jsonl",
-        "graph.fingerprint",
-        "graph.json",
-        "plan.json",
-        "run.json",
-        "state.json",
-        "usage.jsonl",
-        "artifacts",
-        "review",
-        "events.index",
-        "engine-logs"
+      "oneOf": [
+        {
+          "const": [
+            "attempts.jsonl",
+            "config.redactions.json",
+            "config.resolved.toml",
+            "events.jsonl",
+            "graph.fingerprint",
+            "graph.json",
+            "plan.json",
+            "run.json",
+            "state.json",
+            "usage.jsonl",
+            "artifacts",
+            "review",
+            "events.index",
+            "engine-logs"
+          ]
+        },
+        {
+          "const": ["report.json", "report.md"]
+        }
       ]
     },
-    "excluded_roots": { "const": ["workspaces"] },
-    "excluded_patterns": { "const": ["artifacts/final-report/report.json.pre-*"] },
+    "excluded_roots": {
+      "const": ["workspaces"]
+    },
+    "excluded_patterns": {
+      "const": ["artifacts/final-report/report.json.pre-*"]
+    },
     "path_mappings": {
       "type": "array",
       "maxItems": 100000,
@@ -64,6 +83,70 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9007199254740991
+    },
+    "scope": {
+      "const": "report-only"
+    },
+    "verification": {
+      "enum": ["verified", "not-checked"]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["scope"],
+        "properties": {
+          "scope": {
+            "const": "report-only"
+          }
+        }
+      },
+      "then": {
+        "required": ["verification"],
+        "properties": {
+          "included_roots": {
+            "const": ["report.json", "report.md"]
+          },
+          "path_mappings": {
+            "maxItems": 0,
+            "type": "array"
+          },
+          "entry_count_without_manifest": {
+            "const": 2
+          },
+          "verification": {
+            "enum": ["verified", "not-checked"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "included_roots": {
+            "const": [
+              "attempts.jsonl",
+              "config.redactions.json",
+              "config.resolved.toml",
+              "events.jsonl",
+              "graph.fingerprint",
+              "graph.json",
+              "plan.json",
+              "run.json",
+              "state.json",
+              "usage.jsonl",
+              "artifacts",
+              "review",
+              "events.index",
+              "engine-logs"
+            ]
+          }
+        },
+        "not": {
+          "required": ["verification"],
+          "properties": {
+            "verification": {}
+          }
+        }
+      }
+    }
+  ]
 }

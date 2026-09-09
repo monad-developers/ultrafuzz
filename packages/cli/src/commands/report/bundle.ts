@@ -20,6 +20,7 @@ import {
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import {
+  assertReportSnapshotRemainedCurrent,
   assertVerifiedRunOutputAuthorityRemainedCurrent,
   isVerifiedOutputAuthorityUnavailable,
   loadVerifiedRunOutputAuthoritySnapshot,
@@ -31,7 +32,7 @@ import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
 import { validateReportBundleManifest } from "../../cli-schema-registry.js";
-import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../../report-artifacts.js";
+import { loadReportArtifactsSnapshot, type ReportArtifactsSnapshot } from "../../report-artifacts.js";
 
 const TOP_LEVEL_RUN_FILES = [
   "attempts.jsonl",
@@ -62,6 +63,8 @@ interface BundleData {
   entry_count: number;
   included_roots: string[];
   excluded_roots: string[];
+  scope?: "report-only";
+  verification?: "verified" | "not-checked";
 }
 
 interface BundleFile {
@@ -80,6 +83,8 @@ interface ReportBundleManifest {
   excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
   path_mappings: Array<{ source_path: string; archive_path: string }>;
   entry_count_without_manifest: number;
+  scope?: "report-only";
+  verification?: "verified" | "not-checked";
 }
 
 export default class ReportBundle extends Command {
@@ -87,6 +92,7 @@ export default class ReportBundle extends Command {
   static override args = { runId: Args.string({ required: true, description: "Ultrafuzz run ID" }) };
   static override flags = {
     ...globalFlags,
+    "require-verified": Flags.boolean({ summary: "Require a verified full-run bundle" }),
     output: Flags.string({
       char: "o",
       summary: "Output ZIP path; relative paths resolve from the project root"
@@ -126,14 +132,48 @@ export default class ReportBundle extends Command {
       assertNoSymlinkComponents(outputGuardRoot, outputDirectory, "output directory");
 
       const diagnostics: RuntimeDiagnostic[] = [];
-      assertCurrentBundleAuthorityPresent(layout.root);
-      const verifiedRunAuthority = loadVerifiedRunOutputAuthoritySnapshot(layout.root);
-      const validatedReport = loadDeclaredValidatedReportSnapshot(layout.root);
-      const eventJournal = loadValidatedEventJournalSnapshot(layout.root, layout.eventsPath, runId);
-      const files = collectBundleFiles(layout.root, diagnostics, eventJournal);
-      assertVerifiedRunAuthorityBundleSnapshots(files, verifiedRunAuthority);
-      if (validatedReport !== undefined) assertValidatedReportBundleSnapshot(files, validatedReport);
-      assertVerifiedRunOutputAuthorityRemainedCurrent(verifiedRunAuthority);
+      let files: BundleFile[];
+      let reportOnly: ReportArtifactsSnapshot | undefined;
+      try {
+        files = collectVerifiedBundleFiles(
+          layout.root,
+          layout.eventsPath,
+          runId,
+          diagnostics,
+          !flags["require-verified"]
+        );
+      } catch (error) {
+        if (flags["require-verified"]) throw error;
+        reportOnly = loadReportArtifactsSnapshot(layout.root);
+        files = [
+          { absolutePath: reportOnly.artifacts.json_path, archivePath: "report.json", contents: reportOnly.json_bytes },
+          {
+            absolutePath: reportOnly.artifacts.markdown_path,
+            archivePath: "report.md",
+            contents: reportOnly.markdown_bytes
+          }
+        ];
+        assertReportSnapshotRemainedCurrent(reportOnly);
+        diagnostics.push({
+          code: "REPORT_BUNDLE_REPORT_ONLY",
+          severity: "warning",
+          source: "report",
+          message: `This archive contains only the available report pair: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        });
+      }
+      const includedRoots =
+        reportOnly === undefined
+          ? [...TOP_LEVEL_RUN_FILES, ...INCLUDED_DIRECTORIES, ...RENAMED_DIRECTORIES.map((entry) => entry.archive)]
+          : ["report.json", "report.md"];
+      const reportOnlyLabels =
+        reportOnly === undefined
+          ? {}
+          : {
+              scope: "report-only" as const,
+              verification: reportOnly.verification
+            };
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
       }
@@ -146,11 +186,8 @@ export default class ReportBundle extends Command {
         schema_version: "ultrafuzz.report-bundle-manifest.v3",
         run_id: runId,
         created_at: new Date().toISOString(),
-        included_roots: [
-          ...TOP_LEVEL_RUN_FILES,
-          ...INCLUDED_DIRECTORIES,
-          ...RENAMED_DIRECTORIES.map((entry) => entry.archive)
-        ],
+        included_roots: includedRoots,
+        ...reportOnlyLabels,
         excluded_roots: ["workspaces"],
         excluded_patterns: ["artifacts/final-report/report.json.pre-*"],
         path_mappings: files.flatMap((file) =>
@@ -176,11 +213,8 @@ export default class ReportBundle extends Command {
         bytes: fs.statSync(outputPath).size,
         sha256: sha256File(outputPath),
         entry_count: files.length + 1,
-        included_roots: [
-          ...TOP_LEVEL_RUN_FILES,
-          ...INCLUDED_DIRECTORIES,
-          ...RENAMED_DIRECTORIES.map((entry) => entry.archive)
-        ],
+        included_roots: includedRoots,
+        ...reportOnlyLabels,
         excluded_roots: ["workspaces"]
       };
 
@@ -191,7 +225,7 @@ export default class ReportBundle extends Command {
           ok: true,
           command: commandName,
           data,
-          text: `Report bundle: ${data.zip_path}\nSHA256: ${data.sha256}\nEntries: ${data.entry_count}\n`,
+          text: `Report bundle: ${data.zip_path}\n${reportOnly === undefined ? "" : `Scope: report-only\nVerification: ${reportOnly.verification}\n`}SHA256: ${data.sha256}\nEntries: ${String(data.entry_count)}\n`,
           diagnostics
         },
         flags.json === true
@@ -207,10 +241,37 @@ export default class ReportBundle extends Command {
   }
 }
 
-function assertValidatedReportBundleSnapshot(files: readonly BundleFile[], report: ValidatedReportSnapshot): void {
+function collectVerifiedBundleFiles(
+  runRoot: string,
+  eventsPath: string,
+  runId: string,
+  diagnostics: RuntimeDiagnostic[],
+  preferBestEffort: boolean
+): BundleFile[] {
+  assertCurrentBundleAuthorityPresent(runRoot);
+  const authority = loadVerifiedRunOutputAuthoritySnapshot(runRoot);
+  const report = loadDeclaredReportArtifactsSnapshot(runRoot);
+  if (preferBestEffort && report !== undefined && loadReportArtifactsSnapshot(runRoot).verification === "not-checked") {
+    throw new Error("verification of the selected agent-written report could not be completed");
+  }
+  const eventJournal = loadValidatedEventJournalSnapshot(runRoot, eventsPath, runId);
+  const files = collectBundleFiles(runRoot, diagnostics, eventJournal, report);
+  assertVerifiedRunAuthorityBundleSnapshots(files, authority);
+  if (report !== undefined) assertValidatedReportBundleSnapshot(files, report);
+  assertVerifiedRunOutputAuthorityRemainedCurrent(authority);
+  if (report !== undefined) {
+    assertReportSnapshotRemainedCurrent(report);
+  } else if (loadDeclaredReportArtifactsSnapshot(runRoot) !== undefined) {
+    throw new Error("report authority appeared while bundle inputs were being captured");
+  }
+  return files;
+}
+
+function assertValidatedReportBundleSnapshot(files: readonly BundleFile[], report: ReportArtifactsSnapshot): void {
   const expected = [
     { path: report.artifacts.json_path, contents: report.json_bytes },
-    { path: report.artifacts.markdown_path, contents: report.markdown_bytes }
+    { path: report.artifacts.markdown_path, contents: report.markdown_bytes },
+    ...(report.publications ?? []).map((publication) => ({ path: publication.path, contents: publication.bytes }))
   ];
   for (const entry of expected) {
     const captured = files.find((file) => file.absolutePath === entry.path);
@@ -230,9 +291,9 @@ function assertCurrentBundleAuthorityPresent(runRoot: string): void {
   }
 }
 
-function loadDeclaredValidatedReportSnapshot(runRoot: string): ValidatedReportSnapshot | undefined {
+function loadDeclaredReportArtifactsSnapshot(runRoot: string): ReportArtifactsSnapshot | undefined {
   try {
-    return loadValidatedReportSnapshot(runRoot);
+    return loadReportArtifactsSnapshot(runRoot, { requireVerified: true });
   } catch (error) {
     if (isVerifiedOutputAuthorityUnavailable(error)) return undefined;
     throw error;
@@ -396,7 +457,8 @@ function eventJournalCodec(expectedRunId: string): StrictJsonlCodec<EventRecord>
 function collectBundleFiles(
   runRoot: string,
   diagnostics: RuntimeDiagnostic[],
-  eventJournal: BundleFile | undefined
+  eventJournal: BundleFile | undefined,
+  report: ReportArtifactsSnapshot | undefined
 ): BundleFile[] {
   const files: BundleFile[] = eventJournal === undefined ? [] : [eventJournal];
 
@@ -425,6 +487,20 @@ function collectBundleFiles(
     }
   }
 
+  const runtimeReportRoot = path.join(runRoot, "review", "runtime-report");
+  if (report?.artifacts.source === "verified-runtime-report") {
+    const publications = report.publications;
+    if (publications === undefined || publications.length === 0) {
+      throw new Error("runtime report has no authenticated publication files");
+    }
+    for (const publication of publications) {
+      assertPathInside(runtimeReportRoot, publication.path, "runtime report publication");
+      addBundleFile(runRoot, publication.path, displayRelativePath(runRoot, publication.path), files, diagnostics);
+    }
+  } else if (lstatIfPresent(runtimeReportRoot) !== undefined) {
+    throw new Error("runtime report directory has no authenticated current publication");
+  }
+
   const totalBytes = files.reduce((total, file) => total + file.contents.byteLength, 0);
   if (totalBytes > MAX_BUNDLE_TOTAL_BYTES) {
     throw new Error(`report bundle inputs exceed the ${MAX_BUNDLE_TOTAL_BYTES}-byte limit`);
@@ -444,6 +520,10 @@ function collectDirectory(
   diagnostics: RuntimeDiagnostic[],
   rename?: ArchiveRename
 ): void {
+  // Runtime publication generations are admitted only by the current report
+  // snapshot. Recursive enumeration must not publish stale or unverified copies.
+  if (["review/runtime-report", "review/unverified-report"].includes(displayRelativePath(runRoot, absoluteDirectory)))
+    return;
   assertPathInside(runRoot, absoluteDirectory, "bundle directory");
   assertNoSymlinkComponents(runRoot, absoluteDirectory, "bundle directory");
   for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {

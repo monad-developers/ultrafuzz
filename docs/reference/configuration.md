@@ -375,6 +375,19 @@ or fragments and must resolve entirely to public addresses. The validated DNS
 address is pinned for the request, redirects are rejected, and response bodies
 are streamed with a 25 MiB limit before strict JSON parsing.
 
+## Completion policy
+
+`[run].completion_policy` accepts `"best-effort"` (the default) or
+`"require-complete"`. `ultrafuzz run --require-complete` selects strict completion
+for one run. The saved policy determines whether incomplete coverage makes the
+terminal run unsuccessful. Both modes retain the configured retry counts and
+attempt eligible agent-written reporting. A failed report agent leaves report
+availability unavailable; no replacement report is synthesized. Custom
+topologies keep their declared group failure policies.
+
+`ultrafuzz report --require-verified` is independent: it requires verification of
+an available agent-written report, not complete execution coverage.
+
 ## Resolution Order
 
 1. Built-in root TOML defaults.
@@ -387,8 +400,8 @@ optional `[retry]` table does not invalidate existing project files. The
 redacted operator-facing resolved config is persisted for each run as
 `config.resolved.toml`, with restore metadata in `config.redactions.json`. The
 unredacted workflow control contract is serialized once as camelCase JSON,
-identified as `ultrafuzz.resolved-config.v3`, validated against
-`urn:ultrafuzz:schema:config:resolved-config:3`, and published
+identified as `ultrafuzz.resolved-config.v4`, validated against
+`urn:ultrafuzz:schema:config:resolved-config:4`, and published
 byte-for-byte as `smithers/resolved-config.json` before it is sealed into the
 execution snapshot. Sealed readers run the same strict parser and schema; they
 do not use historical fallbacks. That JSON document carries the audit-profile

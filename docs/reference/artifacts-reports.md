@@ -478,6 +478,12 @@ current topology; it is not a historical fallback. The Markdown projection
 renders the same two fields, and omission or the former `"unavailable"` string
 is schema-invalid.
 
+When the property-implementation track was planned but its result is omitted
+after failure, the report agent copies the runtime-supplied value
+`{ "status": "unavailable", "reason": "property-implementation-not-completed" }`.
+This records a coverage gap without claiming the track was absent. It does not
+permit a failed producer's artifacts to become report inputs.
+
 ### Campaign outcome
 
 An invariant campaign that never fuzzed and one that fuzzed and found nothing
@@ -522,25 +528,153 @@ report gate; the host does not synthesize it from older handoffs.
 
 ## Final Report
 
-Final reporting is agentic. The report command reads agent-written final report
-artifacts from:
+Final report content is always agent-written. The final-report agent normally writes:
 
 ```text
 artifacts/final-report/report.md
 artifacts/final-report/report.json
 ```
 
-If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
 `report.json` must satisfy `ultrafuzz/report@3` with the exact
-`ultrafuzz.report.v3` version literal. Reporting reads the agent-authored bytes;
-it does not reconstruct, reorder, normalize, or rewrite them.
+`ultrafuzz.report.v3` version literal. After a run stops, the runtime can format
+that report and attach whole-run completion information without changing the
+agent's files. Verified publications use:
+
+```text
+review/runtime-report/<authority-digest>/report.json
+review/runtime-report/<authority-digest>/report.md
+review/runtime-report/<authority-digest>/terminal.json
+review/runtime-report/current.json
+```
+
+New runs use `run.completion_policy = "best-effort"` by default. Stock strategy
+groups continue after ordinary task failures. Independent work can finish;
+work that needs a missing required result is skipped. Review uses successful
+results that pass the existing input checks. User-authored topologies retain
+their declared failure policies. The configured attempts and time limits remain
+in effect; reporting does not restart analysis or add recovery attempts.
+
+`ultrafuzz run --require-complete` selects strict completion. Incomplete work
+makes the run unsuccessful, while eligible reporting still proceeds. The policy
+is saved at launch. It is separate from verification of the report.
+
+A successful report agent produces a PARTIAL report when planned coverage is
+incomplete. If every strategy fails, review can still report missing coverage
+when its execution prerequisites and time limits permit it. If the report
+agent cannot start, fails, or exhausts its allowed attempts, the run ends with
+**report unavailable** and preserves the saved task results. The runtime does
+not synthesize a replacement report from raw findings. `ultrafuzz report`
+returns a clear error when no current successful report-agent output exists.
+
+`ultrafuzz report <run-id>` prefers the current verified report. Local report
+verification is optional: when supporting records cannot be fully verified,
+a readable, schema-valid report from the current successful report-agent attempt
+can be formatted as an unchecked PARTIAL report under
+`review/unverified-report/<digest>/report.json` and `report.md`. These files
+preserve the agent-written content; they are not fallback analysis reports.
+
+The command's JSON result includes `source` (`verified-agent-report`,
+`verified-runtime-report`, or `unverified-runtime-report`), `verification`
+(`verified` or `not-checked`), `terminal`, and the `completion` outcome when
+available. Completion describes coverage; verification describes checks of the
+supporting records. Unknown counts remain unknown, rather than becoming zero.
+Unchecked reports are always PARTIAL because complete coverage was not verified.
+
+Unchecked `report.json` documents carry `verification.status: "not-checked"`,
+bounded reason codes, and `observed_completion` with nullable counts and an
+outcome of `partial`. The runtime does not turn other task findings into new
+report issues. These presentation fields grant no execution or scoring authority.
+
+Use `ultrafuzz report <run-id> --require-verified` to require report verification.
+The dashboard uses the same default and displays the verification label. A
+PARTIAL report can coexist with a failed run. `ultrafuzz status`, including
+`--watch --json`, exposes execution completion and current report availability;
+it does not start report agents. A terminal run without a report stops the
+watcher with a clear unavailable reason. Paused runs remain distinct from ended
+runs. Repeated polls read a saved publication summary rather than rebuilding
+report content.
+
+An explicit retry can replace a failed attempt. A new terminal publication must
+match the current execution and successful report attempt; an older report must
+not appear as the current result of a resumed run. Verified publication still
+checks the recovery evidence before accepting a recovered product outcome that
+differs from the workflow engine's retained aggregate state.
+
+### Whole-run completion contract
+
+The optional `report.json.completion` object describes whole-run completeness,
+separately from the invariant-specific `campaign_outcome`. The runtime derives
+the census from a stopped run's authenticated task and output evidence.
+Completion remains optional on agent-authored reports; their producers cannot
+assert whole-run completion on their own authority.
+
+A completion object uses `ultrafuzz.report-completion.v1` and binds `run_id` to
+`run_metadata.run_id`. Its `counts` object contains `planned`, `succeeded`,
+`failed`, `timed_out`, `skipped`, `cancelled`, and `unverified`. The six outcome
+counts must sum exactly to `planned`; `outcome` is `complete` only when every
+planned node succeeded, otherwise `partial`.
+
+`incomplete_nodes` records up to 256 unique node identities with their outcome
+and a closed failure category. `incomplete_nodes_omitted` accounts exactly for
+any identities beyond that limit; omitted identities never reduce the counts.
+The contract does not accept control-plane or integrity failures as ordinary
+task failures.
+
+Counts cover each concrete sealed task slot once, including the reporting task.
+Retries and logical/model aggregates do not add planned work. An unexpanded
+dynamic group contributes one incomplete scope of unknown size; its future
+tasks are not guessed. Only current verified outputs count as successful.
+
+Canonical rendering of a partial census starts with
+`# Ultrafuzz report — PARTIAL`, puts a prominent incompleteness warning before
+findings, and shows the counts and incomplete scope. An empty partial report
+explicitly says it is not a clean result. A complete census retains the normal
+report title. A report without a runtime census retains its previous rendering;
+absence of the field is not evidence of whole-run completeness.
+
+Offline schema validation and `ultrafuzz report render` establish document
+consistency and presentation only. Verified runtime report publication also
+requires authenticated terminal evidence, the sealed graph and task manifest,
+and current verification/finalization authority for successful outputs. The
+runtime reader rederives the census and canonical report and requires exact
+agreement with the stored publication. Agent verifier paths continue to reject
+unauthenticated completion claims, even when publication digests match.
+
+Verified publication can describe ordinary task failures and their coverage
+gaps while preserving an agent-written report. Artifact and controller integrity
+failures still prevent verified publication. Optional verification may expose an
+existing agent-written report with explicit unchecked status; it never creates
+missing report content or admits failed task outputs into execution.
+
+This is a new-version contract. The saved completion policy uses resolved-config
+v4; migration or resumption of runs from older versions is outside this change.
+
+Portable report bundles first attempt to include the verified runtime
+publication and recheck the current verified run snapshot before writing the
+archive. Only the current verified runtime generation and its pointer are
+included in a full run bundle. Older generations and unchecked report
+directories are excluded. If full-run verification fails, the default bundle
+contains only `report.json`, `report.md`, and `bundle-manifest.json`; the
+manifest and command result identify `scope: "report-only"` and the report's
+verification status. Arbitrary unchecked run artifacts are not included. Use
+`ultrafuzz report bundle <run-id> --require-verified` to require a verified
+full-run bundle. A report-only archive provides no run statistics or scoring
+authority.
+
+Report publications preserve the identity recorded by the agent. Reading them
+does not depend on the source checkout or its current Git origin. Public bundles
+still require matching repository identity and a bound verified terminal report.
+Unchecked local reports do not create benchmark scoring authority. If no agent
+report exists, report bundling also fails clearly.
 
 ### Internal authority and public projection
 
-The paths above are the private, run-local report authority. Verification,
-scoring, and lifecycle consumers continue to use that immutable internal
-`report.json` and its canonical `report.md`; public publication neither mutates
-those files nor promotes a published copy to run authority.
+The agent artifacts and the separate runtime publication are private, run-local
+reports with distinct authority. Existing strict agent-report verification and
+lifecycle APIs retain their immutable agent-report authority. Runtime
+formatting does not grant a failed task successful finalization. Public
+publication neither mutates those files nor promotes a published copy to run
+authority.
 
 Public benchmark publication crosses a separate privacy boundary. It first
 validates the internal report, deep-copies its canonical JSON, redacts private
@@ -554,9 +688,10 @@ parity without changing the trusted internal report authority.
 
 ### Coverage evidence
 
-When coverage is planned, `report.json.coverage_evidence` is the exact finalized
-`ultrafuzz/coverage-evidence@1` handoff. Measured evidence authenticates its raw
-`coverage-input.lcov` and `recon-coverage.json` sibling outputs by path and
+In a verified agent report, planned `report.json.coverage_evidence` is the exact
+finalized `ultrafuzz/coverage-evidence@1` handoff. Measured
+evidence authenticates its raw `coverage-input.lcov` and `recon-coverage.json`
+sibling outputs by path and
 SHA-256. Unavailable evidence carries typed blockers and no measurement.
 
 `report.md` and the coverage producer's Markdown use exactly one canonical
@@ -618,11 +753,10 @@ data.
 If cumulative metadata has not synchronized when the final-report producer
 starts, its live Smithers fallback is a snapshot through that producer's start.
 It includes earlier attempts but cannot include the producer's own eventual
-duration, model fallback, tokens, or cost. Report v3 has no metric-scope field,
-so closed-run accounting should be read from `ultrafuzz stats` after terminal
-synchronization. A future report-contract version should carry an explicit
-scope/completeness marker before controller-owned post-production metrics are
-published into the canonical report pair.
+duration, model fallback, tokens, or cost. A terminal presentation of an existing
+verified agent report preserves those accounting values. Report v3 has no
+metric-scope field, so use
+`ultrafuzz stats` after terminal synchronization for closed-run accounting.
 
 `accounting.segments` publishes one rollup per checkpoint generation, and
 `accounting.current` identifies the latest segment. Each segment retains every

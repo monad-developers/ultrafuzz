@@ -1,5 +1,7 @@
 import { z } from "zod/v4";
 import { artifactValidationWarningsSchema } from "./artifact-validation.js";
+import { reportCompletionSchema } from "./report-completion.js";
+import { reportObservedCompletionSchema, reportVerificationSchema } from "./report-observation.js";
 
 import {
   MAX_FINDINGS,
@@ -1610,6 +1612,11 @@ const reportCoverageNotPlannedSchema = z.strictObject({
   reason: z.literal("property-implementation-track-not-declared")
 });
 
+const reportCoverageUnavailableSchema = z.strictObject({
+  status: z.literal("unavailable"),
+  reason: z.literal("property-implementation-not-completed")
+});
+
 const reportIssueSchema = findingSchema.safeExtend({
   notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   description: nonEmptyString,
@@ -1650,41 +1657,87 @@ const reportAgentExecutionSchema = z.strictObject({
 });
 
 export const reportSchema = withDocumentMetadata(
-  z.strictObject({
-    schema_version: z.literal(REPORT_SCHEMA_VERSION),
-    run_metadata: z.strictObject({
-      run_id: nonEmptyString,
-      source_run_id: nonEmptyString,
-      repository: nonEmptyString,
-      elapsed_time: nonEmptyString,
-      models_used: z.array(nonEmptyString),
-      tokens_used: nonEmptyString,
-      estimated_spend: nonEmptyString,
-      partial_pricing: z.boolean(),
-      strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
-      // The report renders these beside the rest of the run summary, so a report
-      // that omits them cannot be projected.
-      audit_profile: nonEmptyString,
-      audit_profile_catalog_digest: z.union([sha256, z.literal("unavailable")]),
-      topology_digest: z.union([sha256, z.literal("unavailable")]),
-      prompt_digest: z.union([sha256, z.literal("unavailable")]),
-      expanded_graph_fingerprint: nonEmptyString,
-      agent_execution: reportAgentExecutionSchema.optional(),
-      artifact_validation_warnings: artifactValidationWarningsSchema.optional(),
-      source_run_ids: uniqueStrings().optional()
+  z
+    .strictObject({
+      schema_version: z.literal(REPORT_SCHEMA_VERSION),
+      run_metadata: z.strictObject({
+        run_id: nonEmptyString,
+        source_run_id: nonEmptyString,
+        repository: nonEmptyString,
+        elapsed_time: nonEmptyString,
+        models_used: z.array(nonEmptyString),
+        tokens_used: nonEmptyString,
+        estimated_spend: nonEmptyString,
+        partial_pricing: z.boolean(),
+        strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
+        // The report renders these beside the rest of the run summary, so a report
+        // that omits them cannot be projected.
+        audit_profile: nonEmptyString,
+        audit_profile_catalog_digest: z.union([sha256, z.literal("unavailable")]),
+        topology_digest: z.union([sha256, z.literal("unavailable")]),
+        prompt_digest: z.union([sha256, z.literal("unavailable")]),
+        expanded_graph_fingerprint: nonEmptyString,
+        agent_execution: reportAgentExecutionSchema.optional(),
+        artifact_validation_warnings: artifactValidationWarningsSchema.optional(),
+        source_run_ids: uniqueStrings().optional()
+      }),
+      completion: reportCompletionSchema.optional(),
+      verification: reportVerificationSchema.optional(),
+      observed_completion: reportObservedCompletionSchema.optional(),
+      campaign_outcome: z
+        .strictObject({
+          outcome: z.enum(["complete", "partial", "blocked"]),
+          reason: nonEmptyString.max(4_000).optional()
+        })
+        .optional(),
+      issues: z.array(reportIssueSchema),
+      non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
+      coverage_evidence: coverageEvidenceSchema.optional(),
+      property_provenance: z.array(reportPropertyProvenanceSchema),
+      property_implementation_coverage: z.union([
+        reportCoverageNotPlannedSchema,
+        reportCoverageUnavailableSchema,
+        reportCoverageSchema
+      ])
+    })
+    .meta({
+      allOf: [
+        {
+          if: {
+            anyOf: [
+              { properties: { verification: true }, required: ["verification"] },
+              { properties: { observed_completion: true }, required: ["observed_completion"] }
+            ]
+          },
+          then: {
+            properties: { verification: true, observed_completion: true },
+            required: ["verification", "observed_completion"],
+            not: { properties: { completion: true }, required: ["completion"] }
+          }
+        }
+      ]
+    })
+    .superRefine((report, context) => {
+      if (
+        (report.verification !== undefined || report.observed_completion !== undefined) &&
+        (report.verification === undefined ||
+          report.observed_completion === undefined ||
+          report.completion !== undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Unchecked reports require verification and observed_completion without a completion census",
+          path: ["verification"]
+        });
+      }
+      if (report.completion !== undefined && report.completion.run_id !== report.run_metadata.run_id) {
+        context.addIssue({
+          code: "custom",
+          message: "Completion run ID must equal report run_metadata.run_id",
+          path: ["completion", "run_id"]
+        });
+      }
     }),
-    campaign_outcome: z
-      .strictObject({
-        outcome: z.enum(["complete", "partial", "blocked"]),
-        reason: nonEmptyString.max(4_000).optional()
-      })
-      .optional(),
-    issues: z.array(reportIssueSchema),
-    non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
-    coverage_evidence: coverageEvidenceSchema.optional(),
-    property_provenance: z.array(reportPropertyProvenanceSchema),
-    property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
-  }),
   "report",
   3,
   "Ultrafuzz terminal report"

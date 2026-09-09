@@ -320,6 +320,44 @@ test("pending launch has no workflow identity while submitted status still requi
   assertParity("status", successEnvelope("status", submitted), false);
 });
 
+test("status separates successful queries, partial reports, unavailable reports, and unknown completion", () => {
+  const ended = { ...statusData(), status: "failed", ended: true };
+  const partial = {
+    status: "available",
+    reason: null,
+    completion: "partial",
+    verification: "not-checked",
+    json_path: "/run/report.json",
+    markdown_path: "/run/report.md"
+  };
+  assertParity("status", successEnvelope("status", { ...ended, report: partial }), true);
+  assertParity("status", successEnvelope("status", { ...ended, report: { ...partial, json_path: null } }), false);
+  const unavailable = {
+    status: "unavailable",
+    reason: "report-agent-output-unavailable",
+    completion: "unknown",
+    verification: "unknown",
+    json_path: null,
+    markdown_path: null
+  };
+  assertParity("status", successEnvelope("status", { ...ended, report: unavailable }), true);
+  assertParity(
+    "status",
+    successEnvelope("status", { ...ended, ended: null, report: { ...unavailable, status: "unknown" } }),
+    true
+  );
+  assertParity(
+    "status",
+    successEnvelope("status", { ...ended, report: { ...unavailable, completion: "complete" } }),
+    false
+  );
+  assertParity(
+    "status",
+    successEnvelope("status", { ...ended, report: { ...unavailable, markdown_path: "/stale/report.md" } }),
+    false
+  );
+});
+
 test("EVMBench consumes the same registered CLI v2 definitions without a parallel shape authority", () => {
   const definitions = cliResultJsonSchema.$defs as Record<string, unknown>;
   for (const name of ["initData", "runData", "statusData", "reportData"] as const) {
@@ -386,6 +424,33 @@ test("EVMBench consumes the same registered CLI v2 definitions without a paralle
   assertParity("init", successfulError, false);
 });
 
+test("report results expose runtime publication and terminal completion in both CLI contract readers", () => {
+  const report = {
+    markdown_path: "/run/review/runtime-report/digest/report.md",
+    json_path: "/run/review/runtime-report/digest/report.json",
+    source: "verified-runtime-report",
+    completion: "partial",
+    terminal: true
+  };
+  assertParity("report", successEnvelope("report", report), true);
+  assertParity("report", successEnvelope("report", { ...report, completion: "complete" }), true);
+  assertParity("report", successEnvelope("report", { ...report, completion: "succeeded" }), false);
+  assertParity("report", successEnvelope("report", { ...report, terminal: "true" }), false);
+  assertParity("report", successEnvelope("report", { ...report, source: "unverified-report" }), false);
+  assertParity("report", successEnvelope("report", { ...report, unexpected: true }), false);
+  assertParity(
+    "report",
+    successEnvelope("report", {
+      ...report,
+      source: "unverified-runtime-report",
+      verification: "not-checked"
+    }),
+    true
+  );
+  assertParity("report", successEnvelope("report", { ...report, verification: "verified" }), true);
+  assertParity("report", successEnvelope("report", { ...report, verification: "trusted" }), false);
+});
+
 function successEnvelope(command: EvmbenchCliCommand, data: Record<string, unknown>): Record<string, unknown> {
   return {
     schema_version: CLI_SCHEMA_VERSION,
@@ -413,6 +478,15 @@ function statusData(): Record<string, unknown> {
     run_id: "",
     run_root: "",
     status: "",
+    ended: false,
+    report: {
+      status: "pending",
+      reason: "run-has-not-ended",
+      completion: "unknown",
+      verification: "unknown",
+      json_path: null,
+      markdown_path: null
+    },
     workflow_ids: [],
     workflow_run_id: "",
     workflow_status: "",

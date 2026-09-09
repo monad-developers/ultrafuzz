@@ -17,6 +17,7 @@ import {
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   assertRunMetadataDocument,
+  executeSemanticGate,
   executeSchemaSemanticGates,
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
@@ -42,6 +43,7 @@ import {
   type ArtifactContractId,
   type InvariantLedgerArtifact,
   type PropertiesArtifact,
+  type SemanticGateContext,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestOutput,
   type SmithersTaskManifestTask
@@ -4393,6 +4395,7 @@ test("generated semantic contexts match host semantics when property producers a
 
   const report = contextFor(task, { path: "custom/report.json", schemaFile: "report.schema.json" }, verifiedOutputs);
   assert.deepEqual(report.artifactSet, {
+    reportCompletion: null,
     campaignSummary: null,
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
     implementedProperties: {
@@ -4605,6 +4608,38 @@ test("generated Smithers accepts direct lenses, excludes transitive lenses, and 
   ]);
 });
 
+test("report prompt coverage distinguishes an omitted planned implementation from an unplanned track", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function authoritativeFinalReportCoverage");
+  const end = source.indexOf("\n\ntype FinalReportAgentAttempt", start);
+  assert.ok(start >= 0 && end > start);
+  const helper = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  for (const planned of [false, true]) {
+    const coverage = new Function(
+      "declaredFinalReportOutputPair",
+      "verifiedSingletonAncestorJsonArtifact",
+      "declaredAncestorContractOutputs",
+      `${helper}; return authoritativeFinalReportCoverage;`
+    )(
+      () => ({}),
+      () => undefined,
+      (_task: unknown, contract: string, options: { includeOmitted?: boolean }) => {
+        assert.equal(contract, "ultrafuzz/implemented-properties@3");
+        assert.equal(options.includeOmitted, true);
+        return planned ? [{ attemptId: "implementation" }] : [];
+      }
+    ) as (task: unknown) => unknown;
+    assert.deepEqual(
+      coverage({}),
+      planned
+        ? { status: "unavailable", reason: "property-implementation-not-completed" }
+        : { status: "not-planned", reason: "property-implementation-track-not-declared" }
+    );
+  }
+});
+
 test("generated Smithers selects property and discovery inputs by their declared contracts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");
@@ -4787,6 +4822,7 @@ test("generated semantic context projects every required review authority field"
     });
   }
   assert.deepEqual(context("report.schema.json"), {
+    reportCompletion: null,
     campaignSummary: { outcome: "blocked", reason: "recon was unavailable" },
     campaignSummaryPath: "custom/campaign-summary.json",
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
@@ -5456,6 +5492,65 @@ test("generated review verification uses declared immutable review-stage authori
   assert.match(context, /\.\.\.finalSeverityAuthority/u);
 });
 
+test("generated report verification rejects completion claims without controller census authority", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function semanticGateContextForVerifiedOutput");
+  const end = source.indexOf("\n\nfunction verifyOutputSemanticGates", start);
+  assert.ok(start >= 0 && end > start);
+  const emitted = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const getContext = new Function(
+    "verifiedCanonicalPropertyCatalog",
+    "verifiedSingletonAncestorJsonArtifact",
+    "verifiedFinalSeverityReviewAuthority",
+    "UNPLANNED_PROPERTY_CATALOG_CONTEXT",
+    "UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT",
+    `${emitted}\nreturn semanticGateContextForVerifiedOutput;`
+  )(
+    () => undefined,
+    () => undefined,
+    () => ({}),
+    {},
+    {}
+  ) as (
+    task: unknown,
+    output: unknown,
+    outputs: Map<string, unknown>,
+    evidence: Map<string, unknown>
+  ) => SemanticGateContext;
+  const output = { path: "custom/report.json", schemaFile: "report.schema.json" };
+  const context = getContext(
+    {
+      attemptId: "report-attempt",
+      metadata: { run: { ultrafuzzRunId: "report-run" }, node: { logicalNodeId: "report" } }
+    },
+    output,
+    new Map([[output.path, { artifactRoot: "/synthetic/artifacts/report" }]]),
+    new Map()
+  );
+  assert.equal(
+    executeSemanticGate("report-completion-authority", { document: {}, context }).status,
+    "passed",
+    "legacy reports remain admissible when the controller declares no census"
+  );
+  const result = executeSemanticGate("report-completion-authority", {
+    document: {
+      run_metadata: { run_id: "report-run" },
+      completion: {
+        schema_version: "ultrafuzz.report-completion.v1",
+        run_id: "report-run",
+        outcome: "complete",
+        counts: { planned: 1, succeeded: 1, failed: 0, timed_out: 0, skipped: 0, cancelled: 0, unverified: 0 },
+        incomplete_nodes: [],
+        incomplete_nodes_omitted: 0
+      }
+    },
+    context
+  });
+  assert.equal(result.status, "failed", "producer bytes cannot supply their own completion authority");
+});
+
 test("generated dynamic verification passes the resolved policy and exact declared recipe and finding ancestors", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function siblingDynamicStrategySemanticArtifacts");
@@ -5735,8 +5830,13 @@ test("generated cloud handoff derives durable marker authorities on pre-sync and
 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /ctx\.outputMaybe\(outputs\.verification, \{ nodeId: producer\.verifierId \}\)/u);
-  assert.match(source, /if \(dependencyVerificationAuthorities === undefined\) return null/u);
-  assert.match(source, /dependency_verification_authorities: dependencyVerificationAuthorities/u);
+  assert.match(source, /if \(dependencyVerificationAuthorities === undefined && !skipAgent\) return null/u);
+  const sandboxStart = source.indexOf("<Sandbox", source.indexOf("const dependencyVerificationAuthorities ="));
+  const sandboxEnd = source.indexOf("/>", sandboxStart);
+  assert.ok(sandboxStart >= 0 && sandboxEnd > sandboxStart);
+  const sandbox = source.slice(sandboxStart, sandboxEnd);
+  assert.match(sandbox, /dependency_verification_authorities: dependencyVerificationAuthorities \?\? \[\]/u);
+  assert.match(sandbox, /skipIf=\{skipAgent\}/u);
   assert.match(source, /schema_version: "ultrafuzz\.modal\.node\.v2"/u);
 });
 
@@ -5886,6 +5986,30 @@ test("Smithers rerenders a cloud Sandbox only after its required verifier output
   assert.ok(restartedCloudTask, "a fresh renderer must recover the Sandbox solely from durable verifier rows");
   assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, expectedSandboxInput);
   assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, cloudTask.meta?.__sandboxInput);
+
+  const skippedWorkflow = {
+    ...workflow,
+    build: () =>
+      React.createElement(
+        components.Workflow,
+        { name: "verification-authority-skipped" },
+        React.createElement(components.Sandbox, {
+          id: "cloud-consumer",
+          output: "sandbox_result",
+          provider: { id: "modal-test-provider" },
+          input: { schema_version: "ultrafuzz.modal.node.v2", dependency_verification_authorities: [] },
+          skipIf: true,
+          meta: { executionMode: "cloud" }
+        })
+      )
+  };
+  const skipped = testing.simulate(skippedWorkflow, {
+    mocks: { "cloud-consumer": { summary: "must not dispatch" } }
+  });
+  await skipped.run();
+  assert.equal(skipped.status, "finished");
+  assert.deepEqual(skipped.executed, [], "missing marker authorities may mount only a skipped, undispatched Sandbox");
+  assert.deepEqual(skipped.outputs.sandbox_result ?? [], []);
 });
 
 test("generated Smithers workflow quarantines optional tasks and reads only verified optional ancestors", () => {

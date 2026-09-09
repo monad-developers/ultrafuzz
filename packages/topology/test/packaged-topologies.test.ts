@@ -111,6 +111,19 @@ const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
 };
 
 describe("packaged topology collection", () => {
+  it.each(PACKAGED_TOPOLOGY_IDS)("continues independent strategies in %s without changing setup failures", (id) => {
+    const topology = loadTopology(REPOSITORY_ROOT, {
+      topologyPath: path.join(TOPOLOGY_ROOT, `${id}.yml`),
+      requirePromptFiles: true
+    });
+    expect(topology.groups.strategies?.defaults?.failure_policy).toBe("continue");
+    expect(topology.groups.setup?.defaults?.failure_policy).toBeUndefined();
+    expect(topology.groups.properties?.defaults?.failure_policy).toBeUndefined();
+    const expanded = expandTopology(topology, { projectRoot: REPOSITORY_ROOT, runId: `policy-${id}` });
+    expect(expanded.groups.strategies?.defaults?.failure_policy).toBe("continue");
+    expect(expanded.nodes.some((node) => node.group === "strategies")).toBe(true);
+  });
+
   it("keeps the goal topology in the initialized default and packaged exhaustive graphs", () => {
     const packagedDefaultPath = path.join(TOPOLOGY_ROOT, "default.yml");
     const packagedPath = path.join(TOPOLOGY_ROOT, "exhaustive.yml");

@@ -8799,7 +8799,7 @@ test("producer-free final reports require the exact not-planned implementation c
   );
 });
 
-test("final reports treat markerless optional implementation, campaign, and coverage producers as absent", () => {
+test("final reports disclose planned but omitted implementation coverage without consuming failed output", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-markerless-optional-report-tracks" });
   const optionalNode: PlannedGraphNode = {
     ...plannedNode([]),
@@ -8838,7 +8838,7 @@ test("final reports treat markerless optional implementation, campaign, and cove
   writeArtifactFile(layout, reportTask.attemptId, "report.json", JSON.stringify(currentReport(layout.runId)));
   writeSealedFixtureTaskAuthority(layout, [optionalNode, reportNode], tasks);
 
-  const result = verifyRuntimeRequiredArtifactsForAttempt(
+  const missingDisclosure = verifyRuntimeRequiredArtifactsForAttempt(
     layout,
     reportNode,
     reportTask.attemptId,
@@ -8846,7 +8846,34 @@ test("final reports treat markerless optional implementation, campaign, and cove
     authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
   );
 
+  assert.equal(missingDisclosure.ok, false);
+  assert.ok(
+    missingDisclosure.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH"
+    )
+  );
+  writeArtifactFile(
+    layout,
+    reportTask.attemptId,
+    "report.json",
+    JSON.stringify(
+      currentReport(layout.runId, {
+        property_implementation_coverage: { status: "unavailable", reason: "property-implementation-not-completed" }
+      })
+    )
+  );
+  const result = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    reportNode,
+    reportTask.attemptId,
+    { task: reportTask, tasks, admittedDependencyAttemptIds: [] },
+    authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
+  );
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    fs.existsSync(path.join(layout.artifactsDir, optionalTask.attemptId, "implemented-properties.json")),
+    false
+  );
 });
 
 test("final report gate joins the default recon-only campaign backend", () => {

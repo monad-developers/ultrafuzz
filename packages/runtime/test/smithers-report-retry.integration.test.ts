@@ -57,6 +57,7 @@ const { assertRegularFileInside, normalizeNodeAttemptFailureMessage, parseStrict
 const { inspectSmithersAttemptAgentSelection, reconcileSmithersAttemptAgentSelection,
   smithersTaskAgentId, projectCanonicalFinalReport } = await import(${JSON.stringify(runtimeModule)});
 const root = ${JSON.stringify(root)};
+const quotaRetry = ${JSON.stringify(quotaRetry)};
 const baseReport = ${JSON.stringify(report)};
 const reportPath = path.join(root, "report.json");
 const markdownPath = path.join(root, "report.md");
@@ -101,7 +102,11 @@ const agents = task.agentChain.map((_profile, chainIndex) => artifactAwareAgent(
     if (!args.prompt.includes(finalReportPromptAuthorityRelativePath(task))) throw new Error("authority omitted from prompt");
     const authority = JSON.parse(fs.readFileSync(promptAuthorityPath, "utf8"));
     fs.appendFileSync(evidencePath, JSON.stringify({phase: "producer", pid: process.pid, attempt, chainIndex, authority}) + "\\n");
-    execFileSync("smithers", ["pause", task.smithersRunId, "--format", "json"], {cwd: root, timeout: 30_000});
+    // Quota failure parks the controller itself. A simultaneous graceful-pause
+    // request races that waiting-quota transition and is not needed for restart.
+    if (!quotaRetry || attempt > 1) {
+      execFileSync("smithers", ["pause", task.smithersRunId, "--format", "json"], {cwd: root, timeout: 30_000});
+    }
     if (attempt === 1) {
       const error = new Error("synthetic first producer failure");
       ${quotaRetry ? 'error.code = "AGENT_QUOTA_EXCEEDED"; error.details = {failureQuota: true, failureRetryable: true};' : ""}
@@ -192,7 +197,7 @@ for (const quotaRetry of [false, true]) {
     const launch = ["up", workflowPath, "--detach", "--run-id", runId, "--root", root, "--input", "{}"];
     try {
       cli(root, launch);
-      await waitForStatus(root, runId, "paused", 1);
+      await waitForStatus(root, runId, quotaRetry ? "waiting-quota" : "paused", 1);
       cli(root, [...launch, "--resume", runId]);
       await waitForStatus(root, runId, "paused", 2);
       assert.ok(fs.existsSync(path.join(root, "report.json")));

@@ -12,6 +12,7 @@ groups:
     label: Ground-truth-informed smoke strategies
     color: "#7c3aed"
     defaults:
+      failure_policy: continue
       loops: 1
       model_profiles:
         - default

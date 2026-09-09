@@ -8,14 +8,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+  appendEvent,
   createEventRecord,
+  parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
+  readRunMetadataDocument,
   readRunState,
   sha256Bytes,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  writeRunMetadataDocument,
+  writeRunState,
   type ArtifactVerificationMarker,
   type PlannedGraphNodeDocument,
   type RunLayout
@@ -25,6 +30,7 @@ import {
   loadVerifiedRunOutputAuthoritySnapshot,
   planRun,
   projectCanonicalFinalReport,
+  publishTerminalReport,
   sealWorkflowControlFiles
 } from "@ultrafuzz/runtime";
 
@@ -447,6 +453,34 @@ test("dashboard validates persisted run-state v5 documents through the composed 
   }
 });
 
+test("dashboard keeps a persisted run visible before its report agent completes", async () => {
+  const fixture = await createDashboardFindingsFixture({ includeFinalReport: true });
+  assert.ok(fixture.reportAttemptId);
+  updateNodeState(fixture.layout, fixture.reportAttemptId, { status: "pending", provenance: undefined });
+  const state = readRunState(fixture.layout);
+  state.status = "running";
+  delete state.finished_at;
+  writeRunState(fixture.layout, state);
+  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  try {
+    const routes: Array<[string, DashboardHttpDefinition]> = [
+      ["/api/run", "runOverviewResponse"],
+      ["/api/flow", "flowResponse"],
+      ["/api/nodes", "nodesResponse"]
+    ];
+    for (const [route, definition] of routes) {
+      const document = await getJson<Record<string, unknown>>(apiUrl(handle.url, route), definition);
+      if (definition === "runOverviewResponse") assert.equal(document.report_path, undefined);
+    }
+    const report = await fetch(apiUrl(handle.url, "/api/report"));
+    assert.equal(report.status, 500);
+    const error = await parseHttpResponse(report, "errorResponse");
+    assert.match(String(error.error), /Report unavailable/u);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("dashboard events returns one captured journal epoch when the path is replaced after its snapshot", async (t) => {
   const projectRoot = makeProject();
   writeSmallTopology(projectRoot);
@@ -604,7 +638,7 @@ test("dashboard prefers a completed declared report over raw findings without a 
   }
 });
 
-test("dashboard does not hide unavailable custom report authority after the renamed producer claims success", async () => {
+test("dashboard reports unavailable when agent report files are missing", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   assert.ok(fixture.reportAttemptId);
   const reportDir = path.join(fixture.layout.artifactsDir, fixture.reportAttemptId, "deliverables");
@@ -617,16 +651,144 @@ test("dashboard does not hide unavailable custom report authority after the rena
     const response = await fetch(apiUrl(handle.url, "/api/report"));
     assert.equal(response.status, 500);
     const error = await parseHttpResponse(response, "errorResponse");
-    assert.match(
-      String(error.error),
-      /claims succeeded without complete current verification\/finalization authority/iu
-    );
+    assert.match(String(error.error), /Report unavailable/u);
   } finally {
     await handle.close();
   }
 });
 
-test("dashboard report rejects malformed present task-manifest and control-seal authority", async () => {
+test("dashboard labels an unchecked partial report when the runtime receipt is malformed", async () => {
+  const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
+  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  try {
+    const valid = await fetch(apiUrl(handle.url, "/api/report"));
+    assert.equal(valid.status, 200, await valid.text());
+    const receiptPath = path.join(fixture.layout.root, "review", "runtime-report", "current.json");
+    fs.mkdirSync(path.dirname(receiptPath), { recursive: true });
+    fs.writeFileSync(receiptPath, "{", "utf8");
+
+    const response = await fetch(apiUrl(handle.url, "/api/report"));
+    assert.equal(response.status, 200);
+    const report = await parseHttpResponse(response, "reportResponse");
+    assert.equal(report.verification, "not-checked");
+    assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+    assert.equal(fs.readFileSync(receiptPath, "utf8"), "{");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard serves the current partial report while retaining the failed run state", async () => {
+  const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
+  const { layout } = fixture;
+  const manifest = parseSmithersTaskManifestBytes(fs.readFileSync(path.join(layout.root, "smithers", "tasks.json")));
+  const task = manifest.tasks.find((candidate) => candidate.attemptId === fixture.attemptId);
+  assert.ok(task);
+  const workflowRunId = manifest.smithers_run_id;
+  const generation = sha256Bytes(fs.readFileSync(path.join(layout.root, "smithers", "control-integrity.json")));
+  const linkId = "123e4567-e89b-42d3-a456-426614174000";
+  const executionSnapshot = `smithers/execution-snapshots/${generation}`;
+  updateNodeState(layout, fixture.attemptId, {
+    status: "failed",
+    provenance: {
+      workflow: {
+        run_id: workflowRunId,
+        task_id: task.smithersNodeId,
+        agent_task_id: task.smithersNodeId,
+        verifier_task_id: task.verifierSmithersNodeId,
+        state: "failed",
+        attempt: 1
+      },
+      failure: {
+        category: "agent-failure",
+        causal_task_id: task.smithersNodeId,
+        causal_failure_category: "agent-failure",
+        dependent_task_ids: []
+      }
+    }
+  });
+  const state = readRunState(layout);
+  state.status = "failed";
+  state.finished_at = new Date().toISOString();
+  state.provenance = {
+    workflow: {
+      inspection: { runId: workflowRunId },
+      runId: workflowRunId,
+      compiledRunId: workflowRunId,
+      name: manifest.workflow_name,
+      controlGeneration: generation,
+      linkId,
+      executionSnapshot
+    }
+  };
+  writeRunState(layout, state);
+  const metadata = readRunMetadataDocument(layout.runMetadataPath);
+  writeRunMetadataDocument(layout.runMetadataPath, {
+    ...metadata,
+    workflow_ids: [workflowRunId],
+    workflow: {
+      run_id: workflowRunId,
+      compiled_run_id: workflowRunId,
+      name: manifest.workflow_name,
+      path: "smithers/workflow.tsx",
+      evidence_path: "smithers/evidence.json",
+      expanded_graph_path: "smithers/expanded-graph.json",
+      config_path: "smithers/config.json",
+      input_path: "smithers/input.json",
+      tasks_path: "smithers/tasks.json",
+      control_integrity_path: "smithers/control-integrity.json",
+      control_generation: generation,
+      workflow_link_id: linkId,
+      execution_snapshot_path: executionSnapshot,
+      task_node_ids: manifest.tasks.map((entry) => entry.smithersNodeId)
+    }
+  });
+  appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: fixture.attemptId,
+    status: "failed",
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_task_id: task.smithersNodeId,
+      workflow_state: "failed",
+      attempt: 1
+    }
+  });
+  appendEvent(layout, {
+    eventType: "workflow-synced",
+    status: "failed",
+    payload: {
+      workflow_run_id: workflowRunId,
+      workflow_status: "failed",
+      workflow_state: "failed",
+      exhausted_loops: [],
+      synced_nodes: manifest.tasks.length,
+      accounting_available: false,
+      recovery_due: false,
+      deadline_exceeded: false
+    }
+  });
+  const snapshot = publishTerminalReport(layout.root, { workflowRunId, workflowState: "failed" });
+  assert.ok(snapshot);
+  const stateBytes = fs.readFileSync(layout.statePath);
+  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  try {
+    const report = await getJson<{
+      markdown: string;
+      json_path: string;
+      json: { completion: { outcome: string; counts: { failed: number } } };
+    }>(apiUrl(handle.url, "/api/report"), "reportResponse");
+    assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+    assert.match(report.json_path, /^review\/runtime-report\/[0-9a-f]{64}\/report.json$/u);
+    assert.equal(report.json.completion.outcome, "partial");
+    assert.equal(report.json.completion.counts.failed, 1);
+    assert.deepEqual(fs.readFileSync(layout.statePath), stateBytes);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard report tolerates an invalid seal but requires an identifiable report-agent attempt", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
@@ -641,9 +803,17 @@ test("dashboard report rejects malformed present task-manifest and control-seal 
       fs.writeFileSync(authorityPath, "{", "utf8");
       try {
         const response = await fetch(apiUrl(handle.url, "/api/report"));
-        assert.equal(response.status, 500, label);
-        const error = await parseHttpResponse(response, "errorResponse");
-        assert.ok(String(error.error).length > 0, label);
+        if (label === "task manifest") {
+          assert.equal(response.status, 500, label);
+          const error = await parseHttpResponse(response, "errorResponse");
+          assert.match(String(error.error), /Report unavailable:.*attempt cannot be identified/u);
+        } else {
+          assert.equal(response.status, 200, label);
+          const report = await parseHttpResponse(response, "reportResponse");
+          assert.equal(report.verification, "not-checked", label);
+          assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+        }
+        assert.equal(fs.readFileSync(authorityPath, "utf8"), "{");
       } finally {
         fs.writeFileSync(authorityPath, original);
       }
@@ -694,10 +864,10 @@ test("dashboard flow captures run-wide authority outside per-node projection and
     captureContextStart,
     compiledSource.indexOf("async assertCapturedRunAuthorityRemainedCurrent", captureContextStart)
   );
-  const projection = compiledSource.slice(
-    compiledSource.indexOf("function dashboardFlowAuthorityProjection"),
-    compiledSource.indexOf("function dashboardDeclaredReportAvailability")
-  );
+  const projectionStart = compiledSource.indexOf("function dashboardFlowAuthorityProjection");
+  const projectionEnd = compiledSource.indexOf("function assertDashboardAbsentAuthorityRemainedCurrent");
+  assert.ok(projectionStart >= 0 && projectionEnd > projectionStart);
+  const projection = compiledSource.slice(projectionStart, projectionEnd);
   assert.match(flow, /captureRunAuthorityContext/u);
   assert.match(captureContext, /dashboardFlowAuthorityProjection/u);
   assert.match(flow, /assertCapturedRunAuthorityRemainedCurrent/u);

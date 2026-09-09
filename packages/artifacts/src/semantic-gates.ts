@@ -17,6 +17,7 @@ import {
   MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES
 } from "./artifact-limits.js";
 import { MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES } from "./property-provenance.js";
+import { reportCompletionSchema } from "./report-completion.js";
 import { readSinglyLinkedRegularFileSnapshotInside } from "./safe-paths.js";
 import { coverageGoalSchema } from "./workflow-contracts.js";
 
@@ -143,6 +144,8 @@ export interface SemanticArtifactSetContext {
   campaignPlanPath?: string;
   campaignSummary?: unknown;
   campaignSummaryPath?: string;
+  /** Exact runtime-authenticated completion census, or null when no authority exists. */
+  reportCompletion?: unknown;
   campaigns?: readonly unknown[];
   findings?: readonly unknown[];
   findingsPath?: string;
@@ -1461,6 +1464,67 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
         issue(entry.path, `Bounded report row has no authenticated deduped source for ${JSON.stringify(key)}`)
       );
     }
+  }
+  return issues;
+}
+
+function reportCompletionReconciliationIssues(document: unknown): SemanticGateIssue[] {
+  const completion = at(document, ["completion"]);
+  if (completion === undefined) return [];
+  const validation = reportCompletionSchema.safeParse(completion);
+  if (!validation.success) {
+    return validation.error.issues.map((entry) =>
+      issue(
+        entry.path.reduce<string>(
+          (prefix, segment) =>
+            typeof segment === "number" ? `${prefix}[${String(segment)}]` : `${prefix}.${String(segment)}`,
+          "$.completion"
+        ),
+        entry.message
+      )
+    );
+  }
+  return validation.data.run_id === at(document, ["run_metadata", "run_id"])
+    ? []
+    : [issue("$.completion.run_id", "Report completion run ID does not match report metadata")];
+}
+
+function reportCompletionAuthorityIssues(document: unknown, context: SemanticGateContext): SemanticGateIssue[] {
+  const expected = context.artifactSet?.reportCompletion;
+  const reported = at(document, ["completion"]);
+  // A null host sentinel explicitly prohibits agent-authored completion claims.
+  // Missing context remains a requires-context result, including for legacy reports.
+  if (expected === null) {
+    const issues =
+      reported === undefined
+        ? []
+        : [issue("$.completion", "Report declares completion without an authoritative runtime census")];
+    for (const field of ["verification", "observed_completion"]) {
+      if (at(document, [field]) !== undefined) {
+        issues.push(
+          issue(`$.${field}`, "Unchecked report metadata is runtime-owned and cannot be admitted as agent output")
+        );
+      }
+    }
+    return issues;
+  }
+  const validation = reportCompletionSchema.safeParse(expected);
+  if (!validation.success) {
+    return [issue("$context.artifactSet.reportCompletion", "Authoritative report completion context is invalid")];
+  }
+  const issues: SemanticGateIssue[] = [];
+  if (
+    validation.data.run_id !== at(document, ["run_metadata", "run_id"]) ||
+    (context.artifactIdentity !== undefined && validation.data.run_id !== context.artifactIdentity.runId)
+  ) {
+    issues.push(
+      issue("$context.artifactSet.reportCompletion.run_id", "Authoritative completion census belongs to another run")
+    );
+  }
+  if (reported === undefined) {
+    issues.push(issue("$.completion", "Report omits the authoritative runtime completion census"));
+  } else if (!isDeepStrictEqual(reported, expected)) {
+    issues.push(issue("$.completion", "Report completion does not match the authoritative runtime census"));
   }
   return issues;
 }
@@ -7835,6 +7899,12 @@ const gateSpecifications = {
   "report-finding-evidence-span-consistency": documentGate(reportFindingEvidenceSpanIssues),
   "report-finding-report-vocabulary": documentGate(reportFindingReportVocabularyIssues),
   "report-coverage-evidence-reconciliation": documentGate(reportCoverageEvidenceReconciliationIssues),
+  "report-completion-reconciliation": documentGate(reportCompletionReconciliationIssues),
+  "report-completion-authority": contextualGate(
+    "cross-artifact",
+    ["artifactSet.reportCompletion"],
+    reportCompletionAuthorityIssues
+  ),
   "report-severity-classification-preservation": contextualGate(
     "cross-artifact",
     ["artifactSet.severityClassifiedFindings"],

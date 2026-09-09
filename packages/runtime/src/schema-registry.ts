@@ -23,8 +23,10 @@ import {
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
   PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
   PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
+  REPORT_PUBLICATION_STATUS_JSON_SCHEMA_ID,
   SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
+  TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID,
   WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
   WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID,
   WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID,
@@ -94,6 +96,8 @@ export const pinnedSubmoduleExpectationJsonSchema = loadSchemaDocument("pinned-s
 export const pinnedSubmoduleSnapshotJsonSchema = loadSchemaDocument("pinned-submodule-snapshot.schema.json");
 export const smithersResetNodeJsonSchema = loadSchemaDocument("smithers-reset-node.schema.json");
 export const smithersSubmissionJsonSchema = loadSchemaDocument("smithers-submission.schema.json");
+export const terminalReportReceiptJsonSchema = loadSchemaDocument("terminal-report-receipt.schema.json");
+export const reportPublicationStatusJsonSchema = loadSchemaDocument("report-publication-status.schema.json");
 export const workflowControlIntegrityJsonSchema = loadSchemaDocument("workflow-control-integrity.schema.json");
 export const workflowExecutionDependenciesJsonSchema = loadSchemaDocument(
   "workflow-execution-dependencies.schema.json"
@@ -115,6 +119,8 @@ export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
   pinnedSubmoduleSnapshotJsonSchema,
   smithersResetNodeJsonSchema,
   smithersSubmissionJsonSchema,
+  terminalReportReceiptJsonSchema,
+  reportPublicationStatusJsonSchema,
   workflowControlIntegrityJsonSchema,
   workflowExecutionDependenciesJsonSchema,
   workflowRunLinkJournalJsonSchema,
@@ -199,6 +205,19 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
     role: "runtime-state",
     typescriptExport: "smithersSubmissionJsonSchema",
     semanticGates: Object.freeze([])
+  },
+  "terminal-report-receipt.schema.json": {
+    id: TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "terminalReportReceiptJsonSchema",
+    semanticGates: Object.freeze([])
+  },
+  "report-publication-status.schema.json": {
+    id: REPORT_PUBLICATION_STATUS_JSON_SCHEMA_ID,
+    role: "runtime-state",
+    typescriptExport: "reportPublicationStatusJsonSchema",
+    semanticGates: Object.freeze([]),
+    maxInstanceBytes: 16 * 1024
   },
   "workflow-control-integrity.schema.json": {
     id: WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,

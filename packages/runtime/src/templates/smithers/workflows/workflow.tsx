@@ -1559,6 +1559,49 @@ function cloudSnapshotRelativePath(value: string, label: string): string {
   return relative.split(path.sep).join("/");
 }
 
+type WorkflowTaskStateContext = {
+  iteration: number;
+  _taskStates?: ReadonlyMap<string, unknown> | Record<string, unknown>;
+  _taskIterations?: ReadonlyMap<string, number> | Record<string, number>;
+};
+
+function workflowContextValue<T>(
+  values: ReadonlyMap<string, T> | Record<string, T> | undefined,
+  key: string
+): T | undefined {
+  if (values === undefined) return undefined;
+  if (values instanceof Map) return values.get(key);
+  return Object.hasOwn(values, key) ? (values as Record<string, T>)[key] : undefined;
+}
+
+function currentWorkflowTaskState(ctx: WorkflowTaskStateContext, nodeId: string): unknown {
+  const iteration = workflowContextValue(ctx._taskIterations, nodeId) ?? ctx.iteration;
+  const key = `${nodeId}::${iteration}`;
+  return (
+    workflowContextValue(ctx._taskStates, key) ??
+    (iteration === 0 ? workflowContextValue(ctx._taskStates, nodeId) : undefined)
+  );
+}
+
+function failedWorkflowPrerequisites(ctx: WorkflowTaskStateContext, nodeIds: readonly string[]): string[] {
+  return nodeIds.filter((nodeId) => {
+    const state = currentWorkflowTaskState(ctx, nodeId);
+    return state === "failed" || state === "stalled" || state === "skipped" || state === "cancelled";
+  });
+}
+
+function shouldSkipWorkflowTask(
+  ctx: WorkflowTaskStateContext,
+  nodeId: string,
+  failedPrerequisites: readonly string[]
+): boolean {
+  if (failedPrerequisites.length === 0) return false;
+  // Do not rewrite a finished, running, or failed attempt when a later render
+  // observes an unavailable prerequisite. Its original execution evidence stays.
+  const state = currentWorkflowTaskState(ctx, nodeId);
+  return state === undefined || state === "pending" || state === "skipped";
+}
+
 type DependencyVerificationProducer = (typeof taskSpecs)[number]["dependencyVerificationProducers"][number];
 
 type DependencyVerificationAuthority = {
@@ -2112,7 +2155,7 @@ function declaredCanonicalPropertiesPair(task: (typeof taskSpecs)[number]):
 function declaredAncestorContractOutputs(
   task: (typeof taskSpecs)[number],
   contract: string,
-  options: { directOnly?: boolean } = {}
+  options: { directOnly?: boolean; includeOmitted?: boolean } = {}
 ): ReturnType<typeof declaredAncestorOutputsByContract> {
   const declarations = semanticArtifactTaskDeclarations();
   const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
@@ -2120,7 +2163,7 @@ function declaredAncestorContractOutputs(
     throw new Error(`artifact-contract failure: current task declaration is unavailable ${task.attemptId}`);
   }
   const outputs = declaredAncestorOutputsByContract(current, declarations, contract, options);
-  if ((task.optionalDependencyArtifactDirs?.length ?? 0) === 0) return outputs;
+  if (options.includeOmitted === true || (task.optionalDependencyArtifactDirs?.length ?? 0) === 0) return outputs;
   const admittedDirectories = new Set(admittedDependencyArtifactDirs(task).map((directory) => path.resolve(directory)));
   return outputs.filter((output) => admittedDirectories.has(path.resolve(output.artifactDir)));
 }
@@ -2790,6 +2833,12 @@ function authoritativeFinalReportCoverage(task: (typeof taskSpecs)[number]): unk
     "implemented property coverage"
   );
   if (implementation === undefined) {
+    const planned = declaredAncestorContractOutputs(task, "ultrafuzz/implemented-properties@3", {
+      includeOmitted: true
+    });
+    if (planned.length > 0) {
+      return { status: "unavailable", reason: "property-implementation-not-completed" };
+    }
     return {
       status: "not-planned",
       reason: "property-implementation-track-not-declared"
@@ -8784,6 +8833,7 @@ function semanticGateContextForVerifiedOutput(
     campaignPlanPath?: string;
     campaignSummary?: unknown;
     campaignSummaryPath?: string;
+    reportCompletion?: unknown;
     campaigns?: readonly unknown[];
     findings?: readonly unknown[];
     findingsPath?: string;
@@ -9024,6 +9074,9 @@ function semanticGateContextForVerifiedOutput(
     );
     const finalSeverityAuthority = verifiedFinalSeverityReviewAuthority(task);
     context.artifactSet = {
+      // Whole-run completion is added by the terminal controller presentation,
+      // after this report task settles; agent output cannot attest its own census.
+      reportCompletion: null,
       campaignSummary: campaignSummary?.value ?? null,
       ...(campaignSummary === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),
       propertyCatalog: propertyCatalog?.value ?? UNPLANNED_PROPERTY_CATALOG_CONTEXT,
@@ -9913,6 +9966,18 @@ export default smithers((ctx) => {
     <Workflow name={__ULTRAFUZZ_WORKFLOW_NAME__}>
       <Parallel id="ultrafuzz-agent-tasks">
         {selectedTaskSpecs.map((task) => {
+          const requiredProducerIds = task.dependencyVerificationProducers
+            .filter((producer) => !producer.optional)
+            .map((producer) => producer.verifierId);
+          const failedDependencies = cloudWorker ? [] : failedWorkflowPrerequisites(ctx, requiredProducerIds);
+          const skipPreparation = shouldSkipWorkflowTask(ctx, task.preparationId, failedDependencies);
+          const failedPreparation = failedWorkflowPrerequisites(ctx, [task.preparationId]);
+          const skipAgent = shouldSkipWorkflowTask(ctx, task.id, [...failedDependencies, ...failedPreparation]);
+          const skipVerifier = shouldSkipWorkflowTask(ctx, task.verifierId, [
+            ...failedDependencies,
+            ...failedPreparation,
+            ...failedWorkflowPrerequisites(ctx, [task.id])
+          ]);
           const inputTask = inputTasks.get(task.id);
           const fullTaskPrompt = renderAgentPrompt({
             runtimeContext: task.runtimeContext,
@@ -9923,7 +9988,7 @@ export default smithers((ctx) => {
             const dependencyVerificationAuthorities = dependencyVerificationAuthoritiesForTask(task, (producer) =>
               ctx.outputMaybe(outputs.verification, { nodeId: producer.verifierId })
             );
-            if (dependencyVerificationAuthorities === undefined) return null;
+            if (dependencyVerificationAuthorities === undefined && !skipAgent) return null;
             if (cloudProvider === undefined || modalModule === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");
             }
@@ -9962,7 +10027,7 @@ export default smithers((ctx) => {
                       ? {}
                       : { vulnerability_database: task.vulnerabilityDatabaseRelative }),
                     selected_task: cloudSelectedTaskHandoff(task),
-                    dependency_verification_authorities: dependencyVerificationAuthorities,
+                    dependency_verification_authorities: dependencyVerificationAuthorities ?? [],
                     resources: {
                       cpu: task.execution.resources.cpu,
                       memory_mib: task.execution.resources.memoryMiB,
@@ -9973,6 +10038,7 @@ export default smithers((ctx) => {
                   }}
                   output={outputs.agentProcess}
                   dependsOn={task.dependsOn}
+                  skipIf={skipAgent}
                   continueOnFail={task.continueOnFail}
                   allowNetwork
                   reviewDiffs={false}
@@ -9986,6 +10052,7 @@ export default smithers((ctx) => {
                   id={task.verifierId}
                   output={outputs.verification}
                   dependsOn={[task.id]}
+                  skipIf={skipVerifier}
                   needs={{ agent: task.id }}
                   deps={{ agent: outputs.agentProcess }}
                   depsOptional
@@ -10015,6 +10082,7 @@ export default smithers((ctx) => {
                 id={task.preparationId}
                 output={outputs.preparation}
                 dependsOn={cloudWorker ? [] : task.dependsOn}
+                skipIf={skipPreparation}
                 continueOnFail={task.continueOnFail}
                 retries={Math.max(task.retries, 1)}
                 metadata={{
@@ -10028,8 +10096,9 @@ export default smithers((ctx) => {
               <Task
                 id={task.id}
                 output={outputs.agentProcess}
-                agent={agentForTask(task, fullTaskPrompt)}
+                agent={skipAgent ? undefined : agentForTask(task, fullTaskPrompt)}
                 dependsOn={[task.preparationId]}
+                skipIf={skipAgent}
                 continueOnFail={task.continueOnFail}
                 timeoutMs={task.timeoutMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
@@ -10043,6 +10112,7 @@ export default smithers((ctx) => {
                 id={task.verifierId}
                 output={outputs.verification}
                 dependsOn={[task.id]}
+                skipIf={skipVerifier}
                 needs={{ agent: task.id }}
                 deps={{ agent: outputs.agentProcess }}
                 depsOptional
