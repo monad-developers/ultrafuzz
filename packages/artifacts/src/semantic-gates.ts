@@ -1499,7 +1499,7 @@ function reportCompletionAuthorityIssues(document: unknown, context: SemanticGat
       reported === undefined
         ? []
         : [issue("$.completion", "Report declares completion without an authoritative runtime census")];
-    for (const field of ["verification", "observed_completion", "unreviewed_findings"]) {
+    for (const field of ["verification", "observed_completion"]) {
       if (at(document, [field]) !== undefined) {
         issues.push(
           issue(`$.${field}`, "Unchecked report metadata is runtime-owned and cannot be admitted as agent output")

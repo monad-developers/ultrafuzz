@@ -578,7 +578,7 @@
         },
         "reason_codes": {
           "minItems": 1,
-          "maxItems": 6,
+          "maxItems": 5,
           "type": "array",
           "items": {
             "type": "string",
@@ -587,7 +587,6 @@
               "record-missing",
               "record-invalid",
               "result-unreadable",
-              "result-not-reviewed",
               "results-truncated"
             ]
           },
@@ -729,32 +728,6 @@
       },
       "required": ["outcome", "counts"],
       "additionalProperties": false
-    },
-    "unreviewed_findings": {
-      "maxItems": 256,
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "source_path": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 1024
-          },
-          "title": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 512
-          },
-          "description": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 4000
-          }
-        },
-        "required": ["source_path", "title", "description"],
-        "additionalProperties": false
-      }
     },
     "campaign_outcome": {
       "type": "object",
@@ -3263,7 +3236,7 @@
             },
             "reason": {
               "type": "string",
-              "const": "final-review-not-completed"
+              "const": "property-implementation-not-completed"
             }
           },
           "required": ["status", "reason"],
@@ -3411,74 +3384,6 @@
             "completion": true
           },
           "required": ["completion"]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "unreviewed_findings": true
-        },
-        "required": ["unreviewed_findings"]
-      },
-      "then": {
-        "properties": {
-          "verification": true,
-          "observed_completion": true
-        },
-        "required": ["verification", "observed_completion"]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "property_implementation_coverage": {
-            "type": "object",
-            "properties": {
-              "status": {
-                "const": "unavailable"
-              }
-            },
-            "required": ["status"]
-          }
-        },
-        "required": ["property_implementation_coverage"]
-      },
-      "then": {
-        "anyOf": [
-          {
-            "required": ["completion"],
-            "properties": {
-              "completion": {
-                "type": "object",
-                "properties": {
-                  "outcome": {
-                    "const": "partial"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "properties": {
-              "observed_completion": true
-            },
-            "required": ["observed_completion"]
-          }
-        ],
-        "properties": {
-          "issues": {
-            "type": "array",
-            "maxItems": 0
-          },
-          "non_production_outcomes": {
-            "type": "array",
-            "maxItems": 0
-          },
-          "property_provenance": {
-            "type": "array",
-            "maxItems": 0
-          }
         }
       }
     }

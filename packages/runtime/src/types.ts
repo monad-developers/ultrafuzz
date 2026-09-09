@@ -319,7 +319,19 @@ export interface RunProgressSummary {
   current_step: RunHealthCurrentStep;
 }
 
+export interface RunReportStatus {
+  status: "available" | "unavailable" | "pending" | "unknown";
+  reason: string | null;
+  completion: "complete" | "partial" | "unknown";
+  verification: "verified" | "not-checked" | "unknown";
+  json_path: string | null;
+  markdown_path: string | null;
+}
+
 export interface RunHealthValue extends RunListEntry, RunProgressSummary {
+  /** null means that the local and workflow observations do not establish whether work ended. */
+  ended: boolean | null;
+  report: RunReportStatus;
   // No authenticated workflow identity exists during incomplete launch preparation.
   workflow_run_id?: string;
   // The run's recorded audit profile, typed rather than a loose record so a

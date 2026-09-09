@@ -12,6 +12,7 @@ groups:
     label: Strategies
     color: "#7c3aed"
     defaults:
+      failure_policy: continue
       loops: 3
       timeout_seconds: 7200
       model_profiles:

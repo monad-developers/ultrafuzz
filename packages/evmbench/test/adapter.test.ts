@@ -448,6 +448,15 @@ function statusData(
     run_id: "evmbench-smoke",
     run_root: "/synthetic/.ultrafuzz/runs/evmbench-smoke",
     status: runStatus ?? (verdict === "done" ? "succeeded" : "running"),
+    ended: verdict === "done" || verdict === "failed" || verdict === "cancelled",
+    report: {
+      status: "unknown",
+      reason: "report-publication-not-recorded",
+      completion: "unknown",
+      verification: "unknown",
+      json_path: null,
+      markdown_path: null
+    },
     workflow_ids: ["evmbench-smoke"],
     workflow_run_id: "evmbench-smoke",
     workflow_status: verdict === "done" ? "succeeded" : "running",

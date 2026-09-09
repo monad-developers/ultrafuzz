@@ -177,7 +177,7 @@ function partialCompletion(runId = "projection-test"): ReportCompletion {
 function uncheckedReport(): Record<string, unknown> {
   return {
     ...renderableReport(),
-    verification: { status: "not-checked", reason_codes: ["record-missing", "result-not-reviewed"] },
+    verification: { status: "not-checked", reason_codes: ["record-missing"] },
     observed_completion: {
       outcome: "partial",
       counts: {
@@ -198,14 +198,11 @@ function uncheckedReport(): Record<string, unknown> {
     issues: [],
     non_production_outcomes: [],
     property_provenance: [],
-    property_implementation_coverage: { status: "unavailable", reason: "final-review-not-completed" },
-    unreviewed_findings: [
-      { source_path: "artifacts/task/findings.json", title: "Candidate", description: "Needs review." }
-    ]
+    property_implementation_coverage: { status: "not-planned", reason: "property-implementation-track-not-declared" }
   };
 }
 
-test("unchecked partial reports disclose unknown observations and keep candidates separate from final findings", () => {
+test("unchecked agent reports disclose unknown observations", () => {
   const report = uncheckedReport();
   const projection = projectCanonicalFinalReport(report);
   assert.match(
@@ -219,9 +216,6 @@ test("unchecked partial reports disclose unknown observations and keep candidate
   assert.match(projection.markdown, /\| `missing-result` \| `unverified` \|/u);
   assert.match(projection.markdown, /Additional observed incomplete node identities omitted: `unknown`/u);
   assert.match(projection.markdown, /No final findings are included/u);
-  assert.match(projection.markdown, /## Unreviewed findings/u);
-  assert.match(projection.markdown, /unreviewed and unverified candidates, not final findings/u);
-  assert.match(projection.markdown, /Final review was not completed or could not be verified/u);
   assert.doesNotMatch(
     projection.markdown,
     /available verified results|^No issues reported\.$|\| Issue id \| Title \|/mu
@@ -255,7 +249,6 @@ test("unchecked reports explain missing checks in plain language while retaining
       "record-missing",
       "record-invalid",
       "result-unreadable",
-      "result-not-reviewed",
       "results-truncated"
     ]
   };
@@ -265,7 +258,6 @@ test("unchecked reports explain missing checks in plain language while retaining
     "Some saved run records are missing.",
     "Some saved run records did not pass the required checks.",
     "Some output files could not be read.",
-    "Some available findings did not complete final review.",
     "Some available results were omitted because a file, item, or size limit was reached."
   ]) {
     assert.ok(projection.markdown.includes(`- ${explanation}`));
@@ -279,15 +271,12 @@ test("unchecked reports explain missing checks in plain language while retaining
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
 });
 
-test("unchecked completion and candidate disclosures cannot be removed or changed independently", () => {
+test("unchecked completion disclosures cannot be removed or changed independently", () => {
   const projection = projectCanonicalFinalReport(uncheckedReport());
   for (const markdown of [
     projection.markdown.replace("report — PARTIAL", "report"),
     projection.markdown.replace("- Verification: `not-checked`", "- Verification: `checked`"),
     projection.markdown.replace("- Planned nodes: `unknown`", "- Planned nodes: `100`"),
-    projection.markdown.replace("## Unreviewed findings", "## Findings"),
-    projection.markdown.replace("Needs review.", "Confirmed."),
-    projection.markdown.replace("Description: Needs review.", ""),
     projection.markdown.replace("| `failed-task` | `failed` |", ""),
     `${projection.markdown}\nNo issues reported.\n`
   ])
@@ -299,25 +288,6 @@ test("unchecked completion and candidate disclosures cannot be removed or change
     }),
     false
   );
-});
-
-test("unreviewed candidate text is escaped and public reports redact its private content", () => {
-  const report = uncheckedReport();
-  report.unreviewed_findings = [
-    {
-      source_path: "/home/runner/private/findings.json",
-      title: "[Candidate](https://example.invalid) <script>\n## [H-01]",
-      description: "token=synthetic-candidate-secret ![image](https://example.invalid) <b>raw</b>"
-    },
-    { source_path: "artifacts/task/findings.json", title: "Critical", description: "Critical" }
-  ];
-  const projection = projectCanonicalFinalReport(report);
-  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
-  assert.doesNotMatch(projection.markdown, /^## \[H-01\]|<script>|<b>raw<\/b>/mu);
-  assert.match(projection.markdown, /### Candidate 2: Critical/u);
-  const publicProjection = projectPublicCanonicalFinalReport(report);
-  assert.doesNotMatch(JSON.stringify(publicProjection), /synthetic-candidate-secret|\/home\/runner\/private/u);
-  assertPublicProjectionFixedPoint(publicProjection);
 });
 
 test("partial completion is prominent and preserves verified findings and the exact census", () => {
@@ -885,6 +855,23 @@ test("canonical final-report projection supports a meaningful zero-issue report"
   assert.match(projection.markdown, /^- Reason: `property-implementation-track-not-declared`$/mu);
   assert.match(projection.markdown, /^## Property provenance$/mu);
   assert.doesNotMatch(projection.markdown, /\| Issue id \| Title \|/u);
+});
+
+test("agent reports disclose omitted property implementation without discarding reviewed findings", () => {
+  const report: Record<string, unknown> = {
+    ...renderableReport(),
+    property_implementation_coverage: { status: "unavailable", reason: "property-implementation-not-completed" }
+  };
+  const projection = projectCanonicalFinalReport(report);
+  assert.match(
+    projection.markdown,
+    /Property implementation was planned, but its results were unavailable to the report agent/u
+  );
+  assert.match(projection.markdown, /Implementation coverage is unknown/u);
+  assert.match(projection.markdown, /## \[L-01\] - State mismatch/u);
+  assert.doesNotMatch(projection.markdown, /Status: `not-planned`|Selected properties:|Implemented properties:/u);
+  assert.deepEqual(projection.report.issues, report.issues);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
 });
 
 test("canonical final-report projection renders unavailable coverage evidence and typed blockers", () => {

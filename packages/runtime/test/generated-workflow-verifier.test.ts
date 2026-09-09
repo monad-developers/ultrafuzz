@@ -4608,6 +4608,38 @@ test("generated Smithers accepts direct lenses, excludes transitive lenses, and 
   ]);
 });
 
+test("report prompt coverage distinguishes an omitted planned implementation from an unplanned track", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function authoritativeFinalReportCoverage");
+  const end = source.indexOf("\n\ntype FinalReportAgentAttempt", start);
+  assert.ok(start >= 0 && end > start);
+  const helper = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  for (const planned of [false, true]) {
+    const coverage = new Function(
+      "declaredFinalReportOutputPair",
+      "verifiedSingletonAncestorJsonArtifact",
+      "declaredAncestorContractOutputs",
+      `${helper}; return authoritativeFinalReportCoverage;`
+    )(
+      () => ({}),
+      () => undefined,
+      (_task: unknown, contract: string, options: { includeOmitted?: boolean }) => {
+        assert.equal(contract, "ultrafuzz/implemented-properties@3");
+        assert.equal(options.includeOmitted, true);
+        return planned ? [{ attemptId: "implementation" }] : [];
+      }
+    ) as (task: unknown) => unknown;
+    assert.deepEqual(
+      coverage({}),
+      planned
+        ? { status: "unavailable", reason: "property-implementation-not-completed" }
+        : { status: "not-planned", reason: "property-implementation-track-not-declared" }
+    );
+  }
+});
+
 test("generated Smithers selects property and discovery inputs by their declared contracts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function verifiedAncestorPropertyLenses");

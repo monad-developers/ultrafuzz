@@ -22,6 +22,9 @@ export default class Run extends Command {
   static override flags = {
     ...globalFlags,
     "run-id": Flags.string({ summary: "Ultrafuzz run ID" }),
+    "require-complete": Flags.boolean({
+      summary: "Require complete coverage for a successful run; still attempt a report after failures"
+    }),
     "input-json": Flags.string({
       summary: "Workflow input as strict inline JSON",
       exclusive: ["input-file"]
@@ -65,7 +68,14 @@ export default class Run extends Command {
       agent: flags.agent,
       model: flags.model,
       topologyPath: flags["topology-path"],
-      ...(flags["audit-profile"] === undefined ? {} : { runtimeOverrides: { auditProfile: flags["audit-profile"] } }),
+      ...(flags["audit-profile"] === undefined && !flags["require-complete"]
+        ? {}
+        : {
+            runtimeOverrides: {
+              ...(flags["audit-profile"] === undefined ? {} : { auditProfile: flags["audit-profile"] }),
+              ...(flags["require-complete"] ? { run: { completionPolicy: "require-complete" as const } } : {})
+            }
+          }),
       workflowInput,
       maxConcurrency: flags["max-concurrency"],
       env: cliIo().env

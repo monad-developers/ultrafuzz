@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ultrafuzz:schema:runtime:report-publication-status:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state_fingerprint",
+    "status",
+    "reason",
+    "completion",
+    "verification",
+    "json_file",
+    "markdown_file"
+  ],
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.report-publication-status.v1" },
+    "state_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "status": { "enum": ["available", "unavailable"] },
+    "reason": { "enum": ["report-agent-output-unavailable", "report-publication-failed", null] },
+    "completion": { "enum": ["complete", "partial", "unknown"] },
+    "verification": { "enum": ["verified", "not-checked", "unknown"] },
+    "json_file": { "oneOf": [{ "$ref": "#/$defs/file" }, { "type": "null" }] },
+    "markdown_file": { "oneOf": [{ "$ref": "#/$defs/file" }, { "type": "null" }] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "available" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "reason": { "type": "null" },
+          "verification": { "enum": ["verified", "not-checked"] },
+          "json_file": { "$ref": "#/$defs/file" },
+          "markdown_file": { "$ref": "#/$defs/file" }
+        }
+      },
+      "else": {
+        "properties": {
+          "reason": { "enum": ["report-agent-output-unavailable", "report-publication-failed"] },
+          "completion": { "const": "unknown" },
+          "verification": { "const": "unknown" },
+          "json_file": { "type": "null" },
+          "markdown_file": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "dev", "ino", "size", "mtime_ms", "ctime_ms"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))[^\\\\]+$"
+        },
+        "dev": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "ino": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "size": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "mtime_ms": { "type": "number" },
+        "ctime_ms": { "type": "number" }
+      }
+    }
+  }
+}

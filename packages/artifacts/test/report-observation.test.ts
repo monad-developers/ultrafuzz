@@ -3,11 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 import { createStrictAjv } from "../src/json-schema-validator.js";
-import {
-  MAX_REPORT_UNREVIEWED_FINDINGS,
-  reportObservedCompletionSchema,
-  reportVerificationSchema
-} from "../src/report-observation.js";
+import { reportObservedCompletionSchema, reportVerificationSchema } from "../src/report-observation.js";
 import { reportJsonSchema, reportSchema } from "../src/workflow-contracts.js";
 
 const validateShape = createStrictAjv().compile(reportJsonSchema);
@@ -23,7 +19,7 @@ function uncheckedReport(): Record<string, unknown> {
   assert.ok(fixture);
   return {
     ...fixture.valid,
-    verification: { status: "not-checked", reason_codes: ["record-missing", "result-not-reviewed"] },
+    verification: { status: "not-checked", reason_codes: ["record-missing"] },
     observed_completion: {
       outcome: "partial",
       counts: {
@@ -39,10 +35,7 @@ function uncheckedReport(): Record<string, unknown> {
     issues: [],
     non_production_outcomes: [],
     property_provenance: [],
-    property_implementation_coverage: { status: "unavailable", reason: "final-review-not-completed" },
-    unreviewed_findings: [
-      { source_path: "artifacts/task/findings.json", title: "Candidate", description: "Needs review." }
-    ]
+    property_implementation_coverage: { status: "not-planned", reason: "property-implementation-track-not-declared" }
   };
 }
 
@@ -51,7 +44,7 @@ function assertValidity(value: unknown, expected: boolean): void {
   assert.equal(validateShape(value), expected, JSON.stringify(validateShape.errors));
 }
 
-test("unchecked partial reports retain observations and candidates without a strict completion census", () => {
+test("unchecked agent reports retain observations without a strict completion census", () => {
   const report = uncheckedReport();
   assertValidity(report, true);
   assert.deepEqual(reportSchema.parse(report), report);
@@ -87,21 +80,7 @@ test("unchecked verification cannot claim an authenticated census or omit its pa
     assertValidity(value, false);
 });
 
-test("unavailable final review still cannot claim strict issues or property provenance", () => {
-  const report = uncheckedReport();
-  for (const field of ["issues", "non_production_outcomes", "property_provenance"]) {
-    assertValidity({ ...report, [field]: [{}] }, false);
-  }
-  const {
-    verification: _verification,
-    observed_completion: _observation,
-    unreviewed_findings: _findings,
-    ...withoutObservation
-  } = report;
-  assertValidity(withoutObservation, false);
-});
-
-test("unchecked observations and candidates have bounded values and typed reasons", () => {
+test("unchecked observations have bounded values and typed reasons", () => {
   const report = uncheckedReport();
   const observed = report.observed_completion as { outcome: string; counts: Record<string, unknown> };
   for (const invalidCount of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "unknown"]) {
@@ -115,14 +94,29 @@ test("unchecked observations and candidates have bounded values and typed reason
     assert.equal(reportVerificationSchema.safeParse(verification).success, false);
     assertValidity({ ...report, verification }, false);
   }
-  const candidate = (report.unreviewed_findings as Array<Record<string, string>>)[0];
-  assert.ok(candidate);
-  for (const findings of [
-    Array(MAX_REPORT_UNREVIEWED_FINDINGS + 1).fill(candidate),
-    [{ ...candidate, source_path: "s".repeat(1_025) }],
-    [{ ...candidate, title: "t".repeat(513) }],
-    [{ ...candidate, description: "d".repeat(4_001) }],
-    [{ ...candidate, severity: "High" }]
-  ])
-    assertValidity({ ...report, unreviewed_findings: findings }, false);
+});
+
+test("agent-written reports can disclose unavailable planned implementation without a runtime census", () => {
+  const report = uncheckedReport();
+  const { verification: _verification, observed_completion: _observed, ...agent } = report;
+  assertValidity(
+    {
+      ...agent,
+      property_implementation_coverage: {
+        status: "unavailable",
+        reason: "property-implementation-not-completed"
+      }
+    },
+    true
+  );
+  assertValidity(
+    {
+      ...agent,
+      property_implementation_coverage: {
+        status: "unavailable",
+        reason: "final-review-not-completed"
+      }
+    },
+    false
+  );
 });

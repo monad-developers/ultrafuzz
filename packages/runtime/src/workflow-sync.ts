@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { parseResolvedConfigJsonBytes } from "@ultrafuzz/config";
 
 import {
   ARTIFACT_MANIFEST_FILE,
@@ -109,6 +110,7 @@ import {
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
 import { publishBestEffortTerminalReport } from "./unverified-report.js";
+import { hasCurrentReportPublicationStatus, writeReportPublicationStatus } from "./report-publication-status.js";
 import { recoverySubmissionAuthority } from "./workflow-recovery-authority.js";
 import {
   parseCurrentSmithersInspect,
@@ -1492,7 +1494,9 @@ export async function synchronizeLinkedWorkflowRun(
       controlGeneration: evidence.controlGeneration
     }) !== undefined;
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
-  const nonBlockingNodeIds = nonBlockingRuntimeNodeIds(loaded.graph);
+  const nonBlockingNodeIds = requiresCompleteRun(evidence)
+    ? new Set<string>()
+    : nonBlockingRuntimeNodeIds(loaded.graph);
   const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
     records: recoveryRecords,
     state: recoveryState,
@@ -1731,25 +1735,49 @@ export async function synchronizeLinkedWorkflowRun(
     }
   }
 
-  if (["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState)) {
+  if (
+    ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState) &&
+    !hasCurrentReportPublicationStatus(layout.root, readRunState(layout))
+  ) {
     try {
       assertSynchronizationBudget(control);
-      // A stopped workflow can still produce an explicitly unchecked report
-      // when task verification or controller evidence prevents a checked one.
-      // Publication does not change execution diagnostics or task disposition.
-      publishBestEffortTerminalReport(layout.root, {
+      // Publish only an existing agent-written report. Missing agent output is
+      // a terminal reporting result, not a reason to rerun analysis.
+      const report = publishBestEffortTerminalReport(layout.root, {
         workflowRunId: evidence.smithersRunId,
         workflowState: inspect.runState as "succeeded" | "succeeded-with-failures" | "failed" | "cancelled"
+      });
+      writeReportPublicationStatus({
+        runRoot: layout.root,
+        state: readRunState(layout),
+        ...(report === undefined ? { unavailableReason: "report-agent-output-unavailable" as const } : { report })
       });
     } catch (error) {
       const interrupted = synchronizationInterruptionDiagnostic(error);
       if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
       diagnostics.push({
         code: "TERMINAL_REPORT_UNAVAILABLE",
-        message: "The terminal report could not be published from the available run records.",
+        message: "No current agent-written final report is available, or report publication failed.",
         severity: "warning",
         source: "report"
       });
+      try {
+        writeReportPublicationStatus({
+          runRoot: layout.root,
+          state: readRunState(layout),
+          unavailableReason:
+            error instanceof Error && error.name === "ReportUnavailableError"
+              ? "report-agent-output-unavailable"
+              : "report-publication-failed"
+        });
+      } catch {
+        diagnostics.push({
+          code: "REPORT_STATUS_UNAVAILABLE",
+          message: "The final report availability record could not be saved.",
+          severity: "warning",
+          source: "report"
+        });
+      }
     }
   }
 
@@ -1764,6 +1792,14 @@ export async function synchronizeLinkedWorkflowRun(
       synced_nodes: syncResult.syncedNodes
     }
   };
+}
+
+function requiresCompleteRun(evidence: LinkedWorkflowEvidence): boolean {
+  const saved = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  if (saved === undefined) throw new Error("sealed completion policy is unavailable");
+  return parseResolvedConfigJsonBytes(saved.contents).run.completionPolicy === "require-complete";
 }
 
 function recoveryAuthorizesTerminalAggregate(input: {
@@ -5822,7 +5858,7 @@ function completionEvidenceForTask(
     preparationEvidence !== undefined &&
     PREPARATION_FAILURE_STATUSES.has(preparationEvidence.status) &&
     preparationWorkflowStateIsFailure(preparationEvidence) &&
-    (agentEvidence === undefined || !terminalStatus(agentEvidence.status))
+    (agentEvidence === undefined || agentEvidence.status === "skipped" || !terminalStatus(agentEvidence.status))
   ) {
     return {
       evidence: preparationEvidence,
@@ -6008,7 +6044,7 @@ function finalRunStatus(
   if (
     inspect.exhaustedLoops.length > 0 ||
     (workflowStatus === "failed" && options.recoveredAggregateAuthorized !== true) ||
-    statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))
+    statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
   }
@@ -6186,7 +6222,7 @@ function monotonicReplayedLastError(
 }
 
 function preparationWorkflowStateIsFailure(evidence: NodeWorkflowEvidence): boolean {
-  return evidence.workflowState === "failed" || evidence.timedOut === true;
+  return evidence.workflowState === "failed" || evidence.workflowState === "stalled" || evidence.timedOut === true;
 }
 
 function finishedAtForStatus(

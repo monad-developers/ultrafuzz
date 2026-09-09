@@ -10,18 +10,18 @@ import {
   safeResolveInside,
   sha256Bytes,
   type ObservedReportCompletion,
-  type ReportVerification,
-  type UnreviewedReportFinding
+  reportSchema,
+  type ReportVerification
 } from "@ultrafuzz/artifacts";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { ReportUnavailableError } from "./report-unavailable.js";
 
 type JsonRecord = Record<string, unknown>;
 type Reason = ReportVerification["reason_codes"][number];
 type IncompleteNode = NonNullable<ObservedReportCompletion["incomplete_nodes"]>[number];
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
-const MAX_INPUT_BYTES = 64 * 1024 * 1024;
-const MAX_RESULT_FILES = 512;
-const MAX_FINDINGS = 256;
+const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+const MAX_INPUT_BYTES = 128 * 1024 * 1024;
+const MAX_INCOMPLETE_NODES = 256;
 
 export interface UnverifiedReportInputs {
   root: string;
@@ -30,7 +30,7 @@ export interface UnverifiedReportInputs {
   metadata?: JsonRecord;
   observed: ObservedReportCompletion;
   verification: ReportVerification;
-  findings: UnreviewedReportFinding[];
+  agentReport: JsonRecord;
   sources_sha256: string;
 }
 
@@ -44,8 +44,7 @@ export function readUnverifiedReportInputs(root: string): UnverifiedReportInputs
   const manifest = reader.bytes("smithers/tasks.json");
   const graph = reader.record("graph.json");
   const observed = observeCompletion(state, manifest, graph, reader.reasons);
-  const findings = collectFindingCandidates(reader, graph);
-  if (findings.length > 0) reader.reasons.add("result-not-reviewed");
+  const agentReport = readAgentReport(reader, state, graph, manifest);
   return {
     root,
     runId: path.basename(root),
@@ -53,7 +52,7 @@ export function readUnverifiedReportInputs(root: string): UnverifiedReportInputs
     metadata,
     observed,
     verification: { status: "not-checked", reason_codes: [...reader.reasons].sort() },
-    findings,
+    agentReport,
     sources_sha256: sha256Bytes(Buffer.from(JSON.stringify(reader.sources)))
   };
 }
@@ -65,7 +64,7 @@ class ReportInputReader {
 
   constructor(readonly root: string) {}
 
-  bytes(relative: string): Buffer | undefined {
+  bytes(relative: string, maxBytes = MAX_RECORD_BYTES): Buffer | undefined {
     try {
       const file = safeResolveInside(this.root, relative, "report input");
       const remaining = MAX_INPUT_BYTES - this.totalBytes;
@@ -77,7 +76,7 @@ class ReportInputReader {
       const bytes = readSinglyLinkedRegularFileSnapshotInside(
         this.root,
         file,
-        Math.min(MAX_RECORD_BYTES, remaining),
+        Math.min(maxBytes, remaining),
         "report input"
       );
       this.totalBytes += bytes.byteLength;
@@ -92,19 +91,19 @@ class ReportInputReader {
     }
   }
 
-  value(relative: string): unknown {
-    const bytes = this.bytes(relative);
+  value(relative: string, maxBytes = MAX_RECORD_BYTES): unknown {
+    const bytes = this.bytes(relative, maxBytes);
     if (bytes === undefined) return undefined;
     try {
-      return parseStrictJsonBytes(bytes, { maxBytes: MAX_RECORD_BYTES });
+      return parseStrictJsonBytes(bytes, { maxBytes });
     } catch {
       this.reasons.add("record-invalid");
       return undefined;
     }
   }
 
-  record(relative: string, requireRunId = false): JsonRecord | undefined {
-    const value = this.value(relative);
+  record(relative: string, requireRunId = false, maxBytes = MAX_RECORD_BYTES): JsonRecord | undefined {
+    const value = this.value(relative, maxBytes);
     if (value === undefined) return undefined;
     const record = asRecord(value);
     if (record === undefined || (requireRunId && record.run_id !== path.basename(this.root))) {
@@ -187,8 +186,8 @@ function observedIncompleteNodes(state: JsonRecord | undefined, ids?: string[], 
   incomplete.push(...scopes.map((node_id): IncompleteNode => ({ node_id, outcome: "unverified" })));
   incomplete.sort((left, right) => left.node_id.localeCompare(right.node_id));
   return {
-    incomplete_nodes: incomplete.slice(0, MAX_FINDINGS),
-    incomplete_nodes_omitted: ids === undefined ? null : Math.max(0, incomplete.length - MAX_FINDINGS)
+    incomplete_nodes: incomplete.slice(0, MAX_INCOMPLETE_NODES),
+    incomplete_nodes_omitted: ids === undefined ? null : Math.max(0, incomplete.length - MAX_INCOMPLETE_NODES)
   };
 }
 
@@ -204,80 +203,79 @@ function unexpandedScopes(graph: JsonRecord | undefined): string[] | undefined {
   return scopes;
 }
 
-function collectFindingCandidates(reader: ReportInputReader, graph: JsonRecord | undefined): UnreviewedReportFinding[] {
-  const declared = declaredFindingPaths(graph);
-  const discovered = discoverFindingPaths(reader);
-  const files = [...new Set([...declared, ...discovered])].sort();
-  if (files.length > MAX_RESULT_FILES) reader.reasons.add("results-truncated");
-  const findings: UnreviewedReportFinding[] = [];
-  for (const relative of files.slice(0, MAX_RESULT_FILES)) {
-    const value = reader.value(relative);
-    const record = asRecord(value);
-    const raw = Array.isArray(value) ? value : Array.isArray(record?.findings) ? record.findings : record?.issues;
-    if (!Array.isArray(raw)) continue;
-    for (const candidate of raw) {
-      if (findings.length >= MAX_FINDINGS) {
-        reader.reasons.add("results-truncated");
-        return findings;
-      }
-      const value = asRecord(candidate);
-      const title = boundedText(value?.title, 512);
-      const description = boundedText(value?.description, 4000) ?? boundedText(value?.summary, 4000);
-      if (title === undefined || description === undefined) {
-        reader.reasons.add("record-invalid");
-        continue;
-      }
-      findings.push({ source_path: relative, title, description });
+/** Locate the current successful report task. Never promote raw strategy results into a report. */
+function readAgentReport(
+  reader: ReportInputReader,
+  state: JsonRecord | undefined,
+  graph: JsonRecord | undefined,
+  manifestBytes: Buffer | undefined
+): JsonRecord {
+  const nodes = asRecord(state?.nodes);
+  const producers = Array.isArray(graph?.nodes)
+    ? graph.nodes
+        .map(asRecord)
+        .filter(
+          (node) =>
+            Array.isArray(node?.outputs) &&
+            node.outputs.some((output) => asRecord(output)?.contract === "ultrafuzz/report@3")
+        )
+    : [];
+  if (producers.length !== 1 || producers[0] === undefined || nodes === undefined)
+    throw new ReportUnavailableError("the current report-agent task cannot be identified from saved records");
+  const producer = producers[0];
+  if (typeof producer.id !== "string" || !NODE_REFERENCE_PATTERN.test(producer.id))
+    throw new ReportUnavailableError("the current report-agent task ID is invalid");
+  const attempt = successfulReportAttempt(producer.id, nodes, state?.run_id, manifestBytes);
+  const outputs = (producer.outputs as unknown[])
+    .map(asRecord)
+    .filter((output) => output?.contract === "ultrafuzz/report@3");
+  const outputPath = outputs.length === 1 ? outputs[0]?.path : undefined;
+  if (typeof outputPath !== "string" || !safeReportPath(outputPath))
+    throw new ReportUnavailableError("the declared report output path is invalid");
+  const value = reader.record(`artifacts/${attempt}/${outputPath}`, false, MAX_REPORT_BYTES);
+  const parsed = reportSchema.safeParse(value);
+  if (!parsed.success || parsed.data.run_metadata.run_id !== path.basename(reader.root))
+    throw new ReportUnavailableError("the report-agent JSON is missing, unreadable, or invalid");
+  // Completion and verification metadata are attached by the runtime. A raw
+  // report claiming those fields is not an agent report from the current contract.
+  if (
+    parsed.data.completion !== undefined ||
+    parsed.data.verification !== undefined ||
+    parsed.data.observed_completion !== undefined
+  )
+    throw new ReportUnavailableError("the agent report contains runtime-owned completion metadata");
+  return parsed.data;
+}
+
+function successfulReportAttempt(
+  producerId: string,
+  nodes: JsonRecord,
+  runId: unknown,
+  manifestBytes: Buffer | undefined
+): string {
+  let attempts = [producerId];
+  if (manifestBytes !== undefined) {
+    try {
+      const manifest = parseSmithersTaskManifestBytes(manifestBytes);
+      if (manifest.run_id !== runId) throw new Error("task manifest belongs to another run");
+      attempts = manifest.tasks.filter((task) => task.concreteNodeId === producerId).map((task) => task.attemptId);
+    } catch {
+      throw new ReportUnavailableError("the current report-agent attempt cannot be identified from the task manifest");
     }
   }
-  return findings;
+  const successful = attempts.filter((id) => asRecord(nodes[id])?.status === "succeeded");
+  const attempt = successful[0];
+  if (successful.length !== 1 || attempt === undefined)
+    throw new ReportUnavailableError("no unique successful report-agent attempt is recorded");
+  return attempt;
 }
 
-function declaredFindingPaths(graph: JsonRecord | undefined): string[] {
-  if (!Array.isArray(graph?.nodes)) return [];
-  const paths: string[] = [];
-  for (const item of graph.nodes) {
-    const node = asRecord(item);
-    if (typeof node?.artifact_dir !== "string" || !Array.isArray(node.outputs)) continue;
-    for (const output of node.outputs) {
-      const contract = asRecord(output);
-      if (typeof contract?.path !== "string" || typeof contract.contract !== "string") continue;
-      if (contract.contract === "ultrafuzz/report@3" || contract.contract.includes("findings@")) {
-        const relative = `${node.artifact_dir}/${contract.path}`;
-        if (isResultPath(relative)) paths.push(relative);
-      }
-    }
-  }
-  return paths;
-}
-
-function discoverFindingPaths(reader: ReportInputReader): string[] {
-  const root = safeResolveInside(reader.root, "artifacts");
-  const paths: string[] = [];
-  try {
-    assertNoSymlinkComponents(reader.root, root, "report artifacts");
-    const entries = fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
-    if (entries.length > MAX_RESULT_FILES) reader.reasons.add("results-truncated");
-    for (const entry of entries.slice(0, MAX_RESULT_FILES)) {
-      if (!entry.isDirectory() || !NODE_REFERENCE_PATTERN.test(entry.name)) continue;
-      const directory = safeResolveInside(root, entry.name);
-      for (const name of ["findings.json", "report.json"]) {
-        if (fs.existsSync(path.join(directory, name))) paths.push(`artifacts/${entry.name}/${name}`);
-      }
-    }
-  } catch {
-    reader.reasons.add("result-unreadable");
-  }
-  return paths;
-}
-
-function isResultPath(relative: string): boolean {
-  return relative.length <= 1024 && /^artifacts\/(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+\.json$/u.test(relative);
-}
-
-function boundedText(value: unknown, maxLength: number): string | undefined {
-  if (typeof value !== "string" || value.trim().length === 0) return undefined;
-  return redactSecretsInText(value.slice(0, maxLength), "REDACTED").slice(0, maxLength);
+function safeReportPath(relative: string): boolean {
+  return (
+    relative.length <= 1024 &&
+    relative.split("/").every((segment) => segment !== "." && segment !== ".." && /^[A-Za-z0-9._-]+$/u.test(segment)) &&
+    relative.endsWith(".json")
+  );
 }
 
 export function asRecord(value: unknown): JsonRecord | undefined {

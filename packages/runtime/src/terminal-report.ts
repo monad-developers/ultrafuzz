@@ -42,7 +42,6 @@ import { projectTerminalReport } from "./terminal-report-projection.js";
 import { recoveryAuthorizesStoppedRun } from "./workflow-recovery-authority.js";
 import {
   assertVerifiedRunOutputAuthorityRemainedCurrent,
-  isVerifiedOutputAuthorityUnavailable,
   loadVerifiedFinalReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   VerifiedOutputError,
@@ -203,12 +202,12 @@ function currentAgentReport(report: VerifiedFinalReportSnapshot): CurrentFinalRe
 
 function captureTerminalReport(runRoot: string): TerminalReportCapture {
   const inputs = loadTerminalReportInputs(runRoot);
-  const agentReport = loadOptionalAgentReport(inputs.layout.root);
+  const agentReport = loadVerifiedFinalReportSnapshot(inputs.layout.root);
   const projection = projectTerminalReport({
     completion: inputs.completion,
     state: inputs.state,
     metadata: inputs.metadata,
-    ...(agentReport === undefined ? {} : { agentReport: agentReport.json as Record<string, unknown> }),
+    agentReport: agentReport.json as Record<string, unknown>,
     goalSearchCoverage: inputs.goalSearchCoverage
   });
   const gate = executeSemanticGate("report-completion-authority", {
@@ -280,17 +279,6 @@ function assertCurrentContractBindings(authority: VerifiedRunOutputAuthoritySnap
   }
 }
 
-function loadOptionalAgentReport(runRoot: string): VerifiedFinalReportSnapshot | undefined {
-  try {
-    return loadVerifiedFinalReportSnapshot(runRoot);
-  } catch (error) {
-    // Invalid successful publications are integrity failures. Only genuinely
-    // absent final-review authority permits an empty, explicitly partial report.
-    if (!isVerifiedOutputAuthorityUnavailable(error)) throw error;
-  }
-  return undefined;
-}
-
 function createTerminalReceipt(
   inputs: TerminalReportInputs,
   jsonBytes: Buffer,
@@ -331,7 +319,7 @@ function createTerminalSnapshot(
   inputs: TerminalReportInputs,
   projection: ReturnType<typeof projectTerminalReport>,
   bytes: { jsonBytes: Buffer; markdownBytes: Buffer; receiptBytes: Buffer },
-  agentReport: VerifiedFinalReportSnapshot | undefined
+  agentReport: VerifiedFinalReportSnapshot
 ): TerminalReportCapture["snapshot"] {
   const { layout, completion } = inputs;
   const { jsonBytes, markdownBytes, receiptBytes } = bytes;
@@ -356,7 +344,7 @@ function createTerminalSnapshot(
     json_bytes: jsonBytes,
     markdown: projection.markdown,
     markdown_bytes: markdownBytes,
-    validation_warnings: agentReport?.validation_warnings ?? Object.freeze([]),
+    validation_warnings: agentReport.validation_warnings,
     completion,
     terminal: true,
     publications: Object.freeze(publications)
@@ -419,6 +407,10 @@ function assertConsistentStoppedState(
 function workflowStateMatchesRun(workflowState: string, status: RunState["status"], recovered: boolean): boolean {
   if (workflowState === "failed") return status === "failed" || (status === "succeeded" && recovered);
   if (workflowState === "cancelled") return status === "canceled" || status === "timed-out";
+  // Strict completion may reject the runner's tolerated failures. This still
+  // permits a verified PARTIAL report: the census independently requires an
+  // attributable terminal task failure for every locally failed run.
+  if (workflowState === "succeeded-with-failures" && status === "failed") return true;
   return workflowState.startsWith("succeeded") && status === "succeeded";
 }
 

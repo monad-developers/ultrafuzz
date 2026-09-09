@@ -18,6 +18,8 @@ export const CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID =
 export const SMITHERS_SUBMISSION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-submission:1" as const;
 export const SMITHERS_RESET_NODE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-reset-node:1" as const;
 export const TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:terminal-report-receipt:1" as const;
+export const REPORT_PUBLICATION_STATUS_JSON_SCHEMA_ID =
+  "urn:ultrafuzz:schema:runtime:report-publication-status:1" as const;
 export const PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:pinned-submodule-snapshot:2" as const;
 export const PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID =
@@ -38,6 +40,7 @@ export const CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION = "ultrafuzz.cloud.execut
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
 export const SMITHERS_RESET_NODE_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
 export const TERMINAL_REPORT_RECEIPT_SCHEMA_VERSION = "ultrafuzz.terminal-report-receipt.v1" as const;
+export const REPORT_PUBLICATION_STATUS_SCHEMA_VERSION = "ultrafuzz.report-publication-status.v1" as const;
 export const PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION = "ultrafuzz.pinned-submodules.v2" as const;
 export const PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION = "ultrafuzz.pinned-submodules-expectation.v1" as const;
 
@@ -48,6 +51,7 @@ export const RUNTIME_DOCUMENT_SCHEMA_IDS = Object.freeze([
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
   PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID,
   PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID,
+  REPORT_PUBLICATION_STATUS_JSON_SCHEMA_ID,
   SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
   TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID,
@@ -285,6 +289,7 @@ export interface PinnedSubmoduleExpectationDocument {
 }
 
 export interface RuntimeDocumentBySchemaId {
+  [REPORT_PUBLICATION_STATUS_JSON_SCHEMA_ID]: ReportPublicationStatusDocument;
   [WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID]: WorkspacePatchBaselineDocument;
   [WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID]: WorkspacePatchPreparationDocument;
   [INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID]: InvariantSuiteBaselineDocument;
@@ -299,6 +304,26 @@ export interface RuntimeDocumentBySchemaId {
   [TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID]: TerminalReportReceiptDocument;
   [PINNED_SUBMODULE_SNAPSHOT_JSON_SCHEMA_ID]: PinnedSubmoduleSnapshotDocument;
   [PINNED_SUBMODULE_EXPECTATION_JSON_SCHEMA_ID]: PinnedSubmoduleExpectationDocument;
+}
+
+export interface ReportPublicationFileIdentity {
+  path: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtime_ms: number;
+  ctime_ms: number;
+}
+
+export interface ReportPublicationStatusDocument {
+  schema_version: typeof REPORT_PUBLICATION_STATUS_SCHEMA_VERSION;
+  state_fingerprint: string;
+  status: "available" | "unavailable";
+  reason: "report-agent-output-unavailable" | "report-publication-failed" | null;
+  completion: "complete" | "partial" | "unknown";
+  verification: "verified" | "not-checked" | "unknown";
+  json_file: ReportPublicationFileIdentity | null;
+  markdown_file: ReportPublicationFileIdentity | null;
 }
 
 export type RuntimeDocumentForSchemaId<SchemaId extends RuntimeDocumentSchemaId> = RuntimeDocumentBySchemaId[SchemaId];

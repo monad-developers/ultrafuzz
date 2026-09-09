@@ -59,6 +59,15 @@ export interface EvmbenchStatusData {
   run_id: string;
   run_root: string;
   status: string;
+  ended: boolean | null;
+  report: {
+    status: "available" | "unavailable" | "pending" | "unknown";
+    reason: string | null;
+    completion: "complete" | "partial" | "unknown";
+    verification: "verified" | "not-checked" | "unknown";
+    json_path: string | null;
+    markdown_path: string | null;
+  };
   created_at?: string;
   started_at?: string;
   finished_at?: string;

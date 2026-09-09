@@ -637,7 +637,9 @@ describe("prompt semantic anchors", () => {
     expect(finalReport).toContain("reference_expectation_ids");
     expect(finalReport).toMatch(/Copy that JSON value exactly; do not derive/u);
     expect(finalReport).toMatch(/preserve every ID array and blocker summary in the\s+runtime-supplied order/u);
-    expect(finalReport).toContain("tracked and not-planned");
+    expect(finalReport).toMatch(/tracked, not-planned,\s+and unavailable JSON variants/u);
+    expect(finalReport).toContain("property-implementation-not-completed");
+    expect(finalReport).toMatch(/Do not replace it with not-planned or invent implementation counts/u);
     expect(finalReport).not.toMatch(/implementation handoff's\s+`selection` object/u);
     // The Markdown half of the same coverage block is compared line by line and
     // was documented nowhere. Pin every label the gate matches on, not a sample.
@@ -1694,7 +1696,7 @@ describe("prompt semantic anchors", () => {
     expect(report).toContain("and before `## Goal search coverage`");
     expect(report).toContain("Add `## Property provenance` after the goal search coverage section.");
     expect(report.match(/Add `## Property implementation coverage`/gu)).toHaveLength(1);
-    expect(report).toContain("runtime-authoritative tracked or not-planned object");
+    expect(report).toContain("runtime-authoritative tracked, not-planned, or unavailable object");
     expect(report).toContain("the values below are only a format example");
     expect(report).not.toContain("or the string `unavailable`");
     expect(report).not.toMatch(/implementation handoff's\s+`selection` object/u);

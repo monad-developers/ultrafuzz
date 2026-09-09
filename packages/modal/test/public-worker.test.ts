@@ -14,7 +14,7 @@ import {
   writeRunMetadataDocument,
   writeRunState
 } from "@ultrafuzz/artifacts";
-import { publishTerminalReport } from "@ultrafuzz/runtime";
+import { loadReportSnapshot, publishTerminalReport, ReportUnavailableError } from "@ultrafuzz/runtime";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
@@ -2114,13 +2114,18 @@ it("rejects a malformed runtime report receipt instead of publishing an older ag
   }
 });
 
-it("publishes an authenticated partial runtime report when the report agent failed", () => {
+it("does not publish a replacement or stale report when the report agent failed", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-partial-report-"));
   try {
     const runRoot = path.join(root, "example-run");
-    const partial = writeRuntimeReportFixture(runRoot, true);
+    expect(() => writeRuntimeReportFixture(runRoot, true)).toThrow(/no successful current verification/u);
     const layout = layoutForRunRoot(runRoot);
     const stateBytes = fs.readFileSync(layout.statePath);
+    const agentPath = path.join(runRoot, "artifacts", "final-report", "report.json");
+    const staleAgentBytes = fs.readFileSync(agentPath);
+    expect(() => loadReportSnapshot(runRoot)).toThrow(ReportUnavailableError);
+    expect(fs.existsSync(path.join(runRoot, "review", "runtime-report"))).toBe(false);
+    expect(fs.existsSync(path.join(runRoot, "review", "unverified-report"))).toBe(false);
 
     const controlRoot = path.join(root, "control");
     const evalRunId = "eval-partial-report";
@@ -2129,33 +2134,18 @@ it("publishes an authenticated partial runtime report when the report agent fail
     fs.mkdirSync(evalRoot, { recursive: true });
     fs.writeFileSync(
       path.join(evalRoot, "runs.jsonl"),
-      `${JSON.stringify({ row_id: rowId, ultrafuzz_run_id: "example-run", ultrafuzz_run_root: runRoot, report_json_path: partial.artifacts.json_path, final_status: "failed", workflow: { status: "failed", terminal: true } })}\n`
+      `${JSON.stringify({ row_id: rowId, ultrafuzz_run_id: "example-run", ultrafuzz_run_root: runRoot, report_json_path: agentPath, final_status: "failed", workflow: { status: "failed", terminal: true } })}\n`
     );
     fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
     const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
     fs.writeFileSync(diagnosticsPath, "{}\n");
-    const sources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath });
-    const json = sources.find((source) => source.path === `reports/${rowId}/report.json`);
-    const markdown = sources.find((source) => source.path === `reports/${rowId}/report.md`);
-    expect(json?.source).toBe(partial.artifacts.json_path);
-    const reportBytes = json?.immutableContents;
-    if (reportBytes === undefined) throw new Error("missing public runtime report fixture");
-    expect(JSON.parse(reportBytes.toString())).toMatchObject({
-      completion: { outcome: "partial" },
-      run_metadata: { repository: "unavailable" }
-    });
-    expect(markdown?.immutableContents?.toString()).toMatch(/^# Ultrafuzz report — PARTIAL/u);
-    expect(markdown?.immutableContents?.toString()).toContain("final review was not completed");
+    expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
+      /no verified terminal report authority/u
+    );
     expect(fs.readFileSync(layout.statePath)).toEqual(stateBytes);
+    expect(fs.readFileSync(agentPath)).toEqual(staleAgentBytes);
     const recordPath = path.join(evalRoot, "runs.jsonl");
     const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as Record<string, unknown>;
-    fs.writeFileSync(
-      recordPath,
-      `${JSON.stringify({ ...record, report_json_path: path.join(runRoot, "artifacts/final-report/report.json") })}\n`
-    );
-    expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
-      /no current scored report authority/u
-    );
     fs.writeFileSync(recordPath, `${JSON.stringify({ ...record, report_json_path: undefined })}\n`);
     expect(() => publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath })).toThrow(
       /missing its terminal report authority binding/u

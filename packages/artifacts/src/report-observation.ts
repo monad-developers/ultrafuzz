@@ -8,14 +8,8 @@ export const REPORT_VERIFICATION_REASON_CODES = [
   "record-missing",
   "record-invalid",
   "result-unreadable",
-  "result-not-reviewed",
   "results-truncated"
 ] as const;
-export const MAX_REPORT_UNREVIEWED_FINDINGS = 256;
-export const MAX_REPORT_UNREVIEWED_SOURCE_PATH_CHARS = 1_024;
-export const MAX_REPORT_UNREVIEWED_TITLE_CHARS = 512;
-export const MAX_REPORT_UNREVIEWED_DESCRIPTION_CHARS = 4_000;
-
 /** Descriptive report metadata only; this never authorizes execution or artifact admission. */
 export const reportVerificationSchema = z.strictObject({
   status: z.literal("not-checked"),
@@ -53,18 +47,7 @@ export const reportObservedCompletionSchema = z.strictObject({
   incomplete_nodes_omitted: observedCount.optional()
 });
 
-export const reportUnreviewedFindingSchema = z.strictObject({
-  source_path: z.string().min(1).max(MAX_REPORT_UNREVIEWED_SOURCE_PATH_CHARS),
-  title: z.string().min(1).max(MAX_REPORT_UNREVIEWED_TITLE_CHARS),
-  description: z.string().min(1).max(MAX_REPORT_UNREVIEWED_DESCRIPTION_CHARS)
-});
-export const reportUnreviewedFindingsSchema = z
-  .array(reportUnreviewedFindingSchema)
-  .max(MAX_REPORT_UNREVIEWED_FINDINGS);
-
 export type ReportVerification = z.infer<typeof reportVerificationSchema>;
 export type ReportVerificationReasonCode = ReportVerification["reason_codes"][number];
 export type ReportObservedCompletion = z.infer<typeof reportObservedCompletionSchema>;
-export type ReportUnreviewedFinding = z.infer<typeof reportUnreviewedFindingSchema>;
 export type ObservedReportCompletion = ReportObservedCompletion;
-export type UnreviewedReportFinding = ReportUnreviewedFinding;

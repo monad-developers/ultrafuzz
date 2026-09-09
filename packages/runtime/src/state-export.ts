@@ -52,6 +52,7 @@ import {
 } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 import { readPendingRunHealth } from "./pending-run-health.js";
+import { observedRunEnded, readReportPublicationStatus } from "./report-publication-status.js";
 
 const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
   "running",
@@ -330,6 +331,7 @@ export async function getRunHealth(input: {
     evidence.layout.statePath
   );
   const diagnostics = [...syncDiagnostics, ...(lifecycleDivergence === undefined ? [] : [lifecycleDivergence])];
+  const ended = observedRunEnded(state.status, health.workflow_status, health.verdict);
   return runtimeResult<RunHealthValue>(
     !diagnostics.some((diagnostic) => diagnostic.severity === "error"),
     {
@@ -337,6 +339,8 @@ export async function getRunHealth(input: {
       workflow_run_id: evidence.smithersRunId,
       ...(auditProfile === undefined ? {} : { audit_profile: auditProfile }),
       ...health,
+      ended,
+      report: readReportPublicationStatus(evidence.layout.root, state, ended),
       ...summarizeRunProgress({
         runStatus: base.status,
         counts: health.counts,
@@ -827,7 +831,9 @@ export const CURRENT_SMITHERS_STATUS_KEY_CONTRACT = {
 function parseRunHealth(
   value: unknown,
   expectedWorkflowRunId: string
-): Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id" | keyof RunProgressSummary> | undefined {
+):
+  | Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id" | "ended" | "report" | keyof RunProgressSummary>
+  | undefined {
   const data = currentSmithersStatusData(value);
   if (
     data === undefined ||

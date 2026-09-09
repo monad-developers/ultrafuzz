@@ -13,20 +13,12 @@ import {
   type CommandResult
 } from "../command-shared.js";
 import { formatStatusDuration } from "../status-rendering.js";
+import { renderReportStatusLines, shouldRefreshStatus } from "../status-report.js";
 import { setTimeout as wait } from "node:timers/promises";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
 
 const TERMINAL_RUN_STATUSES = new Set<string>(TERMINAL_RUN_STATE_STATUSES);
-const STOP_WATCH_VERDICTS = new Set<RunHealthValue["verdict"]>([
-  "done",
-  "degraded",
-  "orphaned",
-  "cancel-pending",
-  "paused",
-  "cancelled",
-  "failed"
-]);
 
 export default class Status extends Command {
   static override summary = "Show concise health for an Ultrafuzz run";
@@ -34,7 +26,7 @@ export default class Status extends Command {
   static override flags = {
     ...globalFlags,
     window: Flags.integer({ min: 1, summary: "Recent activity window in minutes" }),
-    watch: Flags.boolean({ summary: "Refresh until the run reaches a terminal state" }),
+    watch: Flags.boolean({ summary: "Refresh until the run ends, needs attention, or the poll fails" }),
     interval: Flags.integer({
       summary: "Watch refresh interval in seconds",
       min: 1,
@@ -68,7 +60,7 @@ export default class Status extends Command {
         );
       }
       emitStatusResult(this, result, watch, json);
-      refresh = watch && health?.ok === true && shouldRefresh(health.value);
+      refresh = watch && health?.ok === true && shouldRefreshStatus(health.value);
       if (refresh) {
         await wait(flags.interval * 1_000);
       }
@@ -92,19 +84,16 @@ function emitStatusResult(command: Command, result: CommandResult, watch: boolea
   emitCommandResult(command, "status", result, json);
 }
 
-function shouldRefresh(value: RunHealthValue | undefined): boolean {
-  return value !== undefined && !TERMINAL_RUN_STATUSES.has(value.status) && !STOP_WATCH_VERDICTS.has(value.verdict);
-}
-
 function renderHealth(value: RunHealthValue): string {
   if (value.verdict === "launch-incomplete") {
-    return `Run: ${value.run_id}\nStatus: launch-incomplete (pending)\nReason: ${value.reason}\nWorkflow progress and ETA are unavailable until launch preparation completes.\n`;
+    return `Run: ${value.run_id}\nStatus: launch-incomplete (pending)\n${renderReportStatusLines(value).join("\n")}\nReason: ${value.reason}\nWorkflow progress and ETA are unavailable until launch preparation completes.\n`;
   }
   const progress = value.progress;
   const lines = [
     `Run: ${value.run_id}`,
     ...(typeof value.audit_profile?.effective === "string" ? [`Audit profile: ${value.audit_profile.effective}`] : []),
     `Status: ${value.verdict} (${value.status})`,
+    ...renderReportStatusLines(value),
     ...lifecycleDivergenceLines(value),
     `Reason: ${value.reason}`,
     `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,

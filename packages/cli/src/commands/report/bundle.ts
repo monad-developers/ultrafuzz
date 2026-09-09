@@ -252,7 +252,7 @@ function collectVerifiedBundleFiles(
   const authority = loadVerifiedRunOutputAuthoritySnapshot(runRoot);
   const report = loadDeclaredReportArtifactsSnapshot(runRoot);
   if (preferBestEffort && report !== undefined && loadReportArtifactsSnapshot(runRoot).verification === "not-checked") {
-    throw new Error("the selected report includes available findings that have not received final review");
+    throw new Error("verification of the selected agent-written report could not be completed");
   }
   const eventJournal = loadValidatedEventJournalSnapshot(runRoot, eventsPath, runId);
   const files = collectBundleFiles(runRoot, diagnostics, eventJournal, report);

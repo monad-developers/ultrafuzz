@@ -6,6 +6,7 @@ dynamic_strategies_enumerator = 3
 repo = "."
 
 [run]
+completion_policy = "best-effort"
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
 max_dynamic_nodes = 2048

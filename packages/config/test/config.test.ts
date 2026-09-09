@@ -43,6 +43,42 @@ describe("invariant property priority selection", () => {
 });
 
 describe("config loading and resolution", () => {
+  it("defaults to best effort and persists a strict completion override without changing retry policy", () => {
+    const defaults = resolveConfig({ env: {} });
+    const strict = resolveConfig({
+      env: {},
+      projectConfig: { run: { completionPolicy: "best-effort" } },
+      runtimeOverrides: { run: { completionPolicy: "require-complete" } }
+    });
+    expect(defaults.ok).toBe(true);
+    expect(strict.ok).toBe(true);
+    if (!defaults.ok || !strict.ok) return;
+    expect(defaults.value.run.completionPolicy).toBe("best-effort");
+    expect(strict.value.run.completionPolicy).toBe("require-complete");
+    expect(strict.value.retry).toEqual(defaults.value.retry);
+    expect(strict.value.run.workflowDeadlineSeconds).toBe(defaults.value.run.workflowDeadlineSeconds);
+    const serialized = serializeRedactedResolvedConfigToml(strict.value);
+    expect(serialized).toContain('completion_policy = "require-complete"');
+    const parsed = parseProjectConfigToml(serialized);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.run?.completionPolicy).toBe("require-complete");
+  });
+
+  it.each(["best-effort", "require-complete"] as const)("accepts project completion policy %s", (completionPolicy) => {
+    const parsed = parseProjectConfigToml(`[run]\ncompletion_policy = "${completionPolicy}"\n`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ env: {}, projectConfig: parsed.value });
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.value.run.completionPolicy).toBe(completionPolicy);
+  });
+
+  it.each(['"retry"', '"BEST-EFFORT"', "true", "3"])("rejects invalid project completion policy %s", (value) => {
+    const parsed = parseProjectConfigToml(`[run]\ncompletion_policy = ${value}\n`);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.diagnostics.some((entry) => entry.path.join(".") === "run.completion_policy")).toBe(true);
+  });
+
   it("uses quorum 3 and panel size 4 by default", () => {
     const resolved = resolveConfig({ env: {} });
     expect(resolved.ok).toBe(true);

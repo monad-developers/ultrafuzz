@@ -3074,7 +3074,8 @@ function plannedContractProducerStatus(
   layout: RunLayout,
   consumer: PlannedGraphNode,
   contract: PlannedGraphNode["outputs"][number]["contract"],
-  attemptAuthority?: ArtifactGateAttemptAuthority
+  attemptAuthority?: ArtifactGateAttemptAuthority,
+  includeOmitted = false
 ): "absent" | "present" | "unknown" {
   if (attemptAuthority !== undefined) {
     const { current, declarations } = semanticAttemptDeclarations(consumer, attemptAuthority);
@@ -3083,6 +3084,7 @@ function plannedContractProducerStatus(
     assertExactSealedAttemptAuthority(layout, graph, consumer, attemptAuthority);
     const bindings = declaredAncestorOutputsByContract(current, declarations, contract);
     if (bindings.length === 0) return "absent";
+    if (includeOmitted) return "present";
     const sealedTasksByAttempt = new Map(attemptAuthority.tasks.map((task) => [task.attemptId, task] as const));
     const nodesById = new Map(graph.nodes.map((node) => [node.id, node] as const));
     const attemptIds = [...new Set(bindings.map((binding) => binding.attemptId))];
@@ -3109,6 +3111,7 @@ function plannedContractProducerStatus(
     (node) => ancestorIds.has(node.id) && node.outputs.some((output) => output.contract === contract)
   );
   if (producers.length === 0) return "absent";
+  if (includeOmitted) return "present";
   return producers.every((node) => optionalDeclaredProducerWasNotAdmitted(graph, node, node.id, undefined, undefined))
     ? "absent"
     : "present";
@@ -8663,13 +8666,20 @@ function verifyFinalReportImplementationCoverage(
   if (
     plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3", attemptAuthority) === "absent"
   ) {
-    return isDeepStrictEqual(report.property_implementation_coverage, UNPLANNED_IMPLEMENTATION_COVERAGE)
+    const wasPlanned =
+      plannedContractProducerStatus(layout, node, "ultrafuzz/implemented-properties@3", attemptAuthority, true) ===
+      "present";
+    const expectedCoverage = wasPlanned
+      ? { status: "unavailable", reason: "property-implementation-not-completed" }
+      : UNPLANNED_IMPLEMENTATION_COVERAGE;
+    return isDeepStrictEqual(report.property_implementation_coverage, expectedCoverage)
       ? []
       : [
           {
             code: "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH",
-            message:
-              "A report without a planned property implementation producer must declare the exact not-planned coverage value",
+            message: wasPlanned
+              ? "A report whose planned property implementation results were omitted must declare unavailable coverage"
+              : "A report without a planned property implementation producer must declare the exact not-planned coverage value",
             severity: "error",
             source: "property-provenance",
             path: `${reportPath}#$.property_implementation_coverage`

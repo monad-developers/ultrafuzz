@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "c1b2f78d53c6eb9fb877803a21652ef40b6475951226554f28f49c980ebee4d7";
-const EXPECTED_BUNDLE_SHA256 = "6be48dac42a18bd1e54c985beae6a1e4a962cb9afc4fef3571b453190645eaf0";
+const EXPECTED_SCHEMA_SHA256 = "0ffcb21f4f11a65f93b12a53f5cdfb4efb9f594384048afe4df154097fe881b9";
+const EXPECTED_BUNDLE_SHA256 = "85ba69cac131346a7b19d416f22688b00ca325f23535c0250b4e059654c5e7aa";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -69,16 +69,14 @@ describe("resolved config JSON contract", () => {
     if (zod.success) expect(zod.data).toEqual(parsed);
   });
 
-  it("keeps both validators aligned for the exact pre-PR v3 fixture", () => {
+  it("rejects the previous v3 snapshot rather than adding a completion policy", () => {
     const fixtureBytes = readFixture("resolved-config.valid.pre-same-agent-attempts.json");
-    const parsed = parseResolvedConfigJsonBytes(fixtureBytes);
+    const parsed = JSON.parse(fixtureBytes.toString("utf8")) as unknown;
 
-    expect(parsed.auditProfileResolution.settingOrigins).not.toHaveProperty("same_agent_attempts");
-    expect(validateResolvedConfigJson(parsed)).toEqual({ ok: true, issues: [], truncated: false });
-    const zod = resolvedConfigZodSchema.safeParse(parsed);
-    expect(zod.success).toBe(true);
-    if (zod.success) expect(zod.data).toEqual(parsed);
+    expect(validateResolvedConfigJson(parsed).ok).toBe(false);
+    expect(resolvedConfigZodSchema.safeParse(parsed).success).toBe(false);
     expect(resolvedConfigValidatorsAgree(parsed)).toBe(true);
+    expect(() => parseResolvedConfigJsonBytes(fixtureBytes)).toThrow(/does not match/u);
   });
 
   it("accepts Pi's maximum thinking level in sealed resolved configuration", () => {
@@ -108,6 +106,8 @@ describe("resolved config JSON contract", () => {
         label: "unknown audit profile setting origin",
         mutate: (value) => void (record(record(value.auditProfileResolution).settingOrigins).legacy_setting = "default")
       },
+      { label: "missing completion policy", mutate: (value) => void delete record(value.run).completionPolicy },
+      { label: "unknown completion policy", mutate: (value) => void (record(value.run).completionPolicy = "retry") },
       { label: "missing required boolean", mutate: (value) => void delete record(value.run).keepWorkspaces },
       { label: "nullable optional", mutate: (value) => void (record(value.project).name = null) },
       { label: "bad project path", mutate: (value) => void (record(value.project).repo = "../target") },
@@ -280,8 +280,8 @@ describe("resolved config JSON contract", () => {
       readFixture("resolved-config.valid.json")
         .toString("utf8")
         .replace(
-          '"schemaVersion": "ultrafuzz.resolved-config.v3",',
-          '"schemaVersion": "ultrafuzz.resolved-config.v3",\n  "schemaVersion": "ultrafuzz.resolved-config.v3",'
+          '"schemaVersion": "ultrafuzz.resolved-config.v4",',
+          '"schemaVersion": "ultrafuzz.resolved-config.v4",\n  "schemaVersion": "ultrafuzz.resolved-config.v4",'
         ),
       "utf8"
     );

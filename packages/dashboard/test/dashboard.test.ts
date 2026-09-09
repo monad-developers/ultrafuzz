@@ -453,6 +453,34 @@ test("dashboard validates persisted run-state v5 documents through the composed 
   }
 });
 
+test("dashboard keeps a persisted run visible before its report agent completes", async () => {
+  const fixture = await createDashboardFindingsFixture({ includeFinalReport: true });
+  assert.ok(fixture.reportAttemptId);
+  updateNodeState(fixture.layout, fixture.reportAttemptId, { status: "pending", provenance: undefined });
+  const state = readRunState(fixture.layout);
+  state.status = "running";
+  delete state.finished_at;
+  writeRunState(fixture.layout, state);
+  const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
+  try {
+    const routes: Array<[string, DashboardHttpDefinition]> = [
+      ["/api/run", "runOverviewResponse"],
+      ["/api/flow", "flowResponse"],
+      ["/api/nodes", "nodesResponse"]
+    ];
+    for (const [route, definition] of routes) {
+      const document = await getJson<Record<string, unknown>>(apiUrl(handle.url, route), definition);
+      if (definition === "runOverviewResponse") assert.equal(document.report_path, undefined);
+    }
+    const report = await fetch(apiUrl(handle.url, "/api/report"));
+    assert.equal(report.status, 500);
+    const error = await parseHttpResponse(report, "errorResponse");
+    assert.match(String(error.error), /Report unavailable/u);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("dashboard events returns one captured journal epoch when the path is replaced after its snapshot", async (t) => {
   const projectRoot = makeProject();
   writeSmallTopology(projectRoot);
@@ -610,7 +638,7 @@ test("dashboard prefers a completed declared report over raw findings without a 
   }
 });
 
-test("dashboard reports unchecked partial coverage when a successful report producer lacks authority", async () => {
+test("dashboard reports unavailable when agent report files are missing", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   assert.ok(fixture.reportAttemptId);
   const reportDir = path.join(fixture.layout.artifactsDir, fixture.reportAttemptId, "deliverables");
@@ -621,10 +649,9 @@ test("dashboard reports unchecked partial coverage when a successful report prod
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
     const response = await fetch(apiUrl(handle.url, "/api/report"));
-    assert.equal(response.status, 200);
-    const report = await parseHttpResponse(response, "reportResponse");
-    assert.equal(report.verification, "not-checked");
-    assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+    assert.equal(response.status, 500);
+    const error = await parseHttpResponse(response, "errorResponse");
+    assert.match(String(error.error), /Report unavailable/u);
   } finally {
     await handle.close();
   }
@@ -761,7 +788,7 @@ test("dashboard serves the current partial report while retaining the failed run
   }
 });
 
-test("dashboard report marks malformed task-manifest and control-seal authority as unchecked", async () => {
+test("dashboard report tolerates an invalid seal but requires an identifiable report-agent attempt", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
@@ -776,10 +803,16 @@ test("dashboard report marks malformed task-manifest and control-seal authority 
       fs.writeFileSync(authorityPath, "{", "utf8");
       try {
         const response = await fetch(apiUrl(handle.url, "/api/report"));
-        assert.equal(response.status, 200, label);
-        const report = await parseHttpResponse(response, "reportResponse");
-        assert.equal(report.verification, "not-checked", label);
-        assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+        if (label === "task manifest") {
+          assert.equal(response.status, 500, label);
+          const error = await parseHttpResponse(response, "errorResponse");
+          assert.match(String(error.error), /Report unavailable:.*attempt cannot be identified/u);
+        } else {
+          assert.equal(response.status, 200, label);
+          const report = await parseHttpResponse(response, "reportResponse");
+          assert.equal(report.verification, "not-checked", label);
+          assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+        }
         assert.equal(fs.readFileSync(authorityPath, "utf8"), "{");
       } finally {
         fs.writeFileSync(authorityPath, original);
@@ -831,10 +864,10 @@ test("dashboard flow captures run-wide authority outside per-node projection and
     captureContextStart,
     compiledSource.indexOf("async assertCapturedRunAuthorityRemainedCurrent", captureContextStart)
   );
-  const projection = compiledSource.slice(
-    compiledSource.indexOf("function dashboardFlowAuthorityProjection"),
-    compiledSource.indexOf("function dashboardDeclaredReportAvailability")
-  );
+  const projectionStart = compiledSource.indexOf("function dashboardFlowAuthorityProjection");
+  const projectionEnd = compiledSource.indexOf("function assertDashboardAbsentAuthorityRemainedCurrent");
+  assert.ok(projectionStart >= 0 && projectionEnd > projectionStart);
+  const projection = compiledSource.slice(projectionStart, projectionEnd);
   assert.match(flow, /captureRunAuthorityContext/u);
   assert.match(captureContext, /dashboardFlowAuthorityProjection/u);
   assert.match(flow, /assertCapturedRunAuthorityRemainedCurrent/u);

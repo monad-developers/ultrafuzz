@@ -234,6 +234,7 @@ function normalizeAgentConfig(id: string, agent: Partial<AgentConfig>, filePath:
 
 function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfig {
   return {
+    completionPolicy: required(run.completionPolicy, "run.completion_policy", filePath),
     outputDir: required(run.outputDir, "run.output_dir", filePath),
     maxParallelAgents: required(run.maxParallelAgents, "run.max_parallel_agents", filePath),
     maxDynamicNodes: required(run.maxDynamicNodes, "run.max_dynamic_nodes", filePath),

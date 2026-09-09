@@ -1,11 +1,7 @@
 import { z } from "zod/v4";
 import { artifactValidationWarningsSchema } from "./artifact-validation.js";
 import { reportCompletionSchema } from "./report-completion.js";
-import {
-  reportObservedCompletionSchema,
-  reportUnreviewedFindingsSchema,
-  reportVerificationSchema
-} from "./report-observation.js";
+import { reportObservedCompletionSchema, reportVerificationSchema } from "./report-observation.js";
 
 import {
   MAX_FINDINGS,
@@ -1618,7 +1614,7 @@ const reportCoverageNotPlannedSchema = z.strictObject({
 
 const reportCoverageUnavailableSchema = z.strictObject({
   status: z.literal("unavailable"),
-  reason: z.literal("final-review-not-completed")
+  reason: z.literal("property-implementation-not-completed")
 });
 
 const reportIssueSchema = findingSchema.safeExtend({
@@ -1688,7 +1684,6 @@ export const reportSchema = withDocumentMetadata(
       completion: reportCompletionSchema.optional(),
       verification: reportVerificationSchema.optional(),
       observed_completion: reportObservedCompletionSchema.optional(),
-      unreviewed_findings: reportUnreviewedFindingsSchema.optional(),
       campaign_outcome: z
         .strictObject({
           outcome: z.enum(["complete", "partial", "blocked"]),
@@ -1719,39 +1714,6 @@ export const reportSchema = withDocumentMetadata(
             required: ["verification", "observed_completion"],
             not: { properties: { completion: true }, required: ["completion"] }
           }
-        },
-        {
-          if: { properties: { unreviewed_findings: true }, required: ["unreviewed_findings"] },
-          then: {
-            properties: { verification: true, observed_completion: true },
-            required: ["verification", "observed_completion"]
-          }
-        },
-        {
-          if: {
-            properties: {
-              property_implementation_coverage: {
-                type: "object",
-                properties: { status: { const: "unavailable" } },
-                required: ["status"]
-              }
-            },
-            required: ["property_implementation_coverage"]
-          },
-          then: {
-            anyOf: [
-              {
-                required: ["completion"],
-                properties: { completion: { type: "object", properties: { outcome: { const: "partial" } } } }
-              },
-              { properties: { observed_completion: true }, required: ["observed_completion"] }
-            ],
-            properties: {
-              issues: { type: "array", maxItems: 0 },
-              non_production_outcomes: { type: "array", maxItems: 0 },
-              property_provenance: { type: "array", maxItems: 0 }
-            }
-          }
         }
       ]
     })
@@ -1768,32 +1730,11 @@ export const reportSchema = withDocumentMetadata(
           path: ["verification"]
         });
       }
-      if (report.unreviewed_findings !== undefined && report.verification === undefined) {
-        context.addIssue({
-          code: "custom",
-          message: "Unreviewed findings require unchecked report verification",
-          path: ["unreviewed_findings"]
-        });
-      }
       if (report.completion !== undefined && report.completion.run_id !== report.run_metadata.run_id) {
         context.addIssue({
           code: "custom",
           message: "Completion run ID must equal report run_metadata.run_id",
           path: ["completion", "run_id"]
-        });
-      }
-      if (
-        "status" in report.property_implementation_coverage &&
-        report.property_implementation_coverage.status === "unavailable" &&
-        ((report.completion?.outcome !== "partial" && report.observed_completion?.outcome !== "partial") ||
-          report.issues.length > 0 ||
-          report.non_production_outcomes.length > 0 ||
-          report.property_provenance.length > 0)
-      ) {
-        context.addIssue({
-          code: "custom",
-          message: "Unavailable final review requires a partial report without final-review assertions",
-          path: ["property_implementation_coverage"]
         });
       }
     }),

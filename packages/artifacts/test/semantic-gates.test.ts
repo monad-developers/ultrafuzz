@@ -1913,7 +1913,7 @@ test("report completion authority requires trusted context and prohibits unsuppo
 });
 
 test("report-only unchecked metadata cannot enter the verified agent artifact path", () => {
-  for (const field of ["verification", "observed_completion", "unreviewed_findings"]) {
+  for (const field of ["verification", "observed_completion"]) {
     const result = executeSemanticGate("report-completion-authority", {
       document: { [field]: {} },
       context: { artifactSet: { reportCompletion: null } }

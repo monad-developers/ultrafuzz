@@ -342,7 +342,7 @@ function lowerTaskDynamicDependencies(
   const dependencies = [...task.dependencies];
   const dependencySmithersNodeIds = [...task.dependencySmithersNodeIds];
   const dependencyArtifactDirs = [...task.dependencyArtifactDirs];
-  const optionalDependencyArtifactDirs = [...(task.optionalDependencyArtifactDirs ?? [])];
+  let optionalDependencyArtifactDirs = [...(task.optionalDependencyArtifactDirs ?? [])];
   const concreteNodeIds = task.metadata.dependencies.concreteNodeIds.filter(
     (nodeId) => !dynamicDependencies.includes(nodeId)
   );
@@ -359,14 +359,18 @@ function lowerTaskDynamicDependencies(
       }
       const sourceArtifactDir = path.join(runRoot, "artifacts", group.source.attemptId);
       dependencyArtifactDirs.push(sourceArtifactDir);
-      if (group.continueOnFail) optionalDependencyArtifactDirs.push(sourceArtifactDir);
+      // An empty expansion is a successful planner result, not an optional failure.
+      // Keep its source required so the empty result remains authenticated.
+      optionalDependencyArtifactDirs = optionalDependencyArtifactDirs.filter(
+        (directory) => directory !== sourceArtifactDir
+      );
       concreteNodeIds.push(group.source.concreteNodeId);
       continue;
     }
     dependencies.push(...generated.map((candidate) => candidate.attemptId));
     dependencySmithersNodeIds.push(...generated.map((candidate) => candidate.verifierSmithersNodeId));
     dependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
-    if (group.continueOnFail) {
+    if (group.continueOnFail && task.metadata.node.group === "review") {
       optionalDependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
     }
     concreteNodeIds.push(...manifest.items.map((item) => item.node_id));

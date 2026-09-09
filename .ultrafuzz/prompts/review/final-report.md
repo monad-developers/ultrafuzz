@@ -544,8 +544,9 @@ Add `## Property implementation coverage` after the production issue entries
 and before `## Goal search coverage`. The runtime supplies the authoritative
 current-run value in this prompt. Copy that JSON value exactly; do not derive,
 repair, normalize, omit, or convert it. The exact pinned
-`{{schema_path}}/report.schema.json` alone defines the tracked and not-planned
-JSON variants. When the topology declares the property-implementation track,
+`{{schema_path}}/report.schema.json` alone defines the tracked, not-planned,
+and unavailable JSON variants. When the topology declares the
+property-implementation track and its verified results are available,
 preserve the runtime-supplied tracked value.
 
 In the tracked object, preserve every ID array and blocker summary in the
@@ -560,6 +561,18 @@ Render that runtime value in Markdown as exactly:
 ```markdown
 - Status: `not-planned`
 - Reason: `property-implementation-track-not-declared`
+```
+
+When property implementation was planned but its results were omitted from
+this report attempt, preserve the runtime-supplied unavailable value exactly.
+Do not replace it with not-planned or invent implementation counts. Render it
+in Markdown as exactly:
+
+```markdown
+- Status: `unavailable`
+- Reason: `property-implementation-not-completed`
+
+Property implementation was planned, but its results were unavailable to the report agent. Implementation coverage is unknown.
 ```
 
 For a tracked value, the Markdown body of
@@ -821,7 +834,7 @@ Before finishing, verify that:
   findings without them.
 - `report.json` contains no agent-authored `goal_search_coverage` value.
 - `report.json.property_implementation_coverage` is the exact
-  runtime-authoritative tracked or not-planned object.
+  runtime-authoritative tracked, not-planned, or unavailable object.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact values from the injected sanitized

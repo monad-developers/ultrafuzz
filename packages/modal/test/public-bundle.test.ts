@@ -404,7 +404,6 @@ describe("public Modal benchmark bundles", () => {
         /does not match its target repository/u
       );
       metadata.repository = "unavailable";
-      report.property_implementation_coverage = { status: "unavailable", reason: "final-review-not-completed" };
       writeProjection();
       expect(() => createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files })).toThrow(
         /does not match its target repository/u

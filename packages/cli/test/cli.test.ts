@@ -1153,13 +1153,17 @@ async function createReportRun(
 }
 
 async function createTerminalPartialReport(project: string, runId: string) {
-  const run = await createReportRun(project, runId, writeCustomReportTopology);
+  const run = await createReportRun(project, runId, writeReportTopology);
   const layout = layoutForRunRoot(run.run_root, run.run_id);
   const metadata = readRunMetadataDocument(layout.runMetadataPath, run.run_id);
   assert.ok(metadata.workflow);
   const workflowRunId = metadata.workflow.run_id;
   const tasks = parseSmithersTaskManifestBytes(fs.readFileSync(path.join(run.run_root, "smithers", "tasks.json")));
-  for (const task of tasks.tasks) {
+  const reportDir = path.join(run.run_root, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  writeCanonicalReportPair(reportDir, currentReport(run.run_id));
+  sealVerifiedFinalReport(run.run_root);
+  for (const task of tasks.tasks.filter((task) => task.concreteNodeId !== "final-report")) {
     updateNodeState(layout, task.attemptId, {
       status: "failed",
       finished_at: new Date().toISOString(),
@@ -1355,7 +1359,7 @@ test("run reads a bounded immutable workflow-input file", async () => {
 
   const run = await cli(
     project,
-    ["run", "--run-id", "cli-file-input", "--input-file", "operator-input.json", "--json"],
+    ["run", "--run-id", "cli-file-input", "--require-complete", "--input-file", "operator-input.json", "--json"],
     fakeSmithersEnv(project)
   );
   assert.equal(run.code, 0, run.stderr);
@@ -1364,6 +1368,11 @@ test("run reads a bounded immutable workflow-input file", async () => {
     operator_input?: { ticket?: number };
   };
   assert.equal(smithersInput.operator_input?.ticket, 3);
+  const savedConfig = JSON.parse(
+    fs.readFileSync(path.join(runData.run_root, "smithers", "resolved-config.json"), "utf8")
+  ) as { run: { completionPolicy: string }; retry: { sameAgentAttempts: number } };
+  assert.equal(savedConfig.run.completionPolicy, "require-complete");
+  assert.equal(savedConfig.retry.sameAgentAttempts, 3);
 });
 
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
@@ -1400,6 +1409,10 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   };
   assert.equal(smithersInput.operator_prompt, "Operator prompt");
   assert.equal(smithersInput.operator_input?.ticket, 2);
+  const savedConfig = JSON.parse(
+    fs.readFileSync(path.join(runData.run_root, "smithers", "resolved-config.json"), "utf8")
+  ) as { run: { completionPolicy: string } };
+  assert.equal(savedConfig.run.completionPolicy, "best-effort");
 
   const ps = await cli(project, ["ps", "--json"], env);
   assert.equal(ps.code, 0, ps.stderr);
@@ -1441,6 +1454,8 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(statusBody);
   const statusData = statusBody.data as {
     run_id: string;
+    ended: boolean | null;
+    report: { status: string; completion: string };
     verdict: string;
     counts: { in_progress: number };
     gating: Array<{ node_id: string }>;
@@ -1449,6 +1464,9 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     current_step: { running_count: number; elapsed_seconds: number | null };
   };
   assert.equal(statusData.run_id, "cli-run");
+  assert.equal(statusData.ended, false);
+  assert.equal(statusData.report.status, "pending");
+  assert.equal(statusData.report.completion, "unknown");
   assert.equal(statusData.verdict, "running-healthy");
   assert.equal(statusData.counts.in_progress, 1);
   assert.equal(statusData.gating[0]?.node_id, "project-discovery");
@@ -1506,6 +1524,8 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(statusText.code, 0, statusText.stderr);
   assert.doesNotMatch(statusText.stdout, /smithers/iu);
   assert.match(statusText.stdout, /^Status: running-healthy \(running\)$/mu);
+  assert.match(statusText.stdout, /^Run ended: no$/mu);
+  assert.match(statusText.stdout, /^Report: pending$/mu);
   assert.match(statusText.stdout, /^Progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu);
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
   assert.match(statusText.stdout, /^Time on current step: \d+ minutes on project-discovery$/mu);
@@ -1602,6 +1622,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
   fs.writeFileSync(path.join(project, "fake-smithers-inspect-state"), "succeeded\n", "utf8");
+  setFakeSmithersStatus(project, fakeStatusEnvelope("done"));
   const watched = await watching;
   assert.equal(watched.code, 0, `${watched.stderr}\n${watched.stdout}`);
   const watchedLines = watched.stdout.split("\n").filter(Boolean);
@@ -1614,6 +1635,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   }
   assert.equal((watchedEnvelopes[0]!.data as { status: string }).status, "running");
   assert.equal((watchedEnvelopes[1]!.data as { status: string }).status, "succeeded");
+  assert.equal((watchedEnvelopes[1]?.data as { ended?: boolean } | undefined)?.ended, true);
 
   writeRunAccounting(runData.run_root, {
     totalTokens: 123,
@@ -1835,8 +1857,16 @@ test("status observes an incomplete launch with a successful CLI envelope and un
   assert.equal(status.code, 0, `${status.stderr}\n${status.stdout}`);
   const body = parseJson(status);
   assert.equal(body.ok, true);
-  const data = body.data as { verdict: string; workflow_run_id?: string; reason: string };
+  const data = body.data as {
+    verdict: string;
+    workflow_run_id?: string;
+    reason: string;
+    ended: boolean;
+    report: { status: string };
+  };
   assert.equal(data.verdict, "launch-incomplete");
+  assert.equal(data.ended, false);
+  assert.equal(data.report.status, "pending");
   assert.equal(data.workflow_run_id, undefined);
   assert.match(data.reason, /Launcher liveness is unknown/u);
   const text = await cli(project, ["status", runId], env);
@@ -1860,9 +1890,10 @@ test("status surfaces a terminal product and live workflow lifecycle divergence"
 
   assert.equal(jsonStatus.code, 1, `${jsonStatus.stderr}\n${jsonStatus.stdout}`);
   const jsonBody = parseJson(jsonStatus);
-  const jsonData = jsonBody.data as { status?: string; workflow_status?: string };
+  const jsonData = jsonBody.data as { status?: string; workflow_status?: string; ended?: boolean | null };
   assert.equal(jsonData.status, "failed");
   assert.equal(jsonData.workflow_status, "running");
+  assert.equal(jsonData.ended, null);
   assert.equal(jsonBody.ok, false);
   const diagnostics = jsonBody.diagnostics as Array<{ code?: string; severity?: string }>;
   assert.equal(
@@ -1900,8 +1931,12 @@ test("status --watch stops immediately on a degraded verdict even while product 
   assert.equal(watched.code, 0, watched.stderr);
   const lines = watched.stdout.split("\n").filter(Boolean);
   assert.equal(lines.length, 1);
-  const body = JSON.parse(lines[0]!) as { data?: { verdict?: string } };
+  const body = JSON.parse(lines[0] ?? "") as {
+    data?: { verdict?: string; ended?: boolean | null; report?: { status: string } };
+  };
   assert.equal(body.data?.verdict, "degraded");
+  assert.equal(body.data?.ended, null);
+  assert.equal(body.data?.report?.status, "unknown");
 });
 
 test("status surfaces quota parking with preserved attempts and the resume remediation", async () => {

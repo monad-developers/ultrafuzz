@@ -75,7 +75,23 @@
         "tree": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
       }
     ],
-    "entries": [{ "path": "vendor/dependency", "type": "directory", "mode": 493 }]
+    "entries": [
+      {
+        "path": "vendor/dependency",
+        "type": "directory",
+        "mode": 493
+      }
+    ]
+  },
+  "report-publication-status.schema.json": {
+    "schema_version": "ultrafuzz.report-publication-status.v1",
+    "state_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "unavailable",
+    "reason": "report-agent-output-unavailable",
+    "completion": "unknown",
+    "verification": "unknown",
+    "json_file": null,
+    "markdown_file": null
   },
   "smithers-reset-node.schema.json": {
     "schema_version": "ultrafuzz.smithers.reset-node.v1",
@@ -94,7 +110,7 @@
   "terminal-report-receipt.schema.json": {
     "schema_version": "ultrafuzz.terminal-report-receipt.v1",
     "run_id": "example-run",
-    "workflow_run_id": "workflow-example",
+    "workflow_run_id": "ultrafuzz-example",
     "workflow_state": "failed",
     "control_generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "sync_event_id": "evt-bbbbbbbbbbbbbbbbbbbbbbbb",

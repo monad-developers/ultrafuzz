@@ -3,11 +3,7 @@ import test from "node:test";
 
 import {
   createInitialRunState,
-  reportSchema,
-  validateArtifactContract,
   type ReportCompletion,
-  type RunAccountingSegment,
-  type RunAccountingSummary,
   type RunMetadataDocument,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -145,150 +141,14 @@ test("terminal projection preserves all verified review data and warnings for co
   assert.deepEqual(agent, before);
 });
 
-test("a missing report renders an honest partial report with unknown coverage and accounting", () => {
+test("a missing report is unavailable and never produces a replacement report", () => {
   const input = { completion: completion(), state: terminalState(), metadata: metadata() };
-  const before = structuredClone(input);
-  const result = projectTerminalReport(input);
-  assert.deepEqual(input, before);
-  assert.deepEqual(result.report.issues, []);
-  assert.deepEqual(result.report.non_production_outcomes, []);
-  assert.deepEqual(result.report.property_provenance, []);
-  assert.deepEqual(result.report.property_implementation_coverage, {
-    status: "unavailable",
-    reason: "final-review-not-completed"
-  });
-  const run = result.report.run_metadata as Record<string, unknown>;
-  assert.equal(run.run_id, RUN_ID);
-  assert.equal(run.source_run_id, RUN_ID);
-  assert.equal(run.repository, "unavailable");
-  assert.equal(run.elapsed_time, "120s");
-  assert.equal(run.tokens_used, "unavailable");
-  assert.equal(run.estimated_spend, "unavailable");
-  assert.equal(run.partial_pricing, true);
-  assert.equal(run.expanded_graph_fingerprint, DIGEST);
-  assert.match(result.markdown, /^# Ultrafuzz report — PARTIAL/u);
-  assert.match(result.markdown, /No verified report agent output is available/u);
-  assert.match(result.markdown, /final review was not completed/iu);
-  assert.match(result.markdown, /Property implementation coverage is unknown/u);
-  assert.match(result.markdown, /Goal search coverage is unknown/u);
-  assert.match(result.markdown, /This partial report is not a clean result/u);
-  assert.doesNotMatch(
-    result.markdown,
-    /^No issues reported\.$|Selected properties:|Implemented properties:|Status: `not-planned`/mu
-  );
-  assert.deepEqual(projectCanonicalFinalReport(result.report), result);
-});
-
-test("fallback retains recorded profile, lineage and cumulative accounting", () => {
-  const sourceRunId = "prior-run";
-  const recorded = metadata();
-  recorded.source_run_id = sourceRunId;
-  recorded.prompt_digest = "b".repeat(64);
-  recorded.audit_profile = {
-    requested: "example-profile",
-    effective: "example-profile",
-    catalog_schema_version: 1,
-    catalog_digest: DIGEST,
-    effective_topology_path: "topology.yml",
-    topology_path_origin: "audit-profile",
-    topology_digest: DIGEST,
-    prompt_digest: "b".repeat(64),
-    expanded_graph_fingerprint: DIGEST,
-    effective_settings: { strategy_loops: 2 },
-    settings: {},
-    setting_origins: {},
-    overridden_settings: [],
-    topology_overridden: false
-  };
-  recorded.workflow_ids = ["workflow-current"];
-  recorded.workflow = {
-    run_id: "workflow-current",
-    compiled_run_id: "compiled-current",
-    name: "example",
-    path: "workflow.tsx",
-    evidence_path: "evidence.json",
-    expanded_graph_path: "expanded-graph.json",
-    config_path: "config.json",
-    input_path: "input.json",
-    tasks_path: "tasks.json",
-    control_integrity_path: "control-integrity.json",
-    control_generation: DIGEST,
-    workflow_link_id: "123e4567-e89b-42d3-a456-426614174000",
-    execution_snapshot_path: "execution-snapshot.json",
-    task_node_ids: ["review"]
-  };
-  const summary: RunAccountingSummary = {
-    uncached_input_tokens: 80,
-    input_tokens: 80,
-    output_tokens: 20,
-    cache_read_tokens: 0,
-    cache_write_tokens: 0,
-    reasoning_tokens: 0,
-    inclusive_token_total: 100,
-    billable_token_total: 100,
-    total_tokens: 100,
-    tokens_used: "100",
-    estimated_spend: "$0.01",
-    estimated_spend_usd: 0.01,
-    component_costs_usd: { uncached_input: 0.005, cache_read: 0, cache_write: 0, output: 0.005, reasoning: 0 },
-    usage_complete: true,
-    usage_incomplete_reasons: [],
-    pricing_complete: true,
-    pricing_incomplete_reasons: [],
-    partial_pricing: false,
-    cache_read_pricing_estimated: false,
-    event_count: 1,
-    priced_event_count: 1,
-    unpriced_event_count: 0,
-    models: ["example-model"],
-    agents: ["example-agent"]
-  };
-  const segment: RunAccountingSegment = {
-    ...summary,
-    control_generation: DIGEST,
-    workflow_run_id: "workflow-current",
-    source_event_sequences: [1],
-    attempts: [{ node_id: "review", iteration: 1, attempt: 1 }]
-  };
-  recorded.accounting = {
-    schema_version: "ultrafuzz.accounting.v4",
-    source: "usage-ledger",
-    workflow_run_id: "workflow-current",
-    current: segment,
-    segments: [structuredClone(segment)],
-    cumulative: { ...summary, source_run_ids: [sourceRunId, RUN_ID] },
-    checkpoint: {
-      schema_version: "ultrafuzz.accounting-checkpoint.v1",
-      ledger_event_count: 1,
-      last_source_event_sequence: 1,
-      control_generation: DIGEST,
-      workflow_run_id: "workflow-current"
-    },
-    pricing_catalog: {
-      source: "configured-catalog",
-      status: "available",
-      resolved_models: ["example-model"],
-      unresolved_models: [],
-      model_prices: { "example-model": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 } }
-    },
-    updated_at: FINISHED_AT
-  };
-  const run = projectTerminalReport({ completion: completion(), state: terminalState(), metadata: recorded }).report
-    .run_metadata as Record<string, unknown>;
-  assert.equal(run.source_run_id, sourceRunId);
-  assert.equal(run.tokens_used, "100");
-  assert.equal(run.estimated_spend, "$0.01");
-  assert.equal(run.partial_pricing, false);
-  assert.deepEqual(run.models_used, ["example-model"]);
-  assert.deepEqual(run.source_run_ids, [sourceRunId, RUN_ID]);
-  assert.equal(run.strategy_loops, 2);
-  assert.equal(run.audit_profile, "example-profile");
-  assert.equal(run.prompt_digest, recorded.prompt_digest);
+  assert.throws(() => projectTerminalReport(input), /Report unavailable/u);
+  assert.throws(() => projectTerminalReport({ ...input, completion: completion(false) }), /Report unavailable/u);
 });
 
 test("terminal projection rejects missing final review on a complete run, active runs and foreign evidence", () => {
-  const input = { completion: completion(), state: terminalState(), metadata: metadata() };
-  assert.throws(() => projectTerminalReport({ ...input, completion: completion(false) }), /partial completion census/u);
+  const input = { completion: completion(), state: terminalState(), metadata: metadata(), agentReport: agentReport() };
   assert.throws(
     () => projectTerminalReport({ ...input, state: { ...input.state, status: "running" } }),
     /terminal run state/u
@@ -313,7 +173,7 @@ test("terminal projection rejects missing final review on a complete run, active
 });
 
 test("terminal projection enforces bounded and internally consistent completion evidence", () => {
-  const input = { completion: completion(), state: terminalState(), metadata: metadata() };
+  const input = { completion: completion(), state: terminalState(), metadata: metadata(), agentReport: agentReport() };
   input.completion.counts.planned = 3;
   assert.throws(() => projectTerminalReport(input), /sum of all outcomes/u);
   const bounded = completion();
@@ -329,17 +189,4 @@ test("terminal projection enforces bounded and internally consistent completion 
   const result = projectTerminalReport({ ...input, completion: bounded });
   assert.deepEqual(result.report.completion, bounded);
   assert.match(result.markdown, /identities omitted from this bounded census: `1`/u);
-});
-
-test("unavailable review coverage cannot accompany complete or asserted review results", () => {
-  const result = projectTerminalReport({ completion: completion(), state: terminalState(), metadata: metadata() });
-  assert.equal(reportSchema.safeParse(result.report).success, true);
-  for (const invalid of [
-    { ...result.report, completion: undefined },
-    { ...result.report, completion: completion(false) },
-    { ...result.report, issues: agentReport().issues }
-  ]) {
-    assert.equal(reportSchema.safeParse(invalid).success, false);
-    assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(invalid), "report.json").ok, false);
-  }
 });

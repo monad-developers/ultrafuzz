@@ -63,6 +63,7 @@ import {
   loadReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   projectCanonicalFinalReport,
+  ReportUnavailableError,
   type RuntimeResult,
   type VerifiedNodeOutputSnapshot,
   type VerifiedRunOutputAuthoritySnapshot
@@ -840,7 +841,12 @@ class DashboardApp {
       nodeCounts[status] = (nodeCounts[status] ?? 0) + 1;
       if (status === "running" || status === "ready" || status === "runnable") activeNodes.push(node.id);
     }
-    const report = await this.report(context);
+    let report: JsonObject | undefined;
+    try {
+      report = await this.report(context);
+    } catch (error) {
+      if (!(error instanceof ReportUnavailableError)) throw error;
+    }
     return dashboardHttpDocument("run-overview", {
       run_id: context.runId,
       run_root: context.runRoot,
@@ -859,7 +865,7 @@ class DashboardApp {
       live_updates: this.liveUpdates,
       mode: context.persisted ? "persisted" : "preview",
       restart_eligible: Boolean(state?.finished_at),
-      report_path: typeof report.markdown_path === "string" ? report.markdown_path : undefined,
+      report_path: typeof report?.markdown_path === "string" ? report.markdown_path : undefined,
       ...(context.persisted
         ? { run_metadata: readRunMetadataDocument(path.join(context.runRoot, "run.json"), context.runId) }
         : {})

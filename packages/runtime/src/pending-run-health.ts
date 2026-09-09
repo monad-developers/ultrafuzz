@@ -11,6 +11,7 @@ import {
 
 import { retryTransientSnapshotRead } from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
+import { readReportPublicationStatus } from "./report-publication-status.js";
 import type { RunHealthCounts, RunHealthValue, RuntimeDiagnostic } from "./types.js";
 import { runsRootForProject } from "./validate.js";
 
@@ -54,6 +55,8 @@ export async function readPendingRunHealth(
     run_id: safeRunId,
     run_root: layout.root,
     status: "pending",
+    ended: false,
+    report: readReportPublicationStatus(layout.root, state),
     created_at: metadata.created_at,
     ...(metadata.audit_profile === undefined ? {} : { audit_profile: metadata.audit_profile }),
     workflow_ids: [],

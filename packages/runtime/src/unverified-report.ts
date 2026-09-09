@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
   assertNoSymlinkComponents,
@@ -21,8 +20,12 @@ import {
   type CurrentFinalReportSnapshot,
   type TerminalReportObservation
 } from "./terminal-report.js";
-import { asRecord, readUnverifiedReportInputs, type UnverifiedReportInputs } from "./unverified-report-inputs.js";
-import { loadVerifiedFinalReportSnapshot } from "./verified-output.js";
+import { readUnverifiedReportInputs, type UnverifiedReportInputs } from "./unverified-report-inputs.js";
+import {
+  reportPublicationStateBeforeRead,
+  refreshReportPublicationStatusAfterRead
+} from "./report-publication-status.js";
+export { ReportUnavailableError } from "./report-unavailable.js";
 
 export interface ReportSnapshot extends Omit<CurrentFinalReportSnapshot, "artifacts"> {
   artifacts: {
@@ -42,6 +45,13 @@ export interface ReportReadOptions {
 
 /** Optional verification applies to report presentation, never execution or scoring. */
 export function loadReportSnapshot(runRoot: string, options: ReportReadOptions = {}): ReportSnapshot {
+  const before = reportPublicationStateBeforeRead(runRoot);
+  const report = loadAvailableReportSnapshot(runRoot, options);
+  refreshReportPublicationStatusAfterRead(report, before);
+  return report;
+}
+
+function loadAvailableReportSnapshot(runRoot: string, options: ReportReadOptions): ReportSnapshot {
   let verified: CurrentFinalReportSnapshot;
   try {
     verified = loadCurrentFinalReportSnapshot(runRoot);
@@ -49,16 +59,9 @@ export function loadReportSnapshot(runRoot: string, options: ReportReadOptions =
     if (options.requireVerified === true) throw error;
     return publishUnverifiedReport(runRoot);
   }
-  if (
-    options.requireVerified !== true &&
-    (lacksFinalReview(verified) || verified.artifacts.source === "verified-agent-report")
-  ) {
+  if (options.requireVerified !== true && verified.artifacts.source === "verified-agent-report") {
     const inputs = readUnverifiedReportInputs(path.resolve(runRoot));
-    if (
-      (verified.artifacts.source === "verified-agent-report" && stoppedStatus(inputs.state?.status)) ||
-      (lacksFinalReview(verified) && inputs.findings.length > 0)
-    )
-      return publishUnverifiedReport(runRoot, inputs);
+    if (stoppedStatus(inputs.state?.status)) return publishUnverifiedReport(runRoot, inputs);
   }
   return { ...verified, verification: "verified" };
 }
@@ -75,10 +78,6 @@ export function publishBestEffortTerminalReport(
     return publishUnverifiedReport(runRoot);
   }
   if (verified === undefined) return undefined;
-  if (lacksFinalReview(verified)) {
-    const inputs = readUnverifiedReportInputs(path.resolve(runRoot));
-    if (inputs.findings.length > 0) return publishUnverifiedReport(runRoot, inputs);
-  }
   return { ...verified, verification: "verified" };
 }
 
@@ -112,26 +111,9 @@ function publishUncheckedPresentation(root: string, file: string, bytes: Buffer)
 
 function captureUnverifiedReport(inputs: UnverifiedReportInputs): ReportSnapshot {
   validateSafeId(inputs.runId, "run ID");
-  const reviewed = optionalVerifiedAgentReport(inputs.root);
-  const available = reviewed ?? {
-    schema_version: "ultrafuzz.report.v3",
-    run_metadata: observedMetadata(inputs),
-    issues: [],
-    non_production_outcomes: [],
-    property_provenance: [],
-    unreviewed_findings: inputs.findings,
-    property_implementation_coverage: { status: "unavailable", reason: "final-review-not-completed" }
-  };
-  const verification =
-    reviewed === undefined
-      ? inputs.verification
-      : {
-          ...inputs.verification,
-          reason_codes: inputs.verification.reason_codes.filter((reason) => reason !== "result-not-reviewed")
-        };
   const projection = projectCanonicalFinalReport({
-    ...available,
-    verification,
+    ...inputs.agentReport,
+    verification: inputs.verification,
     observed_completion: inputs.observed
   });
   const jsonBytes = Buffer.from(`${JSON.stringify(projection.report, null, 2)}\n`, "utf8");
@@ -157,58 +139,6 @@ function captureUnverifiedReport(inputs: UnverifiedReportInputs): ReportSnapshot
       { path: markdownPath, bytes: markdownBytes }
     ]
   };
-}
-
-function optionalVerifiedAgentReport(root: string): Record<string, unknown> | undefined {
-  try {
-    return asRecord(loadVerifiedFinalReportSnapshot(root).json);
-  } catch {
-    return undefined;
-  }
-}
-
-function observedMetadata(inputs: UnverifiedReportInputs): Record<string, unknown> {
-  const { runId, metadata, state } = inputs;
-  const profile = asRecord(metadata?.audit_profile);
-  const accounting = asRecord(asRecord(metadata?.accounting)?.cumulative);
-  const digest = (value: unknown) =>
-    typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : "unavailable";
-  return {
-    run_id: runId,
-    source_run_id: runId,
-    repository: "unavailable",
-    elapsed_time: "unavailable",
-    models_used: [],
-    tokens_used: reportLabel(accounting?.tokens_used),
-    estimated_spend: reportLabel(accounting?.estimated_spend),
-    partial_pricing: true,
-    strategy_loops: "unavailable",
-    audit_profile: reportLabel(profile?.effective),
-    audit_profile_catalog_digest: digest(profile?.catalog_digest),
-    topology_digest: digest(profile?.topology_digest),
-    prompt_digest: digest(metadata?.prompt_digest),
-    expanded_graph_fingerprint: digest(state?.graph_fingerprint)
-  };
-}
-
-function reportLabel(value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0) return "unavailable";
-  const label = redactSecretsInText(value.slice(0, 512), "REDACTED");
-  // Run-summary fields are inline labels, not arbitrary Markdown. Damaged
-  // optional metadata must not make the canonical fallback unrenderable.
-  for (const character of label) {
-    if (
-      character.charCodeAt(0) < 32 ||
-      character.charCodeAt(0) === 127 ||
-      ["<", ">", "[", "]", "`", "\\"].includes(character)
-    )
-      return "unavailable";
-  }
-  return label;
-}
-
-function lacksFinalReview(snapshot: CurrentFinalReportSnapshot): boolean {
-  return asRecord(asRecord(snapshot.json)?.property_implementation_coverage)?.status === "unavailable";
 }
 
 function stoppedStatus(status: unknown): boolean {
