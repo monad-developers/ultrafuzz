@@ -118,6 +118,7 @@ import {
 } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
+import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
@@ -2565,6 +2566,118 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
     fs.writeFileSync(filePath, contents, "utf8");
   }
   writeCurrentArtifactVerificationMarker(runRoot, nodeId);
+}
+
+function recordSubmittedReportRecoveryFixture(runRoot: string): void {
+  const layout = layoutForRunRoot(runRoot);
+  const state = readRunState(layout);
+  const workflow = state.provenance?.workflow;
+  assert.ok(workflow);
+  const invocation = appendEvent(layout, {
+    eventType: "workflow-lifecycle-invoking",
+    status: "running",
+    payload: {
+      action: "resume",
+      retry_failed: true,
+      workflow_run_id: workflow.runId,
+      workflow_link_id: workflow.linkId,
+      control_generation: workflow.controlGeneration
+    }
+  });
+  const controller = {
+    controller_invocation_id: invocation.event_id,
+    controller_invoked_at: invocation.timestamp
+  };
+  const result = appendEvent(layout, {
+    eventType: "workflow-lifecycle-result",
+    status: "running",
+    payload: {
+      action: "resume",
+      retry_failed: true,
+      source_workflow_run_id: workflow.runId,
+      source_workflow_link_id: workflow.linkId,
+      workflow_run_id: workflow.runId,
+      control_generation: workflow.controlGeneration,
+      ...controller
+    }
+  });
+  const submitted = appendEvent(layout, {
+    eventType: "workflow-lifecycle-submitted",
+    status: "running",
+    payload: {
+      action: "resume",
+      retry_failed: true,
+      workflow_run_id: workflow.runId,
+      workflow_link_id: workflow.linkId,
+      control_generation: workflow.controlGeneration,
+      ...controller
+    }
+  });
+  writeRunState(layout, {
+    ...state,
+    provenance: {
+      workflow,
+      recovery: {
+        recovery_id: crypto.randomUUID(),
+        submission_status: "submitted",
+        recovered: false,
+        prior_status: "failed",
+        failed_nodes: [
+          {
+            node_id: "final-report",
+            workflow_task_id: "node:final-report",
+            failed_attempt: 1,
+            failure_category: "agent-failure"
+          }
+        ],
+        source_workflow_run_id: workflow.runId,
+        source_workflow_link_id: workflow.linkId,
+        workflow_run_id: workflow.runId,
+        workflow_link_id: workflow.linkId,
+        control_generation: workflow.controlGeneration,
+        ...controller,
+        lifecycle_result_event_id: result.event_id,
+        lifecycle_result_at: result.timestamp,
+        lifecycle_submission_event_id: submitted.event_id,
+        lifecycle_submitted_at: submitted.timestamp
+      }
+    }
+  });
+}
+
+function writeEmptyFinalReportArtifactSet(runRoot: string, runId: string) {
+  const finalReport = projectCanonicalFinalReport({
+    schema_version: "ultrafuzz.report.v3",
+    run_metadata: {
+      run_id: runId,
+      source_run_id: runId,
+      repository: "example/repository",
+      elapsed_time: "1m",
+      models_used: ["gpt-5.5"],
+      tokens_used: "100",
+      estimated_spend: "$0.01",
+      partial_pricing: false,
+      strategy_loops: 1,
+      audit_profile: "exhaustive",
+      audit_profile_catalog_digest: "a".repeat(64),
+      topology_digest: "b".repeat(64),
+      prompt_digest: "c".repeat(64),
+      expanded_graph_fingerprint: "d".repeat(64)
+    },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: [],
+    property_implementation_coverage: {
+      status: "not-planned",
+      reason: "property-implementation-track-not-declared"
+    }
+  });
+  const reportDir = path.join(runRoot, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(path.join(reportDir, "report.json"), `${JSON.stringify(finalReport.report, null, 2)}\n`);
+  fs.writeFileSync(path.join(reportDir, "report.md"), finalReport.markdown);
+  writeCurrentArtifactVerificationMarker(runRoot, "final-report");
+  return finalReport;
 }
 
 function writeCurrentArtifactVerificationMarker(runRoot: string, attemptId: string): void {
@@ -19039,7 +19152,7 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
   assert.equal(state.nodes?.["actors-flows"]?.status, "succeeded");
 });
 
-test("syncRun automatically publishes a partial report after an ordinary report task stops failed", async () => {
+test("syncRun supersedes a partial report after authenticated recovery of a failed workflow aggregate", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   fs.appendFileSync(
@@ -19117,6 +19230,55 @@ nodes:
     fs.existsSync(path.join(run.value.run_root, "artifacts", "final-report", "artifact-manifest.json")),
     false
   );
+
+  // Model a retained submitted recovery disposition. Synchronization must
+  // authenticate its journal and publish the later finished task evidence.
+  recordSubmittedReportRecoveryFixture(run.value.run_root);
+  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:final-report", state: "finished", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:final-report", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:final-report",
+        attempt: 1,
+        error: { message: "Synthetic report task failure" }
+      },
+      { type: "RunFailed" },
+      { type: "NodeStarted", nodeId: "node:final-report", attempt: 2 },
+      { type: "NodeFinished", nodeId: "node:final-report", attempt: 2 },
+      { type: "NodeFinished", nodeId: "verify:final-report", attempt: 2 }
+    ])
+  });
+  const finalReport = writeEmptyFinalReportArtifactSet(run.value.run_root, runId);
+
+  const recovered = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  assert.equal(recovered.value?.status, "succeeded", JSON.stringify(recovered.diagnostics));
+  assert.equal(
+    recovered.diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+    false,
+    JSON.stringify(recovered.diagnostics)
+  );
+  const recoveredState = readRunState(path.join(run.value.run_root, "state.json"));
+  assert.equal(recoveredState.provenance?.recovery?.recovered, true);
+  assert.ok(
+    replayEvents(layoutForRunRoot(run.value.run_root)).records.some((event) => event.event_type === "run-recovered")
+  );
+  const recoveredReport = loadCurrentFinalReportSnapshot(run.value.run_root);
+  assert.equal(recoveredReport.artifacts.source, "verified-runtime-report");
+  assert.equal(recoveredReport.terminal, true);
+  assert.equal(recoveredReport.completion?.outcome, "complete");
+  assert.equal(recoveredReport.completion?.counts.succeeded, 1);
+  assert.equal(recoveredReport.completion?.counts.failed, 0);
+  assert.notEqual(recoveredReport.artifacts.json_path, report.artifacts.json_path);
+  assert.doesNotMatch(recoveredReport.markdown, /^# Ultrafuzz report — PARTIAL/u);
+  assert.deepEqual(recoveredReport.json, { ...finalReport.report, completion: recoveredReport.completion });
 });
 
 test("syncRun reports a typed diagnostic when a terminal workflow failure has no failed durable node", async () => {

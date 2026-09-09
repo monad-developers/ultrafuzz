@@ -109,6 +109,7 @@ import {
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
 import { publishTerminalReport } from "./terminal-report.js";
+import { recoverySubmissionAuthority } from "./workflow-recovery-authority.js";
 import {
   parseCurrentSmithersInspect,
   requestSmithersCancel,
@@ -1480,9 +1481,11 @@ export async function synchronizeLinkedWorkflowRun(
   reconcilePreparedRecoveryProvenance(layout);
   const recoveryState = readRunState(layout);
   const recovery = recoveryState.provenance?.recovery;
+  const recoveryRecords =
+    recovery?.submission_status === "submitted" ? replayEvents(layout, Number.MAX_SAFE_INTEGER).records : [];
   const recoveryDispositionAuthorized =
     recoverySubmissionAuthority({
-      layout,
+      records: recoveryRecords,
       state: recoveryState,
       workflowRunId: evidence.smithersRunId,
       workflowLinkId: evidence.workflowLinkId,
@@ -1491,7 +1494,7 @@ export async function synchronizeLinkedWorkflowRun(
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const nonBlockingNodeIds = nonBlockingRuntimeNodeIds(loaded.graph);
   const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
-    layout,
+    records: recoveryRecords,
     state: recoveryState,
     inspect,
     nodeStatuses: syncResult.nodeStatuses,
@@ -1760,7 +1763,7 @@ export async function synchronizeLinkedWorkflowRun(
 }
 
 function recoveryAuthorizesTerminalAggregate(input: {
-  layout: RunLayout;
+  records: readonly EventRecord[];
   state: ReturnType<typeof readRunState>;
   inspect: WorkflowInspect;
   nodeStatuses: Map<string, NodeStatus>;
@@ -1774,7 +1777,7 @@ function recoveryAuthorizesTerminalAggregate(input: {
 }): boolean {
   const recovery = input.state.provenance?.recovery;
   const submissionAuthority = recoverySubmissionAuthority({
-    layout: input.layout,
+    records: input.records,
     state: input.state,
     workflowRunId: input.workflowRunId,
     workflowLinkId: input.workflowLinkId,
@@ -1845,96 +1848,6 @@ function recoveryAuthorizesTerminalAggregate(input: {
   }
 
   return true;
-}
-
-function recoverySubmissionAuthority(input: {
-  layout: RunLayout;
-  state: ReturnType<typeof readRunState>;
-  workflowRunId: string;
-  workflowLinkId: string;
-  controlGeneration: string;
-}): { attemptEpoch: "continued" | "recreated" } | undefined {
-  const recovery = input.state.provenance?.recovery;
-  if (
-    recovery?.submission_status !== "submitted" ||
-    recovery.prior_status !== "failed" ||
-    recovery.workflow_run_id !== input.workflowRunId ||
-    recovery.workflow_link_id !== input.workflowLinkId ||
-    recovery.control_generation !== input.controlGeneration ||
-    recovery.lifecycle_result_event_id === undefined ||
-    recovery.lifecycle_result_at === undefined ||
-    recovery.lifecycle_submission_event_id === undefined ||
-    recovery.lifecycle_submitted_at === undefined
-  ) {
-    return undefined;
-  }
-
-  const records = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records;
-  const uniqueRecord = (eventId: string) => {
-    const matches = records
-      .map((record, index) => ({ record, index }))
-      .filter(({ record }) => record.event_id === eventId);
-    return matches.length === 1 ? matches[0] : undefined;
-  };
-  const invocation = uniqueRecord(recovery.controller_invocation_id);
-  const result = uniqueRecord(recovery.lifecycle_result_event_id);
-  const submission = uniqueRecord(recovery.lifecycle_submission_event_id);
-  if (
-    invocation === undefined ||
-    result === undefined ||
-    submission === undefined ||
-    !(invocation.index < result.index && result.index < submission.index) ||
-    invocation.record.timestamp !== recovery.controller_invoked_at ||
-    result.record.timestamp !== recovery.lifecycle_result_at ||
-    submission.record.timestamp !== recovery.lifecycle_submitted_at
-  ) {
-    return undefined;
-  }
-
-  const invocationPayload = invocation.record.payload as Record<string, unknown>;
-  const resultPayload = result.record.payload as Record<string, unknown>;
-  const submissionPayload = submission.record.payload as Record<string, unknown>;
-  if (
-    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
-    invocationPayload.action !== "resume" ||
-    invocationPayload.retry_failed !== true ||
-    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
-    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
-    invocationPayload.control_generation !== recovery.control_generation ||
-    result.record.event_type !== "workflow-lifecycle-result" ||
-    resultPayload.action !== "resume" ||
-    resultPayload.retry_failed !== true ||
-    resultPayload.source_workflow_run_id !== recovery.source_workflow_run_id ||
-    resultPayload.source_workflow_link_id !== recovery.source_workflow_link_id ||
-    resultPayload.workflow_run_id !== recovery.workflow_run_id ||
-    resultPayload.control_generation !== recovery.control_generation ||
-    resultPayload.controller_invocation_id !== recovery.controller_invocation_id ||
-    resultPayload.controller_invoked_at !== recovery.controller_invoked_at ||
-    submission.record.event_type !== "workflow-lifecycle-submitted" ||
-    submissionPayload.action !== "resume" ||
-    submissionPayload.retry_failed !== true ||
-    submissionPayload.workflow_run_id !== recovery.workflow_run_id ||
-    submissionPayload.workflow_link_id !== recovery.workflow_link_id ||
-    submissionPayload.control_generation !== recovery.control_generation ||
-    submissionPayload.controller_invocation_id !== recovery.controller_invocation_id ||
-    submissionPayload.controller_invoked_at !== recovery.controller_invoked_at ||
-    (resultPayload.recovered_missing_workflow_run === true) !==
-      (submissionPayload.recovered_missing_workflow_run === true)
-  ) {
-    return undefined;
-  }
-
-  // A completed recovery remains stable across read-only synchronization, but
-  // any later lifecycle action consumes its authority. A new retry-failed
-  // action must establish a new exact recovery disposition of its own.
-  if (
-    records.some((record, index) => index > invocation.index && record.event_type === "workflow-lifecycle-invoking")
-  ) {
-    return undefined;
-  }
-  return {
-    attemptEpoch: resultPayload.recovered_missing_workflow_run === true ? "recreated" : "continued"
-  };
 }
 
 function reconcilePreparedRecoveryProvenance(layout: RunLayout): void {

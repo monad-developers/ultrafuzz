@@ -12,6 +12,7 @@ import {
   artifactContractSchemaBinding,
   executeSemanticGate,
   layoutForRunRoot,
+  parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
   prepareSafeFilePath,
   publishFileDurableExclusive,
@@ -38,6 +39,7 @@ import {
 import { parseRuntimeDocumentBytes, serializeRuntimeDocument } from "./runtime-document-codec.js";
 import { deriveTerminalReportCompletion } from "./terminal-report-completion.js";
 import { projectTerminalReport } from "./terminal-report-projection.js";
+import { recoveryAuthorizesStoppedRun } from "./workflow-recovery-authority.js";
 import {
   assertVerifiedRunOutputAuthorityRemainedCurrent,
   isVerifiedOutputAuthorityUnavailable,
@@ -237,7 +239,7 @@ function loadTerminalReportInputs(runRoot: string): TerminalReportInputs {
   }
   assertCurrentContractBindings(authority);
   const events = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
-  const stopped = requireStoppedWorkflowEvent(layout, state, events);
+  const stopped = requireStoppedWorkflowEvent(layout, state, events, authority);
   const completion = deriveTerminalReportCompletion(authority);
   if (
     state.status === "failed" &&
@@ -363,7 +365,12 @@ function createTerminalSnapshot(
 
 type SyncedEvent = Extract<EventRecord, { event_type: "workflow-synced" }>;
 
-function requireStoppedWorkflowEvent(layout: RunLayout, state: RunState, events: readonly EventRecord[]): SyncedEvent {
+function requireStoppedWorkflowEvent(
+  layout: RunLayout,
+  state: RunState,
+  events: readonly EventRecord[],
+  authority: VerifiedRunOutputAuthoritySnapshot
+): SyncedEvent {
   const workflow = state.provenance?.workflow;
   if (workflow === undefined || !["succeeded", "failed", "timed-out", "canceled"].includes(state.status)) {
     throw invalidAuthority("terminal reporting requires a stopped, linked workflow");
@@ -374,7 +381,17 @@ function requireStoppedWorkflowEvent(layout: RunLayout, state: RunState, events:
     if (event.event_type === "workflow-synced" && event.payload.workflow_run_id === workflow.runId) synced = event;
     if (event.event_type === "node-synced") nodeEvents.set(event.node_id, event);
   }
-  assertConsistentStoppedState(layout, state, synced);
+  const recovered =
+    synced?.payload.workflow_state === "failed" &&
+    state.status === "succeeded" &&
+    recoveryAuthorizesStoppedRun({
+      state,
+      records: events,
+      stopped: synced,
+      graph: assertSealedPlannedGraph(parseStrictJsonBytes(authority.graph.bytes)),
+      tasks: parseSmithersTaskManifestBytes(authority.workflow_tasks.bytes).tasks
+    });
+  assertConsistentStoppedState(layout, state, synced, recovered);
   assertNoLaterWorkflowMutation(events, synced);
   assertTerminalNodeEvidence(state, workflow.runId, nodeEvents);
   return synced;
@@ -383,7 +400,8 @@ function requireStoppedWorkflowEvent(layout: RunLayout, state: RunState, events:
 function assertConsistentStoppedState(
   layout: RunLayout,
   state: RunState,
-  synced: SyncedEvent | undefined
+  synced: SyncedEvent | undefined,
+  recovered: boolean
 ): asserts synced is SyncedEvent {
   if (
     synced === undefined ||
@@ -392,14 +410,14 @@ function assertConsistentStoppedState(
     !STOPPED_WORKFLOW_STATES.has(synced.payload.workflow_state) ||
     (synced.payload.exhausted_loops?.length ?? 0) !== 0 ||
     synced.payload.recovery_due ||
-    !workflowStateMatchesRun(synced.payload.workflow_state, state.status)
+    !workflowStateMatchesRun(synced.payload.workflow_state, state.status, recovered)
   ) {
     throw invalidAuthority("terminal reporting lacks consistent stopped workflow evidence");
   }
 }
 
-function workflowStateMatchesRun(workflowState: string, status: RunState["status"]): boolean {
-  if (workflowState === "failed") return status === "failed";
+function workflowStateMatchesRun(workflowState: string, status: RunState["status"], recovered: boolean): boolean {
+  if (workflowState === "failed") return status === "failed" || (status === "succeeded" && recovered);
   if (workflowState === "cancelled") return status === "canceled" || status === "timed-out";
   return workflowState.startsWith("succeeded") && status === "succeeded";
 }

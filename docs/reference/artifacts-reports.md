@@ -563,6 +563,13 @@ presence of report files. `terminal` is true only with authenticated stopped
 workflow evidence; an agent report alone returns false. The primary run status
 remains separate.
 
+After an authenticated retry recovers a run, terminal reporting accepts the
+successful product outcome even if the workflow engine retains its failed
+aggregate state. It rechecks the submitted retry, recovery journal, sealed task
+identities, and successful replacement attempts before publishing a new report
+generation. An earlier PARTIAL report is superseded only after this evidence
+is verified; an unexplained state mismatch remains blocking.
+
 ### Whole-run completion contract
 
 The optional `report.json.completion` object describes whole-run completeness,

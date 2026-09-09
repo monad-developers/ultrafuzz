@@ -144,6 +144,214 @@ test("terminal presentation discloses tolerated failures and preserves verified 
   assert.match(published.markdown, /producer/u);
 });
 
+for (const epoch of ["continued", "recreated"] as const) {
+  test(`terminal reporting replaces a prior partial after authenticated ${epoch} recovery`, () => {
+    const { fixture, prior } = createRecoveredReportFixture(`terminal-report-recovered-${epoch}`, { epoch });
+    const stateBefore = fs.readFileSync(fixture.layout.statePath);
+    const report = publishTerminalReport(fixture.layout.root, {
+      workflowRunId: WORKFLOW_RUN_ID,
+      workflowState: "failed"
+    });
+    assert.ok(report);
+    assert.equal(report.artifacts.source, "verified-runtime-report");
+    assert.equal(report.completion?.outcome, "complete");
+    assert.equal(report.completion?.counts.succeeded, 1);
+    assert.notEqual(report.artifacts.json_path, prior.artifacts.json_path);
+    assert.deepEqual(loadCurrentFinalReportSnapshot(fixture.layout.root), report);
+    assert.deepEqual(
+      publishTerminalReport(fixture.layout.root, { workflowRunId: WORKFLOW_RUN_ID, workflowState: "failed" }),
+      report,
+      "repeated synchronization retains the same recovered publication"
+    );
+    assert.deepEqual(fs.readFileSync(fixture.layout.statePath), stateBefore);
+    assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
+    assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
+    assert.deepEqual(fs.readFileSync(prior.artifacts.json_path), prior.json_bytes);
+  });
+}
+
+test("terminal reporting retains tolerated failures after authenticated recovery", () => {
+  const { fixture } = createRecoveredReportFixture("terminal-report-recovered-partial", {
+    prerequisite: "optional"
+  });
+  const report = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "failed"
+  });
+  assert.ok(report);
+  assert.equal(report.completion?.outcome, "partial");
+  assert.equal(report.completion?.counts.succeeded, 1);
+  assert.equal(report.completion?.counts.failed, 1);
+  assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+  assert.match(report.markdown, /producer/u);
+  assert.deepEqual(loadCurrentFinalReportSnapshot(fixture.layout.root), report);
+});
+
+const INVALID_REPORT_RECOVERIES = [
+  "bare-recovered",
+  "missing-recovered-event",
+  "duplicate-recovered-event",
+  "mismatched-recovered-event",
+  "stale-link",
+  "stale-generation",
+  "later-lifecycle",
+  "unchanged-attempt",
+  "pending-blocking-task",
+  "failed-blocking-task"
+] as const;
+type InvalidReportRecovery = (typeof INVALID_REPORT_RECOVERIES)[number];
+
+for (const invalid of INVALID_REPORT_RECOVERIES) {
+  test(`terminal reporting rejects recovery with ${invalid}`, () => {
+    const { fixture, prior } = createRecoveredReportFixture(`terminal-report-recovery-${invalid}`, {
+      invalid,
+      ...(invalid === "pending-blocking-task" || invalid === "failed-blocking-task" ? { prerequisite: "blocking" } : {})
+    });
+    assert.equal(loadVerifiedFinalReportSnapshot(fixture.layout.root).artifacts.source, "verified-agent-report");
+    const receiptPath = path.join(fixture.layout.root, "review/runtime-report/current.json");
+    const receiptBefore = fs.readFileSync(receiptPath);
+    assert.throws(
+      () => publishTerminalReport(fixture.layout.root, { workflowRunId: WORKFLOW_RUN_ID, workflowState: "failed" }),
+      /terminal reporting lacks consistent stopped workflow evidence/u
+    );
+    assert.throws(() => loadCurrentFinalReportSnapshot(fixture.layout.root));
+    assert.deepEqual(fs.readFileSync(receiptPath), receiptBefore);
+    assert.deepEqual(fs.readFileSync(prior.artifacts.json_path), prior.json_bytes);
+  });
+}
+
+function createRecoveredReportFixture(
+  runId: string,
+  options: {
+    epoch?: "continued" | "recreated";
+    prerequisite?: "blocking" | "optional";
+    invalid?: InvalidReportRecovery;
+  } = {}
+) {
+  const fixture = createVerifiedReportFixture(runId, {
+    withPrerequisite: options.prerequisite !== undefined,
+    optionalPrerequisite: options.prerequisite === "optional"
+  });
+  if (options.prerequisite === "blocking") finalizeFixtureProducer(fixture.layout);
+  const successfulNode = structuredClone(readRunState(fixture.layout).nodes[fixture.attemptId]);
+  assert.ok(successfulNode);
+  recordStoppedReportFixture(fixture, "failed");
+  const prior = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "failed"
+  });
+  assert.ok(prior);
+  assert.equal(prior.completion?.outcome, "partial");
+  const state = readRunState(fixture.layout);
+  assert.ok(state.provenance);
+  const workflow = state.provenance.workflow;
+  assert.ok(successfulNode.provenance && "workflow" in successfulNode.provenance);
+  const successfulWorkflow = successfulNode.provenance.workflow;
+  assert.ok(successfulWorkflow && "attempt" in successfulWorkflow);
+  successfulWorkflow.attempt = options.epoch === "recreated" || options.invalid === "unchanged-attempt" ? 1 : 2;
+  state.nodes[fixture.attemptId] = successfulNode;
+  state.status = "succeeded";
+  const invokePayload = {
+    action: "resume" as const,
+    workflow_run_id: WORKFLOW_RUN_ID,
+    workflow_link_id: workflow.linkId,
+    control_generation: workflow.controlGeneration,
+    retry_failed: true as const
+  };
+  const invocation = appendEvent(fixture.layout, {
+    eventType: "workflow-lifecycle-invoking",
+    status: "running",
+    payload: invokePayload
+  });
+  const lifecycleAuthority = {
+    action: "resume" as const,
+    workflow_run_id: WORKFLOW_RUN_ID,
+    control_generation: workflow.controlGeneration,
+    controller_invocation_id: invocation.event_id,
+    controller_invoked_at: invocation.timestamp,
+    retry_failed: true as const,
+    ...(options.epoch === "recreated" ? { recovered_missing_workflow_run: true as const } : {})
+  };
+  const result = appendEvent(fixture.layout, {
+    eventType: "workflow-lifecycle-result",
+    status: "running",
+    payload: {
+      ...lifecycleAuthority,
+      source_workflow_run_id: WORKFLOW_RUN_ID,
+      source_workflow_link_id: workflow.linkId
+    }
+  });
+  const submission = appendEvent(fixture.layout, {
+    eventType: "workflow-lifecycle-submitted",
+    status: "running",
+    payload: { ...lifecycleAuthority, workflow_link_id: workflow.linkId }
+  });
+  const recovery = {
+    recovery_id: crypto.randomUUID(),
+    submission_status: "submitted" as const,
+    recovered: true,
+    recovered_at: new Date().toISOString(),
+    prior_status: "failed" as const,
+    failed_nodes: [
+      {
+        node_id: fixture.attemptId,
+        workflow_task_id: `node:${fixture.attemptId}`,
+        failed_attempt: 1,
+        failure_category: "agent-failure" as const
+      }
+    ],
+    source_workflow_run_id: WORKFLOW_RUN_ID,
+    source_workflow_link_id: workflow.linkId,
+    workflow_run_id: WORKFLOW_RUN_ID,
+    workflow_link_id: workflow.linkId,
+    control_generation: workflow.controlGeneration,
+    controller_invocation_id: invocation.event_id,
+    controller_invoked_at: invocation.timestamp,
+    lifecycle_result_event_id: result.event_id,
+    lifecycle_result_at: result.timestamp,
+    lifecycle_submission_event_id: submission.event_id,
+    lifecycle_submitted_at: submission.timestamp
+  };
+  if (options.invalid === "bare-recovered") recovery.controller_invocation_id = `evt-${"0".repeat(24)}`;
+  if (options.invalid === "stale-link") recovery.workflow_link_id = crypto.randomUUID();
+  if (options.invalid === "stale-generation") recovery.control_generation = "0".repeat(64);
+  state.provenance.recovery = recovery;
+  writeRunState(fixture.layout, state);
+  const recoveredPayload = {
+    recovery_id: recovery.recovery_id,
+    prior_status: recovery.prior_status,
+    failed_nodes:
+      options.invalid === "mismatched-recovered-event"
+        ? recovery.failed_nodes.map((node) => ({ ...node, failed_attempt: 2 }))
+        : recovery.failed_nodes
+  };
+  if (options.invalid !== "missing-recovered-event" && options.invalid !== "bare-recovered") {
+    appendEvent(fixture.layout, { eventType: "run-recovered", status: "succeeded", payload: recoveredPayload });
+  }
+  if (options.invalid === "duplicate-recovered-event") {
+    appendEvent(fixture.layout, { eventType: "run-recovered", status: "succeeded", payload: recoveredPayload });
+  }
+  if (options.invalid === "later-lifecycle") {
+    appendEvent(fixture.layout, {
+      eventType: "workflow-lifecycle-invoking",
+      status: "running",
+      payload: invokePayload
+    });
+  }
+  if (options.prerequisite === "optional" || options.invalid === "failed-blocking-task") {
+    failReportFixtureNode(fixture.layout, "producer");
+  } else if (options.invalid === "pending-blocking-task") {
+    updateNodeState(fixture.layout, "producer", {
+      status: "pending",
+      wait_since: new Date().toISOString(),
+      wait_reason: "dependency",
+      next_eligible_action: "dependency-complete"
+    });
+  }
+  appendStoppedReportFixture(fixture, "succeeded", "failed");
+  return { fixture, prior };
+}
+
 test("terminal report publication blocks unattributed, active, exhausted, and contradictory workflow evidence", () => {
   for (const failure of ["active", "exhausted", "cancelled", "unattributed", "wrong-generation"] as const) {
     const fixture = createVerifiedReportFixture(`terminal-report-${failure}`);
@@ -313,15 +521,23 @@ function recordStoppedReportFixture(
     }
   };
   writeRunState(fixture.layout, state);
+  appendStoppedReportFixture(fixture, status, workflowState);
+}
+
+function appendStoppedReportFixture(
+  fixture: ReportFixture,
+  status: "succeeded" | "failed",
+  workflowState: "succeeded" | "succeeded-with-failures" | "failed"
+): void {
   appendEvent(fixture.layout, {
     eventType: "workflow-synced",
     status,
     payload: {
       workflow_run_id: WORKFLOW_RUN_ID,
-      workflow_status: status === "succeeded" ? "finished" : "failed",
+      workflow_status: workflowState === "failed" ? "failed" : "finished",
       workflow_state: workflowState,
       exhausted_loops: [],
-      synced_nodes: Object.keys(state.nodes).length,
+      synced_nodes: Object.keys(readRunState(fixture.layout).nodes).length,
       accounting_available: false,
       recovery_due: false,
       deadline_exceeded: false
