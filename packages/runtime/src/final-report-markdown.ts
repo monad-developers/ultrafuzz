@@ -7,9 +7,11 @@ import {
   artifactValidationWarningsSchema,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
+  reportCompletionSchema,
   safeResolveInside,
   validateArtifactContract,
-  type ArtifactValidationWarning
+  type ArtifactValidationWarning,
+  type ReportCompletion
 } from "@ultrafuzz/artifacts";
 import { redactSecretsInText, type SecretScanMode } from "@ultrafuzz/security";
 
@@ -31,6 +33,10 @@ const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\
  * A bare uppercase word satisfies both. Every other redaction keeps the security package's default.
  */
 const PUBLIC_SECRET_REDACTION_PLACEHOLDER = "REDACTED";
+const PARTIAL_REPORT_WARNING =
+  "> **PARTIAL REPORT — coverage is incomplete.** This run did not complete successfully. The findings below cover the available verified results; missing results are coverage gaps, and an empty findings list is not a clean result. See [Run completion](#run-completion).";
+const PARTIAL_EMPTY_FINDINGS_NOTICE =
+  "No production issues were reported from the available verified results. This partial report is not a clean result and does not establish that uncompleted work found no issues. See [Run completion](#run-completion).";
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
@@ -122,6 +128,7 @@ export function projectPublicCanonicalFinalReport(
   if (!isRecord(publicReport)) {
     throw new Error("public final-report projection did not produce an object");
   }
+  preserveDistinctPublicCompletionNodes(internal.report, publicReport);
   const projection = projectCanonicalFinalReport(publicReport, context);
   if (
     containsPrivatePathInValue(projection.report) ||
@@ -198,9 +205,18 @@ export function isDirectiveConformingFinalReportMarkdown(markdown: string, repor
 }
 
 function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRecord): string | undefined {
-  if (!markdown.startsWith("# Ultrafuzz report\n") || !markdown.includes("\n## Run summary\n")) {
+  const completionResult = reportCompletionSchema.optional().safeParse(report.completion);
+  if (!completionResult.success) return "invalid report completion census";
+  const completion = completionResult.data;
+  if (completion !== undefined && completion.run_id !== recordField(report, "run_metadata")?.run_id) {
+    return "completion run ID does not match the report";
+  }
+  const opening = reportOpening(completion);
+  if (!markdown.startsWith(opening) || !markdown.includes("\n## Run summary\n")) {
     return "missing report title or run summary";
   }
+  const completionViolation = completionMarkdownViolation(markdown, report, completion);
+  if (completionViolation !== undefined) return completionViolation;
   if (!markdown.includes("\n## Property implementation coverage\n")) {
     return "missing property implementation coverage";
   }
@@ -233,7 +249,7 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (expectedHeadings.length === 0) {
     return markdown.includes("| Issue id | Title |") ? "contains an issue index without rendered issues" : undefined;
   }
-  if (!markdown.startsWith("# Ultrafuzz report\n\n| Issue id | Title |\n| --- | --- |\n")) {
+  if (!markdown.startsWith(`${opening}| Issue id | Title |\n| --- | --- |\n`)) {
     return "issue index is missing or malformed";
   }
   const issueBlocks = expectedHeadings.map((heading, index) => {
@@ -250,6 +266,43 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   })
     ? undefined
     : "an issue is missing severity or proof-of-concept ordering";
+}
+
+function completionMarkdownViolation(
+  markdown: string,
+  report: JsonRecord,
+  completion: ReportCompletion | undefined
+): string | undefined {
+  const prose = markdownOutsideFencedCode(markdown);
+  const sections = prose.split("\n## Run completion\n");
+  if (completion === undefined) {
+    return sections.length !== 1 || prose.includes(PARTIAL_REPORT_WARNING)
+      ? "contains completion claims without a report completion census"
+      : undefined;
+  }
+  const completionSection = sections[1];
+  if (sections.length !== 2 || completionSection === undefined) return "missing or repeated run completion census";
+  const expected: string[] = [];
+  appendRunCompletion(expected, completion);
+  const actualSection = `## Run completion\n${completionSection.split("\n## ")[0] ?? ""}`.trim();
+  if (actualSection !== expected.join("\n").trim()) return "run completion census does not match the report";
+  const completionIndex = prose.indexOf("\n## Run completion\n");
+  const firstFindingIndex = prose.indexOf("\n## [");
+  if (
+    completionIndex < prose.indexOf("\n## Run summary\n") ||
+    (firstFindingIndex >= 0 && completionIndex > firstFindingIndex)
+  ) {
+    return "run completion census must precede findings";
+  }
+  if (completion.outcome === "partial") {
+    if (/^No issues reported\.$/mu.test(prose)) return "partial report claims a clean empty result";
+    if (Array.isArray(report.issues) && report.issues.length === 0 && !prose.includes(PARTIAL_EMPTY_FINDINGS_NOTICE)) {
+      return "partial report is missing its empty findings caveat";
+    }
+  } else if (prose.includes(PARTIAL_REPORT_WARNING) || prose.includes(PARTIAL_EMPTY_FINDINGS_NOTICE)) {
+    return "complete report contains partial completion claims";
+  }
+  return undefined;
 }
 
 function finalReportProseDirectiveViolation(prose: string): string | undefined {
@@ -569,9 +622,13 @@ function markdownOutsideFencedCode(markdown: string): string {
 }
 
 function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown): string {
+  const completion = report.completion === undefined ? undefined : reportCompletionSchema.parse(report.completion);
+  if (completion !== undefined && completion.run_id !== recordField(report, "run_metadata")?.run_id) {
+    throw new Error("completion run ID does not match the report");
+  }
   const issues = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const outcomes = Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes.filter(isRecord) : [];
-  const lines = ["# Ultrafuzz report", ""];
+  const lines = reportOpening(completion).trimEnd().split("\n").concat("");
 
   if (issues.length > 0) {
     lines.push("| Issue id | Title |", "| --- | --- |");
@@ -598,17 +655,21 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   appendCoverageEvidence(lines, report.coverage_evidence);
   const goalCoverage = summarizeGoalSearchCoverage(goalSearchCoverage);
+  if (issues.length > 0) appendRunCompletion(lines, completion);
 
   for (const issue of issues) {
     appendProductionIssue(lines, issue);
   }
 
-  if (issues.length === 0 && outcomes.length === 0) {
+  if (issues.length === 0 && completion?.outcome === "partial") {
+    lines.push("", PARTIAL_EMPTY_FINDINGS_NOTICE);
+  } else if (issues.length === 0 && outcomes.length === 0) {
     // Saying "no issues" after a campaign that never fuzzed, or after a goal
     // hunt where most lanes never searched, would report an absence of
     // measurement as a clean result.
     lines.push("", noIssuesSentence(campaignDidNotRun, goalCoverage));
   }
+  if (issues.length === 0) appendRunCompletion(lines, completion);
 
   appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
   appendGoalSearchCoverage(lines, goalCoverage);
@@ -616,6 +677,44 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
+}
+
+function reportOpening(completion: ReportCompletion | undefined): string {
+  return completion?.outcome === "partial"
+    ? `# Ultrafuzz report — PARTIAL\n\n${PARTIAL_REPORT_WARNING}\n\n`
+    : "# Ultrafuzz report\n\n";
+}
+
+function appendRunCompletion(lines: string[], completion: ReportCompletion | undefined): void {
+  if (completion === undefined) return;
+  const counts = completion.counts;
+  lines.push(
+    "",
+    "## Run completion",
+    "",
+    `- Outcome: \`${completion.outcome}\``,
+    `- Planned nodes: \`${String(counts.planned)}\``,
+    `- Succeeded nodes: \`${String(counts.succeeded)}\``,
+    `- Failed nodes: \`${String(counts.failed)}\``,
+    `- Timed-out nodes: \`${String(counts.timed_out)}\``,
+    `- Skipped nodes: \`${String(counts.skipped)}\``,
+    `- Cancelled nodes: \`${String(counts.cancelled)}\``,
+    `- Unverified nodes: \`${String(counts.unverified)}\``,
+    "",
+    "These counts describe recorded node outcomes. They do not establish full audit coverage or a clean security result. Incomplete nodes have no verified successful result; their absence from the findings is a coverage gap."
+  );
+  if (completion.incomplete_nodes.length > 0) {
+    lines.push("", "Incomplete nodes:", "", "| Node | Outcome | Failure category |", "| --- | --- | --- |");
+    for (const node of completion.incomplete_nodes) {
+      lines.push(
+        `| \`${inlineValue(node.node_id)}\` | \`${inlineValue(node.outcome)}\` | \`${inlineValue(node.failure_category)}\` |`
+      );
+    }
+  }
+  lines.push(
+    "",
+    `- Additional incomplete node identities omitted from this bounded census: \`${String(completion.incomplete_nodes_omitted)}\``
+  );
 }
 
 /** Host diagnostics can accompany an immutable report without rewriting its JSON/Markdown pair. */
@@ -1342,18 +1441,18 @@ function redactSecrets(value: string, mode: SecretScanMode = "all"): string {
 }
 
 /**
- * `run_metadata.run_id` and `run_metadata.source_run_id` are machine-generated safe IDs
+ * `run_metadata.run_id`, `run_metadata.source_run_id`, and `completion.run_id` are machine-generated safe IDs
  * (`validateSafeId`, so `[A-Za-z0-9._-]`) that the public bundle already publishes in its run
  * records and then requires report.json to repeat. The speculative high-entropy pass redacts the
  * bounded eval run IDs (`ci-<run>-1-smoke-...-<16 hex>`), which breaks that lineage check, so these
- * two fields scan positive-only: a vendor-format credential or URL credential in the slot is still
+ * fields scan positive-only: a vendor-format credential or URL credential in the slot is still
  * redacted (and the bundle then fails closed on lineage), while a high-entropy safe ID is kept.
  */
 function secretScanModeForPath(keyPath: readonly string[]): SecretScanMode {
   const isRetainedIdentifier =
     keyPath.length === 2 &&
-    keyPath[0] === "run_metadata" &&
-    (keyPath[1] === "run_id" || keyPath[1] === "source_run_id");
+    ((keyPath[0] === "run_metadata" && (keyPath[1] === "run_id" || keyPath[1] === "source_run_id")) ||
+      (keyPath[0] === "completion" && keyPath[1] === "run_id"));
   return isRetainedIdentifier ? "positive-only" : "all";
 }
 
@@ -1390,9 +1489,30 @@ function containsUnredactedSecretInMarkdown(markdown: string, report: JsonRecord
 
 function retainedIdentifierValues(report: JsonRecord): string[] {
   const metadata = recordField(report, "run_metadata");
-  return [metadata?.run_id, metadata?.source_run_id].filter(
+  const completion = recordField(report, "completion");
+  return [metadata?.run_id, metadata?.source_run_id, completion?.run_id].filter(
     (value): value is string => typeof value === "string" && value !== ""
   );
+}
+
+/** Keep all census rows when redaction maps distinct node identities to the same placeholder. */
+function preserveDistinctPublicCompletionNodes(internal: JsonRecord, published: JsonRecord): void {
+  const internalCompletion = recordField(internal, "completion");
+  const publicCompletion = recordField(published, "completion");
+  if (!Array.isArray(internalCompletion?.incomplete_nodes) || !Array.isArray(publicCompletion?.incomplete_nodes)) {
+    return;
+  }
+  const originals = internalCompletion.incomplete_nodes as JsonRecord[];
+  const nodes = publicCompletion.incomplete_nodes as JsonRecord[];
+  const reserved = new Set(nodes.map((node) => String(node.node_id)));
+  for (const [index, node] of nodes.entries()) {
+    if (node.node_id === originals[index]?.node_id) continue;
+    let suffix = index + 1;
+    while (reserved.has(`redacted-node-${String(suffix)}`)) suffix += 1;
+    const placeholder = `redacted-node-${String(suffix)}`;
+    node.node_id = placeholder;
+    reserved.add(placeholder);
+  }
 }
 
 function redactSecretsInStringValues(value: unknown, keyPath: readonly string[] = []): unknown {

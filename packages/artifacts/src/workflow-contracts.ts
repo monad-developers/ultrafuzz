@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 import { artifactValidationWarningsSchema } from "./artifact-validation.js";
+import { reportCompletionSchema } from "./report-completion.js";
 
 import {
   MAX_FINDINGS,
@@ -1650,41 +1651,52 @@ const reportAgentExecutionSchema = z.strictObject({
 });
 
 export const reportSchema = withDocumentMetadata(
-  z.strictObject({
-    schema_version: z.literal(REPORT_SCHEMA_VERSION),
-    run_metadata: z.strictObject({
-      run_id: nonEmptyString,
-      source_run_id: nonEmptyString,
-      repository: nonEmptyString,
-      elapsed_time: nonEmptyString,
-      models_used: z.array(nonEmptyString),
-      tokens_used: nonEmptyString,
-      estimated_spend: nonEmptyString,
-      partial_pricing: z.boolean(),
-      strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
-      // The report renders these beside the rest of the run summary, so a report
-      // that omits them cannot be projected.
-      audit_profile: nonEmptyString,
-      audit_profile_catalog_digest: z.union([sha256, z.literal("unavailable")]),
-      topology_digest: z.union([sha256, z.literal("unavailable")]),
-      prompt_digest: z.union([sha256, z.literal("unavailable")]),
-      expanded_graph_fingerprint: nonEmptyString,
-      agent_execution: reportAgentExecutionSchema.optional(),
-      artifact_validation_warnings: artifactValidationWarningsSchema.optional(),
-      source_run_ids: uniqueStrings().optional()
+  z
+    .strictObject({
+      schema_version: z.literal(REPORT_SCHEMA_VERSION),
+      run_metadata: z.strictObject({
+        run_id: nonEmptyString,
+        source_run_id: nonEmptyString,
+        repository: nonEmptyString,
+        elapsed_time: nonEmptyString,
+        models_used: z.array(nonEmptyString),
+        tokens_used: nonEmptyString,
+        estimated_spend: nonEmptyString,
+        partial_pricing: z.boolean(),
+        strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
+        // The report renders these beside the rest of the run summary, so a report
+        // that omits them cannot be projected.
+        audit_profile: nonEmptyString,
+        audit_profile_catalog_digest: z.union([sha256, z.literal("unavailable")]),
+        topology_digest: z.union([sha256, z.literal("unavailable")]),
+        prompt_digest: z.union([sha256, z.literal("unavailable")]),
+        expanded_graph_fingerprint: nonEmptyString,
+        agent_execution: reportAgentExecutionSchema.optional(),
+        artifact_validation_warnings: artifactValidationWarningsSchema.optional(),
+        source_run_ids: uniqueStrings().optional()
+      }),
+      completion: reportCompletionSchema.optional(),
+      campaign_outcome: z
+        .strictObject({
+          outcome: z.enum(["complete", "partial", "blocked"]),
+          reason: nonEmptyString.max(4_000).optional()
+        })
+        .optional(),
+      issues: z.array(reportIssueSchema),
+      non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
+      coverage_evidence: coverageEvidenceSchema.optional(),
+      property_provenance: z.array(reportPropertyProvenanceSchema),
+      property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
+    })
+    .superRefine((report, context) => {
+      if (report.completion !== undefined && report.completion.run_id !== report.run_metadata.run_id) {
+        context.addIssue({
+          code: "custom",
+          message: "Completion run ID must equal report run_metadata.run_id",
+          path: ["completion", "run_id"]
+        });
+      }
     }),
-    campaign_outcome: z
-      .strictObject({
-        outcome: z.enum(["complete", "partial", "blocked"]),
-        reason: nonEmptyString.max(4_000).optional()
-      })
-      .optional(),
-    issues: z.array(reportIssueSchema),
-    non_production_outcomes: z.array(reportNonProductionOutcomeSchema),
-    coverage_evidence: coverageEvidenceSchema.optional(),
-    property_provenance: z.array(reportPropertyProvenanceSchema),
-    property_implementation_coverage: z.union([reportCoverageNotPlannedSchema, reportCoverageSchema])
-  }),
   "report",
   3,
   "Ultrafuzz terminal report"

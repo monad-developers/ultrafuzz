@@ -703,6 +703,45 @@ test("shape-valid severity drift is rejected by current semantic gates despite m
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), markdownBefore);
 });
 
+test("matching report publication digests cannot authenticate an agent-authored completion census", () => {
+  for (const outcome of ["complete", "partial"] as const) {
+    const runId = `verified-report-untrusted-${outcome}-completion`;
+    const report = currentReport(runId);
+    report.completion = {
+      schema_version: "ultrafuzz.report-completion.v1",
+      run_id: runId,
+      outcome,
+      counts: {
+        planned: 2,
+        succeeded: outcome === "complete" ? 2 : 1,
+        failed: outcome === "partial" ? 1 : 0,
+        timed_out: 0,
+        skipped: 0,
+        cancelled: 0,
+        unverified: 0
+      },
+      incomplete_nodes:
+        outcome === "partial"
+          ? [{ node_id: "optional-review", outcome: "failed", failure_category: "task-failure" }]
+          : [],
+      incomplete_nodes_omitted: 0
+    };
+    // Both documents are canonical and all verifier/controller publication digests
+    // match. Those digests authenticate producer bytes, not the census's claims.
+    const projection = projectCanonicalFinalReport(report);
+    const fixture = createVerifiedReportFixture(runId, { report, markdown: projection.markdown });
+    assert.throws(
+      () => loadVerifiedFinalReportSnapshot(fixture.layout.root),
+      (error: unknown) =>
+        error instanceof VerifiedOutputError &&
+        error.code === "VERIFIED_OUTPUT_INVALID" &&
+        /semantic\/context gates.*completion/iu.test(error.message)
+    );
+    assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
+    assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
+  }
+});
+
 test("missing verification evidence after successful finalization is invalid authority, not unavailable authority", () => {
   const fixture = createVerifiedReportFixture("verified-report-missing-marker");
   fs.rmSync(path.join(fixture.layout.root, ".ultrafuzz-verification", `${REPORT_ATTEMPT_ID}.json`));

@@ -25,7 +25,7 @@ test("final reports retain artifact warnings and their context without changing 
   assertPublicProjectionFixedPoint(published);
 });
 
-import { validateSafeId } from "@ultrafuzz/artifacts";
+import { validateSafeId, type ReportCompletion } from "@ultrafuzz/artifacts";
 import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
@@ -155,6 +155,201 @@ function renderableReport(): Record<string, unknown> {
     }
   };
 }
+
+function partialCompletion(runId = "projection-test"): ReportCompletion {
+  return {
+    schema_version: "ultrafuzz.report-completion.v1",
+    run_id: runId,
+    outcome: "partial",
+    counts: { planned: 8, succeeded: 2, failed: 2, timed_out: 1, skipped: 1, cancelled: 1, unverified: 1 },
+    incomplete_nodes: [
+      { node_id: "failed-node", outcome: "failed", failure_category: "task-failure" },
+      { node_id: "refused-node", outcome: "failed", failure_category: "refused" },
+      { node_id: "timed-out-node", outcome: "timed_out", failure_category: "timeout" },
+      { node_id: "skipped-node", outcome: "skipped", failure_category: "dependency" },
+      { node_id: "cancelled-node", outcome: "cancelled", failure_category: "cancelled" },
+      { node_id: "unverified-node", outcome: "unverified", failure_category: "unverified" }
+    ],
+    incomplete_nodes_omitted: 0
+  };
+}
+
+test("partial completion is prominent and preserves verified findings and the exact census", () => {
+  const input = renderableReport();
+  const original = projectCanonicalFinalReport(input);
+  input.completion = partialCompletion();
+  const before = structuredClone(input);
+  const projection = projectCanonicalFinalReport(input);
+
+  assert.match(projection.markdown, /^# Ultrafuzz report — PARTIAL\n\n> \*\*PARTIAL REPORT/u);
+  assert.ok(projection.markdown.indexOf("PARTIAL REPORT") < projection.markdown.indexOf("| Issue id | Title |"));
+  assert.ok(projection.markdown.indexOf("## Run completion") < projection.markdown.indexOf("## [L-01]"));
+  for (const [label, count] of [
+    ["Planned", 8],
+    ["Succeeded", 2],
+    ["Failed", 2],
+    ["Timed-out", 1],
+    ["Skipped", 1],
+    ["Cancelled", 1],
+    ["Unverified", 1]
+  ] as const) {
+    assert.ok(projection.markdown.includes(`- ${label} nodes: \`${count}\``));
+  }
+  assert.match(projection.markdown, /\| `refused-node` \| `failed` \| `refused` \|/u);
+  assert.match(projection.markdown, /\| `skipped-node` \| `skipped` \| `dependency` \|/u);
+  assert.match(projection.markdown, /missing results are coverage gaps/u);
+  assert.match(projection.markdown, /They do not establish full audit coverage or a clean security result/u);
+  assert.deepEqual(projection.report, before);
+  assert.deepEqual(input, before);
+  assert.equal(
+    projection.markdown.slice(projection.markdown.indexOf("## [L-01]")),
+    original.markdown.slice(original.markdown.indexOf("## [L-01]")),
+    "adding a completion census must not rewrite any finding or existing coverage evidence"
+  );
+  assert.deepEqual(projectCanonicalFinalReport(projection.report), projection);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+});
+
+test("completion identity disclosure stays bounded and states how many identities are omitted", () => {
+  const completion = partialCompletion();
+  completion.counts = {
+    planned: 259,
+    succeeded: 2,
+    failed: 257,
+    timed_out: 0,
+    skipped: 0,
+    cancelled: 0,
+    unverified: 0
+  };
+  completion.incomplete_nodes = Array.from({ length: 256 }, (_unused, index) => ({
+    node_id: `incomplete-node-${index}`,
+    outcome: "failed",
+    failure_category: "task-failure"
+  }));
+  completion.incomplete_nodes_omitted = 1;
+  const projection = projectCanonicalFinalReport({ ...renderableReport(), completion });
+  assert.match(projection.markdown, /- Failed nodes: `257`/u);
+  assert.equal(projection.markdown.split("\n").filter((line) => line.startsWith("| `incomplete-node-")).length, 256);
+  assert.match(projection.markdown, /Additional incomplete node identities omitted from this bounded census: `1`/u);
+  assert.deepEqual(projection.report.completion, completion);
+});
+
+test("a complete census retains the normal title and reports every count", () => {
+  const completion = partialCompletion();
+  completion.outcome = "complete";
+  completion.counts = { planned: 8, succeeded: 8, failed: 0, timed_out: 0, skipped: 0, cancelled: 0, unverified: 0 };
+  completion.incomplete_nodes = [];
+  const input = { ...renderableReport(), completion, issues: [], property_provenance: [] };
+  const projection = projectCanonicalFinalReport(input);
+  assert.match(projection.markdown, /^# Ultrafuzz report\n/u);
+  assert.doesNotMatch(projection.markdown, /PARTIAL|Incomplete nodes:/u);
+  assert.match(projection.markdown, /- Outcome: `complete`/u);
+  assert.match(projection.markdown, /- Planned nodes: `8`\n- Succeeded nodes: `8`\n- Failed nodes: `0`/u);
+  assert.match(projection.markdown, /^No issues reported\.$/mu);
+  assert.deepEqual(projection.report, input);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace("## Run completion", "## Completion"),
+      projection.report
+    ),
+    false
+  );
+});
+
+test("empty findings in a partial run explicitly disclaim a clean result", () => {
+  const projection = projectCanonicalFinalReport({
+    ...renderableReport(),
+    completion: partialCompletion(),
+    issues: [],
+    property_provenance: []
+  });
+  assert.match(projection.markdown, /^# Ultrafuzz report — PARTIAL$/mu);
+  assert.match(projection.markdown, /No production issues were reported from the available verified results\./u);
+  assert.match(projection.markdown, /This partial report is not a clean result/u);
+  assert.doesNotMatch(projection.markdown, /^No issues reported\.$/mu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  for (const markdown of [
+    projection.markdown.replace(/^No production issues[^\n]+$/mu, "No issues reported."),
+    projection.markdown.replace(/^No production issues[^\n]+\n/mu, ""),
+    `${projection.markdown}\nNo issues reported.\n`
+  ]) {
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false);
+  }
+});
+
+test("directive validation requires the exact partial title, banner, census and identities", () => {
+  const projection = projectCanonicalFinalReport({ ...renderableReport(), completion: partialCompletion() });
+  const banner = projection.markdown.split("\n").find((line) => line.startsWith("> **PARTIAL REPORT"));
+  assert.ok(banner);
+  const mutations = [
+    projection.markdown.replace("# Ultrafuzz report — PARTIAL", "# Ultrafuzz report"),
+    projection.markdown.replace("# Ultrafuzz report — PARTIAL", "# Ultrafuzz report — partial"),
+    projection.markdown.replace(`${banner}\n\n`, ""),
+    `${projection.markdown.replace(`${banner}\n\n`, "")}\n${banner}\n`,
+    projection.markdown.replace("coverage is incomplete", "coverage is complete"),
+    projection.markdown.replace("## Run completion", "## Completion"),
+    projection.markdown.replace("- Failed nodes: `2`", "- Failed nodes: `0`"),
+    projection.markdown.replace("| `refused-node` | `failed` | `refused` |", ""),
+    projection.markdown.replace(
+      "| `refused-node` | `failed` | `refused` |",
+      "| `refused-node` | `failed` | `task-failure` |"
+    ),
+    projection.markdown.replace("bounded census: `0`", "bounded census: `1`"),
+    `${projection.markdown}\n## Run completion\n\n- Outcome: \`complete\`\n`
+  ];
+  for (const markdown of mutations) {
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false);
+  }
+  const { completion: _completion, ...withoutCompletion } = projection.report;
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, withoutCompletion), false);
+});
+
+test("rendering and standalone directive validation reject inconsistent completion claims", () => {
+  const input = { ...renderableReport(), completion: partialCompletion() };
+  const projection = projectCanonicalFinalReport(input);
+  const inconsistent = structuredClone(input);
+  inconsistent.completion.counts.succeeded += 1;
+  assert.throws(() => projectCanonicalFinalReport(inconsistent), /count|planned|sum/iu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, inconsistent), false);
+  const wrongRun = structuredClone(input);
+  wrongRun.completion.run_id = "different-run";
+  assert.throws(() => projectCanonicalFinalReport(wrongRun), /completion run ID does not match/iu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, wrongRun), false);
+});
+
+test("public partial reports redact distinct private identities and preserve census counts as a fixed point", () => {
+  const runId = "ci-33918585561-1-smoke-ultrafuzz-benc-3e994a685ad7bf44";
+  const input = renderableReport();
+  input.run_metadata = runMetadata(runId);
+  const completion = partialCompletion(runId);
+  const secretIds = ["sk-abcdefghijklmnopqrstuvwx", "sk-zyxwvutsrqponmlkjihgfedc"]; // gitleaks:allow -- fake credential fixtures
+  for (const [index, secretId] of secretIds.entries()) {
+    assert.notEqual(redactSecretsInText(secretId), secretId, "the synthetic node ID must trigger redaction");
+    const node = completion.incomplete_nodes[index];
+    assert.ok(node);
+    node.node_id = secretId;
+  }
+  const retainedNode = completion.incomplete_nodes[2];
+  assert.ok(retainedNode);
+  retainedNode.node_id = "redacted-node-1";
+  input.completion = completion;
+  const before = structuredClone(input);
+  const published = projectPublicCanonicalFinalReport(input);
+  const publicCompletion = published.report.completion as ReportCompletion;
+
+  assert.equal(publicCompletion.run_id, runId);
+  assert.deepEqual(publicCompletion.counts, completion.counts);
+  assert.equal(publicCompletion.incomplete_nodes.length, completion.incomplete_nodes.length);
+  assert.equal(new Set(publicCompletion.incomplete_nodes.map((node) => node.node_id)).size, 6);
+  assert.equal(publicCompletion.incomplete_nodes[2]?.node_id, "redacted-node-1", "unchanged identities stay intact");
+  for (const secretId of secretIds) assert.equal(JSON.stringify(published).includes(secretId), false);
+  assert.doesNotMatch(JSON.stringify(published), /synthetic-final-report-secret|\/home\/runner\/private/u);
+  assert.match(published.markdown, /^# Ultrafuzz report — PARTIAL\n/u);
+  assert.deepEqual(input, before);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assertPublicProjectionFixedPoint(published);
+});
 
 test("canonical final-report validation renders Markdown without rewriting the validated report", () => {
   const input = renderableReport();

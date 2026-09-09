@@ -8784,6 +8784,7 @@ function semanticGateContextForVerifiedOutput(
     campaignPlanPath?: string;
     campaignSummary?: unknown;
     campaignSummaryPath?: string;
+    reportCompletion?: unknown;
     campaigns?: readonly unknown[];
     findings?: readonly unknown[];
     findingsPath?: string;
@@ -9024,6 +9025,8 @@ function semanticGateContextForVerifiedOutput(
     );
     const finalSeverityAuthority = verifiedFinalSeverityReviewAuthority(task);
     context.artifactSet = {
+      // No runtime-authenticated whole-run completion producer is defined yet.
+      reportCompletion: null,
       campaignSummary: campaignSummary?.value ?? null,
       ...(campaignSummary === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),
       propertyCatalog: propertyCatalog?.value ?? UNPLANNED_PROPERTY_CATALOG_CONTEXT,

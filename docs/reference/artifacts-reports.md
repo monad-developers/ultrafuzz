@@ -535,6 +535,45 @@ If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
 `ultrafuzz.report.v3` version literal. Reporting reads the agent-authored bytes;
 it does not reconstruct, reorder, normalize, or rewrite them.
 
+### Whole-run completion contract
+
+The optional `report.json.completion` object describes whole-run completeness,
+separately from the invariant-specific `campaign_outcome`. This is a reporting
+contract foundation for issue #1119. The runtime does not yet produce an
+authenticated whole-run census or automatically publish reports after task
+failures. Current runtime reports omit this field. Completion remains optional
+because requiring it before the runtime can provide that authority would reject
+every generated report. This staging does not require backward compatibility;
+the eventual integration may make breaking changes without a migration fallback.
+
+A completion object uses `ultrafuzz.report-completion.v1` and binds `run_id` to
+`run_metadata.run_id`. Its `counts` object contains `planned`, `succeeded`,
+`failed`, `timed_out`, `skipped`, `cancelled`, and `unverified`. The six outcome
+counts must sum exactly to `planned`; `outcome` is `complete` only when every
+planned node succeeded, otherwise `partial`.
+
+`incomplete_nodes` records up to 256 unique node identities with their outcome
+and a closed failure category. `incomplete_nodes_omitted` accounts exactly for
+any identities beyond that limit; omitted identities never reduce the counts.
+The contract does not accept control-plane or integrity failures as ordinary
+task failures.
+
+Canonical rendering of a partial census starts with
+`# Ultrafuzz report — PARTIAL`, puts a prominent incompleteness warning before
+findings, and shows the counts and incomplete scope. An empty partial report
+explicitly says it is not a clean result. A complete census retains the normal
+report title. A report without a runtime census retains its previous rendering;
+absence of the field is not evidence of whole-run completeness.
+
+Offline schema validation and `ultrafuzz report render` establish document
+consistency and presentation only. The report authority gate additionally
+requires exact equality with an independently authenticated runtime census.
+Until that producer exists, both runtime verifier paths supply an explicit
+no-authority sentinel and reject agent-authored completion claims, even when
+the report's publication digests match. Adding this field does not change
+execution policy, artifact admission, terminal status, or sealed-run resume
+semantics, and does not enable a fallback report producer.
+
 ### Internal authority and public projection
 
 The paths above are the private, run-local report authority. Verification,

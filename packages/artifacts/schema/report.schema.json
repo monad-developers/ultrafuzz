@@ -279,6 +279,296 @@
       ],
       "additionalProperties": false
     },
+    "completion": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "ultrafuzz.report-completion.v1"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["complete", "partial"]
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "planned": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "succeeded": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "timed_out": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "skipped": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "cancelled": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unverified": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": ["planned", "succeeded", "failed", "timed_out", "skipped", "cancelled", "unverified"],
+          "additionalProperties": false
+        },
+        "incomplete_nodes": {
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "node_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "const": "failed"
+                  },
+                  "failure_category": {
+                    "type": "string",
+                    "enum": ["task-failure", "refused"]
+                  }
+                },
+                "required": ["node_id", "outcome", "failure_category"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "node_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "const": "timed_out"
+                  },
+                  "failure_category": {
+                    "type": "string",
+                    "const": "timeout"
+                  }
+                },
+                "required": ["node_id", "outcome", "failure_category"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "node_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "const": "skipped"
+                  },
+                  "failure_category": {
+                    "type": "string",
+                    "const": "dependency"
+                  }
+                },
+                "required": ["node_id", "outcome", "failure_category"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "node_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "const": "cancelled"
+                  },
+                  "failure_category": {
+                    "type": "string",
+                    "const": "cancelled"
+                  }
+                },
+                "required": ["node_id", "outcome", "failure_category"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "node_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "const": "unverified"
+                  },
+                  "failure_category": {
+                    "type": "string",
+                    "const": "unverified"
+                  }
+                },
+                "required": ["node_id", "outcome", "failure_category"],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "incomplete_nodes_omitted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["schema_version", "run_id", "outcome", "counts", "incomplete_nodes", "incomplete_nodes_omitted"],
+      "additionalProperties": false,
+      "description": "Whole-run completion metadata; schema validity does not authenticate the census. Exact counts, unique node identities, and run identity require semantic validation.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "complete"
+              }
+            },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "counts": {
+                "type": "object",
+                "properties": {
+                  "failed": {
+                    "const": 0
+                  },
+                  "timed_out": {
+                    "const": 0
+                  },
+                  "skipped": {
+                    "const": 0
+                  },
+                  "cancelled": {
+                    "const": 0
+                  },
+                  "unverified": {
+                    "const": 0
+                  }
+                }
+              },
+              "incomplete_nodes": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "incomplete_nodes_omitted": {
+                "const": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "counts": {
+                "type": "object",
+                "anyOf": [
+                  {
+                    "properties": {
+                      "failed": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": ["failed"]
+                  },
+                  {
+                    "properties": {
+                      "timed_out": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": ["timed_out"]
+                  },
+                  {
+                    "properties": {
+                      "skipped": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": ["skipped"]
+                  },
+                  {
+                    "properties": {
+                      "cancelled": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": ["cancelled"]
+                  },
+                  {
+                    "properties": {
+                      "unverified": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "required": ["unverified"]
+                  }
+                ]
+              },
+              "incomplete_nodes": {
+                "type": "array",
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "incomplete_nodes_omitted": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": ["incomplete_nodes_omitted"]
+          },
+          "then": {
+            "properties": {
+              "incomplete_nodes": {
+                "type": "array",
+                "minItems": 256
+              }
+            }
+          }
+        }
+      ]
+    },
     "campaign_outcome": {
       "type": "object",
       "properties": {

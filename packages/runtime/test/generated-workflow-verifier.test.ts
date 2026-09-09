@@ -17,6 +17,7 @@ import {
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   assertRunMetadataDocument,
+  executeSemanticGate,
   executeSchemaSemanticGates,
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
@@ -42,6 +43,7 @@ import {
   type ArtifactContractId,
   type InvariantLedgerArtifact,
   type PropertiesArtifact,
+  type SemanticGateContext,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestOutput,
   type SmithersTaskManifestTask
@@ -4393,6 +4395,7 @@ test("generated semantic contexts match host semantics when property producers a
 
   const report = contextFor(task, { path: "custom/report.json", schemaFile: "report.schema.json" }, verifiedOutputs);
   assert.deepEqual(report.artifactSet, {
+    reportCompletion: null,
     campaignSummary: null,
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
     implementedProperties: {
@@ -4787,6 +4790,7 @@ test("generated semantic context projects every required review authority field"
     });
   }
   assert.deepEqual(context("report.schema.json"), {
+    reportCompletion: null,
     campaignSummary: { outcome: "blocked", reason: "recon was unavailable" },
     campaignSummaryPath: "custom/campaign-summary.json",
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] },
@@ -5454,6 +5458,65 @@ test("generated review verification uses declared immutable review-stage authori
   assert.match(context, /reviewStageSemanticContext\(task, verifiedOutputs\)/u);
   assert.match(context, /verifiedFinalSeverityReviewAuthority\(task\)/u);
   assert.match(context, /\.\.\.finalSeverityAuthority/u);
+});
+
+test("generated report verification rejects completion claims without controller census authority", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function semanticGateContextForVerifiedOutput");
+  const end = source.indexOf("\n\nfunction verifyOutputSemanticGates", start);
+  assert.ok(start >= 0 && end > start);
+  const emitted = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const getContext = new Function(
+    "verifiedCanonicalPropertyCatalog",
+    "verifiedSingletonAncestorJsonArtifact",
+    "verifiedFinalSeverityReviewAuthority",
+    "UNPLANNED_PROPERTY_CATALOG_CONTEXT",
+    "UNPLANNED_IMPLEMENTED_PROPERTIES_CONTEXT",
+    `${emitted}\nreturn semanticGateContextForVerifiedOutput;`
+  )(
+    () => undefined,
+    () => undefined,
+    () => ({}),
+    {},
+    {}
+  ) as (
+    task: unknown,
+    output: unknown,
+    outputs: Map<string, unknown>,
+    evidence: Map<string, unknown>
+  ) => SemanticGateContext;
+  const output = { path: "custom/report.json", schemaFile: "report.schema.json" };
+  const context = getContext(
+    {
+      attemptId: "report-attempt",
+      metadata: { run: { ultrafuzzRunId: "report-run" }, node: { logicalNodeId: "report" } }
+    },
+    output,
+    new Map([[output.path, { artifactRoot: "/synthetic/artifacts/report" }]]),
+    new Map()
+  );
+  assert.equal(
+    executeSemanticGate("report-completion-authority", { document: {}, context }).status,
+    "passed",
+    "legacy reports remain admissible when the controller declares no census"
+  );
+  const result = executeSemanticGate("report-completion-authority", {
+    document: {
+      run_metadata: { run_id: "report-run" },
+      completion: {
+        schema_version: "ultrafuzz.report-completion.v1",
+        run_id: "report-run",
+        outcome: "complete",
+        counts: { planned: 1, succeeded: 1, failed: 0, timed_out: 0, skipped: 0, cancelled: 0, unverified: 0 },
+        incomplete_nodes: [],
+        incomplete_nodes_omitted: 0
+      }
+    },
+    context
+  });
+  assert.equal(result.status, "failed", "producer bytes cannot supply their own completion authority");
 });
 
 test("generated dynamic verification passes the resolved policy and exact declared recipe and finding ancestors", () => {

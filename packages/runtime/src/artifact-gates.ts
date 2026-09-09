@@ -2379,6 +2379,8 @@ function semanticArtifactSetForSchema(input: {
     const severity = semanticFinalSeverityContext(input.layout, input.node, input.attemptAuthority);
     const campaignSummary = semanticCampaignSummary(input.layout, input.node, input.attemptAuthority);
     return {
+      // No runtime-authenticated whole-run completion producer is defined yet.
+      reportCompletion: null,
       ...(campaignSummary === undefined ? {} : { campaignSummary: campaignSummary.value }),
       ...(campaignSummary?.path === undefined ? {} : { campaignSummaryPath: campaignSummary.path }),
       ...(propertyCatalog === undefined ? {} : { propertyCatalog }),
