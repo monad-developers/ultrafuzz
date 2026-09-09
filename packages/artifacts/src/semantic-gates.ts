@@ -1495,9 +1495,18 @@ function reportCompletionAuthorityIssues(document: unknown, context: SemanticGat
   // A null host sentinel explicitly prohibits agent-authored completion claims.
   // Missing context remains a requires-context result, including for legacy reports.
   if (expected === null) {
-    return reported === undefined
-      ? []
-      : [issue("$.completion", "Report declares completion without an authoritative runtime census")];
+    const issues =
+      reported === undefined
+        ? []
+        : [issue("$.completion", "Report declares completion without an authoritative runtime census")];
+    for (const field of ["verification", "observed_completion", "unreviewed_findings"]) {
+      if (at(document, [field]) !== undefined) {
+        issues.push(
+          issue(`$.${field}`, "Unchecked report metadata is runtime-owned and cannot be admitted as agent output")
+        );
+      }
+    }
+    return issues;
   }
   const validation = reportCompletionSchema.safeParse(expected);
   if (!validation.success) {

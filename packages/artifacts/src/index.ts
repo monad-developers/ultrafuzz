@@ -30,6 +30,7 @@ export * from "./property-provenance.js";
 export * from "./prompt-artifact-authority-selectors.js";
 export * from "./release-validation.js";
 export * from "./report-completion.js";
+export * from "./report-observation.js";
 export * from "./planned-graph.js";
 export * from "./run-layout.js";
 export * from "./run-documents.js";

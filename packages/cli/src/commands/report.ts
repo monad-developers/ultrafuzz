@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { Args, Command } from "@oclif/core";
+import { Args, Command, Flags } from "@oclif/core";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
@@ -11,7 +11,7 @@ import {
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { commandFailure, diagnosticsText, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
-import { loadValidatedReportSnapshot, type ValidatedReportSnapshot } from "../report-artifacts.js";
+import { loadReportArtifactsSnapshot, type ReportArtifactsSnapshot } from "../report-artifacts.js";
 
 type AccountingField = "tokens_used" | "estimated_spend";
 
@@ -22,9 +22,12 @@ interface ExpectedAccounting {
 }
 
 export default class Report extends Command {
-  static override summary = "Show the verified final report for a run";
+  static override summary = "Show the available report for a run";
   static override args = { runId: Args.string({ required: true, description: "Ultrafuzz run ID" }) };
-  static override flags = globalFlags;
+  static override flags = {
+    ...globalFlags,
+    "require-verified": Flags.boolean({ summary: "Require the report to match verified run records" })
+  };
 
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Report);
@@ -35,7 +38,8 @@ export default class Report extends Command {
       const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
-      const loaded = loadValidatedReportSnapshot(layout.root);
+      const loaded = loadReportArtifactsSnapshot(layout.root, { requireVerified: flags["require-verified"] });
+      const completion = loaded.completion?.outcome ?? loaded.observed_completion?.outcome;
       const validationDiagnostics = loaded.validation_warnings.map((warning): RuntimeDiagnostic => ({
         code: warning.code,
         severity: "warning",
@@ -50,7 +54,7 @@ export default class Report extends Command {
         }
       }));
       const diagnostics: RuntimeDiagnostic[] = [
-        ...reportAccountingDiagnostics(layout.root, loaded),
+        ...reportAccountingDiagnostics(layout.root, loaded, flags["require-verified"]),
         ...validationDiagnostics
       ];
       emitCommandResult(
@@ -61,12 +65,13 @@ export default class Report extends Command {
           command: "report",
           data: {
             ...loaded.artifacts,
-            ...(loaded.completion === undefined ? {} : { completion: loaded.completion.outcome }),
+            verification: loaded.verification,
+            ...(completion === undefined ? {} : { completion }),
             terminal: loaded.terminal
           },
           text: `Report: ${loaded.artifacts.markdown_path}\nJSON: ${loaded.artifacts.json_path}\n${
-            loaded.completion === undefined ? "" : `Completion: ${loaded.completion.outcome}\n`
-          }${diagnosticsText(validationDiagnostics)}`,
+            completion === undefined ? "" : `Completion: ${completion}\n`
+          }Verification: ${loaded.verification}\n${diagnosticsText(diagnostics)}`,
           diagnostics
         },
         flags.json === true
@@ -82,8 +87,26 @@ export default class Report extends Command {
   }
 }
 
-function reportAccountingDiagnostics(runRoot: string, report: ValidatedReportSnapshot): RuntimeDiagnostic[] {
-  const expected = expectedAccountingFromRunMetadata(path.join(runRoot, "run.json"));
+function reportAccountingDiagnostics(
+  runRoot: string,
+  report: ReportArtifactsSnapshot,
+  requireVerified: boolean
+): RuntimeDiagnostic[] {
+  let expected: ExpectedAccounting | undefined;
+  try {
+    expected = expectedAccountingFromRunMetadata(path.join(runRoot, "run.json"));
+  } catch (error) {
+    if (requireVerified) throw error;
+    return [
+      {
+        code: "REPORT_ACCOUNTING_UNAVAILABLE",
+        message: `Report accounting could not be checked: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "warning",
+        source: "report",
+        path: path.join(runRoot, "run.json")
+      }
+    ];
+  }
   if (expected === undefined) {
     return [];
   }

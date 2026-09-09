@@ -77,6 +77,7 @@ interface CapturedLocalEvidenceSnapshot extends LocalEvidenceSnapshot {
 }
 
 interface ReportBundleManifest {
+  scope?: "report-only";
   schema_version: "ultrafuzz.report-bundle-manifest.v3";
   run_id: string;
   created_at: string;
@@ -263,6 +264,9 @@ function parseReportBundleManifest(bytes: Uint8Array): ReportBundleManifest {
   }
   if (!isReportBundleManifest(value)) {
     throw new Error("report bundle manifest validator returned an unexpected value");
+  }
+  if (value.scope === "report-only") {
+    throw new Error("report-only bundles do not contain verified run statistics; use a full run bundle");
   }
   return value;
 }

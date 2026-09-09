@@ -119,6 +119,7 @@ import {
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
+import { loadReportSnapshot } from "../src/unverified-report.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
@@ -2795,6 +2796,41 @@ nodes:
   fs.appendFileSync(
     path.join(project, ".ultrafuzz", "prompts", discoveryPromptPath),
     REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+}
+
+function writeSingleFinalReportTopology(project: string): void {
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: final-report
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on: [__start__]
+    outputs:
+      - path: report.json
+        contract: ultrafuzz/report@3
+        primary: true
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [final-report]
+`,
     "utf8"
   );
 }
@@ -19155,38 +19191,7 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
 test("syncRun supersedes a partial report after authenticated recovery of a failed workflow aggregate", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  fs.appendFileSync(
-    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
-    REPORT_VOCABULARY_PROMPT_REFERENCES,
-    "utf8"
-  );
-  fs.writeFileSync(
-    path.join(project, ".ultrafuzz", "topology.yml"),
-    `version: 2
-defaults:
-  strategy_loops: 1
-nodes:
-  - id: __start__
-    kind: meta
-    role: start
-    depends_on: []
-  - id: final-report
-    kind: agentic
-    prompt: setup/project-discovery.md
-    depends_on: [__start__]
-    outputs:
-      - path: report.json
-        contract: ultrafuzz/report@3
-        primary: true
-      - path: report.md
-        contract: ultrafuzz/nonempty-markdown@1
-  - id: __finish__
-    kind: meta
-    role: finish
-    depends_on: [final-report]
-`,
-    "utf8"
-  );
+  writeSingleFinalReportTopology(project);
   const runId = "sync-terminal-partial-report";
   const workflowRunId = `ultrafuzz-${runId}`;
   const env = fakeLifecycleSmithersEnv(project, {
@@ -19280,6 +19285,96 @@ nodes:
   assert.doesNotMatch(recoveredReport.markdown, /^# Ultrafuzz report — PARTIAL/u);
   assert.deepEqual(recoveredReport.json, { ...finalReport.report, completion: recoveredReport.completion });
 });
+
+for (const variant of ["failed-verifier", "changed-output", "exhausted-loop"] as const) {
+  test(`syncRun publishes an unchecked partial report after stopped failures (${variant})`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSingleFinalReportTopology(project);
+    const runId = `sync-unchecked-report-${variant}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const failedVerifier = variant === "failed-verifier";
+    const exhaustedLoops =
+      variant === "exhausted-loop" ? [{ id: "review", iteration: 3, maxIterations: 3 }] : undefined;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: failedVerifier ? "failed" : "finished",
+        state: failedVerifier ? "failed" : "succeeded",
+        exhaustedLoops,
+        steps: [
+          { id: "node:final-report", state: "finished", attempt: 1 },
+          { id: "verify:final-report", state: failedVerifier ? "failed" : "finished", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:final-report", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+        failedVerifier
+          ? {
+              type: "NodeFailed",
+              nodeId: "verify:final-report",
+              attempt: 1,
+              error: { message: "Synthetic deterministic artifact verification failure" }
+            }
+          : { type: "NodeFinished", nodeId: "verify:final-report", attempt: 1 },
+        { type: failedVerifier ? "RunFailed" : "RunFinished", extra: { exhaustedLoops } }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    writeEmptyFinalReportArtifactSet(runRoot, runId);
+    const authoredMarkdownPath = path.join(runRoot, "artifacts", "final-report", "report.md");
+    if (variant === "changed-output") fs.appendFileSync(authoredMarkdownPath, "\nUnverified appended text.\n");
+    const authoredMarkdownBefore = fs.readFileSync(authoredMarkdownPath);
+    const markerPath = path.join(runRoot, ".ultrafuzz-verification", "final-report.json");
+    const markerBefore = fs.readFileSync(markerPath);
+
+    const sync = await syncRun({ projectRoot: project, runId, env });
+
+    assert.equal(sync.ok, true, `${variant}: ${JSON.stringify(sync.diagnostics)}`);
+    assert.equal(sync.value?.status, "failed");
+    if (variant !== "exhausted-loop") {
+      assert.ok(
+        sync.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code ===
+            (failedVerifier ? "ARTIFACT_VERIFIER_FAILED" : "ARTIFACT_VERIFICATION_AUTHORITY_INVALID")
+        ),
+        JSON.stringify(sync.diagnostics)
+      );
+    }
+    assert.equal(
+      sync.diagnostics.some((diagnostic) => diagnostic.code === "TERMINAL_REPORT_UNAVAILABLE"),
+      false,
+      JSON.stringify(sync.diagnostics)
+    );
+    assert.ok(
+      fs.existsSync(path.join(runRoot, "review", "unverified-report")),
+      "stopped synchronization publishes the report"
+    );
+    const report = loadReportSnapshot(runRoot);
+    assert.equal(report.artifacts.source, "unverified-runtime-report");
+    assert.equal(report.terminal, true);
+    assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+    const json = report.json as {
+      verification?: { status?: string };
+      observed_completion?: { outcome?: string };
+    };
+    assert.equal(json.verification?.status, "not-checked");
+    assert.equal(json.observed_completion?.outcome, "partial");
+    const state = readRunState(path.join(runRoot, "state.json"));
+    assert.equal(state.status, "failed");
+    assert.equal(state.nodes["final-report"]?.status, variant === "exhausted-loop" ? "succeeded" : "failed");
+    assert.deepEqual(fs.readFileSync(authoredMarkdownPath), authoredMarkdownBefore);
+    assert.deepEqual(fs.readFileSync(markerPath), markerBefore);
+    if (variant !== "exhausted-loop") {
+      assert.equal(fs.existsSync(path.join(runRoot, "artifacts", "final-report", "artifact-manifest.json")), false);
+    }
+  });
+}
 
 test("syncRun reports a typed diagnostic when a terminal workflow failure has no failed durable node", async () => {
   const project = tempProject();

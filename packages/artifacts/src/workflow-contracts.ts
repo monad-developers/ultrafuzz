@@ -1,6 +1,11 @@
 import { z } from "zod/v4";
 import { artifactValidationWarningsSchema } from "./artifact-validation.js";
 import { reportCompletionSchema } from "./report-completion.js";
+import {
+  reportObservedCompletionSchema,
+  reportUnreviewedFindingsSchema,
+  reportVerificationSchema
+} from "./report-observation.js";
 
 import {
   MAX_FINDINGS,
@@ -1681,6 +1686,9 @@ export const reportSchema = withDocumentMetadata(
         source_run_ids: uniqueStrings().optional()
       }),
       completion: reportCompletionSchema.optional(),
+      verification: reportVerificationSchema.optional(),
+      observed_completion: reportObservedCompletionSchema.optional(),
+      unreviewed_findings: reportUnreviewedFindingsSchema.optional(),
       campaign_outcome: z
         .strictObject({
           outcome: z.enum(["complete", "partial", "blocked"]),
@@ -1701,6 +1709,26 @@ export const reportSchema = withDocumentMetadata(
       allOf: [
         {
           if: {
+            anyOf: [
+              { properties: { verification: true }, required: ["verification"] },
+              { properties: { observed_completion: true }, required: ["observed_completion"] }
+            ]
+          },
+          then: {
+            properties: { verification: true, observed_completion: true },
+            required: ["verification", "observed_completion"],
+            not: { properties: { completion: true }, required: ["completion"] }
+          }
+        },
+        {
+          if: { properties: { unreviewed_findings: true }, required: ["unreviewed_findings"] },
+          then: {
+            properties: { verification: true, observed_completion: true },
+            required: ["verification", "observed_completion"]
+          }
+        },
+        {
+          if: {
             properties: {
               property_implementation_coverage: {
                 type: "object",
@@ -1711,9 +1739,14 @@ export const reportSchema = withDocumentMetadata(
             required: ["property_implementation_coverage"]
           },
           then: {
-            required: ["completion"],
+            anyOf: [
+              {
+                required: ["completion"],
+                properties: { completion: { type: "object", properties: { outcome: { const: "partial" } } } }
+              },
+              { properties: { observed_completion: true }, required: ["observed_completion"] }
+            ],
             properties: {
-              completion: { type: "object", properties: { outcome: { const: "partial" } } },
               issues: { type: "array", maxItems: 0 },
               non_production_outcomes: { type: "array", maxItems: 0 },
               property_provenance: { type: "array", maxItems: 0 }
@@ -1723,6 +1756,25 @@ export const reportSchema = withDocumentMetadata(
       ]
     })
     .superRefine((report, context) => {
+      if (
+        (report.verification !== undefined || report.observed_completion !== undefined) &&
+        (report.verification === undefined ||
+          report.observed_completion === undefined ||
+          report.completion !== undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Unchecked reports require verification and observed_completion without a completion census",
+          path: ["verification"]
+        });
+      }
+      if (report.unreviewed_findings !== undefined && report.verification === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "Unreviewed findings require unchecked report verification",
+          path: ["unreviewed_findings"]
+        });
+      }
       if (report.completion !== undefined && report.completion.run_id !== report.run_metadata.run_id) {
         context.addIssue({
           code: "custom",
@@ -1733,7 +1785,7 @@ export const reportSchema = withDocumentMetadata(
       if (
         "status" in report.property_implementation_coverage &&
         report.property_implementation_coverage.status === "unavailable" &&
-        (report.completion?.outcome !== "partial" ||
+        ((report.completion?.outcome !== "partial" && report.observed_completion?.outcome !== "partial") ||
           report.issues.length > 0 ||
           report.non_production_outcomes.length > 0 ||
           report.property_provenance.length > 0)

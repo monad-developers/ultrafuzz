@@ -1912,6 +1912,17 @@ test("report completion authority requires trusted context and prohibits unsuppo
   }
 });
 
+test("report-only unchecked metadata cannot enter the verified agent artifact path", () => {
+  for (const field of ["verification", "observed_completion", "unreviewed_findings"]) {
+    const result = executeSemanticGate("report-completion-authority", {
+      document: { [field]: {} },
+      context: { artifactSet: { reportCompletion: null } }
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(result.status === "failed" && result.issues.some((entry) => entry.path === `$.${field}`));
+  }
+});
+
 test("report completion authority rejects omissions, changed census facts, invalid context, and foreign runs", () => {
   const context: SemanticGateContext = {
     artifactSet: { reportCompletion: partialReportCompletion },

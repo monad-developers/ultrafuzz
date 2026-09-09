@@ -174,6 +174,152 @@ function partialCompletion(runId = "projection-test"): ReportCompletion {
   };
 }
 
+function uncheckedReport(): Record<string, unknown> {
+  return {
+    ...renderableReport(),
+    verification: { status: "not-checked", reason_codes: ["record-missing", "result-not-reviewed"] },
+    observed_completion: {
+      outcome: "partial",
+      counts: {
+        planned: null,
+        succeeded: 80,
+        failed: 20,
+        timed_out: null,
+        skipped: null,
+        cancelled: 0,
+        unverified: null
+      },
+      incomplete_nodes: [
+        { node_id: "failed-task", outcome: "failed" },
+        { node_id: "missing-result", outcome: "unverified" }
+      ],
+      incomplete_nodes_omitted: null
+    },
+    issues: [],
+    non_production_outcomes: [],
+    property_provenance: [],
+    property_implementation_coverage: { status: "unavailable", reason: "final-review-not-completed" },
+    unreviewed_findings: [
+      { source_path: "artifacts/task/findings.json", title: "Candidate", description: "Needs review." }
+    ]
+  };
+}
+
+test("unchecked partial reports disclose unknown observations and keep candidates separate from final findings", () => {
+  const report = uncheckedReport();
+  const projection = projectCanonicalFinalReport(report);
+  assert.match(
+    projection.markdown,
+    /^# Ultrafuzz report — PARTIAL\n\n> \*\*PARTIAL REPORT — verification not checked/u
+  );
+  assert.match(projection.markdown, /- Verification: `not-checked`/u);
+  assert.match(projection.markdown, /- Planned nodes: `unknown`\n- Succeeded nodes: `80`\n- Failed nodes: `20`/u);
+  assert.match(projection.markdown, /- Cancelled nodes: `0`\n- Unverified nodes: `unknown`/u);
+  assert.match(projection.markdown, /\| `failed-task` \| `failed` \|/u);
+  assert.match(projection.markdown, /\| `missing-result` \| `unverified` \|/u);
+  assert.match(projection.markdown, /Additional observed incomplete node identities omitted: `unknown`/u);
+  assert.match(projection.markdown, /No final findings are included/u);
+  assert.match(projection.markdown, /## Unreviewed findings/u);
+  assert.match(projection.markdown, /unreviewed and unverified candidates, not final findings/u);
+  assert.match(projection.markdown, /Final review was not completed or could not be verified/u);
+  assert.doesNotMatch(
+    projection.markdown,
+    /available verified results|^No issues reported\.$|\| Issue id \| Title \|/mu
+  );
+  assert.deepEqual(projection.report, report);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
+  assert.deepEqual(projectCanonicalFinalReport(report), projection);
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+});
+
+test("unchecked reports retain renderable final findings under a global verification warning", () => {
+  const report = {
+    ...renderableReport(),
+    verification: uncheckedReport().verification,
+    observed_completion: uncheckedReport().observed_completion
+  };
+  const projection = projectCanonicalFinalReport(report);
+  assert.match(projection.markdown, /PARTIAL REPORT — verification not checked/u);
+  assert.match(projection.markdown, /## \[L-01\] - State mismatch/u);
+  assert.doesNotMatch(projection.markdown, /No final findings are included|available verified results/u);
+  assert.deepEqual(projection.report, report);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
+});
+
+test("unchecked reports explain missing checks in plain language while retaining structured reason codes", () => {
+  const report = uncheckedReport();
+  report.verification = {
+    status: "not-checked",
+    reason_codes: [
+      "verification-unavailable",
+      "record-missing",
+      "record-invalid",
+      "result-unreadable",
+      "result-not-reviewed",
+      "results-truncated"
+    ]
+  };
+  const projection = projectCanonicalFinalReport(report);
+  for (const explanation of [
+    "Run and output verification could not be completed.",
+    "Some saved run records are missing.",
+    "Some saved run records did not pass the required checks.",
+    "Some output files could not be read.",
+    "Some available findings did not complete final review.",
+    "Some available results were omitted because a file, item, or size limit was reached."
+  ]) {
+    assert.ok(projection.markdown.includes(`- ${explanation}`));
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown.replace(explanation, ""), report), false);
+  }
+  assert.doesNotMatch(
+    projection.markdown,
+    /verification-unavailable|record-missing|record-invalid|result-unreadable|result-not-reviewed|results-truncated/u
+  );
+  assert.deepEqual(projection.report.verification, report.verification);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
+});
+
+test("unchecked completion and candidate disclosures cannot be removed or changed independently", () => {
+  const projection = projectCanonicalFinalReport(uncheckedReport());
+  for (const markdown of [
+    projection.markdown.replace("report — PARTIAL", "report"),
+    projection.markdown.replace("- Verification: `not-checked`", "- Verification: `checked`"),
+    projection.markdown.replace("- Planned nodes: `unknown`", "- Planned nodes: `100`"),
+    projection.markdown.replace("## Unreviewed findings", "## Findings"),
+    projection.markdown.replace("Needs review.", "Confirmed."),
+    projection.markdown.replace("Description: Needs review.", ""),
+    projection.markdown.replace("| `failed-task` | `failed` |", ""),
+    `${projection.markdown}\nNo issues reported.\n`
+  ])
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(projection.markdown, {
+      ...projection.report,
+      completion: partialCompletion()
+    }),
+    false
+  );
+});
+
+test("unreviewed candidate text is escaped and public reports redact its private content", () => {
+  const report = uncheckedReport();
+  report.unreviewed_findings = [
+    {
+      source_path: "/home/runner/private/findings.json",
+      title: "[Candidate](https://example.invalid) <script>\n## [H-01]",
+      description: "token=synthetic-candidate-secret ![image](https://example.invalid) <b>raw</b>"
+    },
+    { source_path: "artifacts/task/findings.json", title: "Critical", description: "Critical" }
+  ];
+  const projection = projectCanonicalFinalReport(report);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
+  assert.doesNotMatch(projection.markdown, /^## \[H-01\]|<script>|<b>raw<\/b>/mu);
+  assert.match(projection.markdown, /### Candidate 2: Critical/u);
+  const publicProjection = projectPublicCanonicalFinalReport(report);
+  assert.doesNotMatch(JSON.stringify(publicProjection), /synthetic-candidate-secret|\/home\/runner\/private/u);
+  assertPublicProjectionFixedPoint(publicProjection);
+});
+
 test("partial completion is prominent and preserves verified findings and the exact census", () => {
   const input = renderableReport();
   const original = projectCanonicalFinalReport(input);

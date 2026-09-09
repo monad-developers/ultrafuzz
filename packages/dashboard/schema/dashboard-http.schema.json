@@ -781,6 +781,7 @@
         "markdown": { "$ref": "#/$defs/nonEmptyString" },
         "json_path": { "$ref": "#/$defs/nonEmptyString" },
         "json": { "$ref": "urn:ultrafuzz:schema:artifacts:report:3" },
+        "verification": { "enum": ["verified", "not-checked"] },
         "host_validation_warnings": {
           "$ref": "urn:ultrafuzz:schema:artifacts:report:3#/properties/run_metadata/properties/artifact_validation_warnings"
         }

@@ -630,7 +630,9 @@
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "entry_count": { "$ref": "#/$defs/nonNegativeInteger" },
         "included_roots": { "$ref": "#/$defs/stringArray" },
-        "excluded_roots": { "$ref": "#/$defs/stringArray" }
+        "excluded_roots": { "$ref": "#/$defs/stringArray" },
+        "scope": { "const": "report-only" },
+        "verification": { "enum": ["verified", "not-checked"] }
       }
     },
     "materializeData": {

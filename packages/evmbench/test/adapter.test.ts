@@ -111,10 +111,32 @@ describe("EVMBench adapter", () => {
 
     expect(fs.readdirSync(submissionRoot)).toEqual(["audit.md"]);
     expect(invocations).toContainEqual(["init", "--project", auditRoot, "--force", "--json"]);
+    expect(invocations.find(([command]) => command === "report")).toContain("--require-verified");
     expect(fs.readFileSync(path.join(submissionRoot, "audit.md"), "utf8")).toBe("# Synthetic report\n");
     expect(
       fs.readFileSync(path.join(auditRoot, ".smithers", "node_modules", "synthetic-package", "package.json"), "utf8")
     ).toBe('{"name":"synthetic-package"}\n');
+  });
+
+  it("does not submit an unchecked partial report", async () => {
+    const fixture = adapterFixture();
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        execute: (args) => {
+          if (args[0] === "status") return success("status", statusData("done"));
+          if (args[0] === "report")
+            return success("report", {
+              ...reportData(path.join(fixture.auditRoot, "report.md")),
+              source: "unverified-runtime-report",
+              verification: "not-checked",
+              completion: "partial"
+            });
+          return defaultSuccess(args[0], fixture.auditRoot);
+        }
+      })
+    ).rejects.toThrow("benchmark submission requires a verified report");
+    expect(fs.existsSync(path.join(fixture.submissionRoot, "audit.md"))).toBe(false);
   });
 
   it("rejects a symlinked dependency seed", () => {

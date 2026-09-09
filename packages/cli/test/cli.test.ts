@@ -1633,6 +1633,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(reportBody);
   assert.deepEqual(reportBody.data, {
     ...terminalReport.artifacts,
+    verification: "verified",
     completion: "complete",
     terminal: true
   });
@@ -2138,6 +2139,17 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
   assertFinalReportUnchanged(reportDir, estimatedSnapshot);
+
+  const metadataPath = path.join(runData.run_root, "run.json");
+  fs.writeFileSync(metadataPath, "{", "utf8");
+  const unavailableAccounting = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(unavailableAccounting.code, 0, `${unavailableAccounting.stderr}\n${unavailableAccounting.stdout}`);
+  assert.equal((parseJson(unavailableAccounting).data as { source: string }).source, "verified-agent-report");
+  assert.match(JSON.stringify(parseJson(unavailableAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
+  const strictAccounting = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
+  assert.equal(strictAccounting.code, 1, strictAccounting.stderr);
+  assertFinalReportUnchanged(reportDir, estimatedSnapshot);
+  assert.equal(fs.readFileSync(metadataPath, "utf8"), "{");
 });
 
 test("report validates current artifacts without rewriting agent-owned bytes", async () => {
@@ -2212,6 +2224,7 @@ test("report exposes terminal partial coverage and bundles only the authenticate
   assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
   assert.deepEqual(parseJson(result).data, {
     ...report.artifacts,
+    verification: "verified",
     completion: "partial",
     terminal: true
   });
@@ -2239,7 +2252,65 @@ test("report exposes terminal partial coverage and bundles only the authenticate
   assert.deepEqual(fs.readFileSync(path.join(run.run_root, "state.json")), stateBytes);
 });
 
-test("report bundle rejects receipt bytes changed only during archive capture", async () => {
+test("report verification is optional and unchecked bundles contain only the labeled report pair", async () => {
+  const project = tempProject();
+  const { run, report, stateBytes } = await createTerminalPartialReport(project, "report-optional-verification");
+  const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
+  assert.ok(receipt);
+  fs.rmSync(receipt.path);
+
+  const strict = await cli(project, ["report", run.run_id, "--require-verified", "--json"]);
+  assert.equal(strict.code, 1, strict.stderr);
+  const result = await cli(project, ["report", run.run_id, "--json"]);
+  assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+  const data = parseJson(result).data as {
+    source: string;
+    verification: string;
+    completion: string;
+    markdown_path: string;
+    json_path: string;
+  };
+  assert.equal(data.source, "unverified-runtime-report");
+  assert.equal(data.verification, "not-checked");
+  assert.equal(data.completion, "partial");
+  assert.match(fs.readFileSync(data.markdown_path, "utf8"), /^# Ultrafuzz report — PARTIAL/u);
+  assert.match(fs.readFileSync(data.markdown_path, "utf8"), /not checked|not-checked/iu);
+
+  const strictBundle = await cli(project, ["report", "bundle", run.run_id, "--require-verified", "--json"]);
+  assert.equal(strictBundle.code, 1, strictBundle.stderr);
+  const bundled = await cli(project, ["report", "bundle", run.run_id, "--json"]);
+  assert.equal(bundled.code, 0, `${bundled.stderr}\n${bundled.stdout}`);
+  const bundleData = parseJson(bundled).data as { zip_path: string; scope: string; verification: string };
+  assert.equal(bundleData.scope, "report-only");
+  assert.equal(bundleData.verification, "not-checked");
+  const zip = new AdmZip(bundleData.zip_path);
+  assert.deepEqual(
+    zip
+      .getEntries()
+      .map((entry) => entry.entryName)
+      .sort(),
+    ["bundle-manifest.json", "report.json", "report.md"]
+  );
+  const manifest = JSON.parse(zip.readAsText("bundle-manifest.json"));
+  assert.equal(manifest.scope, "report-only");
+  assert.equal(manifest.verification, "not-checked");
+  assert.equal(validateReportBundleManifest(manifest).ok, true);
+  assert.deepEqual(zip.readFile("report.json"), fs.readFileSync(data.json_path));
+  const stats = await cli(project, ["stats", "--bundle", bundleData.zip_path, "--json"]);
+  assert.equal(stats.code, 1, stats.stderr);
+  assert.match(
+    JSON.stringify(parseJson(stats).diagnostics),
+    /report-only bundles do not contain verified run statistics/u
+  );
+  assert.deepEqual(fs.readFileSync(path.join(run.run_root, "state.json")), stateBytes);
+  assert.equal(fs.existsSync(receipt.path), false);
+  fs.writeFileSync(path.join(run.run_root, "run.json"), "{", "utf8");
+  const withoutAccounting = await cli(project, ["report", run.run_id, "--json"]);
+  assert.equal(withoutAccounting.code, 0, `${withoutAccounting.stderr}\n${withoutAccounting.stdout}`);
+  assert.match(JSON.stringify(parseJson(withoutAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
+});
+
+test("report bundle --require-verified rejects receipt bytes changed only during archive capture", async () => {
   const project = tempProject();
   const { run, report } = await createTerminalPartialReport(project, "report-runtime-receipt-change");
   const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
@@ -2247,7 +2318,7 @@ test("report bundle rejects receipt bytes changed only during archive capture", 
   const bundled = await withInjectedBundleCollectionRead(
     receipt.path,
     Buffer.alloc(receipt.bytes.byteLength, 0x78),
-    () => cli(project, ["report", "bundle", run.run_id, "--json"])
+    () => cli(project, ["report", "bundle", run.run_id, "--require-verified", "--json"])
   );
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /validated report changed/iu);
@@ -2344,7 +2415,7 @@ test("eval report validates the registered summary and never synthesizes missing
   assert.equal((parseJson(valid).data as { eval_run_id: string }).eval_run_id, evalRunId);
 });
 
-test("report rejects final_severity compatibility aliases without rewriting artifacts", async () => {
+test("report --require-verified rejects final_severity compatibility aliases without rewriting artifacts", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-rejects-severity-alias");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2358,7 +2429,7 @@ test("report rejects final_severity compatibility aliases without rewriting arti
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID|additional propert/iu);
@@ -2367,7 +2438,7 @@ test("report rejects final_severity compatibility aliases without rewriting arti
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report does not synthesize missing Markdown", async () => {
+test("report --require-verified does not synthesize missing Markdown", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-missing-markdown");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2378,7 +2449,7 @@ test("report does not synthesize missing Markdown", async () => {
   const jsonBefore = fs.readFileSync(reportPath);
   const jsonSha256Before = digest(jsonBefore);
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(
@@ -2414,7 +2485,7 @@ test("report accepts canonical severity and complete proof without rewriting eit
   assert.equal(Object.hasOwn(report.issues[0] ?? {}, "final_severity"), false);
 });
 
-test("current reports with malformed issues fail closed without preserving stale bytes", async () => {
+test("report --require-verified rejects malformed issues without rewriting stale bytes", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-current-malformed");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2441,7 +2512,7 @@ test("current reports with malformed issues fail closed without preserving stale
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*required/iu);
@@ -2450,7 +2521,7 @@ test("current reports with malformed issues fail closed without preserving stale
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("legacy report versions are rejected without a compatibility reader", async () => {
+test("report --require-verified rejects legacy report versions without a compatibility reader", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-legacy-version");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
@@ -2464,7 +2535,7 @@ test("legacy report versions are rejected without a compatibility reader", async
   const jsonBefore = reportSnapshot.json;
   const markdownBefore = reportSnapshot.markdown;
 
-  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
   assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*constant/iu);
@@ -2846,7 +2917,7 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report bundle rejects a changed authenticated publication from any finalized producer", async () => {
+test("report bundle --require-verified rejects a changed authenticated publication from any finalized producer", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-mutated-publication");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
@@ -2859,7 +2930,7 @@ test("report bundle rejects a changed authenticated publication from any finaliz
 
   const changedBytes = Buffer.from("post-finalization mutation!!!!\n", "utf8");
   fs.writeFileSync(supportPublication, changedBytes);
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /verified publication.*changed/iu);
@@ -2870,7 +2941,7 @@ test("report bundle rejects a changed authenticated publication from any finaliz
   );
 });
 
-test("report bundle rejects manifest bytes injected only into the recursive archive read", async () => {
+test("report bundle --require-verified rejects manifest bytes injected only into the recursive archive read", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-manifest-read-injection");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
@@ -2882,7 +2953,7 @@ test("report bundle rejects manifest bytes injected only into the recursive arch
   const bundled = await withInjectedBundleCollectionRead(
     manifestPath,
     Buffer.alloc(manifestBytes.byteLength, 0x78),
-    () => cli(project, ["report", "bundle", runData.run_id, "--json"])
+    () => cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"])
   );
 
   assert.equal(bundled.code, 1, bundled.stderr);
@@ -2894,7 +2965,7 @@ test("report bundle rejects manifest bytes injected only into the recursive arch
   );
 });
 
-test("report bundle rejects graph-fingerprint bytes injected only into the archive read", async () => {
+test("report bundle --require-verified rejects graph-fingerprint bytes injected only into the archive read", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-fingerprint-read-injection");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
@@ -2906,7 +2977,7 @@ test("report bundle rejects graph-fingerprint bytes injected only into the archi
   const bundled = await withInjectedBundleCollectionRead(
     fingerprintPath,
     Buffer.alloc(fingerprintBytes.byteLength, 0x61),
-    () => cli(project, ["report", "bundle", runData.run_id, "--json"])
+    () => cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"])
   );
 
   assert.equal(bundled.code, 1, bundled.stderr);
@@ -2918,14 +2989,14 @@ test("report bundle rejects graph-fingerprint bytes injected only into the archi
   );
 });
 
-test("report bundle rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async () => {
+test("report bundle --require-verified rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-fingerprint-persistent-tamper");
   const fingerprintPath = path.join(runData.run_root, "graph.fingerprint");
   const tamperedBytes = Buffer.from(`${"a".repeat(64)}\n`, "utf8");
   fs.writeFileSync(fingerprintPath, tamperedBytes);
 
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /graph fingerprint.*sealed workflow control/iu);
@@ -2936,7 +3007,7 @@ test("report bundle rejects a persistently tampered sealed graph fingerprint bef
   );
 });
 
-test("report bundle rejects a declared report producer that claims success without finalization authority", async () => {
+test("report bundle --require-verified rejects a declared report producer that claims success without finalization authority", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-bundle-invalid-success-claim");
   const layout = layoutForRunRoot(runData.run_root, runData.run_id);
@@ -2949,7 +3020,7 @@ test("report bundle rejects a declared report producer that claims success witho
     provenance: undefined
   });
 
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /lacks current finalization authority/iu);
@@ -2959,7 +3030,7 @@ test("report bundle rejects a declared report producer that claims success witho
   );
 });
 
-test("report bundle applies canonical report-pair validation to custom declarations", async () => {
+test("report bundle --require-verified applies canonical report-pair validation to custom declarations", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeCustomReportTopology(project);
@@ -2984,7 +3055,7 @@ test("report bundle applies canonical report-pair validation to custom declarati
   fs.writeFileSync(path.join(reportDir, "current-audit.md"), `${projection.markdown}\n<!-- drift -->\n`, "utf8");
   sealVerifiedNodeOutputs(runData.run_root, "audit-delivery");
 
-  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, `${bundled.stderr}\n${bundled.stdout}`);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /canonical projection/iu);
@@ -3026,7 +3097,7 @@ test("report bundle treats only an absent event journal as optional", async () =
   assert.equal(zip.readAsText("graph.fingerprint"), fs.readFileSync(path.join(runRoot, "graph.fingerprint"), "utf8"));
 });
 
-test("report bundle rejects historical runs without current sealed workflow authority", async () => {
+test("report bundle --require-verified rejects historical runs without current sealed workflow authority", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const runId = "report-bundle-historical-unsealed";
@@ -3034,14 +3105,14 @@ test("report bundle rejects historical runs without current sealed workflow auth
   fs.mkdirSync(runRoot, { recursive: true });
   fs.writeFileSync(path.join(runRoot, "graph.fingerprint"), "sha256:historical\n", "utf8");
 
-  const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+  const bundled = await cli(project, ["report", "bundle", runId, "--require-verified", "--json"]);
 
   assert.equal(bundled.code, 1, bundled.stderr);
   assert.match(JSON.stringify(parseJson(bundled).diagnostics), /historical or unsealed runs is unsupported/iu);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${runId}-report-bundle.zip`)), false);
 });
 
-test("report bundle fails closed on every present invalid event journal", async (context) => {
+test("report bundle --require-verified fails closed on every present invalid event journal", async (context) => {
   const project = tempProject();
   const cases: Array<{
     name: string;
@@ -3111,7 +3182,7 @@ test("report bundle fails closed on every present invalid event journal", async 
       fs.rmSync(path.join(runRoot, "events.jsonl"), { force: true });
       invalidCase.prepare(path.join(runRoot, "events.jsonl"), runId);
 
-      const bundled = await cli(project, ["report", "bundle", runId, "--json"]);
+      const bundled = await cli(project, ["report", "bundle", runId, "--require-verified", "--json"]);
 
       assert.equal(bundled.code, 1, bundled.stderr);
       assert.match(JSON.stringify(parseJson(bundled).diagnostics), invalidCase.diagnostic);

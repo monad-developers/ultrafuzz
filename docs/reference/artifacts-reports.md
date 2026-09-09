@@ -553,22 +553,49 @@ PARTIAL report with a failure census and no synthesized findings. An empty
 findings list in that report does not establish a clean result. Reporting does
 not mark the failed report agent successful or overwrite its output directory.
 
-`ultrafuzz report <run-id>` selects the current authenticated runtime report
-when available, otherwise the verified agent report. If neither is available,
-the command fails. Its JSON result includes `source` (`verified-agent-report`
-or `verified-runtime-report`), `terminal`, and the `completion` outcome when an
-authenticated census is available. Automation can distinguish a terminal
-partial report from complete coverage without inferring success from the
-presence of report files. `terminal` is true only with authenticated stopped
-workflow evidence; an agent report alone returns false. The primary run status
-remains separate.
+`ultrafuzz report <run-id>` selects the current verified runtime report when
+available, otherwise the verified agent report. Verification is optional for
+local report access: if the saved records cannot be verified, the runtime
+creates a separate best-effort PARTIAL report under
+`review/unverified-report/<digest>/report.json` and `report.md`. It does not
+change the agent's files or the verified report publication.
+
+The JSON result includes `source` (`verified-agent-report`,
+`verified-runtime-report`, or `unverified-runtime-report`), `verification`
+(`verified` or `not-checked`), `terminal`, and the `completion` outcome when
+available. Completion describes coverage; verification describes the checks
+on the supporting records. An unchecked report is always PARTIAL, even when
+the saved state claims all tasks succeeded. Missing counts are unknown rather
+than zero. Findings that lack final review are listed separately as unreviewed,
+and verification failures or skipped checks are visible in the report. Such
+findings do not gain scoring or finalization authority.
+
+For a verified runtime report, `terminal` is checked against stopped workflow
+evidence. For an unchecked report, it reflects only the saved run status;
+missing or unreadable state returns `terminal: false`.
+
+In `report.json`, unchecked reports store `verification.status: "not-checked"`
+and bounded `verification.reason_codes`. Their `observed_completion` object
+uses the same count names as `completion`, with `null` for unknown counts and
+an outcome fixed to `partial`. Independently verified final-report `issues`
+can be preserved even when the whole-run report cannot be verified. Other
+available finding candidates appear under `unreviewed_findings` with their
+source path, title, and description, rather than being promoted into reviewed
+`issues`. These fields do not create a verified `completion` claim.
+
+Use `ultrafuzz report <run-id> --require-verified` to require the original
+verification checks and fail when those checks cannot be completed. The
+dashboard uses the same best-effort default and displays the report's
+verification label. Reading a report never starts retries. The primary run
+status remains separate; a final PARTIAL report can coexist with a failed run.
 
 After an authenticated retry recovers a run, terminal reporting accepts the
 successful product outcome even if the workflow engine retains its failed
 aggregate state. It rechecks the submitted retry, recovery journal, sealed task
 identities, and successful replacement attempts before publishing a new report
-generation. An earlier PARTIAL report is superseded only after this evidence
-is verified; an unexplained state mismatch remains blocking.
+generation. An earlier verified PARTIAL report is superseded only after this
+evidence is verified; an unexplained state mismatch still blocks verified
+publication.
 
 ### Whole-run completion contract
 
@@ -603,27 +630,38 @@ report title. A report without a runtime census retains its previous rendering;
 absence of the field is not evidence of whole-run completeness.
 
 Offline schema validation and `ultrafuzz report render` establish document
-consistency and presentation only. Runtime report publication additionally
+consistency and presentation only. Verified runtime report publication also
 requires authenticated terminal evidence, the sealed graph and task manifest,
 and current verification/finalization authority for successful outputs. The
 runtime reader rederives the census and canonical report and requires exact
 agreement with the stored publication. Agent verifier paths continue to reject
 unauthenticated completion claims, even when publication digests match.
 
-Fallback publication admits ordinary task failures and their dependent coverage
-gaps. Artifact-contract, schema, seal, controller, and other integrity failures
-remain blocking. Missing or changed evidence is not treated as an ordinary task
-failure. Unstarted work remains visible as incomplete coverage; reporting does
-not reset or run it.
+Verified fallback publication admits ordinary task failures and their dependent
+coverage gaps. Artifact-contract, schema, seal, controller, and other integrity
+failures still block verified publication. Local best-effort reporting records
+those failed checks, publishes an unchecked PARTIAL report, and does not treat
+missing or changed evidence as verified successful work. Unstarted work remains
+visible as incomplete coverage; reporting does not reset or run it.
 
 This reporting behavior leaves the existing `halt` and `continue` execution
 policies, artifact admission, retry behavior, primary run statuses, and
 sealed-run resume semantics unchanged. It applies after the workflow has
-stopped and does not enable continuation past failed nodes. Portable report
-bundles include the runtime publication and recheck both its report authority
-and the current verified run snapshot before writing the archive. Only the
-authenticated current runtime generation and its pointer are included; older
-generations and unverified files in that directory are excluded.
+stopped and does not enable continuation past failed nodes. This is a
+new-version contract; migration or resumption of runs from older versions is
+outside its scope.
+
+Portable report bundles first attempt to include the verified runtime
+publication and recheck the current verified run snapshot before writing the
+archive. Only the current verified runtime generation and its pointer are
+included in a full run bundle. Older generations and unchecked report
+directories are excluded. If full-run verification fails, the default bundle
+contains only `report.json`, `report.md`, and `bundle-manifest.json`; the
+manifest and command result identify `scope: "report-only"` and the report's
+verification status. Arbitrary unchecked run artifacts are not included. Use
+`ultrafuzz report bundle <run-id> --require-verified` to require a verified
+full-run bundle. A report-only archive provides no run statistics or scoring
+authority.
 
 Runtime fallback reports use `unavailable` for repository identity because
 sealed run metadata does not retain an authenticated repository URL. Verified

@@ -8,10 +8,16 @@ import {
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   reportCompletionSchema,
+  reportObservedCompletionSchema,
+  reportUnreviewedFindingsSchema,
+  reportVerificationSchema,
   safeResolveInside,
   validateArtifactContract,
   type ArtifactValidationWarning,
-  type ReportCompletion
+  type ReportCompletion,
+  type ReportObservedCompletion,
+  type ReportUnreviewedFinding,
+  type ReportVerification
 } from "@ultrafuzz/artifacts";
 import { redactSecretsInText, type SecretScanMode } from "@ultrafuzz/security";
 
@@ -39,6 +45,20 @@ const PARTIAL_EMPTY_FINDINGS_NOTICE =
   "No production issues were reported from the available verified results. This partial report is not a clean result and does not establish that uncompleted work found no issues. See [Run completion](#run-completion).";
 const UNAVAILABLE_FINAL_REVIEW_NOTICE =
   "**No verified report agent output is available; final review was not completed.** Property implementation coverage is unknown. This report does not claim that no properties were planned or implemented.";
+const UNCHECKED_PARTIAL_REPORT_WARNING =
+  "> **PARTIAL REPORT — verification not checked.** This report uses available saved results. Task counts and results could not be fully verified. Missing or uncertain results are coverage gaps, and an empty findings list is not a clean result. See [Run completion](#run-completion).";
+const UNCHECKED_EMPTY_FINDINGS_NOTICE =
+  "No final findings are included in this report. Available unreviewed findings are listed separately. This partial report is not a clean result and does not establish that unfinished or unchecked work found no issues. See [Run completion](#run-completion).";
+const UNCHECKED_FINAL_REVIEW_NOTICE =
+  "**Final review was not completed or could not be verified.** Property implementation coverage is unknown. This report does not claim that no properties were planned or implemented.";
+const REPORT_VERIFICATION_REASON_TEXT: Record<ReportVerification["reason_codes"][number], string> = {
+  "verification-unavailable": "Run and output verification could not be completed.",
+  "record-missing": "Some saved run records are missing.",
+  "record-invalid": "Some saved run records did not pass the required checks.",
+  "result-unreadable": "Some output files could not be read.",
+  "result-not-reviewed": "Some available findings did not complete final review.",
+  "results-truncated": "Some available results were omitted because a file, item, or size limit was reached."
+};
 
 /**
  * The run-root goal-search census the runtime writes (issue #677), and the schema version it stamps.
@@ -210,21 +230,39 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   const completionResult = reportCompletionSchema.optional().safeParse(report.completion);
   if (!completionResult.success) return "invalid report completion census";
   const completion = completionResult.data;
+  const observationResult = reportObservedCompletionSchema.optional().safeParse(report.observed_completion);
+  const verificationResult = reportVerificationSchema.optional().safeParse(report.verification);
+  const unreviewedResult = reportUnreviewedFindingsSchema.optional().safeParse(report.unreviewed_findings);
+  if (!observationResult.success || !verificationResult.success || !unreviewedResult.success) {
+    return "invalid unchecked report metadata";
+  }
+  const observed = observationResult.data;
+  const verification = verificationResult.data;
+  if (
+    (observed !== undefined || verification !== undefined || unreviewedResult.data !== undefined) &&
+    (observed === undefined || verification === undefined || completion !== undefined)
+  ) {
+    return "unchecked reports require observations without a completion census";
+  }
   if (completion !== undefined && completion.run_id !== recordField(report, "run_metadata")?.run_id) {
     return "completion run ID does not match the report";
   }
-  const opening = reportOpening(completion);
+  const opening = reportOpening(completion, observed);
   if (!markdown.startsWith(opening) || !markdown.includes("\n## Run summary\n")) {
     return "missing report title or run summary";
   }
-  const completionViolation = completionMarkdownViolation(markdown, report, completion);
+  const completionViolation = completionMarkdownViolation(markdown, report, completion, observed, verification);
   if (completionViolation !== undefined) return completionViolation;
+  const unreviewedViolation = unreviewedMarkdownViolation(markdown, unreviewedResult.data);
+  if (unreviewedViolation !== undefined) return unreviewedViolation;
   if (!markdown.includes("\n## Property implementation coverage\n")) {
     return "missing property implementation coverage";
   }
   if (
     recordField(report, "property_implementation_coverage")?.status === "unavailable" &&
-    !markdownOutsideFencedCode(markdown).includes(UNAVAILABLE_FINAL_REVIEW_NOTICE)
+    !markdownOutsideFencedCode(markdown).includes(
+      observed === undefined ? UNAVAILABLE_FINAL_REVIEW_NOTICE : UNCHECKED_FINAL_REVIEW_NOTICE
+    )
   ) {
     return "missing unavailable final-review disclosure";
   }
@@ -279,19 +317,23 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
 function completionMarkdownViolation(
   markdown: string,
   report: JsonRecord,
-  completion: ReportCompletion | undefined
+  completion: ReportCompletion | undefined,
+  observed: ReportObservedCompletion | undefined,
+  verification: ReportVerification | undefined
 ): string | undefined {
   const prose = markdownOutsideFencedCode(markdown);
   const sections = prose.split("\n## Run completion\n");
-  if (completion === undefined) {
-    return sections.length !== 1 || prose.includes(PARTIAL_REPORT_WARNING)
+  if (completion === undefined && observed === undefined) {
+    return sections.length !== 1 ||
+      prose.includes(PARTIAL_REPORT_WARNING) ||
+      prose.includes(UNCHECKED_PARTIAL_REPORT_WARNING)
       ? "contains completion claims without a report completion census"
       : undefined;
   }
   const completionSection = sections[1];
   if (sections.length !== 2 || completionSection === undefined) return "missing or repeated run completion census";
   const expected: string[] = [];
-  appendRunCompletion(expected, completion);
+  appendRunCompletion(expected, completion, observed, verification);
   const actualSection = `## Run completion\n${completionSection.split("\n## ")[0] ?? ""}`.trim();
   if (actualSection !== expected.join("\n").trim()) return "run completion census does not match the report";
   const completionIndex = prose.indexOf("\n## Run completion\n");
@@ -302,15 +344,33 @@ function completionMarkdownViolation(
   ) {
     return "run completion census must precede findings";
   }
-  if (completion.outcome === "partial") {
+  if (completion?.outcome === "partial" || observed !== undefined) {
     if (/^No issues reported\.$/mu.test(prose)) return "partial report claims a clean empty result";
-    if (Array.isArray(report.issues) && report.issues.length === 0 && !prose.includes(PARTIAL_EMPTY_FINDINGS_NOTICE)) {
+    const emptyNotice = observed === undefined ? PARTIAL_EMPTY_FINDINGS_NOTICE : UNCHECKED_EMPTY_FINDINGS_NOTICE;
+    if (Array.isArray(report.issues) && report.issues.length === 0 && !prose.includes(emptyNotice)) {
       return "partial report is missing its empty findings caveat";
     }
   } else if (prose.includes(PARTIAL_REPORT_WARNING) || prose.includes(PARTIAL_EMPTY_FINDINGS_NOTICE)) {
     return "complete report contains partial completion claims";
   }
   return undefined;
+}
+
+function unreviewedMarkdownViolation(
+  markdown: string,
+  findings: ReportUnreviewedFinding[] | undefined
+): string | undefined {
+  const sections = markdownOutsideFencedCode(markdown).split("\n## Unreviewed findings\n");
+  if (findings === undefined || findings.length === 0) {
+    return sections.length === 1 ? undefined : "unreviewed findings have no report source";
+  }
+  const section = sections[1];
+  if (sections.length !== 2 || section === undefined) return "missing or repeated unreviewed findings";
+  const expected: string[] = [];
+  appendUnreviewedFindings(expected, findings);
+  return `## Unreviewed findings\n${section.split("\n## ")[0] ?? ""}`.trim() === expected.join("\n").trim()
+    ? undefined
+    : "unreviewed findings do not match the report";
 }
 
 function finalReportProseDirectiveViolation(prose: string): string | undefined {
@@ -631,12 +691,15 @@ function markdownOutsideFencedCode(markdown: string): string {
 
 function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown): string {
   const completion = report.completion === undefined ? undefined : reportCompletionSchema.parse(report.completion);
+  const observed = reportObservedCompletionSchema.optional().parse(report.observed_completion);
+  const verification = reportVerificationSchema.optional().parse(report.verification);
+  const unreviewed = reportUnreviewedFindingsSchema.optional().parse(report.unreviewed_findings);
   if (completion !== undefined && completion.run_id !== recordField(report, "run_metadata")?.run_id) {
     throw new Error("completion run ID does not match the report");
   }
   const issues = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const outcomes = Array.isArray(report.non_production_outcomes) ? report.non_production_outcomes.filter(isRecord) : [];
-  const lines = reportOpening(completion).trimEnd().split("\n").concat("");
+  const lines = reportOpening(completion, observed).trimEnd().split("\n").concat("");
 
   if (issues.length > 0) {
     lines.push("| Issue id | Title |", "| --- | --- |");
@@ -663,13 +726,15 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   appendCoverageEvidence(lines, report.coverage_evidence);
   const goalCoverage = summarizeGoalSearchCoverage(goalSearchCoverage);
-  if (issues.length > 0) appendRunCompletion(lines, completion);
+  if (issues.length > 0) appendRunCompletion(lines, completion, observed, verification);
 
   for (const issue of issues) {
     appendProductionIssue(lines, issue);
   }
 
-  if (issues.length === 0 && completion?.outcome === "partial") {
+  if (issues.length === 0 && observed !== undefined) {
+    lines.push("", UNCHECKED_EMPTY_FINDINGS_NOTICE);
+  } else if (issues.length === 0 && completion?.outcome === "partial") {
     lines.push("", PARTIAL_EMPTY_FINDINGS_NOTICE);
   } else if (issues.length === 0 && outcomes.length === 0) {
     // Saying "no issues" after a campaign that never fuzzed, or after a goal
@@ -677,9 +742,10 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     // measurement as a clean result.
     lines.push("", noIssuesSentence(campaignDidNotRun, goalCoverage));
   }
-  if (issues.length === 0) appendRunCompletion(lines, completion);
+  if (issues.length === 0) appendRunCompletion(lines, completion, observed, verification);
+  appendUnreviewedFindings(lines, unreviewed);
 
-  appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
+  appendPropertyImplementationCoverage(lines, report.property_implementation_coverage, observed !== undefined);
   appendGoalSearchCoverage(lines, goalCoverage);
   appendPropertyProvenance(lines, report.property_provenance, issues, outcomes);
   appendPriorFindingDisposition(lines, issues, outcomes);
@@ -687,13 +753,60 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   return `${trimTrailingBlankLines(lines).join("\n")}\n`;
 }
 
-function reportOpening(completion: ReportCompletion | undefined): string {
+function reportOpening(
+  completion: ReportCompletion | undefined,
+  observed: ReportObservedCompletion | undefined
+): string {
+  if (observed !== undefined) return `# Ultrafuzz report — PARTIAL\n\n${UNCHECKED_PARTIAL_REPORT_WARNING}\n\n`;
   return completion?.outcome === "partial"
     ? `# Ultrafuzz report — PARTIAL\n\n${PARTIAL_REPORT_WARNING}\n\n`
     : "# Ultrafuzz report\n\n";
 }
 
-function appendRunCompletion(lines: string[], completion: ReportCompletion | undefined): void {
+function appendRunCompletion(
+  lines: string[],
+  completion: ReportCompletion | undefined,
+  observed: ReportObservedCompletion | undefined,
+  verification: ReportVerification | undefined
+): void {
+  if (observed !== undefined && verification !== undefined) {
+    lines.push(
+      "",
+      "## Run completion",
+      "",
+      "- Outcome: `partial`",
+      "- Verification: `not-checked`",
+      ...verification.reason_codes.map((reason) => `- ${REPORT_VERIFICATION_REASON_TEXT[reason]}`)
+    );
+    for (const [key, label] of [
+      ["planned", "Planned"],
+      ["succeeded", "Succeeded"],
+      ["failed", "Failed"],
+      ["timed_out", "Timed-out"],
+      ["skipped", "Skipped"],
+      ["cancelled", "Cancelled"],
+      ["unverified", "Unverified"]
+    ] as const) {
+      lines.push(`- ${label} nodes: \`${observed.counts[key] === null ? "unknown" : String(observed.counts[key])}\``);
+    }
+    lines.push(
+      "",
+      "These counts are observations from available saved records. They have not been verified and may be incomplete or inconsistent. Unknown counts are not zero. This report does not establish full audit coverage or a clean security result."
+    );
+    if (observed.incomplete_nodes !== undefined && observed.incomplete_nodes.length > 0) {
+      lines.push("", "Observed incomplete nodes:", "", "| Node | Outcome |", "| --- | --- |");
+      for (const node of observed.incomplete_nodes) {
+        lines.push(`| \`${inlineValue(node.node_id)}\` | \`${inlineValue(node.outcome)}\` |`);
+      }
+    }
+    if (observed.incomplete_nodes !== undefined || observed.incomplete_nodes_omitted !== undefined) {
+      lines.push(
+        "",
+        `- Additional observed incomplete node identities omitted: \`${observed.incomplete_nodes_omitted == null ? "unknown" : String(observed.incomplete_nodes_omitted)}\``
+      );
+    }
+    return;
+  }
   if (completion === undefined) return;
   const counts = completion.counts;
   lines.push(
@@ -723,6 +836,27 @@ function appendRunCompletion(lines: string[], completion: ReportCompletion | und
     "",
     `- Additional incomplete node identities omitted from this bounded census: \`${String(completion.incomplete_nodes_omitted)}\``
   );
+}
+
+function appendUnreviewedFindings(lines: string[], findings: ReportUnreviewedFinding[] | undefined): void {
+  if (findings === undefined || findings.length === 0) return;
+  lines.push(
+    "",
+    "## Unreviewed findings",
+    "",
+    "These entries were read from available result files. They are unreviewed and unverified candidates, not final findings. Their source labels are observations, not verified provenance."
+  );
+  const prose = (value: string): string => publicProse(value).replaceAll("[", "\\[").replaceAll("]", "\\]");
+  for (const [index, finding] of findings.entries()) {
+    lines.push(
+      "",
+      `### Candidate ${String(index + 1)}: ${prose(finding.title)}`,
+      "",
+      `- Source: ${prose(finding.source_path)}`,
+      "",
+      `Description: ${prose(finding.description)}`
+    );
+  }
 }
 
 /** Host diagnostics can accompany an immutable report without rewriting its JSON/Markdown pair. */
@@ -982,7 +1116,7 @@ function appendPropertyProvenance(
   }
 }
 
-function appendPropertyImplementationCoverage(lines: string[], value: unknown): void {
+function appendPropertyImplementationCoverage(lines: string[], value: unknown, unchecked: boolean): void {
   lines.push("", "## Property implementation coverage", "");
   if (!isRecord(value)) {
     throw new Error("Validated final report is missing typed property implementation coverage");
@@ -997,7 +1131,7 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
       "- Status: `unavailable`",
       "- Reason: `final-review-not-completed`",
       "",
-      UNAVAILABLE_FINAL_REVIEW_NOTICE
+      unchecked ? UNCHECKED_FINAL_REVIEW_NOTICE : UNAVAILABLE_FINAL_REVIEW_NOTICE
     );
     return;
   }

@@ -101,7 +101,13 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
     await wait(profile.poll_interval_seconds * 1_000);
   }
 
-  const report = commandData("report", execute(["report", runId, "--project", auditRoot, "--json"]));
+  const report = commandData(
+    "report",
+    execute(["report", runId, "--project", auditRoot, "--require-verified", "--json"])
+  );
+  if (report.source === "unverified-runtime-report" || report.verification === "not-checked") {
+    throw new Error("benchmark submission requires a verified report");
+  }
   const reportPath = report.markdown_path;
   copyFinalMarkdown({ reportPath, submissionRoot });
   return { runId, reportPath };

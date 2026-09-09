@@ -400,6 +400,17 @@ test("report results expose runtime publication and terminal completion in both 
   assertParity("report", successEnvelope("report", { ...report, terminal: "true" }), false);
   assertParity("report", successEnvelope("report", { ...report, source: "unverified-report" }), false);
   assertParity("report", successEnvelope("report", { ...report, unexpected: true }), false);
+  assertParity(
+    "report",
+    successEnvelope("report", {
+      ...report,
+      source: "unverified-runtime-report",
+      verification: "not-checked"
+    }),
+    true
+  );
+  assertParity("report", successEnvelope("report", { ...report, verification: "verified" }), true);
+  assertParity("report", successEnvelope("report", { ...report, verification: "trusted" }), false);
 });
 
 function successEnvelope(command: EvmbenchCliCommand, data: Record<string, unknown>): Record<string, unknown> {

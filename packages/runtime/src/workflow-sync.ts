@@ -108,7 +108,7 @@ import {
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
-import { publishTerminalReport } from "./terminal-report.js";
+import { publishBestEffortTerminalReport } from "./unverified-report.js";
 import { recoverySubmissionAuthority } from "./workflow-recovery-authority.js";
 import {
   parseCurrentSmithersInspect,
@@ -1731,21 +1731,25 @@ export async function synchronizeLinkedWorkflowRun(
     }
   }
 
-  if (
-    ["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState) &&
-    inspect.exhaustedLoops.length === 0 &&
-    !diagnostics.some((diagnostic) => diagnostic.severity === "error")
-  ) {
+  if (["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState)) {
     try {
       assertSynchronizationBudget(control);
-      publishTerminalReport(layout.root, {
+      // A stopped workflow can still produce an explicitly unchecked report
+      // when task verification or controller evidence prevents a checked one.
+      // Publication does not change execution diagnostics or task disposition.
+      publishBestEffortTerminalReport(layout.root, {
         workflowRunId: evidence.smithersRunId,
         workflowState: inspect.runState as "succeeded" | "succeeded-with-failures" | "failed" | "cancelled"
       });
     } catch (error) {
       const interrupted = synchronizationInterruptionDiagnostic(error);
       if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
-      diagnostics.push(diagnosticFromError(error, "report", "TERMINAL_REPORT_UNAVAILABLE"));
+      diagnostics.push({
+        code: "TERMINAL_REPORT_UNAVAILABLE",
+        message: "The terminal report could not be published from the available run records.",
+        severity: "warning",
+        source: "report"
+      });
     }
   }
 

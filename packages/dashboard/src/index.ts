@@ -59,12 +59,10 @@ import {
   validateProject,
   loadResolvedProject,
   modelProfilesForTopology,
-  isVerifiedOutputAuthorityUnavailable,
   loadGoalSearchCoverageSnapshot,
-  loadCurrentFinalReportSnapshot,
+  loadReportSnapshot,
   loadVerifiedRunOutputAuthoritySnapshot,
   projectCanonicalFinalReport,
-  verifySealedTaskManifestSnapshot,
   type RuntimeResult,
   type VerifiedNodeOutputSnapshot,
   type VerifiedRunOutputAuthoritySnapshot
@@ -1027,32 +1025,15 @@ class DashboardApp {
         json: undefined
       });
     }
-    const declaration = dashboardDeclaredReportAvailability(context.runRoot);
-    try {
-      const loaded = loadCurrentFinalReportSnapshot(context.runRoot);
-      return dashboardHttpDocument("report", {
-        markdown_path: posixRelativePath(context.runRoot, loaded.artifacts.markdown_path),
-        markdown: loaded.markdown,
-        json_path: posixRelativePath(context.runRoot, loaded.artifacts.json_path),
-        json: loaded.json,
-        host_validation_warnings: loaded.validation_warnings
-      });
-    } catch (error) {
-      if (
-        !declaration.physicalPresent &&
-        !declaration.claimedSuccess &&
-        !declaration.invalidDeclaration &&
-        isVerifiedOutputAuthorityUnavailable(error)
-      ) {
-        return dashboardHttpDocument("report", {
-          markdown_path: undefined,
-          markdown: undefined,
-          json_path: undefined,
-          json: undefined
-        });
-      }
-      throw error;
-    }
+    const loaded = loadReportSnapshot(context.runRoot);
+    return dashboardHttpDocument("report", {
+      markdown_path: posixRelativePath(context.runRoot, loaded.artifacts.markdown_path),
+      markdown: loaded.markdown,
+      json_path: posixRelativePath(context.runRoot, loaded.artifacts.json_path),
+      json: loaded.json,
+      verification: loaded.verification,
+      host_validation_warnings: loaded.validation_warnings
+    });
   }
 
   async events(context?: DashboardRunContext): Promise<JsonObject> {
@@ -2302,62 +2283,6 @@ function assertDashboardCapturedRunAuthorityRemainedCurrent(captured: DashboardC
   } else if (captured.context.persisted) {
     assertDashboardAbsentAuthorityRemainedCurrent(captured.context.runRoot, captured.state);
   }
-}
-
-interface DashboardReportAvailability {
-  physicalPresent: boolean;
-  claimedSuccess: boolean;
-  invalidDeclaration: boolean;
-}
-
-function dashboardDeclaredReportAvailability(runRoot: string): DashboardReportAvailability {
-  const layout = layoutForRunRoot(runRoot);
-  const graph = readPlannedGraphDocument(layout.graphPath);
-  const state = readRunState(layout);
-  const producers = graph.nodes.filter((node) =>
-    node.outputs.some((output) => output.contract === "ultrafuzz/report@3")
-  );
-  let sealedTasks: ReturnType<typeof verifySealedTaskManifestSnapshot>["document"]["tasks"] = [];
-  const controlAuthority = dashboardControlAuthorityPresence(layout);
-  if (controlAuthority.tasksPresent || controlAuthority.sealPresent) {
-    sealedTasks = verifySealedTaskManifestSnapshot(layout).document.tasks;
-  }
-
-  let physicalPresent = false;
-  let claimedSuccess = false;
-  let invalidDeclaration = producers.length > 1;
-  for (const producer of producers) {
-    const reportOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
-    const markdownOutputs = producer.outputs.filter((output) => output.contract === "ultrafuzz/nonempty-markdown@1");
-    invalidDeclaration ||= reportOutputs.length !== 1 || markdownOutputs.length !== 1;
-    const reportPaths = [...reportOutputs, ...markdownOutputs].map((output) => output.path);
-    const producerTasks = sealedTasks.filter(
-      (task) => task.concreteNodeId === producer.id && task.logicalNodeId === producer.logical_id
-    );
-    const candidateArtifactDirs = new Set([producer.artifact_dir]);
-    for (const task of producerTasks) {
-      candidateArtifactDirs.add(path.posix.join("artifacts", validateSafeId(task.attemptId, "report attempt ID")));
-      if (state.nodes[task.attemptId]?.status === "succeeded") claimedSuccess = true;
-    }
-    claimedSuccess ||= Object.entries(state.nodes).some(
-      ([attemptId, node]) =>
-        node.status === "succeeded" &&
-        (attemptId === producer.id ||
-          node.logical_node_id === producer.logical_id ||
-          producerTasks.some((task) => task.attemptId === attemptId))
-    );
-    for (const artifactDir of candidateArtifactDirs) {
-      for (const reportPath of reportPaths) {
-        const candidate = safeResolveInside(
-          runRoot,
-          path.posix.join(artifactDir, reportPath),
-          "declared dashboard report output"
-        );
-        if (lstatIfPresent(candidate) !== undefined) physicalPresent = true;
-      }
-    }
-  }
-  return { physicalPresent, claimedSuccess, invalidDeclaration };
 }
 
 function dashboardControlAuthorityPresence(layout: ReturnType<typeof layoutForRunRoot>): {

@@ -610,7 +610,7 @@ test("dashboard prefers a completed declared report over raw findings without a 
   }
 });
 
-test("dashboard does not hide unavailable custom report authority after the renamed producer claims success", async () => {
+test("dashboard reports unchecked partial coverage when a successful report producer lacks authority", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   assert.ok(fixture.reportAttemptId);
   const reportDir = path.join(fixture.layout.artifactsDir, fixture.reportAttemptId, "deliverables");
@@ -621,18 +621,16 @@ test("dashboard does not hide unavailable custom report authority after the rena
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
     const response = await fetch(apiUrl(handle.url, "/api/report"));
-    assert.equal(response.status, 500);
-    const error = await parseHttpResponse(response, "errorResponse");
-    assert.match(
-      String(error.error),
-      /claims succeeded without complete current verification\/finalization authority/iu
-    );
+    assert.equal(response.status, 200);
+    const report = await parseHttpResponse(response, "reportResponse");
+    assert.equal(report.verification, "not-checked");
+    assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
   } finally {
     await handle.close();
   }
 });
 
-test("dashboard rejects a malformed runtime report receipt instead of serving an older agent report", async () => {
+test("dashboard labels an unchecked partial report when the runtime receipt is malformed", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
@@ -643,9 +641,11 @@ test("dashboard rejects a malformed runtime report receipt instead of serving an
     fs.writeFileSync(receiptPath, "{", "utf8");
 
     const response = await fetch(apiUrl(handle.url, "/api/report"));
-    assert.equal(response.status, 500);
-    const error = await parseHttpResponse(response, "errorResponse");
-    assert.match(String(error.error), /terminal report receipt|JSON|parse|object-property/iu);
+    assert.equal(response.status, 200);
+    const report = await parseHttpResponse(response, "reportResponse");
+    assert.equal(report.verification, "not-checked");
+    assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+    assert.equal(fs.readFileSync(receiptPath, "utf8"), "{");
   } finally {
     await handle.close();
   }
@@ -761,7 +761,7 @@ test("dashboard serves the current partial report while retaining the failed run
   }
 });
 
-test("dashboard report rejects malformed present task-manifest and control-seal authority", async () => {
+test("dashboard report marks malformed task-manifest and control-seal authority as unchecked", async () => {
   const fixture = await createDashboardFindingsFixture({ includeFinalReport: true, emptyFindings: true });
   const handle = await serveDashboard({ projectRoot: fixture.projectRoot, runId: fixture.runId, port: 0 });
   try {
@@ -776,9 +776,11 @@ test("dashboard report rejects malformed present task-manifest and control-seal 
       fs.writeFileSync(authorityPath, "{", "utf8");
       try {
         const response = await fetch(apiUrl(handle.url, "/api/report"));
-        assert.equal(response.status, 500, label);
-        const error = await parseHttpResponse(response, "errorResponse");
-        assert.ok(String(error.error).length > 0, label);
+        assert.equal(response.status, 200, label);
+        const report = await parseHttpResponse(response, "reportResponse");
+        assert.equal(report.verification, "not-checked", label);
+        assert.match(String(report.markdown), /^# Ultrafuzz report — PARTIAL/u);
+        assert.equal(fs.readFileSync(authorityPath, "utf8"), "{");
       } finally {
         fs.writeFileSync(authorityPath, original);
       }

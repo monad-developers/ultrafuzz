@@ -691,7 +691,10 @@
           "type": "string"
         },
         "source": {
-          "enum": ["verified-agent-report", "verified-runtime-report"]
+          "enum": ["verified-agent-report", "verified-runtime-report", "unverified-runtime-report"]
+        },
+        "verification": {
+          "enum": ["verified", "not-checked"]
         },
         "completion": {
           "enum": ["complete", "partial"]

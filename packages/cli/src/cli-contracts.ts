@@ -50,7 +50,7 @@ import type {
 
 import type { AuditProfileSettingOrigin, AuditProfileSettings } from "@ultrafuzz/config";
 import type { AnalysisSummary } from "./benchmark-analysis/lib/runner.js";
-import type { ValidatedReportArtifacts } from "./report-artifacts.js";
+import type { ReportArtifacts } from "./report-artifacts.js";
 import type { RunStatisticsValue } from "./run-statistics.js";
 
 export const CLI_SCHEMA_VERSION = "ultrafuzz.cli.result.v2" as const;
@@ -212,6 +212,8 @@ export interface CliDoctorData extends Omit<DoctorValue, "validation"> {
 }
 
 export interface CliReportBundleData {
+  scope?: "report-only";
+  verification?: "verified" | "not-checked";
   zip_path: string;
   bytes: number;
   sha256: string;
@@ -346,7 +348,7 @@ export interface CliCommandDataMap {
   status: RunHealthValue;
   stats: RunStatisticsValue;
   inspect: CliInspectData;
-  report: ValidatedReportArtifacts;
+  report: ReportArtifacts;
   "report render": {
     source_path: string;
     destination_path: string;
