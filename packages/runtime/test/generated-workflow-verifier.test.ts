@@ -5830,8 +5830,13 @@ test("generated cloud handoff derives durable marker authorities on pre-sync and
 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /ctx\.outputMaybe\(outputs\.verification, \{ nodeId: producer\.verifierId \}\)/u);
-  assert.match(source, /if \(dependencyVerificationAuthorities === undefined\) return null/u);
-  assert.match(source, /dependency_verification_authorities: dependencyVerificationAuthorities/u);
+  assert.match(source, /if \(dependencyVerificationAuthorities === undefined && !skipAgent\) return null/u);
+  const sandboxStart = source.indexOf("<Sandbox", source.indexOf("const dependencyVerificationAuthorities ="));
+  const sandboxEnd = source.indexOf("/>", sandboxStart);
+  assert.ok(sandboxStart >= 0 && sandboxEnd > sandboxStart);
+  const sandbox = source.slice(sandboxStart, sandboxEnd);
+  assert.match(sandbox, /dependency_verification_authorities: dependencyVerificationAuthorities \?\? \[\]/u);
+  assert.match(sandbox, /skipIf=\{skipAgent\}/u);
   assert.match(source, /schema_version: "ultrafuzz\.modal\.node\.v2"/u);
 });
 
@@ -5981,6 +5986,30 @@ test("Smithers rerenders a cloud Sandbox only after its required verifier output
   assert.ok(restartedCloudTask, "a fresh renderer must recover the Sandbox solely from durable verifier rows");
   assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, expectedSandboxInput);
   assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, cloudTask.meta?.__sandboxInput);
+
+  const skippedWorkflow = {
+    ...workflow,
+    build: () =>
+      React.createElement(
+        components.Workflow,
+        { name: "verification-authority-skipped" },
+        React.createElement(components.Sandbox, {
+          id: "cloud-consumer",
+          output: "sandbox_result",
+          provider: { id: "modal-test-provider" },
+          input: { schema_version: "ultrafuzz.modal.node.v2", dependency_verification_authorities: [] },
+          skipIf: true,
+          meta: { executionMode: "cloud" }
+        })
+      )
+  };
+  const skipped = testing.simulate(skippedWorkflow, {
+    mocks: { "cloud-consumer": { summary: "must not dispatch" } }
+  });
+  await skipped.run();
+  assert.equal(skipped.status, "finished");
+  assert.deepEqual(skipped.executed, [], "missing marker authorities may mount only a skipped, undispatched Sandbox");
+  assert.deepEqual(skipped.outputs.sandbox_result ?? [], []);
 });
 
 test("generated Smithers workflow quarantines optional tasks and reads only verified optional ancestors", () => {

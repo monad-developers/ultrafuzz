@@ -1182,7 +1182,10 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
   assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
   assert.equal(fs.readFileSync(runEventsPath, "utf8"), eventsBefore);
 
-  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  // The fake runner has no controller heartbeat. Keep its lease current independently of CI setup time.
+  const observedAtMs = Date.parse(readState(fixture).last_transition_at) + 1_000;
+  const syncControl = { now: () => observedAtMs };
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env }, syncControl);
   assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
   const state = readState(fixture);
   const generatedProvenance = state.nodes[fixture.storageId!]?.provenance as ExecutionNodeProvenance | undefined;
@@ -1266,7 +1269,7 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
 
   const ledgerAfterFirstSync = fs.readFileSync(path.join(fixture.runRoot, "attempts.jsonl"), "utf8");
   const eventsAfterFirstSync = fs.readFileSync(runEventsPath, "utf8");
-  const replayed = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  const replayed = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env }, syncControl);
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.equal(fs.readFileSync(path.join(fixture.runRoot, "attempts.jsonl"), "utf8"), ledgerAfterFirstSync);
   assert.equal(fs.readFileSync(runEventsPath, "utf8"), eventsAfterFirstSync);
