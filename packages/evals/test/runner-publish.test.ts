@@ -751,16 +751,43 @@ describe("runner", () => {
   it("rejects a row missing its topology backend before creating an Ultrafuzz run", async () => {
     const project = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-required-command-"));
     initProject({ projectRoot: project, force: true });
-    const configPath = path.join(project, "ultrafuzz.toml");
+    // Use a required task with no reference inputs. Packaged strategy groups
+    // continue on failure, and their reference caches are unrelated to preflight.
     fs.writeFileSync(
-      configPath,
-      fs
-        .readFileSync(configPath, "utf8")
-        // The packaged exhaustive topology intentionally quarantines stateful
-        // specialists, so their missing backends are warnings. Use the
-        // focused invariant profile to exercise the blocking preflight.
-        .replace('audit_profile = "default"', 'audit_profile = "invariant-only"')
-        .replace("default_timeout_seconds = 3600", "default_timeout_seconds = 7200"),
+      path.join(project, ".ultrafuzz", "topology.yml"),
+      `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: fixture-task
+    kind: agentic
+    prompt: setup/required-command-fixture.md
+    required_commands: [ultrafuzz-eval-fixture-backend]
+    depends_on: [__start__]
+    outputs:
+      - path: fixture.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [fixture-task]
+`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(project, ".ultrafuzz", "prompts", "setup", "required-command-fixture.md"),
+      `---
+id: required-command-fixture
+display_name: Required Command Fixture
+---
+
+Write a neutral fixture message to {{artifact_path}}/fixture.md.
+`,
       "utf8"
     );
     const suite = testSuite(path.join(project, "ground-truth"));
@@ -781,7 +808,7 @@ describe("runner", () => {
       expect.objectContaining({
         code: "RUN_REQUIRED_COMMAND_MISSING",
         message:
-          "required topology commands are not available in the configured execution environment: covg-eval (required by stateful-invariant-coverage); recon (required by stateful-invariant-campaign, stateful-invariant-coverage); recon-generate (required by stateful-invariant-coverage)",
+          "required topology commands are not available in the configured execution environment: ultrafuzz-eval-fixture-backend (required by fixture-task)",
         path: "topology.required_commands",
         severity: "error",
         source: "runtime"
