@@ -9,9 +9,16 @@ You need:
 
 - A local checkout of this Ultrafuzz repository.
 - A Solidity target repository you can modify locally.
-- `pnpm` installed for the TypeScript workspace.
-- Any agent credentials required by the generated project agent registry.
-- Foundry or a target-project layout your prompts can use for fuzz tests.
+- Node.js `22.19.0` or newer and the repository-pinned `pnpm` `11.1.1` for the
+  TypeScript workspace.
+- Bun `1.3` or newer for the Smithers workflow executable, plus Git.
+- The CLI executables for the configured agent profiles and their credentials.
+  `doctor` checks executables for every configured model profile, including
+  profiles that are not selected for a run.
+- Foundry (`forge`) and the target project's test dependencies and layout.
+
+See [Development Commands](../reference/development.md) for host runtime and
+platform requirements.
 
 > **Security note:** run this tutorial on an ephemeral, isolated virtual machine
 > you can discard afterwards. Agents run in an unrestricted, skip-permissions
@@ -27,8 +34,21 @@ pnpm install
 pnpm --filter @ultrafuzz/cli... build
 ```
 
-The rest of this guide assumes `ultrafuzz` resolves on your PATH. During
-development, you can run the same commands through the workspace CLI binary.
+Building the workspace does not install a global `ultrafuzz` command. From the
+Ultrafuzz repository root, define a shell function for this terminal session and
+check the built CLI:
+
+```bash
+ULTRAFUZZ_CLI="$(pwd)/packages/cli/dist/index.js"
+ultrafuzz() { node "$ULTRAFUZZ_CLI" "$@"; }
+ultrafuzz --help
+```
+
+The absolute entrypoint keeps the function usable after changing directories.
+The rest of this guide assumes this function is defined or an `ultrafuzz`
+executable is already on your PATH. You can also invoke
+`node /absolute/path/to/ultrafuzz/packages/cli/dist/index.js` directly with the
+same arguments.
 
 ## Initialize The Target Repository
 
@@ -97,8 +117,9 @@ OPENROUTER_API_KEY=... ultrafuzz run --project /path/to/target-protocol \
 ```
 
 The OpenRouter model string is a catalogue ID and is preserved exactly; keep
-the key in `OPENROUTER_API_KEY` (or the variable named by
-`agents.OpenRouterAgent.api_key_env`), never in `ultrafuzz.toml`.
+the key in the canonical `OPENROUTER_API_KEY` environment variable, never in
+`ultrafuzz.toml`. A different `agents.OpenRouterAgent.api_key_env` is rejected
+during config validation.
 
 Loops, dependencies, contracted outputs, reference bindings, and model-profile
 fan-out belong in `.ultrafuzz/topology.yml`.
