@@ -607,16 +607,18 @@ describe("strict worker result contracts", () => {
     });
   });
 
-  it("writes every terminal taxonomy value through the terminal contract", async () => {
+  // Give each durable-write case its own timeout budget on busy CI disks.
+  it.each(TERMINAL_CATEGORIES)("writes %s through the terminal contract", async (category) => {
     const root = await temporaryRoot();
     const writer = await WorkerResultWriter.create({
       statusPath: path.join(root, "status.json"),
       resultPath: path.join(root, "result.json")
     });
 
-    for (const category of TERMINAL_CATEGORIES) {
-      expect((await writer.writeTerminal(category, emptyWorkerCheckpoint())).exit_category).toBe(category);
-    }
+    const contract = await writer.writeTerminal(category, emptyWorkerCheckpoint());
+    expect(contract.exit_category).toBe(category);
+    expect(readContract(path.join(root, "status.json"))).toEqual(contract);
+    expect(readContract(path.join(root, "result.json"))).toEqual(contract);
   });
 });
 
