@@ -12,7 +12,7 @@ Topology, prompts, references, runs, workspaces, and cache state live under
 ## Common Shape
 
 ```toml
-schema_version = "1.0"
+schema_version = "ultrafuzz.config.v2"
 audit_profile = "default"
 dynamic_strategies_enumerator = 3
 
@@ -40,9 +40,6 @@ retention_days = 30
 cpu = 4
 memory_mib = 8192
 timeout_seconds = 3600
-
-[models]
-default = "default"
 
 [models.default]
 agent = "CodexAgent"
@@ -174,15 +171,16 @@ handoff, retry, recovery, and cleanup contracts.
 ## Model Profiles
 
 ```toml
-[models]
-default = "default"
-
 [models.default]
 agent = "CodexAgent"
 model = "gpt-5.5"
 reasoning = "xhigh"
 timeout_seconds = 3600
 ```
+
+The profile named `default` is selected implicitly. Do not also define
+`[models] default = "default"`: TOML cannot use `models.default` as both a
+string and a table.
 
 Profile IDs must use safe ASCII identifier characters. Each profile supports:
 
