@@ -81,7 +81,7 @@ api_key_env = "OPENAI_API_KEY"
 
 API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
-### OpenRouter through Codex
+## OpenRouter through Codex
 
 `ultrafuzz init` generates a dedicated `OpenRouterAgent`, which uses the Codex
 CLI harness with an isolated OpenRouter provider configuration. The default
