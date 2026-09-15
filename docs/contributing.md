@@ -2,6 +2,11 @@
 
 This repository is a TypeScript workspace for Ultrafuzz.
 
+Report security vulnerabilities privately as described in the
+[Security Policy](../SECURITY.md). Use GitHub issues for ordinary bugs and
+feature requests, and pull requests for proposed changes. Contributors should
+follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Repository Map
 
 Workspace packages live under `packages/`:

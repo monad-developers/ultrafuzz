@@ -53,7 +53,10 @@ If you need to install any dependencies, ask for my approval first.
 - [EVMBench integration](benchmarks/evmbench/README.md)
 - [Schemas](docs/schemas.md)
 - [Security](docs/security.md)
+- [Reporting a vulnerability](SECURITY.md)
 - [Licensing](docs/licensing.md)
+- [Contributing](docs/contributing.md)
+- [Code of Conduct](docs/CODE_OF_CONDUCT.md)
 
 ## Evals
 
@@ -64,3 +67,8 @@ Longitudinal results from the public benchmark suite. See [Eval Suites](docs/ref
 ![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)
 
 ![UltrafuzzBench model performance versus cost](docs/assets/eval-history/performance-cost.svg)
+
+## License
+
+Ultrafuzz is licensed under the [MIT License](LICENSE.md).
+Copyright (c) 2026 Monad Foundation.
