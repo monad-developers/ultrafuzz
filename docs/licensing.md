@@ -1,33 +1,25 @@
 # Licensing
 
-Ultrafuzz is released under the MIT License. The canonical text is [`LICENSE`](../LICENSE) at the repository root, and
+Ultrafuzz is released under the MIT License. The canonical text is [`LICENSE.md`](../LICENSE.md) at the repository root, and
 the SPDX identifier for the whole repository is `MIT`.
 
-## Copyright attribution evidence
+## Copyright attribution
 
-The notice reads `Copyright (c) 2026 Monad Developers`.
+The notice reads `Copyright (c) 2026 Monad Foundation`.
 
-- **Holder.** `Monad Developers` is the display name of the GitHub organization that owns this repository
-  (`github.com/monad-developers`). No prior copyright notice, header, or attribution existed anywhere in the tree, so the
-  repository owner is the only evidence-backed holder. The organization's other first-party repositories carry no
-  in-house notice to copy; its MIT-licensed repositories are forks that retain their upstream holders' notices.
-- **Year.** A single year, not a range. Every commit in this repository is dated 2026 — the first commit
-  (`56ef2c304698618c3c8214d5c9f0ac7f6bada3b9`) landed 2026-06-24, and no commit predates it. A range such as
-  `2025-2026` would assert authorship in a year with no authorship.
-
-If the intended holder is a different legal entity, changing the holder string in `LICENSE` is the only edit required —
-no other file names a holder.
+The MIT text and copyright notice match the
+[Monad Foundation license in monad-ts](https://github.com/monad-crypto/monad-ts/blob/main/LICENSE).
 
 ## SPDX and metadata consistency
 
 | Surface                         | Declaration                                   |
 | ------------------------------- | --------------------------------------------- |
-| `LICENSE`                       | Full MIT text with the copyright notice above |
+| `LICENSE.md`                    | Full MIT text with the copyright notice above |
 | Root `package.json`             | `"license": "MIT"`                            |
 | Every `packages/*/package.json` | `"license": "MIT"`                            |
-| `README.md`                     | License section naming MIT and `LICENSE`      |
+| `README.md`                     | License section naming MIT and `LICENSE.md`   |
 
-`"license": "MIT"` is itself the SPDX short identifier that npm and pnpm expect, so the manifests and `LICENSE` express
+`"license": "MIT"` is itself the SPDX short identifier that npm and pnpm expect, so the manifests and `LICENSE.md` express
 one license with no second, divergent declaration to keep in sync. Per-file `SPDX-License-Identifier` headers are
 deliberately not used: they would add a header to every source file without changing the licensing outcome, and the
 repository-level declarations already cover every published surface.
@@ -37,7 +29,7 @@ repository-level declarations already cover every published surface.
 A NOTICE file would be misleading here rather than merely redundant, because nothing generates a notice obligation:
 
 - **MIT has no notice-file mechanism.** Its only condition is that the copyright notice and permission notice travel
-  with copies or substantial portions of the Software. `LICENSE` satisfies that. The attribution-notice file convention
+  with copies or substantial portions of the Software. `LICENSE.md` satisfies that. The attribution-notice file convention
   comes from Apache-2.0 §4(d), and no part of this repository is Apache-2.0 licensed.
 - **No third-party source is vendored.** There is no `vendor/`, `third_party/`, or copied-upstream directory, and no
   source file in `packages/**` or `scripts/**` is derived from an external project.
@@ -55,6 +47,6 @@ whose upstream ships its own NOTICE.
 
 ## Enforcement
 
-`scripts/ci/license-metadata.test.ts` fails the `ci-scripts` release gate if `LICENSE` stops being the MIT text, if its
+`scripts/ci/license-metadata.test.ts` fails the `ci-scripts` release gate if `LICENSE.md` stops being the MIT text, if its
 copyright line changes shape, or if any workspace package listed in `pnpm-workspace.yaml` stops declaring
 `"license": "MIT"`.

@@ -231,7 +231,7 @@ function assertPackedPackagePayload(packageRoot, installedRoot, manifest) {
   ) {
     throw new Error(`${manifest.name} must declare an explicit non-empty runtime files allowlist`);
   }
-  const expectedFiles = ["LICENSE", "package.json"];
+  const expectedFiles = ["LICENSE.md", "package.json"];
   for (const entry of manifest.files) {
     const source = path.join(packageRoot, entry);
     const stat = fs.statSync(source, { throwIfNoEntry: false });
@@ -255,7 +255,8 @@ function assertPackedPackagePayload(packageRoot, installedRoot, manifest) {
     );
   }
   for (const relativePath of expectedFiles.filter((entry) => entry !== "package.json")) {
-    const sourcePath = relativePath === "LICENSE" ? path.join(root, "LICENSE") : path.join(packageRoot, relativePath);
+    const sourcePath =
+      relativePath === "LICENSE.md" ? path.join(root, "LICENSE.md") : path.join(packageRoot, relativePath);
     assertSameBytes(sourcePath, path.join(installedRoot, relativePath), `installed ${manifest.name} ${relativePath}`);
   }
 }

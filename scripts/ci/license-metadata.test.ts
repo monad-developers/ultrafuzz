@@ -8,13 +8,13 @@ import { parse as parseYaml } from "yaml";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * The repository declares MIT in three places that a reader treats as one statement: the root `LICENSE`
+ * The repository declares MIT in three places that a reader treats as one statement: the root `LICENSE.md`
  * text, the root manifest, and every workspace manifest. A package that silently drops `license` publishes
- * as unlicensed, and a `LICENSE` whose holder or year drifts from `docs/licensing.md` makes the recorded
+ * as unlicensed, and a `LICENSE.md` whose holder or year drifts from `docs/licensing.md` makes the recorded
  * attribution evidence wrong. Both failures are invisible in review, so they are asserted here.
  */
 describe("license metadata", () => {
-  const license = fs.readFileSync(path.join(repoRoot, "LICENSE"), "utf8");
+  const license = fs.readFileSync(path.join(repoRoot, "LICENSE.md"), "utf8");
 
   const manifestPaths = (() => {
     const workspace = parseYaml(fs.readFileSync(path.join(repoRoot, "pnpm-workspace.yaml"), "utf8")) as {
@@ -36,7 +36,7 @@ describe("license metadata", () => {
     const notice = /^Copyright \(c\) (\d{4}) (.+)$/mu.exec(license);
     expect(notice).not.toBeNull();
     expect(notice?.[1]).toBe("2026");
-    expect(notice?.[2]).toBe("Monad Developers");
+    expect(notice?.[2]).toBe("Monad Foundation");
   });
 
   it("declares MIT in the root manifest and every workspace manifest", () => {
@@ -54,7 +54,7 @@ describe("license metadata", () => {
   it("records the licensing decision, including why no NOTICE file exists", () => {
     expect(fs.existsSync(path.join(repoRoot, "NOTICE"))).toBe(false);
     const licensing = fs.readFileSync(path.join(repoRoot, "docs", "licensing.md"), "utf8");
-    expect(licensing).toInclude("Copyright (c) 2026 Monad Developers");
+    expect(licensing).toInclude("Copyright (c) 2026 Monad Foundation");
     expect(licensing).toInclude("Why there is no NOTICE file");
   });
 });

@@ -38,7 +38,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at the project's GitHub issue tracker at [https://github.com/monad-developers/ultrafuzz/issues](https://github.com/monad-developers/ultrafuzz/issues). All complaints will be reviewed and investigated promptly and fairly.
 
-> **Note:** This project currently designates no separate private reporting contact ([docs/security.md](security.md) defines none), so conduct reports use the repository issue tracker, the same channel the security documentation uses for tracking issues.
+For security vulnerability reports, use the private reporting channel in the [Security Policy](../SECURITY.md).
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

@@ -1,5 +1,11 @@
 # Ultrafuzz Security Posture
 
+## Reporting a Vulnerability
+
+Report suspected vulnerabilities privately to
+[security@monad.foundation](mailto:security@monad.foundation). See the
+[Security Policy](../SECURITY.md) for reporting guidance.
+
 ## Before You Run
 
 > **Security note**
