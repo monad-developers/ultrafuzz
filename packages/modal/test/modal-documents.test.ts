@@ -484,15 +484,13 @@ describe("Modal strict JSON contract foundation", () => {
     );
   });
 
-  it("validates one exact TypeScript fixture for every root contract", () => {
-    const fixtures = contractFixtures();
-    for (const [schemaId, value] of Object.entries(fixtures) as Array<
-      [ModalContractSchemaId, ModalContractBySchemaId[ModalContractSchemaId]]
-    >) {
-      expect(validateModalJsonSchema(schemaId, value)).toMatchObject({ ok: true });
-      expect(parseModalDocumentValue(schemaId, value)).toBe(value);
-      expect(parseModalDocumentBytes(schemaId, bytes(value)).value).toEqual(value);
-    }
+  // Give each contract's isolated validation its own timeout budget on busy CI runners.
+  it.each(
+    Object.entries(contractFixtures()) as Array<[ModalContractSchemaId, ModalContractBySchemaId[ModalContractSchemaId]]>
+  )("validates one exact TypeScript fixture for root contract %s", (schemaId, value) => {
+    expect(validateModalJsonSchema(schemaId, value)).toMatchObject({ ok: true });
+    expect(parseModalDocumentValue(schemaId, value)).toBe(value);
+    expect(parseModalDocumentBytes(schemaId, bytes(value)).value).toEqual(value);
   });
 
   it("pins positive and negative public benchmark bundle v5 schema fixtures", () => {

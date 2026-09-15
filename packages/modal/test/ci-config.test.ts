@@ -580,23 +580,26 @@ describe("public Modal benchmark configuration", () => {
     }
   }, 15_000);
 
-  it("rejects malformed-present model selection JSON instead of defaulting or converting it", () => {
+  // Give each subprocess its own timeout budget on busy CI runners.
+  it.each([
+    { name: "whitespace-only JSON", generation: "70000-1", value: "   ", message: /must be valid strict JSON/u },
+    {
+      name: "duplicate JSON keys",
+      generation: "70001-1",
+      value: '[{"provider":"openai","provider":"anthropic","model":"gpt-5.6-luna","reasoning":"high"}]',
+      message: /duplicate/iu
+    }
+  ])("rejects malformed-present model selection: $name", (testCase) => {
     const workspace = path.resolve("../..");
-    for (const [index, testCase] of [
-      { value: "   ", message: /must be valid strict JSON/u },
-      {
-        value: '[{"provider":"openai","provider":"anthropic","model":"gpt-5.6-luna","reasoning":"high"}]',
-        message: /duplicate/iu
-      }
-    ].entries()) {
-      const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-invalid-model-json-"));
+    const output = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-modal-invalid-model-json-"));
+    try {
       const result = spawnSync(
         process.execPath,
         [
           path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
           "d".repeat(40),
           "https://github.com/monad-developers/ultrafuzz",
-          `${70_000 + index}-1`,
+          testCase.generation,
           output,
           "smoke"
         ],
@@ -609,6 +612,8 @@ describe("public Modal benchmark configuration", () => {
       expect(result.status).not.toBe(0);
       expect(result.stderr).toMatch(testCase.message);
       expect(fs.existsSync(path.join(output, "manifest.json"))).toBe(false);
+    } finally {
+      fs.rmSync(output, { recursive: true, force: true });
     }
   });
 
