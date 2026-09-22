@@ -47,9 +47,11 @@ describe("release validation lane policy", () => {
     expect([...gates].sort()).toEqual([...PULL_REQUEST_REQUIRED_GATES].sort());
   });
 
-  it("gives the complete supporting runtime suite its proven shared-runner budget", () => {
-    const supporting = RELEASE_VALIDATION_LANES.find((lane) => lane.lane === "runtime-supporting");
-    expect(supporting?.timeout_minutes).toBe(120);
+  it("gives complete runtime and CLI suites a bounded budget beyond observed 75-minute runs", () => {
+    for (const name of [...PULL_REQUEST_REQUIRED_GATES, "cli"]) {
+      const lane = RELEASE_VALIDATION_LANES.find((candidate) => candidate.lane === name);
+      expect(lane?.timeout_minutes).toBe(120);
+    }
   });
 
   it("covers every runtime test file on pull requests", () => {
@@ -85,6 +87,7 @@ describe("release validation lane policy", () => {
     const job = releaseValidation.slice(0, releaseValidation.indexOf("\n  release-gates:"));
     expect(job).not.toContain("if: github.event_name != 'pull_request'");
     expect(job).toContain("fromJSON(needs.release-validation-lanes.outputs.lanes)");
+    expect(job).toContain("timeout-minutes: ${{ matrix.timeout_minutes }}");
   });
 
   it("requires the release validation lanes on pull requests", () => {

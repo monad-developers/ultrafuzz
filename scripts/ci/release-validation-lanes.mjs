@@ -43,7 +43,9 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-1",
     description: "Node.js 24 runtime integration tests, shard 1/4",
     gates: "runtime-1",
-    timeout_minutes: 75,
+    // A slow hosted runner passed 59 of shard 4's 67 tests before the old
+    // 75-minute cutoff. Give every shard the same bounded completion budget.
+    timeout_minutes: 120,
     pull_request: true,
     build_modal_dependencies: true
   },
@@ -51,7 +53,7 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-2",
     description: "Node.js 24 runtime integration tests, shard 2/4",
     gates: "runtime-2",
-    timeout_minutes: 75,
+    timeout_minutes: 120,
     pull_request: true,
     build_modal_dependencies: true
   },
@@ -59,7 +61,7 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-3",
     description: "Node.js 24 runtime integration tests, shard 3/4",
     gates: "runtime-3",
-    timeout_minutes: 75,
+    timeout_minutes: 120,
     pull_request: true,
     build_modal_dependencies: true
   },
@@ -67,7 +69,7 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-4",
     description: "Node.js 24 runtime integration tests, shard 4/4",
     gates: "runtime-4",
-    timeout_minutes: 75,
+    timeout_minutes: 120,
     pull_request: true,
     build_modal_dependencies: true
   },
@@ -75,7 +77,8 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "cli",
     description: "CLI package tests",
     gates: "cli",
-    timeout_minutes: 75,
+    // The complete local CLI suite took 76 minutes before job setup overhead.
+    timeout_minutes: 120,
     pull_request: false,
     build_release_reporter: true
   },
