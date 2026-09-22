@@ -146,6 +146,18 @@ function occurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
+function linkPromptDependencies(repoRoot: string, nodeModulesRoot: string): void {
+  for (const dependency of ["@ultrafuzz/artifacts", "yaml"]) {
+    const destination = path.join(nodeModulesRoot, dependency);
+    mkdirSync(path.dirname(destination), { recursive: true });
+    symlinkSync(
+      realpathSync(path.join(repoRoot, "packages", "prompts", "node_modules", dependency)),
+      destination,
+      "dir"
+    );
+  }
+}
+
 function taskLocalArtifactAuthorityPath(input: PromptRenderInput): string {
   return path.join(input.node.workspacePath, ".ultrafuzz", "authorities", `${input.node.concreteId}.json`);
 }
@@ -185,12 +197,7 @@ describe("prompt rendering", () => {
     const distRoot = path.join(tmp, "modules", "@ultrafuzz", "prompts", "dist");
     mkdirSync(path.dirname(distRoot), { recursive: true });
     cpSync(path.join(repoRoot, "packages", "prompts", "dist"), distRoot, { recursive: true });
-    mkdirSync(path.join(tmp, "node_modules"), { recursive: true });
-    symlinkSync(
-      realpathSync(path.join(repoRoot, "node_modules", "yaml")),
-      path.join(tmp, "node_modules", "yaml"),
-      "dir"
-    );
+    linkPromptDependencies(repoRoot, path.join(tmp, "node_modules"));
     expect(existsSync(path.resolve(distRoot, "../../../.ultrafuzz"))).toBe(false);
 
     const packaged = (await import(
@@ -227,12 +234,7 @@ describe("prompt rendering", () => {
     );
     cpSync(path.join(repoRoot, ".ultrafuzz", "prompts"), path.join(distRoot, "prompts"), { recursive: true });
     copyFileSync(path.join(repoRoot, "packages", "prompts", "package.json"), path.join(packageRoot, "package.json"));
-    mkdirSync(path.join(appRoot, "node_modules"), { recursive: true });
-    symlinkSync(
-      realpathSync(path.join(repoRoot, "node_modules", "yaml")),
-      path.join(appRoot, "node_modules", "yaml"),
-      "dir"
-    );
+    linkPromptDependencies(repoRoot, path.join(appRoot, "node_modules"));
 
     const installed = (await import(
       `${pathToFileURL(path.join(distRoot, "render.js")).href}?installed-layout=${Date.now()}`

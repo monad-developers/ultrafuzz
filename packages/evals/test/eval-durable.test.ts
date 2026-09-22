@@ -1,6 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -151,12 +150,9 @@ interface AppendChild {
 }
 
 function startAppendChild(args: string[]): AppendChild {
-  const localRequire = createRequire(import.meta.url);
-  const requireFromVitest = createRequire(localRequire.resolve("vitest"));
-  const viteNode = requireFromVitest.resolve("vite-node/vite-node.mjs");
   const testDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const childScript = path.join(testDirectory, "append-eval-run-record-child.ts");
-  const child = spawn(process.execPath, [viteNode, "--script", childScript, ...args], {
+  const childScript = path.join(testDirectory, "append-eval-run-record-child.mjs");
+  const child = spawn(process.execPath, [childScript, ...args], {
     cwd: path.resolve(testDirectory, "../../.."),
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"]
