@@ -238,17 +238,18 @@ pnpm --filter @ultrafuzz/modal... build
 candidate="$(git rev-parse HEAD)"
 generation="$(date +%s)-1"
 control=".ultrafuzz/modal/public-$generation"
-node scripts/ci/verify-cohort-reachability.mjs --lane smoke
+mode=smoke
+node scripts/ci/verify-cohort-reachability.mjs --lane "$mode"
 node scripts/ci/prepare-modal-benchmarks.mjs \
   "$candidate" https://github.com/monad-developers/ultrafuzz \
-  "$generation" "$control" smoke
-node scripts/ci/validate-modal-benchmark-launch.mjs "$control/manifest.json" . smoke
+  "$generation" "$control" "$mode"
+node scripts/ci/validate-modal-benchmark-launch.mjs "$control/manifest.json" . "$mode"
 ```
 
 Use a fresh positive `number-attempt` generation ID for each plan; it is a
 local lineage identifier and does not require a GitHub run. Resolve any
-reachability failure before paying for an image or sandbox. Select `full` in
-all three commands only when intending the complete four-provider cohort.
+reachability failure before paying for an image or sandbox. Set `mode=full`
+only when intending the complete four-provider cohort.
 Review `manifest.json` and every generated pair config before proceeding.
 An explicit `BENCHMARK_MODELS_JSON` can override the runner selection while
 the validator enforces the lane's provider count and target policy.
@@ -283,12 +284,44 @@ pnpm exec ultrafuzz-modal status --state "$state"
 If a launch did not persist its state, the retained
 `prepare-modal-benchmark-cleanup.mjs` and `terminate-modal-benchmark.sh` helpers
 can validate a preserved plan and terminate its exact build and pair scopes.
-Use trusted tooling and confirm uncertain remote cleanup before retiring
-credentials. Keep cleanup access available until the detached work is stopped.
+Run the following from the same clean, reviewed candidate checkout with its
+built tooling. Reuse the original `candidate`, `generation`, `mode`, and
+`control` values recorded at launch; do not derive them from an untrusted
+manifest. The validator requires the checkout to match that candidate and
+checks every pair against its benchmark policy before writing the cleanup list:
 
-After a pair completes, collect its validated public bundle with `collect
---public-results --config <path>` and extract it with `unpack-public`. Preserve
-all scored rows and candidate/target lineage. A complete generation can then
+```bash
+cleanup_pairs="$control/cleanup-pairs.tsv"
+node scripts/ci/prepare-modal-benchmark-cleanup.mjs \
+  "$control/manifest.json" "$cleanup_pairs" "$candidate" \
+  https://github.com/monad-developers/ultrafuzz "$generation" "$mode" . &&
+  bash scripts/ci/terminate-modal-benchmark.sh \
+    "$control" "$control" "$cleanup_pairs" "$generation" true .
+```
+
+Use a new cleanup-list filename if it already exists; validation refuses to
+overwrite it. The two `control` arguments are the plan and state directories.
+`true` tells the helper to use any preserved state files first; missing state
+files do not prevent cleanup by the validated build and pair scopes. Both
+cleanup passes run even when an individual termination is uncertain, and any
+uncertainty makes the helper fail. Confirm remote cleanup before retiring
+credentials, and keep cleanup access available until detached work is stopped.
+
+After a pair completes, collect and extract its validated public bundle using
+the exact config and state selected for that pair:
+
+```bash
+results="$control/results"
+model_slug="$(jq -er '.models[0].slug' "$config")"
+pnpm exec ultrafuzz-modal collect \
+  --state "$state" --public-results --config "$config" --output "$results" &&
+  pnpm exec ultrafuzz-modal unpack-public \
+    --bundle "$results/$model_slug/public-results.json" \
+    --output "$control/unpacked/$model_slug"
+```
+
+Collection writes each model's bundle under its slug in the results directory.
+Preserve all scored rows and candidate/target lineage. A complete generation can then
 be appended locally with [manual history publication](run-evals.md#publish-longitudinal-history),
 and the reviewed history/chart changes submitted through a normal pull
 request. Existing charts stay unchanged until such a publication.
@@ -449,8 +482,8 @@ identities, terminal states, report-presence flags, diagnostic codes, exact
 launch lineage, and a bounded failed-node projection (node ID, status, timeout
 flag, and allowlisted failure category or code). It never contains messages,
 paths, findings, or provider output.
-This lets failed Actions runs publish useful lifecycle evidence without
-repeating paid model work. Investigate arbitrary sensitive run data on the
+This preserves useful lifecycle evidence from failed runs without repeating
+paid model work. Investigate arbitrary sensitive run data on the
 private volume under the repository's normal access controls. Collection validates each contract and
 generic log line before writing locally and refuses pre-hardening or malformed
 volume artifacts.

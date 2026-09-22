@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { createNodeAttemptLedgerEntry, EVENT_SCHEMA_VERSION } from "@ultrafuzz/artifacts";
+import { createNodeAttemptLedgerEntry } from "@ultrafuzz/artifacts";
 import { initProject } from "@ultrafuzz/runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -15,13 +15,11 @@ import {
   RecordingReporter,
   currentEvalRunRecord,
   currentPlannedGraph,
-  currentRunManifest,
   currentRunState,
   initializeTestGitRepository,
   testRow,
   testSuite,
-  writeRunFixture,
-  writeVerifiedFinalReport
+  writeRunFixture
 } from "./helpers.js";
 
 const T0 = "2026-07-09T00:00:00.000Z";
