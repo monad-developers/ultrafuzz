@@ -46,6 +46,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import {
   invariantPropertyPrioritySelection,
+  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
   resolveExecutionResources,
   serializeResolvedConfigJsonBytes,
   serializeResolvedConfigToml,
@@ -7707,6 +7708,8 @@ function compileDynamicGroup(input: {
         },
         dynamicStrategiesEnumerator: input.input.config.dynamicStrategiesEnumerator,
         invariantPropertyPriorityThreshold: input.input.config.invariants.propertyPriorityThreshold,
+        invariantReferenceExpectationSelection:
+          input.input.config.invariants.referenceExpectationSelection ?? "mandatory",
         invariantPropertyPriorityFilter: priorities.filter,
         invariantPropertyPriorities: priorities.priorities,
         invariantTestingFuzzerTimeout: input.input.config.invariants.invariantTestingFuzzerTimeoutSeconds,
@@ -7775,6 +7778,32 @@ function compileTask(input: {
         };
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
+  // A cloud container must survive the agent task; its provider adds lifecycle
+  // overhead separately. Smaller resource defaults cannot truncate the task.
+  const taskTimeoutSeconds = Math.ceil(timeoutMs / 1000);
+  const explicitNodeTimeout = input.config.execution.nodes[input.node.logicalId]?.resources.timeoutSeconds;
+  const explicitResourceTimeout =
+    explicitNodeTimeout ??
+    (input.config.execution.resourceTimeoutOrigin === "default"
+      ? undefined
+      : input.config.execution.resources.timeoutSeconds);
+  if (input.config.execution.mode === "cloud") {
+    if (explicitResourceTimeout !== undefined && explicitResourceTimeout < taskTimeoutSeconds) {
+      const setting =
+        explicitNodeTimeout === undefined
+          ? "execution.resources.timeout_seconds"
+          : `execution.nodes.${input.node.logicalId}.resources.timeout_seconds`;
+      throw new Error(
+        `CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED: explicit resource timeout ${String(explicitResourceTimeout)}s for ${input.node.logicalId} cannot contain its ${String(taskTimeoutSeconds)}s task; increase ${setting} or reduce the task timeout`
+      );
+    }
+    executionResources.timeoutSeconds = Math.max(executionResources.timeoutSeconds, taskTimeoutSeconds);
+    if (executionResources.timeoutSeconds > MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS) {
+      throw new Error(
+        `CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED: ${input.node.logicalId} leaves no room for the Modal lifecycle reserve`
+      );
+    }
+  }
   const agentCredentialEnv = [
     ...new Set(
       agentChain.flatMap((entry) =>

@@ -857,6 +857,22 @@ test("canonical final-report projection supports a meaningful zero-issue report"
   assert.doesNotMatch(projection.markdown, /\| Issue id \| Title \|/u);
 });
 
+test("priority-filtered reference expectations remain visible without claiming fulfillment", () => {
+  const report = renderableReport();
+  report.property_implementation_coverage = {
+    ...(report.property_implementation_coverage as Record<string, unknown>),
+    reference_expected_property_ids: ["property-1", "excluded-low-property"],
+    reference_expectation_ids: ["external-required-check"]
+  };
+  const projection = projectCanonicalFinalReport(report);
+  assert.match(projection.markdown, /Reference expectation properties: `2`/u);
+  assert.match(
+    projection.markdown,
+    /Unselected reference expectation properties \(not fulfilled\): `excluded-low-property`/u
+  );
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
+});
+
 test("agent reports disclose omitted property implementation without discarding reviewed findings", () => {
   const report: Record<string, unknown> = {
     ...renderableReport(),

@@ -1,6 +1,6 @@
 version: 2
 defaults:
-  strategy_loops: 1
+  strategy_loops: 2
 groups:
   setup:
     label: Setup
@@ -22,10 +22,19 @@ groups:
     color: "#7c3aed"
     defaults:
       failure_policy: continue
-      loops: 3
+      loops: 2
       timeout_seconds: 7200
       model_profiles:
         - default
+  specialists:
+    label: Stateful invariants
+    color: "#9333ea"
+    defaults:
+      loops: 1
+      timeout_seconds: 7200
+      model_profiles:
+        - default
+      failure_policy: continue
   references:
     label: References
     color: "#4b5563"
@@ -700,6 +709,123 @@ nodes:
         primary: true
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@3
+  - id: stateful-invariant-setup
+    kind: agentic
+    prompt: strategies/invariants/setup.md
+    group: specialists
+    depends_on:
+      - property-specification-fanin
+    outputs:
+      - path: setup-inventory.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
+    loops: 1
+  - id: stateful-invariant-handlers
+    kind: agentic
+    prompt: strategies/invariants/handlers.md
+    group: specialists
+    depends_on:
+      - stateful-invariant-setup
+    outputs:
+      - path: handler-coverage-inventory.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
+    loops: 1
+  - id: stateful-invariant-coverage
+    kind: agentic
+    prompt: strategies/invariants/coverage.md
+    group: specialists
+    required_commands:
+      - covg-eval
+      - recon
+      - recon-generate
+    depends_on:
+      - stateful-invariant-handlers
+      - property-specification-fanin
+    loop_mode: series
+    outputs:
+      - path: coverage-goal.json
+        contract: ultrafuzz/coverage-goal@2
+        primary: true
+      - path: coverage-report.md
+        contract: ultrafuzz/nonempty-markdown@1
+      - path: coverage-evidence.json
+        contract: ultrafuzz/coverage-evidence@1
+      - path: coverage-input.lcov
+        contract: ultrafuzz/text@1
+      - path: recon-coverage.json
+        contract: ultrafuzz/text@1
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@3
+      - path: harness-repairs.json
+        contract: ultrafuzz/harness-repairs@1
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
+    loops: 1
+  - id: stateful-invariant-implement-properties
+    kind: agentic
+    prompt: strategies/invariants/implement-properties.md
+    group: specialists
+    depends_on:
+      - stateful-invariant-coverage
+    outputs:
+      - path: implemented-properties.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: implemented-properties.json
+        contract: ultrafuzz/implemented-properties@3
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@3
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
+    loops: 1
+  - id: stateful-invariant-campaign
+    kind: agentic
+    prompt: strategies/invariants/invariant-testing-campaign.md
+    group: specialists
+    required_commands:
+      - recon
+    depends_on:
+      - stateful-invariant-implement-properties
+    outputs:
+      - path: campaign-plan.json
+        contract: ultrafuzz/invariant-campaign-plan@2
+        primary: true
+      - path: campaign-report.md
+        contract: ultrafuzz/nonempty-markdown@1
+      - path: campaign-summary.json
+        contract: ultrafuzz/campaign-summary@2
+      - path: recon-fuzzer-results.json
+        contract: ultrafuzz/property-campaign@3
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@3
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+      - path: workspace.patch
+        contract: ultrafuzz/text@1
+      - path: workspace-patch.json
+        contract: ultrafuzz/workspace-patch@1
+    loops: 1
   - id: dedupe-findings
     kind: agentic
     prompt: review/dedupe-findings.md
@@ -725,6 +851,7 @@ nodes:
       - order-replacement-collateral
       - state-machine-boundaries
       - lifecycle-view-boundaries
+      - stateful-invariant-campaign
       - goal-roaming
       - threat-goals
       - class-goals

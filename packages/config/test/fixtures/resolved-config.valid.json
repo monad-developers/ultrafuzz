@@ -3,10 +3,12 @@
   "auditProfile": "default",
   "auditProfileResolution": {
     "catalogSchemaVersion": 2,
-    "catalogDigest": "534bb02aec33bbe4251a721e8ca1abfbb3bb1f36f1c81722be7ab7af319def7d",
+    "catalogDigest": "553c8beeba2aefab97d3f9197ba6dfb25947a4c4bee91cf8e1b0aae999e9c9da",
     "settings": {},
     "effectiveSettings": {
-      "strategy_loops": 1,
+      "strategy_loops": 2,
+      "property_priority_threshold": "high",
+      "reference_expectation_selection": "priority",
       "dynamic_strategies_enumerator": 3,
       "same_agent_attempts": 3,
       "max_parallel_agents": 4,
@@ -23,6 +25,8 @@
       "invariant_testing_fuzzer_timeout_seconds": "default",
       "invariant_testing_smoke_timeout_seconds": "default",
       "max_parallel_agents": "default",
+      "property_priority_threshold": "default",
+      "reference_expectation_selection": "default",
       "same_agent_attempts": "default",
       "strategy_loops": "default",
       "triage_panel_size": "default",
@@ -52,6 +56,7 @@
   "execution": {
     "mode": "local",
     "retentionDays": 30,
+    "resourceTimeoutOrigin": "default",
     "resources": {
       "cpu": 4,
       "memoryMiB": 8192,
@@ -136,6 +141,7 @@
     ]
   },
   "invariants": {
+    "referenceExpectationSelection": "priority",
     "propertyPriorityThreshold": "high",
     "invariantTestingSmokeTimeoutSeconds": 600,
     "invariantTestingFuzzerTimeoutSeconds": 3600

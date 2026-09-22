@@ -1181,7 +1181,8 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
     env: {}
   });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const runRoot = plan.value!.run_root;
+  assert.ok(plan.value);
+  const runRoot = plan.value.run_root;
 
   // The digest-bound planner catalog the threat-model/goal-plan style postprocessors consume.
   const catalogPath = path.join(runRoot, "vulnerability-db", "catalog.json");
@@ -1193,27 +1194,14 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
     sha256: crypto.createHash("sha256").update(catalogBytes).digest("hex")
   };
 
-  plan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
-    nodes: {},
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-      }
-    }
-  };
+  plan.value.resolved_config.execution = cloudExecutionConfig();
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
-    config: plan.value!.resolved_config,
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
+    config: plan.value.resolved_config,
+    graph: plan.value.expanded_graph,
+    runLayout: plan.value.layout,
     workflowName: "ultrafuzz-cloud-worker",
-    renderedPrompts: plan.value!.rendered_prompts,
+    renderedPrompts: plan.value.rendered_prompts,
     vulnerabilityDatabase
   });
   compiled.workflowPath = materializeHarnessWorkflowSnapshot(compiled);
@@ -1228,7 +1216,7 @@ async function cloudFixture(options: CloudFixtureOptions = {}): Promise<CloudFix
     "utf8"
   );
   materializeDynamicRuntime({
-    runId: plan.value!.run_id,
+    runId: plan.value.run_id,
     projectRoot: project,
     runRoot,
     graphPath: path.join(runRoot, "graph.json"),
@@ -1507,7 +1495,8 @@ function cloudExecutionConfig() {
     mode: "cloud" as const,
     provider: "modal" as const,
     retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
+    // Both handoff topologies use the low-cost profile's 3600-second task budget.
+    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 3600 },
     nodes: {},
     providers: {
       modal: {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { auditProfile, loadAuditProfileCatalog, packagedTopologyPath, type ResolvedConfig } from "@ultrafuzz/config";
-import { resolveTopologyPath } from "@ultrafuzz/topology";
+import { loadTopology, resolveTopologyPath } from "@ultrafuzz/topology";
 
 export type TopologyPathOrigin = "project-default" | "audit-profile" | "project-config" | "runtime-override";
 
@@ -62,6 +62,12 @@ export function effectiveAuditPolicy(input: {
     effectiveTopologyPath = resolveTopologyPath(projectRoot);
     effectiveTopologyDisplayPath = ".ultrafuzz/topology.yml";
     topologyPathOrigin = "project-default";
+  }
+
+  if (input.runtimeStrategyLoops === undefined && input.config.strategyLoops === undefined) {
+    const topology = loadTopology(projectRoot, { topologyPath: effectiveTopologyPath, requirePromptFiles: false });
+    // Describe the selected editable topology without rewriting its loop policy.
+    effectiveSettings.strategy_loops = topology.groups?.strategies?.defaults?.loops ?? topology.defaults.strategy_loops;
   }
 
   return {

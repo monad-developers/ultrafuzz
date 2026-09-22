@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  assertModalBenchmarkExecutionBudget,
   configuredModalSandboxTimeoutMs,
   fingerprintModalConfigFile,
   fingerprintModalModel,
@@ -122,6 +123,33 @@ function expectBenchmarkConfigIdentityGate(value: unknown): void {
 }
 
 describe("Modal benchmark config", () => {
+  it("keeps historical full-row configs readable but rejects their undersized execution envelope", () => {
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-budget-"));
+    const file = path.join(root, "config.json");
+    const source = minimalPublicConfig();
+    const historical = {
+      ...source,
+      public_benchmark: { ...source.public_benchmark, lane: "full", max_runtime_seconds: 15_000 }
+    };
+    try {
+      fs.writeFileSync(file, `${JSON.stringify(historical)}\n`);
+      const parsed = parseModalBenchmarkConfig(historical);
+      expect(parsed).toEqual(historical);
+      expect(loadModalBenchmarkConfig(file)).toEqual(historical);
+      expect(() => assertModalBenchmarkExecutionBudget(parsed)).toThrow(
+        /MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT: full benchmark row allows 15000s.*at least 15600s/u
+      );
+      expect(loadModalBenchmarkConfig(file)).toEqual(historical);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not impose the exhaustive campaign envelope on smoke or private configurations", () => {
+    expect(() => assertModalBenchmarkExecutionBudget(parseModalBenchmarkConfig(minimalPublicConfig()))).not.toThrow();
+    expect(() => assertModalBenchmarkExecutionBudget(parseModalBenchmarkConfig(minimalConfig()))).not.toThrow();
+  });
+
   it("uses identical portable URL lexical rules in JSON Schema and retained Zod", () => {
     const definitions = modalBenchmarkConfigJsonSchema.$defs as Record<string, Record<string, unknown>>;
     expect(definitions.gitUrl?.pattern).toBe(MODAL_GIT_URL_PATTERN_SOURCE);

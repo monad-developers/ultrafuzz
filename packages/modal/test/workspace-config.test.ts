@@ -22,7 +22,7 @@ describe("Modal target model profiles", () => {
     expect(config).toContain('[agents.DeepSeekAgent]\nauth = "api-key"\napi_key_env = "DEEPSEEK_API_KEY"');
     expect(config).toContain("max_parallel_agents = 16");
     expect(config).toContain("keep_workspaces = false");
-    expect(config).toContain('invariant_testing_smoke_timeout = "10min"');
+    expect(config).not.toContain("invariant_testing_smoke_timeout");
     expect(config).toContain('audit_profile = "default"');
   });
 
@@ -53,23 +53,29 @@ describe("Modal target model profiles", () => {
 
     const topology = parse(fs.readFileSync(path.resolve("../config/topologies/exhaustive.yml"), "utf8")) as {
       groups: { specialists: { defaults: { failure_policy: string; timeout_seconds: number } } };
-      nodes: Array<{ id: string; group?: string }>;
+      nodes: Array<{ id: string; group?: string; timeout_seconds?: number }>;
     };
     const campaign = topology.nodes.find((node) => node.id === "stateful-invariant-campaign");
     expect(campaign?.group).toBe("specialists");
     expect(topology.groups.specialists.defaults.failure_policy).toBe("continue");
     const specialistTimeoutSeconds = topology.groups.specialists.defaults.timeout_seconds;
     const hostShutdownGraceSeconds = 5 * 60;
-    const finalizationReserveSeconds = Math.min(5 * 60, Math.floor(specialistTimeoutSeconds / 6));
+    if (campaign?.timeout_seconds === undefined) throw new Error("campaign timeout missing");
+    const campaignTimeoutSeconds = campaign.timeout_seconds;
+    const finalizationReserveSeconds = Math.min(5 * 60, Math.floor(campaignTimeoutSeconds / 6));
     const invariantBudgetSeconds =
       resolved.value.invariants.invariantTestingSmokeTimeoutSeconds +
       resolved.value.invariants.invariantTestingFuzzerTimeoutSeconds +
       hostShutdownGraceSeconds +
       finalizationReserveSeconds;
     expect(specialistTimeoutSeconds).toBe(7_200);
-    expect(invariantBudgetSeconds).toBe(4_800);
-    expect(specialistTimeoutSeconds).toBeGreaterThanOrEqual(invariantBudgetSeconds);
-    expect(PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS).toBeGreaterThan(specialistTimeoutSeconds);
+    expect(resolved.value.invariants.propertyPriorityThreshold).toBe("medium");
+    expect(resolved.value.invariants.referenceExpectationSelection).toBe("priority");
+    expect(invariantBudgetSeconds).toBe(15_600);
+    expect(campaignTimeoutSeconds).toBe(16_200);
+    expect(campaignTimeoutSeconds).toBeGreaterThanOrEqual(invariantBudgetSeconds);
+    // Until the paid controller envelope is enlarged, launch preflight rejects full runs.
+    expect(PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS).toBeLessThan(invariantBudgetSeconds);
   });
 
   it("uses the staged API key for a public Claude benchmark target", () => {

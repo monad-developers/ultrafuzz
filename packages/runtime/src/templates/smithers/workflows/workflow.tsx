@@ -2795,7 +2795,11 @@ function authoritativeFinalReportRunMetadataArgs<T extends { prompt?: unknown } 
 
 function configuredInvariantPrioritySelection(task: (typeof taskSpecs)[number]): {
   path: string;
-  selection?: { priority_threshold: "high" | "medium" | "low"; priorities: ("high" | "medium" | "low")[] };
+  selection?: {
+    priority_threshold: "high" | "medium" | "low";
+    priorities: ("high" | "medium" | "low")[];
+    reference_expectation_selection?: "priority" | "mandatory";
+  };
 } {
   const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
   const configPath = resolveRegularArtifactFile(
@@ -2820,7 +2824,10 @@ function configuredInvariantPrioritySelection(task: (typeof taskSpecs)[number]):
     path: configPath,
     selection: {
       priority_threshold,
-      priorities: order.slice(0, order.indexOf(priority_threshold) + 1)
+      priorities: order.slice(0, order.indexOf(priority_threshold) + 1),
+      reference_expectation_selection:
+        /^\s*reference_expectation_selection\s*=\s*["'](priority|mandatory)["']\s*$/mu.exec(contents)?.[1] as
+          "priority" | "mandatory" | undefined
     }
   };
 }

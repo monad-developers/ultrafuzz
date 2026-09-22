@@ -472,7 +472,16 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       redacted_config_fingerprint: redactedConfigFingerprint,
       prompt_digest: promptDigest,
       controller_source_digest: controllerSource.digest,
-      execution: resolved.config.execution,
+      // Resolution provenance belongs to config snapshots, not the run-plan
+      // execution contract, whose portable resource fields remain unchanged.
+      execution: {
+        mode: resolved.config.execution.mode,
+        ...(resolved.config.execution.provider === undefined ? {} : { provider: resolved.config.execution.provider }),
+        retentionDays: resolved.config.execution.retentionDays,
+        resources: resolved.config.execution.resources,
+        nodes: resolved.config.execution.nodes,
+        providers: resolved.config.execution.providers
+      },
       topology: validation.value.topology,
       audit_profile: {
         id: auditPolicy.auditProfile,
@@ -1015,6 +1024,8 @@ function renderPromptsForPlan(input: {
           },
           dynamicStrategiesEnumerator: input.resolvedConfig.dynamicStrategiesEnumerator,
           invariantPropertyPriorityThreshold: input.resolvedConfig.invariants.propertyPriorityThreshold,
+          invariantReferenceExpectationSelection:
+            input.resolvedConfig.invariants.referenceExpectationSelection ?? "mandatory",
           invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
           invariantPropertyPriorities: invariantPrioritySelection.priorities,
           invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,

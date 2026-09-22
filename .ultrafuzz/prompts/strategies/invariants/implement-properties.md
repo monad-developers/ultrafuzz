@@ -43,18 +43,21 @@ catalog priority values are:
 
 `{{invariant_property_priorities}}`
 
-Also inspect each property's optional `reference_expectations` array. A
-property with one or more reference expectation identifiers is mandatory for
-this current run even when its priority is below the configured threshold;
-include every such canonical ID in the selection so named benchmark behavior
-cannot be lost during priority filtering.
+The resolved reference-expectation selection policy is
+`{{invariant_reference_expectation_selection}}`. Under `priority`, select only
+properties in the priority set above; expectation tags do not bypass the cutoff.
+Under `mandatory`, also select every property with a non-empty
+`reference_expectations` array, even below the cutoff. This explicit benchmark
+policy preserves required external checks. In either mode retain expectation
+tags as provenance, including on unselected properties in the canonical catalog;
+an unselected expected check is not implemented or fulfilled.
 
 ## Work
 
 1. Parse `properties.json` into a stable property list. Use `properties.md`
    only as its human-readable companion.
    - Select properties whose `priority` is one of the included priority values
-     above or whose `reference_expectations` array is non-empty.
+     above, plus tagged properties only when the resolved policy is `mandatory`.
    - When a selected property has one or more `reference_expectations`, preserve
      the complete array in the implementation summary and use it to explain any
      blocker. Omit `reference_expectations` from its structured record when the
@@ -78,7 +81,7 @@ cannot be lost during priority filtering.
      schema-defined empty forms for generated tests and findings. Update those
      artifacts as work progresses so timeout or interruption still leaves
      reviewable state.
-   - If no properties match the threshold or carry a reference expectation, write empty implementation artifacts
+   - If no properties match the resolved selection policy, write empty implementation artifacts
      explaining that no selected properties were eligible.
 
 3. Implement properties in the invariant suite.
@@ -182,7 +185,8 @@ this artifact in the central output contract.
 Set the schema-defined selection priorities to the exact configured priority
 set above and list every canonical ID in
 `properties.json` whose priority is in that set, plus every canonical ID with
-one or more `reference_expectations`, in catalog order. Emit one
+one or more `reference_expectations` only when the resolved policy is
+`mandatory`, in catalog order. Emit one
 implementation record for every selected ID. A selected property that cannot
 be implemented must carry an actionable typed blocker. Preserve every selected
 property's canonical ID exactly; dangling references fail contextual

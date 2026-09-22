@@ -1103,6 +1103,13 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
     ? value.reference_expected_property_ids
     : [];
   lines.push(`- Reference expectation properties: \`${referenceExpected.length}\``);
+  const selectedIds = new Set(Array.isArray(value.selected_property_ids) ? value.selected_property_ids : []);
+  const unselectedExpected = referenceExpected.filter((id) => !selectedIds.has(id));
+  if (unselectedExpected.length > 0) {
+    lines.push(
+      `- Unselected reference expectation properties (not fulfilled): ${unselectedExpected.map((id) => `\`${publicProse(String(id))}\``).join(", ")}`
+    );
+  }
   const blockerSummaries = Array.isArray(value.blocker_summaries)
     ? value.blocker_summaries.filter((entry): entry is string => typeof entry === "string")
     : [];

@@ -6562,7 +6562,9 @@ function verifyImplementationSelectionCoverage(
     .filter(
       (property) =>
         selection.priorities.includes(property.priority) ||
-        (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
+        (configuredSelection?.reference_expectation_selection !== "priority" &&
+          property.reference_expectations !== undefined &&
+          property.reference_expectations.length > 0)
     )
     .map((property) => property.id);
   const selectedIds = new Set(selection.property_ids);
@@ -6575,7 +6577,7 @@ function verifyImplementationSelectionCoverage(
   if (missingSelectedIds.length > 0 || extraSelectedIds.length > 0 || !selectionOrderMatches) {
     diagnostics.push({
       code: "PROPERTY_IMPLEMENTATION_SELECTION_MISMATCH",
-      message: `Implementation selection must list every canonical property matching its priority scope or an explicit reference expectation in catalog order (missing: ${JSON.stringify(missingSelectedIds)}, extra: ${JSON.stringify(extraSelectedIds)})`,
+      message: `Implementation selection must list every canonical property matching the configured priority and reference-expectation selection policy in catalog order (missing: ${JSON.stringify(missingSelectedIds)}, extra: ${JSON.stringify(extraSelectedIds)})`,
       severity: "error",
       source: "property-provenance",
       path: `${implementationPath}#$.selection.property_ids`
@@ -6627,16 +6629,25 @@ function verifyImplementationSelectionCoverage(
   return diagnostics;
 }
 
-function readConfiguredInvariantPrioritySelection(
-  layout: RunLayout
-): { priority_threshold: "high" | "medium" | "low"; priorities: ("high" | "medium" | "low")[] } | undefined {
+function readConfiguredInvariantPrioritySelection(layout: RunLayout):
+  | {
+      priority_threshold: "high" | "medium" | "low";
+      priorities: ("high" | "medium" | "low")[];
+      reference_expectation_selection?: "priority" | "mandatory";
+    }
+  | undefined {
   if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
   const contents = fs.readFileSync(layout.resolvedConfigPath, "utf8");
   const match = /^\s*property_priority_threshold\s*=\s*["'](high|medium|low)["']\s*$/mu.exec(contents);
   if (match === null) return undefined;
   const priority_threshold = match[1] as "high" | "medium" | "low";
   const order = ["high", "medium", "low"] as const;
-  return { priority_threshold, priorities: order.slice(0, order.indexOf(priority_threshold) + 1) };
+  const policy = /^\s*reference_expectation_selection\s*=\s*["'](priority|mandatory)["']\s*$/mu.exec(contents);
+  return {
+    priority_threshold,
+    priorities: order.slice(0, order.indexOf(priority_threshold) + 1),
+    reference_expectation_selection: policy?.[1] as "priority" | "mandatory" | undefined
+  };
 }
 
 function verifyCampaignPropertyReferences(

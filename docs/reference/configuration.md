@@ -56,9 +56,11 @@ prompt_review_required = true
 materialize_outputs_as_unstaged = true
 
 [invariants]
-property_priority_threshold = "high"
-invariant_testing_smoke_timeout = "10min"
-invariant_testing_fuzzer_timeout = "1h"
+# Omit these keys to inherit the selected audit profile.
+# Explicit overrides, if desired:
+# property_priority_threshold = "high"
+# invariant_testing_smoke_timeout = "10min"
+# invariant_testing_fuzzer_timeout = "1h"
 
 [triage]
 quorum = 3
@@ -90,7 +92,7 @@ contract used by the CLI and runtime.
 | `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
 | `[retry]`                       | Bounded primary retries and opt-in ordered model fallback.                 |
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
-| `[invariants]`                  | Invariant prompt defaults.                                                 |
+| `[invariants]`                  | Invariant selection policy and campaign durations.                         |
 | `[triage]`                      | Triage quorum and panel size.                                              |
 | `[eval]`                        | Eval suite defaults and reporting provider binding.                        |
 
@@ -165,6 +167,14 @@ nodes may override any resource in `[execution.nodes.<node-id>.resources]`.
 Cloud provider configuration names credential variables but never stores their
 values. Missing credentials, unsupported provider/auth combinations, invalid
 resource bounds, and unknown override node IDs fail before workflow launch.
+An inherited cloud resource timeout grows to fit the selected task timeout.
+An explicit global `execution.resources.timeout_seconds` or per-node timeout is
+a cap: the effective cap must contain the complete task or planning fails before
+cloud submission. A per-node cap overrides the global cap. Existing explicit
+caps remain deliberate when switching profiles; remove or increase a short cap
+before running exhaustive's 16,200-second campaign task. Modal adds a further
+1,800-second sandbox lifecycle reserve.
+
 See [Cloud Node Execution](cloud-execution.md) for the Modal configuration,
 handoff, retry, recovery, and cleanup contracts.
 
@@ -283,13 +293,26 @@ posture: copied outputs are left as ordinary unstaged working-tree changes.
 
 ## Invariants
 
-| Key                                | Type                       | Meaning                                                                                                                                  |
-| ---------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `property_priority_threshold`      | `high`, `medium`, or `low` | Inclusive priority threshold rendered into invariant prompts (`high` only; `medium` includes high and medium; `low` includes all three). |
-| `invariant_testing_smoke_timeout`  | duration string            | Bounded Recon deployment/compile smoke timeout rendered into invariant prompts; set it high enough for the target build path.            |
-| `invariant_testing_fuzzer_timeout` | duration string            | Timeout rendered into invariant testing prompts.                                                                                         |
+| Key                                | Type                       | Meaning                                                                                                                                            |
+| ---------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `property_priority_threshold`      | `high`, `medium`, or `low` | Inclusive priority threshold for invariant implementation (`high` only; `medium` includes high and medium; `low` includes all three).              |
+| `reference_expectation_selection`  | `priority` or `mandatory`  | `priority` keeps tagged properties subject to the priority threshold; `mandatory` also requires properties carrying `reference_expectations` tags. |
+| `invariant_testing_smoke_timeout`  | duration string            | Bounded Recon deployment/compile smoke timeout rendered into invariant prompts; set it high enough for the target build path.                      |
+| `invariant_testing_fuzzer_timeout` | duration string            | Duration of supervised Recon fuzzing over the shared selected property suite; excludes setup, smoke, shutdown, and artifact finalization.          |
 
 Durations accept `s`, `min`, or `h`, such as `1800s`, `30min`, or `1h`.
+
+The shipped default uses high priority, a one-hour campaign, and `priority`
+selection. Exhaustive uses high and medium priority, a four-hour campaign, and
+`priority` selection. The benchmark-specific `invariant-only` profile uses
+`mandatory` selection. Reference tags remain provenance metadata even when the
+property is excluded; reporting must distinguish unselected checks from
+implemented checks.
+
+The resolved campaign node and enclosing execution budgets must leave room for
+the deployment smoke, shutdown, and artifact finalization as well as the full
+fuzzing duration. Insufficient budgets fail validation before execution. See
+[Audit profiles](audit-profiles.md) for the shipped timeout and retry envelope.
 
 ## Triage
 
@@ -388,10 +411,11 @@ an available agent-written report, not complete execution coverage.
 
 ## Resolution Order
 
-1. Built-in root TOML defaults.
-2. Project `ultrafuzz.toml`.
-3. Supported environment overrides.
-4. Runtime overrides from the CLI.
+1. Packaged defaults from `packages/config/defaults.toml`.
+2. Selected audit profile.
+3. Project `ultrafuzz.toml`.
+4. Supported environment overrides.
+5. Runtime overrides from the CLI.
 
 The user-authored TOML contract remains `ultrafuzz.config.v2`: adding the
 optional `[retry]` table does not invalidate existing project files. The

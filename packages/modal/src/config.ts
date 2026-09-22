@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolveConfig } from "@ultrafuzz/config";
 
 import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID, type StrictModalBenchmarkConfigDocument } from "./modal-contracts.js";
 import { assertModalDocumentValue, readModalDocument } from "./modal-documents.js";
@@ -66,4 +67,21 @@ export function modalBenchmarkConfigValidatorsAgree(value: unknown): boolean {
     validateModalJsonSchema(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value).ok ===
     modalBenchmarkConfigZodSchema.safeParse(value).success
   );
+}
+
+/** Refuse an execution envelope that cannot contain even one complete campaign.
+ * This is separate from document validation: historical configs remain inspectable.
+ */
+export function assertModalBenchmarkExecutionBudget(config: ModalBenchmarkConfig): void {
+  if (!isPublicModalBenchmarkConfig(config) || config.public_benchmark.lane !== "full") return;
+  const resolved = resolveConfig({ env: {}, runtimeOverrides: { auditProfile: "exhaustive" } });
+  if (!resolved.ok) throw new Error("Cannot resolve the exhaustive campaign execution budget");
+  const invariants = resolved.value.invariants;
+  const minimumSeconds =
+    invariants.invariantTestingSmokeTimeoutSeconds + invariants.invariantTestingFuzzerTimeoutSeconds + 300 + 300;
+  if (config.public_benchmark.max_runtime_seconds < minimumSeconds) {
+    throw new Error(
+      `MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT: full benchmark row allows ${String(config.public_benchmark.max_runtime_seconds)}s, but the exhaustive campaign alone requires at least ${String(minimumSeconds)}s including smoke, shutdown and artifacts. Use local or per-node Modal execution for the four-hour profile until the paid full-benchmark row/control envelopes are explicitly enlarged.`
+    );
+  }
 }

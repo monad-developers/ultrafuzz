@@ -124,7 +124,7 @@ try {
     "installed audit profile catalog"
   );
   assertSameBytes(
-    path.join(root, "ultrafuzz.toml"),
+    path.join(root, "packages", "config", "defaults.toml"),
     path.join(installedConfigRoot, "ultrafuzz.toml"),
     "installed default config"
   );

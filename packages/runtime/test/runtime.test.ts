@@ -51,6 +51,7 @@ import {
   SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
 import {
+  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
   parseProjectConfigToml,
   parseResolvedConfigJsonBytes,
   resolveConfig,
@@ -2970,10 +2971,14 @@ async function compileInvariantCampaignBudgetFixture(input: {
   smokeTimeoutSeconds: number;
   fuzzerTimeoutSeconds: number;
   runId: string;
+  cloud?: { globalTimeoutSeconds?: number; nodeTimeoutSeconds?: number };
 }) {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  if (input.cloud !== undefined) {
+    fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
+  }
   const plan = await planRun({ projectRoot: project, runId: input.runId, env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const node = plan.value!.expanded_graph.nodes.find((candidate) => candidate.id === "project-discovery");
@@ -2996,6 +3001,24 @@ async function compileInvariantCampaignBudgetFixture(input: {
   });
   plan.value!.resolved_config.invariants.invariantTestingSmokeTimeoutSeconds = input.smokeTimeoutSeconds;
   plan.value!.resolved_config.invariants.invariantTestingFuzzerTimeoutSeconds = input.fuzzerTimeoutSeconds;
+  if (input.cloud !== undefined) {
+    const execution = plan.value?.resolved_config.execution;
+    if (execution === undefined) throw new Error("missing cloud fixture config");
+    execution.mode = "cloud";
+    execution.provider = "modal";
+    execution.providers.modal = {
+      app: "offline-campaign-budget-test",
+      image: "offline-test-image",
+      credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+    };
+    if (input.cloud.globalTimeoutSeconds !== undefined) {
+      execution.resources.timeoutSeconds = input.cloud.globalTimeoutSeconds;
+      execution.resourceTimeoutOrigin = "project-config";
+    }
+    if (input.cloud.nodeTimeoutSeconds !== undefined) {
+      execution.nodes[input.logicalNodeId] = { resources: { timeoutSeconds: input.cloud.nodeTimeoutSeconds } };
+    }
+  }
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   return compileSmithersWorkflow({
     projectRoot: project,
@@ -10060,7 +10083,9 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
     execution?: { mode?: string; retentionDays?: number };
     rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;
   };
-  assert.deepEqual(persistedPlan.execution, plan.value!.resolved_config.execution);
+  const { resourceTimeoutOrigin, ...portableExecution } = plan.value?.resolved_config.execution ?? {};
+  assert.equal(resourceTimeoutOrigin, "default");
+  assert.deepEqual(persistedPlan.execution, portableExecution);
   assert.equal(persistedPlan.rendered_prompts.length, 1);
   assert.match(persistedPlan.rendered_prompts[0]!.rendered_prompt_snapshot_path ?? "", /^prompt-snapshots\//u);
   assert.equal(
@@ -11375,7 +11400,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     resources: {
       cpu: 4,
       memoryMiB: 8192,
-      timeoutSeconds: 1800
+      timeoutSeconds: 7200
     },
     nodes: {
       "project-discovery": {
@@ -11422,7 +11447,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.deepEqual(discovery.execution.resources, {
     cpu: 8,
     memoryMiB: 16384,
-    timeoutSeconds: 1800
+    timeoutSeconds: 7200
   });
   assert.deepEqual(discovery.execution.agentCredentialEnv, [
     "AWS_REGION",
@@ -11553,7 +11578,7 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
     mode: "cloud",
     provider: "modal",
     retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
+    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 7200 },
     nodes: {},
     providers: {
       modal: {
@@ -11999,6 +12024,73 @@ test("invariant campaign budget follows the @2 output contract on project-owned 
       assert.match(error.message, /timeout_seconds to at least 7201/u);
       return true;
     }
+  );
+});
+
+test("four-hour invariant campaign reserves smoke, shutdown and finalization outside fuzzing", async () => {
+  const compiled = await compileInvariantCampaignBudgetFixture({
+    logicalNodeId: "stateful-invariant-campaign",
+    nodeTimeoutSeconds: 16200,
+    smokeTimeoutSeconds: 600,
+    fuzzerTimeoutSeconds: 14400,
+    runId: "campaign-four-hours"
+  });
+  assert.equal(compiled.tasks[0]?.timeoutMs, 16_200_000);
+  await assert.rejects(
+    compileInvariantCampaignBudgetFixture({
+      logicalNodeId: "stateful-invariant-campaign",
+      nodeTimeoutSeconds: 15599,
+      smokeTimeoutSeconds: 600,
+      fuzzerTimeoutSeconds: 14400,
+      runId: "campaign-four-hours-too-short"
+    }),
+    /required_seconds=15600/u
+  );
+});
+
+test("cloud campaign inherits its full task envelope and preserves explicit global and node caps", async () => {
+  const fixture = {
+    logicalNodeId: "stateful-invariant-campaign",
+    nodeTimeoutSeconds: 16200,
+    smokeTimeoutSeconds: 600,
+    fuzzerTimeoutSeconds: 14400
+  };
+  const compiled = await compileInvariantCampaignBudgetFixture({
+    ...fixture,
+    runId: "cloud-campaign-inherited",
+    cloud: {}
+  });
+  const campaign = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === fixture.logicalNodeId);
+  assert.equal(campaign?.execution.resources.timeoutSeconds, 16200);
+  assert.equal((campaign?.execution.resources.timeoutSeconds ?? 0) + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS, 18000);
+  for (const [label, cloud, setting] of [
+    ["global", { globalTimeoutSeconds: 15000 }, /execution\.resources\.timeout_seconds/u],
+    [
+      "node",
+      { globalTimeoutSeconds: 18000, nodeTimeoutSeconds: 15000 },
+      /execution\.nodes\.stateful-invariant-campaign\.resources\.timeout_seconds/u
+    ]
+  ] as const) {
+    await assert.rejects(
+      compileInvariantCampaignBudgetFixture({ ...fixture, runId: `cloud-campaign-${label}-too-short`, cloud }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED/u);
+        assert.match(error.message, /15000s.*16200s/u);
+        assert.match(error.message, setting);
+        return true;
+      }
+    );
+  }
+  const explicit = await compileInvariantCampaignBudgetFixture({
+    ...fixture,
+    runId: "cloud-campaign-explicit-node",
+    cloud: { globalTimeoutSeconds: 15000, nodeTimeoutSeconds: 17000 }
+  });
+  assert.equal(
+    explicit.tasks.find((task) => task.metadata.node.logicalNodeId === fixture.logicalNodeId)?.execution.resources
+      .timeoutSeconds,
+    17000
   );
 });
 

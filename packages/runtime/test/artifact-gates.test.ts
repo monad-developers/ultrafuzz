@@ -8263,6 +8263,14 @@ test("property implementation gate includes lower-priority benchmark expectation
     /property-supply/u
   );
 
+  fs.appendFileSync(layout.resolvedConfigPath, 'reference_expectation_selection = "priority"\n');
+  const strictSelection = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
+  assert.equal(strictSelection.ok, true, JSON.stringify(strictSelection.diagnostics));
+  fs.writeFileSync(
+    layout.resolvedConfigPath,
+    '[invariants]\nproperty_priority_threshold = "high"\nreference_expectation_selection = "mandatory"\n'
+  );
+
   writeArtifact(
     layout,
     nodeId,

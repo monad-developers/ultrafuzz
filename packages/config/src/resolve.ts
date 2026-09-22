@@ -83,6 +83,14 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
     applyRuntimeOverrides(config, input.runtimeOverrides, diagnostics);
   }
 
+  // Preserve whether the global cloud timeout was deliberately set. A default
+  // allocation can follow a longer task; an explicit allocation is a cap.
+  config.execution.resourceTimeoutOrigin =
+    input.runtimeOverrides?.execution?.resources?.timeoutSeconds !== undefined
+      ? "runtime-override"
+      : input.projectConfig?.execution?.resources?.timeoutSeconds !== undefined
+        ? "project-config"
+        : "default";
   syncDefaultModelProfile(config);
   finalizeAuditProfileResolution(config, input, environment);
   sortConfig(config);
@@ -159,7 +167,10 @@ export function serializeResolvedConfigToml(
   pushTable(lines, tableName(["execution", "resources"]), {
     cpu: clone.execution.resources.cpu,
     memory_mib: clone.execution.resources.memoryMiB,
-    timeout_seconds: clone.execution.resources.timeoutSeconds
+    // Omitting inheritance preserves it when a resolved TOML snapshot is loaded
+    // again. JSON snapshots retain both the default value and its origin.
+    timeout_seconds:
+      clone.execution.resourceTimeoutOrigin === "default" ? undefined : clone.execution.resources.timeoutSeconds
   });
   for (const [id, override] of Object.entries(clone.execution.nodes)) {
     pushTable(lines, tableName(["execution", "nodes", id, "resources"]), {
@@ -206,7 +217,8 @@ export function serializeResolvedConfigToml(
     production_source_roots: clone.permissions.productionSourceRoots
   });
   pushTable(lines, "invariants", {
-    property_priority_threshold: clone.invariants.propertyPriorityThreshold,
+    property_priority_threshold: omitProfileSettings ? undefined : clone.invariants.propertyPriorityThreshold,
+    reference_expectation_selection: omitProfileSettings ? undefined : clone.invariants.referenceExpectationSelection,
     invariant_testing_smoke_timeout: omitProfileSettings
       ? undefined
       : formatDurationSeconds(clone.invariants.invariantTestingSmokeTimeoutSeconds),
@@ -236,6 +248,10 @@ export function serializeResolvedConfigToml(
 
 function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfileSettings): void {
   if (settings.strategy_loops !== undefined) config.strategyLoops = settings.strategy_loops;
+  if (settings.property_priority_threshold !== undefined)
+    config.invariants.propertyPriorityThreshold = settings.property_priority_threshold;
+  if (settings.reference_expectation_selection !== undefined)
+    config.invariants.referenceExpectationSelection = settings.reference_expectation_selection;
   if (settings.dynamic_strategies_enumerator !== undefined) {
     config.dynamicStrategiesEnumerator = settings.dynamic_strategies_enumerator;
   }
@@ -259,7 +275,9 @@ function applyAuditProfileSettings(config: ResolvedConfig, settings: AuditProfil
 
 export function resolvedAuditProfileSettings(config: ResolvedConfig): AuditProfileSettings {
   return {
-    strategy_loops: config.strategyLoops ?? 1,
+    strategy_loops: config.strategyLoops ?? 2,
+    property_priority_threshold: config.invariants.propertyPriorityThreshold,
+    reference_expectation_selection: config.invariants.referenceExpectationSelection ?? "mandatory",
     dynamic_strategies_enumerator: config.dynamicStrategiesEnumerator,
     same_agent_attempts: config.retry.sameAgentAttempts,
     max_parallel_agents: config.run.maxParallelAgents,
@@ -308,6 +326,8 @@ function applyLayerSettingOrigins(
   if (layer === undefined) return;
   const runtimeLayer = layer as RuntimeConfigOverrides;
   if (layer.strategyLoops !== undefined) origins.strategy_loops = origin;
+  if (layer.invariants?.propertyPriorityThreshold !== undefined) origins.property_priority_threshold = origin;
+  if (layer.invariants?.referenceExpectationSelection !== undefined) origins.reference_expectation_selection = origin;
   if (layer.dynamicStrategiesEnumerator !== undefined) origins.dynamic_strategies_enumerator = origin;
   if (layer.retry?.sameAgentAttempts !== undefined) origins.same_agent_attempts = origin;
   if (layer.run?.maxParallelAgents !== undefined || runtimeLayer.maxParallelAgents !== undefined) {
@@ -880,6 +900,8 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
       return "CONFIG_WORKSPACE_MODE_INVALID";
     case "invariants.property_priority_threshold":
       return "CONFIG_INVARIANT_PRIORITY_INVALID";
+    case "invariants.reference_expectation_selection":
+      return "CONFIG_REFERENCE_EXPECTATION_SELECTION_INVALID";
     case "invariants.reference_expectation_enforcement":
       return "CONFIG_REFERENCE_EXPECTATION_ENFORCEMENT_INVALID";
     case "permissions.trust_model":
@@ -906,6 +928,8 @@ function resolvedConfigDiagnosticMessage(code: string, issue: ZodIssue, config: 
       return `run.workspace_mode \`${String(valueAtPath(config, issue.path))}\` is not supported`;
     case "CONFIG_INVARIANT_PRIORITY_INVALID":
       return "invariants.property_priority_threshold must be high, medium, or low";
+    case "CONFIG_REFERENCE_EXPECTATION_SELECTION_INVALID":
+      return "invariants.reference_expectation_selection must be priority or mandatory";
     case "CONFIG_REFERENCE_EXPECTATION_ENFORCEMENT_INVALID":
       return "invariants.reference_expectation_enforcement must be warn or fail";
     case "CONFIG_TRUST_MODEL_INVALID":
@@ -959,6 +983,8 @@ function configPathSegment(segment: string): string {
       return "timeout_seconds";
     case "credentialEnv":
       return "credential_env";
+    case "referenceExpectationSelection":
+      return "reference_expectation_selection";
     case "propertyPriorityThreshold":
       return "property_priority_threshold";
     case "invariantTestingSmokeTimeoutSeconds":

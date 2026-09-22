@@ -423,10 +423,11 @@ materialize_outputs_as_unstaged = true
 
 ## Resolution Order
 
-1. Built-in root TOML defaults.
-2. Project TOML.
-3. Supported environment overrides.
-4. Runtime overrides.
+1. Packaged defaults from `packages/config/defaults.toml`.
+2. Selected audit profile.
+3. Project TOML.
+4. Supported environment overrides.
+5. Runtime overrides.
 
 Unknown TOML keys fail validation. Backend, dashboard, sandbox, network, tool
 allowlist, strategy definition, and reference catalog config are not accepted

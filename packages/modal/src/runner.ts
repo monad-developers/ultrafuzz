@@ -39,6 +39,7 @@ import {
 } from "./auth.js";
 import {
   configuredModalSandboxTimeoutMs,
+  assertModalBenchmarkExecutionBudget,
   fingerprintModalConfigFile,
   fingerprintModalModel,
   isPublicModalBenchmarkConfig,
@@ -439,6 +440,7 @@ export async function launchModalBenchmark(input: {
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const config = loadModalBenchmarkConfig(configPath);
   assertStandaloneModalBenchmarkAllowed(config);
+  assertModalBenchmarkExecutionBudget(config);
   const candidateRevision = sourceRevision(repoRoot).toLowerCase();
   if (isPublicModalBenchmarkConfig(config) && candidateRevision !== config.public_benchmark.candidate_commit) {
     throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
@@ -1620,6 +1622,7 @@ export async function overseeModalBenchmarkOnce(
     throw new Error("public Modal benchmarks do not permit post-model recovery");
   }
   assertStandaloneModalBenchmarkAllowed(config);
+  assertModalBenchmarkExecutionBudget(config);
   const now = input.now ?? Date.now;
   const env = input.env ?? process.env;
   const recoveryPolicy = modalRecoveryPolicyForNodeTimeout(config.node_timeout_seconds, input.policy);

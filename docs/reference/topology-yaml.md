@@ -268,8 +268,9 @@ Loop expansion is deterministic:
 depend on the final series attempt.
 
 The scaffold uses the `strategies` group default to run normal strategy nodes
-three times, and uses explicit single-loop behavior for setup, references,
-review, invariant, and exception-flow nodes.
+twice; the exhaustive profile uses three passes. Setup, references, review,
+all five stateful-invariant stages, and exception-flow nodes have explicit
+single-loop behavior. These strategy passes do not change failure retry counts.
 
 ## Runtime Dynamic Expansion
 

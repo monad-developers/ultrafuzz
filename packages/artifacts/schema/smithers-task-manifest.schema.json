@@ -354,6 +354,9 @@
                   },
                   "vulnerabilityDatabaseSha256": {
                     "$ref": "#/$defs/sha256"
+                  },
+                  "invariantReferenceExpectationSelection": {
+                    "enum": ["priority", "mandatory"]
                   }
                 }
               }

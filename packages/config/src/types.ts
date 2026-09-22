@@ -127,6 +127,8 @@ export interface ExecutionConfig {
   provider?: CloudExecutionProvider;
   retentionDays: number;
   resources: ExecutionResources;
+  /** Inherited timeouts may grow to fit a task; explicit resource caps must fit as written. */
+  resourceTimeoutOrigin?: "default" | "project-config" | "runtime-override";
   nodes: Record<string, ExecutionNodeOverride>;
   providers: {
     modal?: ModalExecutionProviderConfig;
@@ -170,6 +172,8 @@ export interface PermissionConfig {
 
 export interface InvariantConfig {
   propertyPriorityThreshold: "high" | "medium" | "low";
+  /** Whether externally expected properties may bypass the priority threshold. */
+  referenceExpectationSelection?: "priority" | "mandatory";
   invariantTestingSmokeTimeoutSeconds: number;
   invariantTestingFuzzerTimeoutSeconds: number;
   /**
