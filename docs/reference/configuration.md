@@ -94,7 +94,7 @@ contract used by the CLI and runtime.
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
 | `[invariants]`                  | Invariant selection policy and campaign durations.                         |
 | `[triage]`                      | Triage quorum and panel size.                                              |
-| `[eval]`                        | Eval suite defaults and reporting provider binding.                        |
+| `[eval]`                        | Eval suite defaults and local reporting selection.                         |
 
 See [Audit profiles](audit-profiles.md) for the generated catalog, packaged
 topologies, effective-setting inspection commands, and precedence rules.

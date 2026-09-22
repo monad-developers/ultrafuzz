@@ -33,7 +33,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `clean <run-id>`          | Remove selected generated paths after confirmation and path checks.                                                       |
 | `dashboard`               | Serve the local loopback dashboard and API.                                                                               |
 | `eval plan`               | Dry-run an eval suite matrix without launching workflows.                                                                 |
-| `eval run`                | Launch runs for an eval suite matrix and stream node telemetry to the configured provider.                                |
+| `eval run`                | Launch runs for an eval suite matrix and watch local progress.                                                            |
 | `eval status <id>`        | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                               |
 | `eval score <id>`         | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
 | `eval report <id>`        | Show the scored eval run variant ranking.                                                                                 |
