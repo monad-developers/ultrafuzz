@@ -3529,7 +3529,8 @@ test("stats fails closed for malformed present bundle evidence", async (context)
     {
       name: "duplicate ZIP member",
       mutateZip: (bytes) => duplicateCentralDirectoryEntry(bytes, "state.json"),
-      diagnostic: /duplicate ZIP member/iu
+      // adm-zip can reject the duplicate before Ultrafuzz's member validation runs.
+      diagnostic: /^(?:report bundle contains duplicate ZIP member|ADM-ZIP: Duplicate entry name) "state\.json"$/u
     }
   ];
 
@@ -3548,7 +3549,13 @@ test("stats fails closed for malformed present bundle evidence", async (context)
 
       const captured = await cli(project, ["stats", "--bundle", bundlePath, "--json"]);
       assert.equal(captured.code, 1, captured.stderr);
-      assert.match(JSON.stringify(parseJson(captured).diagnostics), invalidCase.diagnostic);
+      const body = parseJson(captured);
+      assert.equal(body.ok, false);
+      assert.equal(body.data, null);
+      const diagnostics = body.diagnostics as Array<{ code: string; message: string }>;
+      assert.equal(diagnostics.length, 1);
+      assert.equal(diagnostics[0]?.code, "RUN_STATS_FAILED");
+      assert.match(diagnostics[0]?.message ?? "", invalidCase.diagnostic);
     });
   }
 });
