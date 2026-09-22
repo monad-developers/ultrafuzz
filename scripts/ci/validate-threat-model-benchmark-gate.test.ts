@@ -179,20 +179,6 @@ describe("threat-model benchmark structural gate", () => {
 
     expect(() => validateFixture(fixture)).not.toThrow();
   });
-
-  it("runs only after both artifact uploads and before the final matrix decision", () => {
-    const workflow = fs.readFileSync(path.resolve(".github/workflows/eval-benchmarks.yml"), "utf8");
-    const resultsUpload = workflow.indexOf("- name: Upload public benchmark reports and findings");
-    const controlUpload = workflow.indexOf("- name: Upload launch state and failure diagnostics");
-    const gate = workflow.indexOf("- name: Validate threat-model structural gate");
-    const finalDecision = workflow.indexOf("- name: Fail an incomplete matrix after preserving artifacts");
-    expect(resultsUpload).toBeGreaterThan(-1);
-    expect(controlUpload).toBeGreaterThan(resultsUpload);
-    expect(gate).toBeGreaterThan(controlUpload);
-    expect(finalDecision).toBeGreaterThan(gate);
-    expect(workflow.slice(gate, finalDecision)).toContain("always() && env.BENCHMARK_MODE == 'threat-model'");
-    expect(workflow.slice(gate, finalDecision)).toContain("validate-threat-model-benchmark-gate.mjs");
-  });
 });
 
 function gateFixture() {

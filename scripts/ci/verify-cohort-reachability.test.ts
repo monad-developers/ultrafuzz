@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
 
 import {
   anonymousGitArguments,
@@ -180,31 +179,6 @@ function verify(input: {
     attempts: input.attempts ?? 3,
     backoffMs: 0
   }) as Promise<ReachabilityResult>;
-}
-
-interface WorkflowStep {
-  name?: string;
-  run?: string;
-  env?: Record<string, string>;
-  "continue-on-error"?: boolean;
-}
-
-const producerWorkflowPath = path.join(repoRoot, ".github", "workflows", "eval-benchmarks.yml");
-
-/** The steps of the producer job that pays for every Modal image build and sandbox. */
-function launchSteps(): WorkflowStep[] {
-  const workflow = parseYaml(fs.readFileSync(producerWorkflowPath, "utf8")) as {
-    jobs: Record<string, { steps: WorkflowStep[] } | undefined>;
-  };
-  const launch = workflow.jobs.launch;
-  if (launch === undefined) throw new Error(`${producerWorkflowPath} declares no launch job`);
-  return launch.steps;
-}
-
-function preflightStepScript(): string {
-  const script = launchSteps().find((step) => step.run?.includes("verify-cohort-reachability.mjs") === true)?.run;
-  if (script === undefined) throw new Error(`${producerWorkflowPath} declares no cohort reachability preflight step`);
-  return script;
 }
 
 describe("cohort reachability verdicts", () => {
@@ -697,7 +671,7 @@ describe("anonymous probing", () => {
   });
 });
 
-describe("cohort reachability entrypoint and workflow wiring", () => {
+describe("cohort reachability entrypoint", () => {
   it("exits non-zero from the entrypoint for an unusable invocation", () => {
     for (const args of [[], ["--lane"], ["--lane", "everything"], ["--cohort", "/nonexistent/cohort.json"]]) {
       const result = spawnSync(process.execPath, [scriptPath, ...args], { cwd: repoRoot, encoding: "utf8" });
@@ -710,79 +684,5 @@ describe("cohort reachability entrypoint and workflow wiring", () => {
     );
     expect(malformed.status).not.toBe(0);
     expect(malformed.stderr).toContain("failed to read benchmark manifest");
-  });
-
-  it("gates the producer workflow before any Modal spend, and stays out of the general CI gate", () => {
-    const steps = launchSteps();
-    const indexOf = (name: string) => steps.findIndex((step) => step.name === name);
-    const preflight = steps.findIndex((step) => step.run?.includes("verify-cohort-reachability.mjs") === true);
-
-    expect(preflight).toBeGreaterThan(indexOf("Install and build the candidate"));
-    // A broken cohort must cost seconds of preflight, not a paid image build or
-    // a detached sandbox that fails pre-model and publishes nothing.
-    expect(preflight).toBeLessThan(indexOf("Build an immutable Modal image for the candidate"));
-    expect(preflight).toBeLessThan(indexOf("Launch detached Modal benchmark sandboxes"));
-    expect(steps[preflight]?.run).toContain('--lane "$BENCHMARK_MODE"');
-    // A named denial must stay fatal, so the step may not blanket-tolerate a
-    // non-zero exit; only the gate's own inconclusive verdict is tolerated.
-    expect(steps[preflight]?.["continue-on-error"]).toBeUndefined();
-    expect(steps[preflight]?.run).not.toContain("|| true");
-    // An authenticated probe would read the private dependency and pass.
-    expect(steps[preflight]?.env ?? {}).toEqual({});
-    for (const step of steps) {
-      if (step.run?.includes("verify-cohort-reachability.mjs") !== true) continue;
-      expect(step.run).not.toContain("GITHUB_TOKEN");
-      expect(step.run).not.toContain("GH_TOKEN");
-    }
-    expect(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8")).not.toContain(
-      "verify-cohort-reachability"
-    );
-  });
-
-  it("blocks the workflow on a denial and only annotates an unproven cohort", () => {
-    const script = preflightStepScript();
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cohort-reachability-wiring-"));
-    roots.push(root);
-    fs.mkdirSync(path.join(root, "scripts", "ci"), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, "scripts", "ci", "verify-cohort-reachability.mjs"),
-      'console.error("stub reachability report");\nprocess.exitCode = Number(process.env.STUB_EXIT);\n'
-    );
-    // The producer's own shell: a non-zero exit fails the step unless the script
-    // itself decides otherwise.
-    const runStep = (exitCode: string) => {
-      const summaryPath = path.join(root, `summary-${exitCode}.md`);
-      fs.writeFileSync(summaryPath, "");
-      const result = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
-        cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          BENCHMARK_MODE: "smoke",
-          STUB_EXIT: exitCode,
-          GITHUB_STEP_SUMMARY: summaryPath
-        }
-      });
-      return { status: result.status, stdout: result.stdout, summary: fs.readFileSync(summaryPath, "utf8") };
-    };
-
-    const reachable = runStep("0");
-    expect(reachable.status).toBe(0);
-    expect(reachable.stdout).toContain("stub reachability report");
-    expect(reachable.summary).toBe("");
-    // Exit 2 is the gate's own "proved nothing": a resolver blip or a 403
-    // throttle may not block a benchmark run on inconclusive evidence.
-    const unverified = runStep("2");
-    expect(unverified.status).toBe(0);
-    expect(unverified.stdout).toContain("::warning title=Cohort reachability unverified::");
-    expect(unverified.summary).toContain("Cohort reachability unverified");
-    expect(unverified.summary).toContain("stub reachability report");
-    // Exit 1 is a named anonymous denial: red in four seconds, instead of a
-    // four-hour paid run that reports success and publishes nothing.
-    const unreachable = runStep("1");
-    expect(unreachable.status).toBe(1);
-    expect(unreachable.stdout).toContain("stub reachability report");
-    expect(unreachable.stdout).not.toContain("::warning");
-    expect(unreachable.summary).toBe("");
   });
 });

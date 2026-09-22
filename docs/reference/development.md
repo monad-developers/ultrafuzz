@@ -47,12 +47,12 @@ binding, generated workflow input, and representative initialization,
 validation, planning, and workflow-compilation behavior. Feature branches are
 validated only by the pull-request event, avoiding a duplicate push run.
 
-Pushes to `main` and manual workflow dispatches add full release validation. It
-uses seven isolated CI lanes with a maximum of seven jobs in parallel: package
-and CLI/typecheck lanes, one runtime-supporting lane, and four deterministic
-runtime integration shards. It then records their results in stable gate order
-in the JSON report. The expensive full runtime matrix therefore runs once after
-integration instead of after every pull-request update.
+Pull requests also require all five runtime validation lanes: one supporting
+lane, including the Bun adapter contracts, and four deterministic integration
+shards. Together these run the full runtime suite before merge. Pushes to `main`
+and manual workflow dispatches run all eight release lanes, adding package,
+CLI, and benchmark-history/typecheck checks, with at most eight jobs in parallel.
+Their results are recorded in stable gate order in the JSON report.
 
 ## Package Checks
 
@@ -92,10 +92,12 @@ pnpm --filter @ultrafuzz/modal typecheck
 pnpm --filter @ultrafuzz/modal build
 ```
 
-These tests also validate the exact three-target automatic smoke and four-provider full
-EVMBench configuration, the fixed Sol judge, four-hour-ten-minute smoke and one-hour full row budgets,
-immutable image naming, hash-manifested public bundles, and the Modal-only benchmark
-workflow. They make no cloud or model calls.
+These tests also validate the exact three-target smoke and four-provider full
+EVMBench configuration, the fixed Sol judge, bounded row and control deadlines,
+immutable image naming, and hash-manifested public bundles. A workflow policy
+test keeps Actions limited to ordinary CI without provider secrets or paid
+launch commands. The tests make no cloud or model calls; paid benchmarks and
+history publication require explicit maintainer runs outside Actions.
 
 The real-cloud smoke is deliberately separate from every normal test and CI
 script. It must be selected explicitly, once per provider:

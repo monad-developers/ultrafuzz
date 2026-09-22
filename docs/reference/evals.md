@@ -304,7 +304,7 @@ differences that were waived.
 
 ## CLI surface
 
-```
+```bash
 ultrafuzz eval plan      # validate config + suite, print the matrix
 ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
 ultrafuzz eval status    # observe every row's durable node progress and ETA
@@ -349,10 +349,12 @@ one strategy loop, and explicitly leaves all three disable flags off so the
 packaged `exhaustive` audit profile and its complete specialist topology are included.
 Both currently declare one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
-runner variant. Repository variables may override the pushed smoke OpenAI model,
-while a manual smoke dispatch selects one provider, model, and reasoning level;
-full workflow dispatch inputs may override any full-lane runner. These overrides retain the lane's fixed provider count, target
-selection, and topology. Publication validates every pair as an exact projection
+runner variant. Maintainers may explicitly override runner models through the
+local public benchmark config generator's `BENCHMARK_MODELS_JSON` input. Smoke
+selects one provider, model, and reasoning level; full retains its four-provider
+matrix. These overrides retain the lane's fixed provider count, target
+selection, and topology. There are no paid benchmark or history-publication
+Actions workflows. Manual publication validates every pair as an exact projection
 of the candidate commit's trusted lane policy before merging its observations.
 Smoke publication additionally requires at least one normalized finding for
 every successful target row; the single report-backed failed target may publish
