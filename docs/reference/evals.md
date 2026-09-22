@@ -304,7 +304,7 @@ differences that were waived.
 
 ## CLI surface
 
-```
+```bash
 ultrafuzz eval plan      # validate config + suite, print the matrix
 ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
 ultrafuzz eval status    # observe every row's durable node progress and ETA
