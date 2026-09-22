@@ -1,7 +1,6 @@
 import fs from "node:fs";
 
-import { appendEvalRunRecord } from "../src/eval-durable.js";
-import type { EvalRunRecord } from "../src/types.js";
+import { appendEvalRunRecord } from "../dist/eval-durable.js";
 
 const [journalPath, readyPath, gatePath, contendingPath, encodedRecord] = process.argv.slice(2);
 if (
@@ -23,5 +22,5 @@ while (!fs.existsSync(gatePath)) {
 }
 fs.writeFileSync(contendingPath, "", { flag: "wx" });
 
-const record = JSON.parse(Buffer.from(encodedRecord, "base64url").toString("utf8")) as EvalRunRecord;
+const record = JSON.parse(Buffer.from(encodedRecord, "base64url").toString("utf8"));
 appendEvalRunRecord(journalPath, record);

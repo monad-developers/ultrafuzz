@@ -12,7 +12,7 @@
       "entry": ["frontend/public/theme-bootstrap.js"]
     },
     "packages/evals": {
-      "entry": ["src/index.ts", "test/append-eval-run-record-child.ts"]
+      "entry": ["src/index.ts", "test/append-eval-run-record-child.mjs"]
     },
     "packages/evmbench": {
       "entry": ["src/{index,cli,adapter-cli,update-lock}.ts"]
