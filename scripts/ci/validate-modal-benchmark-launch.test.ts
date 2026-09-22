@@ -111,7 +111,6 @@ describe("Modal benchmark launch guardrails", () => {
       format: "ultrafuzz"
     };
     localOnlyConfig.benchmark_execution = { excluded_node_ids: [] };
-    localOnlyConfig.eval_reporting = { provider: "none" };
     writeJson(localOnly.configPath, localOnlyConfig);
     expect(() => validateModalBenchmarkLaunch(localOnly.input)).toThrow(
       /Modal benchmark launch config .*local-only\/private.*manifest/u

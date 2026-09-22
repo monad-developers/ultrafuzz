@@ -49,7 +49,6 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz eval compare <id>`           | Compare scored eval variants against a baseline variant.                                                       |
 | `ultrafuzz eval analyze <type>`         | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.   |
 | `ultrafuzz eval history [id]`           | Validate/render public eval history, or append one complete scored run.                                        |
-| `ultrafuzz eval publish <id>`           | Replay a recorded eval run's node telemetry to the configured provider.                                        |
 
 Generated workflow-engine files are implementation plumbing. The stable product
 surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
@@ -635,7 +634,7 @@ writing, and guards mutating requests with a per-session token.
 ultrafuzz eval plan \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|none] \
+  [--provider none] \
   [--target-root <path>] \
   [--ground-truth-root <external-path>] \
   [--skip-target-validation] \
@@ -643,7 +642,7 @@ ultrafuzz eval plan \
 ultrafuzz eval run \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|none] \
+  [--provider none] \
   [--eval-run-id <id>] \
   [--row <row-id>]... \
   [--target-root <path>] \
@@ -669,11 +668,6 @@ ultrafuzz eval analyze all \
   --input </external/private-handoff.zip> \
   --output </external/private-analysis-directory> \
   [--project <path>] \
-  [--json]
-ultrafuzz eval publish <eval-run-id> \
-  [--project <path>] \
-  [--provider braintrust] \
-  [--resume] \
   [--json]
 ultrafuzz eval history [eval-run-id] \
   [--project <path>] \

@@ -343,7 +343,7 @@ describe("Modal benchmark termination", () => {
 
   it("uses stable config lineage to terminate every valid generation and reject malformed candidates", async () => {
     const config = parseModalBenchmarkConfig({
-      schema_version: "ultrafuzz.modal.benchmark.v2",
+      schema_version: "ultrafuzz.modal.benchmark.v3",
       run_id: "immutable-run",
       app_name: "ultrafuzz-evals",
       image_name: "ultrafuzz-security-runner:latest",
@@ -354,18 +354,15 @@ describe("Modal benchmark termination", () => {
         file: "findings.yml",
         format: "ultrafuzz"
       },
-      braintrust: {
-        project: "termination-test",
-        api_key_env: "BRAINTRUST_API_KEY",
-        judge_api_key_env: "OPENAI_API_KEY",
-        judge_url: "https://api.openai.com/v1/chat/completions",
-        judge_credential_ttl_seconds: 57_600
+      judge: {
+        api_key_env: "OPENAI_API_KEY",
+        url: "https://api.openai.com/v1/chat/completions",
+        credential_ttl_seconds: 57_600
       },
       node_timeout_seconds: 7_200,
       loops: 3,
       models: [MODEL],
-      benchmark_execution: { excluded_node_ids: [] },
-      eval_reporting: { provider: "braintrust" }
+      benchmark_execution: { excluded_node_ids: [] }
     });
     const scopes = modalTerminationScopesForConfig(config, {
       config: "a".repeat(64),
@@ -1459,7 +1456,7 @@ model = "k3"
 
 function privateBenchmarkConfig() {
   return parseModalBenchmarkConfig({
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "immutable-run",
     app_name: "ultrafuzz-evals",
     image_name: "ultrafuzz-security-runner:latest",
@@ -1470,18 +1467,15 @@ function privateBenchmarkConfig() {
       file: "findings.yml",
       format: "ultrafuzz"
     },
-    braintrust: {
-      project: "termination-test",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: "OPENAI_API_KEY",
+      url: "https://api.openai.com/v1/chat/completions",
+      credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: 7_200,
     loops: 3,
     models: [MODEL],
-    benchmark_execution: { excluded_node_ids: [] },
-    eval_reporting: { provider: "braintrust" }
+    benchmark_execution: { excluded_node_ids: [] }
   });
 }
 
@@ -1489,16 +1483,14 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
   const candidateCommit = "d".repeat(40);
   const configFingerprint = "a".repeat(64);
   const config = parseModalBenchmarkConfig({
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-eval",
     app_name: "ultrafuzz-evals",
     image_name: "public-image",
-    braintrust: {
-      project: "public-evals",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: "OPENAI_API_KEY",
+      url: "https://api.openai.com/v1/chat/completions",
+      credential_ttl_seconds: 57_600
     },
     public_benchmark: {
       benchmark: "evmbench",

@@ -234,8 +234,7 @@ describe("Modal durable evaluation resume", () => {
         cliPath: "/opt/tool/cli.js",
         controlRoot: "/workspace/control",
         suitePath: "/workspace/control/modal-suite.yml",
-        evalRunId: "eval-one",
-        provider: "none"
+        evalRunId: "eval-one"
       })
     ).toEqual([
       "node",

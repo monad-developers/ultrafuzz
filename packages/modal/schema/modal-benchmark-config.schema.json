@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:modal:benchmark-config:2",
+  "$id": "urn:ultrafuzz:schema:modal:benchmark-config:3",
   "title": "Ultrafuzz Modal benchmark configuration",
   "type": "object",
   "additionalProperties": false,
@@ -9,17 +9,17 @@
     "run_id",
     "app_name",
     "image_name",
-    "braintrust",
+    "judge",
     "node_timeout_seconds",
     "loops",
     "models"
   ],
   "properties": {
-    "schema_version": { "const": "ultrafuzz.modal.benchmark.v2" },
+    "schema_version": { "const": "ultrafuzz.modal.benchmark.v3" },
     "run_id": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" },
     "app_name": { "type": "string", "minLength": 1, "maxLength": 128 },
     "image_name": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "braintrust": { "$ref": "#/$defs/braintrust" },
+    "judge": { "$ref": "#/$defs/judge" },
     "node_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
     "loops": { "type": "integer", "minimum": 1, "maximum": 256 },
     "models": {
@@ -29,7 +29,6 @@
     },
     "target": { "$ref": "#/$defs/privateTarget" },
     "benchmark_execution": { "$ref": "#/$defs/privateBenchmarkExecution" },
-    "eval_reporting": { "$ref": "#/$defs/privateEvalReporting" },
     "ground_truth": { "$ref": "#/$defs/privateGroundTruth" },
     "public_benchmark": { "$ref": "#/$defs/publicBenchmark" }
   },
@@ -38,11 +37,10 @@
       "properties": {
         "target": {},
         "benchmark_execution": {},
-        "eval_reporting": {},
         "ground_truth": {},
         "public_benchmark": {}
       },
-      "required": ["target", "benchmark_execution", "eval_reporting", "ground_truth"],
+      "required": ["target", "benchmark_execution", "ground_truth"],
       "not": { "properties": { "public_benchmark": {} }, "required": ["public_benchmark"] }
     },
     {
@@ -50,7 +48,6 @@
         "public_benchmark": {},
         "target": {},
         "benchmark_execution": {},
-        "eval_reporting": {},
         "ground_truth": {}
       },
       "required": ["public_benchmark"],
@@ -58,7 +55,6 @@
         "anyOf": [
           { "properties": { "target": {} }, "required": ["target"] },
           { "properties": { "benchmark_execution": {} }, "required": ["benchmark_execution"] },
-          { "properties": { "eval_reporting": {} }, "required": ["eval_reporting"] },
           { "properties": { "ground_truth": {} }, "required": ["ground_truth"] }
         ]
       }
@@ -85,17 +81,15 @@
       "type": "string",
       "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
     },
-    "braintrust": {
+    "judge": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "api_key_env", "judge_api_key_env", "judge_url", "judge_credential_ttl_seconds"],
+      "required": ["api_key_env", "url", "credential_ttl_seconds"],
       "properties": {
-        "project": { "type": "string", "minLength": 1, "maxLength": 256 },
         "api_key_env": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/environmentVariable" },
-        "judge_api_key_env": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/environmentVariable" },
-        "judge_url": { "$ref": "#/$defs/httpsUrl" },
-        "judge_credential_endpoint": { "$ref": "#/$defs/httpsUrl" },
-        "judge_credential_ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
+        "url": { "$ref": "#/$defs/httpsUrl" },
+        "credential_endpoint": { "$ref": "#/$defs/httpsUrl" },
+        "credential_ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 86400 }
       }
     },
     "model": {
@@ -179,14 +173,6 @@
           "items": { "$ref": "urn:ultrafuzz:schema:modal:common:1#/$defs/safeId" }
         },
         "include_threat_model_goal_fanout": { "type": "boolean" }
-      }
-    },
-    "privateEvalReporting": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["provider"],
-      "properties": {
-        "provider": { "enum": ["braintrust", "none"] }
       }
     },
     "privateGroundTruth": {

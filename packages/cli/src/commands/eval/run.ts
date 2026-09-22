@@ -17,7 +17,7 @@ export default class EvalRun extends Command {
   static override flags = {
     ...globalFlags,
     suite: Flags.string({ summary: "Eval suite YAML path (defaults to [eval].eval_config)" }),
-    provider: Flags.string({ summary: "Eval reporter provider override (braintrust | none)" }),
+    provider: Flags.string({ summary: "Eval reporter provider override (none)", options: ["none"] }),
     "eval-run-id": Flags.string({ summary: "Eval run ID" }),
     row: Flags.string({ summary: "Matrix row ID to launch; repeatable", multiple: true }),
     "target-root": Flags.string({ summary: "Directory containing local target checkouts, one per target id" }),

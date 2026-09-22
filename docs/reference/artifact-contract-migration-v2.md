@@ -134,13 +134,13 @@ identities are first canonical versions rather than compatibility aliases.
 
 ### Modal documents
 
-| Document                | Previous identity                                                    | Current identity or decision                                                                        |
-| ----------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Benchmark configuration | `ultrafuzz.modal.benchmark.v1`                                       | `ultrafuzz.modal.benchmark.v2`; the benchmark matrix, source, model, and control policy are closed. |
-| Public benchmark bundle | `ultrafuzz.modal.public-benchmark-bundle.v4` plus a legacy v3 reader | `ultrafuzz.modal.public-benchmark-bundle.v5` only.                                                  |
-| Node result             | v1 and v2 accepted                                                   | `ultrafuzz.modal.node-result.v2` only.                                                              |
-| Worker status/result    | Separate worker-status compatibility shape plus result v2            | `ultrafuzz.modal.worker-result.v2`; partial and terminal states share one closed contract.          |
-| Launch state            | `ultrafuzz.modal.launch-state.v3` with v1/v2 migration readers       | `ultrafuzz.modal.launch-state.v3` remains current, but the v1/v2 migration path is removed.         |
+| Document                | Previous identity                                                    | Current identity or decision                                                                     |
+| ----------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Benchmark configuration | `ultrafuzz.modal.benchmark.v1` and `v2`                              | `ultrafuzz.modal.benchmark.v3`; the closed contract uses explicit vendor-neutral judge settings. |
+| Public benchmark bundle | `ultrafuzz.modal.public-benchmark-bundle.v4` plus a legacy v3 reader | `ultrafuzz.modal.public-benchmark-bundle.v5` only.                                               |
+| Node result             | v1 and v2 accepted                                                   | `ultrafuzz.modal.node-result.v2` only.                                                           |
+| Worker status/result    | Separate worker-status compatibility shape plus result v2            | `ultrafuzz.modal.worker-result.v2`; partial and terminal states share one closed contract.       |
+| Launch state            | `ultrafuzz.modal.launch-state.v3` with v1/v2 migration readers       | `ultrafuzz.modal.launch-state.v3` remains current, but the v1/v2 migration path is removed.      |
 
 The retained Modal node input, dependency manifest, pinned source proof,
 worker lineage, node checkpoint/index/restore, node-worker error, recovery state

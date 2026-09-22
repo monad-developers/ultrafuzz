@@ -331,39 +331,27 @@ panel size.
 [eval]
 eval_config = ".ultrafuzz/evals/bug-finding.yml"
 ground_truth_root = "/secure/eval-ground-truth"
-provider = "braintrust"
-
-[eval.providers.braintrust]
-api_key_env = "BRAINTRUST_API_KEY"
-project = "ultrafuzz-evals"
+provider = "none"
 ```
 
-| Key                 | Type   | Meaning                                                                       |
-| ------------------- | ------ | ----------------------------------------------------------------------------- |
-| `eval_config`       | string | Eval suite YAML used when `--suite` is omitted.                               |
-| `ground_truth_root` | string | Machine-specific ground-truth directory; must resolve outside the repository. |
-| `provider`          | string | Active eval reporter: `braintrust` or `none`.                                 |
+| Key                 | Type   | Meaning                                                         |
+| ------------------- | ------ | --------------------------------------------------------------- |
+| `eval_config`       | string | Eval suite YAML used when `--suite` is omitted.                 |
+| `ground_truth_root` | string | Machine-specific ground-truth directory outside the repository. |
+| `provider`          | string | Only `none` is supported; evaluation reporting stays local.     |
 
-Each `[eval.providers.<name>]` connection profile supports:
+Precedence is `--provider` over `ULTRAFUZZ_EVAL_PROVIDER` over project settings.
+Any other selected provider fails before credential access or workflow launch.
+Generic provider-profile metadata remains readable in saved configurations, but
+there is no external reporting transport and fresh defaults contain no profiles.
+See [Eval Suites](evals.md) and the
+[migration guidance](../how-to/run-evals.md#migrate-retired-reporting-settings).
 
-| Key           | Type   | Meaning                                                                                             |
-| ------------- | ------ | --------------------------------------------------------------------------------------------------- |
-| `api_key_env` | string | Canonical key variable: `BRAINTRUST_API_KEY`.                                                       |
-| `project`     | string | Provider project name for published experiments.                                                    |
-| `endpoint`    | string | Optional HTTPS origin; non-canonical origins require an exact operator environment acknowledgement. |
-
-Profiles name credential environment variables and never contain secret
-values. An
-unknown `provider` or a missing `[eval.providers.<name>]` profile is a config
-error at `eval plan` time; a missing credential env var is an error at publish
-time only, so `provider = "none"` keeps local eval runs working offline. The
-experiment definition itself lives in the eval YAML — see
-[Eval Suites](evals.md).
-
-Reporter credentials are sent only to canonical provider origins by default.
-For a self-hosted service, set the configured `endpoint` and independently set
-`ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` to that exact origin. Redirects are
-rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
+Optional LLM judging is separate from reporting. It requires an explicit HTTPS
+`ULTRAFUZZ_EVAL_JUDGE_URL` and a dedicated `ULTRAFUZZ_EVAL_JUDGE_API_KEY`.
+Private targets additionally require `ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`.
+There is no default judge gateway or credential fallback; deterministic scoring
+is local and remains the default.
 
 ## Environment Overrides
 
@@ -373,7 +361,7 @@ rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
 | `ULTRAFUZZ_AGENT_ENV_ALLOWLIST`         | Extra workflow inputs; credential-like names or values are provider-route scoped.                                                                                                                                                                              |
 | `ULTRAFUZZ_OUTPUT_DIR`                  | Project-local override for `run.output_dir`.                                                                                                                                                                                                                   |
 | `ULTRAFUZZ_KEEP_WORKSPACES`             | Boolean override for `run.keep_workspaces`.                                                                                                                                                                                                                    |
-| `ULTRAFUZZ_EVAL_PROVIDER`               | Override for `eval.provider`.                                                                                                                                                                                                                                  |
+| `ULTRAFUZZ_EVAL_PROVIDER`               | Override for `eval.provider`; only `none` is supported.                                                                                                                                                                                                        |
 | `ULTRAFUZZ_EVAL_CONFIG`                 | Override for `eval.eval_config`.                                                                                                                                                                                                                               |
 | `ULTRAFUZZ_PRICING_CATALOG_URL`         | Live model-pricing catalog URL, or `disabled`, `none`, or `off`.                                                                                                                                                                                               |
 | `ULTRAFUZZ_PRICING_TIMEOUT_MS`          | Positive catalog request timeout in milliseconds, capped at 60 seconds.                                                                                                                                                                                        |

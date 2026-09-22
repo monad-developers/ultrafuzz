@@ -157,7 +157,3 @@ eval_config = ".ultrafuzz/evals/bug-finding.yml"
 # ground_truth_root is machine-specific and MUST resolve outside the repo, e.g.:
 # ground_truth_root = "/secure/eval-ground-truth"
 provider = "none"
-
-[eval.providers.braintrust]
-api_key_env = "BRAINTRUST_API_KEY"
-project = "ultrafuzz-evals"

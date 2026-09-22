@@ -279,12 +279,11 @@ function assertBenchmarkConfigSemantics(config: StrictModalBenchmarkConfigDocume
     return;
   }
   if (
-    config.braintrust.api_key_env !== "BRAINTRUST_API_KEY" ||
-    config.braintrust.judge_api_key_env !== "OPENAI_API_KEY" ||
-    config.braintrust.judge_url !== "https://api.openai.com/v1/chat/completions" ||
-    config.braintrust.judge_credential_endpoint !== undefined
+    config.judge.api_key_env !== "OPENAI_API_KEY" ||
+    config.judge.url !== "https://api.openai.com/v1/chat/completions" ||
+    config.judge.credential_endpoint !== undefined
   ) {
-    fail("modal-benchmark-config-identity", "public benchmark reporting credentials and destination must be canonical");
+    fail("modal-benchmark-config-identity", "public benchmark judge credentials and destination must be canonical");
   }
   if (config.models.length !== 1 || config.models[0]?.slug !== config.public_benchmark.runner_model_profile) {
     fail("modal-benchmark-config-identity", "public runner profile must identify the only configured model");

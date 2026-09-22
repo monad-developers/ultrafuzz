@@ -43,13 +43,7 @@ import {
   type ModalResumeWorkspace
 } from "./resume.js";
 import { inspectPinnedSource, materializePinnedSource } from "./pinned-source.js";
-import {
-  privateEvalProvider,
-  privateEvalPublishCommand,
-  privateEvalScoreEnv,
-  privateJudgeApiKeyEnv,
-  renderPrivateEvalConfigSection
-} from "./private-reporting.js";
+import { privateEvalScoreEnv, privateJudgeApiKeyEnv, renderPrivateEvalConfigSection } from "./private-reporting.js";
 import {
   checkpointPrivateModelWorkStart,
   privateEvalModelWorkEvidence,
@@ -72,7 +66,7 @@ import {
   WorkerResultWriter,
   type WorkerDiagnosticCode
 } from "./worker-result.js";
-import { modalTargetToml, tomlString } from "./workspace-config.js";
+import { modalTargetToml } from "./workspace-config.js";
 import { runPublicBenchmarkWorker } from "./public-worker.js";
 import {
   childExitFailureCause,
@@ -123,12 +117,7 @@ const SOURCE_PROOF_PATH = path.join(DATA_ROOT, "source-proof.json");
  * artifact, and once the collector holds the same value the whole collected file set is refused instead.
  */
 const DIAGNOSTIC_SECRET_VALUES = new Set(
-  [
-    CONFIG.braintrust.api_key_env,
-    CONFIG.braintrust.judge_api_key_env,
-    REFERENCE_GITHUB_TOKEN_ENV,
-    ...runnerApiKeySourceEnv(MODEL.provider)
-  ]
+  [CONFIG.judge.api_key_env, REFERENCE_GITHUB_TOKEN_ENV, ...runnerApiKeySourceEnv(MODEL.provider)]
     .map((name) => process.env[name]?.trim())
     .filter((value): value is string => value !== undefined && value !== "")
 );
@@ -256,8 +245,7 @@ async function main(): Promise<void> {
                     cliPath: CLI,
                     controlRoot: control,
                     suitePath: prepared.suitePath,
-                    evalRunId,
-                    provider: privateEvalProvider(privateConfig())
+                    evalRunId
                   }),
                   target!,
                   writer
@@ -293,15 +281,6 @@ async function main(): Promise<void> {
         env: privateEvalScoreEnv(privateConfig(), judgeCredential)
       });
       await writer.writePartial(await readWorkerCheckpoint(target));
-      const publishCommand = privateEvalPublishCommand({
-        cliPath: CLI,
-        controlRoot: control,
-        evalRunId,
-        provider: privateEvalProvider(privateConfig())
-      });
-      if (publishCommand !== undefined) {
-        await runChecked(publishCommand, { label: "eval publish", failureCategory: "unreachable" });
-      }
       await runChecked(["node", CLI, "eval", "report", evalRunId, "--project", control, "--json"], {
         label: "eval report",
         failureCategory: "unreachable"
@@ -499,7 +478,7 @@ async function materializeGroundTruth(source: string, destination: string, targe
 }
 
 async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
-  const endpoint = CONFIG.braintrust.judge_credential_endpoint;
+  const endpoint = CONFIG.judge.credential_endpoint;
   if (endpoint === undefined) return sourceKey;
   let response: Response;
   try {
@@ -510,7 +489,7 @@ async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
       headers: { authorization: `Bearer ${sourceKey}`, "content-type": "application/json" },
       body: JSON.stringify({
         model: MODEL.model,
-        ttl_seconds: CONFIG.braintrust.judge_credential_ttl_seconds
+        ttl_seconds: CONFIG.judge.credential_ttl_seconds
       })
     });
   } catch (error) {
@@ -567,27 +546,12 @@ async function configureTarget(target: string): Promise<void> {
 }
 
 async function configureControl(control: string, target: string, groundTruth: string): Promise<string> {
-  const privateBenchmarkConfig = privateConfig();
   const configPath = path.join(control, "ultrafuzz.toml");
   let config = await readFile(configPath, "utf8");
-  config = config.replace(
-    /\[eval\][\s\S]*?(?=\n\[[^\n]+\]|$)/u,
-    renderPrivateEvalConfigSection(privateBenchmarkConfig, groundTruth)
-  );
-  config = config.replace(
-    /(\[eval\.providers\.braintrust\][\s\S]*?api_key_env\s*=\s*)"[^"]+"/u,
-    `$1${tomlString(CONFIG.braintrust.api_key_env)}`
-  );
-  config = config.replace(
-    /(\[eval\.providers\.braintrust\][\s\S]*?project\s*=\s*)"[^"]+"/u,
-    `$1${tomlString(CONFIG.braintrust.project)}`
-  );
+  config = config.replace(/\[eval\][\s\S]*?(?=\n\[[^\n]+\]|$)/u, renderPrivateEvalConfigSection(groundTruth));
   await writeFile(configPath, config);
   const suitePath = path.join(control, "modal-suite.yml");
-  await writeFile(
-    suitePath,
-    renderPrivateEvalSuite({ config: privateBenchmarkConfig, model: MODEL, targetPath: target })
-  );
+  await writeFile(suitePath, renderPrivateEvalSuite({ config: privateConfig(), model: MODEL, targetPath: target }));
   return suitePath;
 }
 

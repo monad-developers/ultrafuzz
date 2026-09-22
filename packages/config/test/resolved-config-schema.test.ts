@@ -208,7 +208,10 @@ describe("resolved config JSON contract", () => {
         label: "traversing production source root",
         mutate: (value) => void (record(value.permissions).productionSourceRoots = ["../src"])
       },
-      { label: "bad endpoint", mutate: (value) => void (evalProvider(value, "braintrust").endpoint = "http://local") },
+      {
+        label: "bad historical endpoint",
+        mutate: (value) => void (record(record(value.eval).providers).archived = { endpoint: "http://local" })
+      },
       { label: "old 1.0 version", mutate: (value) => void (value.schemaVersion = "1.0") },
       { label: "old namespaced version", mutate: (value) => void (value.schemaVersion = "ultrafuzz.config.v1") },
       { label: "case variant", mutate: (value) => void (value.schemaVersion = "ULTRAFUZZ.CONFIG.V2") }
@@ -246,7 +249,7 @@ describe("resolved config JSON contract", () => {
     };
     record(value.project).name = "Ultrafuzz target";
     record(value.invariants).referenceExpectationEnforcement = "fail";
-    evalProvider(value, "braintrust").endpoint = "https://api.braintrust.dev";
+    record(record(value.eval).providers).archived = { endpoint: "https://reporter.example.invalid" };
 
     expect(validateResolvedConfigJson(value).ok).toBe(true);
     expect(resolvedConfigZodSchema.safeParse(value).success).toBe(true);
@@ -346,8 +349,4 @@ function addOpenRouterProfile(value: Record<string, unknown>, model = "anthropic
     model,
     reasoning: "high"
   };
-}
-
-function evalProvider(value: Record<string, unknown>, id: string): Record<string, unknown> {
-  return record(record(record(value.eval).providers)[id]);
 }

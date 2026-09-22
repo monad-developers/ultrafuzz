@@ -2,8 +2,8 @@
 
 Eval suites benchmark the Ultrafuzz pipeline against targets with known
 ground-truth bugs and rank prompt or topology variants by precision, recall,
-and F1. The full loop is `plan → run → score → report → compare`, with an
-optional `publish` step that mirrors node telemetry to an eval cloud provider.
+and F1. The full loop is `plan → run → score → report → compare`. Evaluation
+records, telemetry, scores, and reports stay in local artifacts.
 
 ## Configure The Suite
 
@@ -14,15 +14,14 @@ Two files split the configuration:
   counts, grading metrics, and the telemetry policy. It never names a
   provider, an endpoint, or an env var.
 - The `ultrafuzz.toml` `[eval]` section is per-environment: the default suite
-  path, the machine-specific `ground_truth_root`, the active `provider`
-  (`braintrust | none`), and `[eval.providers.<name>]` profiles
-  holding credential env-var _names_.
+  path and the machine-specific `ground_truth_root`. `provider = "none"` is
+  the only supported reporting selection; no external reporter is installed.
 
 ```toml
 [eval]
 eval_config = ".ultrafuzz/evals/bug-finding.yml"
 ground_truth_root = "/secure/eval-ground-truth"
-provider = "none" # keep the local loop offline; switch when publishing
+provider = "none" # evaluation reporting stays local
 ```
 
 Ground truth must live outside the repository; suite targets reference
@@ -52,8 +51,8 @@ ultrafuzz eval plan --target-root /path/to/target-checkouts
 `plan` validates the config and suite and prints the target × variant × trial
 matrix without launching anything. Local target checkouts are expected under
 `--target-root`, one directory per target id, at the suite's pinned git refs;
-pass `--skip-target-validation` to skip the ref check. An unknown provider or
-missing provider profile fails here, before any run is launched.
+pass `--skip-target-validation` to skip the ref check. A reporting provider
+other than `none` fails here, before any run is launched.
 
 Ordinary eval YAML requires an explicit `trials_per_variant`. The public
 benchmark lane manifests under `benchmarks/` default it to `1` when omitted.
@@ -69,9 +68,8 @@ ultrafuzz eval run --row <row-id> --no-watch
 ```
 
 `run` launches an Ultrafuzz run per matrix row (or a `--row` selection),
-polls the runs to a terminal state, and streams node telemetry to the active
-provider when the suite enables it. `--no-watch` launches detached without
-polling or streaming. Artifacts accumulate under
+polls the runs to a terminal state, and records local telemetry when the suite
+enables it. `--no-watch` launches detached without polling. Artifacts accumulate under
 `.ultrafuzz/evals/runs/<eval-run-id>/`.
 
 ## Score And Compare
@@ -94,36 +92,31 @@ variant IDs; an explicit `--allow-incompatible` waiver preserves and reports
 any differences.
 Deterministic scoring requires neither a provider nor provider credentials.
 
-The optional gateway judge has a separate credential and consent boundary:
+The optional LLM judge requires an explicit endpoint, dedicated credential,
+and consent for private data:
 
 ```bash
+export ULTRAFUZZ_EVAL_JUDGE_URL=https://your-judge.example/v1/chat/completions
 export ULTRAFUZZ_EVAL_JUDGE_API_KEY=...
 # Required only when scoring a target marked sensitivity: private:
 export ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true
 ultrafuzz eval score <eval-run-id> --llm-judge
 ```
 
-An optional `ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without embedded
-credentials. Judge and reporter requests do not follow redirects.
+`ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without embedded credentials. Judge
+requests do not follow redirects. There is no default gateway and no fallback
+to a reporter or model-provider credential. LLM judging is an explicit paid
+operation; deterministic scoring needs neither setting.
 
-## Publish Telemetry (Optional)
+## Migrate retired reporting settings
 
-```bash
-ultrafuzz eval publish <eval-run-id> --provider braintrust
-ultrafuzz eval publish <eval-run-id> --resume
-```
-
-`publish` replays a recorded eval run's journals from offset 0 and
-reconstructs the entire node trace (spans, heartbeats, manifests, artifacts,
-scores) on the provider after the fact — useful for CI runs that executed
-with reporting off or for backfilling a newly added provider. `--resume`
-continues from the persisted publish cursor instead of replaying. Missing
-credential env vars fail only at this step. Reporter failures degrade to
-warnings and never fail an eval run.
-
-For sensitive targets, the suite's `reporting.artifacts` policy defaults to
-`manifest-only`: providers see the DAG, timings, and file names/hashes while
-payloads stay on disk.
+Braintrust reporting and `eval publish` have been removed. Delete
+`[eval.providers.braintrust]` from project configuration and set
+`[eval].provider = "none"`. Remove any `ULTRAFUZZ_EVAL_PROVIDER=braintrust`
+override; `--provider none` can explicitly override old environment or project
+settings. Legacy connection metadata can still be read from saved
+configuration, but it cannot enable a reporter or cause credential access.
+Local `eval history`, report, compare, and bundle commands remain available.
 
 The pinned Ultrafuzz-bench and EVMBench targets are public open-source benchmark
 fixtures. Their Modal lane explicitly publishes the allowlisted `report.md`,
@@ -221,7 +214,7 @@ immutable identity, not the later documentation commit. The ordinary CI
 without launching models or Modal compute.
 
 The eval summary and comparison record Ultrafuzz runner tokens and runner cost
-with explicit completeness. Judge usage in Braintrust and sandbox spend in
-Modal remain separate provider-side records keyed by the immutable run IDs; use
-those three sources together for the offline frequency/cost review rather than
-treating the runner ledger as total spend.
+with explicit completeness. Keep judge-service and Modal billing records
+separate and correlate them with the run window, model, or explicit provider
+metadata. Judge requests do not automatically attach an eval run ID. Use these
+records together for cost review; the runner ledger alone is not total spend.

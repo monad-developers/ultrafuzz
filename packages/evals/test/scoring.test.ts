@@ -26,6 +26,11 @@ import {
   writeVerifiedFinalReport
 } from "./helpers.js";
 
+const EXPLICIT_JUDGE_ENV = {
+  ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+  ULTRAFUZZ_EVAL_JUDGE_URL: "https://judge.example/v1/chat/completions"
+};
+
 const BUGS: GroundTruthBug[] = [
   {
     id: "BUG-1",
@@ -237,15 +242,11 @@ function scriptedGatewayJudge(responses: Array<() => Promise<Response>>): {
     if (next === undefined) throw new Error("unexpected extra judge request");
     return next();
   }) as unknown as typeof fetch;
-  const judge = gatewayLlmJudge(
-    { ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key", ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true" },
-    fetchImpl,
-    {
-      sleep: async (milliseconds) => {
-        sleeps.push(milliseconds);
-      }
+  const judge = gatewayLlmJudge({ ...EXPLICIT_JUDGE_ENV, ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true" }, fetchImpl, {
+    sleep: async (milliseconds) => {
+      sleeps.push(milliseconds);
     }
-  );
+  });
   return { judge, sleeps, bodies };
 }
 
@@ -1381,16 +1382,34 @@ describe("deterministic scorer math", () => {
     );
   });
 
+  it.each([undefined, "", "   "])("requires an explicit paid judge endpoint before any request: %j", (url) => {
+    let requests = 0;
+    const fetchImpl = (async () => {
+      requests += 1;
+      throw new Error("unexpected judge request");
+    }) as typeof fetch;
+    expect(() =>
+      gatewayLlmJudge(
+        {
+          ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+          ...(url === undefined ? {} : { ULTRAFUZZ_EVAL_JUDGE_URL: url })
+        },
+        fetchImpl
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_LLM_JUDGE_URL_MISSING" }));
+    expect(requests).toBe(0);
+  });
+
   it("requires an HTTPS judge URL without embedded credentials", () => {
     expect(() =>
       gatewayLlmJudge({
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ...EXPLICIT_JUDGE_ENV,
         ULTRAFUZZ_EVAL_JUDGE_URL: "http://judge.example/v1/chat/completions"
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_LLM_JUDGE_URL_INVALID" }));
     expect(() =>
       gatewayLlmJudge({
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ...EXPLICIT_JUDGE_ENV,
         ULTRAFUZZ_EVAL_JUDGE_URL: "https://user:password@judge.example/v1/chat/completions"
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_LLM_JUDGE_URL_INVALID" }));
@@ -1411,7 +1430,7 @@ describe("deterministic scorer math", () => {
       requests.push(args);
       throw new Error("unexpected request");
     }) as unknown as typeof fetch;
-    const judge = gatewayLlmJudge({ ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key" }, fetchImpl);
+    const judge = gatewayLlmJudge({ ...EXPLICIT_JUDGE_ENV }, fetchImpl);
     const suite = testSuite("/tmp/gt", {
       targets: [
         {
@@ -1442,6 +1461,7 @@ describe("deterministic scorer math", () => {
 
   it("promotes judge-confirmed partial matches and hides ground-truth identifiers", async () => {
     const requests: Array<{
+      url: string;
       body: Record<string, unknown>;
       headers: Record<string, string>;
       redirect?: "follow" | "error" | "manual";
@@ -1454,8 +1474,9 @@ describe("deterministic scorer math", () => {
       rationale: "The root cause and impact match despite incomplete localization and evidence.",
       confidence: 0.69996
     });
-    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
       requests.push({
+        url: String(input),
         body: JSON.parse(String(init?.body)) as Record<string, unknown>,
         headers: init?.headers as Record<string, string>,
         ...(init?.redirect !== undefined ? { redirect: init.redirect } : {})
@@ -1468,7 +1489,7 @@ describe("deterministic scorer math", () => {
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge(
       {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ...EXPLICIT_JUDGE_ENV,
         ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
       },
       fetchImpl
@@ -1490,6 +1511,7 @@ describe("deterministic scorer math", () => {
     });
 
     expect(requests).toHaveLength(3);
+    expect(requests.every((request) => request.url === EXPLICIT_JUDGE_ENV.ULTRAFUZZ_EVAL_JUDGE_URL)).toBe(true);
     expect(requests.every((request) => request.headers.authorization === "Bearer dedicated-key")).toBe(true);
     expect(requests.every((request) => request.redirect === "error")).toBe(true);
     expect(requests.every((request) => !JSON.stringify(request.body).includes("BUG-1"))).toBe(true);
@@ -1568,7 +1590,7 @@ describe("deterministic scorer math", () => {
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge(
       {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ...EXPLICIT_JUDGE_ENV,
         ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
       },
       fetchImpl,
@@ -1646,7 +1668,7 @@ describe("deterministic scorer math", () => {
       let requests = 0;
       const judge = gatewayLlmJudge(
         {
-          ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+          ...EXPLICIT_JUDGE_ENV,
           ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
         },
         (async () => {
@@ -1771,7 +1793,7 @@ describe("deterministic scorer math", () => {
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge(
       {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ...EXPLICIT_JUDGE_ENV,
         ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
       },
       fetchImpl

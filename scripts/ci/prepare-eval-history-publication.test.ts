@@ -100,17 +100,15 @@ describe("trusted automatic eval-history publication handoff", () => {
       auth_mode: "api-key"
     };
     const config = {
-      schema_version: "ultrafuzz.modal.benchmark.v2",
+      schema_version: "ultrafuzz.modal.benchmark.v3",
       run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
       app_name: "ultrafuzz-evals",
       image_name: `ufz-runner-${"a".repeat(40)}`,
       node_timeout_seconds: 1800,
       loops: 1,
-      braintrust: {
-        project: "ultrafuzz-public-benchmarks",
-        api_key_env: "BRAINTRUST_API_KEY",
-        judge_api_key_env: "OPENAI_API_KEY",
-        judge_url: "https://api.openai.com/v1/chat/completions"
+      judge: {
+        api_key_env: "OPENAI_API_KEY",
+        url: "https://api.openai.com/v1/chat/completions"
       },
       public_benchmark: {
         benchmark: "ultrafuzz-bench",
@@ -160,17 +158,15 @@ describe("trusted automatic eval-history publication handoff", () => {
       auth_mode: "api-key"
     };
     const config = {
-      schema_version: "ultrafuzz.modal.benchmark.v2",
+      schema_version: "ultrafuzz.modal.benchmark.v3",
       run_id: "ci-12345-2-smoke-ultrafuzz-bench-openrouter",
       app_name: "ultrafuzz-evals",
       image_name: `ufz-runner-${"a".repeat(40)}`,
       node_timeout_seconds: 1800,
       loops: 1,
-      braintrust: {
-        project: "ultrafuzz-public-benchmarks",
-        api_key_env: "BRAINTRUST_API_KEY",
-        judge_api_key_env: "OPENAI_API_KEY",
-        judge_url: "https://api.openai.com/v1/chat/completions"
+      judge: {
+        api_key_env: "OPENAI_API_KEY",
+        url: "https://api.openai.com/v1/chat/completions"
       },
       public_benchmark: {
         benchmark: "ultrafuzz-bench",
@@ -723,16 +719,14 @@ function fullTargets() {
 function smokeBenchmarkConfig(manifest: ReturnType<typeof smokeManifest>, maxRuntimeSeconds: number) {
   const pair = manifest.pairs[0]!;
   return {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
     app_name: "ultrafuzz-evals",
     image_name: manifest.image_name,
-    braintrust: {
-      project: "ultrafuzz-public-benchmarks",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: "OPENAI_API_KEY",
+      url: "https://api.openai.com/v1/chat/completions",
+      credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: 1800,
     loops: 1,

@@ -109,7 +109,7 @@ describe("public Modal benchmark configuration", () => {
           targets: BenchmarkTarget[];
           max_runtime_seconds: number;
         };
-        braintrust: { judge_api_key_env: string; judge_url?: string };
+        judge: { api_key_env: string; url: string; credential_ttl_seconds: number };
         models: Array<{ model: string; provider: string; agent: string; reasoning: string }>;
       };
       expect(config.node_timeout_seconds).toBe(1800);
@@ -117,8 +117,13 @@ describe("public Modal benchmark configuration", () => {
         expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 15_000 })
       );
       expect(config.public_benchmark.targets).toEqual(manifest.targets);
-      expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");
-      expect(config.braintrust.judge_url).toBe("https://api.openai.com/v1/chat/completions");
+      expect(config.judge).toEqual({
+        api_key_env: "OPENAI_API_KEY",
+        url: "https://api.openai.com/v1/chat/completions",
+        credential_ttl_seconds: 57_600
+      });
+      expect(config).not.toHaveProperty("braintrust");
+      expect(config).not.toHaveProperty("eval_reporting");
       expect(config.models).toEqual([
         expect.objectContaining({
           model: "gpt-5.6-luna",

@@ -4,8 +4,6 @@ import { parseModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "../
 import type { ModalModelSpec } from "../src/defaults.js";
 import { MODAL_BENCHMARK_SCHEMA_VERSION } from "../src/defaults.js";
 import {
-  privateEvalProvider,
-  privateEvalPublishCommand,
   privateEvalScoreEnv,
   privateJudgeApiKeyEnv,
   privateJudgeUrl,
@@ -23,7 +21,6 @@ const MODEL: ModalModelSpec = {
 };
 
 function privateConfig(
-  provider: "braintrust" | "none",
   options: { judgeApiKeyEnv: string; judgeUrl: string } = {
     judgeApiKeyEnv: "OPENAI_API_KEY",
     judgeUrl: "https://api.openai.com/v1/chat/completions"
@@ -31,7 +28,7 @@ function privateConfig(
 ): PrivateModalBenchmarkConfig {
   const config = parseModalBenchmarkConfig({
     schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
-    run_id: "private-no-braintrust",
+    run_id: "private-local-reporting",
     app_name: "ultrafuzz-evals",
     image_name: "ultrafuzz-security-runner:latest",
     target: { repo: "https://github.com/aave/aave-v4", ref: "6959e3219b5506bf2acae18551cbb2a68a5b8fba" },
@@ -41,28 +38,24 @@ function privateConfig(
       file: "findings.yml",
       format: "ultrafuzz"
     },
-    braintrust: {
-      project: "private-evals",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: options.judgeApiKeyEnv,
-      judge_url: options.judgeUrl,
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: options.judgeApiKeyEnv,
+      url: options.judgeUrl,
+      credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: 7_200,
     loops: 3,
     models: [MODEL],
-    benchmark_execution: { excluded_node_ids: [] },
-    eval_reporting: { provider }
+    benchmark_execution: { excluded_node_ids: [] }
   });
   if (!("target" in config)) throw new Error("expected private config");
   return config;
 }
 
-it("renders private eval provider none without changing scoring credentials", () => {
-  const config = privateConfig("none");
+it("renders local private reporting without changing scoring credentials", () => {
+  const config = privateConfig();
 
-  expect(privateEvalProvider(config)).toBe("none");
-  expect(renderPrivateEvalConfigSection(config, "/ground-truth")).toBe(
+  expect(renderPrivateEvalConfigSection("/ground-truth")).toBe(
     `[eval]
 eval_config = ".ultrafuzz/evals/bug-finding.yml"
 ground_truth_root = "/ground-truth"
@@ -75,7 +68,7 @@ provider = "none"
 });
 
 it("uses the explicitly configured private judge credential and endpoint", () => {
-  const config = privateConfig("none");
+  const config = privateConfig();
 
   expect(privateJudgeApiKeyEnv(config)).toBe("OPENAI_API_KEY");
   expect(privateJudgeUrl(config)).toBe("https://api.openai.com/v1/chat/completions");
@@ -90,7 +83,7 @@ it("uses the explicitly configured private judge credential and endpoint", () =>
 });
 
 it("preserves explicit private judge endpoint overrides", () => {
-  const config = privateConfig("none", {
+  const config = privateConfig({
     judgeApiKeyEnv: "PRIVATE_JUDGE_KEY",
     judgeUrl: "https://judge.example.invalid/v1/chat/completions"
   });
@@ -104,53 +97,30 @@ it("preserves explicit private judge endpoint overrides", () => {
   });
 });
 
-it("keeps Braintrust reporting opt-in bound to the fixed Braintrust secret", () => {
-  const config = privateConfig("braintrust");
+it("forwards only runner and judge credentials without reading a reporting secret", () => {
+  const config = privateConfig({
+    judgeApiKeyEnv: "PRIVATE_JUDGE_KEY",
+    judgeUrl: "https://judge.example.invalid/v1/chat/completions"
+  });
+  const env = {
+    OPENAI_API_KEY: "runner-secret",
+    PRIVATE_JUDGE_KEY: "judge-secret",
+    get BRAINTRUST_API_KEY(): never {
+      throw new Error("reporting credential must not be read");
+    }
+  };
 
-  expect(privateEvalProvider(config)).toBe("braintrust");
-  expect(renderPrivateEvalConfigSection(config, "/ground-truth")).toContain('provider = "braintrust"');
-  expect(() => modalBenchmarkSecretValues(config, MODEL, { OPENAI_API_KEY: "openai-secret" })).toThrow(
-    /BRAINTRUST_API_KEY/u
-  );
-  expect(
-    modalBenchmarkSecretValues(config, MODEL, {
-      BRAINTRUST_API_KEY: "braintrust-secret",
-      OPENAI_API_KEY: "openai-secret"
-    })
-  ).toEqual({
-    BRAINTRUST_API_KEY: "braintrust-secret",
-    OPENAI_API_KEY: "openai-secret"
+  expect(modalBenchmarkSecretValues(config, MODEL, env)).toEqual({
+    OPENAI_API_KEY: "runner-secret",
+    PRIVATE_JUDGE_KEY: "judge-secret"
   });
 });
 
-it("skips eval publish when private eval reporting is disabled", () => {
-  expect(
-    privateEvalPublishCommand({
-      cliPath: "/opt/ultrafuzz/packages/cli/dist/index.js",
-      controlRoot: "/workspace/control",
-      evalRunId: "eval-one",
-      provider: "none"
+it("rejects legacy reporting controls before selecting secrets", () => {
+  expect(() =>
+    parseModalBenchmarkConfig({
+      ...privateConfig(),
+      eval_reporting: { provider: "braintrust" }
     })
-  ).toBeUndefined();
-
-  expect(
-    privateEvalPublishCommand({
-      cliPath: "/opt/ultrafuzz/packages/cli/dist/index.js",
-      controlRoot: "/workspace/control",
-      evalRunId: "eval-one",
-      provider: "braintrust"
-    })
-  ).toEqual([
-    "node",
-    "/opt/ultrafuzz/packages/cli/dist/index.js",
-    "eval",
-    "publish",
-    "eval-one",
-    "--project",
-    "/workspace/control",
-    "--provider",
-    "braintrust",
-    "--resume",
-    "--json"
-  ]);
+  ).toThrow();
 });

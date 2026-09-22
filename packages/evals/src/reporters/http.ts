@@ -1,60 +1,6 @@
 import { EvalError } from "../utils.js";
 
-export const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024;
-
-export function trustedProviderOrigin(
-  configured: string | undefined,
-  expected: string,
-  trustedCustom: string | undefined,
-  provider: string
-): string {
-  const value = configured ?? expected;
-  const parsed = parseHttpsOrigin(value, provider);
-  const expectedOrigin = new URL(expected).origin;
-  if (parsed.origin !== expectedOrigin) {
-    const trustedOrigin = trustedCustom === undefined ? undefined : parseHttpsOrigin(trustedCustom, provider).origin;
-    if (trustedOrigin === parsed.origin) {
-      return parsed.origin;
-    }
-    throw new EvalError(
-      "EVAL_PROVIDER_ENDPOINT_UNTRUSTED",
-      `${provider} endpoint ${parsed.origin} is not the canonical origin ${expectedOrigin} and was not explicitly trusted by the operator`,
-      { provider, configuredOrigin: parsed.origin, expectedOrigin }
-    );
-  }
-  return expectedOrigin;
-}
-
-function parseHttpsOrigin(value: string, provider: string): URL {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new EvalError("EVAL_PROVIDER_ENDPOINT_INVALID", `${provider} endpoint must be a valid HTTPS origin`, {
-      provider
-    });
-  }
-  if (
-    parsed.protocol !== "https:" ||
-    parsed.username !== "" ||
-    parsed.password !== "" ||
-    (parsed.pathname !== "" && parsed.pathname !== "/") ||
-    parsed.search !== "" ||
-    parsed.hash !== ""
-  ) {
-    throw new EvalError(
-      "EVAL_PROVIDER_ENDPOINT_INVALID",
-      `${provider} endpoint must be an HTTPS origin without credentials, path, query, or fragment`,
-      { provider }
-    );
-  }
-  return parsed;
-}
-
-export async function boundedProviderResponseBytes(response: Response, provider: string): Promise<Buffer> {
-  return boundedResponseBytes(response, provider, "EVAL_PROVIDER_RESPONSE_TOO_LARGE");
-}
 
 export async function boundedResponseText(
   response: Response,

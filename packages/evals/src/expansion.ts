@@ -49,8 +49,8 @@ export const EVAL_EXPANSION_SOURCE_NODE_KEY = "source_node_id";
  * single `workflow` lifecycle and no node counts, no identifiers and no
  * concurrency, so a fan-out was indistinguishable from one opaque agent node.
  * The alternative channel does not work either -- `node_telemetry` reaches only
- * `this.input.reporters`, and the public worker runs `eval run --provider none`,
- * for which `createEvalReporters` returns `[]`.
+ * `this.input.reporters`, while the public worker uses local reporting and has
+ * no external reporters.
  *
  * Everything here comes from `state.json` and `graph.json`, which every run
  * writes, so it needs no reporter, no provider and no network.

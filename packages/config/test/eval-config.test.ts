@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { parseProjectConfigToml, resolveConfig, serializeResolvedConfigToml } from "../src/index.js";
 
-const EVAL_TOML = `
+// Historical metadata remains readable; the eval execution layer rejects retired selections.
+const HISTORICAL_EVAL_TOML = `
 [eval]
 eval_config = ".ultrafuzz/evals/bug-finding.yml"
 ground_truth_root = "/secure/eval-ground-truth"
@@ -14,8 +15,8 @@ project = "ultrafuzz-evals"
 `;
 
 describe("[eval] config section", () => {
-  it("parses the [eval] table and provider profiles", () => {
-    const parsed = parseProjectConfigToml(EVAL_TOML);
+  it("parses historical [eval] provider metadata without activating a reporter", () => {
+    const parsed = parseProjectConfigToml(HISTORICAL_EVAL_TOML);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.value.eval).toEqual({
@@ -44,10 +45,14 @@ api_key = "not-allowed-here"
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.value.eval.provider).toBe("none");
+    expect(resolved.value.eval.providers).toEqual({});
+    const serialized = serializeResolvedConfigToml(resolved.value);
+    expect(serialized).not.toContain("braintrust");
+    expect(serialized).not.toContain("BRAINTRUST_API_KEY");
   });
 
   it("applies env overrides over the project toml", () => {
-    const parsed = parseProjectConfigToml(EVAL_TOML);
+    const parsed = parseProjectConfigToml(HISTORICAL_EVAL_TOML);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const resolved = resolveConfig({
@@ -64,8 +69,8 @@ api_key = "not-allowed-here"
     });
   });
 
-  it("round-trips [eval] through the resolved config serializer", () => {
-    const parsed = parseProjectConfigToml(EVAL_TOML);
+  it("round-trips historical [eval] metadata through the resolved config serializer", () => {
+    const parsed = parseProjectConfigToml(HISTORICAL_EVAL_TOML);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     const resolved = resolveConfig({ projectConfig: parsed.value, env: {} });
