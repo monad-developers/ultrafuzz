@@ -41,7 +41,7 @@
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/runtime": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
-    "adm-zip": "^0.6.0",
+    "adm-zip": "^0.6.1",
     "tar-stream": "^3.2.0"
   },
   "devDependencies": {

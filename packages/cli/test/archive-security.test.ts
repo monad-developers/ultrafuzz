@@ -44,7 +44,7 @@ test("benchmark ZIP parsing rejects truncated and oversized compressed inputs", 
 test("benchmark ZIP parsing rejects duplicate and aliased central-directory names", () => {
   const duplicatePath = temporaryPath("duplicate.zip");
   fs.writeFileSync(duplicatePath, duplicateCentralDirectoryEntry(validBundle(), "handoff/current-state.json"));
-  assert.throws(() => new BundleArchive(duplicatePath), /duplicate ZIP member/u);
+  assert.throws(() => new BundleArchive(duplicatePath), /duplicate ZIP member|ADM-ZIP: Duplicate entry name/u);
 
   const aliased = new AdmZip();
   aliased.addFile("handoff/current-state.json", Buffer.from("{}\n"));
