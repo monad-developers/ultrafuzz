@@ -75,7 +75,6 @@ import {
 } from "./types.js";
 import { EvalError, evalRunRoot, isRecord, mean, resolveTerminalReportPath, roundMetric } from "./utils.js";
 
-const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 /** Backoff before each retry of a transient judge failure; attempts total this length plus one. */
 const LLM_JUDGE_RETRY_BACKOFF_MS: readonly number[] = [1_000, 3_000];
@@ -94,7 +93,7 @@ interface EvalLlmJudgeResultDocument {
 export interface ScoreEvalRunInput {
   projectRoot: string;
   evalRunId: string;
-  /** `true` selects the default gateway LLM judge; pass a `FindingJudge` to plug in your own. */
+  /** `true` selects an explicitly configured HTTPS LLM judge; pass a `FindingJudge` to plug in your own. */
   llmJudge?: boolean | FindingJudge;
   env?: Record<string, string | undefined>;
 }
@@ -964,9 +963,9 @@ interface JudgeGatewayRequest {
 }
 
 /**
- * Default optional LLM judge. Talks to an OpenAI-compatible chat-completions
- * gateway; nothing in the scoring loop depends on it (grading is deterministic
- * unless a judge is explicitly enabled). Transient failures (network errors,
+ * Optional LLM judge. Talks to an explicitly configured OpenAI-compatible
+ * chat-completions endpoint; grading remains deterministic
+ * unless a judge is explicitly enabled. Transient failures (network errors,
  * timeouts, 429/5xx responses, schema-invalid output) are retried a bounded
  * number of times with the identical fresh-context request.
  */
@@ -982,7 +981,14 @@ export function gatewayLlmJudge(
       "ULTRAFUZZ_EVAL_JUDGE_API_KEY is required for --llm-judge; provider credentials are not reused"
     );
   }
-  const endpoint = validatedJudgeEndpoint(env.ULTRAFUZZ_EVAL_JUDGE_URL ?? DEFAULT_EVAL_JUDGE_ENDPOINT);
+  const configuredUrl = env.ULTRAFUZZ_EVAL_JUDGE_URL;
+  if (configuredUrl === undefined || configuredUrl.trim().length === 0) {
+    throw new EvalError(
+      "EVAL_LLM_JUDGE_URL_MISSING",
+      "ULTRAFUZZ_EVAL_JUDGE_URL is required for --llm-judge; no default paid endpoint is configured"
+    );
+  }
+  const endpoint = validatedJudgeEndpoint(configuredUrl);
   const sleep = options.sleep ?? defaultSleep;
   return async (input) => {
     if (input.row.target.sensitivity === "private" && env[PRIVATE_DATA_JUDGE_ACK] !== "true") {

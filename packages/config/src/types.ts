@@ -191,7 +191,7 @@ export interface TriageConfig {
 }
 
 export interface EvalProviderProfile {
-  /** Built-in providers require their canonical API-key environment variable name. */
+  /** Historical connection metadata; no remote eval reporter is registered. */
   apiKeyEnv?: string;
   project?: string;
   endpoint?: string;
@@ -202,9 +202,9 @@ export interface EvalConfig {
   evalConfig?: string;
   /** Machine-specific root for ground-truth files; must resolve outside the repository. */
   groundTruthRoot?: string;
-  /** Active reporter binding: `braintrust` or `none`. */
+  /** Reporter selection; only `none` is registered, with strings retained for historical snapshots. */
   provider: string;
-  /** Connection profiles keyed by provider name; values are env-var NAMES, never secrets. */
+  /** Historical connection profiles; values are env-var NAMES, never secrets. */
   providers: Record<string, EvalProviderProfile>;
 }
 

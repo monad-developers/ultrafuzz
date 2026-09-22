@@ -3,7 +3,7 @@ import type { CloudSelectedTask } from "@ultrafuzz/artifacts";
 export const MODAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:modal:common:1" as const;
 export const MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:modal:benchmark-control-manifest:1" as const;
-export const MODAL_BENCHMARK_CONFIG_SCHEMA_ID = "urn:ultrafuzz:schema:modal:benchmark-config:2" as const;
+export const MODAL_BENCHMARK_CONFIG_SCHEMA_ID = "urn:ultrafuzz:schema:modal:benchmark-config:3" as const;
 export const MODAL_LAUNCH_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:launch-state:3" as const;
 export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-lifecycle:1" as const;
 export const MODAL_RECOVERY_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-state:1" as const;
@@ -73,21 +73,19 @@ export interface StrictModalModelSpec {
   auth_mode: "api-key" | "subscription";
 }
 
-export interface StrictModalBenchmarkBraintrustConfig {
-  project: string;
+export interface StrictModalBenchmarkJudgeConfig {
   api_key_env: string;
-  judge_api_key_env: string;
-  judge_url: string;
-  judge_credential_endpoint?: string;
-  judge_credential_ttl_seconds: number;
+  url: string;
+  credential_endpoint?: string;
+  credential_ttl_seconds: number;
 }
 
 export interface StrictModalBenchmarkConfigBase {
-  schema_version: "ultrafuzz.modal.benchmark.v2";
+  schema_version: "ultrafuzz.modal.benchmark.v3";
   run_id: string;
   app_name: string;
   image_name: string;
-  braintrust: StrictModalBenchmarkBraintrustConfig;
+  judge: StrictModalBenchmarkJudgeConfig;
   node_timeout_seconds: number;
   loops: number;
   models: StrictModalModelSpec[];
@@ -96,7 +94,6 @@ export interface StrictModalBenchmarkConfigBase {
 export interface StrictPrivateModalBenchmarkConfigDocument extends StrictModalBenchmarkConfigBase {
   target: { repo: string; ref: string; held_out_paths?: string[] };
   benchmark_execution: { excluded_node_ids: string[]; include_threat_model_goal_fanout?: boolean };
-  eval_reporting: { provider: "braintrust" | "none" };
   ground_truth: {
     repo: string;
     ref: string;

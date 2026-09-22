@@ -42,14 +42,13 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz clean <run-id>`              | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
 | `ultrafuzz dashboard`                   | Serve the local loopback dashboard and API for product state inspection and editing.                           |
 | `ultrafuzz eval plan`                   | Dry-run an eval suite matrix without launching workflows.                                                      |
-| `ultrafuzz eval run`                    | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                      |
+| `ultrafuzz eval run`                    | Launch Ultrafuzz runs for an eval suite matrix and watch local progress.                                       |
 | `ultrafuzz eval status <id>`            | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                    |
 | `ultrafuzz eval score <id>`             | Score finished eval run reports against external ground truth.                                                 |
 | `ultrafuzz eval report <id>`            | Show the scored eval run variant ranking.                                                                      |
 | `ultrafuzz eval compare <id>`           | Compare scored eval variants against a baseline variant.                                                       |
 | `ultrafuzz eval analyze <type>`         | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.   |
 | `ultrafuzz eval history [id]`           | Validate/render public eval history, or append one complete scored run.                                        |
-| `ultrafuzz eval publish <id>`           | Replay a recorded eval run's node telemetry to the configured provider.                                        |
 
 Generated workflow-engine files are implementation plumbing. The stable product
 surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
@@ -635,7 +634,7 @@ writing, and guards mutating requests with a per-session token.
 ultrafuzz eval plan \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|none] \
+  [--provider none] \
   [--target-root <path>] \
   [--ground-truth-root <external-path>] \
   [--skip-target-validation] \
@@ -643,7 +642,7 @@ ultrafuzz eval plan \
 ultrafuzz eval run \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|none] \
+  [--provider none] \
   [--eval-run-id <id>] \
   [--row <row-id>]... \
   [--target-root <path>] \
@@ -669,11 +668,6 @@ ultrafuzz eval analyze all \
   --input </external/private-handoff.zip> \
   --output </external/private-analysis-directory> \
   [--project <path>] \
-  [--json]
-ultrafuzz eval publish <eval-run-id> \
-  [--project <path>] \
-  [--provider braintrust] \
-  [--resume] \
   [--json]
 ultrafuzz eval history [eval-run-id] \
   [--project <path>] \
@@ -738,8 +732,10 @@ and disclosure review.
 Eval suites benchmark the fuzzing pipeline against targets with known
 ground-truth bugs. The experiment definition lives in a committable eval YAML
 (default suite path from `[eval].eval_config`, overridable per command with
-`--suite`); provider binding and credential env-var names live in the
-`ultrafuzz.toml` `[eval]` section. Precedence for both is CLI flag > env
+`--suite`). Reporting accepts only `none`; historical provider profiles are
+inert and do not load credentials or enable uploads. An explicit
+`--provider none` can override a retired provider selection. Precedence for
+suite and reporting selection is CLI flag > env
 (`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > `ultrafuzz.toml`.
 
 `plan` validates config plus suite and prints the trial matrix without
@@ -748,9 +744,8 @@ directory per target id under `--target-root`) against the pinned git refs;
 `--skip-target-validation` skips that check.
 
 `run` launches Ultrafuzz runs for matrix rows (all rows, or a `--row`
-selection), polls them to a terminal state, and streams node telemetry to the
-configured provider. `--no-watch` launches detached without polling or
-telemetry streaming.
+selection) and polls them to a terminal state. Reports and telemetry remain
+in local run artifacts. `--no-watch` launches detached without polling.
 
 `status` reads the eval matrix, its latest `runs.jsonl` records, and each
 linked durable `state.json` without synchronizing or changing workflow state.
@@ -775,11 +770,13 @@ emits one schema-versioned JSON object per line.
 
 `score` grades finished run reports against external ground truth resolved
 under `[eval].ground_truth_root`, deterministically by default and with the
-suite's judge model profile when `--llm-judge` is passed. The gateway judge
-requires `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; private targets additionally require
-`ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`. An optional
-`ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without credentials, and redirects
-are rejected. `report` shows the scored variant ranking. `compare` either
+suite's judge model profile when `--llm-judge` is passed. The optional LLM judge
+requires an explicit `ULTRAFUZZ_EVAL_JUDGE_URL` and a dedicated
+`ULTRAFUZZ_EVAL_JUDGE_API_KEY`; there is no default endpoint or fallback to
+reporting or model-provider credentials. The URL must be HTTPS without embedded
+credentials, and redirects are rejected. Private targets additionally require
+`ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`.
+`report` shows the scored variant ranking. `compare` either
 diffs variants against a `--baseline` variant or compares a candidate run to
 an `--against` baseline run after verifying cohort identity, scoring identity,
 and variant scope; `--allow-incompatible` is an explicit, reported waiver.
@@ -790,12 +787,6 @@ evaluation metrics, accounting, and sanitized attempt history. Raw reports,
 findings, diagnostics, configuration, and execution-local identifiers are not
 representable in the bundle. Missing optional evidence is recorded in a typed
 omission manifest.
-
-`publish` replays a recorded eval run's journals from offset 0 and
-reconstructs the full node trace on a provider post hoc; `--resume` continues
-from the persisted publish cursor instead. Provider credentials are only
-required at publish time, so `provider = "none"` keeps the local
-plan → run → score → report → compare loop working offline.
 
 `history` validates and regenerates deterministic public SVGs when no run ID is
 given. With a run ID, it accepts only a complete, successfully scored generation

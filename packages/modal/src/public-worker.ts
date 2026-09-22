@@ -153,8 +153,7 @@ type PublicDiagnosticSecretValues = readonly string[] | (() => Promise<readonly 
  * `reporting.artifacts.include` cannot deliver these. It is read only by
  * `uploadsForManifest` (`packages/evals/src/node-telemetry.ts`), whose output
  * goes only to `this.input.reporters`; the public worker runs
- * `eval run --provider none`, and `createEvalReporters` returns `[]` for
- * `none`. Zero reporters, zero uploads. Nothing else recovers them either:
+ * `eval run --provider none` with an empty reporter list. Nothing else recovers them either:
  * `MODAL_COLLECT_RESULT_FILES` does not list them, and the run root under
  * `PUBLIC_WORKSPACE_ROOT` is removed with the sandbox. The bundle is the only
  * surviving channel, so retention has to happen here.
@@ -384,7 +383,7 @@ export async function runPublicBenchmarkWorker(input: {
       if (checkpoint.runError !== undefined && !publicEvalRunErrorCanBePublished(checkpoint.diagnostics)) {
         throw checkpoint.runError;
       }
-      const judgeKeyEnv = input.config.braintrust.judge_api_key_env;
+      const judgeKeyEnv = input.config.judge.api_key_env;
       await runCommand(
         ["node", CLI, "eval", "score", prepared.evalRunId, "--project", prepared.controlRoot, "--llm-judge", "--json"],
         {
@@ -400,9 +399,7 @@ export async function runPublicBenchmarkWorker(input: {
           evalFailureDiagnosticsFromStdout: true,
           env: {
             ULTRAFUZZ_EVAL_JUDGE_API_KEY: requiredEnv(judgeKeyEnv),
-            ...(input.config.braintrust.judge_url === undefined
-              ? {}
-              : { ULTRAFUZZ_EVAL_JUDGE_URL: input.config.braintrust.judge_url })
+            ULTRAFUZZ_EVAL_JUDGE_URL: input.config.judge.url
           }
         }
       );
@@ -811,7 +808,7 @@ export async function publicBenchmarkWorkerSecretValues(
   return [
     ...new Set([
       ...runnerSecretValues,
-      requiredEnv(config.braintrust.judge_api_key_env, env),
+      requiredEnv(config.judge.api_key_env, env),
       ...(referenceToken === undefined || referenceToken === "" ? [] : [referenceToken])
     ])
   ];

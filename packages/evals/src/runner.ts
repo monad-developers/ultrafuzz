@@ -36,7 +36,7 @@ import {
 } from "./lineage.js";
 import { classifyRecoveryEquivalence } from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
-import { createEvalReporters } from "./reporters/index.js";
+import { resolveEvalProvider } from "./reporters/index.js";
 import { evalWorkflowInputSchema, planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
 import {
   EVAL_RUN_SCHEMA_VERSION,
@@ -101,7 +101,7 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   ultrafuzzCliEntrypoint?: string;
   /** CLI `--provider` override; precedence over env and ultrafuzz.toml. */
   provider?: string;
-  /** `[eval]` section of the resolved ultrafuzz.toml (provider binding + credentials env names). */
+  /** `[eval]` section of resolved config; only the final provider selection is inspected. */
   evalProviderConfig?: EvalConfig;
   /** Poll runs to terminal state and stream node telemetry (default: reporting.node_telemetry). */
   watch?: boolean;
@@ -111,7 +111,6 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   /** Immutable candidate identity supplied by an execution backend, when it is more authoritative than local git. */
   candidateProvenance?: EvalCandidateProvenance;
   sync?: RowSync;
-  fetchImpl?: typeof fetch;
 }
 
 export interface LaunchEvalRowInput {
@@ -129,6 +128,11 @@ export interface LaunchEvalRowInput {
 }
 
 export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunValue> {
+  resolveEvalProvider({
+    ...(input.provider !== undefined ? { cliProvider: input.provider } : {}),
+    ...(input.env !== undefined ? { env: input.env } : {}),
+    ...(input.evalProviderConfig !== undefined ? { evalConfig: input.evalProviderConfig } : {})
+  });
   const planned = planEvalSuite(input);
   const evalRunId = input.evalRunId ?? generateEvalRunId(planned.suite.suite);
   const root = evalRunRoot(planned.project_root, evalRunId);
@@ -138,15 +142,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
   fs.mkdirSync(root, { recursive: true });
 
   const diagnostics: RuntimeDiagnostic[] = [];
-  const reporters = createEvalReporters({
-    ...(input.provider !== undefined ? { cliProvider: input.provider } : {}),
-    ...(input.env !== undefined ? { env: input.env } : {}),
-    ...(input.evalProviderConfig !== undefined ? { evalConfig: input.evalProviderConfig } : {}),
-    evalRunId,
-    policy: planned.suite.reporting,
-    ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
-    onWarning: (diagnostic) => diagnostics.push(diagnostic)
-  });
+  const reporters: EvalReporter[] = [];
   const watch = input.watch ?? planned.suite.reporting.node_telemetry;
   const resolvedProvenance = buildEvalRunProvenance(planned, {
     watch,

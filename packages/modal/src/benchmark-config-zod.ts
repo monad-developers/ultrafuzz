@@ -86,25 +86,17 @@ const privateBenchmarkExecutionSchema = z
     }
   });
 
-const privateEvalReportingSchema = z
-  .object({
-    provider: z.enum(["braintrust", "none"])
-  })
-  .strict();
-
 const commonBenchmarkConfig = {
   schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
   run_id: safeId,
   app_name: z.string().min(1).max(128),
   image_name: z.string().min(1).max(256),
-  braintrust: z
+  judge: z
     .object({
-      project: z.string().min(1).max(256),
       api_key_env: envName,
-      judge_api_key_env: envName,
-      judge_url: httpsUrl,
-      judge_credential_endpoint: httpsUrl.optional(),
-      judge_credential_ttl_seconds: z.number().int().min(60).max(86_400)
+      url: httpsUrl,
+      credential_endpoint: httpsUrl.optional(),
+      credential_ttl_seconds: z.number().int().min(60).max(86_400)
     })
     .strict(),
   node_timeout_seconds: z.number().int().positive().max(86_400),
@@ -117,7 +109,6 @@ const privateBenchmarkConfigSchema = z
     ...commonBenchmarkConfig,
     target: z.object({ repo: gitUrl, ref: gitRef, held_out_paths: z.array(relativeFile).max(64).optional() }).strict(),
     benchmark_execution: privateBenchmarkExecutionSchema,
-    eval_reporting: privateEvalReportingSchema,
     ground_truth: z
       .object({
         repo: gitUrl,

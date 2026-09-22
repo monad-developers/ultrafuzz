@@ -34,12 +34,10 @@ function privateConfig(excludedNodeIds: string[], includeThreatModelGoalFanout?:
       file: "findings.yml",
       format: "ultrafuzz"
     },
-    braintrust: {
-      project: "private-evals",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: "OPENAI_API_KEY",
+      url: "https://api.openai.com/v1/chat/completions",
+      credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: 7_200,
     loops: 1,
@@ -49,8 +47,7 @@ function privateConfig(excludedNodeIds: string[], includeThreatModelGoalFanout?:
       ...(includeThreatModelGoalFanout === undefined
         ? {}
         : { include_threat_model_goal_fanout: includeThreatModelGoalFanout })
-    },
-    eval_reporting: { provider: "braintrust" }
+    }
   });
   if (!("target" in config)) throw new Error("expected private config");
   return config;

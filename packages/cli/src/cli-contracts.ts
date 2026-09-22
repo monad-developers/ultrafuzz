@@ -16,8 +16,7 @@ import type {
   EvalReportingPolicy,
   EvalScoreSummary,
   EvalStatusSnapshot,
-  EvalRunValue,
-  PublishEvalRunValue
+  EvalRunValue
 } from "@ultrafuzz/evals";
 import type {
   CancelRunValue,
@@ -93,7 +92,6 @@ export const CLI_KNOWN_COMMANDS = [
   "eval bundle",
   "eval compare",
   "eval history",
-  "eval publish",
   "eval analyze upsert",
   "eval analyze upset",
   "eval analyze scores",
@@ -225,7 +223,7 @@ export interface CliReportBundleData {
 export interface CliEvalPlanData {
   suite_path: string;
   suite: string;
-  provider: "braintrust" | "none";
+  provider: "none";
   reporting: EvalReportingPolicy;
   matrix: CliEvalMatrixRow[];
 }
@@ -249,7 +247,6 @@ export interface CliEvalRunData {
   launched: number;
   failed: number;
   incomplete: number;
-  report_url?: string;
 }
 
 export interface CliEvalHistoryAppendData {
@@ -264,17 +261,6 @@ export interface CliEvalHistoryViewData {
   observations: number;
   charts_directory: string;
   checked: boolean;
-}
-
-export interface CliEvalPublishData {
-  eval_run_id: string;
-  provider: string;
-  rows_published: number;
-  rows_skipped: number;
-  events_published: number;
-  artifacts_published: number;
-  scores_published: boolean;
-  report_url?: string;
 }
 
 /** Payloads for the packaged audit-profile and topology commands. */
@@ -381,7 +367,6 @@ export interface CliCommandDataMap {
   "eval bundle": WriteAnalysisBundleResult;
   "eval compare": EvalCompareValue | EvalLongitudinalCompareValue;
   "eval history": CliEvalHistoryAppendData | CliEvalHistoryViewData;
-  "eval publish": CliEvalPublishData;
   "eval analyze upsert": AnalysisSummary;
   "eval analyze upset": AnalysisSummary;
   "eval analyze scores": AnalysisSummary;
@@ -525,13 +510,12 @@ export function toCliEvalRunData(value: EvalRunValue): CliEvalRunData {
     matrix_path: value.matrix_path,
     launched: value.launched,
     failed: value.failed,
-    incomplete: value.incomplete,
-    ...(value.report_url === undefined ? {} : { report_url: value.report_url })
+    incomplete: value.incomplete
   };
 }
 
 export function toCliEvalPlanData(value: EvalPlanValue, provider: string): CliEvalPlanData {
-  if (provider !== "braintrust" && provider !== "none") {
+  if (provider !== "none") {
     throw new Error(`unsupported eval provider in CLI result: ${provider}`);
   }
   return {
@@ -555,19 +539,6 @@ export function toCliEvalPlanData(value: EvalPlanValue, provider: string): CliEv
           : { workflow_input: assertJsonValue(workflowInput, "eval matrix workflow input") })
       };
     })
-  };
-}
-
-export function toCliEvalPublishData(value: PublishEvalRunValue): CliEvalPublishData {
-  return {
-    eval_run_id: value.eval_run_id,
-    provider: value.provider,
-    rows_published: value.rows_published,
-    rows_skipped: value.rows_skipped,
-    events_published: value.events_published,
-    artifacts_published: value.artifacts_published,
-    scores_published: value.scores_published,
-    ...(value.report_url === undefined ? {} : { report_url: value.report_url })
   };
 }
 

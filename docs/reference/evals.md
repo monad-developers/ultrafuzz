@@ -1,54 +1,35 @@
 # Eval Suites
 
 Ultrafuzz eval suites benchmark the fuzzing pipeline against targets with
-known ground-truth bugs, with a **provider-agnostic `EvalReporter`
-abstraction** and **first-class node telemetry**: every node of the
-`topology.yml` DAG (lifecycle, heartbeats, and intermediary artifacts —
-reports, markdown, JSON) is streamed to Braintrust as spans, live during a run
-and replayable after it.
+known ground-truth bugs. Run journals retain node lifecycle, heartbeat, and
+artifact evidence locally. Scoring, comparison, reports, and history work
+without an external reporting account.
 
 ## Configuration split
 
-Rule of thumb: **`ultrafuzz.toml` answers "where does this run and how does it
-authenticate in this environment"; the eval YAML answers "what experiment are
-we running and how is it graded."** The YAML is committable and portable
-across providers; the TOML is per-environment and names credential environment
-variables, never inline secret values.
+The eval YAML defines the experiment and grading policy. Project TOML supplies
+the default suite location and machine-specific ground-truth directory.
 
 ### `ultrafuzz.toml` — the `[eval]` section
 
 ```toml
 [eval]
-eval_config = ".ultrafuzz/evals/bug-finding.yml"   # suite used when --suite is omitted
-ground_truth_root = "/secure/eval-ground-truth"    # machine-specific, MUST resolve outside the repo
-provider = "braintrust"                            # active reporter: braintrust | none
-
-[eval.providers.braintrust]
-api_key_env = "BRAINTRUST_API_KEY"
-project = "ultrafuzz-evals"
+eval_config = ".ultrafuzz/evals/bug-finding.yml"
+ground_truth_root = "/secure/eval-ground-truth"
+provider = "none"
 ```
 
-- `provider` selects Braintrust reporting or disables cloud reporting with
-  `none`; `[eval.providers.*]` entries are connection profiles.
-- Precedence: CLI flag (`--provider`, `--suite`) > env
-  (`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > `ultrafuzz.toml`.
-- `ground_truth_root` is machine-specific and security-sensitive: ground truth
-  must live **outside** the repository; suite targets reference files relative
-  to this root. Absolute entries, traversal, symlinks, non-regular files, and
-  files larger than 1 MiB are rejected.
-- The built-in reporter binds credentials to the canonical
-  `BRAINTRUST_API_KEY` name and canonical HTTPS origin. Requests reject
-  redirects, time out after 30 seconds, and accept at most 1 MiB of response
-  data.
-- A self-hosted endpoint must be an HTTPS origin and requires an exact,
-  operator-owned environment acknowledgement. Set
-  `ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` to the same origin as the
-  configured `endpoint`. Repository configuration alone cannot redirect a
-  provider credential.
-- Validation: an unknown `provider` or a missing `[eval.providers.<name>]`
-  profile is a config error at `eval plan` time; a missing env var named by
-  `api_key_env` is an error at publish time only, so local-only runs with
-  `provider = "none"` keep working offline.
+- Only `provider = "none"` is supported. No external reporter is installed.
+- Precedence: CLI flag (`--provider`, `--suite`) > environment
+  (`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > project TOML.
+  An unsupported final provider selection fails before credential access or
+  workflow launch; an explicit `--provider none` can override old settings.
+- Ground truth must live outside the repository. Suite targets reference files
+  relative to `ground_truth_root`; absolute entries, traversal, symlinks,
+  non-regular files, and files larger than 1 MiB are rejected.
+- Generic connection metadata in saved configuration remains readable but
+  cannot activate an external reporter. Fresh defaults contain no connection
+  profiles. See the [migration guidance](../how-to/run-evals.md#migrate-retired-reporting-settings).
 
 ### Eval YAML — the experiment definition
 
@@ -57,12 +38,11 @@ profiles, targets (repo/ref/ground truth/sensitivity), variants, trial counts,
 grading metrics, and the `reporting:` telemetry policy. Nothing in the YAML
 names a provider, an endpoint, or an env var.
 
-The `reporting.artifacts` policy is exact-path allowlist-by-default with a size
-cap and a sensitivity gate: `sensitivity: private` targets default to
-`manifest-only` — the provider sees the DAG, timings, findings counts, and file
-names/hashes, while payloads stay on disk unless the suite explicitly opts
-into `mode: upload`. Before an allowlisted payload is sent, its manifest and
-path containment, regular-file status, size, and SHA-256 digest are checked.
+The generic telemetry API retains `reporting.artifacts` policies for explicit
+programmatic observers. Private targets default to `manifest-only`; payload
+access requires an explicit allowlist and is checked against path containment,
+regular-file status, size, and SHA-256 digest. This policy does not install a
+reporter or cause the built-in CLI to upload artifacts.
 
 ### Suite contract and workflow input
 
@@ -243,11 +223,10 @@ graph-inconsistent execution ledgers fail closed as non-comparable.
 Reporting is **event-sourced from the run journal**, never wired inline into
 the workflow runner:
 
-- `packages/evals/src/reporter.ts` defines the `EvalReporter` interface.
-  Providers are pure observers/exporters; ultrafuzz owns the loop
-  (plan → run → score → summarize, all writing local artifacts: `matrix.json`,
-  `runs.jsonl`, `scores.jsonl`, `summary.json`). Adding a provider is one file
-  implementing the interface plus one `[eval.providers.<name>]` block.
+- `packages/evals/src/reporter.ts` defines the generic `EvalReporter` observer
+  interface. Ultrafuzz owns the local loop and writes `matrix.json`,
+  `runs.jsonl`, `scores.jsonl`, and `summary.json`. No built-in external
+  implementation is registered; a TOML connection profile cannot add one.
 - `packages/evals/src/node-telemetry.ts` is the pump: a cursor over
   `events.jsonl` + `state.json` + artifact manifests, driven from the eval
   driver's poll loop. The cursor (byte offset + `event_id` dedup ring +
@@ -259,10 +238,6 @@ the workflow runner:
   row plus journal `event_id`; artifact keys are derived from row, node, relative
   path, and SHA-256. Exhausted provider delivery retries degrade to warnings;
   cursor lock, validation, and persistence failures stop the drain.
-- `packages/evals/src/reporters/braintrust.ts` maps rows to a three-level span
-  tree (row root → topology group → node attempt) with backdated
-  `start`/`end` metrics. The reporter speaks the provider's REST API directly
-  over `fetch` — `packages/runtime` never imports a provider SDK.
 - Heartbeat liveness is bounded by the sync poll cadence: state transitions
   and partial artifacts appear within one poll interval. That is the correct
   trade for a detached orchestrator.
@@ -286,9 +261,9 @@ Every new eval run records a versioned provenance block in `eval.json`:
   version, judge models, and ground-truth digests. Historical artifacts without
   lineage remain readable and are labeled as having unavailable provenance.
 
-Braintrust receives the benchmark series, cohort fingerprint, candidate
-identity, execution-policy fingerprint, row graph/config fingerprints, and
-scoring identity as filterable metadata. Raw ground truth is never included.
+Local provenance records preserve the benchmark series, cohort fingerprint,
+candidate identity, execution policy, row graph/config fingerprints, and scoring
+identity for comparisons and history publication.
 
 For release-over-release comparisons, pass the candidate run followed by the
 baseline run:
@@ -306,14 +281,13 @@ differences that were waived.
 
 ```bash
 ultrafuzz eval plan      # validate config + suite, print the matrix
-ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
+ultrafuzz eval run       # launch rows, poll to terminal state, retain local telemetry
 ultrafuzz eval status    # observe every row's durable node progress and ETA
 ultrafuzz eval score     # grade reports against ground truth (optional --llm-judge)
 ultrafuzz eval report    # show the scored variant ranking
 ultrafuzz eval compare   # diff variants or release runs with compatible lineage
 ultrafuzz eval bundle    # export privacy-safe aggregate evidence for offline analysis
 ultrafuzz eval history   # validate/render or append to public longitudinal history
-ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 ```
 
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
@@ -439,16 +413,10 @@ a scored datapoint; two failed rows or missing terminal evidence still block
 publication. Bundle path, size, and SHA-256 checks are distinct from
 the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
-`eval publish --provider braintrust <eval-run-id>` replays the journal from
-offset 0 and reconstructs the entire node trace on a provider after the fact
-(CI runs with reporting off, backfilling a newly added provider). Live and
-post-hoc publishing share one code path; `--resume` continues from the
-persisted cursor instead.
-
-Grading never depends on a provider: scores are computed locally
-(deterministic matcher, optional LLM judge behind the generic `FindingJudge`
-type) and mirrored out. `provider = "none"` keeps the full
-plan → run → score → compare loop working offline.
+Deterministic grading runs locally. Optional LLM judging uses the generic
+`FindingJudge` interface and requires an explicitly configured endpoint and
+dedicated judge credential. Results remain in local artifacts; no telemetry
+publishing service is involved.
 
 `eval status <eval-run-id>` is the read-only live view across a whole matrix.
 It derives node counts, row lifecycle state, checkpoint age, and estimated
@@ -527,9 +495,10 @@ efficiency block reports wall/active/wait time, total tokens, and cost together
 with explicit completeness states, and `summary.md` renders those same
 structured fields.
 
-The gateway judge requires its own `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; reporter or
-general OpenAI credentials are never reused. `ULTRAFUZZ_EVAL_JUDGE_URL`, when
-set, must be HTTPS without embedded credentials, and redirects are rejected.
+The optional LLM judge requires both `ULTRAFUZZ_EVAL_JUDGE_URL` and its own
+`ULTRAFUZZ_EVAL_JUDGE_API_KEY`. There is no implicit gateway; reporting or
+general model-provider credentials are never reused. The endpoint must be
+HTTPS without embedded credentials, and redirects are rejected.
 For a target marked `sensitivity: private`, the judge is disabled unless the
 operator explicitly sets `ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`.
 Ground-truth IDs are replaced with candidate aliases in the request, and an

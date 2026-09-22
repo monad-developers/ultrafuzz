@@ -102,6 +102,16 @@ try {
     assertPackedPackagePayload(packageRoot, installedRoot, manifest);
   }
 
+  for (const retiredPath of [
+    "@ultrafuzz/evals/dist/reporters/braintrust.js",
+    "@ultrafuzz/evals/dist/publish.js",
+    "@ultrafuzz/cli/dist/commands/eval/publish.js"
+  ]) {
+    if (fs.existsSync(path.join(consumerRoot, "node_modules", retiredPath))) {
+      throw new Error(`packed install retained removed reporting code: ${retiredPath}`);
+    }
+  }
+
   const cliPath = path.join(consumerRoot, "node_modules", "@ultrafuzz", "cli", "dist", "index.js");
   assertRegularFile(cliPath, "installed Ultrafuzz CLI");
   run(

@@ -67,8 +67,8 @@ export function cliEntrypoint(): string {
 
 /**
  * Resolve the `[eval]` section of ultrafuzz.toml for the eval commands.
- * Provider binding + credentials env-var names live here; the committable
- * experiment definition lives in the eval suite YAML.
+ * Historical provider metadata stays inert here; only `none` may be selected
+ * by eval commands. The experiment definition lives in the eval suite YAML.
  */
 export async function loadEvalConfig(
   root: string,

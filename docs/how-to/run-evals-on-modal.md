@@ -1,8 +1,8 @@
 # Run evals on Modal
 
-Ultrafuzz can run long evaluation rows in Modal sandboxes while reporting live
-telemetry and scores to Braintrust. The runner uses the Modal TypeScript SDK;
-Python is not required.
+Ultrafuzz can run long evaluation rows in Modal sandboxes while retaining
+telemetry, scores, and reports in the run workspace. The runner uses the Modal
+TypeScript SDK; Python is not required.
 
 ## Security and storage boundaries
 
@@ -23,7 +23,7 @@ Non-secret run state is stored under `/data/<run-id>/<model>/workspace` on a
 private Modal Volume. This preserves Ultrafuzz state, generated tests, reports,
 and Smithers workspaces when a sandbox exits. Each sandbox has a 24-hour
 timeout; eval watching stops two hours earlier so terminal persistence, scoring,
-publishing, and volume flushing retain a bounded completion window.
+and volume flushing retain a bounded completion window.
 
 Benchmark sandboxes reserve 16 physical CPU cores (32 vCPUs) and 32 GiB of
 memory, with a 64 GiB memory limit. The Modal benchmark worker override
@@ -87,15 +87,15 @@ refresh-token rotation remains single-writer.
 
 ## Create a private runtime config
 
-The v2 document is an exact contract: every operational value is explicit.
+The v3 document is an exact contract: every operational value is explicit.
 The loader does not add models, loop counts, image names, credential names,
-timeouts, reporting settings, or target selections. Configure each model row you
+timeouts, judge settings, or target selections. Configure each model row you
 intend to run; the public benchmark config generator sets `loops = 1` for its
 smoke and full lanes.
 
 ```json
 {
-  "schema_version": "ultrafuzz.modal.benchmark.v2",
+  "schema_version": "ultrafuzz.modal.benchmark.v3",
   "run_id": "example-run",
   "app_name": "ultrafuzz-evals",
   "image_name": "ultrafuzz-security-runner:latest",
@@ -112,15 +112,10 @@ smoke and full lanes.
   "benchmark_execution": {
     "excluded_node_ids": []
   },
-  "eval_reporting": {
-    "provider": "braintrust"
-  },
-  "braintrust": {
-    "project": "private-evals",
-    "api_key_env": "BRAINTRUST_API_KEY",
-    "judge_api_key_env": "OPENAI_API_KEY",
-    "judge_url": "https://api.openai.com/v1/chat/completions",
-    "judge_credential_ttl_seconds": 57600
+  "judge": {
+    "api_key_env": "OPENAI_API_KEY",
+    "url": "https://api.openai.com/v1/chat/completions",
+    "credential_ttl_seconds": 57600
   },
   "node_timeout_seconds": 7200,
   "loops": 3,
@@ -172,8 +167,28 @@ inside the sandbox, receives the target binding above, and preserves it in the
 converted scorer input. A count mismatch fails before evaluation starts.
 
 For judges that require short-lived credentials, configure an HTTPS
-`braintrust.judge_credential_endpoint`. The worker requests a model-scoped
+`judge.credential_endpoint`. The worker requests a model-scoped
 credential in memory immediately before scoring and never persists it.
+
+### Migrate old benchmark configurations
+
+Fresh launches require `ultrafuzz.modal.benchmark.v3`. Regenerate public pair
+configs with the current generator. For a fresh private run, replace the old
+`braintrust` object with `judge`, map `judge_api_key_env` to `api_key_env`,
+`judge_url` to `url`, `judge_credential_endpoint` to `credential_endpoint`, and
+`judge_credential_ttl_seconds` to `credential_ttl_seconds`. Remove the old
+reporting `project`, `api_key_env`, and top-level `eval_reporting` settings.
+The new `judge.api_key_env` names the judge credential, not the retired
+reporting credential.
+
+Do not rewrite a saved configuration for an existing launch: its exact bytes
+are part of the launch identity. Current config-based launch, resume,
+collection, and cleanup reject old v2 documents. Existing sandboxes can still
+be stopped using their launch state without loading an old config:
+
+```bash
+ultrafuzz-modal terminate --state /path/to/launch-state.json
+```
 
 ### Curated private lanes
 
@@ -223,26 +238,26 @@ pnpm --filter @ultrafuzz/modal... build
 candidate="$(git rev-parse HEAD)"
 generation="$(date +%s)-1"
 control=".ultrafuzz/modal/public-$generation"
-node scripts/ci/verify-cohort-reachability.mjs --lane smoke
+mode=smoke
+node scripts/ci/verify-cohort-reachability.mjs --lane "$mode"
 node scripts/ci/prepare-modal-benchmarks.mjs \
   "$candidate" https://github.com/monad-developers/ultrafuzz \
-  "$generation" "$control" smoke
-node scripts/ci/validate-modal-benchmark-launch.mjs "$control/manifest.json" . smoke
+  "$generation" "$control" "$mode"
+node scripts/ci/validate-modal-benchmark-launch.mjs "$control/manifest.json" . "$mode"
 ```
 
 Use a fresh positive `number-attempt` generation ID for each plan; it is a
 local lineage identifier and does not require a GitHub run. Resolve any
-reachability failure before paying for an image or sandbox. Select `full` in
-all three commands only when intending the complete four-provider cohort.
+reachability failure before paying for an image or sandbox. Set `mode=full`
+only when intending the complete four-provider cohort.
 Review `manifest.json` and every generated pair config before proceeding.
 An explicit `BENCHMARK_MODELS_JSON` can override the runner selection while
 the validator enforces the lane's provider count and target policy.
 
 Export `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and the selected pair's provider
 key on the launcher host. Every public pair also needs `OPENAI_API_KEY` for
-its judge. Public rows score local artifacts and do not require
-`BRAINTRUST_API_KEY`. Do not add these credentials to Actions secrets or
-commit them with a config.
+its explicitly configured judge. Reporting requires no additional credential.
+Do not add these credentials to Actions secrets or commit them with a config.
 
 For the single-pair smoke plan, the following commands start paid compute:
 
@@ -269,12 +284,44 @@ pnpm exec ultrafuzz-modal status --state "$state"
 If a launch did not persist its state, the retained
 `prepare-modal-benchmark-cleanup.mjs` and `terminate-modal-benchmark.sh` helpers
 can validate a preserved plan and terminate its exact build and pair scopes.
-Use trusted tooling and confirm uncertain remote cleanup before retiring
-credentials. Keep cleanup access available until the detached work is stopped.
+Run the following from the same clean, reviewed candidate checkout with its
+built tooling. Reuse the original `candidate`, `generation`, `mode`, and
+`control` values recorded at launch; do not derive them from an untrusted
+manifest. The validator requires the checkout to match that candidate and
+checks every pair against its benchmark policy before writing the cleanup list:
 
-After a pair completes, collect its validated public bundle with `collect
---public-results --config <path>` and extract it with `unpack-public`. Preserve
-all scored rows and candidate/target lineage. A complete generation can then
+```bash
+cleanup_pairs="$control/cleanup-pairs.tsv"
+node scripts/ci/prepare-modal-benchmark-cleanup.mjs \
+  "$control/manifest.json" "$cleanup_pairs" "$candidate" \
+  https://github.com/monad-developers/ultrafuzz "$generation" "$mode" . &&
+  bash scripts/ci/terminate-modal-benchmark.sh \
+    "$control" "$control" "$cleanup_pairs" "$generation" true .
+```
+
+Use a new cleanup-list filename if it already exists; validation refuses to
+overwrite it. The two `control` arguments are the plan and state directories.
+`true` tells the helper to use any preserved state files first; missing state
+files do not prevent cleanup by the validated build and pair scopes. Both
+cleanup passes run even when an individual termination is uncertain, and any
+uncertainty makes the helper fail. Confirm remote cleanup before retiring
+credentials, and keep cleanup access available until detached work is stopped.
+
+After a pair completes, collect and extract its validated public bundle using
+the exact config and state selected for that pair:
+
+```bash
+results="$control/results"
+model_slug="$(jq -er '.models[0].slug' "$config")"
+pnpm exec ultrafuzz-modal collect \
+  --state "$state" --public-results --config "$config" --output "$results" &&
+  pnpm exec ultrafuzz-modal unpack-public \
+    --bundle "$results/$model_slug/public-results.json" \
+    --output "$control/unpacked/$model_slug"
+```
+
+Collection writes each model's bundle under its slug in the results directory.
+Preserve all scored rows and candidate/target lineage. A complete generation can then
 be appended locally with [manual history publication](run-evals.md#publish-longitudinal-history),
 and the reviewed history/chart changes submitted through a normal pull
 request. Existing charts stay unchanged until such a publication.
@@ -435,8 +482,8 @@ identities, terminal states, report-presence flags, diagnostic codes, exact
 launch lineage, and a bounded failed-node projection (node ID, status, timeout
 flag, and allowlisted failure category or code). It never contains messages,
 paths, findings, or provider output.
-This lets failed Actions runs publish useful lifecycle evidence without
-repeating paid model work. Investigate arbitrary sensitive run data on the
+This preserves useful lifecycle evidence from failed runs without repeating
+paid model work. Investigate arbitrary sensitive run data on the
 private volume under the repository's normal access controls. Collection validates each contract and
 generic log line before writing locally and refuses pre-hardening or malformed
 volume artifacts.

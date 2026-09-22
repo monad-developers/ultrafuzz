@@ -152,12 +152,7 @@
   },
   "eval": {
     "provider": "none",
-    "providers": {
-      "braintrust": {
-        "apiKeyEnv": "BRAINTRUST_API_KEY",
-        "project": "ultrafuzz-evals"
-      }
-    },
+    "providers": {},
     "evalConfig": ".ultrafuzz/evals/bug-finding.yml"
   }
 }

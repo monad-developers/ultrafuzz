@@ -13,7 +13,6 @@ export * from "./history-publication.js";
 export * from "./ground-truth.js";
 export * from "./node-telemetry.js";
 export * from "./lineage.js";
-export * from "./publish.js";
 export * from "./public-diagnostics.js";
 export * from "./recovery-equivalence.js";
 export * from "./reporter.js";

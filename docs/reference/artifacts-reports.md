@@ -887,14 +887,13 @@ available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the
 effective deterministic or optional-judge mode.
 
-`telemetry/` holds durable per-row telemetry cursors (byte offset, event dedup
-state, uploaded-artifact hashes) for live streaming, plus per-provider publish
-cursors under `telemetry/publish/<provider>/`, so a crashed driver or
-`ultrafuzz eval publish --resume` can continue delivery without
-double-publishing. The underlying Ultrafuzz runs
-live inside each target checkout, not under the eval project; eval artifacts
-reference them by run ID. Grading and these artifacts never depend on a
-reporting provider. See [Eval Suites](evals.md).
+`telemetry/` holds durable per-row telemetry cursors with byte offsets, event
+deduplication state, and artifact hashes for the local observer loop. Historical
+publication cursor documents remain readable, but there is no external
+publication command. The underlying Ultrafuzz runs live inside each target
+checkout, not under the eval project; eval artifacts reference them by run ID.
+Grading and these artifacts do not depend on a reporting service.
+See [Eval Suites](evals.md).
 
 ## Analysis Bundles
 

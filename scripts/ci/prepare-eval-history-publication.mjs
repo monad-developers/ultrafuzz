@@ -818,7 +818,7 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   assertUnique(usedModelSlugs, expectedModelSlug, "derived benchmark model slug");
   const scope = config.public_benchmark;
   const mismatches = [
-    config.schema_version === "ultrafuzz.modal.benchmark.v2" ? undefined : "schema version",
+    config.schema_version === "ultrafuzz.modal.benchmark.v3" ? undefined : "schema version",
     config.run_id === expectedRunId ? undefined : "run ID",
     config.app_name === "ultrafuzz-evals" ? undefined : "app name",
     config.image_name === `ufz-runner-${context.candidateCommit}` ? undefined : "image name",
@@ -835,10 +835,8 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
     scope.max_runtime_seconds === (context.maxRuntimeSeconds ?? defaultMaxRuntimeSeconds(context.mode))
       ? undefined
       : "maximum runtime",
-    config.braintrust.project === "ultrafuzz-public-benchmarks" ? undefined : "reporting project",
-    config.braintrust.api_key_env === "BRAINTRUST_API_KEY" ? undefined : "reporting credential name",
-    config.braintrust.judge_api_key_env === "OPENAI_API_KEY" ? undefined : "judge credential name",
-    config.braintrust.judge_url === "https://api.openai.com/v1/chat/completions" ? undefined : "judge URL",
+    config.judge.api_key_env === "OPENAI_API_KEY" ? undefined : "judge credential name",
+    config.judge.url === "https://api.openai.com/v1/chat/completions" ? undefined : "judge URL",
     model.slug === pair.model_slug ? undefined : "model slug",
     model.slug === expectedModelSlug ? undefined : "derived model slug",
     model.provider === pair.provider ? undefined : "model provider",

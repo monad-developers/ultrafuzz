@@ -172,7 +172,7 @@ interface CleanupConfig {
   run_id: string;
   app_name: string;
   image_name: string;
-  braintrust: Record<string, unknown>;
+  judge: Record<string, unknown>;
   node_timeout_seconds: number;
   loops: number;
   public_benchmark: {
@@ -232,16 +232,14 @@ function cleanupFixture() {
   };
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
   const config: CleanupConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
     app_name: "ultrafuzz-evals",
     image_name: `ufz-runner-${candidate}`,
-    braintrust: {
-      project: "ultrafuzz-public-benchmarks",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: "OPENAI_API_KEY",
+      url: "https://api.openai.com/v1/chat/completions",
+      credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: 1800,
     loops: 1,

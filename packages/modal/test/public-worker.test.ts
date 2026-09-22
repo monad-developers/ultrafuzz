@@ -93,13 +93,11 @@ import {
   writeCurrentTerminalReport
 } from "./current-artifact-fixtures.js";
 
-function publicBraintrustConfig() {
+function publicJudgeConfig() {
   return {
-    project: "fixture",
-    api_key_env: "BRAINTRUST_API_KEY",
-    judge_api_key_env: "OPENAI_API_KEY",
-    judge_url: "https://api.openai.com/v1/chat/completions",
-    judge_credential_ttl_seconds: 57_600
+    api_key_env: "OPENAI_API_KEY",
+    url: "https://api.openai.com/v1/chat/completions",
+    credential_ttl_seconds: 57_600
   } as const;
 }
 
@@ -168,11 +166,11 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-preflight",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -248,11 +246,11 @@ it("rejects a present dangling public bundle without starting replacement model 
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-dangling-bundle",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -326,11 +324,11 @@ it("accepts the bounded full lane, then names the missing paid-run credential as
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-full-lane",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -409,11 +407,11 @@ it("allows only API-key public workers plus Kimi subscription workers", () => {
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-auth-admission",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [apiKeyModel],
@@ -475,11 +473,11 @@ it("treats the private reference token as an exact worker-side forbidden secret"
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-reference-secret",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 1800,
     loops: 1,
     models: [model],
@@ -2332,11 +2330,11 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     auth_mode: "api-key"
   };
   const config: PublicModalBenchmarkConfig = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: "public-worker-lineage",
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 900,
     loops: 1,
     models: [model],
@@ -2427,11 +2425,11 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
     auth_mode: "api-key"
   };
   const config = {
-    schema_version: "ultrafuzz.modal.benchmark.v2",
+    schema_version: "ultrafuzz.modal.benchmark.v3",
     run_id: runId,
     app_name: "ultrafuzz-benchmarks",
     image_name: "fixture-image",
-    braintrust: publicBraintrustConfig(),
+    judge: publicJudgeConfig(),
     node_timeout_seconds: 900,
     loops: 1,
     models: [model],
@@ -2691,8 +2689,7 @@ it("retains threat-model, goal-plan and vulnerability-database artifacts per row
   // #183 requires the real generated documents to be retrievable. They cannot
   // reach the bundle any other way: `reporting.artifacts.include` is consumed
   // only by `uploadsForManifest`, which delivers to `this.input.reporters`, and
-  // the public worker runs `eval run --provider none`, for which
-  // `createEvalReporters` returns `[]`.
+  // the public worker runs `eval run --provider none` with an empty reporter list.
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-threat-"));
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-threat-model";

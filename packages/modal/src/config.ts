@@ -70,7 +70,7 @@ export function modalBenchmarkConfigValidatorsAgree(value: unknown): boolean {
 }
 
 /** Refuse an execution envelope that cannot contain even one complete campaign.
- * This is separate from document validation: historical configs remain inspectable.
+ * This is separate from document validation: current-schema configs remain inspectable.
  */
 export function assertModalBenchmarkExecutionBudget(config: ModalBenchmarkConfig): void {
   if (!isPublicModalBenchmarkConfig(config) || config.public_benchmark.lane !== "full") return;

@@ -465,11 +465,9 @@ before launch.
 
 ## Eval suites
 
-The `[eval]` section binds eval suites to a reporting provider per
-environment. It holds the default suite path, the machine-specific
-`ground_truth_root` (which must resolve outside the repository), the active
-`provider` (`braintrust` or `none`), and per-provider
-`[eval.providers.<name>]` connection profiles containing env-var _names_ only
-(matching the `[agents.CodexAgent] api_key_env` pattern). The committable
-experiment definition lives in the eval YAML referenced by `eval_config`. See
-[docs/reference/evals.md](reference/evals.md).
+The `[eval]` section holds the default suite path and the machine-specific
+`ground_truth_root`, which must resolve outside the repository. Reporting uses
+`provider = "none"`; no external reporter is installed. The committable
+experiment definition lives in the eval YAML referenced by `eval_config`.
+Optional LLM judging requires its own explicitly configured HTTPS endpoint and
+judge credential. See [Eval Suites](reference/evals.md).

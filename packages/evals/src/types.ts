@@ -90,7 +90,7 @@ export interface EvalTarget {
   id: string;
   repo: string;
   ref: string;
-  /** Local checkout of the target; required to launch rows, optional for plan/score/publish. */
+  /** Local checkout of the target; required to launch rows, optional for plan/score. */
   path?: string;
   signal_profile?: string;
   /** Relative ground-truth file resolved strictly under the operator-supplied `[eval].ground_truth_root`. */
@@ -557,7 +557,6 @@ export interface EvalRunValue {
   /** Whether this call polled the launched rows toward a terminal observation. */
   watched: boolean;
   records: EvalRunRecord[];
-  report_url?: string;
   diagnostics: RuntimeDiagnostic[];
 }
 

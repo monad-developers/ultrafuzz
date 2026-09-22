@@ -47,7 +47,6 @@ import {
   type ModalBenchmarkConfig,
   type PublicModalBenchmarkConfig
 } from "./config.js";
-import { privateEvalProvider, privateJudgeApiKeyEnv } from "./private-reporting.js";
 import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
@@ -2822,7 +2821,7 @@ export async function publicBenchmarkCollectionSecretValues(
     ...new Set([
       ...retainedSecretValues,
       ...runnerSecretValues,
-      requiredEnv(env, config.braintrust.judge_api_key_env),
+      requiredEnv(env, config.judge.api_key_env),
       ...modalReferenceCredentialRedactionValues(env)
     ])
   ];
@@ -3112,13 +3111,7 @@ export function modalReferenceCredentialRedactionValues(env: Record<string, stri
 }
 
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
-  const names = new Set<string>();
-  if (isPublicModalBenchmarkConfig(config)) {
-    names.add(config.braintrust.judge_api_key_env);
-  } else {
-    if (privateEvalProvider(config) === "braintrust") names.add(config.braintrust.api_key_env);
-    names.add(privateJudgeApiKeyEnv(config));
-  }
+  const names = new Set<string>([config.judge.api_key_env]);
   if (model.auth_mode === "api-key") names.add(runnerApiKeyEnv(model.provider));
   return names;
 }

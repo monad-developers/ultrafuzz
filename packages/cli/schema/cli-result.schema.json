@@ -74,7 +74,6 @@
     { "$ref": "#/$defs/evalBundleCommand" },
     { "$ref": "#/$defs/evalCompareCommand" },
     { "$ref": "#/$defs/evalHistoryCommand" },
-    { "$ref": "#/$defs/evalPublishCommand" },
     { "$ref": "#/$defs/evalAnalyzeCommand" },
     { "$ref": "#/$defs/configAuditProfileCommand" },
     { "$ref": "#/$defs/configAuditProfilesCommand" },
@@ -122,7 +121,6 @@
         "eval bundle",
         "eval compare",
         "eval history",
-        "eval publish",
         "eval analyze upsert",
         "eval analyze upset",
         "eval analyze scores",
@@ -1238,7 +1236,7 @@
       "properties": {
         "suite_path": { "type": "string" },
         "suite": { "type": "string" },
-        "provider": { "enum": ["braintrust", "none"] },
+        "provider": { "enum": ["none"] },
         "reporting": { "$ref": "urn:ultrafuzz:schema:evals:common:3#/$defs/reportingPolicy" },
         "matrix": { "$ref": "urn:ultrafuzz:schema:evals:matrix:2" }
       }
@@ -1254,8 +1252,7 @@
         "matrix_path": { "type": "string" },
         "launched": { "$ref": "#/$defs/nonNegativeInteger" },
         "failed": { "$ref": "#/$defs/nonNegativeInteger" },
-        "incomplete": { "$ref": "#/$defs/nonNegativeInteger" },
-        "report_url": { "type": "string" }
+        "incomplete": { "$ref": "#/$defs/nonNegativeInteger" }
       }
     },
     "evalStatusData": { "$ref": "urn:ultrafuzz:schema:evals:status:1" },
@@ -1452,29 +1449,6 @@
           }
         }
       ]
-    },
-    "evalPublishData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "eval_run_id",
-        "provider",
-        "rows_published",
-        "rows_skipped",
-        "events_published",
-        "artifacts_published",
-        "scores_published"
-      ],
-      "properties": {
-        "eval_run_id": { "type": "string" },
-        "provider": { "type": "string" },
-        "rows_published": { "$ref": "#/$defs/nonNegativeInteger" },
-        "rows_skipped": { "$ref": "#/$defs/nonNegativeInteger" },
-        "events_published": { "$ref": "#/$defs/nonNegativeInteger" },
-        "artifacts_published": { "$ref": "#/$defs/nonNegativeInteger" },
-        "scores_published": { "type": "boolean" },
-        "report_url": { "type": "string" }
-      }
     },
     "analysisData": {
       "type": "object",
@@ -1948,7 +1922,6 @@
     "evalBundleCommand": { "$ref": "#/$defs/command-eval-bundle" },
     "evalCompareCommand": { "$ref": "#/$defs/command-eval-compare" },
     "evalHistoryCommand": { "$ref": "#/$defs/command-eval-history" },
-    "evalPublishCommand": { "$ref": "#/$defs/command-eval-publish" },
     "configAuditProfileCommand": { "$ref": "#/$defs/command-config-audit-profile" },
     "configAuditProfilesCommand": { "$ref": "#/$defs/command-config-audit-profiles" },
     "topologyListCommand": { "$ref": "#/$defs/command-topology-list" },
@@ -2029,7 +2002,6 @@
     "command-eval-bundle": { "$ref": "#/$defs/commandTemplate-eval-bundle" },
     "command-eval-compare": { "$ref": "#/$defs/commandTemplate-eval-compare" },
     "command-eval-history": { "$ref": "#/$defs/commandTemplate-eval-history" },
-    "command-eval-publish": { "$ref": "#/$defs/commandTemplate-eval-publish" },
     "command-config-audit-profile": { "$ref": "#/$defs/commandTemplate-config-audit-profile" },
     "command-config-audit-profiles": { "$ref": "#/$defs/commandTemplate-config-audit-profiles" },
     "command-topology-list": { "$ref": "#/$defs/commandTemplate-topology-list" },
@@ -2340,13 +2312,6 @@
       "then": {
         "type": "object",
         "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalHistoryData" }] } }
-      }
-    },
-    "commandTemplate-eval-publish": {
-      "if": { "type": "object", "properties": { "command": { "const": "eval publish" } }, "required": ["command"] },
-      "then": {
-        "type": "object",
-        "properties": { "data": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/evalPublishData" }] } }
       }
     },
     "commandTemplate-config-audit-profile": {

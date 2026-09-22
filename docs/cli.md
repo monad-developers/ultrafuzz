@@ -33,14 +33,13 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `clean <run-id>`          | Remove selected generated paths after confirmation and path checks.                                                       |
 | `dashboard`               | Serve the local loopback dashboard and API.                                                                               |
 | `eval plan`               | Dry-run an eval suite matrix without launching workflows.                                                                 |
-| `eval run`                | Launch runs for an eval suite matrix and stream node telemetry to the configured provider.                                |
+| `eval run`                | Launch runs for an eval suite matrix and watch local progress.                                                            |
 | `eval status <id>`        | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                               |
 | `eval score <id>`         | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
 | `eval report <id>`        | Show the scored eval run variant ranking.                                                                                 |
 | `eval compare <id>`       | Compare scored eval variants against a `--baseline` variant.                                                              |
 | `eval analyze <type>`     | Generate private offline benchmark analysis from a finalized handoff ZIP.                                                 |
 | `eval history [id]`       | Validate/render public eval history, or append one complete scored run.                                                   |
-| `eval publish <id>`       | Replay a recorded eval run's node telemetry to a provider post hoc.                                                       |
 
 The dashboard/API is a local operator surface over product state, not a
 workflow-engine API.
@@ -176,15 +175,15 @@ explicit `--copy` selections for files you have reviewed.
 
 ## Eval Commands
 
-`eval plan | run | status | score | report | compare | bundle | analyze | history | publish` drive eval suites that
+`eval plan | run | status | score | report | compare | bundle | analyze | history` drive eval suites that
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
-the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
-provider (`braintrust | none`) and credential env-var names.
+the experiment; the `ultrafuzz.toml` `[eval]` section provides the suite and
+ground-truth paths. Only local reporting (`provider = "none"`) is supported.
 Common flags:
 
 - `--suite <suite-yaml-path>` (plan, run)
-- `--provider <name>` (plan, run, publish)
+- `--provider none` (plan, run)
 - `--target-root <path>` (plan, run)
 - `--ground-truth-root <external-path>` (plan, run)
 - `--row <row-id>` (run, repeatable)
@@ -201,7 +200,6 @@ Common flags:
 - `--history <path>` and `--charts <directory>` (history)
 - `--publication-url <url>` (history source bundle location, required when appending)
 - `--check` (history validation without writes)
-- `--resume` (publish)
 
 Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](reference/evals.md) and the

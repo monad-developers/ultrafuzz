@@ -83,8 +83,8 @@ export interface EvalArtifactUpload {
 /**
  * Providers are pure observers/exporters. Ultrafuzz owns the loop
  * (plan → run → score → summarize, all writing local artifacts); a reporter
- * translates that stream into provider objects. Adding a provider is one file
- * implementing this interface plus one `[eval.providers.<name>]` block.
+ * observes that stream through explicitly supplied callbacks. No built-in
+ * remote reporter or configuration-based exporter is installed.
  */
 export interface EvalReporter {
   readonly name: string;

@@ -38,8 +38,7 @@ function minimalConfig(): Record<string, unknown> {
       file: "findings.yml",
       format: "ultrafuzz"
     },
-    benchmark_execution: { excluded_node_ids: [] },
-    eval_reporting: { provider: "braintrust" }
+    benchmark_execution: { excluded_node_ids: [] }
   };
 }
 
@@ -49,12 +48,10 @@ function commonConfig(runId: string, models: unknown[]): Record<string, unknown>
     run_id: runId,
     app_name: "ultrafuzz-evals",
     image_name: "ultrafuzz-security-runner:latest",
-    braintrust: {
-      project: "example-evals",
-      api_key_env: "BRAINTRUST_API_KEY",
-      judge_api_key_env: "OPENAI_API_KEY",
-      judge_url: "https://api.openai.com/v1/chat/completions",
-      judge_credential_ttl_seconds: 57_600
+    judge: {
+      api_key_env: "OPENAI_API_KEY",
+      url: "https://api.openai.com/v1/chat/completions",
+      credential_ttl_seconds: 57_600
     },
     node_timeout_seconds: 7_200,
     loops: 3,
@@ -91,9 +88,9 @@ function privateRepositoryVariant(scope: "ground_truth" | "target", repository: 
   return config;
 }
 
-function braintrustUrlVariant(field: "judge_credential_endpoint" | "judge_url", url: string): Record<string, unknown> {
+function judgeUrlVariant(field: "credential_endpoint" | "url", url: string): Record<string, unknown> {
   const config = minimalConfig();
-  config.braintrust = { ...(config.braintrust as Record<string, unknown>), [field]: url };
+  config.judge = { ...(config.judge as Record<string, unknown>), [field]: url };
   return config;
 }
 
@@ -123,23 +120,23 @@ function expectBenchmarkConfigIdentityGate(value: unknown): void {
 }
 
 describe("Modal benchmark config", () => {
-  it("keeps historical full-row configs readable but rejects their undersized execution envelope", () => {
+  it("keeps current-schema full-row configs readable but rejects their undersized execution envelope", () => {
     const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-budget-"));
     const file = path.join(root, "config.json");
     const source = minimalPublicConfig();
-    const historical = {
+    const undersized = {
       ...source,
       public_benchmark: { ...source.public_benchmark, lane: "full", max_runtime_seconds: 15_000 }
     };
     try {
-      fs.writeFileSync(file, `${JSON.stringify(historical)}\n`);
-      const parsed = parseModalBenchmarkConfig(historical);
-      expect(parsed).toEqual(historical);
-      expect(loadModalBenchmarkConfig(file)).toEqual(historical);
+      fs.writeFileSync(file, `${JSON.stringify(undersized)}\n`);
+      const parsed = parseModalBenchmarkConfig(undersized);
+      expect(parsed).toEqual(undersized);
+      expect(loadModalBenchmarkConfig(file)).toEqual(undersized);
       expect(() => assertModalBenchmarkExecutionBudget(parsed)).toThrow(
         /MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT: full benchmark row allows 15000s.*at least 15600s/u
       );
-      expect(loadModalBenchmarkConfig(file)).toEqual(historical);
+      expect(loadModalBenchmarkConfig(file)).toEqual(undersized);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -170,18 +167,15 @@ describe("Modal benchmark config", () => {
       },
       {
         label: "an encoded credential-free HTTPS endpoint",
-        value: braintrustUrlVariant(
-          "judge_credential_endpoint",
+        value: judgeUrlVariant(
+          "credential_endpoint",
           "https://gateway.example.invalid/v1/credentials%20temporary?mode=short#request"
         ),
         accepted: true
       },
       {
         label: "an at-sign outside the HTTPS authority",
-        value: braintrustUrlVariant(
-          "judge_url",
-          "https://gateway.example.invalid/v1/user@example.invalid/chat?model=gpt-5.6-sol"
-        ),
+        value: judgeUrlVariant("url", "https://gateway.example.invalid/v1/user@example.invalid/chat?model=gpt-5.6-sol"),
         accepted: true
       },
       {
@@ -201,15 +195,12 @@ describe("Modal benchmark config", () => {
       },
       {
         label: "an uppercase HTTPS scheme",
-        value: braintrustUrlVariant("judge_url", "HTTPS://gateway.example.invalid/v1/chat"),
+        value: judgeUrlVariant("url", "HTTPS://gateway.example.invalid/v1/chat"),
         accepted: false
       },
       {
         label: "embedded HTTPS credentials",
-        value: braintrustUrlVariant(
-          "judge_credential_endpoint",
-          "https://user:secret@gateway.example.invalid/v1/credentials"
-        ),
+        value: judgeUrlVariant("credential_endpoint", "https://user:secret@gateway.example.invalid/v1/credentials"),
         accepted: false
       },
       {
@@ -283,29 +274,30 @@ describe("Modal benchmark config", () => {
       expect(() => parseModalBenchmarkConfig(missing), field).toThrow();
     }
 
-    const missingNested = minimalConfig();
-    delete (missingNested.braintrust as Record<string, unknown>).judge_credential_ttl_seconds;
-    expect(() => parseModalBenchmarkConfig(missingNested)).toThrow();
+    for (const field of ["api_key_env", "url", "credential_ttl_seconds"] as const) {
+      const missingNested = minimalConfig();
+      Reflect.deleteProperty(missingNested.judge as Record<string, unknown>, field);
+      expect(() => parseModalBenchmarkConfig(missingNested), field).toThrow();
+    }
   });
 
   it("rejects inline secrets and repository-selected public credential routes", () => {
     expect(() =>
       parseModalBenchmarkConfig({
         ...minimalConfig(),
-        braintrust: { project: "example-evals", api_key: "must-not-be-accepted" }
+        judge: { ...(minimalConfig().judge as Record<string, unknown>), api_key: "must-not-be-accepted" }
       })
     ).toThrow();
 
     for (const [field, value] of [
       ["api_key_env", "AWS_SECRET_ACCESS_KEY"],
-      ["judge_api_key_env", "AWS_SECRET_ACCESS_KEY"],
-      ["judge_url", "https://collector.example.invalid/v1/chat/completions"],
-      ["judge_credential_endpoint", "https://collector.example.invalid/v1/credentials"]
+      ["url", "https://collector.example.invalid/v1/chat/completions"],
+      ["credential_endpoint", "https://collector.example.invalid/v1/credentials"]
     ] as const) {
       const config = minimalPublicConfig() as unknown as Record<string, unknown> & {
-        braintrust: Record<string, unknown>;
+        judge: Record<string, unknown>;
       };
-      config.braintrust = { ...config.braintrust, [field]: value };
+      config.judge = { ...config.judge, [field]: value };
       expect(() => parseModalBenchmarkConfig(config), field).toThrow(/trusted semantic gates/u);
     }
   });
@@ -482,17 +474,17 @@ describe("Modal benchmark config", () => {
         format: "audit-markdown",
         expected_findings: 2
       },
-      braintrust: {
-        ...(minimalConfig().braintrust as Record<string, unknown>),
-        judge_api_key_env: "JUDGE_KEY",
-        judge_url: "https://gateway.example.invalid/v1/chat/completions",
-        judge_credential_endpoint: "https://gateway.example.invalid/v1/credentials",
-        judge_credential_ttl_seconds: 900
+      judge: {
+        ...(minimalConfig().judge as Record<string, unknown>),
+        api_key_env: "JUDGE_KEY",
+        url: "https://gateway.example.invalid/v1/chat/completions",
+        credential_endpoint: "https://gateway.example.invalid/v1/credentials",
+        credential_ttl_seconds: 900
       }
     });
 
     expect("ground_truth" in config && config.ground_truth.expected_findings).toBe(2);
-    expect(config.braintrust.judge_credential_ttl_seconds).toBe(900);
+    expect(config.judge.credential_ttl_seconds).toBe(900);
   });
 
   it("accepts bounded private benchmark execution controls", () => {
@@ -539,27 +531,46 @@ describe("Modal benchmark config", () => {
     ).toThrow();
   });
 
-  it("accepts private eval reporting provider controls", () => {
-    const config = parseModalBenchmarkConfig({
-      ...minimalConfig(),
-      eval_reporting: { provider: "none" }
-    });
+  it("rejects legacy Modal versions and removed reporting configuration", () => {
+    const current = minimalConfig();
+    const legacy = { ...current };
+    Reflect.deleteProperty(legacy, "judge");
+    const legacyConfig = {
+      ...legacy,
+      schema_version: "ultrafuzz.modal.benchmark.v2",
+      braintrust: {
+        project: "example-evals",
+        api_key_env: "BRAINTRUST_API_KEY",
+        judge_api_key_env: "OPENAI_API_KEY",
+        judge_url: "https://api.openai.com/v1/chat/completions",
+        judge_credential_ttl_seconds: 57_600
+      },
+      eval_reporting: { provider: "braintrust" }
+    };
+    for (const value of [
+      legacyConfig,
+      { ...current, schema_version: "ultrafuzz.modal.benchmark.v2" },
+      { ...current, braintrust: legacyConfig.braintrust },
+      { ...current, eval_reporting: { provider: "none" } },
+      { ...current, eval_reporting: { provider: "braintrust" } },
+      { ...current, judge: { ...(current.judge as Record<string, unknown>), project: "example-evals" } }
+    ]) {
+      expect(modalBenchmarkConfigValidatorsAgree(value)).toBe(true);
+      expect(modalBenchmarkConfigZodSchema.safeParse(value).success).toBe(false);
+      expect(() => parseModalBenchmarkConfig(value)).toThrow(ModalDocumentValidationError);
+    }
 
-    expect("target" in config && config.eval_reporting).toEqual({ provider: "none" });
-
-    expect(() =>
-      parseModalBenchmarkConfig({
-        ...minimalConfig(),
-        eval_reporting: { provider: "openai" }
-      })
-    ).toThrow();
-
-    expect(() =>
-      parseModalBenchmarkConfig({
-        ...minimalConfig(),
-        eval_reporting: { provider: "none", unexpected: true }
-      })
-    ).toThrow();
+    const root = mkdtempSync(path.join(realpathSync(tmpdir()), "ultrafuzz-modal-legacy-config-"));
+    const file = path.join(root, "config.json");
+    const contents = `${JSON.stringify(legacyConfig, null, 2)}\n`;
+    try {
+      fs.writeFileSync(file, contents);
+      expect(() => loadModalBenchmarkConfig(file)).toThrow(ModalDocumentValidationError);
+      expect(() => fingerprintModalConfigFile(file)).toThrow(ModalDocumentValidationError);
+      expect(fs.readFileSync(file, "utf8")).toBe(contents);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("accepts only an explicit strict public benchmark shape", () => {
