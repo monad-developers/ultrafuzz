@@ -191,13 +191,40 @@ async function runSpawnedCommand(input: {
       stderr += chunk;
     });
     const timeout = setTimeout(() => child.kill("SIGKILL"), input.timeoutMs);
-    child.once("error", reject);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
     child.once("close", (status, signal) => {
       clearTimeout(timeout);
       resolve({ status, signal, stdout, stderr });
     });
     child.stdin.end(input.stdin);
   });
+}
+
+async function waitForFixtureProcessExit(pid: number): Promise<void> {
+  const deadline = performance.now() + 1_000;
+  while (true) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    assert.equal(performance.now() < deadline, true, `fixture process ${pid} was not reaped`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function stopFixtureProcess(pid: number): Promise<void> {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+    throw error;
+  }
+  await waitForFixtureProcessExit(pid);
 }
 
 function prefixTestNames(register: typeof test, prefix: string): typeof test {
@@ -670,14 +697,36 @@ function loadOpenRouterPatchedSmithersUrl(): Promise<string> {
     const source = fs.readFileSync(sourcePath, "utf8");
     assert.equal(source.split(patch.patchable).length, 2, "ordered stdout must uniquely anchor in pinned Smithers");
     fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched));
+    // Keep the real diagnostic checks, but replace their transport in this
+    // isolated dependency copy. A live /models probe otherwise competes with
+    // the caller deadline and can prevent the retry fixture from resuming.
+    const diagnosticPath = path.join(isolatedRoot, "src", "diagnostics", "getDiagnosticStrategy.js");
+    const diagnosticSource = fs.readFileSync(diagnosticPath, "utf8");
+    assert.equal(diagnosticSource.split("fetch(openaiModelsUrl(ctx.env), {").length, 3);
+    fs.writeFileSync(
+      diagnosticPath,
+      `export const openRouterDiagnosticRequests = [];
+const fetch = async (url) => {
+  openRouterDiagnosticRequests.push(String(url));
+  if (String(url) !== "https://openrouter.ai/api/v1/models") {
+    throw new Error("Unexpected offline diagnostic endpoint: " + String(url));
+  }
+  return new Response(JSON.stringify({ object: "list", data: [] }), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
+};
+${diagnosticSource}`
+    );
     const shim = path.join(isolatedRoot, "openrouter-smithers.mjs");
     const smithersUrl = pathToFileURL(
       fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs", "src", "index.js"))
     ).href;
     const codexUrl = pathToFileURL(path.join(isolatedRoot, "src", "CodexAgent.js")).href;
+    const diagnosticUrl = pathToFileURL(diagnosticPath).href;
     fs.writeFileSync(
       shim,
-      `export * from ${JSON.stringify(smithersUrl)};\nexport { CodexAgent } from ${JSON.stringify(codexUrl)};\n`
+      `export * from ${JSON.stringify(smithersUrl)};\nexport { CodexAgent } from ${JSON.stringify(codexUrl)};\nexport { openRouterDiagnosticRequests } from ${JSON.stringify(diagnosticUrl)};\n`
     );
     return pathToFileURL(shim).href;
   })());
@@ -1564,6 +1613,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   createDeepSeekAgent(options?: Record<string, unknown>): {
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       env?: Record<string, string>;
+      cleanup?: () => void | Promise<void>;
     }>;
   };
   CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
@@ -1646,6 +1696,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     createDeepSeekAgent(options?: Record<string, unknown>): {
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         env?: Record<string, string>;
+        cleanup?: () => void | Promise<void>;
       }>;
     };
     DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
@@ -6261,30 +6312,54 @@ bunAdapterTest(
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
       assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
 
-      // A caller deadline this test spends has to cover the fresh attempt, the
-      // failure-path diagnostics Smithers awaits before the 429 surfaces (its
-      // codex strategy probes `${OPENAI_BASE_URL}/models`, which this adapter
-      // points at OpenRouter, so it costs a live round trip), and the resume
-      // child's own start. At 250ms that left ~50ms of headroom on CI, and the
-      // recovery deadline fired before the resume was ever launched — the
-      // counter stayed at "1" and the test measured nothing. 2s keeps the
-      // property under test and stops measuring probe latency.
+      // Diagnostics use the offline transport in our isolated Smithers copy.
+      // Observe the resumed child's event before the original caller deadline,
+      // then verify that deadline kills and reaps the actual hanging process.
       resetFixture("resume-hang");
+      const { openRouterDiagnosticRequests } = (await import(await loadOpenRouterPatchedSmithersUrl())) as {
+        openRouterDiagnosticRequests: string[];
+      };
+      const diagnosticCount = openRouterDiagnosticRequests.length;
+      const timeoutPids = new Set<number>();
+      let resumedBeforeTimeout = false;
       const timeoutStartedAt = performance.now();
-      await assert.rejects(
-        createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
-          prompt: "Bounded resume timeout fixture",
-          timeout: 2_000
-        }),
-        (error: unknown) => {
-          assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
-          return true;
+      try {
+        await assert.rejects(
+          createOpenRouterAgent({ model: "openai/gpt-5.6-luna" }).generate({
+            prompt: "Bounded resume timeout fixture",
+            timeout: 2_000,
+            onProcess: (event: { phase: "started" | "exited"; pid: number | undefined }) => {
+              if (event.phase === "started" && event.pid !== undefined) timeoutPids.add(event.pid);
+            },
+            onEvent: (event) => {
+              if (JSON.stringify(event).includes("resume began")) resumedBeforeTimeout = true;
+            }
+          }),
+          (error: unknown) => {
+            assert.equal((error as { code?: unknown }).code, "PROCESS_TIMEOUT");
+            return true;
+          }
+        );
+        assert.equal(resumedBeforeTimeout, true);
+        assertExactResume("Bounded resume timeout fixture");
+        assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
+        assert.equal(timeoutPids.size, 2);
+        for (const pid of timeoutPids) {
+          await waitForFixtureProcessExit(pid);
+          timeoutPids.delete(pid);
         }
-      );
-      // The resume really started, and the hung child it left behind is killed
-      // by the caller deadline rather than running to the test timeout.
-      assert.equal(fs.readFileSync(fixture.counter, "utf8"), "2");
-      assert.equal(performance.now() - timeoutStartedAt < 10_000, true);
+        assert.equal(performance.now() - timeoutStartedAt < 10_000, true);
+        assert.equal(openRouterDiagnosticRequests.length > diagnosticCount, true);
+        assert.deepEqual(
+          [...new Set(openRouterDiagnosticRequests.slice(diagnosticCount))],
+          ["https://openrouter.ai/api/v1/models"]
+        );
+      } finally {
+        // A failing lifecycle assertion must not leave the fixture running.
+        for (const pid of timeoutPids) {
+          await stopFixtureProcess(pid);
+        }
+      }
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
@@ -13765,25 +13840,28 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
-bunAdapterTest(
-  "two active API-key providers reach generated children with only their own credential",
-  { timeout: 120_000 },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
-    fs.writeFileSync(
-      topologyPath,
-      fs
-        .readFileSync(topologyPath, "utf8")
-        .replace(
-          "    prompt: setup/project-discovery.md\n    depends_on:\n",
-          "    prompt: setup/project-discovery.md\n    model_profiles:\n      - default\n    depends_on:\n"
-        )
-        .replace(
-          "  - id: __finish__\n",
-          `  - id: deepseek-discovery
+function multiProviderCredentialFixture(): {
+  project: string;
+  openAiKey: string;
+  deepSeekKey: string;
+  providerCredentialNames: string;
+} {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n    depends_on:\n",
+        "    prompt: setup/project-discovery.md\n    model_profiles:\n      - default\n    depends_on:\n"
+      )
+      .replace(
+        "  - id: __finish__\n",
+        `  - id: deepseek-discovery
     kind: agentic
     prompt: setup/project-discovery.md
     model_profiles:
@@ -13796,18 +13874,30 @@ bunAdapterTest(
         primary: true
   - id: __finish__
 `
-        )
-        .replace(
-          "    depends_on:\n      - project-discovery\n",
-          "    depends_on:\n      - project-discovery\n      - deepseek-discovery\n"
-        ),
-      "utf8"
-    );
+      )
+      .replace(
+        "    depends_on:\n      - project-discovery\n",
+        "    depends_on:\n      - project-discovery\n      - deepseek-discovery\n"
+      ),
+    "utf8"
+  );
+  return {
+    project,
+    openAiKey: "active-openai-key",
+    deepSeekKey: "active-deepseek-key",
+    providerCredentialNames: "DEEPSEEK_API_KEY,OPENAI_API_KEY"
+  };
+}
 
+// Snapshot preparation copies and seals the controller dependencies. Keep that
+// integration coverage in the Node lane, away from Bun adapter timing budgets.
+testWhen(!runningUnderBun)(
+  "startRun forwards both active API-key provider credentials to the controller",
+  { timeout: 120_000 },
+  async () => {
+    const { project, openAiKey, deepSeekKey, providerCredentialNames } = multiProviderCredentialFixture();
     const controllerEnvironmentLog = path.join(project, "smithers-multi-provider-environment.log");
     const controllerCredentialLog = path.join(project, "smithers-multi-provider-credentials.log");
-    const openAiKey = "active-openai-key";
-    const deepSeekKey = "active-deepseek-key";
     const run = await startRun({
       projectRoot: project,
       runId: "multi-provider-credential-isolation",
@@ -13824,42 +13914,83 @@ bunAdapterTest(
     assert.equal(fs.readFileSync(controllerCredentialLog, "utf8"), `${openAiKey}|${deepSeekKey}\n`);
     const controllerEnvironment = fs.readFileSync(controllerEnvironmentLog, "utf8").trimEnd().split("|");
     assert.equal(controllerEnvironment[0], openAiKey);
-    const providerCredentialNames = controllerEnvironment.at(-1);
-    assert.equal(providerCredentialNames, "DEEPSEEK_API_KEY,OPENAI_API_KEY");
-
-    const saved = Object.fromEntries(
-      ["ULTRAFUZZ_CONFIG_PATH", "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"].map(
-        (name) => [name, process.env[name]]
-      )
-    );
-    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
-    process.env.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES = providerCredentialNames!;
-    process.env.OPENAI_API_KEY = openAiKey;
-    process.env.DEEPSEEK_API_KEY = deepSeekKey;
-    try {
-      const { createCodexAgent } = await loadGeneratedCodexAgent(project);
-      const codexEnvironment = (createCodexAgent() as { opts: { env: Record<string, string> } }).opts.env;
-      assert.equal(codexEnvironment.CODEX_API_KEY, openAiKey);
-      assert.equal(codexEnvironment.DEEPSEEK_API_KEY, "");
-
-      const { createDeepSeekAgent } = await loadGeneratedDeepSeekAgent(project);
-      const deepSeekCommand = await createDeepSeekAgent().buildCommand({
-        prompt: "isolate",
-        cwd: project,
-        options: {}
-      });
-      assert.equal(deepSeekCommand.env?.ANTHROPIC_AUTH_TOKEN, deepSeekKey);
-      assert.equal(deepSeekCommand.env?.OPENAI_API_KEY, "");
-      assert.equal(deepSeekCommand.env?.CODEX_API_KEY, "");
-      assert.equal(deepSeekCommand.env?.DEEPSEEK_API_KEY, "");
-    } finally {
-      for (const [name, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    }
+    assert.equal(controllerEnvironment.at(-1), providerCredentialNames);
   }
 );
+
+bunAdapterTest("two active API-key providers reach generated children with only their own credential", async () => {
+  const { project, openAiKey, deepSeekKey, providerCredentialNames } = multiProviderCredentialFixture();
+  const saved = Object.fromEntries(
+    ["ULTRAFUZZ_CONFIG_PATH", "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"].map(
+      (name) => [name, process.env[name]]
+    )
+  );
+  process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+  process.env.ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES = providerCredentialNames;
+  process.env.OPENAI_API_KEY = openAiKey;
+  process.env.DEEPSEEK_API_KEY = deepSeekKey;
+  try {
+    const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+    const codexAgent = createCodexAgent() as {
+      opts: { env: Record<string, string> };
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        env?: Record<string, string>;
+        cleanup?: () => void | Promise<void>;
+      }>;
+    };
+    const codexEnvironment = codexAgent.opts.env;
+    assert.equal(codexEnvironment.CODEX_API_KEY, openAiKey);
+    assert.equal(codexEnvironment.DEEPSEEK_API_KEY, "");
+
+    const { createDeepSeekAgent } = await loadGeneratedDeepSeekAgent(project);
+    const deepSeekCommand = await createDeepSeekAgent().buildCommand({
+      prompt: "isolate",
+      cwd: project,
+      options: {}
+    });
+    assert.equal(deepSeekCommand.env?.ANTHROPIC_AUTH_TOKEN, deepSeekKey);
+    assert.equal(deepSeekCommand.env?.OPENAI_API_KEY, "");
+    assert.equal(deepSeekCommand.env?.CODEX_API_KEY, "");
+    assert.equal(deepSeekCommand.env?.DEEPSEEK_API_KEY, "");
+    const codexCommand = await codexAgent.buildCommand({ prompt: "isolate", cwd: project, options: {} });
+    try {
+      // Exercise inheritance as well as the returned environment: the parent
+      // has both keys, and each generated command must clear the other one.
+      for (const [environment, expected] of [
+        [
+          { ...codexEnvironment, ...codexCommand.env },
+          { OPENAI_API_KEY: openAiKey, CODEX_API_KEY: openAiKey, DEEPSEEK_API_KEY: "" }
+        ],
+        [
+          deepSeekCommand.env,
+          { OPENAI_API_KEY: "", CODEX_API_KEY: "", DEEPSEEK_API_KEY: "", ANTHROPIC_AUTH_TOKEN: deepSeekKey }
+        ]
+      ] as const) {
+        const execution = await runSpawnedCommand({
+          command: process.execPath,
+          args: [
+            "-e",
+            `process.stdout.write(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(expected))}.map(name => [name, process.env[name]]))))`
+          ],
+          cwd: project,
+          env: { ...process.env, ...environment },
+          timeoutMs: 5_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+        assert.equal(execution.signal, null);
+        assert.deepEqual(JSON.parse(execution.stdout), expected);
+      }
+    } finally {
+      await codexCommand.cleanup?.();
+      await deepSeekCommand.cleanup?.();
+    }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = value;
+    }
+  }
+});
 
 test("startRun warns for optional specialist commands but still rejects blocking command gaps", async () => {
   const command = "ultrafuzz-specialist-command-that-does-not-exist";

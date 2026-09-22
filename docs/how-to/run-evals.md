@@ -200,68 +200,25 @@ timing or cost value is retained and visibly labeled `partial` with its target
 coverage. A value with no usable evidence renders as `n/a` and `unavailable`;
 neither case is converted to zero.
 
-Every non-deletion push to `main` launches the real three-target
-Ultrafuzz-bench smoke as detached Modal work. Feature-branch and pull-request
-events, including drafts, do not run the workflow. Repository access that can
-merge or push to `main` is inside the benchmark credential and cost trust
-boundary, so write access, provider credentials, and provider/Modal budgets
-must be tightly scoped. A newer commit on `main` cancels the older smoke.
-GPT-5.6 Luna `high`
-is the default smoke runner; repository variable
-`BENCHMARK_SMOKE_OPENAI_MODEL` can override its model while retaining the
-single OpenAI/Codex lane and selected reasoning level across every smoke node.
-Candidate installation and build happen before any Modal launch, so a broken
-commit fails without allocating the benchmark matrix. GitHub Actions still
-performs the build, control, and collection work; benchmark and model compute
-itself runs only on Modal.
+Paid benchmarks do not run in this repository's GitHub Actions. Pushes, pull
+requests, and manual CI dispatches run the build, test, and static checks without
+provider or Modal credentials. Existing history and charts remain available;
+new benchmark measurements require an explicitly initiated maintainer run.
 
-Cancellation is latest-wins on `main`. A recovery workflow runs
-only trusted default-branch tooling, uses the exact candidate checkout as data
-for its source fingerprint, and validates the preserved plan before terminating
-an exact failed, timed-out, or cancelled Modal generation. Independent manual
-dispatches can still overlap the automatic smoke, so enforce provider and Modal
-budgets across all concurrent runs.
+Run benchmarks from a clean, isolated checkout of the reviewed candidate, with
+credentials scoped to that run on the launcher host. See
+[Run evals on Modal](run-evals-on-modal.md#run-public-benchmarks-manually) for the
+manual public-lane procedure. Review the selected targets, models, trials,
+parallelism, and provider/Modal spending limits before launching. Scoring uses
+its own judge credential and contributes separate API spend.
 
-A manual workflow dispatch selects the full EVMBench cohort by default and can
-explicitly select smoke for an ad hoc run. Full uses GPT-5.6 Luna `high`, Claude
-Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro `max` by default. Its model
-and reasoning inputs can override all full-lane runners. Full runs only through
-that manual dispatch; pushes always select smoke. Both modes retain the standard
-Modal CPU and memory allocation. Smoke rows keep their 15,000-second watchdog,
-covering both allowed attempts across the smoke graph's four sequential agent
-stages plus transition slack. Manual full-lane rows use the same 15,000-second
-schema ceiling as a bounded execution budget while retaining their existing
-specialist node durations. That row cutoff is not a worst-case completion
-guarantee for the complete topology. The full lane seals one 37,500-second
-control deadline in the launch job, monitors only its first 19,500 seconds in a
-full-only hosted job, and hands the remaining 18,000 seconds to collection;
-recovery in either phase cannot reset that deadline. Both modes publish
-ordinary 30-day Actions artifacts. Missing credentials, revision drift,
-unavailable ground truth, failed model work, scoring errors, or an incomplete
-configured matrix fail before publication.
-
-Every publisher rebuilds from the latest `main` tip and uses a normal
-fast-forward push authenticated by the repository-scoped eval-history GitHub
-App; a lost race is retried with the new tip. The exact candidate checkout
-supplies the benchmark policy, and observations and regenerated charts stay
-keyed to that candidate commit. This compare-and-swap loop retains every
-complete generation without relying on a GitHub concurrency queue, which can
-discard a pending job. Its commit is restricted to `benchmarks/ultrafuzzbench/history.json`
-and the nine `docs/assets/eval-history/*.svg` charts.
-
-Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
-variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions
-secret. The App must be installed only on this repository with
-`Contents: read and write` and added to the default-branch ruleset bypass list
-with `Always allow`. Publication-only paths are excluded from the Modal push
-trigger, preventing a direct chart commit from recursively allocating another
-benchmark matrix.
-
-Publication accepts only successful Modal benchmark producers from the
-repository's default `main` branch and rechecks that the exact candidate commit
-remains reachable from `main` before minting the bypass-capable token. The
-automatic run for the merged commit performs publication. The publisher does
-not expose a free-form manual artifact replay path.
+After collecting and validating the complete scored results, run the history
+command above, review the changed history and charts, and submit them through a
+normal pull request. There is no automatic history publisher or publisher App
+bypass. The publication records remain bound to the benchmark candidate's
+immutable identity, not the later documentation commit. The ordinary CI
+`benchmark:history:check` command still verifies history/chart consistency
+without launching models or Modal compute.
 
 The eval summary and comparison record Ultrafuzz runner tokens and runner cost
 with explicit completeness. Judge usage in Braintrust and sandbox spend in

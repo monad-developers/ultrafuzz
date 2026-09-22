@@ -73,8 +73,8 @@ refresh-token rotation remains single-writer.
 The v2 document is an exact contract: every operational value is explicit.
 The loader does not add models, loop counts, image names, credential names,
 timeouts, reporting settings, or target selections. Configure each model row you
-intend to run; public CI launch configs set `loops = 1` for their smoke and full
-lanes.
+intend to run; the public benchmark config generator sets `loops = 1` for its
+smoke and full lanes.
 
 ```json
 {
@@ -181,165 +181,92 @@ though its work is unchanged. Expect one discontinuity in a long-running
 comparison such as an invariant-only trend line, and read across it deliberately
 rather than treating it as a measured regression.
 
-## Run the public benchmark workflow
+## Run public benchmarks manually
 
-The checked-in GitHub workflow uses Actions only to build the candidate and as a
-control and collection plane; all benchmark and model compute runs on Modal.
-Every non-deletion push to `main` launches the paid smoke for the exact merged
-commit. Feature-branch and pull-request events, including drafts, do not run this
-workflow. Repository write access that can merge or push to `main` is therefore
-inside the benchmark credential and cost trust boundary; protect that access
-and enforce scoped provider credentials and hard provider/Modal budgets. A
-newer commit on `main` cancels its older smoke workflow. Each run installs and
-builds the exact candidate commit before building its immutable Modal image.
+This repository's GitHub Actions do not launch paid benchmarks, hold provider or
+Modal credentials, or publish new benchmark history. Maintainers explicitly
+launch public benchmarks from a clean, isolated checkout of a reviewed commit.
+Keep credentials on that launcher host and apply scoped provider and Modal
+spending limits. Neither a process timeout nor a local token ledger is a total
+spend limit.
 
-Cancellation is latest-wins on `main`. A separate recovery
-workflow uses tooling from the trusted default branch, treats the exact
-candidate checkout only as fingerprinted data, and semantically validates the
-incomplete attempt's immutable pre-compute plan before giving termination code
-Modal credentials. It recovers failed, timed-out, and cancelled generations.
-Independent manual dispatches may overlap the automatic smoke, so provider and
-Modal budgets remain the hard aggregate cost boundary.
+The checked-in smoke lane selects three Ultrafuzz-bench targets: one Foundry,
+one Hardhat, and one Vyper target. Full selects the checked-in EVMBench cohort
+and its four runner providers. Both use one strategy loop and an independent
+OpenAI judge. The lane manifests retain their model, target, trial, and
+concurrency policies; see [Eval Suites](../reference/evals.md#cli-surface).
 
-GitHub attaches a `workflow_run` recovery check to the trusted default-branch
-tooling commit, not to the candidate tree it operates on. Recovery run titles,
-check names, and job summaries therefore carry the full candidate SHA plus the
-source run and attempt. When qualifying an exact release commit, list its check
-runs without opening logs:
+The retained plan generator and validators under `scripts/ci/` can prepare a
+public run locally. These commands only build local tooling, probe anonymous
+repository reachability, and write a plan; they do not launch Modal or a model:
 
 ```bash
-repository=monad-developers/ultrafuzz
-release_sha=<40-character-release-sha>
-gh api --paginate "repos/$repository/commits/$release_sha/check-runs?per_page=100" \
-  --jq '.check_runs[] | [.name, .conclusion, .details_url] | @tsv'
+pnpm install --frozen-lockfile
+pnpm --filter @ultrafuzz/modal... build
+candidate="$(git rev-parse HEAD)"
+generation="$(date +%s)-1"
+control=".ultrafuzz/modal/public-$generation"
+node scripts/ci/verify-cohort-reachability.mjs --lane smoke
+node scripts/ci/prepare-modal-benchmarks.mjs \
+  "$candidate" https://github.com/monad-developers/ultrafuzz \
+  "$generation" "$control" smoke
+node scripts/ci/validate-modal-benchmark-launch.mjs "$control/manifest.json" . smoke
 ```
 
-A check named `Recover candidate <sha> from source run ...` is about the tree
-identified by `<sha>`; it is tree-local to the release only when that SHA equals
-`$release_sha`. To query recovery runs for a candidate directly, independently
-of the commit to which GitHub attached their checks, use the run title:
+Use a fresh positive `number-attempt` generation ID for each plan; it is a
+local lineage identifier and does not require a GitHub run. Resolve any
+reachability failure before paying for an image or sandbox. Select `full` in
+all three commands only when intending the complete four-provider cohort.
+Review `manifest.json` and every generated pair config before proceeding.
+An explicit `BENCHMARK_MODELS_JSON` can override the runner selection while
+the validator enforces the lane's provider count and target policy.
+
+Export `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and the selected pair's provider
+key on the launcher host. Every public pair also needs `OPENAI_API_KEY` for
+its judge. Public rows score local artifacts and do not require
+`BRAINTRUST_API_KEY`. Do not add these credentials to Actions secrets or
+commit them with a config.
+
+For the single-pair smoke plan, the following commands start paid compute:
 
 ```bash
-candidate_sha=<40-character-candidate-sha>
-gh api --paginate "repos/$repository/actions/workflows/eval-benchmark-recovery.yml/runs?per_page=100" \
-  | jq --arg candidate "$candidate_sha" \
-      '.workflow_runs[] | select(.display_title | contains("candidate \($candidate) from source run")) | {id, display_title, conclusion, html_url}'
+image_name="$(jq -r '.image_name' "$control/manifest.json")"
+config="$control/$(jq -r '.pairs[0].config_path' "$control/manifest.json")"
+state="$control/$(jq -r '.pairs[0].state_path' "$control/manifest.json")"
+pnpm exec ultrafuzz-modal build --image "$image_name" --build-scope "$generation" --repo-root .
+pnpm exec ultrafuzz-modal launch --config "$config" --state "$state" --mode fresh --repo-root .
+pnpm exec ultrafuzz-modal status --state "$state"
 ```
 
-The smoke has exactly three targets: one Foundry target, one Hardhat target, and
-one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
-and uses the `smoke` profile's packaged graph. One context node feeds four
-bug-finding strategies in parallel, then dedupe and report nodes finish the
-row; every node uses the selected runner model and reasoning level. Invariant,
-differential, dynamic, threat-model, goal-fanout, and production-only review
-stages are absent from this graph. Repository variable
-`BENCHMARK_SMOKE_OPENAI_MODEL` can override the
-smoke model without changing its single OpenAI/Codex provider or its target and
-topology limits.
+For full, inspect and explicitly launch each selected pair from the manifest
+using its own config and state paths. Preserve the plan and state files for
+status, collection, and exact termination. The sandboxes are detached:
+stopping the launcher does not stop their work. There is no Actions recovery
+job. To stop a launched pair, terminate it and confirm its remote state:
 
-A manual `workflow_dispatch` selects the full lane by default and can explicitly
-select smoke for an ad hoc run. Full evaluates every checked-in EVMBench target
-with GPT-5.6 Luna at `high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and
-DeepSeek V4 Pro at `max` by default. Dispatch inputs `openai_model`,
-`openai_reasoning`, `anthropic_model`,
-`anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
-`deepseek_reasoning` provide explicit overrides. The full lane retains the
-packaged `exhaustive` audit profile's strategy set, including invariant,
-differential, and dynamic strategies, with all three disable flags set to
-`false`. Target preparation selects and validates that `exhaustive` profile, and its
-effective catalog and topology digests are attested again before `startRun`.
-Push events can never select the full lane.
+```bash
+pnpm exec ultrafuzz-modal terminate --state "$state"
+pnpm exec ultrafuzz-modal status --state "$state"
+```
 
-For an ad hoc OpenRouter smoke, select `openrouter` as `smoke_provider`, enter
-any current OpenRouter catalogue ID in `smoke_model`, and configure the
-`OPENROUTER_API_KEY` Actions secret. The workflow does not validate the ID
-against a static catalogue and does not add OpenRouter to the historical
-four-provider full lane automatically.
+If a launch did not persist its state, the retained
+`prepare-modal-benchmark-cleanup.mjs` and `terminate-modal-benchmark.sh` helpers
+can validate a preserved plan and terminate its exact build and pair scopes.
+Use trusted tooling and confirm uncertain remote cleanup before retiring
+credentials. Keep cleanup access available until the detached work is stopped.
 
-Both lanes use the standard Modal benchmark resources described above. Each
-smoke target row keeps its 15,000-second model-work watchdog: the smoke graph's
-four sequential agent stages may each use two 1,800-second attempts, with ten
-minutes left for workflow transitions and final synchronization. Manual full
-rows also have a 15,000-second watchdog, the schema's bounded maximum. That
-budget leaves the packaged specialist durations unchanged, including the
-7,200-second stateful-invariant node whose 10-minute smoke, one-hour fuzzing,
-five-minute shutdown grace, and five-minute finalization reserve require 4,800
-seconds. It is a hard execution cutoff, not a guarantee that every full-topology
-node can consume its worst-case timeout in one row. With 40 rows and 20-way row
-concurrency, the full control deadline derives to 37,500 seconds after adding
-two eval waves, preparation, scoring, cleanup, reporting, and polling grace.
-The launch job seals that deadline once in a strict sidecar bound to the
-candidate, canonical repository, run attempt, mode, and control-manifest
-digest. A full-only hosted monitor uses at most the first 19,500 seconds,
-persists a mutable handoff, and leaves 18,000 seconds for the final collection
-job. The final job treats the exact launch artifact as authoritative and
-byte-compares the handoff's manifest, deadline sidecar, launch-attempt log, and
-every pair config before accepting only updated state, status, outcome, and
-diagnostic files. Those two phases leave 35 and 60 minutes respectively below
-GitHub's six-hour hosted-job limit for handoff, setup, collection, and artifact
-upload. Recovery never resets the absolute deadline. Smoke remains a single
-collection phase.
-Smoke admits all three rows at a time; full admits 20, keeping each checked-in
-cohort to two row waves. Smoke uses four-way workflow concurrency; full uses
-eight-way concurrency so production rows can progress without serializing their
-agent work.
-Scoring remains independent of the runner and always uses GPT-5.6 Sol at
-`xhigh`.
-
-`trials_per_variant` defaults to `1` when it is omitted, and all three checked-in
-lanes resolve to one trial. Increase it only deliberately: benchmark work and
-cost multiply across every selected target, runner model, and trial.
-
-Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
-Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
-either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`; automatic
-smoke runs do not.
-An OpenRouter manual smoke additionally requires `OPENROUTER_API_KEY`.
-Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
-should use a compatible non-default HTTPS endpoint.
-Public rows score from their local artifacts and do not require a Braintrust
-reporting key. Modal receives only the provider credential needed by a pair plus
-the OpenAI judge credential. It never receives a GitHub token.
-
-The worker verifies the exact candidate and target commits, obtains EVMBench
-labels from the pinned public Frontier Evals revision, and uses the versioned
-public Ultrafuzz-bench labels. Public target reports and normalized findings are
-packed with SHA-256 and path validation and uploaded with 30-day retention. No
-partial generation updates history: the trusted publisher verifies that the
-exact producer attempt's launch and collection jobs both succeeded, and every
-configured pair must finish and score before publication. Branch results remain
-keyed to the exact pushed commit.
-
-Smoke publication also fails when any target row produces zero normalized
-findings. This is a no-regression signal, not a synthetic canary: the workflow
-must find and support a real issue from target source evidence.
-
-The compare-and-swap publisher validates the generation with the benchmark
-policy from the exact candidate checkout, appends observations keyed to that
-candidate commit, regenerates the charts, and commits the exact publication
-allowlist directly to `main`. It authenticates with the repository-scoped eval
-history GitHub App, which has `Contents: read and write` and an explicit
-`Always allow` exception in the default-branch ruleset. A changed remote tip is
-rebuilt and retried before a normal fast-forward push. Publication-only history
-and chart paths are excluded from the Modal push trigger, so the App commit
-cannot recursively start another benchmark run.
-
-Only a successful producer run whose candidate is still reachable from the
-repository's default `main` branch may mint the publisher token. The automatic
-`main` smoke after merge is the publication source. Full-lane runs follow the
-same boundary by dispatching the Modal benchmark workflow on `main`. There is
-no free-form artifact replay entry point.
-
-Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
-variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions
-secret. The workflow exchanges those credentials for a short-lived
-installation token; the private key is never passed to Modal.
+After a pair completes, collect its validated public bundle with `collect
+--public-results --config <path>` and extract it with `unpack-public`. Preserve
+all scored rows and candidate/target lineage. A complete generation can then
+be appended locally with [manual history publication](run-evals.md#publish-longitudinal-history),
+and the reviewed history/chart changes submitted through a normal pull
+request. Existing charts stay unchanged until such a publication.
 
 ## Build and launch
 
 ```bash
-pnpm install
-pnpm --filter @ultrafuzz/modal build
+pnpm install --frozen-lockfile
+pnpm --filter @ultrafuzz/modal... build
 pnpm exec ultrafuzz-modal build --repo-root .
 pnpm exec ultrafuzz-modal launch \
   --config .ultrafuzz/modal/benchmark.json \
@@ -427,7 +354,7 @@ pnpm exec ultrafuzz-modal collect \
   --output .ultrafuzz/modal/results
 ```
 
-Private collection remains aggregate-only. The public workflow opts into the
+Private collection remains aggregate-only. Public collection opts into the
 larger allowlisted result contract with `--public-results --config <path>`, then
 validates and extracts it with `unpack-public`. Public collection requires the
 exact config used at launch and accepts a bundle only when its candidate,
