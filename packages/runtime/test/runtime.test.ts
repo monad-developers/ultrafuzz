@@ -10083,7 +10083,9 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
     execution?: { mode?: string; retentionDays?: number };
     rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;
   };
-  assert.deepEqual(persistedPlan.execution, plan.value!.resolved_config.execution);
+  const { resourceTimeoutOrigin, ...portableExecution } = plan.value?.resolved_config.execution ?? {};
+  assert.equal(resourceTimeoutOrigin, "default");
+  assert.deepEqual(persistedPlan.execution, portableExecution);
   assert.equal(persistedPlan.rendered_prompts.length, 1);
   assert.match(persistedPlan.rendered_prompts[0]!.rendered_prompt_snapshot_path ?? "", /^prompt-snapshots\//u);
   assert.equal(
