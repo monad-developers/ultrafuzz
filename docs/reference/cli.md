@@ -770,11 +770,13 @@ emits one schema-versioned JSON object per line.
 
 `score` grades finished run reports against external ground truth resolved
 under `[eval].ground_truth_root`, deterministically by default and with the
-suite's judge model profile when `--llm-judge` is passed. The gateway judge
-requires `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; private targets additionally require
-`ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`. An optional
-`ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without credentials, and redirects
-are rejected. `report` shows the scored variant ranking. `compare` either
+suite's judge model profile when `--llm-judge` is passed. The optional LLM judge
+requires an explicit `ULTRAFUZZ_EVAL_JUDGE_URL` and a dedicated
+`ULTRAFUZZ_EVAL_JUDGE_API_KEY`; there is no default endpoint or fallback to
+reporting or model-provider credentials. The URL must be HTTPS without embedded
+credentials, and redirects are rejected. Private targets additionally require
+`ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`.
+`report` shows the scored variant ranking. `compare` either
 diffs variants against a `--baseline` variant or compares a candidate run to
 an `--against` baseline run after verifying cohort identity, scoring identity,
 and variant scope; `--allow-incompatible` is an explicit, reported waiver.
@@ -785,12 +787,6 @@ evaluation metrics, accounting, and sanitized attempt history. Raw reports,
 findings, diagnostics, configuration, and execution-local identifiers are not
 representable in the bundle. Missing optional evidence is recorded in a typed
 omission manifest.
-
-`publish` replays a recorded eval run's journals from offset 0 and
-reconstructs the full node trace on a provider post hoc; `--resume` continues
-from the persisted publish cursor instead. Provider credentials are only
-required at publish time, so `provider = "none"` keeps the local
-plan → run → score → report → compare loop working offline.
 
 `history` validates and regenerates deterministic public SVGs when no run ID is
 given. With a run ID, it accepts only a complete, successfully scored generation

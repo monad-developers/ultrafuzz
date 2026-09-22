@@ -281,7 +281,7 @@ differences that were waived.
 
 ```bash
 ultrafuzz eval plan      # validate config + suite, print the matrix
-ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
+ultrafuzz eval run       # launch rows, poll to terminal state, retain local telemetry
 ultrafuzz eval status    # observe every row's durable node progress and ETA
 ultrafuzz eval score     # grade reports against ground truth (optional --llm-judge)
 ultrafuzz eval report    # show the scored variant ranking
