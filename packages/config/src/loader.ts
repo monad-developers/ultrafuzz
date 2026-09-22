@@ -70,6 +70,7 @@ const PERMISSION_KEYS = [
 ] as const;
 const INVARIANT_KEYS = [
   "property_priority_threshold",
+  "reference_expectation_selection",
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "reference_expectation_enforcement"
@@ -569,6 +570,16 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
       normalizeInvariantPriority,
       (value) => {
         invariantConfig.propertyPriorityThreshold = value;
+      }
+    );
+    readEnum(
+      invariants,
+      "reference_expectation_selection",
+      ["invariants", "reference_expectation_selection"],
+      diagnostics,
+      (value) => (value === "priority" || value === "mandatory" ? value : undefined),
+      (value) => {
+        invariantConfig.referenceExpectationSelection = value;
       }
     );
     readString(

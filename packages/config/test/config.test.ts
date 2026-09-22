@@ -127,6 +127,7 @@ describe("config loading and resolution", () => {
     expect(resolved.value.permissions.productionSourceRoots).toEqual(["src", "contracts"]);
     expect(resolved.value.execution).toEqual({
       mode: "local",
+      resourceTimeoutOrigin: "default",
       retentionDays: 30,
       resources: {
         cpu: 4,

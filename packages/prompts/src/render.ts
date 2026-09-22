@@ -48,6 +48,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_property_priority_threshold",
   "invariant_property_priority_filter",
   "invariant_property_priorities",
+  "invariant_reference_expectation_selection",
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir",
@@ -154,6 +155,7 @@ export interface PromptRenderInput {
     };
     dynamicStrategiesEnumerator?: number | "unlimited";
     invariantPropertyPriorityThreshold?: string | number;
+    invariantReferenceExpectationSelection?: "priority" | "mandatory";
     invariantPropertyPriorityFilter?: string;
     invariantPropertyPriorities?: string[];
     invariantTestingSmokeTimeout?: string | number;
@@ -1214,6 +1216,8 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     triage_panel_size: String(input.resolvedConfig?.triage?.panelSize ?? 1),
     dynamic_strategies_enumerator: String(input.resolvedConfig?.dynamicStrategiesEnumerator ?? 1),
     invariant_property_priority_threshold: String(input.resolvedConfig?.invariantPropertyPriorityThreshold ?? ""),
+    invariant_reference_expectation_selection:
+      input.resolvedConfig?.invariantReferenceExpectationSelection ?? "mandatory",
     invariant_property_priority_filter: input.resolvedConfig?.invariantPropertyPriorityFilter ?? "",
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),

@@ -132,7 +132,9 @@ export interface PropertyImplementationCoverage {
 }
 
 export interface PropertyImplementationCoverageDerivationOptions {
-  configuredSelection?: Pick<ImplementedPropertySelection, "priority_threshold" | "priorities">;
+  configuredSelection?: Pick<ImplementedPropertySelection, "priority_threshold" | "priorities"> & {
+    reference_expectation_selection?: "priority" | "mandatory";
+  };
   requireConfiguredSelection?: boolean;
   catalogPath?: string;
   implementationPath?: string;
@@ -1245,7 +1247,9 @@ export function derivePropertyImplementationCoverage(
     .filter(
       (property) =>
         selection.priorities.includes(property.priority) ||
-        (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
+        (options.configuredSelection?.reference_expectation_selection !== "priority" &&
+          property.reference_expectations !== undefined &&
+          property.reference_expectations.length > 0)
     )
     .map((property) => property.id);
   if (!sameStringSequence(selection.property_ids, expectedIds)) {
@@ -1253,7 +1257,7 @@ export function derivePropertyImplementationCoverage(
     const expectedIdSet = new Set(expectedIds);
     issues.push({
       code: "PROPERTY_IMPLEMENTATION_SELECTION_MISMATCH",
-      message: `Implementation selection must list every canonical property matching its priority scope or an explicit reference expectation in catalog order (missing: ${JSON.stringify(expectedIds.filter((propertyId) => !selectedIds.has(propertyId)))}, extra: ${JSON.stringify(selection.property_ids.filter((propertyId) => !expectedIdSet.has(propertyId)))})`,
+      message: `Implementation selection must list every canonical property matching the configured priority and reference-expectation selection policy in catalog order (missing: ${JSON.stringify(expectedIds.filter((propertyId) => !selectedIds.has(propertyId)))}, extra: ${JSON.stringify(selection.property_ids.filter((propertyId) => !expectedIdSet.has(propertyId)))})`,
       path: `${implementationPath}#$.selection.property_ids`
     });
   }

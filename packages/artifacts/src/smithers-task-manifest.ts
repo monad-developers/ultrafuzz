@@ -516,6 +516,7 @@ const dynamicPromptRuntimeContextJsonSchema = {
           anyOf: [{ type: "integer", minimum: 1 }, { const: "unlimited" }]
         },
         invariantPropertyPriorityThreshold: nonEmptyStringJsonSchema,
+        invariantReferenceExpectationSelection: { enum: ["priority", "mandatory"] },
         invariantPropertyPriorityFilter: nonEmptyStringJsonSchema,
         invariantPropertyPriorities: {
           type: "array",
@@ -958,6 +959,7 @@ export interface SmithersTaskManifestDynamicPromptRuntimeContext {
     triage: { quorum: number; panelSize: number };
     dynamicStrategiesEnumerator: number | "unlimited";
     invariantPropertyPriorityThreshold: string;
+    invariantReferenceExpectationSelection?: "priority" | "mandatory";
     invariantPropertyPriorityFilter: string;
     invariantPropertyPriorities: string[];
     invariantTestingFuzzerTimeout: number;

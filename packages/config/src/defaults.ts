@@ -74,11 +74,7 @@ function loadDefaultConfig(): ResolvedConfig {
 
 function defaultConfigPath(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.join(here, CONFIG_FILE_NAME),
-    path.resolve(here, "../../../", CONFIG_FILE_NAME),
-    path.resolve(here, "../../../../", CONFIG_FILE_NAME)
-  ];
+  const candidates = [path.join(here, CONFIG_FILE_NAME), path.resolve(here, "../defaults.toml")];
   const found = candidates.find((candidate) => fs.existsSync(candidate));
   if (found === undefined) {
     throw new Error(`unable to locate ${CONFIG_FILE_NAME} from ${here}`);
@@ -134,6 +130,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
     ),
     permissions: normalizePermissions(permissions, filePath),
     invariants: {
+      referenceExpectationSelection: invariants.referenceExpectationSelection ?? "priority",
       propertyPriorityThreshold: required(
         invariants.propertyPriorityThreshold,
         "invariants.property_priority_threshold",
@@ -179,6 +176,7 @@ function normalizeExecutionConfig(
     mode: required(execution.mode, "execution.mode", filePath),
     ...(execution.provider !== undefined ? { provider: execution.provider } : {}),
     retentionDays: required(execution.retentionDays, "execution.retention_days", filePath),
+    resourceTimeoutOrigin: "default",
     resources: {
       cpu: required(resources.cpu, "execution.resources.cpu", filePath),
       memoryMiB: required(resources.memoryMiB, "execution.resources.memory_mib", filePath),

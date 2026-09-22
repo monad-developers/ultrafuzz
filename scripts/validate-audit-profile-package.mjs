@@ -8,6 +8,7 @@ run("pnpm", ["--filter", "@ultrafuzz/config", "build"], root);
 run("pnpm", ["--filter", "@ultrafuzz/prompts", "build"], root);
 
 const expectedConfigFiles = [
+  "dist/ultrafuzz.toml",
   "dist/audit-profiles.yml",
   "dist/topologies/default.yml",
   "dist/topologies/exhaustive.yml",
@@ -21,7 +22,8 @@ assertPackFiles(path.join(root, "packages", "prompts"), [
 ]);
 
 for (const relativePath of expectedConfigFiles) {
-  const sourceRelative = relativePath.replace(/^dist\//u, "");
+  const sourceRelative =
+    relativePath === "dist/ultrafuzz.toml" ? "defaults.toml" : relativePath.replace(/^dist\//u, "");
   const source = path.join(root, "packages", "config", sourceRelative);
   const built = path.join(root, "packages", "config", relativePath);
   if (!fs.readFileSync(source).equals(fs.readFileSync(built))) {

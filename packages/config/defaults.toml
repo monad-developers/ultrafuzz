@@ -145,8 +145,10 @@ production_source_roots = ["src", "contracts"]
 
 
 [invariants]
-# Inherit profile-specific property selection and campaign duration.
-# Explicit settings here override the selected audit profile.
+property_priority_threshold = "high"
+reference_expectation_selection = "priority"
+invariant_testing_smoke_timeout = "10min"
+invariant_testing_fuzzer_timeout = "1h"
 
 [triage]
 quorum = 3

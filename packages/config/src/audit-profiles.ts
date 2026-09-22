@@ -15,6 +15,8 @@ export type DynamicStrategiesEnumerator = number | "unlimited";
 
 export interface AuditProfileSettings {
   strategy_loops?: number;
+  property_priority_threshold?: "high" | "medium" | "low";
+  reference_expectation_selection?: "priority" | "mandatory";
   dynamic_strategies_enumerator?: DynamicStrategiesEnumerator;
   same_agent_attempts?: number;
   max_parallel_agents?: number;
@@ -51,7 +53,7 @@ export interface PackagedTopologyDefinition {
 }
 
 const PACKAGED_TOPOLOGY_DESCRIPTIONS = {
-  default: "The canonical bug-first direct-discovery graph copied to projects by ultrafuzz init.",
+  default: "The canonical direct-discovery and stateful-invariant graph copied to projects by ultrafuzz init.",
   exhaustive:
     "The complete production audit graph with direct discovery and specialist lanes, run by the exhaustive profile.",
   smoke: "The bounded CI graph with context, four parallel strategies, dedupe, and reporting.",
@@ -68,6 +70,8 @@ const packagedTopologyPathSchema = z
 const settingsSchema = z
   .strictObject({
     strategy_loops: positiveIntegerSchema.optional(),
+    property_priority_threshold: z.enum(["high", "medium", "low"]).optional(),
+    reference_expectation_selection: z.enum(["priority", "mandatory"]).optional(),
     dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
     same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),

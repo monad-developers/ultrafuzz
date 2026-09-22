@@ -1432,9 +1432,10 @@ describe("prompt rendering", () => {
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
     input.prompt =
-      "Threshold: {{invariant_property_priority_threshold}}\nFilter: {{invariant_property_priority_filter}}\nPriorities: {{invariant_property_priorities}}";
+      "Threshold: {{invariant_property_priority_threshold}}\nFilter: {{invariant_property_priority_filter}}\nPriorities: {{invariant_property_priorities}}\nExpectation policy: {{invariant_reference_expectation_selection}}";
     input.resolvedConfig = {
       invariantPropertyPriorityThreshold: "medium",
+      invariantReferenceExpectationSelection: "priority",
       invariantPropertyPriorityFilter: "properties with priority at or above `medium`",
       invariantPropertyPriorities: ["high", "medium"]
     };
@@ -1444,6 +1445,7 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Threshold: medium");
     expect(result.renderedMarkdown).toContain("Filter: properties with priority at or above `medium`");
     expect(result.renderedMarkdown).toContain("Priorities: high, medium");
+    expect(result.renderedMarkdown).toContain("Expectation policy: priority");
   });
 
   it("renders the configured invariant Recon smoke timeout", () => {

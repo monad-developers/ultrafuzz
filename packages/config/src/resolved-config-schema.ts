@@ -34,6 +34,8 @@ const packagedTopologyPathSchema = z.string().regex(PACKAGED_TOPOLOGY_PATH_PATTE
 
 const AUDIT_PROFILE_SETTING_NAMES = [
   "strategy_loops",
+  "property_priority_threshold",
+  "reference_expectation_selection",
   "dynamic_strategies_enumerator",
   "same_agent_attempts",
   "max_parallel_agents",
@@ -58,6 +60,8 @@ const auditProfileSettingOriginSchema = z.enum([
 const auditProfileSettingsSchema = z
   .object({
     strategy_loops: positiveIntegerSchema.optional(),
+    property_priority_threshold: z.enum(["high", "medium", "low"]).optional(),
+    reference_expectation_selection: z.enum(["priority", "mandatory"]).optional(),
     dynamic_strategies_enumerator: dynamicStrategiesEnumeratorSchema.optional(),
     same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
@@ -192,6 +196,7 @@ const executionConfigSchema = z
     provider: z.literal("modal").optional(),
     retentionDays: z.number().int().min(1).max(3_650),
     resources: executionResourcesSchema,
+    resourceTimeoutOrigin: z.enum(["default", "project-config", "runtime-override"]).optional(),
     nodes: z.record(z.string().regex(NODE_ID_PATTERN), executionNodeOverrideSchema),
     providers: z
       .object({
@@ -328,6 +333,7 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
     invariants: z
       .object({
         propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
+        referenceExpectationSelection: z.enum(["priority", "mandatory"]).optional(),
         invariantTestingSmokeTimeoutSeconds: timeoutSecondsSchema,
         invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema,
         referenceExpectationEnforcement: z.enum(["warn", "fail"]).optional()

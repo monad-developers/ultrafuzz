@@ -602,6 +602,72 @@ describe("Modal image source staging", () => {
     );
   });
 
+  it.each(["fresh", "resume"] as const)(
+    "rejects an undersized full-row %s launch before credentials or state mutation",
+    async (mode) => {
+      const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-launch-budget-"));
+      const configPath = path.join(root, "benchmark.json");
+      const statePath = path.join(root, "launch-state.json");
+      const repoRoot = path.resolve("../..");
+      const candidateCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+      const { config } = publicCollectionLineage();
+      const readCredential = vi.fn(() => {
+        throw new Error("unexpected credential lookup");
+      });
+      const env = new Proxy({}, { get: readCredential });
+      try {
+        fs.writeFileSync(
+          configPath,
+          `${JSON.stringify({
+            ...config,
+            public_benchmark: {
+              ...config.public_benchmark,
+              lane: "full",
+              candidate_commit: candidateCommit,
+              max_runtime_seconds: 15_000
+            }
+          })}\n`
+        );
+        await expect(launchModalBenchmark({ configPath, statePath, repoRoot, mode, env })).rejects.toThrow(
+          /MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT.*15000s.*15600s/u
+        );
+        expect(readCredential).not.toHaveBeenCalled();
+        expect(fs.readdirSync(root)).toEqual(["benchmark.json"]);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("lets a smoke launch pass the campaign budget gate without making a provider call", async () => {
+    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-smoke-budget-"));
+    const configPath = path.join(root, "benchmark.json");
+    const statePath = path.join(root, "launch-state.json");
+    const repoRoot = path.resolve("../..");
+    const candidateCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+    const { config } = publicCollectionLineage();
+    const credentialsReached = new Error("smoke reached credential lookup; stop before constructing Modal client");
+    const readCredential = vi.fn(() => {
+      throw credentialsReached;
+    });
+    const env = new Proxy({}, { get: readCredential });
+    try {
+      fs.writeFileSync(
+        configPath,
+        `${JSON.stringify({
+          ...config,
+          public_benchmark: { ...config.public_benchmark, candidate_commit: candidateCommit }
+        })}\n`
+      );
+      await expect(launchModalBenchmark({ configPath, statePath, repoRoot, env })).rejects.toBe(credentialsReached);
+      expect(readCredential).toHaveBeenCalledTimes(1);
+      expect(readCredential).toHaveBeenCalledWith(expect.anything(), "MODAL_TOKEN_ID", expect.anything());
+      expect(fs.readdirSync(root)).toEqual(["benchmark.json"]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects private launch and recovery before Modal or local state mutation", async () => {
     const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-private-modal-governance-"));
     const configPath = path.join(root, "benchmark.json"),

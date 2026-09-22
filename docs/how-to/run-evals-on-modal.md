@@ -30,6 +30,23 @@ memory, with a 64 GiB memory limit. The Modal benchmark worker override
 configuration permits 16 parallel agents and 32 parallel planned nodes so the
 workflow can use that capacity.
 
+## Four-hour exhaustive campaigns
+
+The exhaustive profile runs one four-hour Recon campaign over its selected high
+and medium priority properties. The deployment smoke, shutdown, and artifact
+finalization require additional time: at least 15,600 seconds in total. Its
+campaign task allows 16,200 seconds; per-node Modal execution adds a further
+1,800-second lifecycle reserve, producing a five-hour sandbox. An explicit
+resource cap must accommodate the full task.
+
+The retained public full benchmark configuration allows only 15,000 seconds per
+row. Launch validation rejects it before execution with
+`MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT`. Use local or per-node Modal execution with a
+compatible budget for the four-hour profile until the full benchmark's row and
+control budgets are deliberately revised. The runner does not silently shorten
+the campaign or increase these paid benchmark budgets. Each campaign shares the
+workflow deadline with its other stages and retries.
+
 ## Authenticate locally
 
 For subscription auth, log in before launching:

@@ -7,7 +7,7 @@ The **Category** column is documentation only. It is not prompt frontmatter or t
 
 ## Default Campaign Prompts
 
-The default topology binds 43 agentic nodes to 42 distinct prompt files. [`strategies/goal-hunter.mdx`](../../.ultrafuzz/prompts/strategies/goal-hunter.mdx) is reused by 2 nodes.
+The default topology binds 48 agentic nodes to 47 distinct prompt files. [`strategies/goal-hunter.mdx`](../../.ultrafuzz/prompts/strategies/goal-hunter.mdx) is reused by 2 nodes.
 
 | Filename | Category | Description |
 | --- | --- | --- |
@@ -48,6 +48,11 @@ The default topology binds 43 agentic nodes to 42 distinct prompt files. [`strat
 | [`strategies/order-replacement-collateral.md`](../../.ultrafuzz/prompts/strategies/order-replacement-collateral.md) | Strategy | Investigates order replacement, cancellation, partial fills, collateral release, and owner attribution. |
 | [`strategies/state-machine-boundaries.md`](../../.ultrafuzz/prompts/strategies/state-machine-boundaries.md) | Strategy | Tests lifecycle transitions such as pause, lock, close, graduation, finalization, and exact-input fundability. |
 | [`strategies/lifecycle-view-boundaries.md`](../../.ultrafuzz/prompts/strategies/lifecycle-view-boundaries.md) | Strategy | Checks whether documented views remain total, static, and consistent in empty, closed, exhausted, or terminal states. |
+| [`strategies/invariants/setup.md`](../../.ultrafuzz/prompts/strategies/invariants/setup.md) | Invariant setup | Scaffolds a Recon and Chimera stateful invariant suite with realistic deployment, actors, assets, and entrypoint coverage. |
+| [`strategies/invariants/handlers.md`](../../.ultrafuzz/prompts/strategies/invariants/handlers.md) | Invariant handlers | Implements natural stateful action handlers while preserving reachable protocol failures and anti-vacuity. |
+| [`strategies/invariants/coverage.md`](../../.ultrafuzz/prompts/strategies/invariants/coverage.md) | Invariant coverage | Iterates on realistic handler reachability until authenticated Recon-selected coverage reaches its target or a blocker is proven. |
+| [`strategies/invariants/implement-properties.md`](../../.ultrafuzz/prompts/strategies/invariants/implement-properties.md) | Invariant properties | Implements selected canonical properties as concrete assertions in the Recon and Chimera suite. |
+| [`strategies/invariants/invariant-testing-campaign.md`](../../.ultrafuzz/prompts/strategies/invariants/invariant-testing-campaign.md) | Invariant campaign | Runs the final supervised Recon fuzzing campaign and records coverage, property results, failures, and reproducible findings. |
 | [`review/dedupe-findings.md`](../../.ultrafuzz/prompts/review/dedupe-findings.md) | Review | Collapses duplicate and same-root findings while preserving provenance, family variants, tests, and lifecycle records. |
 | [`review/triage.md`](../../.ultrafuzz/prompts/review/triage.md) | Review | Uses independent review passes to classify findings and audit reachability, dependency scope, rollback, and harness validity. |
 | [`review/severity-classification.md`](../../.ultrafuzz/prompts/review/severity-classification.md) | Review | Applies reportability gates and assigns canonical impact, likelihood, severity, and final disposition. |
@@ -56,7 +61,7 @@ The default topology binds 43 agentic nodes to 42 distinct prompt files. [`strat
 
 ## Additional Shipped-Profile Prompts
 
-These 15 project-editable prompts are not bound by the default topology, but are used by other shipped topologies. Additional-file counts by topology are `exhaustive` (12), `invariant-only` (5), `smoke` (3); a prompt can appear in more than one topology.
+These 10 project-editable prompts are not bound by the default topology, but are used by other shipped topologies. Additional-file counts by topology are `exhaustive` (7), `smoke` (3); a prompt can appear in more than one topology.
 
 | Filename | Category | Description |
 | --- | --- | --- |
@@ -70,11 +75,6 @@ These 15 project-editable prompts are not bound by the default topology, but are
 | [`strategies/differential/reference-and-lane-auditor.md`](../../.ultrafuzz/prompts/strategies/differential/reference-and-lane-auditor.md) | Differential audit | Audits reference independence and narrows or rejects differential lanes before execution. |
 | [`strategies/differential/reference-harness-author.md`](../../.ultrafuzz/prompts/strategies/differential/reference-harness-author.md) | Differential harness | Authors deliberately simple test-owned reference models and harnesses without copying production internals. |
 | [`strategies/dynamic-strategy-generator.md`](../../.ultrafuzz/prompts/strategies/dynamic-strategy-generator.md) | Dynamic strategy | Uses current-run evidence and enumerator agents to select and execute remaining target-specific investigations. |
-| [`strategies/invariants/coverage.md`](../../.ultrafuzz/prompts/strategies/invariants/coverage.md) | Invariant coverage | Iterates on realistic handler reachability until authenticated Recon-selected coverage reaches its target or a blocker is proven. |
-| [`strategies/invariants/handlers.md`](../../.ultrafuzz/prompts/strategies/invariants/handlers.md) | Invariant handlers | Implements natural stateful action handlers while preserving reachable protocol failures and anti-vacuity. |
-| [`strategies/invariants/implement-properties.md`](../../.ultrafuzz/prompts/strategies/invariants/implement-properties.md) | Invariant properties | Implements selected canonical properties as concrete assertions in the Recon and Chimera suite. |
-| [`strategies/invariants/invariant-testing-campaign.md`](../../.ultrafuzz/prompts/strategies/invariants/invariant-testing-campaign.md) | Invariant campaign | Runs the final supervised Recon fuzzing campaign and records coverage, property results, failures, and reproducible findings. |
-| [`strategies/invariants/setup.md`](../../.ultrafuzz/prompts/strategies/invariants/setup.md) | Invariant setup | Scaffolds a Recon and Chimera stateful invariant suite with realistic deployment, actors, assets, and entrypoint coverage. |
 
 ## Runtime Composition Templates
 

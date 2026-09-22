@@ -170,6 +170,9 @@
         "resources": {
           "$ref": "#/$defs/executionResources"
         },
+        "resourceTimeoutOrigin": {
+          "enum": ["default", "project-config", "runtime-override"]
+        },
         "nodes": {
           "type": "object",
           "propertyNames": {
@@ -348,6 +351,9 @@
         },
         "referenceExpectationEnforcement": {
           "enum": ["warn", "fail"]
+        },
+        "referenceExpectationSelection": {
+          "enum": ["priority", "mandatory"]
         }
       }
     },
@@ -513,7 +519,9 @@
         "invariant_testing_smoke_timeout_seconds",
         "invariant_testing_fuzzer_timeout_seconds",
         "triage_quorum",
-        "triage_panel_size"
+        "triage_panel_size",
+        "property_priority_threshold",
+        "reference_expectation_selection"
       ]
     },
     "auditProfileSettingOrigin": {
@@ -555,6 +563,12 @@
         },
         "triage_panel_size": {
           "$ref": "#/$defs/positiveInteger"
+        },
+        "property_priority_threshold": {
+          "enum": ["high", "medium", "low"]
+        },
+        "reference_expectation_selection": {
+          "enum": ["priority", "mandatory"]
         }
       }
     },
@@ -656,7 +670,14 @@
           "type": "array",
           "minItems": 2,
           "maxItems": 2,
-          "prefixItems": [{ "const": "MODAL_TOKEN_ID" }, { "const": "MODAL_TOKEN_SECRET" }],
+          "prefixItems": [
+            {
+              "const": "MODAL_TOKEN_ID"
+            },
+            {
+              "const": "MODAL_TOKEN_SECRET"
+            }
+          ],
           "items": false
         }
       }

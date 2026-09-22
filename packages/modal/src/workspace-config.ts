@@ -46,11 +46,6 @@ trust_model = "skip-permissions"
 prompt_review_required = true
 materialize_outputs_as_unstaged = true
 
-[invariants]
-property_priority_threshold = "high"
-invariant_testing_smoke_timeout = "10min"
-invariant_testing_fuzzer_timeout = "1h"
-
 [triage]
 quorum = 3
 panel_size = 4

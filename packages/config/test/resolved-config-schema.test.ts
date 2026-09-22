@@ -24,8 +24,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "0ffcb21f4f11a65f93b12a53f5cdfb4efb9f594384048afe4df154097fe881b9";
-const EXPECTED_BUNDLE_SHA256 = "85ba69cac131346a7b19d416f22688b00ca325f23535c0250b4e059654c5e7aa";
+const EXPECTED_SCHEMA_SHA256 = "f7d513f45b696b4539259f40506aac57066aace218b3d1a8d8f382d1af04dd32";
+const EXPECTED_BUNDLE_SHA256 = "f0715eb17527e9974a4fa837fb064ee514446cdea887ccc4a8d821c08646fe31";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -77,6 +77,22 @@ describe("resolved config JSON contract", () => {
     expect(resolvedConfigZodSchema.safeParse(parsed).success).toBe(false);
     expect(resolvedConfigValidatorsAgree(parsed)).toBe(true);
     expect(() => parseResolvedConfigJsonBytes(fixtureBytes)).toThrow(/does not match/u);
+  });
+
+  it("preserves v4 snapshots without the new selection policy and resource timeout origin", () => {
+    const value = validFixture();
+    delete record(value.invariants).referenceExpectationSelection;
+    delete record(value.execution).resourceTimeoutOrigin;
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+    const parsed = parseResolvedConfigJsonBytes(bytes);
+
+    expect(parsed.invariants.referenceExpectationSelection).toBeUndefined();
+    expect(parsed.execution.resourceTimeoutOrigin).toBeUndefined();
+    expect(serializeResolvedConfigJsonBytes(parsed).equals(bytes)).toBe(true);
+    expect(validateResolvedConfigJson(parsed).ok).toBe(true);
+    const zod = resolvedConfigZodSchema.safeParse(parsed);
+    expect(zod.success).toBe(true);
+    if (zod.success) expect(zod.data).toEqual(parsed);
   });
 
   it("accepts Pi's maximum thinking level in sealed resolved configuration", () => {

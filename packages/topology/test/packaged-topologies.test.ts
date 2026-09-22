@@ -55,7 +55,6 @@ const DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES = [
   "differential-repair-and-report-review"
 ] as const;
 const NONDEFAULT_SPECIALIST_STRATEGIES = [
-  ...STATEFUL_SPECIALIST_STRATEGIES,
   ...DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES,
   "dynamic-strategy-generator"
 ] as const;
@@ -70,9 +69,16 @@ const FINDINGS_ONLY: OutputRole = { findings: 1, generatedTests: 0 };
 const NO_FINDINGS_NO_TESTS: OutputRole = { findings: 0, generatedTests: 0 };
 const NO_FINDINGS_WITH_GENERATED_TESTS: OutputRole = { findings: 0, generatedTests: 1 };
 
-const DEFAULT_PROFILE_ROLES: Record<string, OutputRole> = Object.fromEntries(
-  [...DIRECT_BUG_FIRST_STRATEGIES, ...GOAL_STRATEGIES].map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])
-);
+const DEFAULT_PROFILE_ROLES: Record<string, OutputRole> = {
+  ...Object.fromEntries(
+    [...DIRECT_BUG_FIRST_STRATEGIES, ...GOAL_STRATEGIES].map((id) => [id, FINDINGS_WITH_OPTIONAL_TESTS])
+  ),
+  "stateful-invariant-setup": FINDINGS_ONLY,
+  "stateful-invariant-handlers": FINDINGS_ONLY,
+  "stateful-invariant-coverage": FINDINGS_WITH_OPTIONAL_TESTS,
+  "stateful-invariant-implement-properties": FINDINGS_WITH_OPTIONAL_TESTS,
+  "stateful-invariant-campaign": FINDINGS_WITH_OPTIONAL_TESTS
+};
 const EXHAUSTIVE_PROFILE_ROLES: Record<string, OutputRole> = {
   ...DEFAULT_PROFILE_ROLES,
   "stateful-invariant-setup": FINDINGS_ONLY,
@@ -277,7 +283,7 @@ describe("packaged topology collection", () => {
     }
   });
 
-  it("keeps ordinary discovery direct-only while the exhaustive profile ships every specialist lane", () => {
+  it("includes stateful invariants in ordinary discovery while exhaustive retains every specialist lane", () => {
     const canonical = loadTopology(REPOSITORY_ROOT, {
       topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
       requirePromptFiles: true
@@ -298,6 +304,11 @@ describe("packaged topology collection", () => {
       true
     );
     expect(STATEFUL_SPECIALIST_STRATEGIES).toHaveLength(5);
+    for (const id of STATEFUL_SPECIALIST_STRATEGIES) {
+      expect(canonicalIds.has(id)).toBe(true);
+      expect(canonical.nodes.find((node) => node.id === id)?.loops).toBe(1);
+      expect(exhaustive.nodes.find((node) => node.id === id)?.loops).toBe(1);
+    }
     expect(DEEP_DIFFERENTIAL_SPECIALIST_STRATEGIES).toHaveLength(6);
     for (const id of NONDEFAULT_SPECIALIST_STRATEGIES) {
       expect(canonicalIds.has(id), `canonical excludes specialist ${id}`).toBe(false);
@@ -306,6 +317,7 @@ describe("packaged topology collection", () => {
 
     expect(canonical.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual([
       ...DIRECT_BUG_FIRST_STRATEGIES,
+      "stateful-invariant-campaign",
       ...GOAL_STRATEGIES
     ]);
     expect(canonical.groups.goals?.defaults?.failure_policy).toBe("continue");
@@ -369,7 +381,7 @@ describe("packaged topology collection", () => {
   });
 
   it("declares the invariant backend commands in every topology that runs them", () => {
-    for (const name of ["exhaustive", "invariant-only"]) {
+    for (const name of ["default", "exhaustive", "invariant-only"]) {
       const topology = loadTopology(REPOSITORY_ROOT, {
         topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
         requirePromptFiles: true

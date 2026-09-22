@@ -85,7 +85,7 @@ describe("packaged smoke topology", () => {
 
     expect(defaultTopology.nodes.some((node) => node.id === "smoke-context")).toBe(false);
     expect(defaultTopology.nodes.length).toBeGreaterThan(smoke.nodes.length);
-    expect(defaultTopology.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(false);
+    expect(defaultTopology.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(true);
     expect(defaultTopology.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(false);
     expect(exhaustive.nodes.length).toBeGreaterThan(defaultTopology.nodes.length);
     expect(exhaustive.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(true);

@@ -1,6 +1,6 @@
 version: 2
 defaults:
-  strategy_loops: 1
+  strategy_loops: 3
 groups:
   setup:
     label: Setup
@@ -801,6 +801,7 @@ nodes:
     loops: 1
   - id: stateful-invariant-campaign
     kind: agentic
+    timeout_seconds: 16200
     prompt: strategies/invariants/invariant-testing-campaign.md
     group: specialists
     required_commands:
