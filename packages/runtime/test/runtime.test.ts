@@ -10994,8 +10994,13 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.resolved-config.v4");
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const controllerData = JSON.parse(fs.readFileSync(compiled.controllerDataPath, "utf8")) as {
+    compiled_base_tasks: unknown[];
+    settings: { pinned_submodules: unknown };
+  };
   assert.equal(compiled.pinnedSubmodules, undefined);
-  assert.match(workflowSource, /"pinnedSubmodules": null/u);
+  assert.equal(controllerData.settings.pinned_submodules, null);
+  assert.doesNotMatch(workflowSource, /"pinnedSubmodules": null/u);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /const agentProcessOutput = z\.strictObject\(\{/);
   assert.match(workflowSource, /completed: z\.literal\(true\)/);
@@ -11022,7 +11027,9 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.equal(smithersTasks.pinned_submodules, null);
   assert.equal("layers" in smithersTasks, false);
   assert.ok(smithersTasks.tasks.every((task) => task.referenceArtifactManifestAuthorities === undefined));
-  assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
+  assert.equal(controllerData.compiled_base_tasks.length, smithersTasks.tasks.length);
+  assert.match(workflowSource, /runtimeContext: topologyRuntimeContextForTimeout\(task\.timeoutMs\)/u);
+  assert.doesNotMatch(workflowSource, /"runtimeContext":/u);
   assert.deepEqual(
     smithersTasks.tasks.find((task) => task.attemptId === "project-discovery__model_0__attempt_0")
       ?.dependencySmithersNodeIds,
