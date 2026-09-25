@@ -768,6 +768,25 @@ metadata snapshot. Usage and pricing completeness are reported independently
 through `usage_complete`/`usage_incomplete_reasons` and
 `pricing_complete`/`pricing_incomplete_reasons`.
 
+`execution_reconciliation` cross-checks the canonical attempt and usage
+ledgers against the runner's own durable records: `scheduler_invocation_count`
+counts the agent-backed attempt rows the scheduler retained, and
+`adapter_usage_session_count` counts the adapter's per-attempt usage rows.
+`known_invocation_count` is the number of invocations the run is known to have
+made -- every invocation either ledger identifies, floored by those two runner
+counts -- so it never shrinks to the larger single ledger when each ledger holds
+an invocation the other lacks. `missing_attempt_invocations` and
+`missing_usage_invocations` name the gaps by `(node_id, iteration, attempt)`
+wherever the identity is recoverable, and the matching counts stay authoritative
+when only the runner's totals prove that evidence is missing. The document is
+rebuilt idempotently on every synchronization pass, so a gap that a later pass
+closes clears without duplicating tokens or cost. While
+`execution_reconciliation.usage_complete` is false, accounting carries an
+`invocation-usage-missing` usage-incompleteness reason and cannot report usage
+as complete; `ultrafuzz stats` reports the same coverage through
+`totals.attempts_complete`, `usage_complete`, and the
+`STATS_ATTEMPT_HISTORY_INCOMPLETE`/`STATS_USAGE_INCOMPLETE` diagnostics.
+
 Accounting schema `ultrafuzz.accounting.v4` treats provider `input_tokens` as
 inclusive of fresh input, cache reads, and cache writes, and treats provider
 `output_tokens` as inclusive of reasoning tokens. Consequently,

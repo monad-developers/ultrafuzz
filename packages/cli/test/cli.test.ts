@@ -591,6 +591,10 @@ function writeRunAccounting(
   assert.ok(runMetadata.workflow, "accounting fixtures require a linked workflow");
   const workflowRunId = runMetadata.workflow.run_id;
   const controlGeneration = runMetadata.workflow.control_generation;
+  // These fixtures replace accounting wholesale, so they must keep it agreeing
+  // with the reconciliation the run actually produced: run.json cannot claim
+  // complete usage while a known invocation has no usage-ledger row.
+  const invocationUsageMissing = runMetadata.execution_reconciliation?.usage_complete === false;
   const unpricedEventCount = accounting.unpricedEventCount ?? (accounting.partialPricing ? 1 : 0);
   const eventCount = 1 + unpricedEventCount;
   const estimatedSpendUsd = Number(accounting.estimatedSpend.replace(/[$,+]/gu, ""));
@@ -614,8 +618,8 @@ function writeRunAccounting(
       output: 0,
       reasoning: 0
     },
-    usage_complete: true,
-    usage_incomplete_reasons: [],
+    usage_complete: !invocationUsageMissing,
+    usage_incomplete_reasons: invocationUsageMissing ? [{ code: "invocation-usage-missing" as const }] : [],
     pricing_complete: !accounting.partialPricing,
     pricing_incomplete_reasons: accounting.partialPricing
       ? [{ code: "model-pricing-unavailable" as const, model: "gpt-test" }]

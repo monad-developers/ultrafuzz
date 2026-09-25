@@ -22,6 +22,7 @@ import {
   type ConfigRedactionsDocument,
   type RunAccountingSegment,
   type RunAccountingSummary,
+  type RunExecutionReconciliation,
   type RunMetadataDocument,
   type RunPlanDocument,
   type SourceRunDocument
@@ -500,4 +501,112 @@ test("runtime document reads detect same-file mutation and refuse symlinks", (t)
 
   assert.throws(() => readSourceRunDocument(sourcePath), /file changed while it was read/u);
   assert.equal(mutated, true);
+});
+
+function reconciliationWithDisjointLedgers(): RunExecutionReconciliation {
+  // One invocation reached the attempt ledger without its usage row, and a
+  // different one reached the usage ledger without its attempt row. Neither
+  // ledger alone identifies both, so the identified set has two members even
+  // though each ledger holds exactly one.
+  return {
+    schema_version: "ultrafuzz.execution-reconciliation.v1",
+    workflow_run_id: "workflow-current",
+    scheduler_invocation_count: null,
+    adapter_usage_session_count: null,
+    canonical_attempt_count: 1,
+    canonical_usage_count: 1,
+    known_invocation_count: 2,
+    missing_attempt_count: 1,
+    missing_usage_count: 1,
+    missing_attempt_invocations: [{ node_id: "node:b", iteration: 0, attempt: 0 }],
+    missing_usage_invocations: [{ node_id: "node:a", iteration: 0, attempt: 0 }],
+    attempts_complete: false,
+    usage_complete: false,
+    updated_at: CREATED_AT
+  };
+}
+
+function metadataWithReconciliation(reconciliation: RunExecutionReconciliation): RunMetadataDocument {
+  const metadata = canonicalRunMetadata();
+  const accounting = metadata.accounting;
+  assert.ok(accounting, "the canonical fixture must carry accounting");
+  const current = {
+    ...accounting.current,
+    usage_complete: false,
+    usage_incomplete_reasons: [{ code: "invocation-usage-missing" as const }]
+  };
+  return {
+    ...metadata,
+    accounting: { ...accounting, current, segments: [current] },
+    execution_reconciliation: reconciliation
+  };
+}
+
+test("execution reconciliation counts the invocations both ledgers identify, not the larger ledger", () => {
+  const reconciliation = reconciliationWithDisjointLedgers();
+  const metadata = metadataWithReconciliation(reconciliation);
+
+  assert.deepEqual(assertRunMetadataDocument(metadata, metadata.run_id).execution_reconciliation, reconciliation);
+  // Neither canonical count on its own reaches the two invocations the run is
+  // known to have made, so a document that counts the larger ledger would have
+  // to claim one known invocation and could not report the second gap at all.
+  assert.equal(Math.max(reconciliation.canonical_attempt_count, reconciliation.canonical_usage_count), 1);
+  assert.equal(reconciliation.known_invocation_count, 2);
+});
+
+test("execution reconciliation rejects ledgers that identify different invocation sets", () => {
+  assert.throws(
+    () =>
+      assertRunMetadataDocument(
+        metadataWithReconciliation({
+          ...reconciliationWithDisjointLedgers(),
+          missing_usage_invocations: []
+        }),
+        "run-child"
+      ),
+    /ledgers identify different invocation sets/u
+  );
+});
+
+test("execution reconciliation known count still floors on durable scheduler and adapter evidence", () => {
+  const reconciliation = reconciliationWithDisjointLedgers();
+  assert.deepEqual(
+    assertRunMetadataDocument(
+      metadataWithReconciliation({
+        ...reconciliation,
+        scheduler_invocation_count: 5,
+        adapter_usage_session_count: 3,
+        known_invocation_count: 5,
+        missing_attempt_count: 4,
+        missing_usage_count: 4
+      }),
+      "run-child"
+    ).execution_reconciliation?.known_invocation_count,
+    5
+  );
+  assert.throws(
+    () =>
+      assertRunMetadataDocument(
+        metadataWithReconciliation({ ...reconciliation, scheduler_invocation_count: 5 }),
+        "run-child"
+      ),
+    /known count disagrees with its evidence counts/u
+  );
+});
+
+test("execution reconciliation cannot claim usage completeness while accounting reports a gap", () => {
+  assert.throws(
+    () =>
+      assertRunMetadataDocument(
+        metadataWithReconciliation({
+          ...reconciliationWithDisjointLedgers(),
+          canonical_usage_count: 2,
+          missing_usage_invocations: [],
+          missing_usage_count: 0,
+          usage_complete: true
+        }),
+        "run-child"
+      ),
+    /accounting completeness disagrees with execution reconciliation/u
+  );
 });

@@ -17,6 +17,7 @@ import {
   modelPricingFromSnapshot,
   projectNormalizedUsageAccounting,
   roundAccountingUsd,
+  smithersNodeIdForAttempt,
   type ModelPricing,
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
@@ -176,6 +177,33 @@ export function deriveRunStatistics(
 
   const attempts = evidence.attempts ?? [];
   const usageEvents = latestUsageEntriesByAttempt(evidence.usage ?? []);
+  const reconciliation = reconcileInvocationCoverage(evidence, attempts, usageEvents);
+  if (reconciliation.missingAttemptCount > 0) {
+    diagnostics.push(
+      warning(
+        "STATS_ATTEMPT_HISTORY_INCOMPLETE",
+        `${String(reconciliation.missingAttemptCount)} known invocation${reconciliation.missingAttemptCount === 1 ? " is" : "s are"} absent from attempts.jsonl`,
+        {
+          known_invocation_count: reconciliation.knownInvocationCount,
+          canonical_attempt_count: reconciliation.canonicalAttemptCount,
+          missing_attempt_count: reconciliation.missingAttemptCount
+        }
+      )
+    );
+  }
+  if (reconciliation.missingUsageCount > 0) {
+    diagnostics.push(
+      warning(
+        "STATS_USAGE_INCOMPLETE",
+        `${String(reconciliation.missingUsageCount)} known invocation${reconciliation.missingUsageCount === 1 ? " is" : "s are"} absent from usage.jsonl`,
+        {
+          known_invocation_count: reconciliation.knownInvocationCount,
+          canonical_usage_count: reconciliation.canonicalUsageCount,
+          missing_usage_count: reconciliation.missingUsageCount
+        }
+      )
+    );
+  }
   const descriptors = nodeDescriptors(evidence.graph, evidence.state, attempts);
   const aliases = usageNodeAliases(descriptors, diagnostics);
   const pricing = modelPricing(evidence.runMetadata);
@@ -187,6 +215,12 @@ export function deriveRunStatistics(
     const target = nodeId === undefined ? unattributed : (usageByNode.get(nodeId) ?? emptyUsageAccumulator());
     accumulateUsage(target, event, pricing, cacheReadRatio(evidence.runMetadata));
     if (nodeId !== undefined) usageByNode.set(nodeId, target);
+  }
+  for (const identity of reconciliation.missingUsageIdentities) {
+    const coordinate = JSON.parse(identity) as [string, string, number, number];
+    const nodeId = aliases.get(coordinate[1]);
+    const accumulator = nodeId === undefined ? undefined : usageByNode.get(nodeId);
+    if (accumulator !== undefined) accumulator.usageComplete = false;
   }
 
   if (unattributed.eventCount > 0) {
@@ -210,6 +244,11 @@ export function deriveRunStatistics(
     )
   );
   const allUsage = mergeUsageAccumulators([...usageByNode.values(), unattributed]);
+  allUsage.usageComplete &&= reconciliation.missingUsageCount === 0;
+  const cumulativeAccounting = evidence.usage === undefined ? null : accountingCumulative(evidence.runMetadata);
+  if (cumulativeAccounting !== null && reconciliation.missingUsageCount > 0) {
+    cumulativeAccounting.usage_complete = false;
+  }
   const stateStart = Date.parse(evidence.state.started_at ?? evidence.state.created_at);
   const stateEnd = evidence.state.finished_at === undefined ? evidenceTimeMs : Date.parse(evidence.state.finished_at);
   const statusCounts = emptyStatusCounts();
@@ -237,9 +276,9 @@ export function deriveRunStatistics(
             0
           )
         : null,
-      attempts_complete: attemptsAvailable,
+      attempts_complete: attemptsAvailable && reconciliation.missingAttemptCount === 0,
       usage: usageStatistics(allUsage),
-      accounting_cumulative: evidence.usage === undefined ? null : accountingCumulative(evidence.runMetadata)
+      accounting_cumulative: cumulativeAccounting
     },
     unattributed_usage: usageStatistics(unattributed)
   };
@@ -256,6 +295,72 @@ function latestUsageEntriesByAttempt(entries: readonly UsageLedgerEntry[]): Usag
     }
   }
   return [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence);
+}
+
+interface InvocationCoverage {
+  knownInvocationCount: number;
+  canonicalAttemptCount: number;
+  canonicalUsageCount: number;
+  missingAttemptCount: number;
+  missingUsageCount: number;
+  missingUsageIdentities: ReadonlySet<string>;
+}
+
+function reconcileInvocationCoverage(
+  evidence: StatisticsEvidence,
+  attempts: readonly NodeAttemptLedgerEntry[],
+  usage: readonly UsageLedgerEntry[]
+): InvocationCoverage {
+  const attemptIdentities = new Set(
+    attempts
+      .filter((entry) => entry.reuse.status === "executed")
+      .map((entry) =>
+        JSON.stringify([
+          entry.workflow_run_id,
+          smithersNodeIdForAttempt(entry.strategy_attempt_id),
+          entry.iteration,
+          entry.attempt
+        ])
+      )
+  );
+  const usageIdentities = new Set(
+    usage.map((entry) => JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]))
+  );
+  const missingUsageByIdentity = [...attemptIdentities].filter((identity) => !usageIdentities.has(identity)).length;
+  const missingAttemptsByIdentity = [...usageIdentities].filter((identity) => !attemptIdentities.has(identity)).length;
+  const persisted = evidence.runMetadata.execution_reconciliation;
+  const missingUsageIdentities = new Set([...attemptIdentities].filter((identity) => !usageIdentities.has(identity)));
+  if (persisted !== undefined) {
+    for (const coordinate of persisted.missing_usage_invocations) {
+      missingUsageIdentities.add(
+        JSON.stringify([persisted.workflow_run_id, coordinate.node_id, coordinate.iteration, coordinate.attempt])
+      );
+    }
+  }
+  const canonicalAttemptCount = attemptIdentities.size;
+  const canonicalUsageCount = usageIdentities.size;
+  // The identified invocation set is the union of both ledgers, not the larger
+  // of the two: when each ledger holds a row the other lacks, the larger count
+  // hides one of them. This matches how the runtime reconciler counts, so the
+  // persisted document and the bundle-derived statistics cannot disagree.
+  const identifiedInvocationCount = new Set([...attemptIdentities, ...usageIdentities]).size;
+  const knownInvocationCount = Math.max(identifiedInvocationCount, persisted?.known_invocation_count ?? 0);
+  return {
+    knownInvocationCount,
+    canonicalAttemptCount,
+    canonicalUsageCount,
+    missingAttemptCount: Math.max(
+      evidence.attempts === undefined ? knownInvocationCount : 0,
+      missingAttemptsByIdentity,
+      persisted?.missing_attempt_count ?? 0
+    ),
+    missingUsageCount: Math.max(
+      evidence.usage === undefined ? knownInvocationCount : 0,
+      missingUsageByIdentity,
+      persisted?.missing_usage_count ?? 0
+    ),
+    missingUsageIdentities
+  };
 }
 
 function assertEvidenceBindings(evidence: StatisticsEvidence): void {
@@ -293,6 +398,7 @@ function assertEvidenceBindings(evidence: StatisticsEvidence): void {
     addTimestamp("controller lease renewed_at", evidence.state.controller_lease.renewed_at);
     addTimestamp("concurrency observed_at", evidence.state.concurrency.observed_at);
     addTimestamp("accounting updated_at", evidence.runMetadata.accounting?.updated_at);
+    addTimestamp("execution reconciliation updated_at", evidence.runMetadata.execution_reconciliation?.updated_at);
     addTimestamp("pricing catalog fetched_at", evidence.runMetadata.accounting?.pricing_catalog.fetched_at);
     for (const [nodeKey, node] of Object.entries(evidence.state.nodes)) {
       for (const [field, timestamp] of [
@@ -730,7 +836,7 @@ function accountingCumulative(metadata: RunMetadataDocument): AccountingCumulati
     ...components,
     total_tokens: cumulative.total_tokens,
     estimated_spend_usd: cumulative.estimated_spend_usd ?? null,
-    usage_complete: cumulative.usage_complete,
+    usage_complete: cumulative.usage_complete && (metadata.execution_reconciliation?.usage_complete ?? true),
     pricing_complete: !cumulative.partial_pricing,
     event_count: cumulative.event_count,
     models: [...cumulative.models],
@@ -826,8 +932,8 @@ function emptyStatusCounts(): Record<NodeStatisticsStatus, number> {
   };
 }
 
-function warning(code: string, message: string): RuntimeDiagnostic {
-  return { code, message, severity: "warning", source: "stats" };
+function warning(code: string, message: string, details?: Record<string, unknown>): RuntimeDiagnostic {
+  return { code, message, severity: "warning", source: "stats", ...(details === undefined ? {} : { details }) };
 }
 
 function stripNodePrefix(value: string): string {

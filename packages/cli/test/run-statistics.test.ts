@@ -192,6 +192,64 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
   assert.deepEqual(derived.diagnostics, []);
 });
 
+test("stats never reports complete usage when a canonical invocation has no usage row", () => {
+  const firstAttempt = attempt("node", "node", 1);
+  const secondAttempt = attempt("node", "node", 2);
+  const derived = deriveRunStatistics(evidence({ attempts: [firstAttempt, secondAttempt] }), Date.parse(FINISHED_AT));
+
+  assert.equal(derived.value.totals.attempts_complete, true);
+  assert.equal(derived.value.nodes[0]?.usage?.usage_complete, false);
+  assert.equal(derived.value.totals.usage?.usage_complete, false);
+  assert.equal(derived.value.totals.accounting_cumulative?.usage_complete, false);
+  assert.deepEqual(derived.diagnostics.find((diagnostic) => diagnostic.code === "STATS_USAGE_INCOMPLETE")?.details, {
+    known_invocation_count: 2,
+    canonical_usage_count: 1,
+    missing_usage_count: 1
+  });
+});
+
+test("stats reports attempt evidence partial when usage has no canonical attempt", () => {
+  const derived = deriveRunStatistics(evidence({ attempts: [] }), Date.parse(FINISHED_AT));
+
+  assert.equal(derived.value.totals.attempts_complete, false);
+  assert.deepEqual(
+    derived.diagnostics.find((diagnostic) => diagnostic.code === "STATS_ATTEMPT_HISTORY_INCOMPLETE")?.details,
+    {
+      known_invocation_count: 1,
+      canonical_attempt_count: 0,
+      missing_attempt_count: 1
+    }
+  );
+});
+
+test("stats counts every invocation either ledger identifies, not the larger ledger", () => {
+  // One invocation reached attempts.jsonl without its usage row; a different one
+  // reached usage.jsonl without its attempt row. Counting the larger ledger
+  // would report one known invocation and hide the second gap.
+  const usageEntries = [usage(3, "node:node", { input_tokens: 10, output_tokens: 2, attempt: 2 })];
+  const derived = deriveRunStatistics(
+    evidence({
+      attempts: [attempt("node", "node", 1)],
+      usage: usageEntries,
+      runMetadata: runMetadata(["node:node"], usageEntries)
+    }),
+    Date.parse(FINISHED_AT)
+  );
+
+  assert.equal(derived.value.totals.attempts_complete, false);
+  assert.equal(derived.value.totals.usage?.usage_complete, false);
+  assert.equal(derived.value.totals.accounting_cumulative?.usage_complete, false);
+  assert.deepEqual(
+    derived.diagnostics.find((diagnostic) => diagnostic.code === "STATS_ATTEMPT_HISTORY_INCOMPLETE")?.details,
+    { known_invocation_count: 2, canonical_attempt_count: 1, missing_attempt_count: 1 }
+  );
+  assert.deepEqual(derived.diagnostics.find((diagnostic) => diagnostic.code === "STATS_USAGE_INCOMPLETE")?.details, {
+    known_invocation_count: 2,
+    canonical_usage_count: 1,
+    missing_usage_count: 1
+  });
+});
+
 test("stats counts only the latest cumulative usage snapshot for each attempt", () => {
   const snapshots = [
     usage(1, "node:node", {

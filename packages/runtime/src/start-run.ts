@@ -1192,8 +1192,9 @@ async function persistSmithersEvidence(
   });
 
   const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
+  const { execution_reconciliation: _priorReconciliation, ...metadataWithoutReconciliation } = metadata;
   writeRunMetadataDocument(layout.runMetadataPath, {
-    ...metadata,
+    ...metadataWithoutReconciliation,
     workflow_ids: [compiled.smithersRunId],
     workflow: {
       run_id: compiled.smithersRunId,
@@ -1620,8 +1621,9 @@ function reconcilePendingWorkflowRunLink(projectRoot: string, layout: RunLayout)
     ) {
       throw new Error("pending initial workflow run link projections cannot be reconciled safely");
     }
+    const { execution_reconciliation: _unboundReconciliation, ...metadataWithoutReconciliation } = metadata;
     writeRunMetadataDocument(layout.runMetadataPath, {
-      ...metadata,
+      ...metadataWithoutReconciliation,
       workflow_ids: [pending.workflow_run_id],
       workflow: binding.metadataWorkflow
     });
@@ -1745,9 +1747,16 @@ function writeLinkedWorkflowBinding(
 ): void {
   const existingWorkflow = metadata.workflow;
   if (existingWorkflow === undefined) throw new Error("workflow replacement requires an existing workflow binding");
-  const { accounting: _staleAccounting, ...metadataWithoutAccounting } = metadata;
+  // Accounting and execution reconciliation are both derived from the workflow
+  // run being replaced, so neither can survive a rebinding: the next
+  // synchronization pass rebuilds them against the new run.
+  const {
+    accounting: _staleAccounting,
+    execution_reconciliation: _staleReconciliation,
+    ...metadataWithoutDerivedState
+  } = metadata;
   writeRunMetadataDocument(layout.runMetadataPath, {
-    ...metadataWithoutAccounting,
+    ...metadataWithoutDerivedState,
     workflow_ids: [link.workflow_run_id],
     workflow: {
       ...existingWorkflow,

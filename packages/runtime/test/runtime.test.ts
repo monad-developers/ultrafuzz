@@ -23,6 +23,7 @@ import { test, testWhen } from "./runtime-test-shard.js";
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   appendNodeAttempts,
+  appendUsageEvents,
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaBundleDigest,
@@ -44,6 +45,7 @@ import {
   validateRegisteredJsonBytesSync,
   VALIDATOR_BUILD_IDENTITY,
   writeRunState,
+  type RunMetadataDocument,
   type RunState,
   type SmithersTaskManifestDocument,
   SMITHERS_NODE_STATES,
@@ -2180,15 +2182,18 @@ function fakeLifecycleSmithersEnv(
     "utf8"
   );
   fs.mkdirSync(nodeDetailsDirectory, { recursive: true });
-  const terminalAttempts = new Map<string, Array<{ attempt: number; state: "finished" | "failed" }>>();
+  const terminalAttempts = new Map<string, Array<{ attempt: number; state: "finished" | "failed" | "cancelled" }>>();
   for (const line of (input.events ?? "").trim().split("\n").filter(Boolean)) {
     const event = JSON.parse(line) as { type?: unknown; payload?: Record<string, unknown> };
-    if (event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
+    if (event.type !== "NodeFinished" && event.type !== "NodeFailed" && event.type !== "NodeCancelled") continue;
     const nodeId = event.payload?.nodeId;
     const attempt = event.payload?.attempt;
     if (typeof nodeId !== "string" || !nodeId.startsWith("node:") || typeof attempt !== "number") continue;
     const rows = terminalAttempts.get(nodeId) ?? [];
-    rows.push({ attempt, state: event.type === "NodeFinished" ? "finished" : "failed" });
+    rows.push({
+      attempt,
+      state: event.type === "NodeFinished" ? "finished" : event.type === "NodeFailed" ? "failed" : "cancelled"
+    });
     terminalAttempts.set(nodeId, rows);
   }
   for (const [nodeId, attempts] of terminalAttempts) {
@@ -2374,6 +2379,7 @@ function workflowInspect(input: {
   // optional here so the existing fixtures stay minimal, but at least one test
   // must emit all three or the widened allowlists are never exercised.
   tokenUsage?: Record<string, unknown>;
+  pool?: { attempts: Array<{ pool: string; attempts: number }>; summary: string };
   cancellationSource?: Record<string, unknown>;
   warnings?: Array<Record<string, unknown>>;
   includeVerifierSteps?: boolean;
@@ -2424,6 +2430,7 @@ function workflowInspect(input: {
         ...(input.warnings === undefined ? {} : { warnings: input.warnings })
       },
       ...(input.tokenUsage === undefined ? {} : { tokenUsage: input.tokenUsage }),
+      ...(input.pool === undefined ? {} : { pool: input.pool }),
       ...(input.failedChildKeys === undefined || input.failedChildKeys.length === 0
         ? {}
         : { failedChildren: input.failedChildKeys.length, failedChildKeys: input.failedChildKeys }),
@@ -18273,7 +18280,14 @@ test("parseCurrentSmithersInspect admits the 0.35.0 envelope and bounds its new 
           }
         ]
       },
-      tokenUsage: { inputTokens: 10, outputTokens: 4, costUsd: null },
+      tokenUsage: { inputTokens: 10, outputTokens: 4, costUsd: null, attempts: 2 },
+      pool: {
+        attempts: [
+          { pool: "codex/gpt-5.5", attempts: 2 },
+          { pool: "claude/claude-sonnet", attempts: 1 }
+        ],
+        summary: "codex/gpt-5.5 x2, claude/claude-sonnet x1"
+      },
       failedChildren: 1,
       failedChildKeys: ["node:tolerated::0"],
       exhaustedLoops: [{ id: "loop:a", iteration: 3, maxIterations: 3 }],
@@ -18302,6 +18316,8 @@ test("parseCurrentSmithersInspect admits the 0.35.0 envelope and bounds its new 
     ["loop:a"]
   );
   assert.deepEqual(parsed.failedChildKeys, ["node:tolerated::0"]);
+  assert.equal(parsed.adapterUsageSessionCount, 2);
+  assert.equal(parsed.schedulerInvocationCount, 3);
 
   type MutableInspectData = Record<string, Record<string, unknown>> & {
     run: Record<string, unknown>;
@@ -18312,9 +18328,32 @@ test("parseCurrentSmithersInspect admits the 0.35.0 envelope and bounds its new 
     apply(copy.data);
     return copy;
   };
+  const emptyPool = parseCurrentSmithersInspect(
+    snapshot(
+      mutate((data) => {
+        data.pool = { attempts: [], summary: "" };
+      })
+    ),
+    workflowRunId
+  );
+  assert.equal(emptyPool.schedulerInvocationCount, 0);
   await assert.rejects(
     async () => parseCurrentSmithersInspect(snapshot(mutate((data) => (data.tokenUsage = [] as never))), workflowRunId),
     /data\.tokenUsage must be an object/u
+  );
+  await assert.rejects(
+    async () =>
+      parseCurrentSmithersInspect(
+        snapshot(
+          mutate((data) => {
+            const pool = data.pool;
+            assert.ok(pool);
+            pool.attempts = [{ pool: "codex/gpt-5.5", attempts: -1 }];
+          })
+        ),
+        workflowRunId
+      ),
+    /data\.pool\.attempts\[0\]\.attempts must be a non-negative safe integer/u
   );
   await assert.rejects(
     async () =>
@@ -20081,6 +20120,167 @@ test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new f
     () => syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 6 }),
     /contains unsupported fields/u
   );
+});
+
+test("syncRun reconciles durable scheduler and adapter sessions against canonical usage", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "usage-session-gap";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const inspect = workflowInspect({
+    workflowRunId,
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }],
+    tokenUsage: { attempts: 2 },
+    pool: { attempts: [{ pool: "codex/gpt-5.5", attempts: 2 }], summary: "codex/gpt-5.5 x2" }
+  });
+  const events = workflowEvents(workflowRunId, [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    {
+      type: "TokenUsageReported",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      extra: { inputTokens: 10, freshInputTokens: 10, outputTokens: 2, model: "gpt-5.5", agent: "codex" }
+    },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+    { type: "RunFinished" }
+  ]);
+  const env = fakeLifecycleSmithersEnv(project, { inspect, events });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const first = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_HISTORY_INCOMPLETE"));
+  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_USAGE_INCOMPLETE"));
+  const metadataPath = path.join(runRoot, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as RunMetadataDocument;
+  assert.deepEqual(metadata.execution_reconciliation, {
+    schema_version: "ultrafuzz.execution-reconciliation.v1",
+    workflow_run_id: workflowRunId,
+    scheduler_invocation_count: 2,
+    adapter_usage_session_count: 2,
+    canonical_attempt_count: 0,
+    canonical_usage_count: 1,
+    known_invocation_count: 2,
+    missing_attempt_count: 2,
+    missing_usage_count: 1,
+    missing_attempt_invocations: [{ node_id: "node:project-discovery", iteration: 0, attempt: 1 }],
+    missing_usage_invocations: [],
+    attempts_complete: false,
+    usage_complete: false,
+    updated_at: metadata.execution_reconciliation?.updated_at
+  });
+  assert.equal(metadata.accounting?.current.usage_complete, false);
+  assert.deepEqual(metadata.accounting?.current.usage_incomplete_reasons, [{ code: "invocation-usage-missing" }]);
+  assert.equal(metadata.accounting?.cumulative.usage_complete, false);
+
+  // Model a crash after the immutable usage append but before run.json was
+  // replaced. The saved checkpoint authenticates a prefix and the next pass
+  // must rebuild from the full ledger rather than reject the recoverable gap.
+  assert.ok(metadata.workflow);
+  appendUsageEvents(layoutForRunRoot(runRoot, runId), [
+    {
+      workflowRunId,
+      controlGeneration: metadata.workflow.control_generation,
+      sourceEventSequence: 99,
+      observedTimestampMs: Date.parse("2026-07-03T00:00:01.000Z"),
+      nodeId: "node:project-discovery",
+      iteration: 0,
+      attempt: 2,
+      usage: {
+        model: "gpt-5.5",
+        agent: "codex",
+        input_tokens: 4,
+        fresh_input_tokens: 4,
+        output_tokens: 1,
+        recorded_cost_usd: 0
+      }
+    }
+  ]);
+  const recovered = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  assert.equal(
+    recovered.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_USAGE_INCOMPLETE"),
+    false
+  );
+  const recoveredMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as RunMetadataDocument;
+  assert.equal(recoveredMetadata.execution_reconciliation?.canonical_usage_count, 2);
+  assert.equal(recoveredMetadata.execution_reconciliation?.usage_complete, true);
+  assert.equal(recoveredMetadata.accounting?.current.usage_complete, true);
+
+  const metadataBeforeRepeat = fs.readFileSync(metadataPath);
+  const attemptsBeforeRepeat = fs.readFileSync(path.join(runRoot, "attempts.jsonl"));
+  const usageBeforeRepeat = fs.readFileSync(path.join(runRoot, "usage.jsonl"));
+  const repeated = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+  assert.deepEqual(fs.readFileSync(metadataPath), metadataBeforeRepeat);
+  assert.deepEqual(fs.readFileSync(path.join(runRoot, "attempts.jsonl")), attemptsBeforeRepeat);
+  assert.deepEqual(fs.readFileSync(path.join(runRoot, "usage.jsonl")), usageBeforeRepeat);
+});
+
+test("syncRun durably records canceled agent attempts and their usage gap", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "canceled-attempt-ledger";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "cancelled",
+      state: "cancelled",
+      steps: [{ id: "node:project-discovery", state: "cancelled", attempt: 1 }],
+      includeVerifierSteps: false,
+      tokenUsage: { attempts: 0 },
+      pool: { attempts: [{ pool: "codex/gpt-5.5", attempts: 1 }], summary: "codex/gpt-5.5 x1" }
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeCancelled",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: { reason: "run-cancelled" }
+      },
+      { type: "RunCancelled" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+
+  const first = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  const attemptsPath = path.join(runRoot, "attempts.jsonl");
+  const attempts = fs
+    .readFileSync(attemptsPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0]?.outcome, "canceled");
+  assert.equal(attempts[0]?.failure_category, "canceled");
+  assert.equal(attempts[0]?.failure_message, "run-cancelled");
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as RunMetadataDocument;
+  assert.equal(metadata.execution_reconciliation?.attempts_complete, true);
+  assert.equal(metadata.execution_reconciliation?.usage_complete, false);
+  assert.deepEqual(metadata.execution_reconciliation?.missing_usage_invocations, [
+    { node_id: "node:project-discovery", iteration: 0, attempt: 1 }
+  ]);
+
+  const ledgerBeforeRepeat = fs.readFileSync(attemptsPath);
+  const repeated = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+  assert.deepEqual(fs.readFileSync(attemptsPath), ledgerBeforeRepeat);
 });
 
 test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {

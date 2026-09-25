@@ -72,6 +72,8 @@ import {
   type RunLayout,
   type RunMetadataAccounting,
   type RunMetadataDocument,
+  type RunExecutionReconciliation,
+  type RunInvocationCoordinate,
   type RunStatus,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
@@ -117,6 +119,7 @@ import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
   smithersDiagnostic,
+  smithersNodeIdForAttempt,
   smithersSnapshotReportsMissingRun,
   type CurrentSmithersInspect,
   type SmithersCommandSnapshot
@@ -145,6 +148,8 @@ interface WorkflowInspect {
   steps: WorkflowStep[];
   failedWorkflowTaskIds: string[];
   exhaustedLoops: CurrentSmithersInspect["exhaustedLoops"];
+  schedulerInvocationCount: number | null;
+  adapterUsageSessionCount: number | null;
 }
 
 type SmithersRunStatus = CurrentSmithersInspect["runStatus"];
@@ -159,7 +164,7 @@ interface WorkflowEvent {
   payload: Record<string, unknown>;
 }
 
-type UsageCompletenessMarker = ComponentUsageIncompleteReason;
+type UsageCompletenessMarker = ComponentUsageIncompleteReason | InvocationUsageIncompleteReason;
 
 type PricingCompletenessMarker = PricingIncompleteReason;
 
@@ -264,7 +269,7 @@ interface AccountingTotals {
   estimatedSpendUsd?: number;
   providedCostUsd?: number;
   componentCostsUsd: UsageComponentCosts;
-  usageIncompleteReasons: ComponentUsageIncompleteReason[];
+  usageIncompleteReasons: UsageCompletenessMarker[];
   pricingIncompleteReasons: PricingIncompleteReason[];
   partialPricing: boolean;
   cacheReadPricingEstimated: boolean;
@@ -284,6 +289,10 @@ interface ComponentUsageIncompleteReason {
   code: "component-usage-unavailable" | "component-usage-estimated" | "component-breakdown-incomplete";
   component?: UsageComponent;
   model?: string;
+}
+
+interface InvocationUsageIncompleteReason {
+  code: "invocation-usage-missing";
 }
 
 interface PricingIncompleteReason {
@@ -1348,7 +1357,7 @@ export async function synchronizeLinkedWorkflowRun(
   );
 
   const inspectSnapshot = await runSmithersInspectionCommand({
-    args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
+    args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output", "--pool"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
@@ -1546,12 +1555,39 @@ export async function synchronizeLinkedWorkflowRun(
     controlGeneration: evidence.controlGeneration,
     events: tokenEvents,
     tasks: loaded.tasks,
-    attemptEvents: events,
+    schedulerInvocationCount: inspect.schedulerInvocationCount,
+    adapterUsageSessionCount: inspect.adapterUsageSessionCount,
     control,
     env: input.env ?? process.env
   });
   if (accountingResult.budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
+  }
+  if (accountingResult.reconciliation.missingAttemptCount > 0) {
+    diagnostics.push({
+      code: "WORKFLOW_ATTEMPT_HISTORY_INCOMPLETE",
+      message: `${String(accountingResult.reconciliation.missingAttemptCount)} known invocation${accountingResult.reconciliation.missingAttemptCount === 1 ? " is" : "s are"} absent from the canonical attempt ledger`,
+      severity: "warning",
+      source: "workflow",
+      details: {
+        known_invocation_count: accountingResult.reconciliation.knownInvocationCount,
+        canonical_attempt_count: accountingResult.reconciliation.canonicalAttemptCount,
+        missing_attempt_count: accountingResult.reconciliation.missingAttemptCount
+      }
+    });
+  }
+  if (accountingResult.reconciliation.missingUsageCount > 0) {
+    diagnostics.push({
+      code: "WORKFLOW_USAGE_INCOMPLETE",
+      message: `${String(accountingResult.reconciliation.missingUsageCount)} known invocation${accountingResult.reconciliation.missingUsageCount === 1 ? " is" : "s are"} absent from the canonical usage ledger`,
+      severity: "warning",
+      source: "workflow",
+      details: {
+        known_invocation_count: accountingResult.reconciliation.knownInvocationCount,
+        canonical_usage_count: accountingResult.reconciliation.canonicalUsageCount,
+        missing_usage_count: accountingResult.reconciliation.missingUsageCount
+      }
+    });
   }
 
   const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
@@ -2116,18 +2152,120 @@ function smithersNodeAttemptAuthorityKey(nodeId: string, iteration: number): str
   return JSON.stringify([nodeId, iteration]);
 }
 
+interface ExecutionReconciliationResult {
+  document: Omit<RunExecutionReconciliation, "updated_at">;
+  knownInvocationCount: number;
+  canonicalAttemptCount: number;
+  canonicalUsageCount: number;
+  missingAttemptCount: number;
+  missingUsageCount: number;
+}
+
+function reconcileExecutionEvidence(input: {
+  layout: RunLayout;
+  workflowRunId: string;
+  tasks: readonly StoredWorkflowTask[];
+  usageEntries: readonly UsageLedgerEntry[];
+  schedulerInvocationCount: number | null;
+  adapterUsageSessionCount: number | null;
+}): ExecutionReconciliationResult {
+  const tasksByAttemptId = new Map(input.tasks.map((task) => [task.attemptId, task] as const));
+  const canonicalAttemptCoordinates = uniqueInvocationCoordinates(
+    replayNodeAttempts(input.layout).entries.flatMap((entry) => {
+      if (entry.workflow_run_id !== input.workflowRunId || entry.reuse.status !== "executed") return [];
+      // The strategy attempt ID is the stable identifier the ledger already
+      // stores, so a task row that this pass did not load cannot make a durably
+      // recorded attempt disappear from its own reconciliation.
+      const nodeId =
+        tasksByAttemptId.get(entry.strategy_attempt_id)?.smithersNodeId ??
+        smithersNodeIdForAttempt(entry.strategy_attempt_id);
+      return [{ node_id: nodeId, iteration: entry.iteration, attempt: entry.attempt }];
+    })
+  );
+  const canonicalUsageCoordinates = uniqueInvocationCoordinates(
+    latestUsageLedgerEntriesByAttempt(input.usageEntries)
+      .filter((entry) => entry.workflow_run_id === input.workflowRunId)
+      .map((entry) => ({ node_id: entry.node_id, iteration: entry.iteration, attempt: entry.attempt }))
+  );
+  const expectedCoordinates = uniqueInvocationCoordinates([
+    ...canonicalAttemptCoordinates,
+    ...canonicalUsageCoordinates
+  ]);
+  const canonicalAttemptIdentities = new Set(canonicalAttemptCoordinates.map(invocationCoordinateIdentity));
+  const canonicalUsageIdentities = new Set(canonicalUsageCoordinates.map(invocationCoordinateIdentity));
+  const missingAttemptInvocations = expectedCoordinates.filter(
+    (coordinate) => !canonicalAttemptIdentities.has(invocationCoordinateIdentity(coordinate))
+  );
+  const missingUsageInvocations = expectedCoordinates.filter(
+    (coordinate) => !canonicalUsageIdentities.has(invocationCoordinateIdentity(coordinate))
+  );
+  const canonicalAttemptCount = canonicalAttemptCoordinates.length;
+  const canonicalUsageCount = canonicalUsageCoordinates.length;
+  const knownInvocationCount = Math.max(
+    expectedCoordinates.length,
+    input.schedulerInvocationCount ?? 0,
+    input.adapterUsageSessionCount ?? 0
+  );
+  const missingAttemptCount = Math.max(missingAttemptInvocations.length, knownInvocationCount - canonicalAttemptCount);
+  const missingUsageCount = Math.max(missingUsageInvocations.length, knownInvocationCount - canonicalUsageCount);
+  return {
+    document: {
+      schema_version: "ultrafuzz.execution-reconciliation.v1",
+      workflow_run_id: input.workflowRunId,
+      scheduler_invocation_count: input.schedulerInvocationCount,
+      adapter_usage_session_count: input.adapterUsageSessionCount,
+      canonical_attempt_count: canonicalAttemptCount,
+      canonical_usage_count: canonicalUsageCount,
+      known_invocation_count: knownInvocationCount,
+      missing_attempt_count: missingAttemptCount,
+      missing_usage_count: missingUsageCount,
+      missing_attempt_invocations: missingAttemptInvocations,
+      missing_usage_invocations: missingUsageInvocations,
+      attempts_complete: missingAttemptCount === 0,
+      usage_complete: missingUsageCount === 0
+    },
+    knownInvocationCount,
+    canonicalAttemptCount,
+    canonicalUsageCount,
+    missingAttemptCount,
+    missingUsageCount
+  };
+}
+
+function uniqueInvocationCoordinates(coordinates: readonly RunInvocationCoordinate[]): RunInvocationCoordinate[] {
+  const unique = new Map<string, RunInvocationCoordinate>();
+  for (const coordinate of coordinates) unique.set(invocationCoordinateIdentity(coordinate), coordinate);
+  return [...unique.values()].sort((left, right) =>
+    invocationCoordinateIdentity(left).localeCompare(invocationCoordinateIdentity(right))
+  );
+}
+
+function invocationCoordinateIdentity(coordinate: RunInvocationCoordinate): string {
+  return JSON.stringify([coordinate.node_id, coordinate.iteration, coordinate.attempt]);
+}
+
+function comparableExecutionReconciliation(
+  value: RunExecutionReconciliation | Omit<RunExecutionReconciliation, "updated_at"> | undefined
+): Omit<RunExecutionReconciliation, "updated_at"> | undefined {
+  if (value === undefined) return undefined;
+  const { updated_at: _updatedAt, ...comparable } = value as RunExecutionReconciliation;
+  return comparable;
+}
+
 async function synchronizeWorkflowAccounting(input: {
   layout: RunLayout;
   workflowRunId: string;
   controlGeneration: string;
   events: WorkflowEvent[];
   tasks: readonly StoredWorkflowTask[];
-  attemptEvents: WorkflowEvent[];
+  schedulerInvocationCount: number | null;
+  adapterUsageSessionCount: number | null;
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
   changed: boolean;
   available: boolean;
+  reconciliation: ExecutionReconciliationResult;
   budgetDiagnostic?: RuntimeDiagnostic;
 }> {
   const metadata = readRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId);
@@ -2141,7 +2279,19 @@ async function synchronizeWorkflowAccounting(input: {
     metadata.accounting === undefined ? undefined : storedAccountingDocument(metadata.accounting, input.workflowRunId);
   const existingUsageReplay = replayUsageEvents(input.layout);
   if (storedAccounting !== undefined) {
-    assertAccountingMatchesUsageLedger(storedAccounting, existingUsageReplay.entries, "run.json#$.accounting");
+    // The ledger append is durable before run.json is replaced. A process can
+    // die in that narrow window, leaving a valid accounting checkpoint that is
+    // an authenticated prefix of the canonical ledger. Rebuild from the full
+    // ledger instead of turning that recoverable commit boundary into a
+    // permanent synchronization failure.
+    if (storedAccounting.checkpoint.ledger_event_count > existingUsageReplay.entries.length) {
+      throw new Error("run.json accounting checkpoint is ahead of the canonical usage ledger");
+    }
+    assertAccountingMatchesUsageLedger(
+      storedAccounting,
+      existingUsageReplay.entries.slice(0, storedAccounting.checkpoint.ledger_event_count),
+      "run.json#$.accounting"
+    );
   }
   const preparedUsage = prepareWorkflowUsageEvents(
     input.layout,
@@ -2150,6 +2300,26 @@ async function synchronizeWorkflowAccounting(input: {
     input.events,
     existingUsageReplay
   );
+  const reconciliation = reconcileExecutionEvidence({
+    layout: input.layout,
+    workflowRunId: input.workflowRunId,
+    tasks: input.tasks,
+    usageEntries: preparedUsage.entries,
+    schedulerInvocationCount: input.schedulerInvocationCount,
+    adapterUsageSessionCount: input.adapterUsageSessionCount
+  });
+  const storedReconciliation = metadata.execution_reconciliation;
+  const reconciliationChanged = !sameJsonValue(
+    comparableExecutionReconciliation(storedReconciliation),
+    comparableExecutionReconciliation(reconciliation.document)
+  );
+  const nextReconciliation: RunExecutionReconciliation = {
+    ...reconciliation.document,
+    updated_at:
+      reconciliationChanged || storedReconciliation === undefined
+        ? new Date().toISOString()
+        : storedReconciliation.updated_at
+  };
 
   const stateSourceRunId = readRunState(input.layout).source_run_id;
   if (metadata.source_run_id !== stateSourceRunId) {
@@ -2159,7 +2329,25 @@ async function synchronizeWorkflowAccounting(input: {
     if (storedAccounting !== undefined) {
       throw new Error("run.json accounting cannot exist when the usage ledger is empty");
     }
-    return { changed: false, available: false };
+    if (reconciliationChanged) {
+      const preReconciliationMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
+        input.control,
+        synchronizationClock(input.control)
+      );
+      if (preReconciliationMutationBudgetDiagnostic !== undefined) {
+        return {
+          changed: false,
+          available: false,
+          reconciliation,
+          budgetDiagnostic: preReconciliationMutationBudgetDiagnostic
+        };
+      }
+      writeRunMetadataDocument(
+        input.layout.runMetadataPath,
+        assertRunMetadataDocument({ ...metadata, execution_reconciliation: nextReconciliation }, input.layout.runId)
+      );
+    }
+    return { changed: reconciliationChanged, available: false, reconciliation };
   }
 
   const storedPricingCatalog = storedAccounting?.pricingCatalog;
@@ -2190,7 +2378,7 @@ async function synchronizeWorkflowAccounting(input: {
     synchronizationClock(input.control)
   );
   if (postPricingBudgetDiagnostic !== undefined) {
-    return { changed: false, available: false, budgetDiagnostic: postPricingBudgetDiagnostic };
+    return { changed: false, available: false, reconciliation, budgetDiagnostic: postPricingBudgetDiagnostic };
   }
   const resolvedPricing = new Map(storedPricing);
   for (const [model, modelPricing] of livePricing?.prices ?? []) {
@@ -2203,7 +2391,12 @@ async function synchronizeWorkflowAccounting(input: {
     live: livePricing?.metadata
   });
   const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
-  const accountingSegments = accountingSegmentsFromUsageLedger(preparedUsage.entries, resolvedPricing, cacheReadRatio);
+  const accountingSegments = accountingSegmentsFromUsageLedger(
+    preparedUsage.entries,
+    resolvedPricing,
+    cacheReadRatio,
+    reconciliation.missingUsageCount > 0
+  );
   const current = accountingSegments.at(-1);
   if (current === undefined) throw new Error("non-empty usage ledger produced no accounting segment");
 
@@ -2241,12 +2434,15 @@ async function synchronizeWorkflowAccounting(input: {
     updated_at:
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
-  const nextMetadata = assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
+  const nextMetadata = assertRunMetadataDocument(
+    { ...metadata, accounting: nextAccounting, execution_reconciliation: nextReconciliation },
+    input.layout.runId
+  );
   const validatedAccounting = storedAccountingDocument(nextMetadata.accounting, input.workflowRunId);
   assertAccountingMatchesUsageLedger(validatedAccounting, preparedUsage.entries, "proposed run.json#$.accounting");
 
-  if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
-    return { changed: false, available: true };
+  if (!accountingChanged && !reconciliationChanged && preparedUsage.pendingEntries.length === 0) {
+    return { changed: false, available: true, reconciliation };
   }
 
   const preAccountingMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
@@ -2254,7 +2450,12 @@ async function synchronizeWorkflowAccounting(input: {
     synchronizationClock(input.control)
   );
   if (preAccountingMutationBudgetDiagnostic !== undefined) {
-    return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
+    return {
+      changed: false,
+      available: false,
+      reconciliation,
+      budgetDiagnostic: preAccountingMutationBudgetDiagnostic
+    };
   }
 
   if (preparedUsage.inputs.length > 0) {
@@ -2263,10 +2464,14 @@ async function synchronizeWorkflowAccounting(input: {
       throw new Error("usage ledger changed after its immutable validation snapshot");
     }
   }
-  if (accountingChanged) {
+  if (accountingChanged || reconciliationChanged) {
     writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
   }
-  return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
+  return {
+    changed: accountingChanged || reconciliationChanged || preparedUsage.pendingEntries.length > 0,
+    available: true,
+    reconciliation
+  };
 }
 
 function accountingFromWorkflowEvents(
@@ -2539,7 +2744,8 @@ function workflowEventsFromUsageLedger(entries: readonly UsageLedgerEntry[]): Wo
 function accountingSegmentsFromUsageLedger(
   entries: readonly UsageLedgerEntry[],
   modelPricing: ReadonlyMap<string, ModelPricing>,
-  cacheReadRatio: number | undefined
+  cacheReadRatio: number | undefined,
+  invocationUsageMissing = false
 ): AccountingSegment[] {
   const accountedEventIdentities = new Set(
     latestUsageLedgerEntriesByAttempt(entries).map((entry) => usageLedgerIdentity(entry))
@@ -2553,7 +2759,7 @@ function accountingSegmentsFromUsageLedger(
     grouped.set(key, generation);
   }
   const groups = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
-  return groups.map((generation) => {
+  const segments = groups.map((generation) => {
     const generationEntries = generation.entries;
     const accountedEntries = generationEntries.filter((entry) =>
       accountedEventIdentities.has(usageLedgerIdentity(entry))
@@ -2569,6 +2775,21 @@ function accountingSegmentsFromUsageLedger(
       }
     );
   });
+  if (invocationUsageMissing) {
+    const current = segments.at(-1);
+    if (current !== undefined) {
+      const usageIncompleteReasons = uniqueUsageCompletenessMarkers([
+        ...current.usage_incomplete_reasons,
+        { code: "invocation-usage-missing" }
+      ]);
+      segments[segments.length - 1] = {
+        ...current,
+        usage_complete: false,
+        usage_incomplete_reasons: usageIncompleteReasons
+      };
+    }
+  }
+  return segments;
 }
 
 function latestUsageLedgerEntriesByAttempt(entries: readonly UsageLedgerEntry[]): UsageLedgerEntry[] {
@@ -2889,7 +3110,14 @@ function assertAccountingMatchesUsageLedger(
   if (cacheReadRatios.length > 1) {
     throw new Error(`${label}.segments use inconsistent cache-read ratios`);
   }
-  const recomputedSegments = accountingSegmentsFromUsageLedger(entries, accounting.pricing, cacheReadRatios[0]);
+  const recomputedSegments = accountingSegmentsFromUsageLedger(
+    entries,
+    accounting.pricing,
+    cacheReadRatios[0],
+    accounting.segments.some((segment) =>
+      segment.usage_incomplete_reasons.some((reason) => reason.code === "invocation-usage-missing")
+    )
+  );
   for (const [index, recomputed] of recomputedSegments.entries()) {
     if (!isDeepStrictEqual(accounting.segments[index], recomputed)) {
       throw new Error(`${label}.segments[${index}] does not exactly match usage-ledger accounting`);
@@ -3777,7 +4005,7 @@ export function roundAccountingUsd(value: number): number {
   return Number(value.toFixed(ACCOUNTING_USD_PRECISION));
 }
 
-function uniqueReasons<T extends ComponentUsageIncompleteReason | PricingIncompleteReason>(reasons: T[]): T[] {
+function uniqueReasons<T extends { code: string; component?: UsageComponent; model?: string }>(reasons: T[]): T[] {
   const unique = new Map<string, T>();
   for (const reason of reasons) {
     unique.set(`${reason.code}:${reason.component ?? ""}:${reason.model ?? ""}`, reason);
@@ -5121,7 +5349,10 @@ function appendTerminalTaskAttempts(input: {
     // successful executor outcome into a permanent phantom failure (#352).
     if (outcome === "succeeded" && outputDigest === undefined) continue;
     if (isCurrent && ["failed", "timed-out", "canceled"].includes(outcome)) {
-      failureMessage = input.finalization.lastError ?? failureMessage;
+      failureMessage =
+        outcome === "canceled"
+          ? (failureMessage ?? input.finalization.lastError)
+          : (input.finalization.lastError ?? failureMessage);
     }
     const reuseSource =
       outcome === "reused"
@@ -5287,9 +5518,18 @@ function terminalWorkflowAttempts(
       activation += 1;
       continue;
     }
-    if (event.type !== "NodeStarted" && event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
+    if (
+      event.type !== "NodeStarted" &&
+      event.type !== "NodeFinished" &&
+      event.type !== "NodeFailed" &&
+      event.type !== "NodeCancelled"
+    )
+      continue;
     const payload = event.payload;
     const nodeId = requiredWorkflowEventString(payload.nodeId, `${event.type} nodeId`);
+    // A canceled node can have no acquired attempt. It remains lifecycle
+    // evidence, but cannot be represented as a canonical invocation.
+    if (event.type === "NodeCancelled" && (payload.attempt === undefined || payload.attempt === null)) continue;
     const retry = requiredWorkflowEventCount(payload.attempt, `${event.type} attempt`);
     const iteration = requiredWorkflowEventCount(payload.iteration, `${event.type} iteration`);
     const identity = JSON.stringify([nodeId, iteration, retry]);
@@ -5686,6 +5926,14 @@ function terminalOutcomeForEvent(event: WorkflowEvent):
       return errorLooksLikeTimeout(event.payload.error)
         ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
         : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
+    }
+    case "NodeCancelled": {
+      const reason = typeof event.payload.reason === "string" ? event.payload.reason : undefined;
+      return {
+        outcome: "canceled",
+        failureCategory: "canceled",
+        ...(reason === undefined || reason.length === 0 ? {} : { failureMessage: reason })
+      };
     }
     default:
       return undefined;
@@ -6321,7 +6569,9 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
     runState: current.runState,
     steps: current.nodes.map((node) => ({ id: node.nodeId, state: node.state, attempt: node.attempt })),
     failedWorkflowTaskIds: [...failedWorkflowTaskIds].sort(),
-    exhaustedLoops: current.exhaustedLoops
+    exhaustedLoops: current.exhaustedLoops,
+    schedulerInvocationCount: current.schedulerInvocationCount,
+    adapterUsageSessionCount: current.adapterUsageSessionCount
   };
 }
 
@@ -6434,6 +6684,12 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
     requiredWorkflowEventCount(payload.attempt, `${label} attempt`);
+  } else if (type === "NodeCancelled") {
+    requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
+    requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
+    if (payload.attempt !== undefined && payload.attempt !== null) {
+      requiredWorkflowEventCount(payload.attempt, `${label} attempt`);
+    }
   } else if (type === "NodeSkipped") {
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
@@ -6754,15 +7010,28 @@ function requiredStoredStringArray(value: unknown, label: string, options: { sor
 }
 
 function storedUsageCompletenessMarkers(value: unknown, label: string): UsageCompletenessMarker[] {
-  return storedCompletenessMarkers(
-    value,
-    label,
-    new Set<ComponentUsageIncompleteReason["code"]>([
-      "component-usage-unavailable",
-      "component-usage-estimated",
-      "component-breakdown-incomplete"
-    ])
-  );
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const markers = value.map((entry, index): UsageCompletenessMarker => {
+    const markerLabel = `${label}[${String(index)}]`;
+    if (isRecord(entry) && entry.code === "invocation-usage-missing") {
+      exactStoredRecord(entry, markerLabel, ["code"], []);
+      return { code: "invocation-usage-missing" };
+    }
+    const [marker] = storedCompletenessMarkers(
+      [entry],
+      markerLabel,
+      new Set<ComponentUsageIncompleteReason["code"]>([
+        "component-usage-unavailable",
+        "component-usage-estimated",
+        "component-breakdown-incomplete"
+      ])
+    );
+    if (marker === undefined) throw new Error(`${markerLabel} is missing`);
+    return marker;
+  });
+  const canonical = uniqueUsageCompletenessMarkers(markers);
+  if (!sameJsonValue(markers, canonical)) throw new Error(`${label} must be unique and sorted canonically`);
+  return markers;
 }
 
 function storedPricingCompletenessMarkers(value: unknown, label: string): PricingCompletenessMarker[] {

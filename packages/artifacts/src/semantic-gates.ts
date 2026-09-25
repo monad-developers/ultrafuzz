@@ -7373,7 +7373,12 @@ function attemptSourceEventJoinIssues(document: unknown, context: SemanticGateCo
   }
   const outcome = stringField(document, "outcome");
   const failureCategory = stringField(document, "failure_category");
-  const expectedTerminal = outcome === "succeeded" || outcome === "reused" ? "NodeFinished" : "NodeFailed";
+  const expectedTerminal =
+    outcome === "succeeded" || outcome === "reused"
+      ? "NodeFinished"
+      : outcome === "canceled"
+        ? "NodeCancelled"
+        : "NodeFailed";
   const hostValidationDisposition =
     outcome === "failed" &&
     (failureCategory === "artifact-validation" || failureCategory === "invalid-output") &&
