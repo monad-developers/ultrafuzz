@@ -60,8 +60,8 @@ function claudeAuthOptions(): ClaudeAuthOptions {
   }
   if (auth === "subscription") {
     // ClaudeCodeAgent clears ANTHROPIC_API_KEY itself so the logged-in
-    // Claude subscription (`claude -p`) is used; we only forward an
-    // isolated config directory when one is configured.
+    // Claude subscription (`claude -p`) is used. configDir is always forwarded;
+    // resolveProviderHome falls back to $CLAUDE_CONFIG_DIR, then ~/.claude.
     return { configDir };
   }
   throw new Error(`unsupported ClaudeAgent auth mode in ultrafuzz.toml: ${auth}`);
