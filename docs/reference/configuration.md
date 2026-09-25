@@ -122,7 +122,7 @@ empty path components, and dot components fail validation.
 | `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
 | `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
 | `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
-| `workflow_deadline_seconds` | integer | Maximum workflow wall time before the next synchronization cancels it.      |
+| `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).    |
 | `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
 
 Other workspace modes are outside the product contract.
@@ -136,6 +136,19 @@ limit fails the run instead of silently dropping items. The selected value is
 part of the durable expansion contract, so changing it requires a new or
 explicitly incompatible run rather than changing an existing expansion on
 resume.
+
+`workflow_deadline_seconds` is not a guaranteed wall-clock limit. The deadline
+is measured from workflow submission and recorded as `workflow_deadline_at` in
+run state, but nothing enforces it on a timer. It is checked only when a
+command synchronizes the run: `ultrafuzz run` once at launch, then `ultrafuzz
+status`, `inspect`, `why`, and `stats`. The first synchronization after the
+deadline cancels the workflow, marks the run `timed-out`, and appends a
+`workflow-deadline-exceeded` event. Until then an unattended run keeps
+executing, and keeps incurring provider cost, past its deadline. To bound an
+unattended run, run `ultrafuzz status <run-id>` periodically (for example from
+cron) or cancel it with `ultrafuzz cancel <run-id>`. Workflow-side enforcement
+is tracked in [#1110](https://github.com/monad-developers/ultrafuzz/issues/1110).
+
 Successful runs remove their generated workspaces by default. Setting
 `keep_workspaces = true` retains them; dirty or unpushed workspaces are always
 preserved by the workflow runner.
