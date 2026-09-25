@@ -289,6 +289,11 @@ test("explicit source retry archives a complete expansion generation and rejects
   const verificationRoot = path.join(fixture.runRoot, ".ultrafuzz-verification");
   fs.mkdirSync(verificationRoot);
   fs.writeFileSync(path.join(verificationRoot, `${attemptId}.json`), '{"verified":true}\n', "utf8");
+  // The immutable generation a marker points at is attempt-owned too: leaving it
+  // behind would let a withdrawn generation's bytes outlive its own pointer.
+  const generationRoot = path.join(fixture.runRoot, ".ultrafuzz-artifact-generations", attemptId);
+  fs.mkdirSync(generationRoot, { recursive: true });
+  fs.writeFileSync(path.join(generationRoot, "retained.txt"), "generation result\n", "utf8");
   const manifestDir = path.join(fixture.runRoot, "dynamic-expansions");
   const retry = { projectRoot: fixture.runRoot, runRoot: fixture.runRoot };
 
@@ -305,6 +310,7 @@ test("explicit source retry archives a complete expansion generation and rejects
   assert.deepEqual(archived.pruned_state_node_ids, []);
   assert.deepEqual(fs.readdirSync(manifestDir), []);
   assert.deepEqual(fs.readdirSync(archived.archive_path).sort(), [
+    ".ultrafuzz-artifact-generations",
     ".ultrafuzz-verification",
     "artifacts",
     "invariant-suite-workspace-snapshots",
@@ -315,11 +321,11 @@ test("explicit source retry archives a complete expansion generation and rejects
     "fanout.json",
     "second.json"
   ]);
-  for (const root of ["artifacts", "invariant-suite-workspace-snapshots"]) {
+  for (const root of ["artifacts", "invariant-suite-workspace-snapshots", ".ultrafuzz-artifact-generations"]) {
     assert.equal(fs.existsSync(path.join(fixture.runRoot, root, attemptId)), false);
     assert.equal(
       fs.readFileSync(path.join(archived.archive_path, root, attemptId, "retained.txt"), "utf8"),
-      `${root} result\n`
+      root === ".ultrafuzz-artifact-generations" ? "generation result\n" : `${root} result\n`
     );
   }
   // A durable worktree stays where Smithers registered it.
@@ -341,6 +347,7 @@ test("explicit source retry archives a complete expansion generation and rejects
   assert.deepEqual(record.group_node_ids, ["fanout", "second"]);
   const archiveRelative = path.relative(fixture.runRoot, archived.archive_path);
   assert.deepEqual(record.archived_attempt_paths, [
+    `${archiveRelative}/.ultrafuzz-artifact-generations/${attemptId}`,
     `${archiveRelative}/.ultrafuzz-verification/${attemptId}.json`,
     `${archiveRelative}/artifacts/${attemptId}`,
     `${archiveRelative}/invariant-suite-workspace-snapshots/${attemptId}`

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -15,10 +15,12 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   assertArtifactPublicationsContainNoSecrets,
+  assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
   assertRunMetadataDocument,
   executeSemanticGate,
   executeSchemaSemanticGates,
+  fsyncDirectory,
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -38,6 +40,7 @@ import {
   sensitiveEnvironmentValues,
   validateArtifactContract,
   validateArtifactContractBytes,
+  validateArtifactVerificationMarker,
   validatePropertiesSchema,
   writeFileDurable,
   type ArtifactContractId,
@@ -2045,7 +2048,7 @@ function loadVerifyArtifactsHarness(
     "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES",
     "MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES",
     "assertSafeVerifiedPublicationPath",
-    "clearArtifactVerificationMarker",
+    "retainVerifiedArtifactGenerationPointer",
     "decodeStrictUtf8Snapshot",
     "artifactContractDefinition",
     "parseStrictJsonSnapshot",
@@ -2201,7 +2204,10 @@ function loadArtifactVerificationMarkerWriter(
     "validateArtifactVerificationMarker",
     "assertArtifactVerificationMarkerSemantics",
     "Buffer",
-    "publishFileDurableExclusive",
+    "publishImmutableArtifactGeneration",
+    "existsSync",
+    "lstatSync",
+    "writeFileDurable",
     "ARTIFACT_VERIFICATION_SCHEMA_VERSION",
     "MAX_ARTIFACT_VERIFICATION_MARKER_BYTES",
     "admittedDependencyArtifactDirs",
@@ -2221,7 +2227,10 @@ function loadArtifactVerificationMarkerWriter(
     () => ({ ok: true, issues: [] }),
     () => undefined,
     Buffer,
-    publishFileDurableExclusive,
+    () => root,
+    fs.existsSync,
+    fs.lstatSync,
+    writeFileDurable,
     "ultrafuzz.artifact-verification.v2",
     64 * 1024 * 1024,
     () => [path.join(root, "artifacts", "required-ancestor")],
@@ -2759,6 +2768,278 @@ test("generated verifier returns the exact durable verification-marker byte auth
     assert.notEqual(createHash("sha256").update(rewritten).digest("hex"), authority.marker_sha256);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated verifier publishes an immutable generation before moving the current marker", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const generationStart = source.indexOf("function publishImmutableArtifactGeneration");
+  const writerStart = source.indexOf("function writeArtifactVerificationMarker", generationStart);
+  const writerEnd = source.indexOf("\n\nfunction verifyGeneratedTestFiles", writerStart);
+  assert.ok(generationStart >= 0 && writerStart > generationStart && writerEnd > writerStart, source);
+  const generation = source.slice(generationStart, writerStart);
+  const writer = source.slice(writerStart, writerEnd);
+
+  assert.match(generation, /ARTIFACT_GENERATION_DIRECTORY/u);
+  assert.match(generation, /path\.resolve\(attemptRoot, markerSha256\)/u);
+  assert.match(generation, /publishFileDurableExclusive\(stagingRoot, "verification-marker\.json", marker\)/u);
+  assert.match(generation, /renameSync\(stagingRoot, generationRoot\)/u);
+  assert.match(generation, /assertExistingGeneration\(\)/u);
+  assert.ok(
+    writer.indexOf("publishImmutableArtifactGeneration(task, marker, publications)") <
+      writer.indexOf("writeFileDurable(location.path, marker)"),
+    writer
+  );
+  assert.doesNotMatch(source, /clearArtifactVerificationMarker/u);
+  // Both verifier entry points have to re-establish pointer hygiene now that the
+  // unconditional clear is gone, or a failed attempt could leave a marker this
+  // verifier never published.
+  assert.equal(source.match(/retainVerifiedArtifactGenerationPointer\(task\)/gu)?.length, 2);
+});
+
+function loadImmutableArtifactGenerationHelpers(): {
+  publishImmutableArtifactGeneration: (
+    task: { attemptId: string; runRoot: string; metadata: { node: { logicalNodeId: string } } },
+    marker: Buffer,
+    publications: ReadonlyMap<string, Buffer>
+  ) => string;
+  verifiedArtifactGenerationIsDurable: (
+    task: { attemptId: string; runRoot: string; metadata: { node: { logicalNodeId: string } } },
+    marker: Buffer,
+    expectedPublications?: ReadonlyMap<string, string>
+  ) => boolean;
+  retainVerifiedArtifactGenerationPointer: (task: {
+    attemptId: string;
+    runRoot: string;
+    metadata: { node: { logicalNodeId: string } };
+  }) => void;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function publishImmutableArtifactGeneration");
+  const end = source.indexOf("\n\nfunction writeArtifactVerificationMarker", start);
+  assert.ok(start >= 0 && end > start, source);
+  const emitted = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "createHash",
+    "randomUUID",
+    "Buffer",
+    "existsSync",
+    "lstatSync",
+    "mkdirSync",
+    "readdirSync",
+    "realpathSync",
+    "renameSync",
+    "rmSync",
+    "isStrictlyInsideDirectory",
+    "isMissingPathError",
+    "assertSafeVerifiedPublicationPath",
+    "publishFileDurableExclusive",
+    "fsyncDirectory",
+    "readBoundedRegularArtifactSnapshot",
+    "parseStrictJsonSnapshot",
+    "validateArtifactVerificationMarker",
+    "assertArtifactVerificationMarkerSemantics",
+    "artifactVerificationMarkerLocation",
+    "ARTIFACT_GENERATION_DIRECTORY",
+    "ARTIFACT_GENERATION_SCHEMA_VERSION",
+    "ARTIFACT_VERIFICATION_SCHEMA_VERSION",
+    "MAX_ARTIFACT_VERIFICATION_MARKER_BYTES",
+    "MAX_VERIFIED_ARTIFACT_BYTES",
+    "MAX_PRE_AGENT_EVIDENCE_BYTES",
+    "MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES",
+    "MAX_GENERATED_TEST_BUNDLE_ENTRIES",
+    `${emitted}; return { publishImmutableArtifactGeneration, verifiedArtifactGenerationIsDurable, retainVerifiedArtifactGenerationPointer };`
+  )(
+    path,
+    createHash,
+    randomUUID,
+    Buffer,
+    fs.existsSync,
+    fs.lstatSync,
+    fs.mkdirSync,
+    fs.readdirSync,
+    fs.realpathSync,
+    fs.renameSync,
+    fs.rmSync,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (error: unknown) => (error as { code?: string } | null)?.code === "ENOENT",
+    (relativePath: string) => {
+      assert.equal(path.posix.normalize(relativePath), relativePath);
+      assert.equal(path.posix.isAbsolute(relativePath), false);
+    },
+    publishFileDurableExclusive,
+    fsyncDirectory,
+    (root: string, candidate: string, failureMessage: string, maxBytes: number, requireNonEmpty = false) => {
+      if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) throw new Error(failureMessage);
+      const stat = fs.lstatSync(candidate);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error(failureMessage);
+      if (stat.size > maxBytes) throw new Error(`${failureMessage}: file exceeds the ${maxBytes}-byte limit`);
+      const bytes = fs.readFileSync(candidate);
+      if (requireNonEmpty && bytes.length === 0) throw new Error(`${failureMessage}: file is empty`);
+      return { path: candidate, bytes };
+    },
+    (snapshot: { bytes: Buffer }) => JSON.parse(snapshot.bytes.toString("utf8")) as unknown,
+    validateArtifactVerificationMarker,
+    assertArtifactVerificationMarkerSemantics,
+    (runRoot: string, attemptId: string, createRoot: boolean) => {
+      const root = path.join(fs.realpathSync(runRoot), ".ultrafuzz-verification");
+      if (createRoot) fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+      if (!fs.existsSync(root)) return undefined;
+      return { root, path: path.join(root, `${attemptId}.json`), relativePath: `${attemptId}.json` };
+    },
+    ".ultrafuzz-artifact-generations",
+    "ultrafuzz.artifact-generation.v1",
+    "ultrafuzz.artifact-verification.v2",
+    64 * 1024 * 1024,
+    64 * 1024 * 1024,
+    128 * 1024 * 1024,
+    4_096,
+    1_024
+  ) as ReturnType<typeof loadImmutableArtifactGenerationHelpers>;
+}
+
+test("a verification-marker pointer outlives a failed replacement only while its generation does", () => {
+  const runRoot = fs.realpathSync(temporaryRoot("ultrafuzz-artifact-generation-"));
+  try {
+    const {
+      publishImmutableArtifactGeneration,
+      verifiedArtifactGenerationIsDurable,
+      retainVerifiedArtifactGenerationPointer
+    } = loadImmutableArtifactGenerationHelpers();
+    const task = {
+      attemptId: "producer-one",
+      runRoot,
+      metadata: { node: { logicalNodeId: "producer-node" } }
+    };
+    // An empty publication is legal, so the generation must round-trip one.
+    const publications = new Map([
+      ["result.json", Buffer.from('{"ok":true}\n', "utf8")],
+      ["nested/companion.txt", Buffer.alloc(0)]
+    ]);
+    const publicationDigests = new Map(
+      [...publications].map(([relativePath, bytes]) => [relativePath, createHash("sha256").update(bytes).digest("hex")])
+    );
+    const marker = Buffer.from(
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.artifact-verification.v2",
+        attempt_id: task.attemptId,
+        node_id: task.metadata.node.logicalNodeId,
+        artifacts: [
+          {
+            path: "result.json",
+            contract: "ultrafuzz/text@1",
+            contract_digest: artifactContractDefinition("ultrafuzz/text@1").digest,
+            sha256: publicationDigests.get("result.json"),
+            primary: true
+          }
+        ],
+        publications: [...publicationDigests].map(([relativePath, sha256]) => ({ path: relativePath, sha256 }))
+      })}\n`,
+      "utf8"
+    );
+    const generationRoot = publishImmutableArtifactGeneration(task, marker, publications);
+    // Re-publishing an identical generation is a durable no-op, not a conflict.
+    assert.equal(publishImmutableArtifactGeneration(task, marker, publications), generationRoot);
+
+    const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
+    fs.mkdirSync(markerRoot, { recursive: true, mode: 0o700 });
+    const markerPath = path.join(markerRoot, `${task.attemptId}.json`);
+    fs.writeFileSync(markerPath, marker);
+
+    // #1142: a replacement attempt that fails must not withdraw the authority an
+    // already admitted consumer depends on.
+    retainVerifiedArtifactGenerationPointer(task);
+    assert.equal(fs.existsSync(markerPath), true);
+
+    // Moving the mutable current pointer to replacement B must not revoke the
+    // immutable generation A already admitted by a consumer.
+    const replacementPublications = new Map([
+      ["result.json", Buffer.from('{"ok":"replacement"}\n', "utf8")],
+      ["nested/companion.txt", Buffer.from("replacement\n", "utf8")]
+    ]);
+    const replacementDigests = new Map(
+      [...replacementPublications].map(([relativePath, bytes]) => [
+        relativePath,
+        createHash("sha256").update(bytes).digest("hex")
+      ])
+    );
+    const replacementMarker = Buffer.from(
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.artifact-verification.v2",
+        attempt_id: task.attemptId,
+        node_id: task.metadata.node.logicalNodeId,
+        artifacts: [
+          {
+            path: "result.json",
+            contract: "ultrafuzz/text@1",
+            contract_digest: artifactContractDefinition("ultrafuzz/text@1").digest,
+            sha256: replacementDigests.get("result.json"),
+            primary: true
+          }
+        ],
+        publications: [...replacementDigests].map(([relativePath, sha256]) => ({ path: relativePath, sha256 }))
+      })}\n`,
+      "utf8"
+    );
+    const replacementGenerationRoot = publishImmutableArtifactGeneration(
+      task,
+      replacementMarker,
+      replacementPublications
+    );
+    fs.writeFileSync(markerPath, replacementMarker);
+    assert.equal(verifiedArtifactGenerationIsDurable(task, marker, publicationDigests), true);
+    assert.equal(verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests), true);
+
+    const replacementAuthorityPath = path.join(replacementGenerationRoot, "authority.json");
+    const replacementAuthorityBytes = fs.readFileSync(replacementAuthorityPath);
+    const replacementAuthority = JSON.parse(replacementAuthorityBytes.toString("utf8")) as {
+      publications: Array<{ path: string; sha256: string; size_bytes: number }>;
+    };
+    const firstReplacementPublication = replacementAuthority.publications[0];
+    assert.ok(firstReplacementPublication);
+    replacementAuthority.publications.push({ ...firstReplacementPublication });
+    fs.writeFileSync(replacementAuthorityPath, `${JSON.stringify(replacementAuthority)}\n`);
+    assert.equal(
+      verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests),
+      false,
+      "duplicate authority publications must not extend marker authority"
+    );
+    fs.writeFileSync(replacementAuthorityPath, replacementAuthorityBytes);
+    fs.writeFileSync(path.join(replacementGenerationRoot, "unlisted.txt"), "unlisted\n");
+    assert.equal(
+      verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests),
+      false,
+      "the immutable generation file set must exactly match its marker"
+    );
+    fs.rmSync(path.join(replacementGenerationRoot, "unlisted.txt"));
+    fs.mkdirSync(path.join(replacementGenerationRoot, "empty-unlisted-directory"));
+    assert.equal(
+      verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests),
+      false,
+      "unlisted directories must not extend the immutable generation"
+    );
+    fs.rmSync(path.join(replacementGenerationRoot, "empty-unlisted-directory"), { recursive: true });
+    assert.equal(verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests), true);
+
+    // A pointer no immutable generation backs is a pre-created sidecar, not an
+    // authority, and is discarded before any gate runs.
+    fs.writeFileSync(markerPath, `${JSON.stringify({ attempt_id: task.attemptId, planted: true })}\n`);
+    retainVerifiedArtifactGenerationPointer(task);
+    assert.equal(fs.existsSync(markerPath), false);
+
+    // So is a pointer whose generation stopped matching its own authority.
+    fs.writeFileSync(markerPath, marker);
+    fs.writeFileSync(path.join(generationRoot, "artifacts", "result.json"), '{"ok":false}\n');
+    assert.equal(verifiedArtifactGenerationIsDurable(task, marker, publicationDigests), false);
+    assert.equal(verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests), true);
+    assert.equal(fs.existsSync(replacementGenerationRoot), true);
+    retainVerifiedArtifactGenerationPointer(task);
+    assert.equal(fs.existsSync(markerPath), false);
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
   }
 });
 
@@ -6260,11 +6541,18 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
       return { producer, consumer, taskSpecs: [producer, consumer] };
     };
     const loadRenderModule = (taskSpecs: ReturnType<typeof makeTaskSpecs>["taskSpecs"]) => {
-      const counters = { authentications: 0, preparations: 0, replaceArtifact: false };
+      const counters = {
+        authentications: 0,
+        preparations: 0,
+        replaceArtifact: false,
+        generationChecks: 0,
+        generationTampered: false
+      };
       const factoryAddDirs: string[][] = [];
       const module = new Function(
         "path",
         "Buffer",
+        "createHash",
         "isDeepStrictEqual",
         "taskSpecs",
         "counters",
@@ -6276,6 +6564,8 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "realpathSync",
         "isStrictlyInsideDirectory",
         "assertVerifiedDependency",
+        "verifiedArtifactGenerationPaths",
+        "verifiedArtifactGenerationIsDurable",
         "sameImmutableFileIdentity",
         "agentFactories",
         "assertGovernedWorkspaceSource",
@@ -6295,6 +6585,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
       )(
         path,
         Buffer,
+        createHash,
         isDeepStrictEqual,
         taskSpecs,
         counters,
@@ -6321,6 +6612,12 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
           return {
             attemptId: producerAttemptId,
             artifactDir,
+            generationRoot: path.join(
+              runRoot,
+              ".ultrafuzz-artifact-generations",
+              producerAttemptId,
+              createHash("sha256").update(markerBytes).digest("hex")
+            ),
             marker: {
               path: path.join(runRoot, ".ultrafuzz-verification", `${producerAttemptId}.json`),
               bytes: markerBytes,
@@ -6341,6 +6638,13 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
             publications: new Map([["result.json", createHash("sha256").update(currentArtifactBytes).digest("hex")]]),
             generatedTestBundles: []
           };
+        },
+        (task: { attemptId: string }, markerSha256: string) => ({
+          generationRoot: path.join(runRoot, ".ultrafuzz-artifact-generations", task.attemptId, markerSha256)
+        }),
+        () => {
+          counters.generationChecks += 1;
+          return !counters.generationTampered;
         },
         (left: unknown, right: unknown) => isDeepStrictEqual(left, right),
         {
@@ -6394,18 +6698,24 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
     assert.ok(rehydratedAgent.preflight);
     await rehydratedAgent.preflight({});
     assert.equal(firstRender.counters.preparations, 1, "an ordinary rerender must not replace the prepared epoch");
-    assert.ok(firstRender.counters.authentications >= 2, "preflight must recheck the admitted snapshot");
+    assert.equal(firstRender.counters.authentications, 1, "preflight must retain the authenticated admission snapshot");
+    assert.ok(firstRender.counters.generationChecks >= 1, "preflight must recheck the admitted immutable generation");
     assert.deepEqual(firstRender.factoryAddDirs, [[consumerDir], [consumerDir, producerDir]]);
 
     firstRender.counters.replaceArtifact = true;
     const replacementCheck = firstRender.module.agent(reconciledConsumer!);
     assert.ok(replacementCheck.preflight);
-    await assert.rejects(
-      replacementCheck.preflight({}),
-      /dependency artifact changed after admission dependency-producer/u
+    await replacementCheck.preflight({});
+    assert.equal(
+      firstRender.counters.authentications,
+      1,
+      "a mutable replacement must not supersede the immutable admitted generation"
     );
+    firstRender.counters.generationTampered = true;
+    await assert.rejects(replacementCheck.preflight({}), /admitted dependency generation changed dependency-producer/u);
     assert.equal(firstRender.counters.preparations, 1, "replacement detection must retain the original epoch");
     firstRender.counters.replaceArtifact = false;
+    firstRender.counters.generationTampered = false;
 
     const changedTasks = makeTaskSpecs();
     changedTasks.consumer.runRoot = path.join(runRoot, "changed-run-root");
@@ -6429,7 +6739,8 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
     await agent.preflight({});
 
     assert.equal(freshRender.counters.preparations, 1);
-    assert.ok(freshRender.counters.authentications >= 2, "admission and currentness must both authenticate");
+    assert.equal(freshRender.counters.authentications, 1, "a fresh module must authenticate before admission");
+    assert.ok(freshRender.counters.generationChecks >= 1, "currentness must recheck the admitted immutable generation");
     assert.deepEqual(freshRender.factoryAddDirs, [[consumerDir], [consumerDir, producerDir]]);
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });
@@ -6446,8 +6757,13 @@ test("generated verifiers require the runtime-owned process marker before publis
 
   assert.match(finalizer, /agentProcess: z\.infer<typeof agentProcessOutput> \| undefined/u);
   assert.match(finalizer, /agentProcessOutput\.safeParse\(agentProcess\)\.success/u);
+  assert.doesNotMatch(finalizer, /clearArtifactVerificationMarker/u);
+  // A failed or killed process must not leave a publishable marker behind, so
+  // pointer hygiene has to be re-established before the success check returns.
   assert.ok(
-    finalizer.indexOf("clearArtifactVerificationMarker(task)") < finalizer.indexOf("agentProcessOutput.safeParse")
+    finalizer.indexOf("retainVerifiedArtifactGenerationPointer(task)") <
+      finalizer.indexOf("agentProcessOutput.safeParse"),
+    finalizer
   );
   assert.ok(finalizer.indexOf("agentProcessOutput.safeParse") < finalizer.indexOf("prepareArtifactMirror(task"));
   assert.equal(workflow.match(/needs=\{\{ agent: task\.id \}\}/gu)?.length, 2);
@@ -6492,6 +6808,9 @@ test("generated dependency admission retains one exact snapshot epoch and never 
     return {
       attemptId: producer.attemptId,
       artifactDir: producerDir,
+      generationRoot: `/run/.ultrafuzz-artifact-generations/${producer.attemptId}/${createHash("sha256")
+        .update(`valid-marker-${generation}\n`)
+        .digest("hex")}`,
       marker: {
         path: "/run/.ultrafuzz-verification/patch-producer.json",
         bytes: Buffer.from(`valid-marker-${generation}\n`, "utf8"),
@@ -6533,6 +6852,7 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   const applied: string[] = [];
   const validated: string[] = [];
   const preparationTrees = new Map<string, string>();
+  const generationState = { durable: true };
   const harness = new Function(
     "createHash",
     "writeWorkspacePreparationAuthority",
@@ -6541,6 +6861,8 @@ test("generated dependency admission retains one exact snapshot epoch and never 
     "artifactVerificationMarkerLocation",
     "pathEntryExists",
     "assertVerifiedDependency",
+    "verifiedArtifactGenerationPaths",
+    "verifiedArtifactGenerationIsDurable",
     "sameImmutableFileIdentity",
     "readWorkspacePatchPreparation",
     "workspacePatchPreparationTrees",
@@ -6573,6 +6895,14 @@ test("generated dependency admission retains one exact snapshot epoch and never 
     () => undefined,
     () => false,
     () => current,
+    (task: { attemptId: string }, markerSha256: string) => ({
+      generationRoot: `/run/.ultrafuzz-artifact-generations/${task.attemptId}/${markerSha256}`
+    }),
+    (_task: unknown, marker: Buffer, expectedPublications: ReadonlyMap<string, string> | undefined) =>
+      generationState.durable &&
+      marker.equals(admittedA.marker.bytes) &&
+      expectedPublications !== undefined &&
+      isDeepStrictEqual([...expectedPublications], [...admittedA.publications]),
     (left: Record<string, bigint>, right: Record<string, bigint>) =>
       left.dev === right.dev &&
       left.ino === right.ino &&
@@ -6606,34 +6936,15 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   current = snapshot("B", 9_007_199_254_741_100n);
   validated.length = 0;
   applied.length = 0;
-  assert.throws(
-    () => harness.hydrate(consumer, "/workspace", true, "create"),
-    /dependency authority changed after admission patch-producer/u
-  );
-  assert.deepEqual(validated, [], "replacement B must fail before patch validation or hydration");
-  assert.deepEqual(applied, [], "replacement B must never be applied");
+  harness.hydrate(consumer, "/workspace", true, "create");
+  assert.deepEqual(validated, ["valid-patch-A\n"], "replacement B must not revoke admitted generation A");
+  assert.deepEqual(applied, ["valid-patch-A\n"], "hydration must continue from admitted generation A");
 
-  current = {
-    ...admittedA,
-    marker: { ...admittedA.marker, identity: identity(9_007_199_254_741_200n) }
-  };
+  generationState.durable = false;
   assert.throws(
     () => harness.current(consumer),
-    /dependency authority changed after admission patch-producer/u,
-    "an identical-byte marker replacement must not inherit the admitted identity"
-  );
-
-  current = {
-    ...admittedA,
-    artifacts: new Map(admittedA.artifacts).set("workspace.patch", {
-      ...admittedA.artifacts.get("workspace.patch")!,
-      identity: identity(9_007_199_254_741_300n)
-    })
-  };
-  assert.throws(
-    () => harness.current(consumer),
-    /dependency artifact changed after admission patch-producer\/workspace\.patch/u,
-    "an identical-byte selected-output replacement must fail before model access"
+    /admitted dependency generation changed patch-producer/u,
+    "tampering with admitted generation A must fail closed"
   );
 
   const hydration = source.slice(hydrationStart, hydrationEnd);
@@ -9814,7 +10125,13 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /verifiedDependencySnapshot\(task, dependency, producer\)/u);
   assert.match(source, /artifacts: authenticatedArtifacts/u);
   assert.match(source, /marker:\s*Object\.freeze\(\{[\s\S]*?bytes: Buffer\.from\(markerSnapshot\.bytes\)/u);
-  assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
+  assert.doesNotMatch(verifier, /clearArtifactVerificationMarker/u);
+  // Pointer hygiene runs before the gates, and the marker it may leave behind is
+  // only ever one this verifier published and an immutable generation backs.
+  assert.ok(
+    verifier.indexOf("retainVerifiedArtifactGenerationPointer(task)") < verifier.indexOf("const artifactRoots"),
+    verifier
+  );
   assert.match(verifier, /beginVerifiedDependencySnapshotEpoch\(task\)/u);
   assert.match(verifier, /assertVerifiedDependencySnapshotEpochRemainedCurrent\(task, dependencySnapshotEpoch\)/u);
   assert.match(verifier, /endVerifiedDependencySnapshotEpoch\(task, dependencySnapshotEpoch\)/u);
@@ -9828,9 +10145,9 @@ test("generated Smithers preparation requires a successful dependency artifact v
     /rememberExpectedInvariantSuitePublications\(dependencyTask, dependency, expectedPublicationShas\)/u
   );
   assert.match(source, /files: manifestFiles/u);
-  assert.notEqual(verifier.indexOf("clearArtifactVerificationMarker(task)"), -1, verifier);
   assert.ok(
-    verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("const artifactRoots"),
+    source.indexOf("publishImmutableArtifactGeneration(task, marker, publications)") <
+      source.indexOf("writeFileDurable(location.path, marker)"),
     verifier
   );
   assert.ok(
@@ -9934,6 +10251,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     "invariantSuiteNodeIds",
     "verifyGeneratedTestFiles",
     "rememberExpectedInvariantSuitePublications",
+    "publishImmutableArtifactGeneration",
     `const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
    const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
    ${helper}; return assertVerifiedDependency;`
@@ -9985,7 +10303,8 @@ test("generated Smithers dependency verification fails closed before descendant 
           .update(fs.readFileSync(path.join(dependencyRoot, relativePath)))
           .digest("hex")
       );
-    }
+    },
+    () => undefined
   ) as (
     task: { attemptId: string; runRoot: string },
     dependency: string,
@@ -10233,7 +10552,7 @@ test("generated Smithers dependency verification fails closed before descendant 
 test("generated Smithers verification marker root must be a canonical directory", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function artifactVerificationMarkerLocation");
-  const helperEnd = source.indexOf("\n\nfunction clearArtifactVerificationMarker", helperStart);
+  const helperEnd = source.indexOf("\n\nfunction publishImmutableArtifactGeneration", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = source

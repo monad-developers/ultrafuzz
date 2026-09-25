@@ -16231,6 +16231,56 @@ test("agent event ownership compatibility patch coalesces only an in-flight proo
   );
 });
 
+test("controller handoff compatibility fences pause and hijack terminal publication by runtime owner", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const dbClaim = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "db_owned_cancellation");
+  const engineClaim = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_owned_cancellation");
+  const currentCancellation = SMITHERS_COMPATIBILITY_PATCHES.find(
+    (patch) => patch.id === "engine_current_cancellation"
+  );
+  const pause = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_owned_pause");
+  assert.ok(dbClaim);
+  assert.ok(engineClaim);
+  assert.ok(currentCancellation);
+  assert.ok(pause);
+
+  assert.match(dbClaim.patched, /claimRunCancellationOwned\(runId, runtimeOwnerId/u);
+  assert.match(dbClaim.patched, /run_id = \? AND runtime_owner_id = \?/u);
+  assert.match(engineClaim.patched, /typeof options\.runtimeOwnerId === "string"/u);
+  assert.match(engineClaim.patched, /adapter\.claimRunCancellationOwned/u);
+  assert.match(currentCancellation.patched, /runtimeOwnerId,/u);
+  assert.match(pause.patched, /updateRunIfNotCancelledOwned\(runId, runtimeOwnerId/u);
+  assert.match(pause.patched, /return \{ runId, status: authoritative\?\.status \?\? "failed" \}/u);
+  assert.ok(
+    pause.patched.indexOf('return { runId, status: authoritative?.status ?? "failed" }') <
+      pause.patched.lastIndexOf("await Effect.runPromise("),
+    "a superseded controller must return before emitting a paused status"
+  );
+  // The owned guard also refuses a run whose cancel is already requested, so the
+  // new early return has to finalize that cancellation the way the park paths do
+  // instead of stranding the run in `running` with no heartbeat owner.
+  assert.match(pause.patched, /authoritative\?\.cancelRequestedAtMs/u);
+  assert.ok(
+    pause.patched.indexOf("authoritative?.cancelRequestedAtMs") <
+      pause.patched.indexOf("finalizeCurrentRunCancellation()"),
+    "a pending cancel request must reach cancellation finalization"
+  );
+});
+
+test("resume hydration preserves completed output and reopens dependency-blocked descendants", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const scheduler = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "terminal_state_restore");
+  const hydration = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "resume_hydration");
+  assert.ok(scheduler);
+  assert.ok(hydration);
+
+  assert.match(scheduler.patched, /task\.state !== "finished"/u);
+  assert.doesNotMatch(scheduler.patched, /task\.state !== "skipped"|state: "skipped"/u);
+  assert.match(hydration.patched, /node\.state !== "finished"/u);
+  assert.match(hydration.patched, /const hasOutput =/u);
+  assert.doesNotMatch(hydration.patched, /node\.state === "skipped"|state: "skipped"/u);
+});
+
 test("agent usage compatibility persists an owned snapshot before publishing telemetry", async () => {
   const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
   const progress = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_agent_usage_progress");
@@ -18013,12 +18063,10 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     "type"
   ]);
 
-  // 8. `terminal_state_restore` and `resume_hydration` restore a node into a
-  // resumed session only for the states upstream calls terminal unconditionally.
-  // `failed` and `stalled` both stay out: upstream makes them terminal only
-  // under `continueOnFail`, and a node Ultrafuzz means to retry must not be
-  // hydrated back as done. If upstream promotes a new state into the
-  // unconditional branch, both replacements have to learn about it.
+  // 8. `terminal_state_restore` and `resume_hydration` restore only successful
+  // nodes with durable output. A skip is a snapshot of dependency readiness in
+  // the previous activation, so restoring it would strand descendants after an
+  // upstream recovery. Failed and stalled nodes likewise remain retryable.
   // 9. `smithers why`. Ultrafuzz's parser is exact on the required set, so every
   // key `buildDiagnosis` can return must be required, and the only key the
   // command splices in afterwards (`steers`, conditional since 0.34.0) must be
@@ -18160,8 +18208,8 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     const restored = SMITHERS_NODE_STATES.filter((state) => patch.patched.includes(`"${state}"`));
     assert.deepEqual(
       [...restored].sort(),
-      [...unconditionallyTerminal].sort(),
-      `${patchId} restores a different state set than the pinned runner treats as unconditionally terminal`
+      ["finished"],
+      `${patchId} must leave dependency-blocked skips pending so resume can recompute readiness`
     );
   }
 });

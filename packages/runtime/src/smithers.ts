@@ -904,11 +904,11 @@ export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath =
       workflowPath,
       identityWorkflowPath || workflowPath,
     );`;
-// Restores exactly the two states upstream's `isTerminalState` calls terminal
-// unconditionally: `finished` and `skipped`. `failed`, `cancelled` and Smithers
-// 0.35.0's new `stalled` are deliberately NOT restored, and the omission of
-// `stalled` is the deliberate half of that rule, not an oversight from the
-// 0.35.0 bump. Upstream classes `stalled` with `failed` ("it behaves exactly
+// Restore only completed tasks. A durable `skipped` row records the dependency
+// posture from the previous activation, not an immutable result: after an
+// upstream retry succeeds the scheduler must evaluate `skipIf` again and reopen
+// that descendant. `failed`, `cancelled` and Smithers 0.35.0's new `stalled`
+// are likewise deliberately NOT restored. Upstream classes `stalled` with `failed` ("it behaves exactly
 // like `failed`, including the continueOnFail escape hatch"), and a resume's
 // whole purpose is to re-attempt what did not finish -- restoring `stalled` but
 // not `failed` would make a stalled node strictly less retryable than an
@@ -924,8 +924,8 @@ const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
       Effect.sync(() => {
         for (const task of tasks) {
-          if (task.state !== "finished" && task.state !== "skipped") continue;
-          state.states.set(stateKeyFor(task), task.state);
+          if (task.state !== "finished") continue;
+          state.states.set(stateKeyFor(task), "finished");
         }
       }),
     getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),`;
@@ -946,9 +946,6 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
           const durableOutputs = await loadOutputs(db, schema, runId);
           const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
           const terminalTaskStates = durableNodes.flatMap((node) => {
-            if (node.state === "skipped") {
-              return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
-            }
             if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
             const rows = durableOutputs[node.outputTable];
             const hasOutput =
@@ -968,6 +965,119 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
             "engine:run",
           );
         }`;
+
+// A controller that lost the durable runtime owner token must not terminalize
+// the replacement controller's run. Cancellation is also used for hijack
+// handoff, so fence the claim itself rather than relying on a heartbeat check
+// that can race ownership transfer.
+const SMITHERS_DB_OWNED_CANCELLATION_SOURCE = `  /** @returns {RunnableEffect<boolean, SmithersError>} */
+  completeRun(runId, runtimeOwnerId, finishedAtMs) {`;
+const SMITHERS_DB_OWNED_CANCELLATION_PATCH = `  /**
+   * Atomically claim terminal cancellation for one controller generation.
+   * @returns {RunnableEffect<boolean, SmithersError>}
+   */
+  claimRunCancellationOwned(runId, runtimeOwnerId, cancelledAtMs, errorJson = null, attribution = null) {
+    const attributionPatch = attribution ? runCancellationAttributionPatch(attribution) : {};
+    return this.write(\`claim owned cancellation \${runId}\`, () =>
+      this.internalStorage
+        .updateWhere(
+          "_smithers_runs",
+          {
+            status: "cancelled",
+            finishedAtMs: cancelledAtMs,
+            heartbeatAtMs: null,
+            runtimeOwnerId: null,
+            cancelRequestedAtMs: cancelledAtMs,
+            ...attributionPatch,
+            errorJson,
+          },
+          \`run_id = ? AND runtime_owner_id = ? AND status NOT IN (?, ?, ?, ?, ?)\`,
+          [runId, runtimeOwnerId, "finished", "failed", "cancelled", "canceled", "continued"],
+        )
+        .then((count) => count > 0),
+    );
+  }
+  /** @returns {RunnableEffect<boolean, SmithersError>} */
+  completeRun(runId, runtimeOwnerId, finishedAtMs) {`;
+const SMITHERS_ENGINE_OWNED_CANCELLATION_SOURCE = `      claimed = await Effect.runPromise(
+        adapter.claimRunCancellation(runId, cancelledAtMs, options.errorJson ?? null, attribution),
+      );`;
+const SMITHERS_ENGINE_OWNED_CANCELLATION_PATCH = `      claimed = await Effect.runPromise(
+        typeof options.runtimeOwnerId === "string"
+          ? adapter.claimRunCancellationOwned(
+              runId,
+              options.runtimeOwnerId,
+              cancelledAtMs,
+              options.errorJson ?? null,
+              attribution,
+            )
+          : adapter.claimRunCancellation(runId, cancelledAtMs, options.errorJson ?? null, attribution),
+      );`;
+const SMITHERS_ENGINE_CURRENT_CANCELLATION_SOURCE = `    finalizeCancelledRun(adapter, runId, {
+      eventBus,
+      ...options,
+      attribution: cancellationAttributionFromAbortSignal(runAbortController.signal),
+    });`;
+const SMITHERS_ENGINE_CURRENT_CANCELLATION_PATCH = `    finalizeCancelledRun(adapter, runId, {
+      eventBus,
+      ...options,
+      // Ultrafuzz owner-fenced controller cancellation.
+      runtimeOwnerId,
+      attribution: cancellationAttributionFromAbortSignal(runAbortController.signal),
+    });`;
+
+// Graceful pause already drains in-flight work in the driver. Fence the final
+// paused publication too: without the owner predicate a superseded controller
+// can clear the new generation's owner and report a false pause after handoff.
+const SMITHERS_ENGINE_OWNED_PAUSE_SOURCE = `      const paused = await Effect.runPromise(
+        adapter.updateRunIfNotCancelled(runId, {
+          status: "paused",
+          heartbeatAtMs: null,
+          runtimeOwnerId: null,
+          pauseRequestedAtMs: null,
+          cancelRequestedAtMs: null,
+          hijackRequestedAtMs: null,
+          hijackTarget: null,
+        }),
+      );
+      if (!paused) {
+        const authoritative = await Effect.runPromise(adapter.getRun(runId));
+        if (authoritative?.status === "cancelled" || authoritative?.status === "canceled") {
+          const cancellation = await finalizeCurrentRunCancellation();
+          await annotateRunSpan({ status: cancellation.terminalStatus ?? authoritative.status });
+          return { runId, status: cancellation.terminalStatus ?? authoritative.status };
+        }
+      }
+      await Effect.runPromise(`;
+const SMITHERS_ENGINE_OWNED_PAUSE_PATCH = `      const paused = await Effect.runPromise(
+        // Ultrafuzz owner-fenced graceful pause.
+        adapter.updateRunIfNotCancelledOwned(runId, runtimeOwnerId, {
+          status: "paused",
+          heartbeatAtMs: null,
+          runtimeOwnerId: null,
+          pauseRequestedAtMs: null,
+          cancelRequestedAtMs: null,
+          hijackRequestedAtMs: null,
+          hijackTarget: null,
+        }),
+      );
+      if (!paused) {
+        const authoritative = await Effect.runPromise(adapter.getRun(runId));
+        // The owned guard also refuses a pending cancel request, so finalize it
+        // here exactly as upstream's park paths do. A bare return would strand a
+        // cancel-requested run in \`running\` with no heartbeat owner.
+        if (
+          authoritative?.status === "cancelled" ||
+          authoritative?.status === "canceled" ||
+          authoritative?.cancelRequestedAtMs
+        ) {
+          const cancellation = await finalizeCurrentRunCancellation();
+          await annotateRunSpan({ status: cancellation.terminalStatus ?? authoritative.status });
+          return { runId, status: cancellation.terminalStatus ?? authoritative.status };
+        }
+        return { runId, status: authoritative?.status ?? "failed" };
+      }
+      await Effect.runPromise(`;
 
 // Smithers fences every agent event and stdout/stderr chunk with a durable
 // heartbeat ownership proof before accepting its callback. At high concurrency,
@@ -2437,6 +2547,10 @@ export type SmithersCompatibilityPatchId =
   | "resume_snapshot_transfer"
   | "terminal_state_restore"
   | "resume_hydration"
+  | "db_owned_cancellation"
+  | "engine_owned_cancellation"
+  | "engine_current_cancellation"
+  | "engine_owned_pause"
   | "engine_agent_event_ownership"
   | "engine_agent_usage_progress"
   | "engine_main_usage_invocation"
@@ -2575,6 +2689,38 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
     // `restoreTerminalTaskStates` would mean upstream hydrates on its own.
     upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  {
+    id: "db_owned_cancellation",
+    packageName: "@smthrs/db",
+    sourceRelativePath: "src/adapter.js",
+    patchable: SMITHERS_DB_OWNED_CANCELLATION_SOURCE,
+    patched: SMITHERS_DB_OWNED_CANCELLATION_PATCH,
+    upstreamAbsent: ["claimRunCancellationOwned"]
+  },
+  {
+    id: "engine_owned_cancellation",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_OWNED_CANCELLATION_SOURCE,
+    patched: SMITHERS_ENGINE_OWNED_CANCELLATION_PATCH,
+    upstreamAbsent: ["adapter.claimRunCancellationOwned"]
+  },
+  {
+    id: "engine_current_cancellation",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_CURRENT_CANCELLATION_SOURCE,
+    patched: SMITHERS_ENGINE_CURRENT_CANCELLATION_PATCH,
+    upstreamAbsent: ["Ultrafuzz owner-fenced controller cancellation"]
+  },
+  {
+    id: "engine_owned_pause",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_OWNED_PAUSE_SOURCE,
+    patched: SMITHERS_ENGINE_OWNED_PAUSE_PATCH,
+    upstreamAbsent: ["Ultrafuzz owner-fenced graceful pause"]
   },
   {
     id: "engine_agent_event_ownership",
@@ -7050,6 +7196,13 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "continued workflow path"
     ],
     [SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE, SMITHERS_ENGINE_RESUME_HYDRATION_PATCH, "resume hydration"],
+    [SMITHERS_ENGINE_OWNED_CANCELLATION_SOURCE, SMITHERS_ENGINE_OWNED_CANCELLATION_PATCH, "owned cancellation claim"],
+    [
+      SMITHERS_ENGINE_CURRENT_CANCELLATION_SOURCE,
+      SMITHERS_ENGINE_CURRENT_CANCELLATION_PATCH,
+      "current controller cancellation fence"
+    ],
+    [SMITHERS_ENGINE_OWNED_PAUSE_SOURCE, SMITHERS_ENGINE_OWNED_PAUSE_PATCH, "owned pause publication"],
     [
       SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_SOURCE,
       SMITHERS_ENGINE_REPORTED_COST_NORMALIZE_PATCH,
@@ -7135,15 +7288,14 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "event insert probe index"
     )
   );
-  writeFileDurable(
-    dbAdapterSource,
-    applyRequiredSmithersPatch(
-      fs.readFileSync(dbAdapterSource, "utf8"),
-      SMITHERS_DB_FENCED_USAGE_SOURCE,
-      SMITHERS_DB_FENCED_USAGE_PATCH,
-      "owned cumulative agent usage"
-    )
-  );
+  let dbAdapterContents = fs.readFileSync(dbAdapterSource, "utf8");
+  for (const [source, patched, label] of [
+    [SMITHERS_DB_OWNED_CANCELLATION_SOURCE, SMITHERS_DB_OWNED_CANCELLATION_PATCH, "owned cancellation claim"],
+    [SMITHERS_DB_FENCED_USAGE_SOURCE, SMITHERS_DB_FENCED_USAGE_PATCH, "owned cumulative agent usage"]
+  ] as const) {
+    dbAdapterContents = applyRequiredSmithersPatch(dbAdapterContents, source, patched, label);
+  }
+  writeFileDurable(dbAdapterSource, dbAdapterContents);
 }
 
 function applyRequiredSmithersPatch(
