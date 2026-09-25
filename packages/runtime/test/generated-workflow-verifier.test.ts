@@ -3013,6 +3013,13 @@ test("a verification-marker pointer outlives a failed replacement only while its
       "the immutable generation file set must exactly match its marker"
     );
     fs.rmSync(path.join(replacementGenerationRoot, "unlisted.txt"));
+    fs.mkdirSync(path.join(replacementGenerationRoot, "empty-unlisted-directory"));
+    assert.equal(
+      verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests),
+      false,
+      "unlisted directories must not extend the immutable generation"
+    );
+    fs.rmSync(path.join(replacementGenerationRoot, "empty-unlisted-directory"), { recursive: true });
     assert.equal(verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests), true);
 
     // A pointer no immutable generation backs is a pre-created sidecar, not an

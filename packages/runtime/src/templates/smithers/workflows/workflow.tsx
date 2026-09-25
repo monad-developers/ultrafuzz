@@ -10067,7 +10067,16 @@ function verifiedArtifactGenerationIsDurable(
       "verification-marker.json",
       ...[...markerPublications.keys()].map((relativePath) => `artifacts/${relativePath}`)
     ]);
+    const expectedGenerationDirectories = new Set(["artifacts"]);
+    for (const relativePath of markerPublications.keys()) {
+      let parent = path.posix.dirname(`artifacts/${relativePath}`);
+      while (parent !== ".") {
+        expectedGenerationDirectories.add(parent);
+        parent = path.posix.dirname(parent);
+      }
+    }
     const observedGenerationFiles = new Set<string>();
+    const observedGenerationDirectories = new Set<string>();
     const pendingDirectories = [generationRoot];
     let observedEntries = 0;
     while (pendingDirectories.length > 0) {
@@ -10075,17 +10084,21 @@ function verifiedArtifactGenerationIsDurable(
       if (directory === undefined) return false;
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         observedEntries += 1;
-        if (observedEntries > expectedGenerationFiles.size * 2 + 2) return false;
+        if (observedEntries > expectedGenerationFiles.size + expectedGenerationDirectories.size) return false;
         const candidate = path.join(directory, entry.name);
         const relativePath = path.relative(generationRoot, candidate).split(path.sep).join("/");
         if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) return false;
-        if (entry.isDirectory()) pendingDirectories.push(candidate);
-        else observedGenerationFiles.add(relativePath);
+        if (entry.isDirectory()) {
+          observedGenerationDirectories.add(relativePath);
+          pendingDirectories.push(candidate);
+        } else observedGenerationFiles.add(relativePath);
       }
     }
     if (
       observedGenerationFiles.size !== expectedGenerationFiles.size ||
-      [...observedGenerationFiles].some((relativePath) => !expectedGenerationFiles.has(relativePath))
+      [...observedGenerationFiles].some((relativePath) => !expectedGenerationFiles.has(relativePath)) ||
+      observedGenerationDirectories.size !== expectedGenerationDirectories.size ||
+      [...observedGenerationDirectories].some((relativePath) => !expectedGenerationDirectories.has(relativePath))
     ) {
       return false;
     }
