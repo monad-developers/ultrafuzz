@@ -2998,7 +2998,9 @@ test("a verification-marker pointer outlives a failed replacement only while its
     const replacementAuthority = JSON.parse(replacementAuthorityBytes.toString("utf8")) as {
       publications: Array<{ path: string; sha256: string; size_bytes: number }>;
     };
-    replacementAuthority.publications.push({ ...replacementAuthority.publications[0]! });
+    const firstReplacementPublication = replacementAuthority.publications[0];
+    assert.ok(firstReplacementPublication);
+    replacementAuthority.publications.push({ ...firstReplacementPublication });
     fs.writeFileSync(replacementAuthorityPath, `${JSON.stringify(replacementAuthority)}\n`);
     assert.equal(
       verifiedArtifactGenerationIsDurable(task, replacementMarker, replacementDigests),

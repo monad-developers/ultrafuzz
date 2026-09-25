@@ -9917,16 +9917,204 @@ function fsyncDirectoryTree(root: string): void {
   fsyncDirectory(root);
 }
 
-/**
- * Re-derive whether a current-generation pointer names a complete immutable
- * generation.
- *
- * This is the read side of `publishImmutableArtifactGeneration`: the pointer is
- * believed only when the generation it names exists, agrees with its own
- * authority document, and still holds every publication byte-for-byte. Anything
- * else -- a missing generation, a rewritten one, a pointer some other writer
- * left behind -- reports `false` so the caller fails closed.
- */
+function assertExactGenerationObject(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(label);
+  const observedKeys = Object.keys(value).sort().join("\u0000");
+  if (observedKeys !== [...keys].sort().join("\u0000")) throw new Error(label);
+  return value as Record<string, unknown>;
+}
+
+function samePublicationDigests(left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean {
+  if (left.size !== right.size) return false;
+  return [...left].every(([relativePath, sha256]) => right.get(relativePath) === sha256);
+}
+
+function immutableGenerationMarkerPublications(
+  task: (typeof taskSpecs)[number],
+  generationRoot: string,
+  marker: Buffer,
+  expectedPublications?: ReadonlyMap<string, string>
+): Map<string, string> {
+  const snapshot = readBoundedRegularArtifactSnapshot(
+    generationRoot,
+    path.join(generationRoot, "verification-marker.json"),
+    `artifact-contract failure: immutable artifact generation is unreadable ${task.attemptId}`,
+    MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
+    true
+  );
+  if (!snapshot.bytes.equals(marker)) throw new Error("immutable artifact generation marker changed");
+  const markerValue = parseStrictJsonSnapshot(snapshot, `immutable artifact generation marker ${task.attemptId}`);
+  const markerShape = validateArtifactVerificationMarker(markerValue);
+  if (!markerShape.ok) throw new Error("immutable artifact generation marker is invalid");
+  const markerDocument = markerValue as Parameters<typeof assertArtifactVerificationMarkerSemantics>[0];
+  assertArtifactVerificationMarkerSemantics(markerDocument);
+  if (markerDocument.schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION) {
+    throw new Error("immutable artifact generation marker version changed");
+  }
+  if (markerDocument.attempt_id !== task.attemptId) {
+    throw new Error("immutable artifact generation marker attempt changed");
+  }
+  if (markerDocument.node_id !== task.metadata.node.logicalNodeId) {
+    throw new Error("immutable artifact generation marker node changed");
+  }
+  const publicationLimit = MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES + MAX_GENERATED_TEST_BUNDLE_ENTRIES + 64;
+  if (markerDocument.publications.length === 0 || markerDocument.publications.length > publicationLimit) {
+    throw new Error("immutable artifact generation marker publication count is invalid");
+  }
+  const publications = new Map<string, string>();
+  for (const publication of markerDocument.publications) {
+    assertSafeVerifiedPublicationPath(publication.path);
+    if (publications.has(publication.path)) throw new Error("immutable artifact generation marker repeats a path");
+    if (!/^[0-9a-f]{64}$/u.test(publication.sha256)) {
+      throw new Error("immutable artifact generation marker has an invalid digest");
+    }
+    publications.set(publication.path, publication.sha256);
+  }
+  if (expectedPublications !== undefined && !samePublicationDigests(expectedPublications, publications)) {
+    throw new Error("immutable artifact generation marker differs from admitted publications");
+  }
+  return publications;
+}
+
+function immutableGenerationAuthorityPublications(
+  task: (typeof taskSpecs)[number],
+  generationRoot: string,
+  markerSha256: string,
+  markerPublications: ReadonlyMap<string, string>
+): Map<string, { sha256: string; sizeBytes: number }> {
+  const authorityValue = parseStrictJsonSnapshot(
+    readBoundedRegularArtifactSnapshot(
+      generationRoot,
+      path.join(generationRoot, "authority.json"),
+      `artifact-contract failure: immutable artifact generation authority is unreadable ${task.attemptId}`,
+      MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
+      true
+    ),
+    `immutable artifact generation authority ${task.attemptId}`
+  );
+  const authority = assertExactGenerationObject(
+    authorityValue,
+    ["attempt_id", "marker_sha256", "publications", "schema_version"],
+    "immutable artifact generation authority is invalid"
+  );
+  if (authority.schema_version !== ARTIFACT_GENERATION_SCHEMA_VERSION) {
+    throw new Error("immutable artifact generation authority version changed");
+  }
+  if (authority.attempt_id !== task.attemptId || authority.marker_sha256 !== markerSha256) {
+    throw new Error("immutable artifact generation authority identity changed");
+  }
+  if (!Array.isArray(authority.publications) || authority.publications.length !== markerPublications.size) {
+    throw new Error("immutable artifact generation authority publication count changed");
+  }
+  const publications = new Map<string, { sha256: string; sizeBytes: number }>();
+  let totalBytes = 0;
+  for (const publication of authority.publications) {
+    const entry = assertExactGenerationObject(
+      publication,
+      ["path", "sha256", "size_bytes"],
+      "immutable artifact generation authority publication is invalid"
+    );
+    if (typeof entry.path !== "string" || typeof entry.sha256 !== "string") {
+      throw new Error("immutable artifact generation authority publication identity is invalid");
+    }
+    if (!/^[0-9a-f]{64}$/u.test(entry.sha256) || !Number.isSafeInteger(entry.size_bytes)) {
+      throw new Error("immutable artifact generation authority publication bounds are invalid");
+    }
+    const sizeBytes = entry.size_bytes as number;
+    if (sizeBytes < 0 || sizeBytes > MAX_VERIFIED_ARTIFACT_BYTES) {
+      throw new Error("immutable artifact generation authority publication exceeds its file limit");
+    }
+    assertSafeVerifiedPublicationPath(entry.path);
+    if (publications.has(entry.path) || markerPublications.get(entry.path) !== entry.sha256) {
+      throw new Error("immutable artifact generation authority differs from its marker");
+    }
+    totalBytes += sizeBytes;
+    if (totalBytes > MAX_PRE_AGENT_EVIDENCE_BYTES) {
+      throw new Error("immutable artifact generation authority exceeds its aggregate limit");
+    }
+    publications.set(entry.path, { sha256: entry.sha256, sizeBytes });
+  }
+  return publications;
+}
+
+function assertImmutableGenerationPublicationBytes(
+  task: (typeof taskSpecs)[number],
+  generationRoot: string,
+  publications: ReadonlyMap<string, { sha256: string; sizeBytes: number }>
+): void {
+  const artifactsRoot = path.join(generationRoot, "artifacts");
+  for (const [relativePath, publication] of publications) {
+    const bytes = readBoundedRegularArtifactSnapshot(
+      artifactsRoot,
+      path.resolve(artifactsRoot, relativePath),
+      `artifact-contract failure: immutable artifact generation is unreadable ${task.attemptId}/${relativePath}`,
+      publication.sizeBytes
+    ).bytes;
+    if (bytes.byteLength !== publication.sizeBytes) throw new Error("immutable artifact generation size changed");
+    if (createHash("sha256").update(bytes).digest("hex") !== publication.sha256) {
+      throw new Error("immutable artifact generation digest changed");
+    }
+  }
+}
+
+function expectedImmutableGenerationEntries(publications: ReadonlyMap<string, string>): {
+  files: ReadonlySet<string>;
+  directories: ReadonlySet<string>;
+} {
+  const files = new Set(["authority.json", "verification-marker.json"]);
+  const directories = new Set(["artifacts"]);
+  for (const relativePath of publications.keys()) {
+    const artifactPath = `artifacts/${relativePath}`;
+    files.add(artifactPath);
+    let parent = path.posix.dirname(artifactPath);
+    while (parent !== ".") {
+      directories.add(parent);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  return { files, directories };
+}
+
+function assertImmutableGenerationFileSet(
+  generationRoot: string,
+  markerPublications: ReadonlyMap<string, string>
+): void {
+  const expected = expectedImmutableGenerationEntries(markerPublications);
+  const observedFiles = new Set<string>();
+  const observedDirectories = new Set<string>();
+  const pendingDirectories = [generationRoot];
+  let observedEntries = 0;
+  while (pendingDirectories.length > 0) {
+    const directory = pendingDirectories.pop();
+    if (directory === undefined) throw new Error("immutable artifact generation traversal failed");
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      observedEntries += 1;
+      if (observedEntries > expected.files.size + expected.directories.size) {
+        throw new Error("immutable artifact generation contains extra entries");
+      }
+      const candidate = path.join(directory, entry.name);
+      const relativePath = path.relative(generationRoot, candidate).split(path.sep).join("/");
+      if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) {
+        throw new Error("immutable artifact generation contains an unsafe entry");
+      }
+      if (entry.isDirectory()) {
+        observedDirectories.add(relativePath);
+        pendingDirectories.push(candidate);
+      } else observedFiles.add(relativePath);
+    }
+  }
+  if (observedFiles.size !== expected.files.size || observedDirectories.size !== expected.directories.size) {
+    throw new Error("immutable artifact generation entry count changed");
+  }
+  if ([...observedFiles].some((relativePath) => !expected.files.has(relativePath))) {
+    throw new Error("immutable artifact generation file set changed");
+  }
+  if ([...observedDirectories].some((relativePath) => !expected.directories.has(relativePath))) {
+    throw new Error("immutable artifact generation directory set changed");
+  }
+}
+
+/** Re-derive whether an exact immutable generation remains complete and authentic. */
 function verifiedArtifactGenerationIsDurable(
   task: (typeof taskSpecs)[number],
   marker: Buffer,
@@ -9936,172 +10124,22 @@ function verifiedArtifactGenerationIsDurable(
   try {
     const { generationRoot } = verifiedArtifactGenerationPaths(task, markerSha256);
     const generationStat = lstatSync(generationRoot);
-    if (
-      !generationStat.isDirectory() ||
-      generationStat.isSymbolicLink() ||
-      realpathSync(generationRoot) !== generationRoot
-    ) {
-      return false;
-    }
-    const publishedMarkerSnapshot = readBoundedRegularArtifactSnapshot(
+    if (!generationStat.isDirectory() || generationStat.isSymbolicLink()) return false;
+    if (realpathSync(generationRoot) !== generationRoot) return false;
+    const markerPublications = immutableGenerationMarkerPublications(
+      task,
       generationRoot,
-      path.join(generationRoot, "verification-marker.json"),
-      `artifact-contract failure: immutable artifact generation is unreadable ${task.attemptId}`,
-      MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
-      true
+      marker,
+      expectedPublications
     );
-    if (!publishedMarkerSnapshot.bytes.equals(marker)) return false;
-    const markerValue = parseStrictJsonSnapshot(
-      publishedMarkerSnapshot,
-      `immutable artifact generation marker ${task.attemptId}`
+    const authorityPublications = immutableGenerationAuthorityPublications(
+      task,
+      generationRoot,
+      markerSha256,
+      markerPublications
     );
-    const markerShape = validateArtifactVerificationMarker(markerValue);
-    if (!markerShape.ok) return false;
-    const markerDocument = markerValue as {
-      schema_version: string;
-      attempt_id: string;
-      node_id: string;
-      artifacts: readonly unknown[];
-      publications: readonly { path: string; sha256: string }[];
-    };
-    assertArtifactVerificationMarkerSemantics(markerDocument);
-    if (
-      markerDocument.schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
-      markerDocument.attempt_id !== task.attemptId ||
-      markerDocument.node_id !== task.metadata.node.logicalNodeId ||
-      markerDocument.publications.length === 0 ||
-      markerDocument.publications.length > MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES + MAX_GENERATED_TEST_BUNDLE_ENTRIES + 64
-    ) {
-      return false;
-    }
-    const markerPublications = new Map<string, string>();
-    for (const publication of markerDocument.publications) {
-      assertSafeVerifiedPublicationPath(publication.path);
-      if (markerPublications.has(publication.path) || !/^[0-9a-f]{64}$/u.test(publication.sha256)) return false;
-      markerPublications.set(publication.path, publication.sha256);
-    }
-    if (
-      expectedPublications !== undefined &&
-      (expectedPublications.size !== markerPublications.size ||
-        [...expectedPublications].some(([relativePath, sha256]) => markerPublications.get(relativePath) !== sha256))
-    ) {
-      return false;
-    }
-    const authorityValue = parseStrictJsonSnapshot(
-      readBoundedRegularArtifactSnapshot(
-        generationRoot,
-        path.join(generationRoot, "authority.json"),
-        `artifact-contract failure: immutable artifact generation authority is unreadable ${task.attemptId}`,
-        MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
-        true
-      ),
-      `immutable artifact generation authority ${task.attemptId}`
-    );
-    if (
-      typeof authorityValue !== "object" ||
-      authorityValue === null ||
-      Array.isArray(authorityValue) ||
-      Object.keys(authorityValue).sort().join("\u0000") !==
-        ["attempt_id", "marker_sha256", "publications", "schema_version"].sort().join("\u0000")
-    ) {
-      return false;
-    }
-    const authority = authorityValue as {
-      schema_version?: unknown;
-      attempt_id?: unknown;
-      marker_sha256?: unknown;
-      publications?: unknown;
-    };
-    if (
-      authority.schema_version !== ARTIFACT_GENERATION_SCHEMA_VERSION ||
-      authority.attempt_id !== task.attemptId ||
-      authority.marker_sha256 !== markerSha256 ||
-      !Array.isArray(authority.publications) ||
-      authority.publications.length !== markerPublications.size
-    ) {
-      return false;
-    }
-    const artifactsRoot = path.join(generationRoot, "artifacts");
-    const authorityPublications = new Map<string, { sha256: string; sizeBytes: number }>();
-    let totalBytes = 0;
-    for (const publication of authority.publications) {
-      if (
-        typeof publication !== "object" ||
-        publication === null ||
-        Array.isArray(publication) ||
-        Object.keys(publication).sort().join("\u0000") !== ["path", "sha256", "size_bytes"].sort().join("\u0000") ||
-        typeof (publication as { path?: unknown }).path !== "string" ||
-        typeof (publication as { sha256?: unknown }).sha256 !== "string" ||
-        !/^[0-9a-f]{64}$/u.test((publication as { sha256: string }).sha256) ||
-        !Number.isSafeInteger((publication as { size_bytes?: unknown }).size_bytes) ||
-        (publication as { size_bytes: number }).size_bytes < 0 ||
-        (publication as { size_bytes: number }).size_bytes > MAX_VERIFIED_ARTIFACT_BYTES
-      ) {
-        return false;
-      }
-      const entry = publication as { path: string; sha256: string; size_bytes: number };
-      assertSafeVerifiedPublicationPath(entry.path);
-      if (
-        authorityPublications.has(entry.path) ||
-        markerPublications.get(entry.path) !== entry.sha256 ||
-        totalBytes + entry.size_bytes > MAX_PRE_AGENT_EVIDENCE_BYTES
-      ) {
-        return false;
-      }
-      authorityPublications.set(entry.path, { sha256: entry.sha256, sizeBytes: entry.size_bytes });
-      totalBytes += entry.size_bytes;
-      const bytes = readBoundedRegularArtifactSnapshot(
-        artifactsRoot,
-        path.resolve(artifactsRoot, entry.path),
-        `artifact-contract failure: immutable artifact generation is unreadable ${task.attemptId}/${entry.path}`,
-        entry.size_bytes
-      ).bytes;
-      if (bytes.byteLength !== entry.size_bytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
-        return false;
-      }
-    }
-    if (authorityPublications.size !== markerPublications.size) return false;
-
-    const expectedGenerationFiles = new Set([
-      "authority.json",
-      "verification-marker.json",
-      ...[...markerPublications.keys()].map((relativePath) => `artifacts/${relativePath}`)
-    ]);
-    const expectedGenerationDirectories = new Set(["artifacts"]);
-    for (const relativePath of markerPublications.keys()) {
-      let parent = path.posix.dirname(`artifacts/${relativePath}`);
-      while (parent !== ".") {
-        expectedGenerationDirectories.add(parent);
-        parent = path.posix.dirname(parent);
-      }
-    }
-    const observedGenerationFiles = new Set<string>();
-    const observedGenerationDirectories = new Set<string>();
-    const pendingDirectories = [generationRoot];
-    let observedEntries = 0;
-    while (pendingDirectories.length > 0) {
-      const directory = pendingDirectories.pop();
-      if (directory === undefined) return false;
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        observedEntries += 1;
-        if (observedEntries > expectedGenerationFiles.size + expectedGenerationDirectories.size) return false;
-        const candidate = path.join(directory, entry.name);
-        const relativePath = path.relative(generationRoot, candidate).split(path.sep).join("/");
-        if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) return false;
-        if (entry.isDirectory()) {
-          observedGenerationDirectories.add(relativePath);
-          pendingDirectories.push(candidate);
-        } else observedGenerationFiles.add(relativePath);
-      }
-    }
-    if (
-      observedGenerationFiles.size !== expectedGenerationFiles.size ||
-      [...observedGenerationFiles].some((relativePath) => !expectedGenerationFiles.has(relativePath)) ||
-      observedGenerationDirectories.size !== expectedGenerationDirectories.size ||
-      [...observedGenerationDirectories].some((relativePath) => !expectedGenerationDirectories.has(relativePath))
-    ) {
-      return false;
-    }
+    assertImmutableGenerationPublicationBytes(task, generationRoot, authorityPublications);
+    assertImmutableGenerationFileSet(generationRoot, markerPublications);
     return true;
   } catch {
     return false;
