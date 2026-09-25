@@ -329,6 +329,7 @@ const verificationOutput = z.strictObject({
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const ARTIFACT_GENERATION_DIRECTORY = ".ultrafuzz-artifact-generations";
+const ARTIFACT_GENERATION_SCHEMA_VERSION = "ultrafuzz.artifact-generation.v1";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
@@ -9237,6 +9238,7 @@ function finalizeAndVerifyArtifacts(
   // artifacts and exact-byte companions may be materialized here. The process
   // marker is emitted by artifactAwareAgent only after generation succeeds; a
   // failed or killed process therefore cannot publish verified artifacts.
+  retainVerifiedArtifactGenerationPointer(task);
   if (!agentProcessOutput.safeParse(agentProcess).success) {
     throw new Error(`artifact-contract failure: agent task did not succeed ${task.attemptId}`);
   }
@@ -9272,8 +9274,10 @@ function verifyArtifacts(
   requireCompleteDynamicStrategyOutputTuple(task);
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   // The current marker is an atomic pointer to the last immutable verified
-  // generation. Keep it in place until every gate and the replacement
-  // generation have been published successfully.
+  // generation. Keep a pointer this verifier published in place until every gate
+  // and the replacement generation have succeeded, and drop any other pointer so
+  // only this verifier can publish the boundary downstream preparation consumes.
+  retainVerifiedArtifactGenerationPointer(task);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
@@ -9776,20 +9780,8 @@ function publishImmutableArtifactGeneration(
   marker: Buffer,
   publications: ReadonlyMap<string, Buffer>
 ): string {
-  const runRoot = realpathSync(task.runRoot);
   const markerSha256 = createHash("sha256").update(marker).digest("hex");
-  const generationsRoot = path.resolve(runRoot, ARTIFACT_GENERATION_DIRECTORY);
-  const attemptRoot = path.resolve(generationsRoot, task.attemptId);
-  const generationRoot = path.resolve(attemptRoot, markerSha256);
-  if (
-    path.basename(task.attemptId) !== task.attemptId ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(task.attemptId) ||
-    !isStrictlyInsideDirectory(runRoot, generationsRoot) ||
-    !isStrictlyInsideDirectory(generationsRoot, attemptRoot) ||
-    !isStrictlyInsideDirectory(attemptRoot, generationRoot)
-  ) {
-    throw new Error(`artifact-contract failure: unsafe immutable artifact generation ${task.attemptId}`);
-  }
+  const { generationsRoot, attemptRoot, generationRoot } = verifiedArtifactGenerationPaths(task, markerSha256);
   mkdirSync(generationsRoot, { recursive: true, mode: 0o700 });
   if (realpathSync(generationsRoot) !== generationsRoot || lstatSync(generationsRoot).isSymbolicLink()) {
     throw new Error(`artifact-contract failure: unsafe immutable artifact generation root ${task.attemptId}`);
@@ -9801,7 +9793,7 @@ function publishImmutableArtifactGeneration(
   const authority = Buffer.from(
     `${JSON.stringify(
       {
-        schema_version: "ultrafuzz.artifact-generation.v1",
+        schema_version: ARTIFACT_GENERATION_SCHEMA_VERSION,
         attempt_id: task.attemptId,
         marker_sha256: markerSha256,
         publications: [...publications]
@@ -9849,12 +9841,13 @@ function publishImmutableArtifactGeneration(
       throw new Error(`artifact-contract failure: immutable artifact generation file set changed ${task.attemptId}`);
     }
     for (const [relativePath, bytes] of expected) {
+      // A verified publication may legitimately be empty, so the bound is the
+      // expected length and the bytes themselves are the equality check.
       const snapshot = readBoundedRegularArtifactSnapshot(
         generationRoot,
         path.join(generationRoot, relativePath),
         `artifact-contract failure: immutable artifact generation changed ${task.attemptId}/${relativePath}`,
-        Math.max(bytes.byteLength, 1),
-        true
+        bytes.byteLength
       );
       if (!snapshot.bytes.equals(bytes)) {
         throw new Error(
@@ -9884,8 +9877,10 @@ function publishImmutableArtifactGeneration(
     }
     publishFileDurableExclusive(stagingRoot, "verification-marker.json", marker);
     publishFileDurableExclusive(stagingRoot, "authority.json", authority);
-    fsyncDirectory(artifactsRoot);
-    fsyncDirectory(stagingRoot);
+    // Nested publication directories are created on the way in, so the whole
+    // staged tree -- not just its two roots -- has to be durable before the
+    // rename makes it the immutable generation.
+    fsyncDirectoryTree(stagingRoot);
     try {
       renameSync(stagingRoot, generationRoot);
       fsyncDirectory(attemptRoot);
@@ -9905,6 +9900,158 @@ function publishImmutableArtifactGeneration(
   }
   assertExistingGeneration();
   return generationRoot;
+}
+
+function verifiedArtifactGenerationPaths(
+  task: (typeof taskSpecs)[number],
+  markerSha256: string
+): { runRoot: string; generationsRoot: string; attemptRoot: string; generationRoot: string } {
+  const runRoot = realpathSync(task.runRoot);
+  const generationsRoot = path.resolve(runRoot, ARTIFACT_GENERATION_DIRECTORY);
+  const attemptRoot = path.resolve(generationsRoot, task.attemptId);
+  const generationRoot = path.resolve(attemptRoot, markerSha256);
+  if (
+    path.basename(task.attemptId) !== task.attemptId ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(task.attemptId) ||
+    !/^[0-9a-f]{64}$/u.test(markerSha256) ||
+    !isStrictlyInsideDirectory(runRoot, generationsRoot) ||
+    !isStrictlyInsideDirectory(generationsRoot, attemptRoot) ||
+    !isStrictlyInsideDirectory(attemptRoot, generationRoot)
+  ) {
+    throw new Error(`artifact-contract failure: unsafe immutable artifact generation ${task.attemptId}`);
+  }
+  return { runRoot, generationsRoot, attemptRoot, generationRoot };
+}
+
+function fsyncDirectoryTree(root: string): void {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.isDirectory() && !entry.isSymbolicLink()) fsyncDirectoryTree(path.join(root, entry.name));
+  }
+  fsyncDirectory(root);
+}
+
+/**
+ * Re-derive whether a current-generation pointer names a complete immutable
+ * generation.
+ *
+ * This is the read side of `publishImmutableArtifactGeneration`: the pointer is
+ * believed only when the generation it names exists, agrees with its own
+ * authority document, and still holds every publication byte-for-byte. Anything
+ * else -- a missing generation, a rewritten one, a pointer some other writer
+ * left behind -- reports `false` so the caller fails closed.
+ */
+function verifiedArtifactGenerationIsDurable(task: (typeof taskSpecs)[number], marker: Buffer): boolean {
+  const markerSha256 = createHash("sha256").update(marker).digest("hex");
+  try {
+    const { generationRoot } = verifiedArtifactGenerationPaths(task, markerSha256);
+    const generationStat = lstatSync(generationRoot);
+    if (
+      !generationStat.isDirectory() ||
+      generationStat.isSymbolicLink() ||
+      realpathSync(generationRoot) !== generationRoot
+    ) {
+      return false;
+    }
+    const publishedMarker = readBoundedRegularArtifactSnapshot(
+      generationRoot,
+      path.join(generationRoot, "verification-marker.json"),
+      `artifact-contract failure: immutable artifact generation is unreadable ${task.attemptId}`,
+      MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
+      true
+    ).bytes;
+    if (!publishedMarker.equals(marker)) return false;
+    const authority = parseStrictJsonSnapshot(
+      readBoundedRegularArtifactSnapshot(
+        generationRoot,
+        path.join(generationRoot, "authority.json"),
+        `artifact-contract failure: immutable artifact generation authority is unreadable ${task.attemptId}`,
+        MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
+        true
+      ),
+      `immutable artifact generation authority ${task.attemptId}`
+    ) as { schema_version?: unknown; attempt_id?: unknown; marker_sha256?: unknown; publications?: unknown };
+    if (
+      authority.schema_version !== ARTIFACT_GENERATION_SCHEMA_VERSION ||
+      authority.attempt_id !== task.attemptId ||
+      authority.marker_sha256 !== markerSha256 ||
+      !Array.isArray(authority.publications) ||
+      authority.publications.length === 0
+    ) {
+      return false;
+    }
+    const artifactsRoot = path.join(generationRoot, "artifacts");
+    for (const publication of authority.publications) {
+      if (
+        typeof publication !== "object" ||
+        publication === null ||
+        Array.isArray(publication) ||
+        typeof (publication as { path?: unknown }).path !== "string" ||
+        typeof (publication as { sha256?: unknown }).sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test((publication as { sha256: string }).sha256) ||
+        !Number.isSafeInteger((publication as { size_bytes?: unknown }).size_bytes)
+      ) {
+        return false;
+      }
+      const entry = publication as { path: string; sha256: string; size_bytes: number };
+      assertSafeVerifiedPublicationPath(entry.path);
+      const bytes = readBoundedRegularArtifactSnapshot(
+        artifactsRoot,
+        path.resolve(artifactsRoot, entry.path),
+        `artifact-contract failure: immutable artifact generation is unreadable ${task.attemptId}/${entry.path}`,
+        entry.size_bytes
+      ).bytes;
+      if (bytes.byteLength !== entry.size_bytes || createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Discard a current-generation pointer this verifier never published.
+ *
+ * A model-controlled workspace can pre-create arbitrary sidecars, so the pointer
+ * is only honoured while the immutable generation it names is intact. A pointer
+ * left by an earlier successful verification of this same attempt is retained:
+ * a replacement attempt that fails must not destroy the authority an already
+ * admitted consumer depends on. Everything else is removed before any gate runs,
+ * so a failed or killed process still cannot leave a publishable marker behind.
+ */
+function retainVerifiedArtifactGenerationPointer(task: (typeof taskSpecs)[number]): void {
+  const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, false);
+  if (location === undefined) return;
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(location.path);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
+  if (stat.isDirectory()) {
+    throw new Error("artifact-contract failure: artifact verification marker is a directory");
+  }
+  let marker: Buffer | undefined;
+  try {
+    marker = readBoundedRegularArtifactSnapshot(
+      location.root,
+      location.path,
+      `artifact-contract failure: verification marker is unreadable ${task.attemptId}`,
+      MAX_ARTIFACT_VERIFICATION_MARKER_BYTES,
+      true
+    ).bytes;
+  } catch {
+    marker = undefined;
+  }
+  if (marker !== undefined && verifiedArtifactGenerationIsDurable(task, marker)) return;
+  try {
+    rmSync(location.path, { force: true });
+    fsyncDirectory(location.root);
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
 }
 
 function writeArtifactVerificationMarker(

@@ -16256,6 +16256,15 @@ test("controller handoff compatibility fences pause and hijack terminal publicat
       pause.patched.lastIndexOf("await Effect.runPromise("),
     "a superseded controller must return before emitting a paused status"
   );
+  // The owned guard also refuses a run whose cancel is already requested, so the
+  // new early return has to finalize that cancellation the way the park paths do
+  // instead of stranding the run in `running` with no heartbeat owner.
+  assert.match(pause.patched, /authoritative\?\.cancelRequestedAtMs/u);
+  assert.ok(
+    pause.patched.indexOf("authoritative?.cancelRequestedAtMs") <
+      pause.patched.indexOf("finalizeCurrentRunCancellation()"),
+    "a pending cancel request must reach cancellation finalization"
+  );
 });
 
 test("resume hydration preserves completed output and reopens dependency-blocked descendants", async () => {

@@ -1063,7 +1063,14 @@ const SMITHERS_ENGINE_OWNED_PAUSE_PATCH = `      const paused = await Effect.run
       );
       if (!paused) {
         const authoritative = await Effect.runPromise(adapter.getRun(runId));
-        if (authoritative?.status === "cancelled" || authoritative?.status === "canceled") {
+        // The owned guard also refuses a pending cancel request, so finalize it
+        // here exactly as upstream's park paths do. A bare return would strand a
+        // cancel-requested run in \`running\` with no heartbeat owner.
+        if (
+          authoritative?.status === "cancelled" ||
+          authoritative?.status === "canceled" ||
+          authoritative?.cancelRequestedAtMs
+        ) {
           const cancellation = await finalizeCurrentRunCancellation();
           await annotateRunSpan({ status: cancellation.terminalStatus ?? authoritative.status });
           return { runId, status: cancellation.terminalStatus ?? authoritative.status };

@@ -28,6 +28,7 @@ const MAX_RUNTIME_BASE_CONTROL_BYTES = 64 * 1024 * 1024;
 const ATTEMPT_STATE_ROOTS = [
   { name: "artifacts", kind: "directory", suffix: "" },
   { name: "invariant-suite-workspace-snapshots", kind: "directory", suffix: "" },
+  { name: ".ultrafuzz-artifact-generations", kind: "directory", suffix: "" },
   { name: ".ultrafuzz-verification", kind: "file", suffix: ".json" }
 ] as const;
 
