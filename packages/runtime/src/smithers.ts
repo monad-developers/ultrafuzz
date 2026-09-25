@@ -3149,6 +3149,10 @@ export interface CurrentSmithersInspect {
   nodes: CurrentSmithersInspectNode[];
   failedChildKeys: string[];
   exhaustedLoops: CurrentSmithersExhaustedLoop[];
+  /** Durable selected-agent attempt rows exposed by `inspect --pool`. */
+  schedulerInvocationCount: number | null;
+  /** Durable adapter usage rows exposed by the aggregate usage snapshot. */
+  adapterUsageSessionCount: number | null;
 }
 
 /**
@@ -5778,6 +5782,7 @@ export const CURRENT_SMITHERS_INSPECT_KEY_CONTRACT = {
       "exhaustedLoops",
       "steers",
       "tokenUsage",
+      "pool",
       "config"
     ]
   },
@@ -5804,12 +5809,7 @@ export const CURRENT_SMITHERS_INSPECT_KEY_CONTRACT = {
     allowed: ["runId", "state", "computedAt", "blocked", "unhealthy", "warnings"]
   },
   node: { exact: ["nodeId", "state", "attempt", "label"] },
-  /**
-   * `pool` is emitted only under `smithers inspect --pool`, a flag Ultrafuzz
-   * never passes, so it is deliberately outside `data.allowed` rather than
-   * missing from it.
-   */
-  dataKeysGatedOnUnusedFlags: ["pool"]
+  dataKeysGatedOnUnusedFlags: []
 } as const satisfies Record<string, unknown>;
 
 export function parseCurrentSmithersInspect(
@@ -5851,10 +5851,38 @@ export function parseCurrentSmithersInspect(
     throw new Error("Smithers inspect data.config must be an object");
   }
   // Aggregate run usage, emitted whenever the store carries the run-usage
-  // migrations. Ultrafuzz reads its own accounting, so the contract only pins
-  // the shape well enough to notice a future change.
+  // migrations. The row count is independent evidence for reconciliation;
+  // token totals remain exclusively owned by Ultrafuzz's immutable ledger.
   if (data.tokenUsage !== undefined && !isObjectRecord(data.tokenUsage)) {
     throw new Error("Smithers inspect data.tokenUsage must be an object");
+  }
+  const adapterUsageSessionCount =
+    isObjectRecord(data.tokenUsage) && data.tokenUsage.attempts !== undefined
+      ? requiredCurrentInspectCount(data.tokenUsage.attempts, "Smithers inspect data.tokenUsage.attempts")
+      : null;
+  let schedulerInvocationCount: number | null = null;
+  if (data.pool !== undefined) {
+    if (!isObjectRecord(data.pool) || !hasExactObjectKeys(data.pool, ["attempts", "summary"])) {
+      throw new Error("Smithers inspect data.pool must use the exact current shape");
+    }
+    if (!Array.isArray(data.pool.attempts)) {
+      throw new Error("Smithers inspect data.pool.attempts must be an array");
+    }
+    const poolAttempts: unknown[] = data.pool.attempts;
+    if (typeof data.pool.summary !== "string" || data.pool.summary.length > 64 * 1024) {
+      throw new Error("Smithers inspect data.pool.summary must be a bounded string");
+    }
+    schedulerInvocationCount = poolAttempts.reduce<number>((total, entry, index) => {
+      const label = `Smithers inspect data.pool.attempts[${String(index)}]`;
+      if (!isObjectRecord(entry) || !hasExactObjectKeys(entry, ["pool", "attempts"])) {
+        throw new Error(`${label} must use the exact current shape`);
+      }
+      requiredCurrentInspectString(entry.pool, `${label}.pool`);
+      const count = requiredCurrentInspectCount(entry.attempts, `${label}.attempts`);
+      const next = total + count;
+      if (!Number.isSafeInteger(next)) throw new Error("Smithers inspect data.pool attempt total is too large");
+      return next;
+    }, 0);
   }
 
   const run = data.run;
@@ -5965,7 +5993,15 @@ export function parseCurrentSmithersInspect(
   if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded" && parsedRunState !== "succeeded-with-failures") {
     throw new Error("Smithers inspect data.exhaustedLoops is only valid for a succeeded workflow state");
   }
-  return { runStatus, runState: parsedRunState, nodes, failedChildKeys, exhaustedLoops };
+  return {
+    runStatus,
+    runState: parsedRunState,
+    nodes,
+    failedChildKeys,
+    exhaustedLoops,
+    schedulerInvocationCount,
+    adapterUsageSessionCount
+  };
 }
 
 function parseCurrentSmithersExhaustedLoops(value: unknown): CurrentSmithersExhaustedLoop[] {

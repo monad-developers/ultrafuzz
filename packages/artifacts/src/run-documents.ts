@@ -165,7 +165,8 @@ export interface AccountingCompletenessReason {
     | "component-rate-unavailable"
     | "event-pricing-reported-partial"
     | "price-unavailable"
-    | "ledger-entry-malformed";
+    | "ledger-entry-malformed"
+    | "invocation-usage-missing";
   field?: "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens" | "reasoning_tokens";
   component?: AccountingUsageComponent;
   model?: string;
@@ -270,6 +271,35 @@ export interface RunMetadataAccounting {
   updated_at: string;
 }
 
+export interface RunInvocationCoordinate {
+  node_id: string;
+  iteration: number;
+  attempt: number;
+}
+
+/**
+ * Cross-check of the immutable Ultrafuzz ledgers against the runner's durable
+ * scheduler and adapter records. Counts are intentionally retained alongside
+ * exact coordinates: older interrupted runs can prove that evidence is
+ * missing even when the missing row's full identity was never published.
+ */
+export interface RunExecutionReconciliation {
+  schema_version: "ultrafuzz.execution-reconciliation.v1";
+  workflow_run_id: string;
+  scheduler_invocation_count: number | null;
+  adapter_usage_session_count: number | null;
+  canonical_attempt_count: number;
+  canonical_usage_count: number;
+  known_invocation_count: number;
+  missing_attempt_count: number;
+  missing_usage_count: number;
+  missing_attempt_invocations: RunInvocationCoordinate[];
+  missing_usage_invocations: RunInvocationCoordinate[];
+  attempts_complete: boolean;
+  usage_complete: boolean;
+  updated_at: string;
+}
+
 export interface RunMetadataDocument {
   schema_version: typeof RUN_METADATA_SCHEMA_VERSION;
   run_id: string;
@@ -293,6 +323,7 @@ export interface RunMetadataDocument {
   };
   workflow?: RunMetadataWorkflow;
   accounting?: RunMetadataAccounting;
+  execution_reconciliation?: RunExecutionReconciliation;
 }
 
 export const sourceRunJsonSchema = loadSchemaDocument("source-run.schema.json");
@@ -409,6 +440,55 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
       document.accounting.current.workflow_run_id !== document.workflow.run_id
     ) {
       throw new Error("run metadata accounting does not match the active workflow run");
+    }
+  }
+  if (document.execution_reconciliation !== undefined) {
+    const reconciliation = document.execution_reconciliation;
+    if (document.workflow === undefined || reconciliation.workflow_run_id !== document.workflow.run_id) {
+      throw new Error("run metadata execution reconciliation does not match the active workflow run");
+    }
+    const evidenceCounts = [
+      reconciliation.canonical_attempt_count,
+      reconciliation.canonical_usage_count,
+      ...(reconciliation.scheduler_invocation_count === null ? [] : [reconciliation.scheduler_invocation_count]),
+      ...(reconciliation.adapter_usage_session_count === null ? [] : [reconciliation.adapter_usage_session_count])
+    ];
+    if (reconciliation.known_invocation_count !== Math.max(0, ...evidenceCounts)) {
+      throw new Error("run metadata execution reconciliation known count disagrees with its evidence counts");
+    }
+    if (
+      reconciliation.missing_attempt_count !==
+        Math.max(
+          reconciliation.missing_attempt_invocations.length,
+          reconciliation.known_invocation_count - reconciliation.canonical_attempt_count
+        ) ||
+      reconciliation.missing_usage_count !==
+        Math.max(
+          reconciliation.missing_usage_invocations.length,
+          reconciliation.known_invocation_count - reconciliation.canonical_usage_count
+        )
+    ) {
+      throw new Error("run metadata execution reconciliation missing counts disagree with canonical evidence");
+    }
+    if (
+      reconciliation.attempts_complete !== (reconciliation.missing_attempt_count === 0) ||
+      reconciliation.usage_complete !== (reconciliation.missing_usage_count === 0)
+    ) {
+      throw new Error("run metadata execution reconciliation completeness disagrees with missing counts");
+    }
+    if (
+      reconciliation.missing_attempt_invocations.length > reconciliation.missing_attempt_count ||
+      reconciliation.missing_usage_invocations.length > reconciliation.missing_usage_count
+    ) {
+      throw new Error("run metadata execution reconciliation identifies more missing rows than its counts");
+    }
+    if (document.accounting !== undefined) {
+      const currentHasInvocationGap = document.accounting.current.usage_incomplete_reasons.some(
+        (reason) => reason.code === "invocation-usage-missing"
+      );
+      if (currentHasInvocationGap !== !reconciliation.usage_complete) {
+        throw new Error("run metadata accounting completeness disagrees with execution reconciliation");
+      }
     }
   }
   return document;

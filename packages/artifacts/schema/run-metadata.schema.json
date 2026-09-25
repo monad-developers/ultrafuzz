@@ -57,6 +57,9 @@
     "accounting": {
       "$ref": "#/$defs/accounting"
     },
+    "execution_reconciliation": {
+      "$ref": "#/$defs/executionReconciliation"
+    },
     "prompt_digest": {
       "$ref": "#/$defs/sha256"
     },
@@ -145,7 +148,8 @@
     }
   },
   "dependentRequired": {
-    "accounting": ["workflow"]
+    "accounting": ["workflow"],
+    "execution_reconciliation": ["workflow"]
   },
   "allOf": [
     {
@@ -351,6 +355,64 @@
     "usageComponent": {
       "enum": ["uncached_input", "cache_read", "cache_write", "output", "reasoning"]
     },
+    "invocationCoordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "iteration", "attempt"],
+      "properties": {
+        "node_id": { "type": "string", "minLength": 1 },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "executionReconciliation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "workflow_run_id",
+        "scheduler_invocation_count",
+        "adapter_usage_session_count",
+        "canonical_attempt_count",
+        "canonical_usage_count",
+        "known_invocation_count",
+        "missing_attempt_count",
+        "missing_usage_count",
+        "missing_attempt_invocations",
+        "missing_usage_invocations",
+        "attempts_complete",
+        "usage_complete",
+        "updated_at"
+      ],
+      "properties": {
+        "schema_version": { "const": "ultrafuzz.execution-reconciliation.v1" },
+        "workflow_run_id": { "type": "string", "minLength": 1 },
+        "scheduler_invocation_count": {
+          "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
+        },
+        "adapter_usage_session_count": {
+          "oneOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
+        },
+        "canonical_attempt_count": { "type": "integer", "minimum": 0 },
+        "canonical_usage_count": { "type": "integer", "minimum": 0 },
+        "known_invocation_count": { "type": "integer", "minimum": 0 },
+        "missing_attempt_count": { "type": "integer", "minimum": 0 },
+        "missing_usage_count": { "type": "integer", "minimum": 0 },
+        "missing_attempt_invocations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/invocationCoordinate" }
+        },
+        "missing_usage_invocations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/invocationCoordinate" }
+        },
+        "attempts_complete": { "type": "boolean" },
+        "usage_complete": { "type": "boolean" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
     "componentCosts": {
       "type": "object",
       "additionalProperties": false,
@@ -388,7 +450,8 @@
             "component-usage-unavailable",
             "component-usage-estimated",
             "component-breakdown-incomplete",
-            "ledger-entry-malformed"
+            "ledger-entry-malformed",
+            "invocation-usage-missing"
           ]
         },
         "field": {
