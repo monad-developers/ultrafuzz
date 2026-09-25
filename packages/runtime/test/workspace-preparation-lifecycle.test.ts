@@ -88,6 +88,18 @@ function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean 
     true,
     ts.ScriptKind.TSX
   );
+  const admittedGenerations = new Map<string, { marker: Buffer; publications: ReadonlyMap<string, string> }>();
+  const generationPaths = (task: Task, markerSha256: string) => {
+    const runRoot = fs.realpathSync(task.runRoot);
+    const generationsRoot = path.join(runRoot, ".ultrafuzz-artifact-generations");
+    const attemptRoot = path.join(generationsRoot, task.attemptId);
+    return {
+      runRoot,
+      generationsRoot,
+      attemptRoot,
+      generationRoot: path.join(attemptRoot, markerSha256)
+    };
+  };
   const replacements: Record<string, unknown> = {
     assertWorkspaceSourceRevision: () => undefined,
     preservePinnedSourceProof: () => undefined,
@@ -100,7 +112,32 @@ function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean 
     },
     assertVerifiedDependency: (_task: Task, dependency: string) => {
       if (options.rejectAdmission) throw new Error("artifact-contract failure: unauthenticated fixture dependency");
-      return dependencySnapshot(dependency);
+      const snapshot = dependencySnapshot(dependency);
+      const producer = tasks.find((candidate) => candidate.attemptId === snapshot.attemptId);
+      assert.ok(producer);
+      const markerSha256 = createHash("sha256").update(snapshot.marker.bytes).digest("hex");
+      const { generationRoot } = generationPaths(producer, markerSha256);
+      admittedGenerations.set(generationRoot, {
+        marker: Buffer.from(snapshot.marker.bytes),
+        publications: new Map(snapshot.publications)
+      });
+      return { ...snapshot, generationRoot };
+    },
+    verifiedArtifactGenerationPaths: generationPaths,
+    verifiedArtifactGenerationIsDurable: (
+      task: Task,
+      marker: Buffer,
+      expectedPublications?: ReadonlyMap<string, string>
+    ) => {
+      const markerSha256 = createHash("sha256").update(marker).digest("hex");
+      const admitted = admittedGenerations.get(generationPaths(task, markerSha256).generationRoot);
+      return (
+        admitted !== undefined &&
+        admitted.marker.equals(marker) &&
+        expectedPublications !== undefined &&
+        admitted.publications.size === expectedPublications.size &&
+        [...admitted.publications].every(([relativePath, sha256]) => expectedPublications.get(relativePath) === sha256)
+      );
     }
   };
   const localConstants = new Set<string>();
@@ -293,11 +330,10 @@ test("#1081 complete preparation regenerates every pre-agent store after a depen
       })
     );
     fixture.publishSecond();
-    // An already admitted controller must keep its immutable dependency epoch.
-    // Reopening under the replacement publication requires a new controller.
-    const beforeReopen = runtime.captureWorkspaceTree(fixture.task.workspacePath);
-    assert.throws(() => initial.prepare(fixture.task), /dependency authority changed after admission/u);
-    assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), beforeReopen);
+    // An already admitted controller keeps using its immutable dependency epoch.
+    // Reopening under the replacement publication admits the new generation.
+    assert.deepEqual(initial.prepare(fixture.task), { prepared: true });
+    assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), fixture.first);
     const reopened = preparationHarness(fixture.tasks);
     assert.deepEqual(reopened.prepare(fixture.task), { prepared: true });
     assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), fixture.second);
