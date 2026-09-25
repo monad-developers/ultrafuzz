@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   WORKSPACE_PATCH_SCHEMA_VERSION,
+  normalizeWorkspacePatchPath,
   validateArtifactContract,
   validateWorkspacePatchSchema,
   workspacePatchJsonSchema
@@ -73,5 +74,28 @@ test("accepts audited exact-file overflow exclusions and rejects ambiguous recor
   assert.equal(
     validateWorkspacePatchSchema({ ...valid, excluded_files: [{ ...exclusion, path: "contracts/Vault.sol" }] }).ok,
     false
+  );
+});
+
+test("names the rejected segment and the reason for an unsafe workspace patch path", () => {
+  const longest = "a".repeat(128);
+  assert.equal(normalizeWorkspacePatchPath(`test/${longest}`), `test/${longest}`);
+
+  const tooLong = "b".repeat(129);
+  assert.throws(
+    () => normalizeWorkspacePatchPath(`test/${tooLong}/x.sol`),
+    new Error(
+      `workspace patch file path "test/${tooLong}/x.sol" contains an unsafe path segment "${tooLong}": segment is 129 characters long (maximum 128)`
+    )
+  );
+  assert.throws(
+    () => normalizeWorkspacePatchPath("lib/@scope/x.sol", "workspace patch excluded file path"),
+    new Error(
+      'workspace patch excluded file path "lib/@scope/x.sol" contains an unsafe path segment "@scope": segment contains disallowed character "@" (allowed: A-Z, a-z, 0-9, ".", "_", "-")'
+    )
+  );
+  assert.throws(
+    () => normalizeWorkspacePatchPath("test/my file.sol"),
+    /segment "my file\.sol": segment contains disallowed character " "/u
   );
 });
