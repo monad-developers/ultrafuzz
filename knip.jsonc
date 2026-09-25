@@ -28,7 +28,11 @@
     "packages/runtime": {
       "entry": ["src/templates/**/*.tsx"],
       "ignoreDependencies": ["@moonshot-ai/kimi-code", "@smthrs/driver", "react"],
-      "ignoreUnresolved": ["^__ULTRAFUZZ_WORKFLOW_IMPORT__$", "^\\.\\./agents/index\\.ts$"]
+      "ignoreUnresolved": [
+        "^__ULTRAFUZZ_WORKFLOW_IMPORT__$",
+        "^\\.\\./agents/index\\.ts$",
+        "^\\.\\./agents/resource-limit\\.ts$"
+      ]
     }
   }
 }

@@ -558,8 +558,13 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   });
   assert.deepEqual(compiled.pinnedSubmodules, expectation);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  assert.ok(workflowSource.includes(expectation.manifest_sha256));
-  assert.match(workflowSource, /"pinnedSubmodules": \{/u);
+  const controllerData = JSON.parse(fs.readFileSync(compiled.controllerDataPath, "utf8")) as {
+    settings: { pinned_submodules: unknown };
+  };
+  assert.deepEqual(controllerData.settings.pinned_submodules, expectation);
+  assert.ok(fs.readFileSync(compiled.controllerDataPath, "utf8").includes(expectation.manifest_sha256));
+  assert.equal(workflowSource.includes(expectation.manifest_sha256), false);
+  assert.doesNotMatch(workflowSource, /"pinnedSubmodules": \{/u);
 
   const executionEnvironment = {
     SMITHERS_BIN: "/bin/true",
@@ -659,7 +664,11 @@ test("pinned local and cloud compilation carry the exact manifest through sealed
   });
   assert.deepEqual(cloudCompiled.pinnedSubmodules, expectation);
   const cloudWorkflowSource = fs.readFileSync(cloudCompiled.workflowPath, "utf8");
-  assert.equal(cloudWorkflowSource.match(/"pinnedSubmodules": \{/gu)?.length, cloudCompiled.tasks.length);
+  const cloudControllerData = JSON.parse(fs.readFileSync(cloudCompiled.controllerDataPath, "utf8")) as {
+    settings: { pinned_submodules: unknown };
+  };
+  assert.deepEqual(cloudControllerData.settings.pinned_submodules, expectation);
+  assert.doesNotMatch(cloudWorkflowSource, /"pinnedSubmodules": \{/u);
   const cloudTaskManifest = parseSmithersTaskManifestBytes(fs.readFileSync(cloudCompiled.tasksPath));
   assert.deepEqual(cloudTaskManifest.pinned_submodules, expectation);
 

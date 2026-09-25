@@ -1737,6 +1737,31 @@
         },
         "unattributed_usage": {
           "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/statsTokenData" }]
+        },
+        "retained_storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logical_bytes", "physical_bytes", "entry_count", "truncated", "categories"],
+          "properties": {
+            "logical_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+            "physical_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+            "entry_count": { "$ref": "#/$defs/nonNegativeInteger" },
+            "truncated": { "type": "boolean" },
+            "categories": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "logical_bytes", "physical_bytes", "entry_count"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "logical_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+                  "physical_bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+                  "entry_count": { "$ref": "#/$defs/nonNegativeInteger" }
+                }
+              }
+            }
+          }
         }
       }
     },

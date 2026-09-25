@@ -373,6 +373,16 @@ test("an authenticated closure content address is preflighted once per process",
   const second = createRunLayout({ projectRoot: root, runId: "closure-preflight-second" });
   const secondTrusted = prepareTrustedCliEnvironment({ layout: second, cliEntrypoint: entrypoint });
   assert.equal(countCliInvocations(counterPath), 1);
+  const firstMetadata = JSON.parse(fs.readFileSync(path.join(first.root, "trusted-cli.json"), "utf8")) as {
+    cli_entrypoint: string;
+  };
+  const secondMetadata = JSON.parse(fs.readFileSync(path.join(second.root, "trusted-cli.json"), "utf8")) as {
+    cli_entrypoint: string;
+  };
+  assert.equal(secondMetadata.cli_entrypoint, firstMetadata.cli_entrypoint);
+  const sharedClosuresRoot = path.join(path.dirname(first.root), ".objects", "trusted-cli-closures");
+  assert.equal(firstMetadata.cli_entrypoint.startsWith(`${sharedClosuresRoot}${path.sep}`), true);
+  assert.equal(fs.readdirSync(sharedClosuresRoot).length, 1);
 
   // Every run still executes the real fixture through its own launcher.
   runTrustedJsonValidatorPreflight({ layout: first, trusted: firstTrusted });
@@ -668,7 +678,7 @@ test("active trusted CLI stays on its sealed transitive build and rejects an inc
   const trusted = prepareTrustedCliEnvironment({ layout, cliEntrypoint: source.entrypoint });
   const metadataPath = path.join(layout.root, "trusted-cli.json");
   const metadataBefore = fs.readFileSync(metadataPath);
-  const closuresRoot = path.join(layout.root, "trusted-cli-closures");
+  const closuresRoot = path.join(path.dirname(layout.root), ".objects", "trusted-cli-closures");
   const closuresBefore = fs.readdirSync(closuresRoot).sort();
 
   const rebuiltEnvelope = structuredClone(originalEnvelope) as {

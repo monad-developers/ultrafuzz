@@ -34,13 +34,10 @@ import {
   type CommandResult
 } from "../command-shared.js";
 import { validateReportBundleManifest } from "../cli-schema-registry.js";
-import {
-  deriveRunStatistics,
-  type RunStatisticsValue,
-  type StatisticsEvidence,
-  type TokenStatistics
-} from "../run-statistics.js";
+import { deriveRunStatistics, type RunStatisticsValue, type StatisticsEvidence } from "../run-statistics.js";
+import { renderStatistics } from "../stats-rendering.js";
 import { captureCoherentStatisticsSnapshot, StatisticsSnapshotRaceError } from "../stats-snapshot.js";
+import { measureRetainedStorage } from "../stats-storage.js";
 import { isRecord } from "@ultrafuzz/artifacts";
 
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
@@ -194,7 +191,8 @@ async function loadLocalEvidence(
       ...(snapshot.attempts === undefined
         ? {}
         : { attempts: parseNodeAttemptLedgerBytes(snapshot.attempts, runId).entries }),
-      ...(snapshot.usage === undefined ? {} : { usage: parseUsageLedgerBytes(snapshot.usage, runId).entries })
+      ...(snapshot.usage === undefined ? {} : { usage: parseUsageLedgerBytes(snapshot.usage, runId).entries }),
+      retainedStorage: measureRetainedStorage(layout.root, path.join(runsRoot, ".objects"))
     },
     diagnostics
   };
@@ -483,115 +481,4 @@ function safeByteSum(left: number, right: number, label: string): number {
 
 function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
-}
-
-function renderStatistics(value: RunStatisticsValue, diagnostics: RuntimeDiagnostic[]): string {
-  const headers = [
-    "Node",
-    "Status",
-    "Outcome",
-    "Time",
-    "Input",
-    "CacheR",
-    "CacheW",
-    "Output",
-    "Reason",
-    "Total",
-    "Cost",
-    "Model",
-    "Exec/Reuse",
-    "Completeness"
-  ];
-  const rows = value.nodes.map((node) => {
-    const usage = node.usage;
-    const elapsed = (node.duration_ms ?? 0) + (node.current_elapsed_ms ?? 0);
-    return [
-      node.node_id,
-      node.status,
-      node.outcome ?? "—",
-      elapsed === 0 && node.duration_ms === null && node.current_elapsed_ms === null
-        ? "—"
-        : `${formatDuration(elapsed)}${node.current_elapsed_ms === null ? "" : "+"}`,
-      tokenLabel(usage, "input_tokens"),
-      tokenLabel(usage, "cache_read_tokens"),
-      tokenLabel(usage, "cache_write_tokens"),
-      tokenLabel(usage, "output_tokens"),
-      tokenLabel(usage, "reasoning_tokens"),
-      tokenLabel(usage, "total_tokens"),
-      costLabel(usage),
-      node.model ?? "—",
-      attemptLabel(node.executed_attempt_count, node.reused_attempt_count, node.retry_count),
-      completenessLabel(usage)
-    ];
-  });
-  const widths = headers.map((header, index) =>
-    Math.max(header.length, ...rows.map((row) => String(row[index] ?? "").length))
-  );
-  const line = (row: string[]) =>
-    row
-      .map((cell, index) => cell.padEnd(widths[index]!))
-      .join("  ")
-      .trimEnd();
-  const usage = value.totals.usage;
-  const accounting = value.totals.accounting_cumulative;
-  const cumulativeTokens = accounting?.total_tokens;
-  const cumulativeCost = accounting?.estimated_spend_usd ?? undefined;
-  const summary = [
-    `Run: ${value.run_id}`,
-    `Status: ${value.status}`,
-    `Source: ${value.source.kind} (${value.source.path})`,
-    `Run elapsed: ${formatDuration(value.run_elapsed_ms)}`,
-    `Recorded node usage: ${usage === null || usage.total_tokens === null ? "unavailable" : `${formatInteger(usage.total_tokens)} tokens, ${costLabel(usage)}`}`,
-    `Attempt evidence: ${value.totals.attempts_complete ? "complete" : "partial or unavailable"}`,
-    ...(cumulativeTokens === undefined
-      ? []
-      : [
-          `Cumulative accounting: ${formatInteger(cumulativeTokens)} tokens${cumulativeCost === undefined ? "" : `, $${cumulativeCost.toFixed(2)}${accounting?.pricing_complete === false ? "+" : ""}`}`
-        ]),
-    "",
-    line(headers),
-    line(widths.map((width) => "-".repeat(width))),
-    ...rows.map(line),
-    ...(diagnostics.length === 0
-      ? []
-      : ["", "Warnings:", ...diagnostics.map((diagnostic) => `- [${diagnostic.code}] ${diagnostic.message}`)]),
-    ""
-  ];
-  return summary.join("\n");
-}
-
-function tokenLabel(usage: TokenStatistics | null, field: keyof TokenStatistics): string {
-  const value = usage?.[field];
-  return typeof value === "number" ? formatInteger(value) : "—";
-}
-
-function costLabel(usage: TokenStatistics | null): string {
-  if (usage?.estimated_spend_usd === null || usage === null) return "—";
-  return `$${usage.estimated_spend_usd.toFixed(2)}${usage.pricing_complete ? "" : "+"}`;
-}
-
-function attemptLabel(executed: number | null, reused: number | null, retries: number | null): string {
-  if (executed === null || reused === null) return "—";
-  return `${executed}/${reused}${retries !== null && retries > 0 ? ` (${retries} retry)` : ""}`;
-}
-
-function completenessLabel(usage: TokenStatistics | null): string {
-  if (usage === null) return "—";
-  if (usage.usage_complete && usage.pricing_complete) return "complete";
-  if (!usage.usage_complete && !usage.pricing_complete) return "usage+pricing partial";
-  return usage.usage_complete ? "pricing partial" : "usage partial";
-}
-
-function formatInteger(value: number): string {
-  return Math.trunc(value).toLocaleString("en-US");
-}
-
-function formatDuration(milliseconds: number): string {
-  const totalSeconds = Math.max(0, milliseconds) / 1_000;
-  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.floor(totalSeconds % 60);
-  if (totalMinutes < 60) return `${totalMinutes}m ${String(seconds).padStart(2, "0")}s`;
-  const hours = Math.floor(totalMinutes / 60);
-  return `${hours}h ${String(totalMinutes % 60).padStart(2, "0")}m`;
 }

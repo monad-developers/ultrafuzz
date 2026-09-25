@@ -10994,8 +10994,13 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.equal(parseResolvedConfigJsonBytes(resolvedConfigBytes).schemaVersion, "ultrafuzz.resolved-config.v4");
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const controllerData = JSON.parse(fs.readFileSync(compiled.controllerDataPath, "utf8")) as {
+    compiled_base_tasks: unknown[];
+    settings: { pinned_submodules: unknown };
+  };
   assert.equal(compiled.pinnedSubmodules, undefined);
-  assert.match(workflowSource, /"pinnedSubmodules": null/u);
+  assert.equal(controllerData.settings.pinned_submodules, null);
+  assert.doesNotMatch(workflowSource, /"pinnedSubmodules": null/u);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /const agentProcessOutput = z\.strictObject\(\{/);
   assert.match(workflowSource, /completed: z\.literal\(true\)/);
@@ -11022,7 +11027,9 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.equal(smithersTasks.pinned_submodules, null);
   assert.equal("layers" in smithersTasks, false);
   assert.ok(smithersTasks.tasks.every((task) => task.referenceArtifactManifestAuthorities === undefined));
-  assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
+  assert.equal(controllerData.compiled_base_tasks.length, smithersTasks.tasks.length);
+  assert.match(workflowSource, /runtimeContext: topologyRuntimeContextForTimeout\(task\.timeoutMs\)/u);
+  assert.doesNotMatch(workflowSource, /"runtimeContext":/u);
   assert.deepEqual(
     smithersTasks.tasks.find((task) => task.attemptId === "project-discovery__model_0__attempt_0")
       ?.dependencySmithersNodeIds,
@@ -11062,23 +11069,18 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
 
   assert.deepEqual(compiled.nonBlockingAttemptIds, ["optional-specialist"]);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    continueOnFail: boolean;
-    dependencyArtifactDirs: string[];
-    optionalDependencyArtifactDirs: string[];
-    dependencyVerificationProducers: Array<{ attemptId: string; verifierId: string; optional: boolean }>;
-  }>;
-  const direct = specs.find((task) => task.attemptId === "direct-strategy");
+  const controllerData = JSON.parse(fs.readFileSync(compiled.controllerDataPath, "utf8")) as {
+    compiled_base_tasks: Array<{
+      attemptId: string;
+      dependencyArtifactDirs: string[];
+      optionalDependencyArtifactDirs: string[];
+    }>;
+    settings: { non_blocking_attempt_ids: string[] };
+  };
+  const specs = controllerData.compiled_base_tasks;
   const specialist = specs.find((task) => task.attemptId === "optional-specialist");
   const report = specs.find((task) => task.attemptId === "final-report");
-  assert.equal(direct?.continueOnFail, false);
-  assert.equal(specialist?.continueOnFail, true);
-  assert.equal(report?.continueOnFail, false);
+  assert.deepEqual(controllerData.settings.non_blocking_attempt_ids, ["optional-specialist"]);
   assert.deepEqual(specialist?.optionalDependencyArtifactDirs, []);
   assert.deepEqual(report?.dependencyArtifactDirs.map((directory) => path.basename(directory)).sort(), [
     "direct-strategy",
@@ -11088,10 +11090,8 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
     report?.optionalDependencyArtifactDirs.map((directory) => path.basename(directory)),
     ["optional-specialist"]
   );
-  assert.deepEqual(report?.dependencyVerificationProducers, [
-    { attemptId: "direct-strategy", verifierId: "verify:direct-strategy", optional: false },
-    { attemptId: "optional-specialist", verifierId: "verify:optional-specialist", optional: true }
-  ]);
+  assert.match(workflowSource, /dependencyVerificationProducersFromCompiledTask/u);
+  assert.doesNotMatch(workflowSource, /"attemptId": "optional-specialist"/u);
   assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
 });
 
@@ -11145,19 +11145,18 @@ test("current-controller rendering preserves prompts idempotently and continue p
   });
   const workflowSource = fs.readFileSync(workflowPath, "utf8");
   assert.match(workflowSource, /const replacePromptSchemas = true;/u);
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    continueOnFail: boolean;
-    outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string }>;
-    promptPath?: string;
-  }>;
-  assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
-  const reboundOutput = specs
-    .flatMap((task) => task.outputs)
+  const controllerData = JSON.parse(fs.readFileSync(`${workflowPath}.data.json`, "utf8")) as {
+    compiled_base_tasks: Array<{
+      attemptId: string;
+      metadata: {
+        artifacts: { outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string }> };
+      };
+    }>;
+    settings: { non_blocking_attempt_ids: string[]; retained_prompt_paths: Record<string, string> };
+  };
+  assert.equal(controllerData.settings.non_blocking_attempt_ids.includes("final-report"), true);
+  const reboundOutput = controllerData.compiled_base_tasks
+    .flatMap((task) => task.metadata.artifacts.outputs)
     .find((output) => output.contract === historicalOutput.contract);
   assert.equal(reboundOutput?.contractDigest, artifactContractDefinition(historicalOutput.contract).digest);
   assert.equal(
@@ -11167,7 +11166,7 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const plannedPrompt = persistedPlan.rendered_prompts.find((prompt) => prompt.attempt_id === promptedTask.attemptId);
   assert.ok(plannedPrompt);
   const snapshotPath = path.join(plan.value!.layout.root, plannedPrompt.rendered_prompt_snapshot_path);
-  assert.equal(specs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, snapshotPath);
+  assert.equal(controllerData.settings.retained_prompt_paths[promptedTask.attemptId], snapshotPath);
 
   // The workflow runtime persists the current task specifications back to tasks.json. A later
   // refresh therefore sees the retained path produced above, not the cleanup-owned launch path.
@@ -11181,15 +11180,12 @@ test("current-controller rendering preserves prompts idempotently and continue p
     config: plan.value!.resolved_config,
     expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
   });
-  const repeatedSource = fs.readFileSync(repeatedWorkflowPath, "utf8");
-  const repeatedStart = repeatedSource.indexOf(specsPrefix);
-  const repeatedEnd = repeatedSource.indexOf(" as const;", repeatedStart);
-  assert.ok(repeatedStart >= 0 && repeatedEnd > repeatedStart, repeatedSource);
-  const repeatedSpecs = JSON.parse(
-    repeatedSource.slice(repeatedStart + specsPrefix.length, repeatedEnd)
-  ) as typeof specs;
-  assert.equal(repeatedSpecs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, snapshotPath);
-  assert.equal(repeatedSpecs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
+  const repeatedData = JSON.parse(
+    fs.readFileSync(`${repeatedWorkflowPath}.data.json`, "utf8")
+  ) as typeof controllerData;
+  assert.equal(repeatedWorkflowPath, workflowPath);
+  assert.equal(repeatedData.settings.retained_prompt_paths[promptedTask.attemptId], snapshotPath);
+  assert.equal(repeatedData.settings.non_blocking_attempt_ids.includes("final-report"), true);
 
   promptedTask.renderedPromptPath = path.join(plan.value!.layout.root, "prompt-snapshots", `${"0".repeat(64)}.md`);
   assert.throws(
@@ -11313,15 +11309,13 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
   assert.deepEqual(reportTask?.promptArtifactAuthoritySelectors, expectedSelectors);
   assert.equal("promptArtifactAuthoritySelectors" in directTask!, false);
 
-  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    promptArtifactAuthoritySelectors?: unknown[];
-  }>;
+  const controllerData = JSON.parse(fs.readFileSync(compiled.controllerDataPath, "utf8")) as {
+    compiled_base_tasks: Array<{
+      attemptId: string;
+      promptArtifactAuthoritySelectors?: unknown[];
+    }>;
+  };
+  const specs = controllerData.compiled_base_tasks;
   assert.deepEqual(
     specs.find((task) => task.attemptId === "final-report")?.promptArtifactAuthoritySelectors,
     expectedSelectors
@@ -11482,6 +11476,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
     /cloud agent credential classification changed after workflow compilation/u
   );
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const controllerDataText = fs.readFileSync(compiled.controllerDataPath, "utf8");
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
   assert.match(
@@ -11503,12 +11498,10 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /run_id: "cloud-nodes"/u);
   assert.doesNotMatch(workflowSource, /run_id: cloud-nodes/u);
   assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
-  assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
-  assert.match(workflowSource, /"prompt": ""/u);
+  assert.doesNotMatch(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.doesNotMatch(workflowSource, new RegExp(promptMarker, "u"));
-  assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
-  assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
-  assert.match(workflowSource, /"dependencyArtifactDirs": \[/u);
+  assert.match(controllerDataText, /"workspacePath":".*\.ultrafuzz\/runs\/cloud-nodes\//u);
+  assert.match(controllerDataText, /"dependencyArtifactDirs":\[/u);
   const fanIn = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "signal-analysis");
   assert.equal(fanIn?.dependencyArtifactDirs.length, 2);
   assert.ok(
@@ -11516,40 +11509,20 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
       directory.startsWith(path.join(project, ".ultrafuzz", "runs", "cloud-nodes", "artifacts"))
     )
   );
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    dependencyVerificationProducers: Array<{
-      attemptId: string;
-      verifierId: string;
-      optional: boolean;
-    }>;
-  }>;
-  const consumer = specs.find((task) => task.attemptId === "cloud-consumer");
-  assert.deepEqual(consumer?.dependencyVerificationProducers, [
-    {
-      attemptId: "project-discovery__model_0__attempt_0",
-      verifierId: "verify:project-discovery__model_0__attempt_0",
-      optional: false
-    },
-    {
-      attemptId: "project-discovery__model_1__attempt_1",
-      verifierId: "verify:project-discovery__model_1__attempt_1",
-      optional: false
-    },
-    {
-      attemptId: "signal-analysis__model_0__attempt_0",
-      verifierId: "verify:signal-analysis__model_0__attempt_0",
-      optional: false
-    },
-    {
-      attemptId: "signal-analysis__model_1__attempt_1",
-      verifierId: "verify:signal-analysis__model_1__attempt_1",
-      optional: false
+  const specs = (
+    JSON.parse(controllerDataText) as {
+      compiled_base_tasks: Array<{
+        attemptId: string;
+        dependencySmithersNodeIds: string[];
+      }>;
     }
+  ).compiled_base_tasks;
+  const consumer = specs.find((task) => task.attemptId === "cloud-consumer");
+  assert.deepEqual(consumer?.dependencySmithersNodeIds, [
+    "verify:project-discovery__model_0__attempt_0",
+    "verify:project-discovery__model_1__attempt_1",
+    "verify:signal-analysis__model_0__attempt_0",
+    "verify:signal-analysis__model_1__attempt_1"
   ]);
   assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
   assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
@@ -16229,6 +16202,18 @@ test("agent event ownership compatibility patch coalesces only an in-flight proo
     ownershipPatch.patched,
     /if \(heartbeatOwnershipCheckInFlight === check\) heartbeatOwnershipCheckInFlight = null/u
   );
+});
+
+test("heartbeat compatibility patches coalesce unchanged event rows without weakening ownership writes", async () => {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const state = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_heartbeat_event_state");
+  const coalescing = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_heartbeat_event_coalescing");
+  assert.ok(state);
+  assert.ok(coalescing);
+  assert.match(state.patched, /heartbeatEventIntervalMs = 30_000/u);
+  assert.match(coalescing.patched, /heartbeatDataChanged/u);
+  assert.match(coalescing.patched, /eventBus\.emitEventQueued/u);
+  assert.doesNotMatch(coalescing.patched, /adapter\.heartbeatAttempt/u);
 });
 
 test("agent usage compatibility persists an owned snapshot before publishing telemetry", async () => {
@@ -23938,16 +23923,10 @@ test("controller refresh selects current source without rewriting historical evi
   const continuationPath = /^up (\S+)/u.exec(commands[1] ?? "")?.[1];
   assert.ok(continuationPath);
   assert.equal(fs.existsSync(continuationPath), true);
-  const continuationSource = fs.readFileSync(continuationPath, "utf8");
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = continuationSource.indexOf(specsPrefix);
-  const specsEnd = continuationSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, continuationSource);
-  const specs = JSON.parse(continuationSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    continueOnFail: boolean;
-  }>;
-  assert.equal(specs.find((task) => task.attemptId === leafTask.attemptId)?.continueOnFail, true);
+  const continuationData = JSON.parse(fs.readFileSync(`${continuationPath}.data.json`, "utf8")) as {
+    settings: { non_blocking_attempt_ids: string[] };
+  };
+  assert.equal(continuationData.settings.non_blocking_attempt_ids.includes(leafTask.attemptId), true);
   assert.deepEqual(fs.readFileSync(historicalWorkflowPath), historicalWorkflow);
   assert.deepEqual(fs.readFileSync(resolvedConfigPath), retainedConfig);
   assert.deepEqual(fs.readFileSync(metadataPath), retainedMetadata);
