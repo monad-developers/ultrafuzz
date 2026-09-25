@@ -4,7 +4,7 @@
 // project-agents: .smithers/agents
 /** @jsxImportSource smthrs */
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync
@@ -54,6 +55,7 @@ const {
   checkInvariantSourcePinned,
   derivePropertyImplementationCoverage,
   executeSchemaSemanticGates,
+  fsyncDirectory,
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   invariantPinnedSourceRefExists,
@@ -326,6 +328,7 @@ const verificationOutput = z.strictObject({
 
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
 const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
+const ARTIFACT_GENERATION_DIRECTORY = ".ultrafuzz-artifact-generations";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
@@ -6063,6 +6066,27 @@ function assertVerifiedDependency(
         throw new Error(`verification marker publication digest does not match verified output ${expectedPath}`);
       }
     }
+    const immutablePublications = new Map<string, Buffer>();
+    for (const [relativePath, expectedSha] of markerPublicationShas) {
+      const authenticated = authenticatedArtifacts.get(relativePath);
+      const bytes =
+        authenticated?.bytes ??
+        readBoundedRegularArtifactSnapshot(
+          dependency,
+          path.resolve(dependency, relativePath),
+          `artifact-contract failure: verified dependency publication is missing ${relativePath}`,
+          MAX_VERIFIED_ARTIFACT_BYTES
+        ).bytes;
+      if (createHash("sha256").update(bytes).digest("hex") !== expectedSha) {
+        throw new Error(`verified dependency publication changed ${relativePath}`);
+      }
+      immutablePublications.set(relativePath, Buffer.from(bytes));
+    }
+    // Runs verified before immutable generations were introduced are upgraded
+    // lazily from the fully re-authenticated marker/publication set. Future
+    // continuations then retain this exact generation even if a replacement
+    // attempt fails after resetting its mutable artifact directory.
+    publishImmutableArtifactGeneration(dependencyTask, markerSnapshot.bytes, immutablePublications);
     return Object.freeze({
       attemptId: dependencyAttemptId,
       artifactDir: dependency,
@@ -9213,7 +9237,6 @@ function finalizeAndVerifyArtifacts(
   // artifacts and exact-byte companions may be materialized here. The process
   // marker is emitted by artifactAwareAgent only after generation succeeds; a
   // failed or killed process therefore cannot publish verified artifacts.
-  clearArtifactVerificationMarker(task);
   if (!agentProcessOutput.safeParse(agentProcess).success) {
     throw new Error(`artifact-contract failure: agent task did not succeed ${task.attemptId}`);
   }
@@ -9248,10 +9271,9 @@ function verifyArtifacts(
   }
   requireCompleteDynamicStrategyOutputTuple(task);
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
-  // A model-controlled workspace can pre-create arbitrary sidecars. Remove
-  // any stale marker before validating so only this verifier can publish the
-  // success boundary consumed by downstream preparation tasks.
-  clearArtifactVerificationMarker(task);
+  // The current marker is an atomic pointer to the last immutable verified
+  // generation. Keep it in place until every gate and the replacement
+  // generation have been published successfully.
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const capturedOutputs = capturedTaskOutputs ?? captureTaskOutputs(task);
   const { artifacts, verifiedOutputs } = validateCapturedTaskOutputs(task, capturedOutputs);
@@ -9749,18 +9771,140 @@ function artifactVerificationMarkerLocation(
   return { root, path: markerPath, relativePath };
 }
 
-function clearArtifactVerificationMarker(task: (typeof taskSpecs)[number]): void {
-  const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, false);
-  if (location === undefined) return;
-  try {
-    const stat = lstatSync(location.path);
-    if (stat.isDirectory()) {
-      throw new Error("artifact-contract failure: artifact verification marker is a directory");
-    }
-    rmSync(location.path, { force: true });
-  } catch (error) {
-    if (!isMissingPathError(error)) throw error;
+function publishImmutableArtifactGeneration(
+  task: (typeof taskSpecs)[number],
+  marker: Buffer,
+  publications: ReadonlyMap<string, Buffer>
+): string {
+  const runRoot = realpathSync(task.runRoot);
+  const markerSha256 = createHash("sha256").update(marker).digest("hex");
+  const generationsRoot = path.resolve(runRoot, ARTIFACT_GENERATION_DIRECTORY);
+  const attemptRoot = path.resolve(generationsRoot, task.attemptId);
+  const generationRoot = path.resolve(attemptRoot, markerSha256);
+  if (
+    path.basename(task.attemptId) !== task.attemptId ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(task.attemptId) ||
+    !isStrictlyInsideDirectory(runRoot, generationsRoot) ||
+    !isStrictlyInsideDirectory(generationsRoot, attemptRoot) ||
+    !isStrictlyInsideDirectory(attemptRoot, generationRoot)
+  ) {
+    throw new Error(`artifact-contract failure: unsafe immutable artifact generation ${task.attemptId}`);
   }
+  mkdirSync(generationsRoot, { recursive: true, mode: 0o700 });
+  if (realpathSync(generationsRoot) !== generationsRoot || lstatSync(generationsRoot).isSymbolicLink()) {
+    throw new Error(`artifact-contract failure: unsafe immutable artifact generation root ${task.attemptId}`);
+  }
+  mkdirSync(attemptRoot, { recursive: true, mode: 0o700 });
+  if (realpathSync(attemptRoot) !== attemptRoot || lstatSync(attemptRoot).isSymbolicLink()) {
+    throw new Error(`artifact-contract failure: unsafe immutable artifact attempt root ${task.attemptId}`);
+  }
+  const authority = Buffer.from(
+    `${JSON.stringify(
+      {
+        schema_version: "ultrafuzz.artifact-generation.v1",
+        attempt_id: task.attemptId,
+        marker_sha256: markerSha256,
+        publications: [...publications]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([relativePath, bytes]) => ({
+            path: relativePath,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            size_bytes: bytes.byteLength
+          }))
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  const assertExistingGeneration = (): void => {
+    const generationStat = lstatSync(generationRoot);
+    if (
+      !generationStat.isDirectory() ||
+      generationStat.isSymbolicLink() ||
+      realpathSync(generationRoot) !== generationRoot
+    ) {
+      throw new Error(`artifact-contract failure: immutable artifact generation is unsafe ${task.attemptId}`);
+    }
+    const artifactsRoot = path.join(generationRoot, "artifacts");
+    const expected = new Map<string, Buffer>([
+      ["authority.json", authority],
+      ["verification-marker.json", marker],
+      ...[...publications].map(([relativePath, bytes]) => [`artifacts/${relativePath}`, Buffer.from(bytes)] as const)
+    ]);
+    const observed = new Set<string>();
+    const visit = (directory: string): void => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const candidate = path.join(directory, entry.name);
+        const relativePath = path.relative(generationRoot, candidate).split(path.sep).join("/");
+        if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) {
+          throw new Error(`artifact-contract failure: immutable artifact generation has unsafe entry ${relativePath}`);
+        }
+        if (entry.isDirectory()) visit(candidate);
+        else observed.add(relativePath);
+      }
+    };
+    visit(generationRoot);
+    if (observed.size !== expected.size || [...observed].some((relativePath) => !expected.has(relativePath))) {
+      throw new Error(`artifact-contract failure: immutable artifact generation file set changed ${task.attemptId}`);
+    }
+    for (const [relativePath, bytes] of expected) {
+      const snapshot = readBoundedRegularArtifactSnapshot(
+        generationRoot,
+        path.join(generationRoot, relativePath),
+        `artifact-contract failure: immutable artifact generation changed ${task.attemptId}/${relativePath}`,
+        Math.max(bytes.byteLength, 1),
+        true
+      );
+      if (!snapshot.bytes.equals(bytes)) {
+        throw new Error(
+          `artifact-contract failure: immutable artifact generation changed ${task.attemptId}/${relativePath}`
+        );
+      }
+    }
+    if (!existsSync(artifactsRoot) || !lstatSync(artifactsRoot).isDirectory()) {
+      throw new Error(
+        `artifact-contract failure: immutable artifact generation artifacts are missing ${task.attemptId}`
+      );
+    }
+  };
+  if (existsSync(generationRoot)) {
+    assertExistingGeneration();
+    return generationRoot;
+  }
+
+  const stagingRoot = path.join(attemptRoot, `.${markerSha256}.tmp-${process.pid}-${randomUUID()}`);
+  mkdirSync(stagingRoot, { mode: 0o700 });
+  try {
+    const artifactsRoot = path.join(stagingRoot, "artifacts");
+    mkdirSync(artifactsRoot, { mode: 0o700 });
+    for (const [relativePath, bytes] of [...publications].sort(([left], [right]) => left.localeCompare(right))) {
+      assertSafeVerifiedPublicationPath(relativePath);
+      publishFileDurableExclusive(artifactsRoot, relativePath, bytes);
+    }
+    publishFileDurableExclusive(stagingRoot, "verification-marker.json", marker);
+    publishFileDurableExclusive(stagingRoot, "authority.json", authority);
+    fsyncDirectory(artifactsRoot);
+    fsyncDirectory(stagingRoot);
+    try {
+      renameSync(stagingRoot, generationRoot);
+      fsyncDirectory(attemptRoot);
+    } catch (error) {
+      if (!(
+        error instanceof Error &&
+        "code" in error &&
+        ["EEXIST", "ENOTEMPTY"].includes(String(error.code)) &&
+        existsSync(generationRoot)
+      )) {
+        throw error;
+      }
+      assertExistingGeneration();
+    }
+  } finally {
+    if (existsSync(stagingRoot)) rmSync(stagingRoot, { recursive: true, force: true });
+  }
+  assertExistingGeneration();
+  return generationRoot;
 }
 
 function writeArtifactVerificationMarker(
@@ -9820,7 +9964,17 @@ function writeArtifactVerificationMarker(
       `artifact-contract failure: verification marker exceeds ${MAX_ARTIFACT_VERIFICATION_MARKER_BYTES} bytes ${task.attemptId}`
     );
   }
-  publishFileDurableExclusive(location.root, location.relativePath, marker);
+  publishImmutableArtifactGeneration(task, marker, publications);
+  if (existsSync(location.path)) {
+    const current = lstatSync(location.path);
+    if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1) {
+      throw new Error(`artifact-contract failure: verification marker is unsafe ${task.attemptId}`);
+    }
+  }
+  // This file is the atomic pointer to the current verified generation. The
+  // immutable generation is durable before the pointer moves, so a failed or
+  // interrupted replacement leaves the previous authority recoverable.
+  writeFileDurable(location.path, marker);
   return {
     marker_sha256: createHash("sha256").update(marker).digest("hex"),
     size_bytes: marker.byteLength

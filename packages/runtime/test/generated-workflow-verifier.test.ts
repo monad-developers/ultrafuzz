@@ -2201,7 +2201,10 @@ function loadArtifactVerificationMarkerWriter(
     "validateArtifactVerificationMarker",
     "assertArtifactVerificationMarkerSemantics",
     "Buffer",
-    "publishFileDurableExclusive",
+    "publishImmutableArtifactGeneration",
+    "existsSync",
+    "lstatSync",
+    "writeFileDurable",
     "ARTIFACT_VERIFICATION_SCHEMA_VERSION",
     "MAX_ARTIFACT_VERIFICATION_MARKER_BYTES",
     "admittedDependencyArtifactDirs",
@@ -2221,7 +2224,10 @@ function loadArtifactVerificationMarkerWriter(
     () => ({ ok: true, issues: [] }),
     () => undefined,
     Buffer,
-    publishFileDurableExclusive,
+    () => root,
+    fs.existsSync,
+    fs.lstatSync,
+    writeFileDurable,
     "ultrafuzz.artifact-verification.v2",
     64 * 1024 * 1024,
     () => [path.join(root, "artifacts", "required-ancestor")],
@@ -2760,6 +2766,28 @@ test("generated verifier returns the exact durable verification-marker byte auth
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("generated verifier publishes an immutable generation before moving the current marker", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const generationStart = source.indexOf("function publishImmutableArtifactGeneration");
+  const writerStart = source.indexOf("function writeArtifactVerificationMarker", generationStart);
+  const writerEnd = source.indexOf("\n\nfunction verifyGeneratedTestFiles", writerStart);
+  assert.ok(generationStart >= 0 && writerStart > generationStart && writerEnd > writerStart, source);
+  const generation = source.slice(generationStart, writerStart);
+  const writer = source.slice(writerStart, writerEnd);
+
+  assert.match(generation, /ARTIFACT_GENERATION_DIRECTORY/u);
+  assert.match(generation, /path\.resolve\(attemptRoot, markerSha256\)/u);
+  assert.match(generation, /publishFileDurableExclusive\(stagingRoot, "verification-marker\.json", marker\)/u);
+  assert.match(generation, /renameSync\(stagingRoot, generationRoot\)/u);
+  assert.match(generation, /assertExistingGeneration\(\)/u);
+  assert.ok(
+    writer.indexOf("publishImmutableArtifactGeneration(task, marker, publications)") <
+      writer.indexOf("writeFileDurable(location.path, marker)"),
+    writer
+  );
+  assert.doesNotMatch(source, /clearArtifactVerificationMarker/u);
 });
 
 test("generated Smithers fails closed on schema-valid document semantic violations", () => {
@@ -6446,9 +6474,7 @@ test("generated verifiers require the runtime-owned process marker before publis
 
   assert.match(finalizer, /agentProcess: z\.infer<typeof agentProcessOutput> \| undefined/u);
   assert.match(finalizer, /agentProcessOutput\.safeParse\(agentProcess\)\.success/u);
-  assert.ok(
-    finalizer.indexOf("clearArtifactVerificationMarker(task)") < finalizer.indexOf("agentProcessOutput.safeParse")
-  );
+  assert.doesNotMatch(finalizer, /clearArtifactVerificationMarker/u);
   assert.ok(finalizer.indexOf("agentProcessOutput.safeParse") < finalizer.indexOf("prepareArtifactMirror(task"));
   assert.equal(workflow.match(/needs=\{\{ agent: task\.id \}\}/gu)?.length, 2);
   assert.equal(workflow.match(/deps=\{\{ agent: outputs\.agentProcess \}\}/gu)?.length, 2);
@@ -9814,7 +9840,7 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /verifiedDependencySnapshot\(task, dependency, producer\)/u);
   assert.match(source, /artifacts: authenticatedArtifacts/u);
   assert.match(source, /marker:\s*Object\.freeze\(\{[\s\S]*?bytes: Buffer\.from\(markerSnapshot\.bytes\)/u);
-  assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
+  assert.doesNotMatch(verifier, /clearArtifactVerificationMarker/u);
   assert.match(verifier, /beginVerifiedDependencySnapshotEpoch\(task\)/u);
   assert.match(verifier, /assertVerifiedDependencySnapshotEpochRemainedCurrent\(task, dependencySnapshotEpoch\)/u);
   assert.match(verifier, /endVerifiedDependencySnapshotEpoch\(task, dependencySnapshotEpoch\)/u);
@@ -9828,9 +9854,9 @@ test("generated Smithers preparation requires a successful dependency artifact v
     /rememberExpectedInvariantSuitePublications\(dependencyTask, dependency, expectedPublicationShas\)/u
   );
   assert.match(source, /files: manifestFiles/u);
-  assert.notEqual(verifier.indexOf("clearArtifactVerificationMarker(task)"), -1, verifier);
   assert.ok(
-    verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("const artifactRoots"),
+    source.indexOf("publishImmutableArtifactGeneration(task, marker, publications)") <
+      source.indexOf("writeFileDurable(location.path, marker)"),
     verifier
   );
   assert.ok(
@@ -9934,6 +9960,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     "invariantSuiteNodeIds",
     "verifyGeneratedTestFiles",
     "rememberExpectedInvariantSuitePublications",
+    "publishImmutableArtifactGeneration",
     `const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
    const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v2";
    ${helper}; return assertVerifiedDependency;`
@@ -9985,7 +10012,8 @@ test("generated Smithers dependency verification fails closed before descendant 
           .update(fs.readFileSync(path.join(dependencyRoot, relativePath)))
           .digest("hex")
       );
-    }
+    },
+    () => undefined
   ) as (
     task: { attemptId: string; runRoot: string },
     dependency: string,
@@ -10233,7 +10261,7 @@ test("generated Smithers dependency verification fails closed before descendant 
 test("generated Smithers verification marker root must be a canonical directory", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function artifactVerificationMarkerLocation");
-  const helperEnd = source.indexOf("\n\nfunction clearArtifactVerificationMarker", helperStart);
+  const helperEnd = source.indexOf("\n\nfunction publishImmutableArtifactGeneration", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = source
