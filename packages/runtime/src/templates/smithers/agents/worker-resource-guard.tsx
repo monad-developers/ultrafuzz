@@ -97,7 +97,8 @@ function processTreeRss(rootPid: number, known: Set<number>): { rssBytes: number
   }
   const pending = [rootPid];
   while (pending.length > 0) {
-    const pid = pending.pop()!;
+    const pid = pending.pop();
+    if (pid === undefined) continue;
     known.add(pid);
     pending.push(...(children.get(pid) ?? []));
   }
@@ -206,12 +207,14 @@ function parseOptions(argv: string[]): Options {
   if (!Number.isSafeInteger(memoryMiB) || memoryMiB < 1) throw new Error("worker memory limit must be positive");
   if (!Number.isSafeInteger(cpu) || cpu < 1) throw new Error("worker CPU limit must be positive");
   if (taskId.length === 0 || markerPath.length === 0) throw new Error("worker resource guard identity is missing");
+  const command = argv[separator + 1];
+  if (command === undefined) throw new Error("worker resource guard requires a command");
   return {
     memoryBytes: memoryMiB * 1024 * 1024,
     cpu,
     taskId,
     markerPath,
-    command: argv[separator + 1]!,
+    command,
     args: argv.slice(separator + 2)
   };
 }

@@ -135,6 +135,9 @@ test("Forge guard serializes compiler processes independently of agent concurren
   await Promise.all([run("one"), run("two")]);
   const events = fs.readFileSync(log, "utf8").trim().split("\n");
   assert.equal(events.length, 4);
-  assert.equal(events[0]!.replace("start:", ""), events[1]!.replace("end:", ""));
-  assert.equal(events[2]!.replace("start:", ""), events[3]!.replace("end:", ""));
+  const [firstStart, firstEnd, secondStart, secondEnd] = events;
+  assert.ok(firstStart !== undefined && firstEnd !== undefined);
+  assert.ok(secondStart !== undefined && secondEnd !== undefined);
+  assert.equal(firstStart.replace("start:", ""), firstEnd.replace("end:", ""));
+  assert.equal(secondStart.replace("start:", ""), secondEnd.replace("end:", ""));
 });

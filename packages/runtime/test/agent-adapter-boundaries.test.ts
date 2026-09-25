@@ -172,7 +172,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     upstreamIssues: []
   },
   "worker-resource-guard.tsx": {
-    classifiedSourceSha256: "2bda2ec5730cc5d745be1a9f9116cc11dc03c44ccfe6394675f6be0203398db3",
+    classifiedSourceSha256: "8505fb88c386bfa2794ec6fbff94359fb36eef008936881ef9abe68f9ba4a0b5",
     responsibilities: ["argv-construction", "filesystem-walking"],
     upstreamIssues: ["https://github.com/monad-developers/ultrafuzz/issues/1146"]
   }
@@ -274,7 +274,7 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxLines: 230,
     maxSyntaxNodes: 1_500,
     purpose: "resource-guard",
-    sourceSha256: "2bda2ec5730cc5d745be1a9f9116cc11dc03c44ccfe6394675f6be0203398db3"
+    sourceSha256: "8505fb88c386bfa2794ec6fbff94359fb36eef008936881ef9abe68f9ba4a0b5"
   }
 };
 

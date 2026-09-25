@@ -155,7 +155,8 @@ function hydrateSerializedTask(controllerDataPath: string) {
     compiled_base_tasks: SmithersTaskManifestTask[];
     settings: { smithers_run_id: string };
   };
-  const task = data.compiled_base_tasks[0]!;
+  const task = data.compiled_base_tasks[0];
+  assert.ok(task);
   return { ...task, id: task.smithersNodeId, smithersRunId: data.settings.smithers_run_id };
 }
 
