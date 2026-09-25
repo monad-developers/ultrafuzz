@@ -22,11 +22,17 @@ import { isDeepStrictEqual } from "node:util";
 import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smthrs";
 import { z } from "zod/v4";
-import type { ArtifactValidationWarning } from "@ultrafuzz/artifacts";
+import type {
+  ArtifactValidationWarning,
+  SmithersPinnedSubmoduleExpectation,
+  SmithersTaskManifestDynamicGroup,
+  SmithersTaskManifestTask
+} from "@ultrafuzz/artifacts";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
 // sibling .smithers/agents.ts, which bun's resolution would prefer over the
 // .smithers/agents/ directory this workflow needs.
 import { agentFactories as projectAgentFactories } from "../agents/index.ts";
+import { withWorkerResourceLimits } from "../agents/resource-limit.ts";
 
 // Detached controller preflights do not promise to forward every process
 // environment variable. Keep the fallback rooted in the workflow's sealed
@@ -352,12 +358,34 @@ const sourceProjectRoot = __ULTRAFUZZ_SOURCE_PROJECT_ROOT__;
 const dynamicRunRoot = path.resolve(process.cwd(), __ULTRAFUZZ_RUN_ROOT_RELATIVE__);
 const dynamicGraphPath = path.join(dynamicRunRoot, "graph.json");
 const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
-const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
-const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
+type ControllerData = {
+  schema_version: "ultrafuzz.controller-data.v1";
+  compiled_base_tasks: SmithersTaskManifestTask[];
+  dynamic_group_specs: SmithersTaskManifestDynamicGroup[];
+  settings: {
+    smithers_run_id: string;
+    non_blocking_attempt_ids: string[];
+    retained_prompt_paths: Record<string, string>;
+    invariant_testing_fuzzer_timeout_seconds: number;
+    dynamic_strategies_enumerator_policy: number;
+    pinned_submodules: SmithersPinnedSubmoduleExpectation | null;
+    production_source_roots: string[];
+  };
+};
+const loadedWorkflowPath = fileURLToPath(import.meta.url);
+const controllerData = parseStrictJsonBytes(
+  readRegularFileSnapshot(`${loadedWorkflowPath}.data.json`, 64 * 1024 * 1024),
+  { maxBytes: 64 * 1024 * 1024, maxDepth: 128, maxItems: 250_000, maxProperties: 2_000_000 }
+) as ControllerData;
+if (controllerData.schema_version !== "ultrafuzz.controller-data.v1") {
+  throw new Error("generated controller data has an unsupported schema version");
+}
+const compiledBaseTasks = controllerData.compiled_base_tasks;
+const dynamicGroupSpecs = controllerData.dynamic_group_specs;
+const controllerSettings = controllerData.settings;
+const nonBlockingAttemptIds = new Set(controllerSettings.non_blocking_attempt_ids);
 const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
 const replacePromptSchemas = __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__;
-const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
-const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
 const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
 const admittedWorkflowRelativePath =
@@ -366,56 +394,7 @@ const admittedWorkflowRelativePath =
     : cloudSnapshotRelativePath(admittedWorkflowControls.persistedWorkflowPath, "persisted workflow path");
 const dynamicBaseGraphPath = sealedRuntimeControlPath("runtime-base-graph.json", admittedWorkflowControls);
 const dynamicBaseTasksPath = sealedRuntimeControlPath("runtime-base-tasks.json", admittedWorkflowControls);
-function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
-  const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
-  const dependencyArtifactRelativeDirs = [...task.dependencyArtifactDirs];
-  const optionalDependencyArtifactRelativeDirs = [...task.optionalDependencyArtifactDirs];
-  const referenceArtifactRelativeDirs = [...task.referenceArtifactDirs];
-  const taskManifestPath =
-    controlPaths.executionSnapshotRoot === undefined
-      ? path.resolve(process.cwd(), task.sourceTaskManifestPath)
-      : path.join(controlPaths.executionSnapshotRoot, "controls", "tasks.json");
-  const promptPath =
-    task.promptPath === undefined
-      ? undefined
-      : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
-        path.resolve(process.cwd(), task.promptPath));
-  return {
-    ...task,
-    promptPath,
-    promptRelativePath:
-      promptPath === undefined
-        ? undefined
-        : task.execution.mode === "cloud" && controlPaths.executionSnapshotRoot !== undefined
-          ? cloudSnapshotRelativePath(promptPath, "rendered prompt path")
-          : task.promptPath,
-    workflowPath: controlPaths.workflowPath ?? path.resolve(process.cwd(), task.workflowPath),
-    executionSnapshotRoot: controlPaths.executionSnapshotRoot,
-    taskManifestPath,
-    workspaceRelativePath: task.workspacePath,
-    workspacePath: path.resolve(process.cwd(), task.workspacePath),
-    artifactRelativeDir: task.artifactDir,
-    artifactDir: path.resolve(process.cwd(), task.artifactDir),
-    dependencyArtifactRelativeDirs,
-    dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
-    optionalDependencyArtifactRelativeDirs,
-    optionalDependencyArtifactDirs: task.optionalDependencyArtifactDirs.map((directory) =>
-      path.resolve(process.cwd(), directory)
-    ),
-    referenceArtifactRelativeDirs,
-    referenceArtifactDirs: task.referenceArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
-    ...(task.vulnerabilityDatabase === undefined
-      ? {}
-      : {
-          vulnerabilityDatabaseRelative: task.vulnerabilityDatabase,
-          vulnerabilityDatabase: {
-            ...task.vulnerabilityDatabase,
-            catalogPath: path.resolve(process.cwd(), task.vulnerabilityDatabase.catalogPath)
-          }
-        })
-  };
-}
-let taskSpecs = serializedTaskSpecs.map((task) => hydrateTaskSpec(task));
+let taskSpecs: ReturnType<typeof taskSpecsFromCompiled>;
 
 function reconcileTaskSpecIdentities(previous: typeof taskSpecs, candidates: typeof taskSpecs): typeof taskSpecs {
   const previousByAttemptId = new Map(previous.map((task) => [task.attemptId, task]));
@@ -480,30 +459,34 @@ function compiledTaskSourceIdentity(task: (typeof compiledBaseTasks)[number]) {
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
   return tasks.map((task) => {
     const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
-    const compiled = serializedTaskSpecs.find((candidate) => candidate.id === task.smithersNodeId);
     const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
         : path.resolve(process.cwd(), dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"));
-    const compiledPromptPath =
-      compiled?.promptPath === undefined ? undefined : path.resolve(process.cwd(), compiled.promptPath);
+    const retainedPromptSetting = Object.hasOwn(controllerSettings.retained_prompt_paths, task.attemptId)
+      ? controllerSettings.retained_prompt_paths[task.attemptId]
+      : undefined;
     const retainedPromptPath =
-      compiledPromptPath !== undefined && compiledPromptPath !== runtimePromptPath ? compiledPromptPath : undefined;
+      retainedPromptSetting === undefined
+        ? undefined
+        : path.resolve(process.cwd(), dynamicExecutionPath(task, retainedPromptSetting, "retained rendered prompt"));
     // A static compiled prompt exists in the initial execution seal. A deferred or generated prompt
     // cannot exist there, so it stays in the run root and is bound by selected_task plus the handoff
     // content digest instead. A continuation may rebind a static prompt to its authenticated retained
     // snapshot after the cleanup-owned launch path is gone; that execution-only binding takes
     // precedence without changing the sealed dynamic-runtime task manifest.
     const promptPath =
-      compiled?.promptPath === undefined
-        ? runtimePromptPath
+      task.renderedPromptPath === undefined
+        ? undefined
         : (retainedPromptPath ??
-          sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
+          (task.execution.mode === "cloud"
+            ? undefined
+            : sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot)) ??
           runtimePromptPath);
     return {
       id: task.smithersNodeId,
       smithersNodeId: task.smithersNodeId,
-      smithersRunId: compiled?.smithersRunId ?? serializedTaskSpecs[0].smithersRunId,
+      smithersRunId: controllerSettings.smithers_run_id,
       preparationId: `prepare:${task.attemptId}`,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
@@ -588,10 +571,10 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       retries: task.retries,
       retryPolicy: task.retryPolicy,
       continueOnFail:
-        compiled?.continueOnFail ??
-        dynamicGroupSpecs.find((group) => group.groupNodeId === task.metadata.node.dynamic?.groupNodeId)
+        nonBlockingAttemptIds.has(task.attemptId) ||
+        (dynamicGroupSpecs.find((group) => group.groupNodeId === task.metadata.node.dynamic?.groupNodeId)
           ?.continueOnFail ??
-        false,
+          false),
       dependencyVerificationProducers: dependencyVerificationProducersFromCompiledTask(task),
       promptArtifactAuthoritySelectors: task.promptArtifactAuthoritySelectors ?? [],
       campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
@@ -599,26 +582,30 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       )
         ? {
             configuredFuzzerTimeoutSeconds:
-              compiled?.campaignTimeoutExpectations?.configuredFuzzerTimeoutSeconds ??
               dynamicGroupSpecs.find((group) => group.groupNodeId === task.metadata.node.dynamic?.groupNodeId)
-                ?.promptContext.resolvedConfig.invariantTestingFuzzerTimeout,
+                ?.promptContext.resolvedConfig.invariantTestingFuzzerTimeout ??
+              controllerSettings.invariant_testing_fuzzer_timeout_seconds,
             plannedTimeoutSeconds: task.metadata.timeout.seconds,
             finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(task.timeoutMs).finalizationReserveSeconds
           }
         : null,
       dynamicStrategiesEnumeratorPolicy:
-        compiled?.dynamicStrategiesEnumeratorPolicy ??
         dynamicGroupSpecs.find((group) => group.groupNodeId === task.metadata.node.dynamic?.groupNodeId)?.promptContext
-          .resolvedConfig.dynamicStrategiesEnumerator ??
-        1,
+          .resolvedConfig.dynamicStrategiesEnumerator ?? controllerSettings.dynamic_strategies_enumerator_policy,
       metadata: dynamicExecutionMetadata(task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution,
-      pinnedSubmodules: compiled?.pinnedSubmodules ?? serializedTaskSpecs[0]?.pinnedSubmodules ?? null,
-      productionSourceRoots: compiled?.productionSourceRoots ??
-        serializedTaskSpecs[0]?.productionSourceRoots ?? ["src", "contracts"]
+      pinnedSubmodules: controllerSettings.pinned_submodules,
+      productionSourceRoots: controllerSettings.production_source_roots
     };
   });
+}
+
+const serializedTaskSpecs = taskSpecsFromCompiled(compiledBaseTasks);
+taskSpecs = serializedTaskSpecs;
+
+function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]): (typeof serializedTaskSpecs)[number] {
+  return task;
 }
 
 function projectRelativePath(value: string, label: string): string {
@@ -855,9 +842,9 @@ function compiledCanonicalSelectedTask(compiled: (typeof serializedTaskSpecs)[nu
     {
       promptPath:
         hydrated.promptRelativePath ??
-        `${compiled.artifactDir}/${CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string}`,
-      workspacePath: compiled.workspacePath,
-      artifactDir: compiled.artifactDir
+        `${compiled.artifactRelativeDir}/${CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string}`,
+      workspacePath: compiled.workspaceRelativePath,
+      artifactDir: compiled.artifactRelativeDir
     },
     executionGeneration
   );
@@ -3283,7 +3270,15 @@ function baseAgentForProfile(
   if (Array.isArray(selected) && selected.some((agent) => agent === null || agent === undefined)) {
     throw new Error(`agent factory returned a nullish agent chain entry: ${profile.agentRef}`);
   }
-  return selected;
+  const limits = {
+    taskId: task.attemptId,
+    runRoot: task.runRoot,
+    memoryMiB: task.execution.resources.memoryMiB,
+    cpu: task.execution.resources.cpu
+  };
+  return Array.isArray(selected)
+    ? selected.map((agent) => withWorkerResourceLimits(agent, limits))
+    : withWorkerResourceLimits(selected, limits);
 }
 
 function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string): AgentLike | AgentLike[] | undefined {

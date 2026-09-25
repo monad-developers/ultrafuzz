@@ -7,7 +7,13 @@ import type { ResolvedConfig } from "@ultrafuzz/config";
 const REAL_FORGE_ENV = "ULTRAFUZZ_REAL_FORGE";
 const FORGE_VMEM_LIMIT_ENV = "ULTRAFUZZ_FORGE_VMEM_LIMIT_KB";
 const FORGE_RAYON_THREADS_ENV = "ULTRAFUZZ_FORGE_RAYON_THREADS";
-const FORGE_GUARD_ENVIRONMENT_VARIABLES = [REAL_FORGE_ENV, FORGE_VMEM_LIMIT_ENV, FORGE_RAYON_THREADS_ENV] as const;
+const FORGE_COMPILER_LOCK_ENV = "ULTRAFUZZ_FORGE_COMPILER_LOCK";
+const FORGE_GUARD_ENVIRONMENT_VARIABLES = [
+  REAL_FORGE_ENV,
+  FORGE_VMEM_LIMIT_ENV,
+  FORGE_RAYON_THREADS_ENV,
+  FORGE_COMPILER_LOCK_ENV
+] as const;
 
 export interface ForgeGuardEnvironment {
   env: Record<string, string | undefined>;
@@ -51,7 +57,8 @@ export function prepareForgeGuardEnvironment(input: {
       PATH: [safeBinRoot, sourcePath].filter((entry) => entry.length > 0).join(path.delimiter),
       [REAL_FORGE_ENV]: realForge,
       [FORGE_VMEM_LIMIT_ENV]: String(input.config.run.forgeVmemLimitKb),
-      [FORGE_RAYON_THREADS_ENV]: String(input.config.run.forgeRayonThreads)
+      [FORGE_RAYON_THREADS_ENV]: String(input.config.run.forgeRayonThreads),
+      [FORGE_COMPILER_LOCK_ENV]: path.join(input.layout.root, "forge-compiler.lock")
     },
     environmentVariableNames: FORGE_GUARD_ENVIRONMENT_VARIABLES,
     active: true
@@ -138,7 +145,23 @@ function forgeGuardWrapper(): string {
     "set -eu",
     `ulimit -v "\${${FORGE_VMEM_LIMIT_ENV}:?}"`,
     `export RAYON_NUM_THREADS="\${RAYON_NUM_THREADS:-\${${FORGE_RAYON_THREADS_ENV}:?}}"`,
-    `exec "\${${REAL_FORGE_ENV}:?}" "$@"`,
+    `lock="\${${FORGE_COMPILER_LOCK_ENV}:?}"`,
+    "if [ -x /usr/bin/flock ]; then",
+    `  exec /usr/bin/flock "$lock" "\${${REAL_FORGE_ENV}:?}" "$@"`,
+    "fi",
+    "if [ -x /bin/flock ]; then",
+    `  exec /bin/flock "$lock" "\${${REAL_FORGE_ENV}:?}" "$@"`,
+    "fi",
+    // Portable fallback for environments without util-linux. The owner PID
+    // makes an interrupted compiler lock reclaimable rather than permanent.
+    'lock_dir="$lock.d"',
+    'while ! /bin/mkdir "$lock_dir" 2>/dev/null; do',
+    '  if [ -f "$lock_dir/pid" ] && ! kill -0 "$(/bin/cat "$lock_dir/pid")" 2>/dev/null; then /bin/rm -f "$lock_dir/pid"; /bin/rmdir "$lock_dir" 2>/dev/null || true; fi',
+    "  /bin/sleep 1",
+    "done",
+    'echo $$ > "$lock_dir/pid"',
+    'trap \'/bin/rm -f "$lock_dir/pid"; /bin/rmdir "$lock_dir" 2>/dev/null || true\' EXIT HUP INT TERM',
+    `"\${${REAL_FORGE_ENV}:?}" "$@"`,
     ""
   ].join("\n");
 }

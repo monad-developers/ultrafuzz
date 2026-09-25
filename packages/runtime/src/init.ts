@@ -250,6 +250,24 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/resource-limit.ts",
+      loadRuntimeTemplate("smithers/agents/resource-limit.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/worker-resource-guard.ts",
+      loadRuntimeTemplate("smithers/agents/worker-resource-guard.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
     for (const agent of AGENT_TEMPLATES) {
       const relativePath = `.smithers/agents/${agent.file}`;
       if (upgradedStockAdapters.has(relativePath)) continue;

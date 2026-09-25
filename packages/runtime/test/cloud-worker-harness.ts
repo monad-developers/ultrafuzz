@@ -37,6 +37,12 @@ export function materializeHarnessWorkflowSnapshot(compiled: CompiledSmithersWor
   const workflowPath = path.join(snapshotRoot, ".smithers", "workflows", path.basename(compiled.workflowPath));
   fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
   fs.copyFileSync(compiled.workflowPath, workflowPath);
+  fs.copyFileSync(compiled.controllerDataPath, `${workflowPath}.data.json`);
+  const agentsRoot = path.join(snapshotRoot, ".smithers", "agents");
+  fs.mkdirSync(agentsRoot, { recursive: true });
+  for (const name of ["resource-limit.ts", "worker-resource-guard.ts"]) {
+    fs.copyFileSync(path.join(compiled.projectRoot, ".smithers", "agents", name), path.join(agentsRoot, name));
+  }
   const dependencies = path.join(snapshotRoot, "dependencies", "manifest.json");
   const controls = path.join(snapshotRoot, "controls");
   fs.mkdirSync(path.dirname(dependencies), { recursive: true });

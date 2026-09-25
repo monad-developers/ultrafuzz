@@ -1011,6 +1011,45 @@ const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChe
     pendingOwnershipChecks.add(check);
   };`;
 
+// Ownership writes remain frequent, while unchanged heartbeat event rows are
+// retained only periodically. A changed checkpoint always emits immediately.
+const SMITHERS_ENGINE_HEARTBEAT_EVENT_STATE_SOURCE = `  let heartbeatLastPersistedWriteAtMs = 0;
+  let heartbeatLastWriteSucceeded = false;
+  let heartbeatLastReceivedAtMs = null;`;
+const SMITHERS_ENGINE_HEARTBEAT_EVENT_STATE_PATCH = `  let heartbeatLastPersistedWriteAtMs = 0;
+  let heartbeatLastWriteSucceeded = false;
+  let heartbeatLastReceivedAtMs = null;
+  let heartbeatLastEventAtMs = Number.NEGATIVE_INFINITY;
+  let heartbeatLastEventDataJson;
+  const heartbeatEventIntervalMs = 30_000;`;
+const SMITHERS_ENGINE_HEARTBEAT_EVENT_SOURCE = `      await eventBus.emitEventQueued({
+        type: "TaskHeartbeat",
+        runId,
+        nodeId: desc.nodeId,
+        iteration: desc.iteration,
+        attempt: attemptNo,
+        hasData: heartbeatDataJson !== null,
+        dataSizeBytes,
+        intervalMs: intervalMs ?? undefined,
+        timestampMs: heartbeatAtMs,
+      });`;
+const SMITHERS_ENGINE_HEARTBEAT_EVENT_PATCH = `      const heartbeatDataChanged = heartbeatDataJson !== heartbeatLastEventDataJson;
+      if (heartbeatDataChanged || heartbeatAtMs - heartbeatLastEventAtMs >= heartbeatEventIntervalMs) {
+        await eventBus.emitEventQueued({
+          type: "TaskHeartbeat",
+          runId,
+          nodeId: desc.nodeId,
+          iteration: desc.iteration,
+          attempt: attemptNo,
+          hasData: heartbeatDataJson !== null,
+          dataSizeBytes,
+          intervalMs: intervalMs ?? undefined,
+          timestampMs: heartbeatAtMs,
+        });
+        heartbeatLastEventAtMs = heartbeatAtMs;
+        heartbeatLastEventDataJson = heartbeatDataJson;
+      }`;
+
 // Every event the engine persists first runs an idempotency probe that
 // filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
 // The table's only index is its (run_id, seq) primary key, and the probe's
@@ -2438,6 +2477,8 @@ export type SmithersCompatibilityPatchId =
   | "terminal_state_restore"
   | "resume_hydration"
   | "engine_agent_event_ownership"
+  | "engine_heartbeat_event_state"
+  | "engine_heartbeat_event_coalescing"
   | "engine_agent_usage_progress"
   | "engine_main_usage_invocation"
   | "engine_json_correction_usage_invocation"
@@ -2584,6 +2625,22 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
     // Upstream coalescing its own in-flight proof retires this patch.
     upstreamAbsent: ["heartbeatOwnershipCheckInFlight"]
+  },
+  {
+    id: "engine_heartbeat_event_state",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_HEARTBEAT_EVENT_STATE_SOURCE,
+    patched: SMITHERS_ENGINE_HEARTBEAT_EVENT_STATE_PATCH,
+    upstreamAbsent: ["heartbeatLastEventAtMs"]
+  },
+  {
+    id: "engine_heartbeat_event_coalescing",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_HEARTBEAT_EVENT_SOURCE,
+    patched: SMITHERS_ENGINE_HEARTBEAT_EVENT_PATCH,
+    upstreamAbsent: ["heartbeatDataChanged"]
   },
   {
     id: "engine_agent_usage_progress",
@@ -3225,8 +3282,8 @@ export interface CompiledSmithersWorkflow {
   /** Attempts whose group explicitly quarantines failures from independent branches. */
   nonBlockingAttemptIds: readonly string[];
   /**
-   * Execution-only prompt bindings by attempt ID. Emitted into the task-spec
-   * literal, never into the compiled task manifest -- the manifest must stay
+   * Execution-only prompt bindings by attempt ID. Emitted into the controller
+   * data companion, never into the compiled task manifest -- the manifest must stay
    * byte-identical to the sealed base so verifyDynamicRuntimeMaterialization
    * can re-derive the published tasks.json from it.
    */
@@ -3236,6 +3293,8 @@ export interface CompiledSmithersWorkflow {
   sourceRevision?: string;
   sourceRef?: string;
   workflowPath: string;
+  /** Bounded JSON data consumed by the generated controller without type-checking it as source. */
+  controllerDataPath: string;
   evidenceWorkflowPath: string;
   expandedGraphPath: string;
   configPath: string;
@@ -3269,7 +3328,7 @@ export interface RefreshedSmithersControllerSnapshot {
  * `WORKFLOW_CONTROL_EVIDENCE_INVALID` for the rest of the run's life.
  *
  * The retained snapshot is returned alongside instead, and reaches only the
- * task-spec literal, which is what actually binds the bytes the agent opens.
+ * controller data companion, which is what actually binds the bytes the agent opens.
  * The manifest field is a NAME that has to re-derive from the seal, not a
  * pointer to authenticated bytes: no execution path reads it, and the one place
  * that does open it -- `smithersExecutionControlFiles`, on launch -- hard-requires
@@ -3317,8 +3376,8 @@ function currentControllerPromptBindings(
     // controls/runtime-base-tasks.json. `smithersExecutionControlFiles` rejects any compiled task
     // whose renderedPromptPath diverges from its plan row, so this normalization is byte-exact for
     // any run that sealed -- and it also scrubs a manifest already poisoned by a prior refresh.
-    // The authenticated retained snapshot binds the bytes the agent reads, via the task-spec
-    // literal only (see renderWorkflowSource / taskSpecsFromCompiled).
+    // The authenticated retained snapshot binds the bytes the agent reads through the controller
+    // data companion only (see controllerDataDocument / taskSpecsFromCompiled).
     return { ...task, renderedPromptPath: planned.rendered_prompt_path };
   });
   // A silently missing binding would fall back to the launch path, which retry cleanup owns and may
@@ -3389,12 +3448,7 @@ export function renderCurrentSmithersController(input: {
   const projectRoot = path.resolve(input.projectRoot);
   const baseTaskDocument = currentControllerBaseTasks(input.layout, input.tasks);
   const { tasks, retainedPromptPaths } = currentControllerPromptBindings(input.layout, baseTaskDocument);
-  const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
-  const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
-  for (const file of packagedController.files) {
-    writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
-  }
   const nonBlockingAttempts = new Set(
     tasks.flatMap((task) => (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory)))
   );
@@ -3405,6 +3459,23 @@ export function renderCurrentSmithersController(input: {
     const group = groupId === undefined ? undefined : groups[groupId];
     const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
     if (defaults.failure_policy === "continue") nonBlockingAttempts.add(task.attemptId);
+  }
+  const continuationDigest = sha256Stable({
+    schema: "ultrafuzz-continuation-controller.v1",
+    runId: input.layout.runId,
+    smithersRunId: input.smithersRunId,
+    tasks,
+    dynamicGroups: baseTaskDocument.dynamic_groups ?? [],
+    nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
+    retainedPromptPaths,
+    config: input.config,
+    graph,
+    controllerSourceDigest: packagedController.digest
+  });
+  const generationRoot = path.join(projectRoot, ".smithers", "continuations", continuationDigest);
+  const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
+  for (const file of packagedController.files) {
+    writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
   }
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
@@ -3422,6 +3493,7 @@ export function renderCurrentSmithersController(input: {
     ...(baseTaskDocument.source_revision === undefined ? {} : { sourceRevision: baseTaskDocument.source_revision }),
     ...(baseTaskDocument.source_ref === undefined ? {} : { sourceRef: baseTaskDocument.source_ref }),
     workflowPath,
+    controllerDataPath: `${workflowPath}.data.json`,
     evidenceWorkflowPath: path.join(input.layout.root, "smithers", "workflow.tsx"),
     expandedGraphPath: path.join(input.layout.root, "smithers", "expanded-graph.json"),
     configPath: path.join(input.layout.root, "smithers", "config.fingerprint-input"),
@@ -3434,12 +3506,7 @@ export function renderCurrentSmithersController(input: {
     controllerSourceDigest: packagedController.digest,
     ...(baseTaskDocument.pinned_submodules === null ? {} : { pinnedSubmodules: baseTaskDocument.pinned_submodules })
   };
-  writePreparedWorkflowFile(
-    projectRoot,
-    workflowPath,
-    renderWorkflowSource(compiled, input.config),
-    "current continuation workflow"
-  );
+  writeGeneratedController(projectRoot, compiled, input.config, "current continuation workflow");
   return workflowPath;
 }
 
@@ -3510,6 +3577,7 @@ export function refreshedSmithersControllerSnapshot(input: {
     ...(taskDocument.source_revision === undefined ? {} : { sourceRevision: taskDocument.source_revision }),
     ...(taskDocument.source_ref === undefined ? {} : { sourceRef: taskDocument.source_ref }),
     workflowPath: input.original.paths.workflowPath,
+    controllerDataPath: `${input.original.paths.workflowPath}.data.json`,
     evidenceWorkflowPath: input.original.paths.evidenceWorkflowPath,
     expandedGraphPath: input.original.paths.expandedGraphPath,
     configPath: input.original.paths.configPath,
@@ -3533,7 +3601,25 @@ export function refreshedSmithersControllerSnapshot(input: {
     currentWorkflowModuleRoots(compiled)
   );
   applyRefreshedSmithersCompatibilityPatches(executionFiles, dependencyMap);
-  const workflow = Buffer.from(renderWorkflowSource(compiled, input.config), "utf8");
+  const workflowSource = renderWorkflowSource(compiled);
+  assertGeneratedWorkflowTranspiles(workflowSource);
+  const workflow = Buffer.from(workflowSource, "utf8");
+  const controllerData = Buffer.from(`${stableJson(controllerDataDocument(compiled, input.config))}\n`, "utf8");
+  const controllerDataSnapshotPath = path.posix.join(
+    ".smithers/workflows",
+    `${path.basename(compiled.workflowPath)}.data.json`
+  );
+  const priorControllerData = executionFiles.find((file) => file.snapshotPath === controllerDataSnapshotPath);
+  if (priorControllerData === undefined) {
+    writePreparedWorkflowFile(projectRoot, compiled.controllerDataPath, controllerData, "generated controller data");
+    executionFiles.push({
+      sourcePath: compiled.controllerDataPath,
+      snapshotPath: controllerDataSnapshotPath,
+      contents: controllerData
+    });
+  } else {
+    priorControllerData.contents = controllerData;
+  }
   const semanticFingerprint = controllerRefreshSemanticFingerprint(input.original);
   return {
     snapshot: {
@@ -4098,6 +4184,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     "workflows",
     `${workflowFileStem(input.runLayout.runId)}.tsx`
   );
+  const controllerDataPath = `${workflowPath}.data.json`;
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
@@ -4121,6 +4208,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     runRoot: input.runLayout.root,
     ...(source === undefined ? {} : { sourceRevision: source.revision, sourceRef: source.ref }),
     workflowPath,
+    controllerDataPath,
     evidenceWorkflowPath,
     expandedGraphPath,
     configPath,
@@ -4175,7 +4263,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     inputPath,
     // "positive-only": these persisted bytes are the exact --input the
     // workflow runner byte-validates against the generated workflow's
-    // compiled literals at detached-launch preflight. The speculative
+    // compiled controller data at detached-launch preflight. The speculative
     // heuristics flag the eval lane's bounded run ids (ci-<run_id>-…-<hex16>)
     // as secrets, so an "all" scan rewrote ultrafuzz_run_id to "<redacted>"
     // and every eval submission failed preflight as INVALID_INPUT (#899).
@@ -4193,12 +4281,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     )}\n`,
     "workflow input"
   );
-  writePreparedWorkflowFile(
-    projectRoot,
-    workflowPath,
-    renderWorkflowSource(compiled, input.config),
-    "generated Smithers workflow"
-  );
+  writeGeneratedController(projectRoot, compiled, input.config, "generated Smithers workflow");
   writePreparedWorkflowFile(
     input.runLayout.root,
     evidenceWorkflowPath,
@@ -4334,6 +4417,10 @@ export async function smithersExecutionControlFiles(
 
   add(compiled.executionConfigPath, "controls/ultrafuzz.toml");
   add(compiled.resolvedConfigPath, "controls/resolved-config.json");
+  add(
+    compiled.controllerDataPath,
+    path.posix.join(".smithers/workflows", `${path.basename(compiled.workflowPath)}.data.json`)
+  );
   const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
   assertControllerSourceDigest(compiled.projectRoot, compiled.controllerSourceDigest);
   for (const sourcePath of walkExecutionFiles(agentsRoot)) {
@@ -7068,6 +7155,16 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "agent event ownership coalescing"
     ],
     [
+      SMITHERS_ENGINE_HEARTBEAT_EVENT_STATE_SOURCE,
+      SMITHERS_ENGINE_HEARTBEAT_EVENT_STATE_PATCH,
+      "heartbeat event coalescing state"
+    ],
+    [
+      SMITHERS_ENGINE_HEARTBEAT_EVENT_SOURCE,
+      SMITHERS_ENGINE_HEARTBEAT_EVENT_PATCH,
+      "unchanged heartbeat event coalescing"
+    ],
+    [
       SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_SOURCE,
       SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_PATCH,
       "incremental owned agent usage"
@@ -8008,11 +8105,6 @@ function agentChainForTask(
 }
 
 const INVARIANT_CAMPAIGN_HOST_SHUTDOWN_GRACE_SECONDS = 300;
-const INVARIANT_CAMPAIGN_ROLE_CONTRACTS = new Set([
-  "ultrafuzz/invariant-campaign-plan@2",
-  "ultrafuzz/property-campaign@3",
-  "ultrafuzz/campaign-summary@2"
-]);
 
 function assertInvariantCampaignTimeoutBudget(
   input: {
@@ -8362,17 +8454,7 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   });
 }
 
-/**
- * The execution-only retained prompt binding for a task, if the compile produced one. Own-property
- * only: an attempt ID is never allowed to reach `Object.prototype` and yield a non-path value.
- */
-function retainedTaskPromptPath(compiled: CompiledSmithersWorkflow, attemptId: string): string | undefined {
-  const bindings = compiled.retainedPromptPaths;
-  if (bindings === undefined || !Object.hasOwn(bindings, attemptId)) return undefined;
-  return bindings[attemptId];
-}
-
-function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
+function controllerDataDocument(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): Record<string, unknown> {
   const controllerTasks = compiled.replacePromptSchemas
     ? compiled.tasks.map((task) => taskWithCurrentArtifactSchemas(task))
     : compiled.tasks;
@@ -8382,104 +8464,23 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
         taskTemplates: group.taskTemplates.map((task) => taskWithCurrentArtifactSchemas(task))
       }))
     : compiled.dynamicGroups;
-  const compiledTasks = JSON.stringify(controllerTasks, null, 2);
-  const dynamicGroups = JSON.stringify(controllerDynamicGroups, null, 2);
-  const nonBlockingAttemptIds = new Set(compiled.nonBlockingAttemptIds);
-  const taskByArtifactDir = new Map<string, CompiledSmithersTask>();
-  for (const task of controllerTasks) {
-    const artifactDir = path.resolve(task.artifactDir);
-    if (taskByArtifactDir.has(artifactDir)) {
-      throw new Error(`multiple compiled tasks share artifact directory ${JSON.stringify(artifactDir)}`);
+  return {
+    schema_version: "ultrafuzz.controller-data.v1",
+    compiled_base_tasks: controllerTasks,
+    dynamic_group_specs: controllerDynamicGroups,
+    settings: {
+      smithers_run_id: compiled.smithersRunId,
+      non_blocking_attempt_ids: compiled.nonBlockingAttemptIds,
+      retained_prompt_paths: compiled.retainedPromptPaths ?? {},
+      invariant_testing_fuzzer_timeout_seconds: config.invariants.invariantTestingFuzzerTimeoutSeconds,
+      dynamic_strategies_enumerator_policy: config.dynamicStrategiesEnumerator,
+      pinned_submodules: compiled.pinnedSubmodules ?? null,
+      production_source_roots: compiled.productionSourceRoots ?? ["src", "contracts"]
     }
-    taskByArtifactDir.set(artifactDir, task);
-  }
-  const taskSpecs = JSON.stringify(
-    controllerTasks.map((task) => ({
-      id: task.smithersNodeId,
-      smithersNodeId: task.smithersNodeId,
-      smithersRunId: compiled.smithersRunId,
-      preparationId: task.preparationSmithersNodeId,
-      verifierId: task.verifierSmithersNodeId,
-      attemptId: task.attemptId,
-      logicalNodeId: task.logicalNodeId,
-      continueOnFail: nonBlockingAttemptIds.has(task.attemptId),
-      dependsOn: task.dependencySmithersNodeIds,
-      agentRef: task.agentRef,
-      agentChain: task.agentChain,
-      modelName: task.modelName ?? null,
-      reasoningEffort: task.reasoningEffort ?? null,
-      prompt: "",
-      promptPath:
-        task.renderedPromptPath === undefined
-          ? undefined
-          : executionPath(
-              compiled.projectRoot,
-              task,
-              retainedTaskPromptPath(compiled, task.attemptId) ?? task.renderedPromptPath,
-              "rendered prompt"
-            ),
-      workspacePath: executionPath(compiled.projectRoot, task, task.workspacePath, "task workspace"),
-      artifactDir: executionPath(compiled.projectRoot, task, task.artifactDir, "task artifact directory"),
-      dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
-        executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")
-      ),
-      referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
-        executionPath(compiled.projectRoot, task, directory, "reference artifact directory")
-      ),
-      ...(task.vulnerabilityDatabaseCatalog === undefined
-        ? {}
-        : {
-            vulnerabilityDatabase: {
-              catalogPath: executionPath(
-                compiled.projectRoot,
-                task,
-                task.vulnerabilityDatabaseCatalog.path,
-                "vulnerability database catalog"
-              ),
-              catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
-            }
-          }),
-      optionalDependencyArtifactDirs: (task.optionalDependencyArtifactDirs ?? []).map((directory) =>
-        executionPath(compiled.projectRoot, task, directory, "optional dependency artifact directory")
-      ),
-      dependencyVerificationProducers: dependencyVerificationProducersForTask(task, taskByArtifactDir),
-      ...(task.promptArtifactAuthoritySelectors === undefined
-        ? {}
-        : { promptArtifactAuthoritySelectors: task.promptArtifactAuthoritySelectors }),
-      runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
-      workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
-      sourceTaskManifestPath: compiled.tasksPath,
-      sourceProjectRoot: compiled.projectRoot,
-      sourceRevision: task.sourceRevision ?? null,
-      sourceRef: task.sourceRef ?? null,
-      branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
-      timeoutMs: task.timeoutMs,
-      runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
-      campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
-        INVARIANT_CAMPAIGN_ROLE_CONTRACTS.has(output.contract)
-      )
-        ? {
-            configuredFuzzerTimeoutSeconds: config.invariants.invariantTestingFuzzerTimeoutSeconds,
-            plannedTimeoutSeconds: task.metadata.timeout.seconds,
-            finalizationReserveSeconds: topologyRuntimeBudgetForTimeout(task.timeoutMs).finalizationReserveSeconds
-          }
-        : null,
-      dynamicStrategiesEnumeratorPolicy: config.dynamicStrategiesEnumerator,
-      heartbeatTimeoutMs: task.heartbeatTimeoutMs,
-      retries: task.retries,
-      retryPolicy: {
-        backoff: task.retryPolicy.backoff,
-        initialDelayMs: task.retryPolicy.initialDelayMs
-      },
-      metadata: executionMetadata(compiled.projectRoot, task),
-      outputs: task.metadata.artifacts.outputs,
-      execution: task.execution,
-      pinnedSubmodules: compiled.pinnedSubmodules ?? null,
-      productionSourceRoots: compiled.productionSourceRoots ?? ["src", "contracts"]
-    })),
-    null,
-    2
-  );
+  };
+}
+
+function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
     __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__: JSON.stringify(loadAgentPreambleTemplate("agent-prompt")),
     __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__: JSON.stringify(
@@ -8496,13 +8497,48 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__: JSON.stringify(
       relativeProjectPath(compiled.projectRoot, compiled.workflowPath, "workflow path")
     ),
-    __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
-    __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
     __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__: JSON.stringify(compiled.replacePromptSchemas),
-    __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
   });
+}
+
+function writeGeneratedController(
+  boundaryRoot: string,
+  compiled: CompiledSmithersWorkflow,
+  config: ResolvedConfig,
+  label: string
+): void {
+  const source = renderWorkflowSource(compiled);
+  assertGeneratedWorkflowTranspiles(source);
+  writePreparedWorkflowFile(
+    boundaryRoot,
+    compiled.controllerDataPath,
+    `${stableJson(controllerDataDocument(compiled, config))}\n`,
+    `${label} data`
+  );
+  writePreparedWorkflowFile(boundaryRoot, compiled.workflowPath, source, label);
+}
+
+function assertGeneratedWorkflowTranspiles(source: string): void {
+  const result = ts.transpileModule(source, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+      jsx: ts.JsxEmit.ReactJSX,
+      isolatedModules: true
+    },
+    reportDiagnostics: true,
+    fileName: "workflow.tsx"
+  });
+  const errors = (result.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
+  if (errors.length > 0) {
+    throw new Error(
+      `generated Smithers workflow does not transpile: ${errors
+        .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, " "))
+        .join("; ")}`
+    );
+  }
 }
 
 function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmithersTask {
@@ -8531,42 +8567,6 @@ function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmi
           };
         })
       }
-    }
-  };
-}
-
-function dependencyVerificationProducersForTask(
-  task: CompiledSmithersTask,
-  taskByArtifactDir: ReadonlyMap<string, CompiledSmithersTask>
-): Array<{ attemptId: string; verifierId: string; optional: boolean }> {
-  const optionalArtifactDirs = new Set(
-    (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.resolve(directory))
-  );
-  return task.dependencyArtifactDirs.flatMap((directory) => {
-    const producer = taskByArtifactDir.get(path.resolve(directory));
-    if (producer === undefined) return [];
-    return [
-      {
-        attemptId: producer.attemptId,
-        verifierId: producer.verifierSmithersNodeId,
-        optional: optionalArtifactDirs.has(path.resolve(directory))
-      }
-    ];
-  });
-}
-
-function executionMetadata(projectRoot: string, task: CompiledSmithersTask): SmithersTaskMetadata {
-  if (task.execution.mode === "local") return task.metadata;
-  return {
-    ...task.metadata,
-    workspace: {
-      ...task.metadata.workspace,
-      path: relativeProjectPath(projectRoot, task.metadata.workspace.path, "workspace metadata path")
-    },
-    artifacts: {
-      ...task.metadata.artifacts,
-      dir: relativeProjectPath(projectRoot, task.metadata.artifacts.dir, "artifact metadata directory"),
-      manifestPath: relativeProjectPath(projectRoot, task.metadata.artifacts.manifestPath, "artifact manifest path")
     }
   };
 }

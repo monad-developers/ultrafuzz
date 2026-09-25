@@ -1646,35 +1646,26 @@ test("dynamic lifecycle admission rejects graph, task, and state extensions not 
 });
 
 /**
- * Recover the two literals the refreshed controller compiles in, exactly as the rendered
- * workflow module binds them at `workflow.tsx` `compiledBaseTasks` / `dynamicGroupSpecs`.
+ * Recover the bounded data the refreshed controller loads, exactly as the rendered
+ * workflow module binds it at `workflow.tsx` `compiledBaseTasks` / `dynamicGroupSpecs`.
  */
-function compiledControllerConstants(workflowSource: string): {
+function compiledControllerConstants(workflowPath: string): {
   baseTasks: CompiledSmithersTask[];
   groups: CompiledSmithersDynamicGroup[];
   taskSpecs: Array<{ attemptId: string; promptPath?: string }>;
 } {
-  const read = (name: string, terminator: string): unknown => {
-    const opener = `const ${name} = `;
-    const start = workflowSource.indexOf(opener);
-    assert.notEqual(start, -1, `rendered controller is missing ${name}`);
-    const end = workflowSource.indexOf(`;\nconst ${terminator} = `, start);
-    assert.notEqual(end, -1, `rendered controller is missing the ${name} terminator`);
-    return JSON.parse(workflowSource.slice(start + opener.length, end)) as unknown;
+  const data = JSON.parse(fs.readFileSync(`${workflowPath}.data.json`, "utf8")) as {
+    compiled_base_tasks: CompiledSmithersTask[];
+    dynamic_group_specs: CompiledSmithersDynamicGroup[];
+    settings: { retained_prompt_paths: Record<string, string> };
   };
-  // `serializedTaskSpecs` ends in `as const;`, which the terminator reader above cannot match.
-  const specsOpener = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsOpener);
-  assert.notEqual(specsStart, -1, "rendered controller is missing serializedTaskSpecs");
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsEnd > specsStart, "rendered controller is missing the serializedTaskSpecs terminator");
   return {
-    baseTasks: read("compiledBaseTasks", "dynamicGroupSpecs") as CompiledSmithersTask[],
-    groups: read("dynamicGroupSpecs", "maxDynamicNodes") as CompiledSmithersDynamicGroup[],
-    taskSpecs: JSON.parse(workflowSource.slice(specsStart + specsOpener.length, specsEnd)) as Array<{
-      attemptId: string;
-      promptPath?: string;
-    }>
+    baseTasks: data.compiled_base_tasks,
+    groups: data.dynamic_group_specs,
+    taskSpecs: data.compiled_base_tasks.map((task) => ({
+      attemptId: task.attemptId,
+      promptPath: data.settings.retained_prompt_paths[task.attemptId] ?? task.renderedPromptPath
+    }))
   };
 }
 
@@ -1708,7 +1699,7 @@ test("refreshed controller compiles the pre-expansion base task set", async () =
     tasks: liveTaskDocument,
     config: JSON.parse(resolvedConfig.contents.toString("utf8"))
   });
-  const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
+  const compiled = compiledControllerConstants(workflowPath);
 
   // The controller's compiled constant is the dynamic runtime's `baseTasks`. Compiling the
   // already-generated tasks into it reserves their own attempt IDs against the very expansion
@@ -1823,7 +1814,7 @@ test("refreshed controller republishes the sealed launch path over a rebound tas
     tasks: parseSmithersTaskManifestBytes(fs.readFileSync(tasksPath)),
     config: JSON.parse(resolvedConfig.contents.toString("utf8"))
   });
-  const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
+  const compiled = compiledControllerConstants(workflowPath);
 
   const plannerBase = compiled.baseTasks.find((task) => task.attemptId === planned.attempt_id);
   assert.ok(plannerBase);
@@ -1937,7 +1928,7 @@ test("a refresh repairs control evidence a rebound task manifest permanently inv
     tasks: parseSmithersTaskManifestBytes(fs.readFileSync(tasksPath)),
     config
   });
-  const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
+  const compiled = compiledControllerConstants(workflowPath);
   materializeDynamicRuntime({
     runId: fixture.runId,
     projectRoot: fixture.project,

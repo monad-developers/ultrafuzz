@@ -37,6 +37,7 @@ import { validateReportBundleManifest } from "../cli-schema-registry.js";
 import {
   deriveRunStatistics,
   type RunStatisticsValue,
+  type RetainedStorageStatistics,
   type StatisticsEvidence,
   type TokenStatistics
 } from "../run-statistics.js";
@@ -194,7 +195,8 @@ async function loadLocalEvidence(
       ...(snapshot.attempts === undefined
         ? {}
         : { attempts: parseNodeAttemptLedgerBytes(snapshot.attempts, runId).entries }),
-      ...(snapshot.usage === undefined ? {} : { usage: parseUsageLedgerBytes(snapshot.usage, runId).entries })
+      ...(snapshot.usage === undefined ? {} : { usage: parseUsageLedgerBytes(snapshot.usage, runId).entries }),
+      retainedStorage: measureRetainedStorage(layout.root, path.join(runsRoot, ".objects"))
     },
     diagnostics
   };
@@ -481,6 +483,80 @@ function safeByteSum(left: number, right: number, label: string): number {
   return value;
 }
 
+const MAX_RETAINED_STORAGE_ENTRIES = 100_000;
+
+function measureRetainedStorage(runRoot: string, sharedObjectsRoot: string): RetainedStorageStatistics {
+  type Category = { name: string; logical_bytes: number; physical_bytes: number; entry_count: number };
+  const categories = new Map<string, Category>();
+  const pending: Array<{ root: string; path: string; shared: boolean }> = [
+    { root: runRoot, path: runRoot, shared: false }
+  ];
+  try {
+    const stat = fs.lstatSync(sharedObjectsRoot);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      pending.push({ root: sharedObjectsRoot, path: sharedObjectsRoot, shared: true });
+    }
+  } catch (error) {
+    if (!isErrnoException(error, "ENOENT")) throw error;
+  }
+  let logicalBytes = 0,
+    physicalBytes = 0,
+    entryCount = 0,
+    truncated = false;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current.path, { withFileTypes: true });
+    } catch (error) {
+      if (isErrnoException(error, "ENOENT")) continue;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entryCount >= MAX_RETAINED_STORAGE_ENTRIES) {
+        truncated = true;
+        pending.length = 0;
+        break;
+      }
+      const candidate = path.join(current.path, entry.name);
+      let stat: fs.Stats;
+      try {
+        stat = fs.lstatSync(candidate);
+      } catch (error) {
+        if (isErrnoException(error, "ENOENT")) continue;
+        throw error;
+      }
+      entryCount += 1;
+      const logical = stat.size;
+      const physical = Number(stat.blocks) * 512;
+      logicalBytes = safeByteSum(logicalBytes, logical, "retained storage");
+      physicalBytes = safeByteSum(physicalBytes, physical, "retained storage");
+      const relative = path.relative(current.root, candidate);
+      const categoryName = current.shared ? "shared-objects" : relative.split(path.sep)[0] || "run-root";
+      const category = categories.get(categoryName) ?? {
+        name: categoryName,
+        logical_bytes: 0,
+        physical_bytes: 0,
+        entry_count: 0
+      };
+      category.logical_bytes = safeByteSum(category.logical_bytes, logical, "retained storage category");
+      category.physical_bytes = safeByteSum(category.physical_bytes, physical, "retained storage category");
+      category.entry_count += 1;
+      categories.set(categoryName, category);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push({ ...current, path: candidate });
+    }
+  }
+  return {
+    logical_bytes: logicalBytes,
+    physical_bytes: physicalBytes,
+    entry_count: entryCount,
+    truncated,
+    categories: [...categories.values()].sort(
+      (left, right) => right.physical_bytes - left.physical_bytes || left.name.localeCompare(right.name)
+    )
+  };
+}
+
 function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
@@ -543,6 +619,12 @@ function renderStatistics(value: RunStatisticsValue, diagnostics: RuntimeDiagnos
     `Run elapsed: ${formatDuration(value.run_elapsed_ms)}`,
     `Recorded node usage: ${usage === null || usage.total_tokens === null ? "unavailable" : `${formatInteger(usage.total_tokens)} tokens, ${costLabel(usage)}`}`,
     `Attempt evidence: ${value.totals.attempts_complete ? "complete" : "partial or unavailable"}`,
+    ...(value.retained_storage === undefined
+      ? []
+      : [
+          `Retained storage: ${formatBytes(value.retained_storage.physical_bytes)} physical / ${formatBytes(value.retained_storage.logical_bytes)} logical across ${formatInteger(value.retained_storage.entry_count)} entries${value.retained_storage.truncated ? " (bounded scan)" : ""}`,
+          `Storage categories: ${value.retained_storage.categories.map((category) => `${category.name}=${formatBytes(category.physical_bytes)}`).join(", ")}`
+        ]),
     ...(cumulativeTokens === undefined
       ? []
       : [
@@ -584,6 +666,18 @@ function completenessLabel(usage: TokenStatistics | null): string {
 
 function formatInteger(value: number): string {
   return Math.trunc(value).toLocaleString("en-US");
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let amount = value / 1024;
+  let index = 0;
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024;
+    index += 1;
+  }
+  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[index]}`;
 }
 
 function formatDuration(milliseconds: number): string {

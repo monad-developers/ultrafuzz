@@ -215,14 +215,30 @@ function readTrustedCliClosureAt(
 }
 
 function safeClosuresRoot(layout: RunLayout): string {
-  const root = path.join(layout.root, CLOSURES_DIRECTORY);
-  if (!pathEntryExists(root)) fs.mkdirSync(root, { recursive: false, mode: 0o700 });
+  const runsRoot = path.dirname(path.resolve(layout.root));
+  const objectsRoot = path.join(runsRoot, ".objects");
+  createSharedDirectory(objectsRoot);
+  const objectsStat = fs.lstatSync(objectsRoot);
+  if (!objectsStat.isDirectory() || objectsStat.isSymbolicLink()) {
+    throw new Error("trusted CLI object root is unsafe");
+  }
+  const root = path.join(objectsRoot, CLOSURES_DIRECTORY);
+  createSharedDirectory(root);
   const stat = fs.lstatSync(root);
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("trusted CLI closures root is unsafe");
-  const relative = path.relative(path.resolve(layout.root), path.resolve(root));
+  const relative = path.relative(runsRoot, path.resolve(root));
   if (relative.startsWith("..") || path.isAbsolute(relative))
-    throw new Error("trusted CLI closures root escapes the run");
+    throw new Error("trusted CLI closures root escapes the runs store");
   return root;
+}
+
+function createSharedDirectory(directory: string): void {
+  if (pathEntryExists(directory)) return;
+  try {
+    fs.mkdirSync(directory, { recursive: false, mode: 0o700 });
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+  }
 }
 
 function snapshotModuleRoots(snapshotRoot: string | undefined): ReadonlyMap<string, string> {

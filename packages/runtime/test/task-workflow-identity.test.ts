@@ -10,13 +10,13 @@ import { compileSmithersWorkflow } from "../src/smithers.js";
 import { reconcileSmithersAttemptAgentSelection, smithersTaskAgentId } from "../src/smithers-attempt-authority.js";
 import { temporaryRoot } from "./temporary-root.js";
 
-function reconstructTaskIdentity(matchingStaticTask: boolean) {
+function reconstructTaskIdentity() {
   const template = fs.readFileSync(
     new URL("../../src/templates/smithers/workflows/workflow.tsx", import.meta.url),
     "utf8"
   );
   const start = template.indexOf("function compiledTaskSourceIdentity");
-  const end = template.indexOf("\nfunction projectRelativePath", start);
+  const end = template.indexOf("\nconst serializedTaskSpecs", start);
   assert.ok(start >= 0 && end > start);
   const compiled = ts.transpileModule(template.slice(start, end), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
@@ -25,28 +25,45 @@ function reconstructTaskIdentity(matchingStaticTask: boolean) {
     smithersNodeId: "node:report-attempt",
     logicalNodeId: "report",
     attemptId: "report-attempt",
-    execution: { mode: "local" },
+    preparationSmithersNodeId: "prepare:report-attempt",
+    verifierSmithersNodeId: "verify:report-attempt",
+    agentRef: "CodexAgent",
+    agentChain: [],
+    dependencySmithersNodeIds: [],
+    timeoutMs: 1_000,
+    heartbeatTimeoutMs: 500,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1 },
+    execution: { mode: "local", resources: { cpu: 1, memoryMiB: 64, timeoutSeconds: 1 } },
     workspacePath: "workspaces/report-attempt",
     artifactDir: "artifacts/report-attempt",
     dependencyArtifactDirs: [],
     referenceArtifactDirs: [],
-    metadata: { node: {}, artifacts: { outputs: [] } }
+    metadata: { node: {}, artifacts: { outputs: [] }, timeout: { seconds: 1 } }
   };
   // Execute the complete reconstruction function. Unrelated path and policy
   // helpers are stubbed; workflow identity must come from the supplied tasks.
   const bindings = {
     path,
     sourceProjectRoot: process.cwd(),
-    serializedTaskSpecs: [
-      { id: "node:planner", smithersRunId: "ultrafuzz-shared-run" },
-      ...(matchingStaticTask ? [{ id: task.smithersNodeId, smithersRunId: "ultrafuzz-static-run" }] : [])
-    ],
+    controllerSettings: {
+      smithers_run_id: "ultrafuzz-shared-run",
+      retained_prompt_paths: {},
+      invariant_testing_fuzzer_timeout_seconds: 60,
+      dynamic_strategies_enumerator_policy: 1,
+      pinned_submodules: null,
+      production_source_roots: ["src", "contracts"]
+    },
+    nonBlockingAttemptIds: new Set(),
     admittedWorkflowControls: {},
     taskWorkflowControlPaths: () => ({}),
+    sealedTaskPromptPath: () => undefined,
+    projectRelativePath: (_value: string) => _value,
     dynamicExecutionPath: (_task: unknown, value: string) => value,
     compiledBaseTasks: [task],
     dynamicGroupSpecs: [],
     topologyRuntimeContextForTimeout: () => ({}),
+    topologyRuntimeBudgetForTimeout: () => ({ finalizationReserveSeconds: 1 }),
     dependencyVerificationProducersFromCompiledTask: () => [],
     INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS: new Set(),
     dynamicExecutionMetadata: () => task.metadata,
@@ -62,16 +79,16 @@ function reconstructTaskIdentity(matchingStaticTask: boolean) {
   )(bindings) as { id: string; smithersNodeId: string; smithersRunId: string; logicalNodeId: string };
 }
 
-test("reconstructed static tasks retain the matching workflow identity", () => {
-  const task = reconstructTaskIdentity(true);
+test("reconstructed static tasks retain the controller workflow identity", () => {
+  const task = reconstructTaskIdentity();
   assert.equal(task.id, "node:report-attempt");
   assert.equal(task.smithersNodeId, task.id);
   assert.equal(task.logicalNodeId, "report");
-  assert.equal(task.smithersRunId, "ultrafuzz-static-run");
+  assert.equal(task.smithersRunId, "ultrafuzz-shared-run");
 });
 
 test("generated tasks inherit the sealed workflow run identity without a static task match", () => {
-  const task = reconstructTaskIdentity(false);
+  const task = reconstructTaskIdentity();
   assert.equal(task.smithersNodeId, "node:report-attempt");
   assert.equal(task.logicalNodeId, "report");
   assert.equal(task.smithersRunId, "ultrafuzz-shared-run");
@@ -133,35 +150,19 @@ nodes:
   return compiled;
 }
 
-function hydrateSerializedTask(source: string) {
-  const literal = source.match(/const serializedTaskSpecs = ([\s\S]*?) as const;/u)?.[1];
-  assert.ok(literal);
-  const start = source.indexOf("function hydrateTaskSpec");
-  const end = source.indexOf("\nlet taskSpecs =", start);
-  assert.ok(start >= 0 && end > start);
-  const helper = ts.transpileModule(source.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  // Execute the actual compiler literal and hydration; only control-path
-  // admission is stubbed because no sealed execution snapshot is needed here.
-  return new Function(
-    "path",
-    "taskWorkflowControlPaths",
-    "admittedWorkflowControls",
-    "sealedTaskPromptPath",
-    `const serializedTaskSpecs = ${literal}; ${helper}; return hydrateTaskSpec(serializedTaskSpecs[0]);`
-  )(
-    path,
-    () => ({}),
-    {},
-    () => undefined
-  ) as SmithersTaskManifestTask & { id: string; smithersRunId: string };
+function hydrateSerializedTask(controllerDataPath: string) {
+  const data = JSON.parse(fs.readFileSync(controllerDataPath, "utf8")) as {
+    compiled_base_tasks: SmithersTaskManifestTask[];
+    settings: { smithers_run_id: string };
+  };
+  const task = data.compiled_base_tasks[0]!;
+  return { ...task, id: task.smithersNodeId, smithersRunId: data.settings.smithers_run_id };
 }
 
 for (const mode of ["local", "cloud"] as const) {
   test(`serialized ${mode} tasks retain identities through hydration and durable attempt reconciliation`, async () => {
     const compiled = await compileStaticTask(mode);
-    const task = hydrateSerializedTask(fs.readFileSync(compiled.workflowPath, "utf8"));
+    const task = hydrateSerializedTask(compiled.controllerDataPath);
     const sealed = compiled.tasks[0];
     assert.ok(sealed);
     const profile = sealed.agentChain[0];

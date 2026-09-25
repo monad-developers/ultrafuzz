@@ -19,7 +19,7 @@ type ResponsibilityPolicy = {
 type SourcePolicy = {
   maxLines: number;
   maxSyntaxNodes: number;
-  purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "strict-input" | "toml";
+  purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "resource-guard" | "strict-input" | "toml";
   sourceSha256: string;
 };
 
@@ -156,6 +156,11 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     responsibilities: [],
     upstreamIssues: []
   },
+  "resource-limit.tsx": {
+    classifiedSourceSha256: "2c1be74d461560ba63f13284c6e69e20f6b8d374c56f4720c81864485698809d",
+    responsibilities: ["argv-construction"],
+    upstreamIssues: ["https://github.com/monad-developers/ultrafuzz/issues/1146"]
+  },
   "strict-json.tsx": {
     classifiedSourceSha256: "16c909eb1f01c82e1174db61877a30028b58a49466714865f1243293f10b186b",
     responsibilities: [],
@@ -165,6 +170,11 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     classifiedSourceSha256: "51b15d0f75a09b49a53a33709cf9127c74b2a35814ad8770ce529f0638a4f6ae",
     responsibilities: [],
     upstreamIssues: []
+  },
+  "worker-resource-guard.tsx": {
+    classifiedSourceSha256: "2bda2ec5730cc5d745be1a9f9116cc11dc03c44ccfe6394675f6be0203398db3",
+    responsibilities: ["argv-construction", "filesystem-walking"],
+    upstreamIssues: ["https://github.com/monad-developers/ultrafuzz/issues/1146"]
   }
 };
 
@@ -242,6 +252,12 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     purpose: "provider-home",
     sourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744"
   },
+  "resource-limit.tsx": {
+    maxLines: 70,
+    maxSyntaxNodes: 450,
+    purpose: "resource-guard",
+    sourceSha256: "2c1be74d461560ba63f13284c6e69e20f6b8d374c56f4720c81864485698809d"
+  },
   "strict-json.tsx": {
     maxLines: 350,
     maxSyntaxNodes: 1_965,
@@ -253,6 +269,12 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxSyntaxNodes: 526,
     purpose: "toml",
     sourceSha256: "51b15d0f75a09b49a53a33709cf9127c74b2a35814ad8770ce529f0638a4f6ae"
+  },
+  "worker-resource-guard.tsx": {
+    maxLines: 230,
+    maxSyntaxNodes: 1_500,
+    purpose: "resource-guard",
+    sourceSha256: "2bda2ec5730cc5d745be1a9f9116cc11dc03c44ccfe6394675f6be0203398db3"
   }
 };
 
@@ -1136,7 +1158,10 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
     );
     assertSourceMatchesPolicy(relativePath, source, policy);
     assertResponsibilityReviewMatchesSource(relativePath, source, responsibilityPolicy);
-    if (policy.purpose !== "adapter") {
+    if (policy.purpose === "resource-guard") {
+      assertDetectedResponsibilitiesDeclared(relativePath, source, responsibilityPolicy);
+      assert.ok(responsibilityPolicy.upstreamIssues.length > 0, `${relativePath} must link its resource-control issue`);
+    } else if (policy.purpose !== "adapter") {
       assert.deepEqual(
         responsibilityPolicy.responsibilities,
         [],

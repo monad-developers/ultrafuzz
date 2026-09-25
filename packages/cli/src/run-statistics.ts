@@ -42,6 +42,15 @@ export interface StatisticsEvidence {
   attempts?: readonly NodeAttemptLedgerEntry[];
   /** Undefined means the ledger was genuinely absent; an empty array means it was present and empty. */
   usage?: readonly UsageLedgerEntry[];
+  retainedStorage?: RetainedStorageStatistics;
+}
+
+export interface RetainedStorageStatistics {
+  logical_bytes: number;
+  physical_bytes: number;
+  entry_count: number;
+  truncated: boolean;
+  categories: Array<{ name: string; logical_bytes: number; physical_bytes: number; entry_count: number }>;
 }
 
 export interface TokenStatistics {
@@ -111,6 +120,7 @@ export interface RunStatisticsValue {
     accounting_cumulative: AccountingCumulativeStatistics | null;
   };
   unattributed_usage: TokenStatistics | null;
+  retained_storage?: RetainedStorageStatistics;
 }
 
 interface NodeDescriptor {
@@ -241,7 +251,8 @@ export function deriveRunStatistics(
       usage: usageStatistics(allUsage),
       accounting_cumulative: evidence.usage === undefined ? null : accountingCumulative(evidence.runMetadata)
     },
-    unattributed_usage: usageStatistics(unattributed)
+    unattributed_usage: usageStatistics(unattributed),
+    ...(evidence.retainedStorage === undefined ? {} : { retained_storage: evidence.retainedStorage })
   };
   return { value, diagnostics };
 }

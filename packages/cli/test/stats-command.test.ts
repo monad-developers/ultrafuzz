@@ -33,7 +33,14 @@ const statistics: RunStatisticsValue = {
     usage: null,
     accounting_cumulative: null
   },
-  unattributed_usage: null
+  unattributed_usage: null,
+  retained_storage: {
+    logical_bytes: 4_096,
+    physical_bytes: 8_192,
+    entry_count: 3,
+    truncated: false,
+    categories: [{ name: "shared-objects", logical_bytes: 4_096, physical_bytes: 8_192, entry_count: 3 }]
+  }
 };
 
 test("stats preserves typed data and error diagnostics in a valid unsuccessful envelope", () => {
