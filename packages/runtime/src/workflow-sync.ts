@@ -119,6 +119,7 @@ import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
   smithersDiagnostic,
+  smithersNodeIdForAttempt,
   smithersSnapshotReportsMissingRun,
   type CurrentSmithersInspect,
   type SmithersCommandSnapshot
@@ -2172,9 +2173,13 @@ function reconcileExecutionEvidence(input: {
   const canonicalAttemptCoordinates = uniqueInvocationCoordinates(
     replayNodeAttempts(input.layout).entries.flatMap((entry) => {
       if (entry.workflow_run_id !== input.workflowRunId || entry.reuse.status !== "executed") return [];
-      const task = tasksByAttemptId.get(entry.strategy_attempt_id);
-      if (task === undefined) return [];
-      return [{ node_id: task.smithersNodeId, iteration: entry.iteration, attempt: entry.attempt }];
+      // The strategy attempt ID is the stable identifier the ledger already
+      // stores, so a task row that this pass did not load cannot make a durably
+      // recorded attempt disappear from its own reconciliation.
+      const nodeId =
+        tasksByAttemptId.get(entry.strategy_attempt_id)?.smithersNodeId ??
+        smithersNodeIdForAttempt(entry.strategy_attempt_id);
+      return [{ node_id: nodeId, iteration: entry.iteration, attempt: entry.attempt }];
     })
   );
   const canonicalUsageCoordinates = uniqueInvocationCoordinates(

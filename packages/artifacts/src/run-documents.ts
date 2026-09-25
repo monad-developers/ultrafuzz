@@ -447,9 +447,19 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
     if (document.workflow === undefined || reconciliation.workflow_run_id !== document.workflow.run_id) {
       throw new Error("run metadata execution reconciliation does not match the active workflow run");
     }
+    // Each `missing_*_invocations` list is exactly the identified invocation set
+    // minus that ledger's own rows, so either ledger reconstructs the identified
+    // set. The two reconstructions must agree, and the identified set is what the
+    // known count counts -- not the larger of the two ledgers, which undercounts
+    // whenever each ledger holds an invocation the other lacks.
+    const identifiedByAttempts =
+      reconciliation.canonical_attempt_count + reconciliation.missing_attempt_invocations.length;
+    const identifiedByUsage = reconciliation.canonical_usage_count + reconciliation.missing_usage_invocations.length;
+    if (identifiedByAttempts !== identifiedByUsage) {
+      throw new Error("run metadata execution reconciliation ledgers identify different invocation sets");
+    }
     const evidenceCounts = [
-      reconciliation.canonical_attempt_count,
-      reconciliation.canonical_usage_count,
+      identifiedByAttempts,
       ...(reconciliation.scheduler_invocation_count === null ? [] : [reconciliation.scheduler_invocation_count]),
       ...(reconciliation.adapter_usage_session_count === null ? [] : [reconciliation.adapter_usage_session_count])
     ];

@@ -17,6 +17,7 @@ import {
   modelPricingFromSnapshot,
   projectNormalizedUsageAccounting,
   roundAccountingUsd,
+  smithersNodeIdForAttempt,
   type ModelPricing,
   type RuntimeDiagnostic
 } from "@ultrafuzz/runtime";
@@ -314,7 +315,12 @@ function reconcileInvocationCoverage(
     attempts
       .filter((entry) => entry.reuse.status === "executed")
       .map((entry) =>
-        JSON.stringify([entry.workflow_run_id, `node:${entry.strategy_attempt_id}`, entry.iteration, entry.attempt])
+        JSON.stringify([
+          entry.workflow_run_id,
+          smithersNodeIdForAttempt(entry.strategy_attempt_id),
+          entry.iteration,
+          entry.attempt
+        ])
       )
   );
   const usageIdentities = new Set(
@@ -333,11 +339,12 @@ function reconcileInvocationCoverage(
   }
   const canonicalAttemptCount = attemptIdentities.size;
   const canonicalUsageCount = usageIdentities.size;
-  const knownInvocationCount = Math.max(
-    canonicalAttemptCount,
-    canonicalUsageCount,
-    persisted?.known_invocation_count ?? 0
-  );
+  // The identified invocation set is the union of both ledgers, not the larger
+  // of the two: when each ledger holds a row the other lacks, the larger count
+  // hides one of them. This matches how the runtime reconciler counts, so the
+  // persisted document and the bundle-derived statistics cannot disagree.
+  const identifiedInvocationCount = new Set([...attemptIdentities, ...usageIdentities]).size;
+  const knownInvocationCount = Math.max(identifiedInvocationCount, persisted?.known_invocation_count ?? 0);
   return {
     knownInvocationCount,
     canonicalAttemptCount,

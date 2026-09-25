@@ -8252,7 +8252,13 @@ function stableBaseAttemptId(concreteNodeId: string): string {
   return concreteNodeId;
 }
 
-function smithersNodeIdForAttempt(attemptId: string): string {
+/**
+ * The single home for the agent-task node-id convention. The attempt ID is the
+ * stable identifier shared by the task manifest, the attempt ledger and the
+ * Smithers event stream, so reconciliation resolves coordinates from it rather
+ * than from a task lookup that can silently drop evidence.
+ */
+export function smithersNodeIdForAttempt(attemptId: string): string {
   return `node:${attemptId}`;
 }
 
