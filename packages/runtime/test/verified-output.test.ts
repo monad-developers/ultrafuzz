@@ -1844,7 +1844,7 @@ function createVerifiedReportFixture(
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
     graph_version: "4",
     topology_version: 2,
-    groups: optionalPrerequisite ? { specialists: { defaults: { failure_policy: "continue" } } } : {},
+    groups: optionalPrerequisite ? { specialists: { defaults: { failure_policy: "continue" } }, review: {} } : {},
     nodes: [
       ...(withPrerequisite
         ? [
@@ -1872,6 +1872,7 @@ function createVerifiedReportFixture(
               logical_id: "bridge",
               display_name: "Bridge",
               kind: "agentic" as const,
+              ...(optionalPrerequisite ? { group: "review" } : {}),
               depends_on: ["producer"],
               artifact_dir: "artifacts/bridge",
               outputs: prerequisiteOutputs,
@@ -1888,6 +1889,7 @@ function createVerifiedReportFixture(
         logical_id: REPORT_LOGICAL_ID,
         display_name: "Final report",
         kind: "agentic",
+        ...(optionalPrerequisite ? { group: "review" } : {}),
         depends_on: withPrerequisite ? [rootPrerequisiteAttemptId] : [],
         artifact_dir: `artifacts/${REPORT_ATTEMPT_ID}`,
         outputs,

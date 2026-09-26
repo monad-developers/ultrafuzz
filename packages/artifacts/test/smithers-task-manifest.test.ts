@@ -428,6 +428,78 @@ test("rejects missing graph coverage, extra tasks, and graph dependency drift", 
   );
 });
 
+test("only review tasks treat inputs from continuing groups as optional", () => {
+  const continuingGraph = graph();
+  continuingGraph.groups = {
+    specialists: { defaults: { failure_policy: "continue" } },
+    review: { defaults: { failure_policy: "continue" } }
+  };
+  const [baseNode] = continuingGraph.nodes;
+  assert.ok(baseNode);
+  baseNode.group = "specialists";
+  for (const [id, group] of [
+    ["consumer", "specialists"],
+    ["reviewer", "review"]
+  ] as const) {
+    continuingGraph.nodes.push({
+      ...structuredClone(baseNode),
+      id,
+      logical_id: id,
+      display_name: id,
+      group,
+      depends_on: ["producer"],
+      artifact_dir: `artifacts/${id}`,
+      workflow: { node_id: `node:${id}`, task_node_ids: [`node:${id}`] }
+    });
+  }
+  const dependent = (id: string, optional: string[]) =>
+    task({
+      attemptId: id,
+      concreteNodeId: id,
+      logicalNodeId: id,
+      dependencies: ["producer"],
+      dependencySmithersNodeIds: ["verify:producer"],
+      dependencyArtifactDirs: ["/runs/run-1/artifacts/producer"],
+      optionalDependencyArtifactDirs: optional
+    });
+  const inGroup = (entry: SmithersTaskManifestTask, group: string) => {
+    entry.metadata.node.group = group;
+    return entry;
+  };
+  const withDependencies = (entry: SmithersTaskManifestTask, group: string) => {
+    inGroup(entry, group);
+    entry.metadata.dependencies = {
+      concreteNodeIds: ["producer"],
+      attemptIds: ["producer"],
+      smithersNodeIds: ["verify:producer"]
+    };
+    return entry;
+  };
+  const current = (consumerOptional: string[], reviewerOptional: string[]) =>
+    manifest([
+      inGroup(task(), "specialists"),
+      withDependencies(dependent("consumer", consumerOptional), "specialists"),
+      withDependencies(dependent("reviewer", reviewerOptional), "review")
+    ]);
+
+  // A continuing specialist's own inputs stay required (#1132's stateful topology).
+  assert.doesNotThrow(() =>
+    assertSmithersTaskManifestMatchesPlannedGraph(current([], ["/runs/run-1/artifacts/producer"]), continuingGraph)
+  );
+  assert.throws(
+    () =>
+      assertSmithersTaskManifestMatchesPlannedGraph(
+        current(["/runs/run-1/artifacts/producer"], ["/runs/run-1/artifacts/producer"]),
+        continuingGraph
+      ),
+    /"consumer" optional dependency artifact directories/u
+  );
+  assert.throws(
+    () => assertSmithersTaskManifestMatchesPlannedGraph(current([], []), continuingGraph),
+    /"reviewer" optional dependency artifact directories/u
+  );
+});
+
 test("planned-graph joins omit unresolved dynamic dependencies but retain ordinary dependency checks", () => {
   const pendingGraph = graph();
   const baseNode = pendingGraph.nodes[0]!;
