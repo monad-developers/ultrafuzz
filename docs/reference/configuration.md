@@ -141,10 +141,14 @@ resume.
 is measured from workflow submission and recorded as `workflow_deadline_at` in
 run state, but nothing enforces it on a timer. It is checked only when a
 command synchronizes the run: `ultrafuzz run` once at launch, then `ultrafuzz
-status`, `inspect`, `why`, and `stats`. The first synchronization after the
-deadline cancels the workflow, marks the run `timed-out`, and appends a
-`workflow-deadline-exceeded` event. Until then an unattended run keeps
-executing, and keeps incurring provider cost, past its deadline. To bound an
+status`, `inspect`, `why`, and `stats`. If the run is still active at the
+first synchronization after the deadline, that synchronization requests
+cancellation and, when the request succeeds, marks the run `timed-out` and
+appends a `workflow-deadline-exceeded` event. A failed request is reported as a
+`WORKFLOW_DEADLINE_CANCEL_FAILED` diagnostic and leaves the run active. A run
+that already finished before that synchronization keeps its terminal outcome,
+with no timeout record. Until then an unattended run keeps executing, and keeps
+incurring provider cost, past its deadline. To bound an
 unattended run, run `ultrafuzz status <run-id>` periodically (for example from
 cron) or cancel it with `ultrafuzz cancel <run-id>`. Workflow-side enforcement
 is tracked in [#1110](https://github.com/monad-developers/ultrafuzz/issues/1110).
