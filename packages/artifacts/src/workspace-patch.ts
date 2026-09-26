@@ -18,10 +18,10 @@ const WORKSPACE_PATCH_SEGMENT_CHARACTER = /^[A-Za-z0-9._-]$/u;
 
 function unsafeWorkspacePatchSegmentReason(segment: string): string {
   if (segment === "." || segment === "..") return "is a relative directory reference";
-  const characters = [...segment];
+  const characters = segment.match(/./gsu) ?? [];
   if (characters.length === 0) return "is empty";
   if (characters.length > WORKSPACE_PATCH_SEGMENT_MAX_LENGTH) {
-    return `is ${characters.length} characters long (maximum ${WORKSPACE_PATCH_SEGMENT_MAX_LENGTH})`;
+    return `is ${String(characters.length)} characters long (maximum ${String(WORKSPACE_PATCH_SEGMENT_MAX_LENGTH)})`;
   }
   const disallowed = characters.find((character) => !WORKSPACE_PATCH_SEGMENT_CHARACTER.test(character));
   return `contains disallowed character ${JSON.stringify(disallowed)} (allowed: A-Z, a-z, 0-9, ".", "_", "-")`;
