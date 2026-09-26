@@ -240,6 +240,7 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
     forgeGuardEnabled: required(run.forgeGuardEnabled, "run.forge_guard_enabled", filePath),
     forgeVmemLimitKb: required(run.forgeVmemLimitKb, "run.forge_vmem_limit_kb", filePath),
     forgeRayonThreads: required(run.forgeRayonThreads, "run.forge_rayon_threads", filePath),
+    frictionLogEnabled: required(run.frictionLogEnabled, "run.friction_log_enabled", filePath),
     workspaceMode: required(run.workspaceMode, "run.workspace_mode", filePath),
     defaultTimeoutSeconds: required(run.defaultTimeoutSeconds, "run.default_timeout_seconds", filePath),
     workflowDeadlineSeconds: required(run.workflowDeadlineSeconds, "run.workflow_deadline_seconds", filePath),

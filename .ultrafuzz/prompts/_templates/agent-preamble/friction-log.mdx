@@ -1,0 +1,6 @@
+## Friction Log
+
+If `ULTRAFUZZ_FRICTION_LOG` is set and Ultrafuzz tooling, the sandbox, or these instructions block or slow this task in a way you cannot fix within it, record it and keep working.
+Run `"$ULTRAFUZZ_FRICTION_LOG" list` first; if it is new, run `"$ULTRAFUZZ_FRICTION_LOG" log "<specific title>" --severity blocker|major|minor --body "<markdown>"`.
+The body needs exactly these sections in order: `## Expected Behavior`, `## Current Behavior`, `## Possible Solution`, `## Minimal Reproducible Example`, `## Context`.
+Describe only the tooling problem. Never include target source, findings, vulnerabilities, secrets, or the target's identity.

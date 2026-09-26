@@ -1661,6 +1661,12 @@ const cloudExecutionGeneration = readCloudExecutionGeneration();
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
+// Empty unless run.friction_log_enabled is set. Appended to the fixed boundary so
+// a disabled run renders byte-identical prompts and an enabled run keeps the
+// friction instructions inside the prefix every task shares.
+const frictionLogContext = __ULTRAFUZZ_FRICTION_LOG_CONTEXT__;
+const frictionLogDirectory =
+  frictionLogContext === "" ? undefined : process.env.ULTRAFUZZ_FRICTION_LOG_DIR?.trim() || undefined;
 // Current main intentionally starts automatic retries from the effective original prompt. Keep the
 // release template sealed into the generated workflow without reintroducing diagnostic injection.
 const retryFailureTemplate = __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__;
@@ -1673,7 +1679,7 @@ const governedSource = readGovernedSource();
 function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }): string {
   const replacements = new Map([
     ["authorized_defensive_security_context", authorizedDefensiveSecurityContext],
-    ["untrusted_content_boundary", untrustedContentBoundary],
+    ["untrusted_content_boundary", untrustedContentBoundary + frictionLogContext],
     ["runtime_context", values.runtimeContext],
     ["operator_prompt", values.operatorPrompt],
     ["task_prompt", values.taskPrompt]
@@ -3274,8 +3280,13 @@ function baseAgentForProfile(
     // authority remains in controller memory or Smithers' durable attempt data.
     // Dependency roots are admitted only after preparation has authenticated
     // their verifier markers. The metadata-only instance created while the
-    // workflow is rendered receives no dependency access.
-    addDir: [task.artifactDir, ...dependencyArtifactDirs]
+    // workflow is rendered receives no dependency access. The run friction log,
+    // when enabled, is the only run-level root and holds no task inputs.
+    addDir: [
+      task.artifactDir,
+      ...dependencyArtifactDirs,
+      ...(frictionLogDirectory === undefined ? [] : [frictionLogDirectory])
+    ]
   });
   if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
     throw new Error(`agent factory returned no agents: ${profile.agentRef}`);

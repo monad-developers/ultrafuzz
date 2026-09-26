@@ -154,6 +154,7 @@ export function serializeResolvedConfigToml(
     forge_guard_enabled: clone.run.forgeGuardEnabled,
     forge_vmem_limit_kb: clone.run.forgeVmemLimitKb,
     forge_rayon_threads: clone.run.forgeRayonThreads,
+    friction_log_enabled: clone.run.frictionLogEnabled,
     workspace_mode: clone.run.workspaceMode,
     default_timeout_seconds: omitProfileSettings ? undefined : clone.run.defaultTimeoutSeconds,
     workflow_deadline_seconds: omitProfileSettings ? undefined : clone.run.workflowDeadlineSeconds,
@@ -967,6 +968,8 @@ function configPathSegment(segment: string): string {
       return "forge_vmem_limit_kb";
     case "forgeRayonThreads":
       return "forge_rayon_threads";
+    case "frictionLogEnabled":
+      return "friction_log_enabled";
     case "defaultTimeoutSeconds":
       return "default_timeout_seconds";
     case "workflowDeadlineSeconds":

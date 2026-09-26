@@ -8486,6 +8486,11 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       renderAgentPreambleTemplate("authorized-defensive-security-context")
     ),
     __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
+    // Static text only: agents resolve paths from the environment, so enabling the
+    // friction log adds identical bytes to every prompt's shared cache prefix.
+    __ULTRAFUZZ_FRICTION_LOG_CONTEXT__: JSON.stringify(
+      config.run.frictionLogEnabled === true ? `\n\n${renderAgentPreambleTemplate("friction-log")}` : ""
+    ),
     __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__: JSON.stringify(loadAgentPreambleTemplate("retry-failure")),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),

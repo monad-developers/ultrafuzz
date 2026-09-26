@@ -57,6 +57,7 @@ import {
   resolveConfig,
   serializeResolvedConfigJsonBytes
 } from "@ultrafuzz/config";
+import { renderAgentPreambleTemplate } from "@ultrafuzz/prompts";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -11708,6 +11709,24 @@ nodes:
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  // A disabled friction log must leave every rendered prompt byte-identical.
+  assert.match(workflowSource, /const frictionLogContext = "";/u);
+  const frictionPlan = await planRun({ projectRoot: project, runId: "group-timeout-friction", env: {} });
+  assert.ok(frictionPlan.ok && frictionPlan.value !== undefined, JSON.stringify(frictionPlan.diagnostics));
+  const frictionRun = frictionPlan.value;
+  const frictionCompiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: { ...frictionRun.resolved_config, run: { ...frictionRun.resolved_config.run, frictionLogEnabled: true } },
+    graph: frictionRun.expanded_graph,
+    runLayout: frictionRun.layout,
+    workflowName: "ultrafuzz-group-timeout",
+    renderedPrompts: frictionRun.rendered_prompts
+  });
+  const frictionContext = /const frictionLogContext = (".*");/u.exec(
+    fs.readFileSync(frictionCompiled.workflowPath, "utf8")
+  )?.[1];
+  assert.ok(frictionContext !== undefined);
+  assert.equal(JSON.parse(frictionContext), `\n\n${renderAgentPreambleTemplate("friction-log")}`);
   // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
   // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock
   // but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted deadline

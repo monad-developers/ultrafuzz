@@ -45,6 +45,31 @@ describe("agent preamble MDX", () => {
     ).toBe(`${mandatoryPrefix}${operatorPrompt}\n\n${taskPrompt}`);
   });
 
+  it("keeps the friction log fragment static so it can sit inside the shared cache prefix", () => {
+    const fragment = renderAgentPreambleTemplate("friction-log");
+    // No template variables, run IDs, or paths: the fragment must be identical
+    // for every task and run, so it never moves a prompt-cache boundary.
+    expect(loadAgentPreambleTemplate("friction-log")).not.toMatch(/\{\{/u);
+    expect(fragment).not.toMatch(/\/(?:Users|home|tmp|private)\//u);
+    expect(fragment).toContain('"$ULTRAFUZZ_FRICTION_LOG" log');
+    expect(fragment).toMatch(/Never include target source, findings/u);
+    expect(Buffer.byteLength(fragment, "utf8")).toBeLessThanOrEqual(1_024);
+
+    const authorization = renderAgentPreambleTemplate("authorized-defensive-security-context");
+    const boundary = renderAgentPreambleTemplate("untrusted-content-boundary");
+    const render = (runtime: string): string =>
+      renderAgentPreambleTemplate("agent-prompt", {
+        authorized_defensive_security_context: authorization,
+        untrusted_content_boundary: `${boundary}\n\n${fragment}`,
+        runtime_context: runtime,
+        operator_prompt: "",
+        task_prompt: "# Task"
+      });
+    const sharedPrefix = `${authorization}\n\n${boundary}\n\n${fragment}\n\n`;
+    expect(render("short timeout").startsWith(sharedPrefix)).toBe(true);
+    expect(render("long timeout").startsWith(sharedPrefix)).toBe(true);
+  });
+
   it("preserves the retry-only prepend and treats inserted values as data", () => {
     const previousFailure = "Error: deterministic verifier failure {{not_a_template_variable}}";
     const rendered = renderAgentPreambleTemplate("retry-failure", {

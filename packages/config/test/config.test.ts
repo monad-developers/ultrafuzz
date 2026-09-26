@@ -124,6 +124,7 @@ describe("config loading and resolution", () => {
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
     expect(resolved.value.run.forgeRayonThreads).toBe(1);
+    expect(resolved.value.run.frictionLogEnabled).toBe(false);
     expect(resolved.value.permissions.productionSourceRoots).toEqual(["src", "contracts"]);
     expect(resolved.value.execution).toEqual({
       mode: "local",
@@ -558,6 +559,7 @@ max_dynamic_nodes = 50
 forge_guard_enabled = false
 forge_vmem_limit_kb = 16777216
 forge_rayon_threads = 3
+friction_log_enabled = true
 default_timeout_seconds = 1200
 workflow_deadline_seconds = 7200
 controller_lease_seconds = 45
@@ -610,6 +612,7 @@ config_dir = "teams/codex"
     expect(resolved.value.run.forgeGuardEnabled).toBe(false);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(16_777_216);
     expect(resolved.value.run.forgeRayonThreads).toBe(3);
+    expect(resolved.value.run.frictionLogEnabled).toBe(true);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 4 });
     expect(resolved.value.models.default).toBe("project-model");
     expect(resolved.value.models.profiles["project-model"]?.agent).toBe("CodexAgent");

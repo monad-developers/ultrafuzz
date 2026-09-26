@@ -48,6 +48,7 @@
     "forgeGuardEnabled": true,
     "forgeVmemLimitKb": 12582912,
     "forgeRayonThreads": 1,
+    "frictionLogEnabled": false,
     "workspaceMode": "git-worktree",
     "defaultTimeoutSeconds": 3600,
     "workflowDeadlineSeconds": 86400,

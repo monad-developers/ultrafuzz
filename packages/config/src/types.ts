@@ -94,6 +94,8 @@ export interface RunConfig {
   forgeGuardEnabled: boolean;
   forgeVmemLimitKb: number;
   forgeRayonThreads: number;
+  /** Absent in configs sealed before the friction log existed; treat absence as disabled. */
+  frictionLogEnabled?: boolean;
   workspaceMode: WorkspaceMode;
   defaultTimeoutSeconds: number;
   workflowDeadlineSeconds: number;

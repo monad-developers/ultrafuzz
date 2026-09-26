@@ -17,6 +17,7 @@ export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
 const AGENT_PREAMBLE_TEMPLATE_FILES = {
   "agent-prompt": "agent-prompt.mdx",
   "authorized-defensive-security-context": "authorized-defensive-security-context.mdx",
+  "friction-log": "friction-log.mdx",
   "retry-failure": "retry-failure.mdx",
   "topology-runtime-context": "topology-runtime-context.mdx",
   "untrusted-content-boundary": "untrusted-content-boundary.mdx"

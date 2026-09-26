@@ -6071,7 +6071,16 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
     taskProjection,
     /optionalDependencyArtifactDirs: task\.optionalDependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
   );
-  assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\]/u);
+  assert.match(
+    baseAgent,
+    /addDir: \[\s*task\.artifactDir,\s*\.\.\.dependencyArtifactDirs,\s*\.\.\.\(frictionLogDirectory === undefined \? \[\] : \[frictionLogDirectory\]\)\s*\]/u
+  );
+  // The friction log root reaches agents only when the sealed prompt fragment is present.
+  assert.match(
+    source,
+    /const frictionLogDirectory =\s*frictionLogContext === "" \? undefined : process\.env\.ULTRAFUZZ_FRICTION_LOG_DIR/u
+  );
+  assert.match(source, /\["untrusted_content_boundary", untrustedContentBoundary \+ frictionLogContext\]/u);
   assert.doesNotMatch(baseAgent, /taskManifestPath|executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflow, /dependency_artifact_dirs: task\.dependencyArtifactRelativeDirs/u);
@@ -6280,6 +6289,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "agentFactories",
         "assertGovernedWorkspaceSource",
         "artifactAwareAgent",
+        "frictionLogDirectory",
         `${emitted}; return {
           prepare(task) {
             prepareArtifactMirror(task);
@@ -6362,7 +6372,8 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         ) => ({
           preflight: async (args: unknown) => admittedAgent().preflight?.(args),
           generate: async () => ({ summary: "ok" })
-        })
+        }),
+        undefined
       ) as {
         prepare(task: ReturnType<typeof makeTaskSpecs>["consumer"]): void;
         agent(task: ReturnType<typeof makeTaskSpecs>["consumer"]): {
