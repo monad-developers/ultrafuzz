@@ -1419,10 +1419,16 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
       .map((task) => task.attemptId)
   );
   for (const task of manifest.tasks) {
-    const expectedOptionalDirectories = task.dependencyArtifactDirs.filter((directory) => {
-      const attemptId = directory.split(/[\\/]/u).at(-1);
-      return attemptId !== undefined && optionalAttemptIds.has(attemptId);
-    });
+    // Mirrors the runtime compiler: continuation lets independent tasks settle,
+    // but only the review group reconciles partial results, so only review tasks
+    // treat inputs from continuing groups as optional.
+    const reconcilesPartialResults = graphNodes.get(task.concreteNodeId)!.group === "review";
+    const expectedOptionalDirectories = reconcilesPartialResults
+      ? task.dependencyArtifactDirs.filter((directory) => {
+          const attemptId = directory.split(/[\\/]/u).at(-1);
+          return attemptId !== undefined && optionalAttemptIds.has(attemptId);
+        })
+      : [];
     assertSameStringSet(
       task.optionalDependencyArtifactDirs ?? [],
       expectedOptionalDirectories,
