@@ -27,6 +27,7 @@ keep_workspaces = false
 forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912
 forge_rayon_threads = 1
+friction_log_enabled = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
 workflow_deadline_seconds = 86400
@@ -120,6 +121,7 @@ empty path components, and dot components fail validation.
 | `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
 | `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
 | `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
+| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local Frog friction log.      |
 | `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
 | `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
 | `workflow_deadline_seconds` | integer | Maximum workflow wall time before the next synchronization cancels it.      |
@@ -148,6 +150,23 @@ The memory limit and Rayon default are recorded in `config.resolved.toml` and
 `forge_vmem_limit_kb` for intentionally larger jobs. A limited Forge process
 exits through the normal task command path, so its diagnostics remain task
 evidence without applying the limit to the workflow controller.
+
+The friction log is disabled by default. With `friction_log_enabled = true`,
+Ultrafuzz initializes a [Frog](https://github.com/wevm/frog) friction log at
+`<run>/friction` using the Frog release pinned by `@ultrafuzz/runtime`. It then
+gives every agent `ULTRAFUZZ_FRICTION_LOG` (the absolute path of a run-owned
+wrapper) and `ULTRAFUZZ_FRICTION_LOG_DIR` (the absolute log directory), plus
+write access to that directory. Agents record Ultrafuzz, tooling, or
+instruction roadblocks with `"$ULTRAFUZZ_FRICTION_LOG" log` and check existing
+entries with `"$ULTRAFUZZ_FRICTION_LOG" list`. The wrapper allows only those
+two commands and removes GitHub credentials, so entries stay local and
+`pending`. Review `<run>/friction/.agents/friction-log/` before publishing
+anything: entries can describe private targets.
+
+The agent instructions are one fixed paragraph appended after the shared trust
+boundary and contain no paths or run identifiers. Enabled runs therefore add
+the same bytes to every task's shared prompt prefix, and disabled runs render
+byte-identical prompts.
 
 Every submitted workflow starts a run-scoped recovery supervisor. The
 supervisor renews controller ownership through runner heartbeats and uses an

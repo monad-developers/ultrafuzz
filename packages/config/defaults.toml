@@ -14,6 +14,7 @@ keep_workspaces = false
 forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912
 forge_rayon_threads = 1
+friction_log_enabled = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
 workflow_deadline_seconds = 86400

@@ -50,6 +50,7 @@ import {
 import { planRun } from "./plan-run.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
+import { prepareFrictionLogEnvironment } from "./friction-log.js";
 import {
   prepareTrustedCliEnvironment,
   runTrustedJsonValidatorPreflight,
@@ -262,11 +263,16 @@ export async function startRun(input: StartRunInput) {
       env: input.env
     });
     persistForgeGuardMetadata(plan.layout, plan.resolved_config, forgeGuard.active);
+    const frictionLog = prepareFrictionLogEnvironment({
+      layout: plan.layout,
+      config: plan.resolved_config,
+      env: forgeGuard.env
+    });
     const trustedCli = prepareTrustedCliEnvironment({
       layout: plan.layout,
       cliEntrypoint: input.ultrafuzzCliEntrypoint,
       executionSnapshotRoot: prepared.executionSnapshot.root,
-      env: forgeGuard.env,
+      env: frictionLog.env,
       required: compiled.tasks.some((task) =>
         task.metadata.artifacts.outputs.some((output) => output.schemaFile !== undefined)
       )
@@ -300,6 +306,7 @@ export async function startRun(input: StartRunInput) {
         agentEnvironmentVariableNames(plan.resolved_config, activeAgentRefs, forgeGuard.env),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
+        frictionLog.environmentVariableNames,
         trustedCli.environmentVariableNames
       ),
       inputJson: prepared.executionSnapshot.inputJson
@@ -567,8 +574,12 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       config === undefined
         ? { env: { ...(input.env ?? {}) }, environmentVariableNames: [] as readonly string[], active: false }
         : prepareForgeGuardEnvironment({ layout, config, env: input.env });
+    const frictionLog =
+      config === undefined
+        ? { env: forgeGuard.env, environmentVariableNames: [] as readonly string[], active: false }
+        : prepareFrictionLogEnvironment({ layout, config, env: forgeGuard.env });
     const controllerEnvironment = {
-      ...forgeGuard.env,
+      ...frictionLog.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: import.meta.resolve("@ultrafuzz/runtime"),
       ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: configPath }),
@@ -665,6 +676,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         config === undefined ? [] : agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
+        frictionLog.environmentVariableNames,
         trustedCli.environmentVariableNames
       )
     });
@@ -904,12 +916,17 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       config: sealedConfig,
       env: input.env
     });
+    const frictionLog = prepareFrictionLogEnvironment({
+      layout: evidence.layout,
+      config: sealedConfig,
+      env: forgeGuard.env
+    });
     persistForgeGuardMetadata(evidence.layout, sealedConfig, forgeGuard.active);
     const trustedCli = prepareTrustedCliEnvironment({
       layout: evidence.layout,
       cliEntrypoint: input.ultrafuzzCliEntrypoint,
       executionSnapshotRoot: evidence.executionSnapshot.root,
-      env: forgeGuard.env,
+      env: frictionLog.env,
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
@@ -958,6 +975,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
         linkedWorkflowEnvironmentVariableNames(sealedConfig, evidence.verifiedControl.contents.tasks, forgeGuard.env),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
+        frictionLog.environmentVariableNames,
         trustedCli.environmentVariableNames
       )
     });

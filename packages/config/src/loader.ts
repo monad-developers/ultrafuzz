@@ -49,6 +49,7 @@ const RUN_KEYS = [
   "forge_guard_enabled",
   "forge_vmem_limit_kb",
   "forge_rayon_threads",
+  "friction_log_enabled",
   "workspace_mode",
   "default_timeout_seconds",
   "workflow_deadline_seconds",
@@ -221,6 +222,13 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "boolean",
         assign: (value) => {
           runConfig.forgeGuardEnabled = value;
+        }
+      },
+      {
+        key: "friction_log_enabled",
+        type: "boolean",
+        assign: (value) => {
+          runConfig.frictionLogEnabled = value;
         }
       },
       {
