@@ -23,8 +23,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "8030b7b7ab1592d4a10d1c08554f418f69786cbe55dbf837ad2b935a91d3028b";
-const EXPECTED_BUNDLE_SHA256 = "b799a29b0fbe83656ff19d14c5f5925189d98e4b4d5dcfa6169ad06d65509be5";
+const EXPECTED_SCHEMA_SHA256 = "3ea924bfc5c489ed6b8c43a6d9dad5e96f6ee6887f8e781aee10fdc76715512f";
+const EXPECTED_BUNDLE_SHA256 = "d4ed62ba88873664f98c6797b2bae60849d1d0d7a2d36eb4d24a07e2b4090667";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -91,6 +91,19 @@ describe("resolved config JSON contract", () => {
       code: "CONFIG_TIMEOUT_INVALID",
       message: "run.default_timeout_seconds must be between 1 and 86400"
     });
+  });
+
+  it("accepts a sealed v4 snapshot written before the friction log setting existed", () => {
+    const fixture = JSON.parse(readFixture("resolved-config.valid.json").toString("utf8")) as {
+      run: Record<string, unknown>;
+    };
+    delete fixture.run.frictionLogEnabled;
+
+    expect(validateResolvedConfigJson(fixture).ok).toBe(true);
+    expect(resolvedConfigZodSchema.safeParse(fixture).success).toBe(true);
+    expect(validateResolvedConfigJson({ ...fixture, run: { ...fixture.run, frictionLogEnabled: "yes" } }).ok).toBe(
+      false
+    );
   });
 
   it("rejects the previous v3 snapshot rather than adding a completion policy", () => {
