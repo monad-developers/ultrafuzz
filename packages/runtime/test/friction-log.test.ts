@@ -118,6 +118,35 @@ test("friction log gives agents absolute paths to a run-owned log and the pinned
   assert.deepEqual(entries(logRoot), [entry]);
 });
 
+test("friction log stays in the run directory when the run sits inside the target repository", () => {
+  const runLayout = layout("friction-in-repo");
+  const projectRoot = path.dirname(path.dirname(runLayout.root));
+  const git = (...args: string[]): void => {
+    const result = spawnSync("git", args, { cwd: projectRoot, encoding: "utf8" });
+    assert.equal(result.status, 0, String(result.stderr));
+  };
+  git("init", "-q");
+  git("-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-q", "--allow-empty", "-m", "init");
+  git("remote", "add", "origin", "https://github.com/example/private-target.git");
+
+  const prepared = prepareFrictionLogEnvironment({
+    layout: runLayout,
+    config: resolvedConfig({ frictionLogEnabled: true })
+  });
+  const wrapper = prepared.env[FRICTION_LOG_ENV];
+  const logRoot = prepared.env[FRICTION_LOG_DIR_ENV];
+  assert.ok(wrapper !== undefined && logRoot !== undefined);
+  const logged = runWrapper(wrapper, ["log", "forge build times out", "--body", BODY]);
+  assert.equal(logged.status, 0, `${String(logged.stderr)}\n${String(logged.stdout)}`);
+
+  assert.equal(fs.existsSync(path.join(projectRoot, ".agents")), false);
+  assert.equal(fs.existsSync(path.join(projectRoot, ".github")), false);
+  const [entry] = entries(logRoot);
+  assert.ok(entry !== undefined);
+  const writeUp = fs.readFileSync(path.join(logRoot, ".agents", "friction-log", entry, "friction.md"), "utf8");
+  assert.doesNotMatch(writeUp, /private-target/u);
+});
+
 test("friction log wrapper refuses publishing, retargeting, and other Frog commands", () => {
   const runLayout = layout("friction-restricted");
   const prepared = prepareFrictionLogEnvironment({
@@ -148,7 +177,8 @@ test("friction log wrapper refuses publishing, retargeting, and other Frog comma
 test("friction log wrapper quotes embedded paths and strips publishing credentials", () => {
   const script = frictionLogWrapper("/opt/node's/bin/node", "/opt/frog/dist/bin.js", "/runs/it's/friction");
   assert.match(script, /^#!\/bin\/sh\n/u);
-  assert.match(script, /unset GITHUB_TOKEN GH_TOKEN GITHUB_API_URL\n/u);
+  assert.match(script, /unset GITHUB_TOKEN GH_TOKEN GITHUB_API_URL GIT_DIR GIT_WORK_TREE\n/u);
+  assert.match(script, /GIT_CEILING_DIRECTORIES='\/runs\/it'\\''s'\n/u);
   assert.match(
     script,
     /exec '\/opt\/node'\\''s\/bin\/node' '\/opt\/frog\/dist\/bin\.js' "\$@" --cwd '\/runs\/it'\\''s\/friction'\n/u
