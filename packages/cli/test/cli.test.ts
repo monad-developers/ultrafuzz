@@ -2821,6 +2821,9 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   const bundleManifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as { schema_version?: unknown };
   assert.equal(bundleManifest.schema_version, "ultrafuzz.report-bundle-manifest.v3");
   assert.equal(validateReportBundleManifest(bundleManifest).ok, true);
+  assert.deepEqual((bundleManifest as { omitted_files?: unknown }).omitted_files, [
+    { path: "artifacts/project-discovery/bad\\name.txt", reason: "unsafe-path", bytes: 20 }
+  ]);
   assert.equal(entries.includes("artifacts/final-report/report.md"), true);
   assert.equal(entries.includes("artifacts/final-report/report.json"), true);
   assert.equal(entries.includes("artifacts/project-discovery/stdout.txt"), true);
@@ -2950,6 +2953,47 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   assert.equal(linkedParentAttempt.code, 1);
   assert.match(JSON.stringify(parseJson(linkedParentAttempt).diagnostics), /symlink/u);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
+});
+
+test("report bundle manifest records files it could not package", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeReportTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await cli(project, ["run", "--run-id", "report-bundle-omissions", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  const runData = parseJson(run).data as { run_id: string; run_root: string };
+
+  const engineLogDir = path.join(runData.run_root, "smithers", "logs");
+  fs.mkdirSync(engineLogDir, { recursive: true });
+  fs.writeFileSync(path.join(engineLogDir, "small.ndjson"), '{"event":"retry"}\n', "utf8");
+  const oversizedLog = path.join(engineLogDir, "stream.ndjson");
+  const oversizedBytes = 64 * 1024 * 1024 + 1;
+  fs.writeFileSync(oversizedLog, "");
+  fs.truncateSync(oversizedLog, oversizedBytes);
+  fs.symlinkSync(path.join(engineLogDir, "small.ndjson"), path.join(engineLogDir, "linked.ndjson"));
+
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  assert.equal(bundled.code, 0, `${bundled.stderr}\n${bundled.stdout}`);
+  const body = parseJson(bundled);
+  assert.match(JSON.stringify(body.diagnostics), /REPORT_BUNDLE_FILE_SKIPPED/u);
+  const zip = new AdmZip((body.data as { zip_path: string }).zip_path);
+  const manifest = JSON.parse(zip.readAsText("bundle-manifest.json")) as {
+    scope?: string;
+    omitted_files: Array<{ path: string; reason: string; bytes?: number }>;
+  };
+  assert.equal(manifest.scope, undefined);
+  assert.equal(validateReportBundleManifest(manifest).ok, true);
+  assert.deepEqual(manifest.omitted_files, [
+    { path: "engine-logs/linked.ndjson", reason: "symlink" },
+    { path: "engine-logs/stream.ndjson", reason: "file-size-limit", bytes: oversizedBytes }
+  ]);
+  assertNoSmithersSurface(manifest);
+  assert.equal(fs.statSync(oversizedLog).size, oversizedBytes);
+  assert.equal(
+    validateReportBundleManifest({ ...manifest, omitted_files: [{ path: "engine-logs/x", reason: "too-big" }] }).ok,
+    false
+  );
 });
 
 test("report bundle --require-verified rejects a changed authenticated publication from any finalized producer", async () => {
