@@ -434,7 +434,8 @@ test("only review tasks treat inputs from continuing groups as optional", () => 
     specialists: { defaults: { failure_policy: "continue" } },
     review: { defaults: { failure_policy: "continue" } }
   };
-  const baseNode = continuingGraph.nodes[0]!;
+  const [baseNode] = continuingGraph.nodes;
+  assert.ok(baseNode);
   baseNode.group = "specialists";
   for (const [id, group] of [
     ["consumer", "specialists"],

@@ -1422,7 +1422,7 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
     // Mirrors the runtime compiler: continuation lets independent tasks settle,
     // but only the review group reconciles partial results, so only review tasks
     // treat inputs from continuing groups as optional.
-    const reconcilesPartialResults = graphNodes.get(task.concreteNodeId)!.group === "review";
+    const reconcilesPartialResults = graphNodes.get(task.concreteNodeId)?.group === "review";
     const expectedOptionalDirectories = reconcilesPartialResults
       ? task.dependencyArtifactDirs.filter((directory) => {
           const attemptId = directory.split(/[\\/]/u).at(-1);
