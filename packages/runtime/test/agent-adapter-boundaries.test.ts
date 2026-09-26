@@ -88,7 +88,7 @@ const TOKEN_ACCOUNTING_SIGNALS = new Set([
 // that the declared responsibility set remains unchanged.
 const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
   "claude.tsx": {
-    classifiedSourceSha256: "04c785868e9a6955d1f048fb1377b61dca6f3da0e4de6a305536a8b0979f73d9",
+    classifiedSourceSha256: "6d8346e882f9ed1e5274d19d6e7cacf27e2743e489a3b931b9ee0488d62ffe76",
     responsibilities: [],
     upstreamIssues: []
   },
@@ -177,7 +177,7 @@ const sourcePolicies: Record<string, SourcePolicy> = {
     maxLines: 100,
     maxSyntaxNodes: 452,
     purpose: "adapter",
-    sourceSha256: "04c785868e9a6955d1f048fb1377b61dca6f3da0e4de6a305536a8b0979f73d9"
+    sourceSha256: "6d8346e882f9ed1e5274d19d6e7cacf27e2743e489a3b931b9ee0488d62ffe76"
   },
   "codex.tsx": {
     maxLines: 250,
