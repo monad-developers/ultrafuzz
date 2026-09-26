@@ -74,6 +74,16 @@ interface BundleFile {
   sourceArchivePath?: string;
 }
 
+type BundleOmissionReason = "file-size-limit" | "symlink" | "not-regular-file" | "unsafe-path" | "unreadable";
+
+// Files the walk found but could not package. Recorded in the manifest so a
+// recipient holding only the ZIP can tell which evidence is missing and why.
+interface BundleOmission {
+  path: string;
+  reason: BundleOmissionReason;
+  bytes?: number;
+}
+
 interface ReportBundleManifest {
   schema_version: "ultrafuzz.report-bundle-manifest.v3";
   run_id: string;
@@ -82,6 +92,7 @@ interface ReportBundleManifest {
   excluded_roots: ["workspaces"];
   excluded_patterns: ["artifacts/final-report/report.json.pre-*"];
   path_mappings: Array<{ source_path: string; archive_path: string }>;
+  omitted_files: BundleOmission[];
   entry_count_without_manifest: number;
   scope?: "report-only";
   verification?: "verified" | "not-checked";
@@ -132,6 +143,7 @@ export default class ReportBundle extends Command {
       assertNoSymlinkComponents(outputGuardRoot, outputDirectory, "output directory");
 
       const diagnostics: RuntimeDiagnostic[] = [];
+      let omissions: BundleOmission[] = [];
       let files: BundleFile[];
       let reportOnly: ReportArtifactsSnapshot | undefined;
       try {
@@ -140,10 +152,12 @@ export default class ReportBundle extends Command {
           layout.eventsPath,
           runId,
           diagnostics,
+          omissions,
           !flags["require-verified"]
         );
       } catch (error) {
         if (flags["require-verified"]) throw error;
+        omissions = [];
         reportOnly = loadReportArtifactsSnapshot(layout.root);
         files = [
           { absolutePath: reportOnly.artifacts.json_path, archivePath: "report.json", contents: reportOnly.json_bytes },
@@ -195,6 +209,7 @@ export default class ReportBundle extends Command {
             ? []
             : [{ source_path: file.sourceArchivePath, archive_path: file.archivePath }]
         ),
+        omitted_files: omissions.sort((left, right) => left.path.localeCompare(right.path)),
         entry_count_without_manifest: files.length
       };
       const manifestValidation = validateReportBundleManifest(manifest);
@@ -246,6 +261,7 @@ function collectVerifiedBundleFiles(
   eventsPath: string,
   runId: string,
   diagnostics: RuntimeDiagnostic[],
+  omissions: BundleOmission[],
   preferBestEffort: boolean
 ): BundleFile[] {
   assertCurrentBundleAuthorityPresent(runRoot);
@@ -255,7 +271,7 @@ function collectVerifiedBundleFiles(
     throw new Error("verification of the selected agent-written report could not be completed");
   }
   const eventJournal = loadValidatedEventJournalSnapshot(runRoot, eventsPath, runId);
-  const files = collectBundleFiles(runRoot, diagnostics, eventJournal, report);
+  const files = collectBundleFiles(runRoot, diagnostics, omissions, eventJournal, report);
   assertVerifiedRunAuthorityBundleSnapshots(files, authority);
   if (report !== undefined) assertValidatedReportBundleSnapshot(files, report);
   assertVerifiedRunOutputAuthorityRemainedCurrent(authority);
@@ -457,6 +473,7 @@ function eventJournalCodec(expectedRunId: string): StrictJsonlCodec<EventRecord>
 function collectBundleFiles(
   runRoot: string,
   diagnostics: RuntimeDiagnostic[],
+  omissions: BundleOmission[],
   eventJournal: BundleFile | undefined,
   report: ReportArtifactsSnapshot | undefined
 ): BundleFile[] {
@@ -466,21 +483,21 @@ function collectBundleFiles(
     if (relativePath === "events.jsonl") continue;
     const absolutePath = path.join(runRoot, relativePath);
     if (fs.existsSync(absolutePath)) {
-      addBundleFile(runRoot, absolutePath, relativePath, files, diagnostics);
+      addBundleFile(runRoot, absolutePath, relativePath, files, diagnostics, omissions);
     }
   }
 
   for (const relativeDirectory of INCLUDED_DIRECTORIES) {
     const absoluteDirectory = path.join(runRoot, ...relativeDirectory.split("/"));
     if (fs.existsSync(absoluteDirectory)) {
-      collectDirectory(runRoot, absoluteDirectory, files, diagnostics);
+      collectDirectory(runRoot, absoluteDirectory, files, diagnostics, omissions);
     }
   }
 
   for (const renamed of RENAMED_DIRECTORIES) {
     const absoluteDirectory = path.join(runRoot, ...renamed.source.split("/"));
     if (fs.existsSync(absoluteDirectory)) {
-      collectDirectory(runRoot, absoluteDirectory, files, diagnostics, {
+      collectDirectory(runRoot, absoluteDirectory, files, diagnostics, omissions, {
         sourceRoot: absoluteDirectory,
         archiveRoot: renamed.archive
       });
@@ -495,7 +512,14 @@ function collectBundleFiles(
     }
     for (const publication of publications) {
       assertPathInside(runtimeReportRoot, publication.path, "runtime report publication");
-      addBundleFile(runRoot, publication.path, displayRelativePath(runRoot, publication.path), files, diagnostics);
+      addBundleFile(
+        runRoot,
+        publication.path,
+        displayRelativePath(runRoot, publication.path),
+        files,
+        diagnostics,
+        omissions
+      );
     }
   } else if (lstatIfPresent(runtimeReportRoot) !== undefined) {
     throw new Error("runtime report directory has no authenticated current publication");
@@ -518,6 +542,7 @@ function collectDirectory(
   absoluteDirectory: string,
   files: BundleFile[],
   diagnostics: RuntimeDiagnostic[],
+  omissions: BundleOmission[],
   rename?: ArchiveRename
 ): void {
   // Runtime publication generations are admitted only by the current report
@@ -528,12 +553,17 @@ function collectDirectory(
   assertNoSymlinkComponents(runRoot, absoluteDirectory, "bundle directory");
   for (const entry of fs.readdirSync(absoluteDirectory, { withFileTypes: true })) {
     const absolutePath = path.join(absoluteDirectory, entry.name);
+    const sourceArchivePath =
+      rename === undefined
+        ? undefined
+        : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
     if (entry.isSymbolicLink()) {
       diagnostics.push(skippedSymlinkDiagnostic(runRoot, absolutePath));
+      omissions.push({ path: sourceArchivePath ?? displayRelativePath(runRoot, absolutePath), reason: "symlink" });
       continue;
     }
     if (entry.isDirectory()) {
-      collectDirectory(runRoot, absolutePath, files, diagnostics, rename);
+      collectDirectory(runRoot, absolutePath, files, diagnostics, omissions, rename);
       continue;
     }
     if (entry.isFile()) {
@@ -544,11 +574,7 @@ function collectDirectory(
       if (shouldExcludeArchivePath(archivePath)) {
         continue;
       }
-      const sourceArchivePath =
-        rename === undefined
-          ? undefined
-          : `${rename.archiveRoot}/${displayRelativePath(rename.sourceRoot, absolutePath)}`;
-      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, sourceArchivePath);
+      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, omissions, sourceArchivePath);
     }
   }
 }
@@ -559,6 +585,7 @@ function addBundleFile(
   archivePath: string,
   files: BundleFile[],
   diagnostics: RuntimeDiagnostic[],
+  omissions: BundleOmission[],
   sourceArchivePath?: string
 ): void {
   try {
@@ -578,7 +605,30 @@ function addBundleFile(
       source: "report-bundle",
       path: absolutePath
     });
+    omissions.push({
+      path: sourceArchivePath ?? displayRelativePath(runRoot, absolutePath),
+      ...classifyOmission(absolutePath, archivePath)
+    });
   }
+}
+
+function classifyOmission(absolutePath: string, archivePath: string): Omit<BundleOmission, "path"> {
+  let stat: fs.Stats | undefined;
+  try {
+    stat = lstatIfPresent(absolutePath);
+  } catch {
+    return { reason: "unreadable" };
+  }
+  if (stat === undefined) return { reason: "unreadable" };
+  if (stat.isSymbolicLink()) return { reason: "symlink" };
+  if (!stat.isFile()) return { reason: "not-regular-file" };
+  if (stat.size > MAX_BUNDLE_FILE_BYTES) return { reason: "file-size-limit", bytes: stat.size };
+  try {
+    normalizeArchivePath(archivePath);
+  } catch {
+    return { reason: "unsafe-path", bytes: stat.size };
+  }
+  return { reason: "unreadable", bytes: stat.size };
 }
 
 function portableArchiveRelativePath(relativePath: string): string {
