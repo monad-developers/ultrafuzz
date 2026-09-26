@@ -19,6 +19,10 @@ const FROG_INIT_TIMEOUT_MS = 60_000;
 // Frog publishes with these. Removing them keeps every entry local to the run
 // until an operator reviews it; target findings must never reach GitHub.
 const PUBLISHING_ENVIRONMENT_VARIABLES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"] as const;
+// Frog anchors its log at `git rev-parse --show-toplevel`, and run roots sit
+// inside the target repository. Without these, Frog would write into the
+// target's root and read the target's remote and commit into entries.
+const GIT_DISCOVERY_ENVIRONMENT_VARIABLES = ["GIT_DIR", "GIT_WORK_TREE"] as const;
 
 export interface FrictionLogEnvironment {
   env: Record<string, string | undefined>;
@@ -73,7 +77,7 @@ export function resolveFrogBin(): string {
 function initializeFrictionLog(frogBin: string, logRoot: string): void {
   const result = spawnSync(process.execPath, [frogBin, "init", "--no-inbound", "--cwd", logRoot, "--format", "json"], {
     encoding: "utf8",
-    env: withoutPublishingCredentials(process.env),
+    env: frogEnvironment(process.env, logRoot),
     timeout: FROG_INIT_TIMEOUT_MS
   });
   if (result.error !== undefined || result.status !== 0) {
@@ -82,9 +86,12 @@ function initializeFrictionLog(frogBin: string, logRoot: string): void {
   }
 }
 
-function withoutPublishingCredentials(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const removed = new Set<string>(PUBLISHING_ENVIRONMENT_VARIABLES);
-  return Object.fromEntries(Object.entries(source).filter(([name]) => !removed.has(name)));
+function frogEnvironment(source: NodeJS.ProcessEnv, logRoot: string): NodeJS.ProcessEnv {
+  const removed = new Set<string>([...PUBLISHING_ENVIRONMENT_VARIABLES, ...GIT_DISCOVERY_ENVIRONMENT_VARIABLES]);
+  return {
+    ...Object.fromEntries(Object.entries(source).filter(([name]) => !removed.has(name))),
+    GIT_CEILING_DIRECTORIES: path.dirname(logRoot)
+  };
 }
 
 export function frictionLogWrapper(nodePath: string, frogBin: string, logRoot: string): string {
@@ -107,7 +114,9 @@ for argument in "$@"; do
       ;;
   esac
 done
-unset ${PUBLISHING_ENVIRONMENT_VARIABLES.join(" ")}
+unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, ...GIT_DISCOVERY_ENVIRONMENT_VARIABLES].join(" ")}
+GIT_CEILING_DIRECTORIES=${shellQuote(path.dirname(logRoot))}
+export GIT_CEILING_DIRECTORIES
 exec ${shellQuote(nodePath)} ${shellQuote(frogBin)} "$@" --cwd ${shellQuote(logRoot)}
 `;
 }
