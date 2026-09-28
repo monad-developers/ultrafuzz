@@ -37,10 +37,9 @@ const namedTests = new Map([
 const bunTestFile = "test/runtime.test.ts";
 const bunTestNamePrefix = "Bun adapter contract: ";
 const bunTestNames = [
-  "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
+  "generated DeepSeek adapter uses the official endpoint and isolates Claude routing",
   "generated DeepSeek adapter cleans an upstream command when environment policy rejects it",
-  "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
-  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
+  "generated DeepSeek adapter completes on a Claude Code result line and reports its usage",
   // Needs bun:sqlite, so it can only run in this lane. Gates the claim that the
   // pinned runner's schema migrations are additive over a stopped 0.34.0 store.
   "pinned store migrations are additive over a 0.34.0 database"

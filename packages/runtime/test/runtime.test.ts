@@ -3532,9 +3532,6 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(deepSeekAgentText, /settingSources:\s*""/);
   assert.match(deepSeekAgentText, /effort:\s*reasoningEffort/);
   assert.doesNotMatch(deepSeekAgentText, /extraArgs:\s*\["--effort"/);
-  assert.match(deepSeekAgentText, /cacheReadTokens/);
-  assert.match(deepSeekAgentText, /reasoningTokens: undefined/);
-  assert.match(deepSeekAgentText, /import \{ parseStrictJson \} from "\.\/strict-json";/u);
   assert.doesNotMatch(deepSeekAgentText, /=\s*createDeepSeekAgent\(\)/);
   const kimiAgentText = fs.readFileSync(path.join(project, ".smithers/agents/kimi.ts"), "utf8");
   assert.match(kimiAgentText, /KimiAgent/);
@@ -6984,7 +6981,7 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
+  "generated DeepSeek adapter uses the official endpoint and isolates Claude routing",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -7066,33 +7063,6 @@ bunAdapterTest(
       ]) {
         assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
       }
-
-      const resultLine = JSON.stringify({
-        type: "result",
-        subtype: "success",
-        is_error: false,
-        result: "done",
-        usage: {
-          prompt_cache_miss_tokens: 120,
-          output_tokens: 30,
-          prompt_cache_hit_tokens: 400,
-          cache_creation_input_tokens: 999,
-          reasoning_tokens: 20
-        }
-      });
-      const events = agent.createOutputInterpreter().onStdoutLine?.(resultLine) as Array<{
-        type?: string;
-        usage?: Record<string, number>;
-      }>;
-      const completed = events.find((event) => event.type === "completed");
-      assert.deepEqual(completed?.usage, {
-        input_tokens: 520,
-        fresh_input_tokens: 120,
-        output_tokens: 30,
-        cache_read_input_tokens: 400,
-        cache_creation_input_tokens: 0,
-        total_tokens: 550
-      });
     } finally {
       await command.cleanup?.();
     }
@@ -7147,173 +7117,56 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
+  "generated DeepSeek adapter completes on a Claude Code result line and reports its usage",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-    const providerUsage = {
-      prompt_cache_miss_tokens: 101,
-      prompt_cache_hit_tokens: 400,
-      output_tokens: 23,
-      reasoning_tokens: 17
-    };
-    const normalizedUsage = {
-      inputTokens: 501,
-      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
-      outputTokens: 23,
-      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
-      totalTokens: 524
-    };
-
-    const successful = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
-    successful.buildCommand = async () => ({
-      command: process.execPath,
-      args: [
-        "-e",
-        `console.log(${JSON.stringify(
-          JSON.stringify({
-            type: "result",
-            subtype: "success",
-            is_error: false,
-            result: "done",
-            session_id: "deepseek-session",
-            usage: providerUsage
-          })
-        )})`
-      ],
-      outputFormat: "stream-json"
-    });
-    const result = await successful.generate({ prompt: "Telemetry", rootDir: project });
-    assert.deepEqual(result.usage, normalizedUsage);
-
-    const streamed = await successful.stream({ prompt: "Stream telemetry", rootDir: project });
-    assert.deepEqual(await streamed.usage, normalizedUsage);
-    assert.deepEqual(await streamed.totalUsage, normalizedUsage);
-
-    const failed = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
-    failed.buildCommand = async () => ({
-      command: process.execPath,
-      args: [
-        "-e",
-        `console.log(${JSON.stringify(
-          JSON.stringify({
-            type: "result",
-            subtype: "error",
-            is_error: true,
-            error: "provider failed",
-            usage: providerUsage
-          })
-        )}); process.exit(17)`
-      ],
-      outputFormat: "stream-json"
-    });
-    let failure: unknown;
-    try {
-      await failed.generate({ prompt: "Failed telemetry", rootDir: project });
-    } catch (error) {
-      failure = error;
-    }
-    assert.ok(failure instanceof Error);
-    assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
-  }
-);
-
-bunAdapterTest(
-  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    const init = initProject({ projectRoot: project, force: true });
-    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-    const agent = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
-    const interpreter = agent.createOutputInterpreter();
-
-    assert.doesNotThrow(() =>
-      interpreter.onStdoutLine?.(JSON.stringify({ type: "assistant", message: { content: "working" } }))
-    );
-    assert.doesNotThrow(() => interpreter.onStdoutLine?.("provider banner: still starting"));
-
-    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
-    const invalid = [
-      {
-        label: "duplicate key",
-        line: '{"type":"result","type":"result","usage":{"prompt_cache_miss_tokens":1,"prompt_cache_hit_tokens":2,"output_tokens":3}}',
-        expected: /duplicate/iu
-      },
-      {
-        label: "malformed candidate",
-        line: '{"type":"result","usage":',
-        expected: /invalid strict JSON/iu
-      },
-      {
-        label: "malformed object without result marker",
-        line: '{"provider_status":',
-        expected: /invalid strict JSON/iu
-      },
-      {
-        label: "legacy aliases",
-        line: JSON.stringify({
-          type: "result",
-          usage: { input_tokens: 1, cache_read_input_tokens: 2, completion_tokens: 3 }
-        }),
-        expected: /legacy alias/iu
-      },
-      {
-        label: "legacy alias alongside canonical fields",
-        line: JSON.stringify({
-          type: "result",
-          usage: {
-            prompt_cache_miss_tokens: 1,
-            prompt_cache_hit_tokens: 2,
-            output_tokens: 3,
-            input_tokens: 1
-          }
-        }),
-        expected: /legacy alias input_tokens/iu
-      },
-      {
-        label: "missing exact field",
-        line: JSON.stringify({
-          type: "result",
-          usage: { prompt_cache_miss_tokens: 1, output_tokens: 3 }
-        }),
-        expected: /prompt_cache_hit_tokens/iu
-      },
-      {
-        label: "oversize raw line whitespace",
-        line:
-          " ".repeat(1024 * 1024) +
-          JSON.stringify({
-            type: "result",
-            usage: { prompt_cache_miss_tokens: 1, prompt_cache_hit_tokens: 2, output_tokens: 3 }
-          }),
-        expected: /1048576-byte limit/iu
-      },
-      {
-        label: "excessive depth",
-        line: `{"type":"result","future":${tooDeep},"usage":{"prompt_cache_miss_tokens":1,"prompt_cache_hit_tokens":2,"output_tokens":3}}`,
-        expected: /nesting-depth limit of 32/iu
-      },
-      {
-        label: "unsafe aggregate",
-        line: JSON.stringify({
-          type: "result",
-          usage: {
-            prompt_cache_miss_tokens: Number.MAX_SAFE_INTEGER,
-            prompt_cache_hit_tokens: 1,
-            output_tokens: 0
-          }
-        }),
-        expected: /safe integer range/iu
+    // The shape Claude Code prints for a DeepSeek-routed session: Anthropic
+    // usage field names. (The Claude Code 2.1.284 binary contains no
+    // prompt_cache_hit_tokens or prompt_cache_miss_tokens string at all.)
+    const resultLine = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 1200,
+      num_turns: 1,
+      result: "done",
+      session_id: "deepseek-session",
+      total_cost_usd: 0.01,
+      usage: {
+        input_tokens: 120,
+        cache_creation_input_tokens: 7,
+        cache_read_input_tokens: 400,
+        output_tokens: 30,
+        server_tool_use: { web_search_requests: 0 },
+        service_tier: "standard"
       }
-    ];
-    for (const fixture of invalid) {
-      assert.throws(() => interpreter.onStdoutLine?.(fixture.line), fixture.expected, fixture.label);
-    }
+    });
+    // A short idle timeout turns a stalled invocation into a prompt failure
+    // instead of waiting for the node timeout.
+    const agent = new DeepSeekClaudeCodeAgent({
+      model: "deepseek-v4-pro",
+      ultrafuzzApiKey: "test-key",
+      idleTimeoutMs: 5_000
+    });
+    agent.buildCommand = async () => ({
+      command: process.execPath,
+      args: ["-e", `console.log(${JSON.stringify(resultLine)})`],
+      outputFormat: "stream-json"
+    });
+
+    const result = (await agent.generate({ prompt: "Telemetry", rootDir: project })) as {
+      text?: string;
+      usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number } };
+    };
+
+    assert.equal(result.text, "done");
+    assert.equal(result.usage?.inputTokens, 120);
+    assert.equal(result.usage?.outputTokens, 30);
+    assert.equal(result.usage?.inputTokenDetails?.cacheReadTokens, 400);
   }
 );
 

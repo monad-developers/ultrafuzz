@@ -84,11 +84,7 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
     responsibilities: ["argv-construction", "session-handling"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
-  "deepseek.tsx": {
-    purpose: "adapter",
-    responsibilities: ["output-interpretation", "token-accounting"],
-    upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
-  },
+  "deepseek.tsx": { purpose: "adapter", responsibilities: [], upstreamIssues: [] },
   "environment.tsx": { purpose: "data-governance", responsibilities: [], upstreamIssues: [] },
   "index.tsx": { purpose: "registry", responsibilities: [], upstreamIssues: [] },
   "kimi.tsx": {

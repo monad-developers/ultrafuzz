@@ -247,9 +247,10 @@ value is rejected before execution. See DeepSeek's
 and [Anthropic API guide](https://api-docs.deepseek.com/guides/anthropic_api).
 
 DeepSeek's automatic disk cache reports cache misses and hits independently.
-Ultrafuzz records those as uncached input and cache-read tokens, records no
-cache-write charge, and treats the provider's output count as already including
-thinking tokens rather than publishing a second reasoning component. Pricing
+Claude Code reports them under Anthropic field names (`input_tokens`,
+`cache_read_input_tokens`), which the pinned Smithers Claude Code adapter
+already reads, so the DeepSeek adapter does no usage parsing of its own. The
+output count already includes thinking tokens. Pricing
 is pinned to the first-party `deepseek` catalog entry so a same-named hosted or
 subscription plan cannot supply a zero or unrelated rate. The current
 [DeepSeek price table](https://api-docs.deepseek.com/quick_start/pricing) lists

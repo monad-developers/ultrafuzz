@@ -3,7 +3,6 @@ import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { resolveProviderHome } from "./provider-home";
-import { parseStrictJson } from "./strict-json";
 import { readStringTable, stringField } from "./toml";
 
 type DeepSeekAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -12,45 +11,18 @@ export type DeepSeekTaskOptions = { model?: string; reasoningEffort?: string; ad
 type DeepSeekAgentOptions = ConstructorParameters<typeof SmithersClaudeCodeAgent>[0] & DeepSeekAuthOptions;
 type DeepSeekCommandParams = Parameters<SmithersClaudeCodeAgent["buildCommand"]>[0];
 type DeepSeekCommand = Awaited<ReturnType<SmithersClaudeCodeAgent["buildCommand"]>>;
-type DeepSeekOutputInterpreter = ReturnType<SmithersClaudeCodeAgent["createOutputInterpreter"]>;
 type DeepSeekReasoningEffort = "low" | "high" | "max";
-type DeepSeekUsage = {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: 0;
-  totalTokens: number;
-};
-type DeepSeekSmithersUsage = {
-  inputTokens: number;
-  inputTokenDetails: { noCacheTokens: number; cacheReadTokens: number; cacheWriteTokens: 0 };
-  outputTokens: number;
-  outputTokenDetails: { textTokens: undefined; reasoningTokens: undefined };
-  totalTokens: number;
-};
 
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
-const DEEPSEEK_RESULT_MAX_BYTES = 1024 * 1024;
-const DEEPSEEK_RESULT_MAX_DEPTH = 32;
-const DEEPSEEK_RESULT_MAX_ITEMS = 10_000;
-const DEEPSEEK_RESULT_MAX_PROPERTIES = 10_000;
-const DEEPSEEK_LEGACY_USAGE_FIELDS = [
-  "input_tokens",
-  "inputTokens",
-  "outputTokens",
-  "completion_tokens",
-  "cache_read_input_tokens",
-  "cacheReadTokens",
-  "cached_input_tokens"
-] as const;
 
 /**
  * Runs the Claude Code harness against DeepSeek's Anthropic-compatible
  * endpoint: a compatibility pairing, not DeepSeek's first-party coding agent.
- * Keep it as a distinct factory so credentials, model selection, telemetry
- * semantics, and pricing provenance never inherit Anthropic defaults
- * accidentally.
+ * Keep it as a distinct factory so credentials, model selection, and pricing
+ * provenance never inherit Anthropic defaults accidentally. Token usage needs
+ * no adapter code: Claude Code reports it under Anthropic field names, which
+ * Smithers' ClaudeCodeAgent already reads.
  */
 export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): SmithersClaudeCodeAgent {
   const reasoningEffort = deepSeekReasoningEffort(options.reasoningEffort);
@@ -67,7 +39,6 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
 }
 
 export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
-  private pendingUsage: DeepSeekSmithersUsage | undefined;
   private readonly ultrafuzzApiKey: string;
 
   // Smithers 0.35.0's BaseCliAgent rejects unknown constructor options with a
@@ -79,35 +50,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
     this.ultrafuzzApiKey = ultrafuzzApiKey;
   }
 
-  override generate(
-    ...args: Parameters<SmithersClaudeCodeAgent["generate"]>
-  ): ReturnType<SmithersClaudeCodeAgent["generate"]> {
-    return this.withDeepSeekUsage(super.generate(...args)) as ReturnType<SmithersClaudeCodeAgent["generate"]>;
-  }
-
-  override stream(
-    ...args: Parameters<SmithersClaudeCodeAgent["stream"]>
-  ): ReturnType<SmithersClaudeCodeAgent["stream"]> {
-    return this.withDeepSeekStreamUsage(super.stream(...args)) as ReturnType<SmithersClaudeCodeAgent["stream"]>;
-  }
-
-  override createOutputInterpreter(): DeepSeekOutputInterpreter {
-    const base = super.createOutputInterpreter();
-    return {
-      ...base,
-      onStdoutLine: (line) => {
-        const usage = deepSeekUsageFromResultLine(line);
-        if (usage !== undefined) this.pendingUsage = deepSeekSmithersUsage(usage);
-        const events = base.onStdoutLine?.(line) ?? [];
-        if (usage === undefined) return events;
-        const completedUsage = deepSeekCompletedUsage(usage);
-        return events.map((event) => (event.type === "completed" ? { ...event, usage: completedUsage } : event));
-      }
-    };
-  }
-
   override async buildCommand(params: DeepSeekCommandParams): Promise<DeepSeekCommand> {
-    this.pendingUsage = undefined;
     this.opts.settingSources = "";
     const command = await super.buildCommand(params);
     try {
@@ -161,28 +104,6 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
       throw error;
     }
   }
-
-  private withDeepSeekUsage<T>(promise: Promise<T>): Promise<T> {
-    return promise
-      .then((result) => attachDeepSeekResultUsage(result, this.pendingUsage))
-      .catch((error: unknown) => {
-        throw attachDeepSeekFailureUsage(error, this.pendingUsage);
-      })
-      .finally(() => {
-        this.pendingUsage = undefined;
-      });
-  }
-
-  private withDeepSeekStreamUsage<T>(promise: Promise<T>): Promise<T> {
-    return promise
-      .then((result) => attachDeepSeekStreamUsage(result, this.pendingUsage))
-      .catch((error: unknown) => {
-        throw attachDeepSeekFailureUsage(error, this.pendingUsage);
-      })
-      .finally(() => {
-        this.pendingUsage = undefined;
-      });
-  }
 }
 
 function deepSeekAuthOptions(): DeepSeekAuthOptions {
@@ -221,137 +142,4 @@ function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEf
     return value as DeepSeekReasoningEffort;
   }
   throw new Error(`DeepSeekAgent reasoning effort must be one of ${DEEPSEEK_REASONING_EFFORTS.join(", ")}: ${value}`);
-}
-
-/**
- * DeepSeek bills cache misses and cache hits independently. Its completion
- * token count already includes thinking tokens, so exposing a separate
- * reasoning count would double-count both tokens and spend.
- */
-function deepSeekUsageFromResultLine(line: string): DeepSeekUsage | undefined {
-  const first = firstNonJsonWhitespace(line);
-  if (first === undefined) return undefined;
-  const objectCandidate = first === "{";
-  let payload: unknown;
-  try {
-    payload = parseStrictJson(line, {
-      maxBytes: DEEPSEEK_RESULT_MAX_BYTES,
-      maxDepth: DEEPSEEK_RESULT_MAX_DEPTH,
-      maxItems: DEEPSEEK_RESULT_MAX_ITEMS,
-      maxProperties: DEEPSEEK_RESULT_MAX_PROPERTIES
-    });
-  } catch (error) {
-    if (objectCandidate) {
-      throw new Error(
-        `DeepSeek result output is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
-    }
-    return undefined;
-  }
-  if (!isRecord(payload) || payload.type !== "result") return undefined;
-  if (!isRecord(payload.usage)) throw new Error("DeepSeek result usage must be an object");
-  const usage = payload.usage;
-  for (const legacyField of DEEPSEEK_LEGACY_USAGE_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(usage, legacyField)) {
-      throw new Error(`DeepSeek result usage contains unsupported legacy alias ${legacyField}`);
-    }
-  }
-  const inputTokens = requiredDeepSeekTokenCount(usage, "prompt_cache_miss_tokens");
-  const outputTokens = requiredDeepSeekTokenCount(usage, "output_tokens");
-  const cacheReadTokens = requiredDeepSeekTokenCount(usage, "prompt_cache_hit_tokens");
-  const normalized = {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens: 0 as const
-  };
-  const totalTokens = normalized.inputTokens + normalized.cacheReadTokens + normalized.outputTokens;
-  if (!Number.isSafeInteger(totalTokens)) throw new Error("DeepSeek result usage exceeds the safe integer range");
-  return { ...normalized, totalTokens };
-}
-
-function firstNonJsonWhitespace(value: string): string | undefined {
-  for (const character of value) {
-    if (character !== " " && character !== "\t" && character !== "\n" && character !== "\r") return character;
-  }
-  return undefined;
-}
-
-function requiredDeepSeekTokenCount(value: Record<string, unknown>, field: string): number {
-  const candidate = value[field];
-  if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
-    throw new Error(`DeepSeek result usage.${field} must be a non-negative safe integer`);
-  }
-  return candidate;
-}
-
-function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {
-  return {
-    input_tokens: deepSeekProviderInputTokens(usage),
-    fresh_input_tokens: usage.inputTokens,
-    output_tokens: usage.outputTokens,
-    cache_read_input_tokens: usage.cacheReadTokens,
-    cache_creation_input_tokens: usage.cacheWriteTokens,
-    total_tokens: usage.totalTokens
-  };
-}
-
-function deepSeekSmithersUsage(usage: DeepSeekUsage): DeepSeekSmithersUsage {
-  return {
-    inputTokens: deepSeekProviderInputTokens(usage),
-    inputTokenDetails: {
-      noCacheTokens: usage.inputTokens,
-      cacheReadTokens: usage.cacheReadTokens,
-      cacheWriteTokens: usage.cacheWriteTokens
-    },
-    outputTokens: usage.outputTokens,
-    outputTokenDetails: {
-      textTokens: undefined,
-      reasoningTokens: undefined
-    },
-    totalTokens: usage.totalTokens
-  };
-}
-
-function deepSeekProviderInputTokens(usage: DeepSeekUsage): number {
-  return usage.totalTokens - usage.outputTokens;
-}
-
-function attachDeepSeekResultUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {
-  if (usage === undefined || !isRecord(result)) return result;
-  try {
-    result.usage = usage;
-    result.totalUsage = usage;
-  } catch {
-    // Telemetry must never turn a successful provider invocation into a model
-    // failure if an exotic Smithers result becomes immutable.
-  }
-  return result;
-}
-
-function attachDeepSeekStreamUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {
-  if (usage === undefined || !isRecord(result)) return result;
-  try {
-    result.usage = Promise.resolve(usage);
-    result.totalUsage = Promise.resolve(usage);
-  } catch {
-    // Telemetry must never turn a successful provider invocation into a model
-    // failure if an exotic Smithers stream result becomes immutable.
-  }
-  return result;
-}
-
-function attachDeepSeekFailureUsage(error: unknown, usage: DeepSeekSmithersUsage | undefined): unknown {
-  if (usage === undefined || !isRecord(error)) return error;
-  try {
-    error.usage = usage;
-  } catch {
-    // Preserve the original failure if an exotic error object is immutable.
-  }
-  return error;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
