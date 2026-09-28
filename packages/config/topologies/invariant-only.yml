@@ -91,7 +91,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/0kn0t.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -104,7 +103,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/certora-thinking.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -117,7 +115,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/certora-sanity.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -130,7 +127,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/aviggiano.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -143,7 +139,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/rounding.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -156,7 +151,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/crytic.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -169,7 +163,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/runtime-verification.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -182,7 +175,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/a16z-erc4626.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -195,7 +187,6 @@ nodes:
     group: references
     depends_on:
       - __start__
-    timeout_seconds: 300
     outputs:
       - path: references/recon.md
         contract: ultrafuzz/nonempty-markdown@1
