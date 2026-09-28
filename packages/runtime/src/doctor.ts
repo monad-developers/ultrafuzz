@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
-import { inspectSmithersInstallation, type SmithersInstallationPosture } from "./smithers.js";
+import { inspectSmithersInstallation } from "./smithers.js";
 import { SMITHERS_PACKAGE_NAME, SMITHERS_VERSION } from "./smithers-package.js";
 import type {
   DoctorCheck,
@@ -20,6 +22,11 @@ import { probeCommandsForExecution } from "./required-commands.js";
 const execFileAsync = promisify(execFile);
 
 const REGISTRY_LOOKUP_TIMEOUT_MS = 10_000;
+
+/** Linux `statfs` filesystem type of a tmpfs mount (`TMPFS_MAGIC`). */
+const TMPFS_MAGIC = 0x01021994;
+
+const MIN_TEMPORARY_DIRECTORY_FREE_BYTES = 2 * 1024 ** 3;
 
 /** Local commands every run needs regardless of which agent backend is selected. */
 const REQUIRED_TOOLCHAIN_COMMANDS = ["git", "node", "forge"] as const;
@@ -64,9 +71,10 @@ export async function diagnoseProject(input: DoctorInput) {
   });
   diagnostics.push(...validation.diagnostics);
 
-  const openRouterSelected =
-    resolved.config !== undefined &&
-    activeTopologyAgentRefs(projectRoot, resolved.config, input.topologyPath).includes("OpenRouterAgent");
+  // The agents the selected topology can dispatch to, including retry fallbacks.
+  const selectedAgentRefs =
+    resolved.config === undefined ? [] : activeTopologyAgentRefs(projectRoot, resolved.config, input.topologyPath);
+  const openRouterSelected = selectedAgentRefs.includes("OpenRouterAgent");
   const openRouterCredential = openRouterSelected ? resolved.config?.agents.OpenRouterAgent?.apiKeyEnv : undefined;
   const openRouterCredentialReady =
     !openRouterSelected || (openRouterCredential !== undefined && (env[openRouterCredential] ?? "").trim() !== "");
@@ -96,18 +104,18 @@ export async function diagnoseProject(input: DoctorInput) {
   });
   diagnostics.push(...references.diagnostics);
 
-  const agentRefs = configuredAgentRefs(resolved.config?.models.profiles);
-  const topologyCommands = validation.value?.topology?.required_commands ?? [];
-  const commandRequirements = [
-    ...REQUIRED_TOOLCHAIN_COMMANDS.map((name) => ({ name, required: true })),
-    ...topologyCommands.map((name) => ({ name, required: true })),
-    ...agentRefs.map((agentRef) => ({
-      name: AGENT_EXECUTABLES[agentRef] ?? agentRef,
-      // Only demand a CLI for agents whose executable Ultrafuzz actually
-      // knows; an unrecognised ref is reported without being required.
-      required: AGENT_EXECUTABLES[agentRef] !== undefined
-    }))
-  ].filter((entry, index, entries) => entries.findIndex((candidate) => candidate.name === entry.name) === index);
+  const requiredByName = new Map<string, boolean>();
+  for (const name of [...REQUIRED_TOOLCHAIN_COMMANDS, ...(validation.value?.topology?.required_commands ?? [])]) {
+    requiredByName.set(name, true);
+  }
+  for (const agentRef of configuredAgentRefs(resolved.config?.models.profiles)) {
+    // Every configured agent's CLI is reported, but only a selected agent's
+    // known CLI is required. Agents can share a CLI, so any requirer wins.
+    const name = AGENT_EXECUTABLES[agentRef] ?? agentRef;
+    const required = AGENT_EXECUTABLES[agentRef] !== undefined && selectedAgentRefs.includes(agentRef);
+    requiredByName.set(name, requiredByName.get(name) === true || required);
+  }
+  const commandRequirements = [...requiredByName].map(([name, required]) => ({ name, required }));
   let probeFailure: string | undefined;
   const probes =
     resolved.config === undefined
@@ -157,26 +165,28 @@ export async function diagnoseProject(input: DoctorInput) {
     });
   }
 
-  const engineCheck = workflowEngineCheck(installation);
-  const observedEngineStatus = engineCheck.check.status;
-  checks.push({
-    ...engineCheck.check,
-    status: "unknown" as const,
-    summary:
-      "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
-  });
-
-  const patchCheck = compatibilityPatchCheck(installation);
-  checks.push({
-    ...patchCheck.check,
-    status: "unknown" as const,
-    summary:
-      "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
-  });
+  checks.push(
+    {
+      name: "workflow-engine-install",
+      status: "unknown",
+      summary:
+        "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
+    },
+    {
+      name: "workflow-engine-patches",
+      status: "unknown",
+      summary:
+        "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
+    }
+  );
 
   const latestCheck = registryCheck(latest);
   checks.push(latestCheck.check);
   diagnostics.push(...latestCheck.diagnostics);
+
+  const temporaryCheck = temporaryDirectoryCheck(os.tmpdir());
+  checks.push(temporaryCheck.check);
+  diagnostics.push(...temporaryCheck.diagnostics);
 
   const value: DoctorValue = {
     project_root: projectRoot,
@@ -194,7 +204,10 @@ export async function diagnoseProject(input: DoctorInput) {
       installed_bin_target: installation.installed_bin_target,
       bin_path: installation.bin_path,
       latest_published_version: latest !== undefined && "version" in latest ? latest.version : "unknown",
-      layout_status: observedEngineStatus,
+      layout_status:
+        installation.installed_version === installation.required_version && installation.layout_error === null
+          ? "ok"
+          : "error",
       layout_detail: installation.layout_error,
       compatibility_patches: installation.compatibility_patches
     }
@@ -202,136 +215,71 @@ export async function diagnoseProject(input: DoctorInput) {
   return runtimeResult<DoctorValue>(value.ok, value, diagnostics);
 }
 
-function workflowEngineCheck(installation: SmithersInstallationPosture): {
-  check: DoctorCheck;
-  diagnostics: RuntimeDiagnostic[];
-} {
-  if (installation.installed_version === null) {
-    return {
-      check: {
-        name: "workflow-engine-install",
-        status: "error",
-        summary: `pinned workflow engine ${installation.required_version} is not installed for this project`
-      },
-      diagnostics: [
-        {
-          code: "DOCTOR_WORKFLOW_ENGINE_MISSING",
-          message: `pinned workflow engine ${installation.required_version} is not installed; it installs automatically on the next run`,
-          severity: "error",
-          source: "doctor"
-        }
-      ]
-    };
+/**
+ * Launch and resume install the workflow engine controller under the OS
+ * temporary directory, and a native resume keeps its install there for the
+ * detached engine. Warn when that directory is RAM-backed or nearly full. The
+ * controller roots are only reported: a live engine may still be using them.
+ */
+function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagnostics: RuntimeDiagnostic[] } {
+  const warning = (message: string) => ({
+    check: { name: "temporary-directory", status: "warning" as const, summary: message },
+    diagnostics: [
+      { code: "DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED", message, severity: "warning" as const, source: "doctor" }
+    ]
+  });
+  let stats: fs.StatsFs;
+  let roots: string[];
+  try {
+    stats = fs.statfsSync(directory);
+    roots = fs
+      .readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith("ultrafuzz-controller-"))
+      .map((entry) => path.join(directory, entry.name));
+  } catch (error) {
+    return warning(
+      `could not inspect the temporary directory ${directory}: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
-  if (installation.installed_version !== installation.required_version) {
-    return {
-      check: {
-        name: "workflow-engine-install",
-        status: "error",
-        summary: `installed workflow engine ${installation.installed_version} does not match the required ${installation.required_version}`
-      },
-      diagnostics: [
-        {
-          code: "DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH",
-          message: `installed workflow engine is ${installation.installed_version} but ${installation.required_version} is required`,
-          severity: "error",
-          source: "doctor"
-        }
-      ]
-    };
-  }
-  if (installation.layout_error !== null) {
-    return {
-      check: {
-        name: "workflow-engine-install",
-        status: "error",
-        summary: `installed workflow engine layout is not usable: ${installation.layout_error}`
-      },
-      diagnostics: [
-        {
-          code: "DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID",
-          message: `installed workflow engine layout failed validation: ${installation.layout_error}`,
-          severity: "error",
-          source: "doctor"
-        }
-      ]
-    };
-  }
-  return {
-    check: {
-      name: "workflow-engine-install",
-      status: "ok",
-      summary: `workflow engine ${installation.installed_version} installed and passing manifest and path validation`
-    },
-    diagnostics: []
-  };
+  const free = stats.bavail * stats.bsize;
+  const rootBytes = roots.reduce((total, root) => total + regularFileBytes(root), 0);
+  const usage = `${formatBytes(free)} free; ${String(roots.length)} ultrafuzz-controller-* ${roots.length === 1 ? "directory holds" : "directories hold"} ${formatBytes(rootBytes)}`;
+  const problems = [
+    ...(stats.type === TMPFS_MAGIC ? ["is a RAM-backed tmpfs"] : []),
+    ...(free < MIN_TEMPORARY_DIRECTORY_FREE_BYTES ? ["has less than 2 GiB free"] : [])
+  ];
+  return problems.length === 0
+    ? { check: { name: "temporary-directory", status: "ok", summary: `${directory}: ${usage}` }, diagnostics: [] }
+    : warning(
+        `temporary directory ${directory} ${problems.join(" and ")}; launch and resume install the workflow engine controller there (${usage}). Set TMPDIR to a disk-backed directory with more free space.`
+      );
 }
 
-function compatibilityPatchCheck(installation: SmithersInstallationPosture): {
-  check: DoctorCheck;
-  diagnostics: RuntimeDiagnostic[];
-} {
-  const entries = Object.entries(installation.compatibility_patches);
-  const incompatible = entries.filter(([, posture]) => posture === "incompatible").map(([name]) => name);
-  const missing = entries.filter(([, posture]) => posture === "missing").map(([name]) => name);
-  const unknown = entries.filter(([, posture]) => posture === "unknown").map(([name]) => name);
-  if (incompatible.length > 0) {
-    // The next run hard-fails in this state, so doctor must not call it healthy.
-    return {
-      check: {
-        name: "workflow-engine-patches",
-        status: "error",
-        summary: `installed engine source is modified or incompatible for: ${incompatible.join(", ")}`
-      },
-      diagnostics: [
-        {
-          code: "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE",
-          message: `installed workflow engine source no longer matches the shape Ultrafuzz patches for: ${incompatible.join(", ")}; reinstall the pinned engine`,
-          severity: "error",
-          source: "doctor"
-        }
-      ]
-    };
+/** Total size of the regular files under a directory, skipping entries that vanish or cannot be read. */
+function regularFileBytes(directory: string): number {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return 0;
   }
-  if (missing.length > 0) {
-    return {
-      check: {
-        name: "workflow-engine-patches",
-        status: "warning",
-        summary: `compatibility patches not applied yet: ${missing.join(", ")}; they apply on the next run`
-      },
-      diagnostics: [
-        {
-          code: "DOCTOR_WORKFLOW_ENGINE_PATCHES_PENDING",
-          message: `required workflow engine compatibility patches are not applied: ${missing.join(", ")}`,
-          severity: "warning",
-          source: "doctor"
-        }
-      ]
-    };
+  let total = 0;
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) total += regularFileBytes(entryPath);
+    else if (entry.isFile()) {
+      try {
+        total += fs.lstatSync(entryPath).size;
+      } catch {
+        // Removed while scanning.
+      }
+    }
   }
-  if (unknown.length > 0) {
-    return {
-      check: {
-        name: "workflow-engine-patches",
-        status: "unknown",
-        summary: `compatibility patch posture unavailable for: ${unknown.join(", ")}`
-      },
-      diagnostics: []
-    };
-  }
-  const upstream = entries.filter(([, posture]) => posture === "upstream").map(([name]) => name);
-  return {
-    check: {
-      name: "workflow-engine-patches",
-      status: "ok",
-      summary:
-        upstream.length === entries.length
-          ? "the installed engine already provides every patched behavior upstream"
-          : `compatibility patches applied${upstream.length > 0 ? `; upstream now covers ${upstream.join(", ")}` : ""}`
-    },
-    diagnostics: []
-  };
+  return total;
+}
+
+function formatBytes(bytes: number): string {
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GiB` : `${String(Math.round(bytes / 1024 ** 2))} MiB`;
 }
 
 function registryCheck(latest: LatestPublishedEngine | { error: string } | undefined): {
