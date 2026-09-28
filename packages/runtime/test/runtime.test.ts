@@ -6961,19 +6961,19 @@ bunAdapterTest(
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
-      workflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
+      snapshot: process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT,
       alias: process.env.MY_ALIAS
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = persistedWorkflow;
+    process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT = snapshotRoot;
     process.env.MY_ALIAS = aliasedControlPath;
     try {
       assert.throws(() => createCodexAgent(), /credential MY_ALIAS resolves inside controller-only execution state/u);
     } finally {
       if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
       else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
-      if (previous.workflow === undefined) delete process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
-      else process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = previous.workflow;
+      if (previous.snapshot === undefined) delete process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT;
+      else process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT = previous.snapshot;
       if (previous.alias === undefined) delete process.env.MY_ALIAS;
       else process.env.MY_ALIAS = previous.alias;
     }
@@ -7178,47 +7178,95 @@ bunAdapterTest(
     initProject({ projectRoot: project, force: true });
     const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
     const externalBin = temporaryRoot("ultrafuzz-continuation-external-bin-");
-    const trustedBin = path.join(project, ".ultrafuzz", "runs", "continued", "trusted-bin");
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "continued");
+    const trustedBin = path.join(runRoot, "trusted-bin");
     const admittedPath = [trustedBin, externalBin].join(path.delimiter);
-    const piHome = path.join(project, ".ultrafuzz", "pi-coding-agent");
+    // Homes adapters place under the target: Pi's configured home, OpenCode's
+    // run-scoped XDG roots, and Kimi's API-key home.
+    const adapterOwned = {
+      PI_CODING_AGENT_DIR: path.join(project, ".ultrafuzz", "pi-coding-agent"),
+      XDG_CONFIG_HOME: path.join(runRoot, "opencode", "config"),
+      OPENCODE_DB: path.join(runRoot, "opencode", "data", "opencode", "opencode.db"),
+      KIMI_CODE_HOME: path.join(project, ".ultrafuzz", "kimi-code")
+    };
     const source = {
       PATH: admittedPath,
-      PI_CODING_AGENT_DIR: piHome,
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(project, ".smithers", "workflows", "continued.tsx"),
-      ULTRAFUZZ_CONFIG_PATH: path.join(project, ".ultrafuzz", "runs", "continued", "smithers", "resolved-config.json"),
-      CONTROL_ALIAS: path.join(project, ".smithers", "workflows", "continued.tsx"),
+      ULTRAFUZZ_CONFIG_PATH: path.join(runRoot, "smithers", "resolved-config.json"),
       OPENAI_API_KEY: "unrelated-provider-key"
     };
-    for (const additions of [{}, { PATH: admittedPath, PI_CODING_AGENT_DIR: piHome }]) {
-      const child = { ...source, ...workflowControlChildEnvironment(additions, source) };
+    // A native continuation runs the target's own workflow and advertises no
+    // sealed snapshot, so nothing under the target is controller-only state:
+    // neither inherited values nor the homes an adapter supplies are blanked.
+    // (An inherited KIMI_CODE_HOME is still dropped as a provider home.)
+    const { KIMI_CODE_HOME: _kimiHome, ...inherited } = adapterOwned;
+    const continuation = { ...source, ...inherited };
+    for (const [additions, expected] of [
+      [{}, inherited],
+      [{ PATH: admittedPath, ...adapterOwned }, adapterOwned]
+    ] as const) {
+      const child: Record<string, string> = {
+        ...continuation,
+        ...workflowControlChildEnvironment(additions, continuation)
+      };
       assert.equal(child.PATH, admittedPath);
-      assert.equal(child.PI_CODING_AGENT_DIR, piHome);
-      assert.equal(child.CONTROL_ALIAS, "");
+      for (const [name, value] of Object.entries(expected)) assert.equal(child[name], value, name);
       assert.equal(child.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, "");
+      assert.equal(child.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(child.OPENAI_API_KEY, "");
     }
-    const snapshotRoot = path.join(
-      project,
-      ".ultrafuzz",
-      "runs",
-      "continued",
-      "smithers",
-      "execution-snapshots",
-      "a".repeat(64)
-    );
+    const snapshotRoot = path.join(runRoot, "smithers", "execution-snapshots", "a".repeat(64));
     const snapshotHome = path.join(snapshotRoot, "controls");
     const snapshotSource = {
       ...source,
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, ".smithers", "workflows", "continued.tsx"),
       ULTRAFUZZ_CONFIG_PATH: path.join(snapshotRoot, "controls", "ultrafuzz.toml"),
       ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
-      PI_CODING_AGENT_DIR: snapshotHome
+      PI_CODING_AGENT_DIR: snapshotHome,
+      XDG_CONFIG_HOME: snapshotHome
     };
-    assert.equal(workflowControlChildEnvironment({}, snapshotSource).PI_CODING_AGENT_DIR, "");
-    assert.equal(
-      workflowControlChildEnvironment({ PI_CODING_AGENT_DIR: snapshotHome }, snapshotSource).PI_CODING_AGENT_DIR,
-      ""
-    );
+    for (const additions of [{}, { PI_CODING_AGENT_DIR: snapshotHome, XDG_CONFIG_HOME: snapshotHome }]) {
+      const child = workflowControlChildEnvironment(additions, snapshotSource);
+      assert.equal(child.PI_CODING_AGENT_DIR, "");
+      assert.equal(child.XDG_CONFIG_HOME, "");
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated OpenCode adapter keeps its run-scoped state roots in a native continuation",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "opencode-continued");
+    const names = ["ULTRAFUZZ_CONFIG_PATH", "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH", "OPENROUTER_API_KEY"] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    // What `ultrafuzz resume` hands a native continuation: the target's own
+    // persisted workflow and no advertised execution snapshot.
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(project, ".smithers", "workflows", "continued.tsx");
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-not-a-real-opencode-credential";
+    try {
+      const agent = createOpenCodeAgent({
+        model: "openrouter/test-model",
+        addDir: [path.join(runRoot, "artifacts", "attempt")]
+      });
+      const command = await agent.buildCommand({ prompt: "inspect", cwd: project, options: {} });
+      const childEnv = { ...process.env, ...agent.opts.env, ...command.env };
+      const stateRoot = path.join(runRoot, "opencode");
+      assert.equal(childEnv.XDG_CONFIG_HOME, path.join(stateRoot, "config"));
+      assert.equal(childEnv.XDG_DATA_HOME, path.join(stateRoot, "data"));
+      assert.equal(childEnv.OPENCODE_DB, path.join(stateRoot, "data", "opencode", "opencode.db"));
+      assert.equal(childEnv.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, "");
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
   }
 );
 

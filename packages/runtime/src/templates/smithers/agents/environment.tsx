@@ -12,6 +12,7 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "SMITHERS_CLI_SRC_DIR",
   "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
+  "ULTRAFUZZ_BUN_MODULE_CONFINEMENT",
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
   "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
@@ -93,22 +94,12 @@ export function workflowControlChildEnvironment(
     ].map((name) => [name, ""])
   );
   const roots = workflowExecutionSnapshotRoots(source);
-  // Native continuations name the target's workflow, not a sealed execution
-  // tree. Pi's configured home may live under that target. Continue rejecting
-  // homes that alias a real advertised snapshot or another controller root.
-  const piHomeRoots =
-    source.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT ||
-    source.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT ||
-    source.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT
-      ? roots
-      : workflowExecutionSnapshotRoots({ ...source, ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: undefined });
   const aliasesControl = (name: string, value: string): boolean => {
     // PATH has already passed the controller's command-path admission. Its
     // trusted-bin/forge guard intentionally lives under the target; blanking
     // the whole list also removes external CLIs admitted by the controller.
     if (name === "PATH") return false;
-    const selectedRoots = name === "PI_CODING_AGENT_DIR" ? piHomeRoots : roots;
-    return selectedRoots.some((root) => environmentPath(value).includes(root));
+    return roots.some((root) => environmentPath(value).includes(root));
   };
   for (const [name, value] of Object.entries(source)) {
     if (value !== undefined && aliasesControl(name, value)) child[name] = "";
@@ -391,26 +382,24 @@ export function workflowControlCredentialValue(
   return value;
 }
 
+/**
+ * The sealed execution snapshot this process runs from, under every name the
+ * process anchor advertises for it. A native continuation runs the target's
+ * own workflow and advertises none: treating that project as controller-only
+ * state would blank every adapter-owned path under it, such as OpenCode's
+ * run-scoped XDG roots and Kimi's API-key home.
+ */
 function workflowExecutionSnapshotRoots(source: Record<string, string | undefined>): string[] {
   const roots = new Set<string>();
-  const persistedWorkflow = source.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
-  if (persistedWorkflow !== undefined && path.isAbsolute(persistedWorkflow)) {
-    const workflowsDirectory = path.dirname(persistedWorkflow);
-    const smithersDirectory = path.dirname(workflowsDirectory);
-    if (path.basename(workflowsDirectory) === "workflows" && path.basename(smithersDirectory) === ".smithers") {
-      roots.add(path.dirname(smithersDirectory));
-    }
+  for (const name of [
+    "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+    "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT",
+    "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT"
+  ]) {
+    const root = source[name]?.trim();
+    if (root && path.isAbsolute(root) && root !== path.parse(root).root) roots.add(root);
   }
-  for (const name of CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) {
-    const value = source[name];
-    if (value === undefined) continue;
-    const candidate = environmentPath(value);
-    for (const marker of ["/dependencies/", "/modules/", "/controls/", "/.smithers/workflows/"]) {
-      const index = candidate.indexOf(marker);
-      if (index > 0) roots.add(candidate.slice(0, index));
-    }
-  }
-  return [...roots].filter((root) => root !== path.parse(root).root);
+  return [...roots];
 }
 
 function environmentPath(value: string): string {
