@@ -137,21 +137,25 @@ part of the durable expansion contract, so changing it requires a new or
 explicitly incompatible run rather than changing an existing expansion on
 resume.
 
-`workflow_deadline_seconds` is not a guaranteed wall-clock limit. The deadline
-is measured from workflow submission and recorded as `workflow_deadline_at` in
-run state, but nothing enforces it on a timer. It is checked only when a
-command synchronizes the run: `ultrafuzz run` once at launch, then `ultrafuzz
-status`, `inspect`, `why`, and `stats`. If the run is still active at the
-first synchronization after the deadline, that synchronization requests
+`workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
+records `workflow_deadline_at` in run state when the run is created, and again
+from each `resume`, `replay`, or `fork`, but nothing enforces it on a timer: an
+unattended run keeps executing, and incurring provider cost, past its deadline.
+The deadline is checked only when a command synchronizes the run: `ultrafuzz
+status` (including each `--watch` poll), `inspect`, `why`, and `stats`, plus
+the dashboard's inspect action and the eval runner's poll loop. `ultrafuzz run`
+does not check it. If the run is not yet terminal (running, pending, or paused)
+at the first synchronization after the deadline, that synchronization requests
 cancellation and, when the request succeeds, marks the run `timed-out` and
 appends a `workflow-deadline-exceeded` event. A failed request is reported as a
-`WORKFLOW_DEADLINE_CANCEL_FAILED` diagnostic and leaves the run active. A run
-that already finished before that synchronization keeps its terminal outcome,
-with no timeout record. Until then an unattended run keeps executing, and keeps
-incurring provider cost, past its deadline. To bound an
+`WORKFLOW_DEADLINE_CANCEL_FAILED` error and leaves the run active; a
+synchronization that fails or is skipped (for example
+`WORKFLOW_STATE_SYNC_SKIPPED`) does not check the deadline at all. A run that
+finished first keeps its terminal outcome, with no timeout record. To bound an
 unattended run, run `ultrafuzz status <run-id>` periodically (for example from
-cron) or cancel it with `ultrafuzz cancel <run-id>`. Workflow-side enforcement
-is tracked in [#1110](https://github.com/monad-developers/ultrafuzz/issues/1110).
+cron) and act on its warnings, or cancel it with `ultrafuzz cancel <run-id>`.
+Workflow-side enforcement is tracked in
+[#1110](https://github.com/monad-developers/ultrafuzz/issues/1110).
 
 Successful runs remove their generated workspaces by default. Setting
 `keep_workspaces = true` retains them; dirty or unpushed workspaces are always
