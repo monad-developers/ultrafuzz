@@ -230,6 +230,28 @@ test("workflow control execution-file uniqueness stays in the linear semantic ga
   assert.equal(assertRuntimeDocument(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, seal, "seal"), seal);
 });
 
+// Launch writes the seal after schema validation alone, so every seal the schema
+// accepts has to parse back, bindings included.
+test("a control seal at its schema's execution-file bound parses back", () => {
+  const properties = workflowControlIntegrityJsonSchema.properties as Record<string, { maxItems?: number }>;
+  const maxExecutionFiles = properties.execution_files?.maxItems;
+  assert.ok(typeof maxExecutionFiles === "number");
+  const seal = fixture("workflow-control-integrity.schema.json");
+  const executionFile = (seal.execution_files as Array<Record<string, unknown>>)[0];
+  assert.ok(executionFile);
+  seal.execution_files = Array.from({ length: maxExecutionFiles }, (_, index) => {
+    const identity = index.toString().padStart(6, "0");
+    return {
+      ...executionFile,
+      source_path: `/generic/source/${identity}`,
+      snapshot_path: `generic/${identity}.json`
+    };
+  });
+  const bytes = Buffer.from(JSON.stringify(seal), "utf8");
+
+  assert.deepEqual(parseRuntimeDocumentBytes(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, bytes, "seal"), seal);
+});
+
 test("strict runtime document parsing rejects duplicate keys before schema validation", () => {
   assert.throws(
     () =>
