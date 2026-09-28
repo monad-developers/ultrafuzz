@@ -526,6 +526,10 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     const smithersRoot = safeResolveInside(layout.root, "smithers", "Smithers evidence");
     const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
     const configPath = safeResolveInside(smithersRoot, "resolved-config.json", "workflow config");
+    // Agent adapters parse ULTRAFUZZ_CONFIG_PATH as TOML; given the JSON above
+    // they find no agent tables and fall back to default auth. Launch writes
+    // the same config as TOML beside it and hands adapters a copy of that file.
+    const agentConfigPath = safeResolveInside(smithersRoot, "execution-config.toml", "workflow agent config");
     let taskDocument: SmithersTaskManifestDocument | undefined;
     let config: ResolvedConfig | undefined;
     if (fs.existsSync(tasksPath)) {
@@ -571,7 +575,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: import.meta.resolve("@ultrafuzz/runtime"),
-      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: configPath }),
+      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: agentConfigPath }),
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
     };
     let trustedCli: TrustedCliEnvironment = {

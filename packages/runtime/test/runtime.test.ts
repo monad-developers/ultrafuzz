@@ -2503,6 +2503,16 @@ function controllerRefreshTerminalEnv(
   });
 }
 
+/** Make a fake lifecycle runner append `$<name>` to `logPath` on every `up`. */
+function logFakeRunnerUpVariable(env: Record<string, string | undefined>, name: string, logPath: string): void {
+  const shim = env.SMITHERS_BIN;
+  assert.ok(shim);
+  fs.writeFileSync(
+    shim,
+    fs.readFileSync(shim, "utf8").replace("  up)\n", `  up)\n    printf '%s\\n' "$${name}" >> ${shellQuote(logPath)}\n`)
+  );
+}
+
 function workflowEvents(
   workflowRunId: string,
   events: Array<{
@@ -15383,7 +15393,7 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const consumed = fs.readFileSync(snapshotBytesLog, "utf8");
   assert.equal(consumed.includes(`workflow=${mutableWorkflow}\n`), true);
-  assert.match(consumed, /^config=.*\/smithers\/resolved-config\.json$/mu);
+  assert.match(consumed, /^config=.*\/smithers\/execution-config\.toml$/mu);
   assert.match(consumed, /^agent=.*\/\.smithers\/agents\/codex\.ts$/mu);
   assert.match(consumed, /HostileReplacement/u);
   assert.match(consumed, /export const hostile/u);
@@ -25058,6 +25068,40 @@ test("native continuation does not use historical trusted CLI identity as an aut
       .filter((command) => command.startsWith("up ")).length,
     2
   );
+});
+
+test("native continuation hands generated agents the run's TOML config, so CodexAgent keeps API-key auth", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "continuation-agent-config";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const configPathLog = path.join(project, "fake-smithers-up-config-path.log");
+  logFakeRunnerUpVariable(env, "ULTRAFUZZ_CONFIG_PATH", configPathLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  fs.writeFileSync(configPathLog, "", "utf8");
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+
+  // Build the stock adapter from the config path the resumed runner received.
+  // The init config selects `auth = "api-key"` for CodexAgent; an adapter that
+  // cannot read it falls back to subscription auth and clears the key.
+  const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+  const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENAI_API_KEY };
+  process.env.ULTRAFUZZ_CONFIG_PATH = fs.readFileSync(configPathLog, "utf8").trim();
+  process.env.OPENAI_API_KEY = "continuation-codex-key";
+  try {
+    const agent = createCodexAgent() as { opts: { env: Record<string, string> } };
+    assert.equal(agent.opts.env.CODEX_API_KEY, "continuation-codex-key");
+    assert.equal(agent.opts.env.OPENAI_API_KEY, "continuation-codex-key");
+  } finally {
+    if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+    else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+    if (previous.key === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous.key;
+  }
 });
 
 test("controller refresh authenticates newly required sealed runner patches and rejects source drift", async () => {
