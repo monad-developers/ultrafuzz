@@ -24,22 +24,6 @@ import {
 
 export const WORKER_RESULT_SCHEMA_VERSION = "ultrafuzz.modal.worker-result.v2" as const;
 
-export const WORKER_RESULT_ALLOWED_KEYS = [
-  "schema_version",
-  "result_type",
-  "generation",
-  "launch_generation",
-  "attempt",
-  "model_work_started",
-  "counts",
-  "checkpoint",
-  "exit_category",
-  "runtime_ms",
-  "usage",
-  "pricing",
-  "diagnostic_code"
-] as const;
-
 export const WORKER_DIAGNOSTIC_CODES = [
   "worker-live",
   "worker-finished",

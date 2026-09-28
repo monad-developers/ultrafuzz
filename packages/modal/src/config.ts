@@ -3,8 +3,6 @@ import { resolveConfig } from "@ultrafuzz/config";
 
 import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID, type StrictModalBenchmarkConfigDocument } from "./modal-contracts.js";
 import { assertModalDocumentValue, readModalDocument } from "./modal-documents.js";
-import { validateModalJsonSchema } from "./modal-schema-registry.js";
-import { modalBenchmarkConfigZodSchema } from "./benchmark-config-zod.js";
 import {
   MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
   MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
@@ -60,13 +58,6 @@ export function fingerprintModalModel(model: ModalModelSpec): string {
       })
     )
     .digest("hex");
-}
-
-export function modalBenchmarkConfigValidatorsAgree(value: unknown): boolean {
-  return (
-    validateModalJsonSchema(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value).ok ===
-    modalBenchmarkConfigZodSchema.safeParse(value).success
-  );
 }
 
 /** Refuse an execution envelope that cannot contain even one complete campaign.

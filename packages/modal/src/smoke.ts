@@ -4,7 +4,6 @@ import { remoteAuthDir, remoteAuthPath } from "./layout.js";
 export const MODAL_SMOKE_RESULT_SCHEMA_VERSION = "ultrafuzz.modal.smoke-result.v1" as const;
 export const MODAL_SMOKE_ENTRY_PATH = "/opt/ultrafuzz/packages/modal/dist/smoke-worker.js";
 export const MODAL_SMOKE_DATA_ROOT = "/data/ultrafuzz-modal-smoke";
-export const MODAL_SMOKE_STOP_PATH = `${MODAL_SMOKE_DATA_ROOT}/fresh-stop`;
 
 export type ModalSmokePhase = "fresh" | "resume";
 export type ModalSmokeFailureStage =
