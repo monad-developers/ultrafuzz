@@ -3929,7 +3929,7 @@ function createProjectFixture(
     groups:
       optionalDependencyArtifactDirs.length === 0
         ? {}
-        : { optional: { label: "Optional dependencies", defaults: { failure_policy: "continue" } } },
+        : { optional: { label: "Optional dependencies", defaults: { failure_policy: "continue" } }, review: {} },
     nodes: [
       ...dependencyArtifactDirs.map((directory) => {
         const id = path.basename(directory);
@@ -3966,6 +3966,7 @@ function createProjectFixture(
         logical_id: "attempt-one",
         display_name: "attempt-one",
         kind: "agentic",
+        ...(optionalDependencyArtifactDirs.length === 0 ? {} : { group: "review" }),
         depends_on: dependencyArtifactDirs.map((directory) => path.basename(directory)),
         artifact_dir: "artifacts/attempt-one",
         outputs: [consumerOutput],
@@ -4080,6 +4081,7 @@ function createProjectFixture(
     dependencyArtifactDirs: consumerDependencyArtifactDirs.map((directory) => path.join(root, directory)),
     referenceArtifactDirs: referenceDependencyArtifactDirs.map((directory) => path.join(root, directory)),
     optionalDependencyArtifactDirs: optionalDependencyArtifactDirs.map((directory) => path.join(root, directory)),
+    ...(optionalDependencyArtifactDirs.length === 0 ? {} : { group: "review" }),
     ...(referenceArtifactManifestAuthorities.length === 0 ? {} : { referenceArtifactManifestAuthorities }),
     ...(vulnerabilityDatabaseCatalog === undefined ? {} : { vulnerabilityDatabaseCatalog }),
     sourceRevision,

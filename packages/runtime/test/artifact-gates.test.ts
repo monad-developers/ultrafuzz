@@ -3417,6 +3417,7 @@ function optionalFindingsDedupeFixture(
     ...plannedNode([]),
     id: "dedupe-findings",
     logical_id: "dedupe-findings",
+    ...(options.optional ? { group: "review" } : {}),
     depends_on: [rawNode.id],
     artifact_dir: "artifacts/dedupe-findings",
     outputs: [
@@ -3427,7 +3428,7 @@ function optionalFindingsDedupeFixture(
   writePlannedGraph(
     layout,
     [rawNode, dedupeNode],
-    options.optional ? { specialists: { defaults: { failure_policy: "continue" } } } : {}
+    options.optional ? { specialists: { defaults: { failure_policy: "continue" } }, review: {} } : {}
   );
   const rawTask = sealedTaskForNode(layout, rawNode);
   const dedupeBase = sealedTaskForNode(layout, dedupeNode, [rawTask]);
@@ -8825,6 +8826,7 @@ test("final reports disclose planned but omitted implementation coverage without
     ...plannedNode([]),
     id: "final-report",
     logical_id: "final-report",
+    group: "review",
     depends_on: [optionalNode.id],
     artifact_dir: "artifacts/final-report",
     outputs: [
@@ -8833,7 +8835,8 @@ test("final reports disclose planned but omitted implementation coverage without
     ]
   };
   writePlannedGraph(layout, [optionalNode, reportNode], {
-    specialists: { defaults: { failure_policy: "continue" } }
+    specialists: { defaults: { failure_policy: "continue" } },
+    review: {}
   });
   const optionalTask = sealedTaskForNode(layout, optionalNode);
   const reportBase = sealedTaskForNode(layout, reportNode, [optionalTask]);
