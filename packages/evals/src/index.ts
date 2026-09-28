@@ -9,7 +9,6 @@ export * from "./expansion.js";
 export * from "./evaluator/adjudicator-prompt.js";
 export * from "./evaluator/judge-panel.js";
 export * from "./history.js";
-export * from "./history-publication.js";
 export * from "./ground-truth.js";
 export * from "./lineage.js";
 export * from "./public-diagnostics.js";

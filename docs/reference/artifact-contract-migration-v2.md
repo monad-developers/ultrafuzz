@@ -125,8 +125,9 @@ not renamed historical payloads.
 | EVMBench result                    | `ultrafuzz.evmbench.result.v1`                                  | `ultrafuzz.evmbench.result.v2`, returned through the shared CLI v2 envelope.                                                                                                     |
 
 Retained evaluation documents for ground truth, publication/status,
-recovery-equivalence, telemetry cursors, automatic history publication, and
-benchmark provenance now have registered closed schemas. New typed analysis
+recovery-equivalence, and benchmark provenance now have registered closed
+schemas; the telemetry-cursor and automatic history-publication schemas were
+later deleted with their unused producers. New typed analysis
 documents include adjudication handoff, finding manifest, instance clusters,
 ground-truth credits, benchmark provenance, benchmark source/analysis
 manifests, and the embedded verified-report authority used by scoring. Their v1
