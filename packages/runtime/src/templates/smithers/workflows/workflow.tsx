@@ -4084,10 +4084,10 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
 }
 
 /**
- * How long the per-node validator preflight may spend inside the Ultrafuzz CLI.
+ * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
  * `"ultrafuzz"` resolves to the run-owned trusted launcher, which `composeSmithersCommandPath` puts
- * first on PATH, so every node preparation pays the CLI's own cold start: ~2.5 s on an idle box,
+ * first on PATH, so the preflight pays the CLI's own cold start: ~2.5 s on an idle box,
  * ~35 s once a dozen agents are building against the same cores. Below that the step reports a bare
  * `spawnSync ultrafuzz ETIMEDOUT`, which names neither the contention nor a schema, and which cost
  * the smoke lane two of its three targets in #1026. Roughly five times that measured worst case,
@@ -4095,8 +4095,14 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
  * inside the attempt.
  */
 const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
+// The preflight proves that this process can launch the agent-facing validator, which does not vary
+// by task: `materializePromptSchemas` has already digest-checked each workspace's schema copy. One
+// success per engine process is enough. Re-spawning it in every prepare, attempt reset and
+// zero-retry verify only added CLI cold starts that could fail a finished attempt.
+let jsonValidatorPreflightPassed = false;
 
 function preflightJsonValidator(schemaDirectory: string): void {
+  if (jsonValidatorPreflightPassed) return;
   const findings = artifactSchemaRegistry().find(
     (entry: { filename: string }) => entry.filename === "findings.schema.json"
   );
@@ -4130,6 +4136,7 @@ function preflightJsonValidator(schemaDirectory: string): void {
       cause: error
     });
   }
+  jsonValidatorPreflightPassed = true;
 }
 
 function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {
