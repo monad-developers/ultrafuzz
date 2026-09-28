@@ -13270,6 +13270,126 @@ test("status reports a runner query that stops answering instead of waiting on i
   );
 });
 
+test("a synchronization that finds another in progress skips it without waiting or writing", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "single-sync-writer";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ]),
+    status: currentStatusEnvelope(workflowRunId)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  // Park the first synchronization inside its runner inspection until the test releases it.
+  const entered = path.join(project, "inspect-entered");
+  const gate = path.join(project, "inspect-gate");
+  prependFakeSmithersCase(
+    env,
+    "inspect",
+    `    : > ${shellQuote(entered)}\n    while [ ! -f ${shellQuote(gate)} ]; do sleep 0.05; done\n`
+  );
+  const inProgress = syncRun({ projectRoot: project, runId, env });
+  try {
+    const waitStartedAt = Date.now();
+    while (!fs.existsSync(entered)) {
+      assert.ok(Date.now() - waitStartedAt < 120_000, "the first synchronization never reached its inspection");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const before = runStateDocumentBytes(runRoot);
+    let timer: NodeJS.Timeout | undefined;
+
+    const concurrent = await Promise.race([
+      getRunHealth({ projectRoot: project, runId, env }),
+      new Promise<"waiting">((resolve) => {
+        timer = setTimeout(() => resolve("waiting"), 30_000);
+      })
+    ]);
+
+    clearTimeout(timer);
+    if (concurrent === "waiting") assert.fail("status waited on the synchronization in progress");
+    assert.equal(concurrent.ok, true, JSON.stringify(concurrent.diagnostics));
+    assert.ok(
+      concurrent.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_IN_PROGRESS"),
+      JSON.stringify(concurrent.diagnostics)
+    );
+    assert.deepEqual(runStateDocumentBytes(runRoot), before, "the skipped synchronization wrote run state");
+  } finally {
+    fs.writeFileSync(gate, "");
+  }
+  const completed = await inProgress;
+  assert.equal(completed.ok, true, JSON.stringify(completed.diagnostics));
+  assert.equal(completed.value?.status, "succeeded");
+  const finalizations = replayEvents(layoutForRunRoot(runRoot, runId), Number.MAX_SAFE_INTEGER).records.filter(
+    (event) => event.event_type === "node-synced" && event.node_id === "project-discovery"
+  );
+  assert.equal(finalizations.length, 1);
+});
+
+test("a node whose outputs fail validation names each failing artifact in its last error", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "located-output-failure";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  // The verification marker binds these bytes, so only the host's schema check rejects them.
+  fs.writeFileSync(
+    path.join(runRoot, "artifacts", "project-discovery", "findings.json"),
+    JSON.stringify([{ schema_version: "ultrafuzz.finding.v2", id: "finding-without-required-fields" }])
+  );
+  writeCurrentArtifactVerificationMarker(runRoot, "project-discovery");
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const layout = layoutForRunRoot(runRoot, runId);
+  const node = readRunState(layout).nodes["project-discovery"];
+  assert.equal(node?.status, "failed");
+  assert.match(
+    node?.last_error ?? "",
+    /(?:^|; )artifacts\/project-discovery\/findings\.json#\/0: must have required property '/u,
+    node?.last_error
+  );
+  assert.equal(node?.last_error?.includes(runRoot), false, "last_error carries a host path");
+  // node-synced and the node's state carry the outcome; an empty "missing artifacts" event only misled.
+  assert.deepEqual(
+    replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.map((event) => event.event_type)
+      .filter((type) => type.startsWith("node-artifacts-")),
+    []
+  );
+});
+
 test("a failed deadline cancel is a warning and the next status requests it again", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

@@ -57,6 +57,7 @@ export const EVENT_RECORD_TYPES = [
   "workflow-failure-unattributed",
   "run-recovered",
   "node-synced",
+  // No longer emitted (node-synced and node state carry the outcome); kept so existing journals replay.
   "node-artifacts-verified",
   "node-artifacts-missing",
   "node-controller-refinalization-intent",

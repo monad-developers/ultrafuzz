@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parseResolvedConfigJsonBytes } from "@ultrafuzz/config";
+import lockfile from "proper-lockfile";
 
 import {
   ARTIFACT_MANIFEST_FILE,
@@ -351,10 +352,7 @@ interface NodeFinalization {
 
 type PendingNodeAppendEvent = Extract<
   AppendEventInput,
-  {
-    eventType:
-      "node-artifacts-verified" | "node-artifacts-missing" | "findings-validated" | "artifact-manifest-written";
-  }
+  { eventType: "findings-validated" | "artifact-manifest-written" }
 >;
 type PendingNodeEvent = PendingNodeAppendEvent extends infer Event
   ? Event extends PendingNodeAppendEvent
@@ -1286,6 +1284,75 @@ async function assertStoppedResetAuthorityUnchanged(input: {
   }
 }
 
+/** Controls of passes that hold their run's synchronization lock. */
+const exclusiveSynchronizations = new WeakSet<WorkflowSynchronizationControl>();
+
+/**
+ * Two passes over one newly finished node would both finalize it and race on its manifest, state
+ * and journals. A pass therefore runs only under its run's synchronization lock, and a pass that
+ * finds the lock held leaves the run to the pass in progress instead of waiting for it.
+ */
+async function synchronizeExclusively(
+  input: SyncRunInput,
+  control: WorkflowSynchronizationControl
+): Promise<
+  { ok: true; value: SyncRunValue; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }
+> {
+  const exclusive = { ...control };
+  exclusiveSynchronizations.add(exclusive);
+  const layoutResult = await checkedRunLayout(path.resolve(input.projectRoot), input.runId);
+  if (!layoutResult.ok || !fs.existsSync(layoutResult.layout.root)) {
+    // A missing or invalid run has nothing to lock; the pass reports it.
+    return synchronizeLinkedWorkflowRun(input, exclusive);
+  }
+  const layout = layoutResult.layout;
+  const release = await tryAcquireSynchronizationLock(layout);
+  if (release === undefined) {
+    return {
+      ok: true,
+      diagnostics: [
+        {
+          code: "WORKFLOW_SYNC_IN_PROGRESS",
+          message:
+            "another synchronization of this run is in progress, so this one was skipped; local run state may lag until it finishes",
+          severity: "info",
+          source: "workflow",
+          path: layout.root
+        }
+      ],
+      value: { run_id: layout.runId, run_root: layout.root, status: readRunState(layout).status, synced_nodes: 0 }
+    };
+  }
+  try {
+    return await synchronizeLinkedWorkflowRun(input, exclusive);
+  } finally {
+    // Failing to remove the lock never fails a finished pass; a lock left behind goes stale.
+    await release().catch(() => undefined);
+  }
+}
+
+/**
+ * Acquires the lock without waiting. Its target is not the run root: the control lock locks that
+ * path, and proper-lockfile keys its in-process registry by target path, so a second lock on it
+ * would release the first.
+ */
+async function tryAcquireSynchronizationLock(layout: RunLayout): Promise<(() => Promise<void>) | undefined> {
+  const target = path.join(layout.root, ".workflow-sync");
+  try {
+    return await lockfile.lock(target, {
+      lockfilePath: `${target}.lock`,
+      realpath: false,
+      stale: 300_000,
+      update: 60_000,
+      // The default handler throws from a timer and would kill an observer or the eval runner.
+      onCompromised: () => undefined
+    });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ELOCKED") return undefined;
+    throw error;
+  }
+}
+
 export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
   const result = await synchronizeLinkedWorkflowRun(input, control);
   if (!result.ok) {
@@ -1300,6 +1367,7 @@ export async function synchronizeLinkedWorkflowRun(
 ): Promise<
   { ok: true; value: SyncRunValue; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }
 > {
+  if (!exclusiveSynchronizations.has(control)) return synchronizeExclusively(input, control);
   let synchronizationNowMs = synchronizationClock(control);
   const budgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (budgetDiagnostic !== undefined) {
@@ -4097,12 +4165,10 @@ async function synchronizeTasks(input: {
     }
     syncedNodes += 1;
     if (previous?.status !== patchStatus) {
-      const eventProvenance = eventProvenanceForTask(task);
       appendEvent(input.layout, {
         eventType: "node-synced",
         nodeId: task.attemptId,
         status: patchStatus,
-        ...(eventProvenance === undefined ? {} : { provenance: eventProvenance }),
         payload: {
           workflow_run_id: input.workflowRunId,
           workflow_task_id: attemptEvidence.taskId,
@@ -4305,19 +4371,7 @@ async function finalizeTerminalTask(input: {
             }
           : {})
       },
-      events:
-        verifierOutputGate !== undefined
-          ? [
-              {
-                eventType: "node-artifacts-missing",
-                status: "failed",
-                payload: {
-                  output_contracts: input.node.outputs,
-                  missing: verifierOutputGate.missing
-                }
-              }
-            ]
-          : []
+      events: []
     };
   }
 
@@ -4363,25 +4417,6 @@ async function finalizeTerminalTask(input: {
           authenticatedGateSnapshots(input.node, verifierAuthority)
         );
   diagnostics.push(...gate.diagnostics);
-  if (gate.ok) {
-    events.push({
-      eventType: "node-artifacts-verified",
-      status: "succeeded",
-      payload: {
-        output_contracts: input.node.outputs,
-        missing: gate.missing
-      }
-    });
-  } else {
-    events.push({
-      eventType: "node-artifacts-missing",
-      status: "failed",
-      payload: {
-        output_contracts: input.node.outputs,
-        missing: gate.missing
-      }
-    });
-  }
 
   let findingsCount: number | undefined;
   let artifactManifestSha256: string | undefined;
@@ -4547,7 +4582,7 @@ async function finalizeTerminalTask(input: {
     return {
       status: "failed",
       diagnostics,
-      lastError: errorDiagnostics.map((diagnostic) => diagnostic.message).join("; "),
+      lastError: errorDiagnostics.map((diagnostic) => durableDiagnosticText(input.layout, diagnostic)).join("; "),
       provenance: {
         // A controller publication failure is never an output-contract
         // success. In particular, the run-state schema forbids publishing
@@ -4588,6 +4623,22 @@ async function finalizeTerminalTask(input: {
     },
     events
   };
+}
+
+/**
+ * Durable failure text names where each error is, relative to the run, so state.json and the attempt
+ * ledger say which artifact failed without carrying a host path.
+ */
+function durableDiagnosticText(layout: RunLayout, diagnostic: RuntimeDiagnostic): string {
+  if (diagnostic.path === undefined) return diagnostic.message;
+  const pointerStart = diagnostic.path.indexOf("#");
+  const filePath = pointerStart === -1 ? diagnostic.path : diagnostic.path.slice(0, pointerStart);
+  const pointer = pointerStart === -1 ? "" : diagnostic.path.slice(pointerStart);
+  const relative = path.isAbsolute(filePath) ? path.relative(layout.root, filePath) : filePath;
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return diagnostic.message;
+  }
+  return `${relative.split(path.sep).join("/")}${pointer}: ${diagnostic.message}`;
 }
 
 function admittedManifestPrerequisiteAttemptIds(
@@ -5008,29 +5059,9 @@ function appendNodeEvents(
   events: PendingNodeEvent[],
   forbiddenSecretValues: readonly string[]
 ): void {
-  const provenance = eventProvenanceForTask(task);
   for (const event of events) {
-    appendEvent(layout, {
-      ...event,
-      nodeId: task.attemptId,
-      ...(provenance === undefined ? {} : { provenance }),
-      forbiddenSecretValues
-    });
+    appendEvent(layout, { ...event, nodeId: task.attemptId, forbiddenSecretValues });
   }
-}
-
-function eventProvenanceForTask(task: StoredWorkflowTask): Record<string, unknown> | undefined {
-  const producerNodeId = task.metadata?.node?.producerNodeId;
-  const storageId = task.metadata?.node?.storageId;
-  const dynamic = task.metadata?.node?.dynamic;
-  if (producerNodeId === undefined && storageId === undefined && dynamic === undefined) return undefined;
-  return {
-    producer_node_id: producerNodeId ?? task.concreteNodeId,
-    concrete_node_id: task.concreteNodeId,
-    strategy_attempt_id: task.attemptId,
-    ...(storageId === undefined ? {} : { storage_id: storageId }),
-    ...(dynamic === undefined ? {} : { dynamic })
-  };
 }
 
 function taskAttemptInputManifestDigest(layout: RunLayout, task: StoredWorkflowTask): string {
