@@ -1,15 +1,4 @@
-import {
-  copyFileSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  symlinkSync
-} from "node:fs";
-import { execFileSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -207,42 +196,6 @@ describe("prompt rendering", () => {
     input.prompt = `${input.prompt}\n{{coverage_evidence_markdown_projection}}`;
 
     const rendered = packaged.renderPrompt(input).renderedMarkdown;
-    expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
-  });
-
-  it("renders output-contract guidance and prompt partials from an installed package layout", async () => {
-    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-installed-prompts-"));
-    tmpDirs.push(tmp);
-    const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
-    const appRoot = path.join(tmp, "app");
-    const packageRoot = path.join(appRoot, "node_modules", "@ultrafuzz", "prompts");
-    const distRoot = path.join(packageRoot, "dist");
-    mkdirSync(packageRoot, { recursive: true });
-    execFileSync(
-      "pnpm",
-      [
-        "exec",
-        "tsc",
-        "-p",
-        path.join(repoRoot, "packages", "prompts", "tsconfig.json"),
-        "--outDir",
-        distRoot,
-        "--tsBuildInfoFile",
-        path.join(distRoot, ".tsbuildinfo")
-      ],
-      { cwd: repoRoot, stdio: "pipe" }
-    );
-    cpSync(path.join(repoRoot, ".ultrafuzz", "prompts"), path.join(distRoot, "prompts"), { recursive: true });
-    copyFileSync(path.join(repoRoot, "packages", "prompts", "package.json"), path.join(packageRoot, "package.json"));
-    linkPromptDependencies(repoRoot, path.join(appRoot, "node_modules"));
-
-    const installed = (await import(
-      `${pathToFileURL(path.join(distRoot, "render.js")).href}?installed-layout=${Date.now()}`
-    )) as { renderPrompt: typeof renderPrompt };
-    const input = baseRenderInput(tmp);
-    input.prompt = `${input.prompt}\n{{coverage_evidence_markdown_projection}}`;
-    const rendered = installed.renderPrompt(input).renderedMarkdown;
-
     expect(rendered).toContain("For every output declared with `Contract: ultrafuzz/findings@2`");
     expect(rendered).toContain("Validation command: `ultrafuzz json validate --schema");
     expect(rendered).toContain("Contract validation command: `ultrafuzz artifact validate");
