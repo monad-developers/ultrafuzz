@@ -7,6 +7,7 @@ import test from "node:test";
 import { sha256Bytes, type RunDataGovernanceReference } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
 import {
+  controllerOwnedGovernancePaths,
   DATA_DISCLOSURE_ACKNOWLEDGEMENTS_ENV,
   DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION,
   DATA_GOVERNANCE_POLICY_ENV,
@@ -436,6 +437,20 @@ test("target identity excludes only exact controller-owned untracked outputs", (
   assert.equal(targetIdentity(root, owned).dirty, true);
   fs.writeFileSync(path.join(root, "unrelated"), "target\n");
   assert.equal(targetIdentity(root, owned).dirty, true);
+});
+test("a refreshed controller rendered into the target leaves its governed identity unchanged", () => {
+  const root = repository(),
+    owned = controllerOwnedGovernancePaths(root, path.join(root, ".ultrafuzz", "runs", "refresh-run")),
+    initial = targetIdentity(root, owned);
+  // The layout `resume --refresh-controller` renders into (renderCurrentSmithersController).
+  const generation = path.join(root, ".smithers", "continuations", "9d4c1f3e-2b7a-4c55-8e1d-6f0a3b2c4d5e");
+  for (const file of ["agents/codex.ts", "workflows/ultrafuzz-refresh-run.tsx"]) {
+    fs.mkdirSync(path.dirname(path.join(generation, file)), { recursive: true });
+    fs.writeFileSync(path.join(generation, file), "controller\n");
+  }
+
+  assert.equal(initial.dirty, false);
+  assert.deepEqual(targetIdentity(root, owned), initial);
 });
 test("governance precedes preflight and rejects a policy mutated during it", async () => {
   const project = temporaryRoot("ufz-governance-plan-");
