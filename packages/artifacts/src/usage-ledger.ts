@@ -24,7 +24,6 @@ export const USAGE_FIELDS = [
   "cache_write_tokens",
   "reasoning_tokens"
 ] as const;
-export type UsageField = (typeof USAGE_FIELDS)[number];
 
 export interface NormalizedUsage {
   model: string;

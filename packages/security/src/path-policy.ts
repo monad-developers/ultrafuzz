@@ -1,17 +1,5 @@
-import { realpathSync } from "node:fs";
 import path from "node:path";
 import { type PolicyDiagnostic, type PolicyResult, policyError, policyResult } from "./types.js";
-
-export interface ResolveInsideOptions {
-  allowAbsolute?: boolean;
-  mustExist?: boolean;
-}
-
-export interface ResolvedPathPolicy {
-  root: string;
-  path: string;
-  relativePath: string;
-}
 
 export function validateSafeId(label: string, id: string): PolicyResult<string> {
   const diagnostics: PolicyDiagnostic[] = [];
@@ -62,63 +50,6 @@ export function validateSafeRelativePath(relativePath: string): PolicyResult<str
   return policyResult(diagnostics, normalized);
 }
 
-export function resolvePathInside(
-  root: string,
-  requestedPath: string,
-  options: ResolveInsideOptions = {}
-): PolicyResult<ResolvedPathPolicy> {
-  const diagnostics: PolicyDiagnostic[] = [];
-  if (requestedPath.includes("\\")) {
-    diagnostics.push(policyError("PATH_BACKSLASH", `path \`${requestedPath}\` must use forward slashes`));
-  }
-  if (isAbsoluteLike(requestedPath) && !options.allowAbsolute) {
-    diagnostics.push(policyError("PATH_ABSOLUTE", `path \`${requestedPath}\` must be relative`));
-  }
-
-  let rootReal = "";
-  let candidateReal = "";
-  try {
-    rootReal = realpathSync.native(root);
-  } catch (error) {
-    diagnostics.push(
-      policyError("PATH_ROOT_MISSING", `root \`${root}\` is not accessible`, {
-        details: { error: String(error) }
-      })
-    );
-  }
-
-  const candidate = isAbsoluteLike(requestedPath) ? requestedPath : path.join(root, requestedPath);
-  if (!isAbsoluteLike(requestedPath)) {
-    diagnostics.push(...validateSafeRelativePath(requestedPath).diagnostics);
-  }
-  try {
-    candidateReal = canonicalExistingOrParent(candidate, options.mustExist ?? false);
-  } catch (error) {
-    diagnostics.push(
-      policyError("PATH_CANDIDATE_MISSING", `path \`${requestedPath}\` is not accessible`, {
-        path: requestedPath,
-        details: { error: String(error) }
-      })
-    );
-  }
-
-  if (rootReal && candidateReal && !isPathInside(rootReal, candidateReal)) {
-    diagnostics.push(
-      policyError("PATH_ESCAPE", `path \`${requestedPath}\` resolves outside \`${rootReal}\``, {
-        path: requestedPath,
-        details: { root: rootReal, resolved: candidateReal }
-      })
-    );
-  }
-
-  const relative = rootReal && candidateReal ? toPosixRelative(rootReal, candidateReal) : "";
-  return policyResult(diagnostics, {
-    root: rootReal,
-    path: candidateReal,
-    relativePath: relative
-  });
-}
-
 export function normalizeRelativePath(value: string): string {
   return value.replaceAll("\\", "/").replace(/^\.\/+/, "");
 }
@@ -139,27 +70,6 @@ export function splitPathComponents(value: string): string[] {
 export function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function canonicalExistingOrParent(candidate: string, mustExist: boolean): string {
-  if (mustExist) {
-    return realpathSync.native(candidate);
-  }
-  let current = candidate;
-  const missingParts: string[] = [];
-  while (current !== path.dirname(current)) {
-    try {
-      return path.join(realpathSync.native(current), ...missingParts.reverse());
-    } catch {
-      missingParts.push(path.basename(current));
-      current = path.dirname(current);
-    }
-  }
-  return path.join(realpathSync.native(current), ...missingParts.reverse());
-}
-
-function toPosixRelative(root: string, candidate: string): string {
-  return normalizeRelativePath(path.relative(root, candidate));
 }
 
 function isReservedWindowsName(component: string): boolean {

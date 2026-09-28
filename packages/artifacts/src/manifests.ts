@@ -8,7 +8,6 @@ import {
   listSafeFiles,
   normalizeSafeRelativePath,
   prepareSafeFilePath,
-  safeResolveInside,
   sha256File,
   validateNodeReference,
   validateSafeId,
@@ -441,49 +440,6 @@ export function readArtifactManifest(layout: RunLayout, nodeId: string): Artifac
   const manifest = parseStrictJsonBytes(fs.readFileSync(manifestPath));
   assertValidArtifactManifest(manifest);
   return manifest as ArtifactManifest;
-}
-
-export interface RunArtifactIndexEntry extends ArtifactManifestEntry {
-  node_id: string;
-}
-
-export interface RunArtifactIndex {
-  schema_version: string;
-  run_id: string;
-  artifacts: RunArtifactIndexEntry[];
-}
-
-export function buildRunArtifactIndex(layout: RunLayout): RunArtifactIndex {
-  const artifacts: RunArtifactIndexEntry[] = [];
-  if (!fs.existsSync(layout.artifactsDir)) {
-    return { schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION, run_id: layout.runId, artifacts };
-  }
-
-  for (const dirent of fs.readdirSync(layout.artifactsDir, { withFileTypes: true })) {
-    if (!dirent.isDirectory()) {
-      continue;
-    }
-    const nodeId = validateSafeId(dirent.name, "node ID");
-    const nodeDir = path.join(layout.artifactsDir, nodeId);
-    const manifestPath = path.join(nodeDir, ARTIFACT_MANIFEST_FILE);
-    if (!fs.existsSync(manifestPath)) {
-      continue;
-    }
-    assertRegularFileInside(layout.artifactsDir, manifestPath, "artifact manifest path");
-    const manifest = readArtifactManifest(layout, nodeId);
-    for (const file of manifest.files) {
-      const artifactPath = safeResolveInside(nodeDir, file.path, "artifact manifest file path");
-      assertRegularFileInside(nodeDir, artifactPath, "artifact manifest file path");
-      artifacts.push({
-        ...file,
-        node_id: nodeId,
-        path: `artifacts/${nodeId}/${file.path}`
-      });
-    }
-  }
-
-  artifacts.sort((left, right) => left.node_id.localeCompare(right.node_id) || left.path.localeCompare(right.path));
-  return { schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION, run_id: layout.runId, artifacts };
 }
 
 function assertValidArtifactManifest(value: unknown): void {

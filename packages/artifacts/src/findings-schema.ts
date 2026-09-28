@@ -25,7 +25,7 @@ import {
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { NODE_REFERENCE_PATTERN } from "./safe-paths.js";
-import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { jsonPointerPath } from "./lang-primitives.js";
 
 export const FINDING_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:finding:2" as const;
@@ -1039,20 +1039,4 @@ function validateRegisteredFindingSchema<T>(
     );
   }
   return { ok: true, issues: [], value: value as T };
-}
-
-export function assertFindingSchema(value: unknown): NormalizedFinding {
-  const result = validateFindingSchema(value);
-  if (!result.ok || !result.value) {
-    throw new Error(schemaErrorMessage("finding", result.issues));
-  }
-  return result.value;
-}
-
-export function assertFindingsSchema(value: unknown): NormalizedFinding[] {
-  const result = validateFindingsSchema(value);
-  if (!result.ok || !result.value) {
-    throw new Error(schemaErrorMessage("findings", result.issues));
-  }
-  return result.value;
 }

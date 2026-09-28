@@ -11,8 +11,7 @@ import {
   appendEventRecord,
   createEventRecord,
   createRunLayout,
-  replayEvents,
-  truncateDurable
+  replayEvents
 } from "../src/index.js";
 
 function tempProject(): string {
@@ -94,13 +93,12 @@ test("a torn event index rejects the whole append before the canonical journal c
   assert.equal(replayEvents(layout).records[0]?.event_id, first.event_id);
 });
 
-test("durable repair mutations reject stale sizes and hard-linked files", () => {
+test("durable appends reject stale sizes and hard-linked files", () => {
   const filePath = path.join(tempProject(), "events.jsonl");
   fs.writeFileSync(filePath, "first\nsecond", "utf8");
   const observedSize = fs.statSync(filePath).size;
   fs.appendFileSync(filePath, "-raced\n", "utf8");
 
-  assert.throws(() => truncateDurable(filePath, 6, { expectedSize: observedSize }), /changed size/u);
   assert.throws(
     () => appendBytesDurableAt(filePath, Buffer.from("\n"), { expectedSize: observedSize }),
     /changed size/u
@@ -109,7 +107,6 @@ test("durable repair mutations reject stale sizes and hard-linked files", () => 
   const currentSize = fs.statSync(filePath).size;
   const linkPath = path.join(path.dirname(filePath), "events-link.jsonl");
   fs.linkSync(filePath, linkPath);
-  assert.throws(() => truncateDurable(filePath, 0, { expectedSize: currentSize }), /must not be hard-linked/u);
   assert.throws(
     () => appendBytesDurableAt(filePath, Buffer.from("x"), { expectedSize: currentSize }),
     /must not be hard-linked/u

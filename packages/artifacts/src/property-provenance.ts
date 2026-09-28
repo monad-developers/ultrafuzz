@@ -3,12 +3,7 @@ import { z } from "zod/v4";
 import { canonicalArtifactRelativePathSchema } from "./artifact-path-primitives.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { canonicalTimestampSchema, hasAtMostCodePoints } from "./portable-json-primitives.js";
-import {
-  schemaErrorMessage,
-  validateWithZod,
-  type SchemaValidationIssue,
-  type SchemaValidationResult
-} from "./schema-validation.js";
+import { validateWithZod, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
 import { jsonPointerPath } from "./lang-primitives.js";
 
 export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v2" as const;
@@ -1154,14 +1149,6 @@ export function validatePropertyCampaignSchema(
       code: "PROPERTY_CAMPAIGN_SCHEMA_INVALID"
     }
   );
-}
-
-export function assertPropertiesSchema(value: unknown): PropertiesArtifact {
-  const result = validatePropertiesSchema(value);
-  if (!result.ok || result.value === undefined) {
-    throw new Error(schemaErrorMessage("properties", result.issues));
-  }
-  return result.value;
 }
 
 export function validatePropertyReferences(
