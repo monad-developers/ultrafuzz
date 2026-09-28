@@ -13111,6 +13111,68 @@ test("getRunHealth returns live runner health when observation synchronization e
   assert.deepEqual(fs.readFileSync(statePath), stateBefore);
 });
 
+/** The run documents a synchronization can write, so a test can prove that a pass wrote none of them. */
+function runStateDocumentBytes(runRoot: string): Record<string, string | null> {
+  return Object.fromEntries(
+    ["state.json", "events.jsonl", "run.json", "attempts.jsonl", "usage.jsonl"].map((file) => {
+      const filePath = path.join(runRoot, file);
+      return [file, fs.existsSync(filePath) ? fs.readFileSync(filePath).toString("base64") : null];
+    })
+  );
+}
+
+/** Makes one fake runner subcommand run `script` first, e.g. to stall or fail it. */
+function prependFakeSmithersCase(env: Record<string, string | undefined>, subcommand: string, script: string): void {
+  const smithers = env.SMITHERS_BIN;
+  assert.ok(smithers !== undefined);
+  const source = fs.readFileSync(smithers, "utf8");
+  assert.ok(source.includes(`  ${subcommand})\n`), `fake runner has no ${subcommand} case`);
+  fs.writeFileSync(smithers, source.replace(`  ${subcommand})\n`, `  ${subcommand})\n${script}`));
+}
+
+test("a failed deadline cancel is a warning and the next status requests it again", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "deadline-cancel-retry";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodePending", nodeId: "node:project-discovery", attempt: 0 }]),
+    status: currentStatusEnvelope(workflowRunId)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  const state = JSON.parse(fs.readFileSync(layout.statePath, "utf8")) as RunState;
+  state.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(layout.statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  prependFakeSmithersCase(env, "cancel", "    printf '%s\\n' 'runner busy' >&2\n    exit 1\n");
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog !== undefined);
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  for (const poll of [1, 2]) {
+    const health = await getRunHealth({ projectRoot: project, runId, env });
+
+    assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+    assert.ok(
+      health.diagnostics.some(
+        (diagnostic) => diagnostic.code === "WORKFLOW_DEADLINE_CANCEL_FAILED" && diagnostic.severity === "warning"
+      ),
+      JSON.stringify(health.diagnostics)
+    );
+    assert.equal(readRunState(layout).status, "running");
+    assert.equal((fs.readFileSync(commandLog, "utf8").match(/^cancel /gmu) ?? []).length, poll);
+  }
+});
+
 test("getRunHealth stays readable while execution holds the workflow control lock", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

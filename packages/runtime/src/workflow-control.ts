@@ -225,10 +225,13 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
 
   const controlTransition = controlStateChanged(previous, state);
   state.last_transition_at = controlTransition ? now : previous.last_transition_at;
+  // A paused run executes nothing and resuming it resets the deadline, so
+  // cancelling it at the next observation would bound nothing.
   const deadlineExceeded =
     state.workflow_deadline_at !== undefined &&
     input.nowMs >= timestampMs(state.workflow_deadline_at, Number.POSITIVE_INFINITY, "workflow deadline") &&
-    !isTerminalRunStatus(state.status);
+    !isTerminalRunStatus(state.status) &&
+    state.status !== "paused";
 
   return {
     state,

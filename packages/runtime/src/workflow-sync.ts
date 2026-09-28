@@ -1642,7 +1642,8 @@ export async function synchronizeLinkedWorkflowRun(
       workflowControl.state.last_transition_at = new Date(observedAtMs).toISOString();
       deadlineApplied = true;
     } catch (error) {
-      diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
+      // The run stays active and the next synchronization requests cancellation again.
+      diagnostics.push({ ...smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"), severity: "warning" });
     }
   }
   const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
