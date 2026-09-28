@@ -24556,12 +24556,18 @@ test("artifact gates validate a historical bundle through its active sealed sche
       output.schema_bundle_sha256 = historicalValidation.schema.bundle_sha256;
     }
   }
-  const verified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  const sealedTasks = (
+    JSON.parse(
+      fs.readFileSync(path.join(layout.root, "smithers", "tasks.json"), "utf8")
+    ) as SmithersTaskManifestDocument
+  ).tasks;
+  const attemptAuthority = { task: sealedTasks.find((task) => task.attemptId === node.id)!, tasks: sealedTasks };
+  const verified = verifyRequiredArtifactsForAttempt(layout, node, node.id, attemptAuthority);
   assert.equal(verified.ok, true, JSON.stringify(verified.diagnostics));
 
   state.provenance!.workflow.controllerExecutionSnapshot = `smithers/execution-snapshots/${"d".repeat(64)}`;
   writeRunState(layout, state);
-  const missingAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  const missingAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id, attemptAuthority);
   assert.equal(missingAuthority.ok, false);
   assert.ok(
     missingAuthority.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SEALED_SCHEMA_AUTHORITY_INVALID")

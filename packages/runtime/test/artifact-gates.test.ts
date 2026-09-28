@@ -543,8 +543,33 @@ function verifyRequiredArtifactsForAttempt(
   if (existingIndex === -1) graph.nodes.push(planned);
   else graph.nodes[existingIndex] = planned;
   fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
-  writeSealedFixtureTaskAuthority(layout, graph.nodes, attemptAuthority?.tasks);
-  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId, attemptAuthority, authenticated);
+  const tasks = writeSealedFixtureTaskAuthority(layout, graph.nodes, attemptAuthority?.tasks);
+  return verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    planned,
+    attemptId,
+    attemptAuthority ?? fixtureAttemptAuthority(tasks, attemptId),
+    authenticated
+  );
+}
+
+/** The sealed attempt authority production passes, taken from the fixture's written task manifest. */
+function fixtureAttemptAuthority(
+  tasks: readonly SmithersTaskManifestTask[],
+  attemptId: string
+): ArtifactGateAttemptAuthority {
+  const task = tasks.find((candidate) => candidate.attemptId === attemptId);
+  if (task === undefined) throw new Error(`fixture has no sealed task for attempt ${attemptId}`);
+  return { task, tasks };
+}
+
+/** Seal the planned graph exactly as written, without the wrapper's inferred dependencies. */
+function sealedFixtureAuthority(
+  layout: ReturnType<typeof createRunLayout>,
+  attemptId: string
+): ArtifactGateAttemptAuthority {
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as { nodes: PlannedGraphNode[] };
+  return fixtureAttemptAuthority(writeSealedFixtureTaskAuthority(layout, graph.nodes), attemptId);
 }
 
 function fixtureAttemptIds(node: PlannedGraphNode): string[] {
@@ -615,7 +640,7 @@ function writeSealedFixtureTaskAuthority(
   layout: ReturnType<typeof createRunLayout>,
   nodes: readonly PlannedGraphNode[],
   suppliedTasks?: readonly SmithersTaskManifestTask[]
-): void {
+): readonly SmithersTaskManifestTask[] {
   const sealedNodes = nodes.map((node) => {
     if (node.kind !== "agentic" || node.workflow !== undefined) return node;
     const attempts = fixtureAttemptIds(node);
@@ -679,6 +704,7 @@ function writeSealedFixtureTaskAuthority(
         .sort()
     }
   });
+  return tasks;
 }
 
 function boundOutput(
@@ -3995,7 +4021,12 @@ test("sealed planned graph ignores unrelated producers but rejects a missing pla
   writePlannedGraph(outsideLayout, [outsideCatalogNode, reportNode]);
   writeArtifact(outsideLayout, reportNode.id, "report.md", "# Report\n");
   writeArtifact(outsideLayout, reportNode.id, "report.json", JSON.stringify(currentReport(outsideLayout.runId)));
-  const outside = verifyRuntimeRequiredArtifactsForAttempt(outsideLayout, reportNode, reportNode.id);
+  const outside = verifyRuntimeRequiredArtifactsForAttempt(
+    outsideLayout,
+    reportNode,
+    reportNode.id,
+    sealedFixtureAuthority(outsideLayout, reportNode.id)
+  );
   assert.equal(outside.ok, true, JSON.stringify(outside.diagnostics));
 
   const missingLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-property-producer" });
@@ -6352,12 +6383,16 @@ for (const [label, undeclaredPath] of [
   ["conventional", "properties/recon.json"],
   ["arbitrary sibling", "properties/other.json"]
 ] as const) {
-  test(`property fan-in ignores ${label} lens JSON without a state declaration`, () => {
+  test(`property fan-in ignores ${label} lens JSON without a sealed lens declaration`, () => {
     const layout = createRunLayout({
       projectRoot: tempProject(),
       runId: `run-undeclared-lens-${label.replaceAll(" ", "-")}`
     });
     const node = writeMinimalPropertyFaninFixture(layout);
+    // The catalog source's planned (and therefore sealed) outputs declare no property lens.
+    registerArtifactNode(layout, "property-specification-recon", [
+      boundOutput("notes.md", "ultrafuzz/nonempty-markdown@1", true)
+    ]);
     const lensPath = writeArtifact(
       layout,
       "property-specification-recon",
@@ -6808,6 +6843,7 @@ test("property fan-in cannot hide a planned lens by omitting its state declarati
       ]
     })
   );
+  // Run state is not a declaration source: the planned lens stays bound.
   const state = readRunState(layout);
   delete state.nodes["property-specification-recon"]!.outputs;
   writeRunState(layout, state);
@@ -6815,8 +6851,9 @@ test("property fan-in cannot hide a planned lens by omitting its state declarati
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
   assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_MISSING"),
+  assert.deepEqual(
+    gateIssuePaths(result, "property-source-join"),
+    ["$.properties"],
     JSON.stringify(result.diagnostics)
   );
 });
@@ -6972,16 +7009,10 @@ test("property fan-in rejects ambiguous property-lens declarations", () => {
   );
 });
 
-test("property fan-in rejects a stale property-lens schema binding", () => {
+test("property fan-in rejects a sealed lens declaration whose schema binding differs from the plan", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-stale-declared-lens" });
   const node = writeMinimalPropertyFaninFixture(layout);
-  registerArtifactNode(layout, "property-specification-recon", [
-    {
-      ...boundOutput("custom/recon.json", "ultrafuzz/property-lens@2"),
-      schema_sha256: "0".repeat(64)
-    }
-  ]);
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "custom/recon.json",
@@ -6997,12 +7028,35 @@ test("property fan-in rejects a stale property-lens schema binding", () => {
       ]
     })
   );
+  const current = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(current.ok, true, JSON.stringify(current.diagnostics));
 
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  const sealed = JSON.parse(
+    fs.readFileSync(path.join(layout.root, "smithers", "tasks.json"), "utf8")
+  ) as SmithersTaskManifestDocument;
+  const staleTasks = sealed.tasks.map((task) =>
+    task.attemptId !== "property-specification-recon"
+      ? task
+      : {
+          ...task,
+          metadata: {
+            ...task.metadata,
+            artifacts: {
+              ...task.metadata.artifacts,
+              outputs: task.metadata.artifacts.outputs.map((output) => ({ ...output, schemaSha256: "0".repeat(64) }))
+            }
+          }
+        }
+  );
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id, fixtureAttemptAuthority(staleTasks, node.id));
 
   assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
   assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_SCHEMA_BINDING_INVALID"),
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        "sealed Smithers attempt does not match its planned node and outputs: property-specification-recon"
+      )
+    ),
     JSON.stringify(result.diagnostics)
   );
 });
@@ -7999,7 +8053,12 @@ test("property implementation accepts an intentional producer-free empty catalog
   });
   writePlannedGraph(layout, [node]);
 
-  const result = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const result = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
@@ -8823,14 +8882,24 @@ test("producer-free final reports require the exact not-planned implementation c
   });
   writePlannedGraph(layout, [node]);
 
-  const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const valid = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
   writeDeclaredArtifactNode(layout, node.id, outputs, {
     "deliverables/report.md": "# Ultrafuzz report\n\nrecon-selected-declaration-completeness: `1/1`\n",
     "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
   });
-  const inventedCoverage = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const inventedCoverage = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
   assert.equal(inventedCoverage.ok, false, JSON.stringify(inventedCoverage.diagnostics));
   assert.ok(
     inventedCoverage.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_UNPLANNED"),
@@ -8845,7 +8914,12 @@ test("producer-free final reports require the exact not-planned implementation c
       })
     )
   });
-  const mismatched = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const mismatched = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
   assert.equal(mismatched.ok, false, JSON.stringify(mismatched.diagnostics));
   assert.ok(
     mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH"),
