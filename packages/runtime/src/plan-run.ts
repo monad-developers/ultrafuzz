@@ -43,7 +43,7 @@ import {
   type PromptConcreteNode,
   type PromptGraphNode
 } from "@ultrafuzz/prompts";
-import { loadReferenceCatalog, materializeReferenceArtifacts } from "@ultrafuzz/references";
+import { loadReferenceCatalog, materializeReferenceArtifacts, verifyReferencesCached } from "@ultrafuzz/references";
 import {
   expandTopology,
   fingerprintGraph,
@@ -108,6 +108,8 @@ interface PlanRunHooks {
     resolvedConfig: PlanRunValue["resolved_config"];
     expandedGraph: ExpandedGraph;
   }): Promise<RuntimeDiagnostic[]>;
+  /** The run directory now exists, so a later planning failure leaves it for the caller to record. */
+  afterLayoutCreated?(layout: RunLayout): void;
 }
 
 export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
@@ -129,6 +131,9 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
     return runtimeFailure<PlanRunValue>(validation.diagnostics);
+  }
+  if (validation.value.topology === undefined) {
+    throw new Error("validated run plan is missing its topology summary");
   }
 
   const resolved = await loadResolvedProject(input);
@@ -227,6 +232,23 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
+  }
+  // Graph-only checks belong before the run directory exists, so an invalid topology commits nothing.
+  const requiresVulnerabilityDatabase = graph.nodes.some(
+    (node) => node.logical_id === "threat-model" || node.logical_id === "goal-plan"
+  );
+  const vulnerabilityDatabaseReferenceNode = graph.nodes.find(
+    (node) => node.logical_id === VULNERABILITY_DATABASE_REFERENCE_NODE_ID && node.kind === "reference"
+  );
+  if (requiresVulnerabilityDatabase && vulnerabilityDatabaseReferenceNode === undefined) {
+    return runtimeFailure<PlanRunValue>([
+      {
+        code: "VULNERABILITY_DATABASE_REFERENCE_REQUIRED",
+        message: `topology nodes threat-model/goal-plan require the ${VULNERABILITY_DATABASE_REFERENCE_NODE_ID} pinned reference node`,
+        severity: "error",
+        source: "vulnerability-database"
+      }
+    ]);
   }
   let controllerSource: ReturnType<typeof inspectControllerSource>;
   try {
@@ -337,6 +359,18 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     requestedConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
     nodes: stateNodes
   });
+  const referenceIds = graph.nodes.flatMap((node) =>
+    node.kind === "reference" && node.reference !== undefined ? [node.reference] : []
+  );
+  if (referenceIds.length > 0) {
+    // Materialization reads these caches after the run directory exists; check them first so a
+    // missing or stale cache does not leave a run behind that can never launch.
+    try {
+      verifyReferencesCached(loadReferenceCatalog(projectRoot), referenceIds);
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
+    }
+  }
 
   let layout;
   try {
@@ -382,6 +416,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
+    hooks.afterLayoutCreated?.(layout);
     writeFileDurable(path.join(layout.root, DATA_GOVERNANCE_PROVENANCE_PATH), governanceBytes);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
@@ -395,27 +430,11 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   }
 
   let vulnerabilityDatabase: MaterializedVulnerabilityDatabaseCatalog | undefined;
-  const requiresVulnerabilityDatabase = graph.nodes.some(
-    (node) => node.logical_id === "threat-model" || node.logical_id === "goal-plan"
-  );
-  if (requiresVulnerabilityDatabase) {
-    const referenceNode = graph.nodes.find(
-      (node) => node.logical_id === VULNERABILITY_DATABASE_REFERENCE_NODE_ID && node.kind === "reference"
-    );
-    if (referenceNode === undefined) {
-      return runtimeFailure<PlanRunValue>([
-        {
-          code: "VULNERABILITY_DATABASE_REFERENCE_REQUIRED",
-          message: `topology nodes threat-model/goal-plan require the ${VULNERABILITY_DATABASE_REFERENCE_NODE_ID} pinned reference node`,
-          severity: "error",
-          source: "vulnerability-database"
-        }
-      ]);
-    }
+  if (requiresVulnerabilityDatabase && vulnerabilityDatabaseReferenceNode !== undefined) {
     try {
       vulnerabilityDatabase = materializeVulnerabilityDatabasePlannerCatalog(
         layout.root,
-        getNodeArtifactDir(layout, referenceNode.id)
+        getNodeArtifactDir(layout, vulnerabilityDatabaseReferenceNode.id)
       );
     } catch (error) {
       return runtimeFailure<PlanRunValue>([
@@ -445,9 +464,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     persistDeferredPromptTemplates(layout, catalog, expandedGraph);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_TEMPLATE_SNAPSHOT_FAILED")]);
-  }
-  if (validation.value.topology === undefined) {
-    throw new Error("validated run plan is missing its topology summary");
   }
   if (sourceRevision !== undefined) {
     try {
