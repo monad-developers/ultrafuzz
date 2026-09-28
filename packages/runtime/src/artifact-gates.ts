@@ -637,79 +637,6 @@ function verifyInvariantLedgerProducerArtifacts(
       severity: "error" as const
     }))
   );
-  if (parsed.value.entries.length === 0 && (parsed.value.scan_probes?.length ?? 0) > 0) {
-    verifyNoInvariantsJustification(parsed.value.no_invariants_justification, ledgerPath, diagnostics);
-    if (parsed.value.inventory_rows === undefined) {
-      diagnostics.push({
-        code: "INVARIANT_LEDGER_INVENTORY_MISSING",
-        message: "An explicit no-evidence ledger must include an empty inventory_rows array",
-        severity: "error",
-        source: "invariant-ledger",
-        path: `${ledgerPath}#$.inventory_rows`
-      });
-    } else if (parsed.value.inventory_rows.length > 0) {
-      diagnostics.push({
-        code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
-        message: "An explicit no-evidence ledger must not contain inventory rows",
-        severity: "error",
-        source: "invariant-ledger",
-        path: `${ledgerPath}#$.inventory_rows`
-      });
-    }
-    const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
-    const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
-    if (fs.existsSync(sourceProofPath)) {
-      readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics);
-    } else if (!fs.existsSync(discoveryWorkspace)) {
-      diagnostics.push({
-        code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
-        message: "Invariant ledger source proof and discovery workspace are unavailable",
-        severity: "error",
-        source: "invariant-ledger",
-        path: ledgerPath
-      });
-    }
-    // DECISION (issue #292), not a fact about probes: a probe path that names nothing is still
-    // accepted, because a probe records WHERE the agent looked and an optional file it did not
-    // find is a legitimate record. Containment stays the only property enforced here — probe
-    // `result` text has zero consumers, so it cannot be checked against anything. What the
-    // decision changed is the weight put on that text: it is no longer allowed to stand in for
-    // the claim "this target has no invariant". That claim now needs
-    // `no_invariants_justification` above.
-    for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-      verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
-    }
-    return diagnostics;
-  }
-  if (parsed.value.entries.length === 0) {
-    diagnostics.push({
-      code: "INVARIANT_LEDGER_EMPTY",
-      message: "Project discovery invariant evidence ledger must contain at least one source entry",
-      severity: "error",
-      source: "invariant-ledger",
-      path: `${ledgerPath}#$.entries`
-    });
-    return diagnostics;
-  }
-  if (parsed.value.inventory_rows === undefined) {
-    diagnostics.push({
-      code: "INVARIANT_LEDGER_INVENTORY_MISSING",
-      message: "Project discovery invariant evidence ledger is missing structured inventory rows",
-      severity: "error",
-      source: "invariant-ledger",
-      path: `${ledgerPath}#$.inventory_rows`
-    });
-    return diagnostics;
-  }
-  if (parsed.value.scan_probes === undefined) {
-    diagnostics.push({
-      code: "INVARIANT_LEDGER_PROBES_MISSING",
-      message: "Project discovery invariant evidence ledger is missing scan probe results",
-      severity: "error",
-      source: "invariant-ledger",
-      path: `${ledgerPath}#$.scan_probes`
-    });
-  }
   const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
   const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
   const sourceProofPresent = fs.existsSync(sourceProofPath);
@@ -725,10 +652,14 @@ function verifyInvariantLedgerProducerArtifacts(
       path: ledgerPath
     });
   }
-  // Same DECISION as the no-evidence branch above (issue #292): an absent probe path is accepted
-  // because a probe records where the agent looked, and containment is the only property that can
-  // be enforced when nothing consumes `result`. On this branch the ledger carries entries, and
-  // those remain byte-checked against the pinned source below.
+  // DECISION (issue #292), not a fact about probes: a probe path that names nothing is still
+  // accepted, because a probe records WHERE the agent looked and an optional file it did not
+  // find is a legitimate record. Containment stays the only property enforced here — probe
+  // `result` text has zero consumers, so it cannot be checked against anything. What the
+  // decision changed is the weight put on that text: it is no longer allowed to stand in for
+  // the claim "this target has no invariant". That claim needs `no_invariants_justification`,
+  // which the ledger schema requires when `entries` is empty. Ledger entries remain
+  // byte-checked against the pinned source below.
   for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
     verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
   }
@@ -849,49 +780,6 @@ function verifyCanonicalPropertiesProducerArtifacts(
   const discoveryWorkspace = path.join(layout.workspacesDir, ledgerProducer.authority.attempt_id);
   for (const [probeIndex, probe] of (ledger.value.scan_probes ?? []).entries()) {
     verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
-  }
-  if (ledger.value.entries.length === 0 && (ledger.value.scan_probes?.length ?? 0) > 0) {
-    verifyNoInvariantsJustification(ledger.value.no_invariants_justification, ledgerPath, diagnostics);
-    if (ledger.value.inventory_rows === undefined || ledger.value.inventory_rows.length > 0) {
-      diagnostics.push({
-        code: "INVARIANT_LEDGER_INVENTORY_UNEXPECTED",
-        message: "An explicit no-evidence ledger must include an empty inventory_rows array",
-        severity: "error",
-        source: "invariant-ledger",
-        path: `${ledgerPath}#$.inventory_rows`
-      });
-    }
-    for (const [propertyIndex, property] of catalog.value.properties.entries()) {
-      for (const [ledgerIndex, ledgerId] of (property.ledger_ids ?? []).entries()) {
-        diagnostics.push({
-          code: "INVARIANT_LEDGER_REFERENCE_UNKNOWN",
-          message: `Canonical property ${JSON.stringify(property.id)} references ledger ID ${JSON.stringify(ledgerId)} but discovery recorded no invariant entries`,
-          severity: "error",
-          source: "invariant-ledger",
-          path: `${catalogPath}#$.properties[${propertyIndex}].ledger_ids[${ledgerIndex}]`
-        });
-      }
-    }
-    return diagnostics;
-  }
-  if (ledger.value.entries.length === 0 || ledger.value.inventory_rows === undefined) {
-    diagnostics.push({
-      code: "INVARIANT_LEDGER_INCOMPLETE",
-      message: "Property fan-in requires a non-empty invariant ledger with structured inventory rows",
-      severity: "error",
-      source: "invariant-ledger",
-      path: ledgerPath
-    });
-    return diagnostics;
-  }
-  if (ledger.value.scan_probes === undefined) {
-    diagnostics.push({
-      code: "INVARIANT_LEDGER_PROBES_MISSING",
-      message: "Property fan-in requires scan probe results from project discovery",
-      severity: "error",
-      source: "invariant-ledger",
-      path: `${ledgerPath}#$.scan_probes`
-    });
   }
 
   const ledgerIds = new Set(ledger.value.entries.map((entry) => entry.id));
@@ -1507,40 +1395,6 @@ function verifyInvariantSourceEvidence(
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_SOURCE_READ_FAILED"));
   }
-}
-
-/**
- * Issue #292 verdict, recorded as a decision: REJECT SILENCE, ACCEPT EXPLICIT EMPTINESS.
- *
- * A ledger with no entries used to pass on the SHAPE of its emptiness alone — `inventory_rows: []`
- * plus at least one scan probe — and that shape is free to fabricate: nothing anywhere reads
- * `probe.result`, every consumer is a presence check, so invented probe text satisfied both evidence
- * gates. "The agent searched and found nothing" was therefore unfalsifiable.
- *
- * A genuinely invariant-free target has to stay possible, so emptiness is not banned; it is made
- * ATTRIBUTABLE. The ledger must state the claim in `no_invariants_justification`, which survives in
- * the artifact and can be read against the target after the fact.
- *
- * Deliberately NOT the third option in the issue (mark the derived proof `partial`): that adds a
- * state every consumer of the ledger has to learn, to describe a case that is already fully
- * described by two existing ones.
- */
-function verifyNoInvariantsJustification(
-  justification: string | undefined,
-  ledgerPath: string,
-  diagnostics: RuntimeDiagnostic[]
-): void {
-  if (justification !== undefined) {
-    return;
-  }
-  diagnostics.push({
-    code: "INVARIANT_LEDGER_NO_INVARIANTS_UNJUSTIFIED",
-    message:
-      "An invariant evidence ledger with no entries must record no_invariants_justification stating why the target carries no invariant",
-    severity: "error",
-    source: "invariant-ledger",
-    path: `${ledgerPath}#$.no_invariants_justification`
-  });
 }
 
 function verifyInvariantProbePath(

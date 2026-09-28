@@ -4761,6 +4761,29 @@ test("project discovery gate rejects an empty ledger that does not justify the a
   const justified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(justified.ok, true, JSON.stringify(justified.diagnostics));
 
+  // The ledger schema is the only check for the remaining incomplete shapes.
+  const justifiedLedger = JSON.parse(ledger("The target states no invariant.")) as Record<string, unknown>;
+  for (const [label, document] of [
+    ["missing inventory_rows", { ...justifiedLedger, inventory_rows: undefined }],
+    ["missing scan_probes", { ...justifiedLedger, scan_probes: undefined }],
+    ["empty ledger without scan probes", { ...justifiedLedger, scan_probes: [] }],
+    [
+      "empty ledger with inventory rows",
+      {
+        ...justifiedLedger,
+        inventory_rows: [{ id: "inventory-1", description: "Solvency", ledger_ids: ["evidence-1"] }]
+      }
+    ]
+  ] as const) {
+    writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(document));
+    const incomplete = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(incomplete.ok, false, label);
+    assert.ok(
+      incomplete.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
+      `${label}: ${JSON.stringify(incomplete.diagnostics)}`
+    );
+  }
+
   // A justification on a ledger that DOES carry entries is contradictory, so the schema refuses it
   // rather than letting both readings of the artifact coexist.
   writeArtifact(
