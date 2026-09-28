@@ -430,14 +430,7 @@
         "materialize",
         "clean",
         "config",
-        "restartWholeRun",
-        "status",
-        "doctor",
-        "triage",
-        "merge",
-        "restartFromNode",
-        "rerunSelectedNode",
-        "arbitraryShell"
+        "status"
       ],
       "properties": {
         "validate": { "type": "boolean" },
@@ -455,14 +448,7 @@
         "materialize": { "type": "boolean" },
         "clean": { "type": "boolean" },
         "config": { "type": "boolean" },
-        "restartWholeRun": { "type": "boolean" },
-        "status": { "type": "boolean" },
-        "doctor": { "type": "boolean" },
-        "triage": { "type": "boolean" },
-        "merge": { "type": "boolean" },
-        "restartFromNode": { "type": "boolean" },
-        "rerunSelectedNode": { "type": "boolean" },
-        "arbitraryShell": { "type": "boolean" }
+        "status": { "type": "boolean" }
       }
     },
     "findingItem": {
