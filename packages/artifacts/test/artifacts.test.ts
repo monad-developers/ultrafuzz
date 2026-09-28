@@ -12,6 +12,7 @@ import {
   assertArtifactPublicationsContainNoSecrets,
   appendNodeAttempt,
   appendEvent,
+  createEventRecord,
   assertUsageLedgerEntry,
   createRunLayout,
   getNodeArtifactDir,
@@ -23,7 +24,6 @@ import {
   queryNodeAttempts,
   queryEvents,
   readArtifactManifest,
-  readEventQueryFacade,
   readRunState,
   replayEvents,
   replayUsageEvents,
@@ -92,12 +92,11 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.statePath,
     layout.eventsPath,
     layout.usageLedgerPath,
-    layout.attemptLedgerPath,
-    path.join(layout.eventsIndexDir, "query-inputs.json")
+    layout.attemptLedgerPath
   ]) {
     assert.equal(fs.existsSync(expected), true, expected);
   }
-  for (const expected of [layout.artifactsDir, layout.reviewDir, layout.eventsIndexDir]) {
+  for (const expected of [layout.artifactsDir, layout.reviewDir]) {
     assert.equal(fs.statSync(expected).isDirectory(), true, expected);
   }
   assert.equal(path.basename(getNodeArtifactDir(layout, "node-a", { create: true })), "node-a");
@@ -773,7 +772,7 @@ test("artifact manifest reuse checks the complete prerequisite chain", () => {
   });
 });
 
-test("events append to JSONL, replay, and expose query indexes", () => {
+test("events append to JSONL, replay, and filter by node and status", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   appendEvent(layout, {
     eventType: "node-synced",
@@ -796,90 +795,53 @@ test("events append to JSONL, replay, and expose query indexes", () => {
     workflow_state: "in-progress"
   });
   assert.equal(queryEvents(layout, { nodeId: "node-a", status: "succeeded" }).length, 1);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", "node-a.jsonl")), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
 });
 
-test("event indexes encode long IDs in a collision-free hash namespace", () => {
-  const maximumRunId = "r".repeat(128);
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
-  const facadeBeforeAppend = readEventQueryFacade(layout);
-  const maximumNodeId = "n".repeat(128);
-  const directBoundaryNodeId = "d".repeat(122);
-  const longBoundaryNodeId = "e".repeat(123);
-  const legacyCollisionNodeId = `${maximumNodeId.slice(0, 97)}-${crypto
-    .createHash("sha256")
-    .update(maximumNodeId, "utf8")
-    .digest("hex")
-    .slice(0, 24)}`;
-  assert.equal(legacyCollisionNodeId.length, 122);
+test("event appends and replays keep working past 100,000 records", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-long-journal" });
+  const template = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "running",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
+  });
+  const lines = Array.from({ length: 100_000 }, (_, index) =>
+    JSON.stringify({ ...template, event_id: `evt-${index.toString(16).padStart(24, "0")}` })
+  );
+  fs.writeFileSync(layout.eventsPath, `${lines.join("\n")}\n`);
 
-  const appendNodeSynced = (nodeId: string, workflowTaskId: string): void => {
-    appendEvent(layout, {
+  const appended = appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
+  });
+  const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
+  assert.equal(replay.records.length, 100_001);
+  assert.equal(replay.records.at(-1)?.event_id, appended.event_id);
+});
+
+test("an event append refuses a repeated or out-of-order event without changing the journal", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-window" });
+  const event = (nodeId: string, timestamp: string) =>
+    ({
       eventType: "node-synced",
       nodeId,
-      status: "running",
-      payload: { workflow_run_id: "workflow-1", workflow_task_id: workflowTaskId }
-    });
-  };
+      status: "succeeded",
+      timestamp,
+      payload: { workflow_run_id: "workflow-1", workflow_task_id: `task-${nodeId}` }
+    }) as const;
+  appendEvent(layout, event("node-a", "2026-08-05T00:00:01.000Z"));
+  appendEvent(layout, event("node-b", "2026-08-05T00:00:01.000Z"));
+  const before = fs.readFileSync(layout.eventsPath);
 
-  appendNodeSynced(maximumNodeId, "task-maximum");
-  appendNodeSynced(longBoundaryNodeId, "task-long-boundary");
-  appendNodeSynced(legacyCollisionNodeId, "task-legacy-collision");
-  appendNodeSynced(directBoundaryNodeId, "task-direct-boundary");
-
-  const hashedIndexPath = (dimension: string, value: string): string =>
-    path.join(
-      layout.eventsIndexDir,
-      dimension,
-      "sha256",
-      `${crypto.createHash("sha256").update(value, "utf8").digest("hex")}.jsonl`
-    );
-  const maximumRunIndex = hashedIndexPath("run", maximumRunId);
-  assert.equal(fs.existsSync(maximumRunIndex), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${legacyCollisionNodeId}.jsonl`)), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${directBoundaryNodeId}.jsonl`)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("node", longBoundaryNodeId)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
-
-  const maximumRecords = fs
-    .readFileSync(maximumRunIndex, "utf8")
-    .trimEnd()
-    .split("\n")
-    .map((line) => JSON.parse(line) as { run_id: string });
-  assert.equal(maximumRecords.length, 4);
-  assert.equal(
-    maximumRecords.every((record) => record.run_id === maximumRunId),
-    true
-  );
-  const facadeAfterAppend = readEventQueryFacade(layout) as {
-    filters?: unknown;
-    long_filters?: unknown;
-    index_key_encoding?: unknown;
-  };
-  assert.deepEqual(facadeAfterAppend, facadeBeforeAppend);
-  assert.deepEqual(facadeAfterAppend.filters, {
-    run_id: "events.index/run/<run-id>.jsonl",
-    node_id: "events.index/node/<node-id>.jsonl",
-    event_type: "events.index/type/<event-type>.jsonl",
-    status: "events.index/status/<status>.jsonl",
-    timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
-  });
-  assert.deepEqual(facadeAfterAppend.long_filters, {
-    run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
-    node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
-    event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
-    status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
-  });
-  assert.deepEqual(facadeAfterAppend.index_key_encoding, {
-    version: "ultrafuzz.event-index-key.v1",
-    direct_max_id_length: 122,
-    direct_id_path: "<dimension>/<id>.jsonl",
-    long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
-    digest: "sha256",
-    hash_input_encoding: "utf8",
-    digest_encoding: "hex"
-  });
+  // The same event again in the same millisecond, behind a different one, is still a repeat.
+  assert.throws(() => appendEvent(layout, event("node-a", "2026-08-05T00:00:01.000Z")), /duplicate identity/u);
+  assert.throws(() => appendEvent(layout, event("node-c", "2026-08-05T00:00:00.000Z")), /not ordered/u);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath), before);
+  assert.equal(replayEvents(layout).records.length, 2);
 });
 
 test("event redaction covers token families, AWS keys, URL credentials, and private keys", () => {

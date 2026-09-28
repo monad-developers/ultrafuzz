@@ -30,14 +30,18 @@ trusted-cli.json
 trusted-bin/
 artifacts/
 review/
-events.index/
 workspaces/
 workspaces.json
 ```
 
-`source-run.json` is present when the run derives from another run. Event query
-indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
-of the artifact contract.
+`source-run.json` is present when the run derives from another run.
+`events.jsonl` is the only event journal: event queries filter it, and SQLite
+events are not part of the artifact contract. An append checks the new event
+against the final event and any trailing events with the same timestamp;
+`replayEvents` and `queryEvents` validate the whole journal. The journal has no
+record-count limit; its 64 MiB byte limit still applies. Runs created before
+this change may also have an `events.index/` directory. Nothing reads it, and
+report bundles still copy it.
 
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
 Each entry's immutable identity is the exact Smithers pair
