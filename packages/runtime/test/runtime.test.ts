@@ -19526,7 +19526,14 @@ test("syncRun publishes a report after recovery of a failed report agent", async
   assert.equal(recoveredReport.completion?.counts.succeeded, 1);
   assert.equal(recoveredReport.completion?.counts.failed, 0);
   assert.doesNotMatch(recoveredReport.markdown, /^# Ultrafuzz report — PARTIAL/u);
-  assert.deepEqual(recoveredReport.json, { ...finalReport.report, completion: recoveredReport.completion });
+  // The run summary restates elapsed time from run.json and state.json; all review content is the agent's.
+  const elapsed = (recoveredReport.json as { run_metadata: { elapsed_time: string } }).run_metadata.elapsed_time;
+  assert.match(elapsed, /^(?:\d+\.\ds|\d+m \d{2}s)$/u);
+  assert.deepEqual(recoveredReport.json, {
+    ...finalReport.report,
+    run_metadata: { ...(finalReport.report.run_metadata as Record<string, unknown>), elapsed_time: elapsed },
+    completion: recoveredReport.completion
+  });
 });
 
 for (const variant of ["failed-verifier", "changed-output", "exhausted-loop"] as const) {
