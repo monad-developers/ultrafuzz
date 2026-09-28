@@ -1280,21 +1280,24 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
-test("plain init surfaces a customized stale agent adapter diagnostic", async () => {
+test("plain init restores a customized agent adapter without touching project config", async () => {
   const project = tempProject();
   const initial = await cli(project, ["init", "--force"]);
   assert.equal(initial.code, 0, initial.stderr);
 
   const adapterPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const customAdapter = 'export const customConfigPath = "ultrafuzz.toml";\n';
-  fs.writeFileSync(adapterPath, customAdapter, "utf8");
+  const stockAdapter = fs.readFileSync(adapterPath, "utf8");
+  fs.writeFileSync(adapterPath, 'export const customConfigPath = "ultrafuzz.toml";\n', "utf8");
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const customConfig = `${fs.readFileSync(configPath, "utf8")}\n# operator customization\n`;
+  fs.writeFileSync(configPath, customConfig, "utf8");
 
   const result = await cli(project, ["init"]);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, "");
-  assert.match(result.stdout, /warning: INIT_AGENT_ADAPTER_UPDATE_REQUIRED:/u);
-  assert.match(result.stdout, /ULTRAFUZZ_CONFIG_PATH/u);
-  assert.equal(fs.readFileSync(adapterPath, "utf8"), customAdapter);
+  assert.doesNotMatch(result.stdout, /warning:/u);
+  assert.equal(fs.readFileSync(adapterPath, "utf8"), stockAdapter);
+  assert.equal(fs.readFileSync(configPath, "utf8"), customConfig);
 });
 
 test("run exposes the trusted reference expectation catalog option", async () => {

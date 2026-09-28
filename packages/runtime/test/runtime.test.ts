@@ -122,6 +122,8 @@ import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { loadReportSnapshot } from "../src/unverified-report.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
+import { inspectControllerSource } from "../src/controller-source.js";
+import { loadRuntimeTemplate } from "../src/runtime-template.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
@@ -3403,9 +3405,9 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
 
       const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
       fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-      const preserved = initProject({ projectRoot: project });
-      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+      const refreshed = initProject({ projectRoot: project });
+      assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+      assert.equal(fs.readFileSync(codexPath, "utf8"), loadRuntimeTemplate("smithers/agents/codex.tsx"));
 
       const attackedProject = tempProject();
       mismatchedPath = path.join(attackedProject, "ultrafuzz.toml");
@@ -3626,26 +3628,30 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
-test("non-force init preserves historical stock agent adapters and force replaces them", () => {
-  assert.equal(
-    crypto.createHash("sha256").update(V0_0_2_STOCK_CODEX_ADAPTER).digest("hex"),
-    "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236"
-  );
+test("non-force init refreshes historical and customized adapters to the packaged closure", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const currentAdapter = fs.readFileSync(codexPath, "utf8");
-  fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-  const historicalStats = fs.statSync(codexPath, { bigint: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const customConfig = `${fs.readFileSync(configPath, "utf8")}\n# operator customization\n`;
+  fs.writeFileSync(configPath, customConfig, "utf8");
+  const agents = path.join(project, ".smithers", "agents");
+  fs.writeFileSync(path.join(agents, "codex.ts"), V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+  fs.writeFileSync(path.join(agents, "environment.ts"), "export const customized = true;\n", "utf8");
+  fs.writeFileSync(
+    path.join(agents, "index.ts"),
+    'import { createCodexAgent } from "./codex";\nexport const agentFactories = { CodexAgent: createCodexAgent };\n',
+    "utf8"
+  );
+  fs.rmSync(path.join(agents, "pi.ts"));
 
-  const preserved = initProject({ projectRoot: project });
+  const refreshed = initProject({ projectRoot: project });
 
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-  assert.equal(fs.statSync(codexPath, { bigint: true }).ino, historicalStats.ino);
-  const forced = initProject({ projectRoot: project, force: true });
-  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
-  assert.equal(fs.readFileSync(codexPath, "utf8"), currentAdapter);
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.deepEqual(refreshed.diagnostics, []);
+  // Plan admits only the packaged closure, so plain init restores all of it
+  // while every project-owned file keeps its customization.
+  assert.doesNotThrow(() => inspectControllerSource(project));
+  assert.equal(fs.readFileSync(configPath, "utf8"), customConfig);
 });
 
 test("non-force init migrates a superseded generated manifest so the project keeps its durable run", () => {
@@ -3732,81 +3738,6 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
   assert.doesNotMatch(source, /smithers-orchestrator/u);
 });
 
-test(
-  "init converts an adapter inspection failure into a preserved manual-review warning",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-    const customized = 'export const customConfig = "ultrafuzz.toml"; // project-owned adapter\n';
-    fs.writeFileSync(codexPath, customized, "utf8");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
-    const originalOpenSync = fs.openSync;
-    let codexOpenCount = 0;
-
-    Object.defineProperty(fs, "openSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (String(args[0]) === codexPath) {
-          codexOpenCount += 1;
-          if (codexOpenCount === 1) {
-            throw Object.assign(new Error("induced sensitive adapter inspection failure"), { code: "EACCES" });
-          }
-        }
-        return Reflect.apply(originalOpenSync, fs, args) as number;
-      }
-    });
-    try {
-      const preserved = initProject({ projectRoot: project });
-      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-      assert.equal(codexOpenCount, 1);
-      assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
-      const warning = preserved.diagnostics.find(
-        (diagnostic) =>
-          diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
-      );
-      assert.equal(warning?.severity, "warning");
-      assert.match(warning?.message ?? "", /could not be safely inspected/u);
-      assert.match(warning?.message ?? "", /verify manually/u);
-      assert.doesNotMatch(JSON.stringify(preserved.diagnostics), /induced sensitive|EACCES/u);
-    } finally {
-      Object.defineProperty(fs, "openSync", originalDescriptor);
-    }
-  }
-);
-
-test("non-force init preserves a customized stale adapter and force remains explicit", () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const customized = [
-    'import { readFileSync } from "node:fs";',
-    'import path from "node:path";',
-    'export const customConfig = readFileSync(path.join(process.cwd(), "ultrafuzz.toml"), "utf8");',
-    "// project-owned customization",
-    ""
-  ].join("\n");
-  fs.writeFileSync(codexPath, customized, "utf8");
-
-  const preserved = initProject({ projectRoot: project });
-
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
-  const warning = preserved.diagnostics.find(
-    (diagnostic) =>
-      diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
-  );
-  assert.equal(warning?.severity, "warning");
-  assert.match(warning?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-  assert.match(warning?.message ?? "", /workflowControlChildEnvironment/u);
-
-  const forced = initProject({ projectRoot: project, force: true });
-  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
-  assert.notEqual(fs.readFileSync(codexPath, "utf8"), customized);
-  assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-});
-
 test("non-force init never follows or overwrites linked adapter paths", () => {
   for (const linkKind of ["symbolic", "hard"] as const) {
     const project = tempProject();
@@ -3822,18 +3753,13 @@ test("non-force init never follows or overwrites linked adapter paths", () => {
       fs.linkSync(outsidePath, codexPath);
     }
 
-    const preserved = initProject({ projectRoot: project });
+    const rejected = initProject({ projectRoot: project });
 
-    assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
     assert.equal(fs.readFileSync(outsidePath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
     assert.equal(fs.lstatSync(codexPath).isSymbolicLink(), linkKind === "symbolic");
     if (linkKind === "hard") assert.equal(fs.statSync(codexPath).nlink, 2);
-    const warning = preserved.diagnostics.find(
-      (diagnostic) =>
-        diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
-    );
-    assert.match(warning?.message ?? "", /preserved it without inspection/u);
   }
 });
 
@@ -3849,11 +3775,11 @@ test("startRun rejects a customized controller adapter before submission", async
   assert.equal(run.ok, false);
   assert.equal(run.diagnostics[0]?.code, "CONTROLLER_SOURCE_UNTRUSTED");
   assert.match(run.diagnostics[0]?.message ?? "", /must exactly match the packaged stock closure/u);
-  assert.match(run.diagnostics[0]?.message ?? "", /ultrafuzz init --force/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /rerun ultrafuzz init$/u);
   assert.equal(fs.existsSync(path.join(project, "smithers-commands.log")), false);
 });
 
-test("init preserves a dangling adapter symlink without writing through it", () => {
+test("init never writes through a dangling adapter symlink", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
@@ -3864,7 +3790,8 @@ test("init preserves a dangling adapter symlink without writing through it", () 
 
   const result = initProject({ projectRoot: project });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
   assert.equal(fs.existsSync(outsidePath), false);
   assert.equal(fs.readlinkSync(codexPath), outsidePath);
 });
@@ -9934,14 +9861,8 @@ test("validate accepts a typed aliased registry composed from static spreads", a
   );
 
   const validate = await validateProject({ projectRoot: project, env: {} });
-  const preserved = initProject({ projectRoot: project });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(
-    preserved.diagnostics.some((diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_STALE"),
-    false
-  );
 });
 
 test("validate applies registry overwrite order and rejects nullish or shadowed factories", async () => {
@@ -12256,127 +12177,41 @@ test("startRun --agent does not carry the previous agent's model onto the new ag
   assert.equal(pinnedTasks.tasks[0]?.reasoningEffort ?? null, null);
 });
 
-test("init reports an agent registry that does not export a generated agent", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-
-  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent,
-  // OpenCodeAgent, OpenRouterAgent, and PiAgent existed: the registry predates the adapters, and init preserves
-  // project-owned files.
-  const registryPath = path.join(project, ".smithers/agents/index.ts");
-  fs.writeFileSync(
-    registryPath,
-    'import { createCodexAgent } from "./codex";\n' +
-      'export { createCodexAgent } from "./codex";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
-    "utf8"
-  );
-
-  const upgraded = initProject({ projectRoot: project });
-  assert.equal(upgraded.ok, true);
-  const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 6, JSON.stringify(upgraded.diagnostics));
-  assert.equal(stale[0]?.severity, "warning");
-  assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /PiAgent/);
-
-  // A registry that names Claude, DeepSeek, Kimi, OpenCode, OpenRouter, and Pi without registering
-  // their factories is still stale: nothing resolves it, since generated
-  // adapters export only factories.
-  fs.writeFileSync(
-    registryPath,
-    'import { createCodexAgent } from "./codex";\n' +
-      'export { CodexAgent, createCodexAgent } from "./codex";\n' +
-      'export { ClaudeAgent } from "./claude";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
-    "utf8"
-  );
-  const named = initProject({ projectRoot: project });
-  const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 6, JSON.stringify(named.diagnostics));
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /PiAgent/);
-
-  // A registry that exports every generated agent stays quiet.
-  const regenerated = initProject({ projectRoot: project, force: true });
-  assert.equal(
-    regenerated.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE").length,
-    0,
-    JSON.stringify(regenerated.diagnostics)
-  );
-});
-
-test(
-  "post-init registry inspection sanitizes access failures instead of failing after mutation",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const registryPath = path.join(project, ".smithers", "agents", "index.ts");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
-    const originalOpenSync = fs.openSync;
-
-    Object.defineProperty(fs, "openSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (String(args[0]) === registryPath) {
-          throw Object.assign(new Error("sensitive registry access detail"), { code: "EACCES" });
-        }
-        return Reflect.apply(originalOpenSync, fs, args) as number;
-      }
-    });
-    try {
-      const inspected = initProject({ projectRoot: project });
-      assert.equal(inspected.ok, true, JSON.stringify(inspected.diagnostics));
-      const warning = inspected.diagnostics.find(
-        (diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_REVIEW_REQUIRED"
-      );
-      assert.equal(warning?.severity, "warning");
-      assert.match(warning?.message ?? "", /could not be safely inspected/u);
-      assert.match(warning?.message ?? "", /verify manually/u);
-      assert.doesNotMatch(JSON.stringify(inspected.diagnostics), /sensitive registry|EACCES/u);
-    } finally {
-      Object.defineProperty(fs, "openSync", originalDescriptor);
-    }
-  }
-);
-
 testWhen(process.platform !== "win32")(
-  "post-init registry inspection rejects symlinks, FIFOs, and oversized files without reading them",
+  "init replaces a stale registry but never writes through a linked or special registry path",
   () => {
-    const cases = ["symlink", "fifo", "oversized"] as const;
-    for (const kind of cases) {
+    const stock = loadRuntimeTemplate("smithers/agents/index.tsx");
+    const staleProject = tempProject();
+    assert.equal(initProject({ projectRoot: staleProject, force: true }).ok, true);
+    const staleRegistry = path.join(staleProject, ".smithers", "agents", "index.ts");
+    // A registry scaffolded before the other adapters existed.
+    fs.writeFileSync(
+      staleRegistry,
+      'import { createCodexAgent } from "./codex";\nexport const agentFactories = { CodexAgent: createCodexAgent };\n',
+      "utf8"
+    );
+    assert.equal(initProject({ projectRoot: staleProject }).ok, true);
+    assert.equal(fs.readFileSync(staleRegistry, "utf8"), stock);
+
+    for (const kind of ["symlink", "fifo"] as const) {
       const project = tempProject();
       assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
       const registryPath = path.join(project, ".smithers", "agents", "index.ts");
       fs.unlinkSync(registryPath);
+      const outside = path.join(tempProject(), "outside-index.ts");
       if (kind === "symlink") {
-        const outside = path.join(tempProject(), "outside-index.ts");
-        fs.writeFileSync(outside, "outside registry must not be read\n", "utf8");
+        fs.writeFileSync(outside, "outside registry must not be written\n", "utf8");
         fs.symlinkSync(outside, registryPath);
-      } else if (kind === "fifo") {
-        execFileSync("mkfifo", [registryPath]);
       } else {
-        fs.writeFileSync(registryPath, Buffer.alloc(256 * 1024 + 1, 0x61));
+        execFileSync("mkfifo", [registryPath]);
       }
 
-      const inspected = initProject({ projectRoot: project });
+      const rejected = initProject({ projectRoot: project });
 
-      assert.equal(inspected.ok, true, `${kind}: ${JSON.stringify(inspected.diagnostics)}`);
-      const warning = inspected.diagnostics.find(
-        (diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_REVIEW_REQUIRED"
-      );
-      assert.equal(warning?.severity, "warning", kind);
-      assert.match(warning?.message ?? "", /preserved (?:it )?without inspection|too large to inspect/u, kind);
-      assert.match(warning?.message ?? "", /verify manually/u, kind);
+      assert.equal(rejected.ok, false, kind);
+      assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE", kind);
+      if (kind === "symlink") assert.equal(fs.readFileSync(outside, "utf8"), "outside registry must not be written\n");
+      else assert.equal(fs.lstatSync(registryPath).isFIFO(), true);
     }
   }
 );

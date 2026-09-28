@@ -65,7 +65,7 @@ Agent configuration and model profiles may name only `ClaudeAgent`, `CodexAgent`
 `DeepSeekAgent`, `KimiAgent`, `OpenCodeAgent`, `OpenRouterAgent`, or `PiAgent`.
 The complete `.smithers/agents`
 tree must byte-match the packaged stock closure; custom adapters and registries
-are unsupported, and `ultrafuzz init --force` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
+are unsupported, and `ultrafuzz init` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
 
 Each stock agent's `api_key_env` must use its canonical provider credential
 name. Custom environment variable names fail config validation.
