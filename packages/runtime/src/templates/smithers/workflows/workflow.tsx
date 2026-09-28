@@ -478,9 +478,10 @@ function compiledTaskSourceIdentity(task: (typeof compiledBaseTasks)[number]) {
 }
 
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
+  const compiledById = new Map(serializedTaskSpecs.map((candidate) => [candidate.id, candidate]));
   return tasks.map((task) => {
     const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
-    const compiled = serializedTaskSpecs.find((candidate) => candidate.id === task.smithersNodeId);
+    const compiled = compiledById.get(task.smithersNodeId);
     const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
