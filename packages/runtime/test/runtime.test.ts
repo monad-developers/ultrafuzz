@@ -22178,13 +22178,28 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     "utf8"
   );
   const workflowRunId = "ultrafuzz-sync-failed-node";
+  // Only Smithers' typed deadline codes make a timeout. The second failure is
+  // the #1144 report: 2ms old, yet its text mentions a timeout.
+  const heartbeatTimeout = "Task node:project-discovery has not heartbeated in 1800250ms (timeout: 1800000ms).";
+  const timeoutWordedFailure =
+    "artifact-contract failure: JSON validator preflight failed after 2ms against a 180000ms budget (only the launcher is signalled on timeout, and its grandchild CLI holds the inherited pipes open, so elapsed can overrun the budget): spawnSync ultrafuzz ENOENT";
   const failedEvents = [
     { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
     { type: "TaskHeartbeatTimeout", nodeId: "node:project-discovery", attempt: 1 },
-    { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "agent failed" } },
+    {
+      type: "NodeFailed",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      error: { code: "TASK_HEARTBEAT_TIMEOUT", message: heartbeatTimeout }
+    },
     { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 },
     { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
-    { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: { message: "agent failed again" } }
+    {
+      type: "NodeFailed",
+      nodeId: "node:project-discovery",
+      attempt: 2,
+      error: { message: timeoutWordedFailure }
+    }
   ];
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -22223,7 +22238,7 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   };
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
   assert.equal(state.nodes?.["project-discovery"]?.retry_count, 1);
-  assert.equal(state.nodes?.["project-discovery"]?.last_error, "agent failed again");
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, timeoutWordedFailure);
   assert.deepEqual(state.nodes?.["project-discovery"]?.provenance?.failure, {
     category: "agent-failure",
     causal_task_id: "node:project-discovery",
@@ -22240,12 +22255,15 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(
-    failedLedger.map((entry) => entry.outcome),
-    ["failed", "failed"]
+    failedLedger.map((entry) => [entry.outcome, entry.failure_category]),
+    [
+      ["timed-out", "timeout"],
+      ["failed", "executor-error"]
+    ]
   );
   assert.deepEqual(
     failedLedger.map((entry) => entry.failure_message),
-    ["agent failed", "agent failed again"]
+    [heartbeatTimeout, timeoutWordedFailure]
   );
   assert.deepEqual(
     failedLedger.map((entry) => entry.agent),
@@ -22740,7 +22758,7 @@ test("syncRun keeps reset workflow nodes pending while the workflow is running",
         type: "NodeFailed",
         nodeId: "node:project-discovery",
         attempt: 1,
-        error: { message: "CLI timed out after 1800000ms" }
+        error: { code: "PROCESS_TIMEOUT", message: "CLI timed out after 1800000ms" }
       }
     ])
   });

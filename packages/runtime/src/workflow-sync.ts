@@ -5683,7 +5683,7 @@ function terminalOutcomeForEvent(event: WorkflowEvent):
       return { outcome: "succeeded" };
     case "NodeFailed": {
       const failureMessage = errorText(event.payload.error);
-      return errorLooksLikeTimeout(event.payload.error)
+      return workflowErrorIsTimeout(event.payload.error)
         ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
         : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
     }
@@ -5929,8 +5929,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         break;
       case "NodeFailed": {
         const error = errorText(payload.error);
-        const timedOut =
-          evidence?.timedOut === true || errorLooksLikeTimeout(payload.error) || errorLooksLikeTimeout(error);
+        const timedOut = evidence?.timedOut === true || workflowErrorIsTimeout(payload.error);
         evidence = {
           ...evidence,
           status: timedOut ? "timed-out" : "failed",
@@ -6844,17 +6843,22 @@ function errorText(value: unknown): string | undefined {
   return stringField(value, "message") ?? stringField(value, "code") ?? stringField(value, "_tag");
 }
 
-function errorLooksLikeTimeout(value: unknown): boolean {
-  if (value === undefined) {
-    return false;
-  }
-  if (typeof value === "string") {
-    return /timeout|timed out|heartbeat/iu.test(value);
-  }
-  if (!isRecord(value)) {
-    return false;
-  }
-  return Object.values(value).some((entry) => errorLooksLikeTimeout(entry));
+/**
+ * Smithers reports each deadline it enforces with a typed code: the engine's
+ * task and heartbeat watchdogs, and the process driver's total and idle timers
+ * for agent CLIs. Message, stack, and cause text are not classification input:
+ * a validator preflight that failed in 2ms mentions "timeout" in its message,
+ * and node ids can contain the word (#1144).
+ */
+const WORKFLOW_TIMEOUT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "TASK_TIMEOUT",
+  "TASK_HEARTBEAT_TIMEOUT",
+  "PROCESS_TIMEOUT",
+  "PROCESS_IDLE_TIMEOUT"
+]);
+
+function workflowErrorIsTimeout(error: unknown): boolean {
+  return isRecord(error) && typeof error.code === "string" && WORKFLOW_TIMEOUT_ERROR_CODES.has(error.code);
 }
 
 /**

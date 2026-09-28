@@ -54,9 +54,10 @@ A retry waits one minute, then two, then four, and at most five minutes (the
 Smithers cap), and uses a fresh session and the same effective task prompt,
 including Smithers' safety contracts; Ultrafuzz does not inspect provider error
 text. The planned chain is the whole budget: repeated identical failures do not
-end it before later attempts or fallback profiles run. The planned chain and
-actual producer are recorded in the task manifest, attempt ledger, and final
-report.
+end it before later attempts or fallback profiles run. A failure to admit a
+dependency's verified artifacts is not retried, because a retry would re-read
+the same producer files. The planned chain and actual producer are recorded in
+the task manifest, attempt ledger, and final report.
 
 Retry chains currently require local execution. Cloud planning accepts one
 effective attempt, and local fallback across different agent implementations
