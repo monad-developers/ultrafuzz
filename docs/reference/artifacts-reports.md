@@ -891,8 +891,7 @@ available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the
 effective deterministic or optional-judge mode.
 
-Historical publication cursor documents remain readable, but there is no
-external publication command. The underlying Ultrafuzz runs live inside each target
+The underlying Ultrafuzz runs live inside each target
 checkout, not under the eval project; eval artifacts reference them by run ID.
 Grading and these artifacts do not depend on a reporting service.
 See [Eval Suites](evals.md).

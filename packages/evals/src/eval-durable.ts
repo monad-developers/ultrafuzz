@@ -13,7 +13,6 @@ import {
 import {
   EVAL_FINDING_SCORE_SCHEMA_ID,
   EVAL_MATRIX_SCHEMA_ID,
-  EVAL_PUBLICATION_STATE_SCHEMA_ID,
   EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID,
   EVAL_RUN_MANIFEST_SCHEMA_ID,
   EVAL_RUN_RECORD_SCHEMA_ID,
@@ -24,14 +23,12 @@ import {
 import { assertEvalSemanticGateRegistry, executeEvalSchemaSemanticGates } from "./eval-semantic-gates.js";
 import {
   EVAL_FINDING_SCORE_SCHEMA_VERSION,
-  EVAL_PUBLICATION_STATE_SCHEMA_VERSION,
   EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION,
   EVAL_RUN_SCHEMA_VERSION,
   EVAL_RUN_SUMMARY_SCHEMA_VERSION,
   EVAL_SCORE_SUMMARY_SCHEMA_VERSION,
   type EvalFindingScore,
   type EvalMatrixRow,
-  type EvalPublicationState,
   type EvalRunManifest,
   type EvalRunRecord,
   type EvalRunSummary,
@@ -344,19 +341,6 @@ export function readEvalScoreSummary(filePath: string): EvalScoreSummary {
 
 export function writeEvalScoreSummary(filePath: string, value: EvalScoreSummary): void {
   writeJsonDurable(filePath, parseEvalScoreSummary(value, filePath));
-}
-
-export function parseEvalPublicationState(value: unknown, source = "publication-state.json"): EvalPublicationState {
-  assertVersion(value, "schema_version", EVAL_PUBLICATION_STATE_SCHEMA_VERSION, source);
-  return validate<EvalPublicationState>(EVAL_PUBLICATION_STATE_SCHEMA_ID, value, source);
-}
-
-export function readEvalPublicationState(filePath: string): EvalPublicationState {
-  return parseEvalPublicationState(readStrictJsonDocument(filePath), filePath);
-}
-
-export function writeEvalPublicationState(filePath: string, value: EvalPublicationState): void {
-  writeJsonDurable(filePath, parseEvalPublicationState(value, filePath));
 }
 
 export function readStrictJsonDocument(filePath: string): unknown {

@@ -45,7 +45,6 @@ export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-su
 export const EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:recovery-equivalence:1" as const;
 export const EVAL_STATUS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:status:1" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;
-export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
 export const EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:public-eval-diagnostics:2" as const;
 
 const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
@@ -128,11 +127,6 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
   "eval-llm-judge-result.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalLlmJudgeResultJsonSchema",
-    semanticGates: []
-  },
-  "eval-publication-state.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "evalPublicationStateJsonSchema",
     semanticGates: []
   },
   "eval-recovery-equivalence.schema.json": {
@@ -253,7 +247,6 @@ export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clust
 export const evalLlmJudgeResultJsonSchema = loadSchemaDocument("eval-llm-judge-result.schema.json");
 export const evalMatrixJsonSchema = loadSchemaDocument("eval-matrix.schema.json");
 export const evalPublicDiagnosticsJsonSchema = loadSchemaDocument("eval-public-diagnostics.schema.json");
-export const evalPublicationStateJsonSchema = loadSchemaDocument("eval-publication-state.schema.json");
 export const evalRecoveryEquivalenceJsonSchema = loadSchemaDocument("eval-recovery-equivalence.schema.json");
 export const evalReviewQueueItemJsonSchema = loadSchemaDocument("eval-review-queue-item.schema.json");
 export const evalRunManifestJsonSchema = loadSchemaDocument("eval-run-manifest.schema.json");
@@ -281,7 +274,6 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalLlmJudgeResultJsonSchema,
   evalMatrixJsonSchema,
   evalPublicDiagnosticsJsonSchema,
-  evalPublicationStateJsonSchema,
   evalRecoveryEquivalenceJsonSchema,
   evalReviewQueueItemJsonSchema,
   evalRunManifestJsonSchema,
@@ -306,7 +298,6 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-history.schema.json": evalHistoryJsonSchema,
   "eval-matrix.schema.json": evalMatrixJsonSchema,
   "eval-public-diagnostics.schema.json": evalPublicDiagnosticsJsonSchema,
-  "eval-publication-state.schema.json": evalPublicationStateJsonSchema,
   "eval-recovery-equivalence.schema.json": evalRecoveryEquivalenceJsonSchema,
   "eval-review-queue-item.schema.json": evalReviewQueueItemJsonSchema,
   "eval-run-manifest.schema.json": evalRunManifestJsonSchema,

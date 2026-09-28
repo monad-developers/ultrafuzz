@@ -7,7 +7,6 @@ export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v2" a
 export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v2" as const;
 export const EVAL_SCORE_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.score-summary.v2" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = "ultrafuzz.eval.review-queue-item.v2" as const;
-export const EVAL_PUBLICATION_STATE_SCHEMA_VERSION = "ultrafuzz.eval.publication.v1" as const;
 
 export type EvalClassification = "true-positive" | "false-positive" | "needs-human-review" | "missed";
 export type EvalClassificationReasonCode =
@@ -687,20 +686,6 @@ export interface HumanReviewQueueItem {
   deterministic_match: FindingJudgeResult;
   judge_result: FindingJudgeResult;
   reviewer_status: ReviewerStatus;
-}
-
-export interface EvalPublicationDiagnostic {
-  code: "TERMINAL_REPORT_NOT_PUBLISHABLE" | "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE";
-  row_id: string;
-  contract: "ultrafuzz/report@3";
-  reason: string;
-  report_path?: string;
-}
-
-export interface EvalPublicationState {
-  schema_version: typeof EVAL_PUBLICATION_STATE_SCHEMA_VERSION;
-  status: "publishable" | "non-publishable";
-  diagnostics: EvalPublicationDiagnostic[];
 }
 
 export interface EvalRowScore {

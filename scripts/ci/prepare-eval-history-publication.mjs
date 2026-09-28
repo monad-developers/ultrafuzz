@@ -82,7 +82,7 @@ export function validateAutomaticPublicationManifest(value, context) {
 }
 
 /** Validate immutable pre-compute control for every recoverable benchmark lane. */
-export function validateBenchmarkControlManifest(value, context) {
+function validateBenchmarkControlManifest(value, context) {
   assertModalDocumentValue(MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID, value);
   const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
   const expected = benchmarkControlExpectations(

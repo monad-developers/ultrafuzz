@@ -177,7 +177,7 @@ export function recoveryEquivalenceSummary(
   };
 }
 
-export function testReportingPolicy(overrides: Partial<EvalReportingPolicy> = {}): EvalReportingPolicy {
+function testReportingPolicy(overrides: Partial<EvalReportingPolicy> = {}): EvalReportingPolicy {
   return {
     node_telemetry: true,
     heartbeat_interval_seconds: 60,
