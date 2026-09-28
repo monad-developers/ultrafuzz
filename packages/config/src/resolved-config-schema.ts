@@ -365,16 +365,3 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
       });
     }
   });
-
-export function assertResolvedConfigZod(
-  value: unknown,
-  label = "resolved configuration"
-): asserts value is ResolvedConfig {
-  const result = resolvedConfigZodSchema.safeParse(value);
-  if (result.success) return;
-  const summary = result.error.issues
-    .slice(0, 10)
-    .map((issue) => `${issue.path.join(".") || "/"}: ${issue.message}`)
-    .join("; ");
-  throw new Error(`${label} does not match ${RESOLVED_CONFIG_JSON_SCHEMA_ID}: ${summary}`);
-}

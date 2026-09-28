@@ -458,10 +458,8 @@ trusted local execution model remains unchanged.
 ## Redaction
 
 Run artifacts store redacted resolved config and a redaction manifest.
-Sensitive model values are redacted before persistence. Launch guards for
-literal redaction placeholders may fail before workflow launch when enabled,
-and manifest entries mark values that must be restored from current config
-before launch.
+Sensitive model values are redacted before persistence. The manifest records
+which values were redacted; no command restores values from it.
 
 ## Eval suites
 
