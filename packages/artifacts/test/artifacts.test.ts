@@ -1119,11 +1119,21 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
   );
 
   // The positive rules must not fire on ordinary contract output either: a
-  // qualified identifier with three long dotted segments was JWT-shaped until
-  // the rule required the eyJ header and payload.
+  // Foundry test deriving and signing with Anvil's published mnemonic and
+  // account (0) key, and a qualified identifier with three long dotted
+  // segments (JWT-shaped until the rule required the eyJ header and payload).
   assert.doesNotThrow(() =>
     assertArtifactPublicationsContainNoSecrets(
       new Map([
+        [
+          "generated-tests/AnvilSigner.t.sol",
+          Buffer.from(
+            'string memory mnemonic = "test test test test test test test test test test test junk";\n' +
+              "uint256 privateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;\n" + // gitleaks:allow -- public Anvil dev key fixture for the redaction tests
+              "assertEq(vm.deriveKey(mnemonic, 0), privateKey);\n",
+            "utf8"
+          )
+        ],
         [
           "setup/call-graph.md",
           Buffer.from(
