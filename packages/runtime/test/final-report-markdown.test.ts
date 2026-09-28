@@ -27,6 +27,7 @@ test("final reports retain artifact warnings and their context without changing 
 
 import { validateSafeId, type ReportCompletion } from "@ultrafuzz/artifacts";
 import { redactSecretsInText } from "@ultrafuzz/security";
+import { fromMarkdown } from "mdast-util-from-markdown";
 
 import {
   isDirectiveConformingFinalReportMarkdown,
@@ -1405,4 +1406,90 @@ test("goal search coverage is rendered into the Markdown report instead of only 
     /\*\*No targeted goal search coverage: this run recorded no targeted goal search lanes\.\*\*/u
   );
   assert.match(roamingOnly.markdown, /^No issues were reported, but no targeted goal search lane ran, /mu);
+});
+
+interface MarkdownNode {
+  type: string;
+  url?: string;
+  value?: string;
+  children?: MarkdownNode[];
+}
+
+/** Flatten the CommonMark tree so assertions describe what a reader sees, not escape bytes. */
+function markdownNodes(markdown: string): Array<{ type: string; url?: string; text: string }> {
+  const text = (node: MarkdownNode): string => node.value ?? (node.children ?? []).map(text).join("");
+  const nodes: Array<{ type: string; url?: string; text: string }> = [];
+  const walk = (node: MarkdownNode): void => {
+    nodes.push({ type: node.type, ...(node.url === undefined ? {} : { url: node.url }), text: text(node) });
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(fromMarkdown(markdown) as unknown as MarkdownNode);
+  return nodes;
+}
+
+test("upstream prose with link or image syntax renders as literal text", () => {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  const description =
+    "See [the spec](https://example.com/spec), ![flow](https://example.com/flow.png), " +
+    "[THREAT_MODEL.md](../threat-model/THREAT_MODEL.md), and handlers[id](payload).";
+  issue.description = description;
+  (issue.proof_of_concept as Record<string, unknown>).scenario = ["Call handlers[id](payload).", "Observe it."];
+  const before = structuredClone(report);
+
+  const projection = projectCanonicalFinalReport(report);
+  assert.deepEqual(projection.report, before);
+  const nodes = markdownNodes(projection.markdown);
+  assert.deepEqual(
+    nodes.filter((node) => node.type === "image" || (node.type === "link" && !node.url?.startsWith("#"))),
+    []
+  );
+  assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === description));
+  assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === "Call handlers[id](payload)."));
+});
+
+test("issue titles with non-ASCII letters render with index anchors that resolve to their headings", () => {
+  // GitHub heading slugs: lowercase, keep letters, marks, digits, spaces, "-" and "_", then spaces become "-".
+  const slug = (text: string): string =>
+    text
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
+      .replace(/\s/gu, "-");
+  for (const title of ["Δ-neutral rebalance drifts", "Naïve [share] math"]) {
+    const report = renderableReport();
+    const [issue] = report.issues as Array<Record<string, unknown>>;
+    if (issue === undefined) throw new Error("missing issue fixture");
+    issue.title = `[L-01] - ${title}`;
+    for (const entry of report.property_provenance as Array<Record<string, unknown>>) entry.title = issue.title;
+
+    const nodes = markdownNodes(projectCanonicalFinalReport(report).markdown);
+    const headings = new Set(nodes.filter((node) => node.type === "heading").map((node) => slug(node.text)));
+    const anchors = nodes.filter((node) => node.type === "link" && node.url?.startsWith("#"));
+    assert.ok(anchors.length > 0, title);
+    for (const anchor of anchors) assert.ok(headings.has(anchor.url?.slice(1) ?? ""), `${title}: ${anchor.url ?? ""}`);
+  }
+});
+
+test("public projection keeps a redacted path followed by a parenthesis as literal text", () => {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.description = "The reproducer at /srv/customer/private/Repro.t.sol(line 12) fails.";
+
+  const published = projectPublicCanonicalFinalReport(report);
+  assert.equal(
+    (published.report.issues as Array<Record<string, unknown>>)[0]?.description,
+    "The reproducer at [redacted-path](line 12) fails."
+  );
+  const nodes = markdownNodes(published.markdown);
+  assert.equal(
+    nodes.some((node) => node.type === "link" && !node.url?.startsWith("#")),
+    false
+  );
+  assert.ok(
+    nodes.some((node) => node.type === "paragraph" && node.text === "The reproducer at [redacted-path](line 12) fails.")
+  );
+  assertPublicProjectionFixedPoint(published);
 });
