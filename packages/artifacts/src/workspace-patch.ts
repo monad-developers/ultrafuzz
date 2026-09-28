@@ -10,7 +10,22 @@ export const WORKSPACE_PATCH_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:wo
 
 const gitObjectId = z.string().regex(/^[0-9a-f]{40,64}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
+// The 128-character bound is part of the published ultrafuzz.workspace-patch.v1
+// JSON schema; loosening it requires a schema version change.
+const WORKSPACE_PATCH_SEGMENT_MAX_LENGTH = 128;
 const WORKSPACE_PATCH_SEGMENT = /^[A-Za-z0-9._-]{1,128}$/u;
+const WORKSPACE_PATCH_SEGMENT_CHARACTER = /^[A-Za-z0-9._-]$/u;
+
+function unsafeWorkspacePatchSegmentReason(segment: string): string {
+  if (segment === "." || segment === "..") return "is a relative directory reference";
+  const characters = segment.match(/./gsu) ?? [];
+  if (characters.length === 0) return "is empty";
+  if (characters.length > WORKSPACE_PATCH_SEGMENT_MAX_LENGTH) {
+    return `is ${String(characters.length)} characters long (maximum ${String(WORKSPACE_PATCH_SEGMENT_MAX_LENGTH)})`;
+  }
+  const disallowed = characters.find((character) => !WORKSPACE_PATCH_SEGMENT_CHARACTER.test(character));
+  return `contains disallowed character ${JSON.stringify(disallowed)} (allowed: A-Z, a-z, 0-9, ".", "_", "-")`;
+}
 
 /** Normalize a target-relative Git path while allowing ordinary dotfiles. */
 export function normalizeWorkspacePatchPath(value: string, label = "workspace patch file path"): string {
@@ -26,7 +41,9 @@ export function normalizeWorkspacePatchPath(value: string, label = "workspace pa
   }
   for (const segment of normalized.split("/")) {
     if (!WORKSPACE_PATCH_SEGMENT.test(segment) || segment === "." || segment === "..") {
-      throw new Error(`${label} contains an unsafe path segment`);
+      throw new Error(
+        `${label} ${JSON.stringify(value)} contains an unsafe path segment ${JSON.stringify(segment)}: segment ${unsafeWorkspacePatchSegmentReason(segment)}`
+      );
     }
   }
   return normalized;
