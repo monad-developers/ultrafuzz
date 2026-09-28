@@ -124,7 +124,10 @@ ultrafuzz validate [--project <path>] [--audit-profile <name>] \
 
 Validation covers typed TOML config, `.ultrafuzz/topology.yml`, project prompt
 copies, safe paths, reference nodes, agent references, and trusted local
-execution posture. It does not launch agents.
+execution posture. It does not launch agents. A project prompt that differs
+from the built-in prompt at the same path sets the prompts posture to `warn`
+with one `PROMPT_DIFFERS_FROM_BUILT_IN` warning per file; warnings do not fail
+validation.
 
 ## JSON Validate
 

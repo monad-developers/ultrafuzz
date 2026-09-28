@@ -14,6 +14,13 @@ After `ultrafuzz init`, editable prompts live under:
 Use the [prompt catalog](../reference/prompt-catalog.md) to find every shipped
 workflow prompt and its role before choosing what to customize.
 
+Runs use these project copies, and `ultrafuzz init` keeps them unless you pass
+`--force`, which also overwrites `ultrafuzz.toml` and the topology. After an
+upgrade a copy therefore keeps the text of the release that scaffolded it.
+`ultrafuzz validate` warns about every project prompt that differs from the
+built-in prompt at the same path. To take the built-in version of a prompt,
+delete your copy and rerun `ultrafuzz init`.
+
 Prompt frontmatter may include only identity and display metadata:
 
 ```md

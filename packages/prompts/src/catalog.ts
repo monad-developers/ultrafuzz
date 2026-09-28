@@ -88,6 +88,20 @@ export function loadPromptCatalog(options: LoadPromptCatalogOptions = {}): Promp
   };
 }
 
+/**
+ * Relative paths of project prompts whose bytes differ from the built-in prompt at the same path. Runs
+ * use the project copy and `ultrafuzz init` keeps it unless run with `--force`, so after an upgrade such
+ * a copy is either a deliberate edit or an older release's prompt.
+ */
+export function projectPromptsDifferingFromBuiltIns(catalog: PromptCatalog): string[] {
+  const builtInMarkdown = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset.markdown]));
+  return [...catalog.entries.values()]
+    .filter((entry) => entry.source === "project" && builtInMarkdown.has(entry.relativePath))
+    .filter((entry) => builtInMarkdown.get(entry.relativePath) !== entry.markdown)
+    .map((entry) => entry.relativePath)
+    .sort();
+}
+
 export function getPrompt(catalog: PromptCatalog, id: string): PromptCatalogEntry {
   const entry = catalog.entries.get(id);
   if (!entry) {
