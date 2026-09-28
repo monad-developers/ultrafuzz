@@ -113,7 +113,11 @@ export function planDynamicExpansionRetryArchive(input: {
     );
   }
   const expectedEntries = new Set(manifests.map((manifest) => `${manifest.group_node_id}.json`));
-  const unexpectedEntries = fs.readdirSync(manifestDir).filter((entry) => !expectedEntries.has(entry));
+  // A dot entry is never a manifest (readExpansionManifests skips it): an interrupted publication's
+  // temporary file, or the `.expansion.lock` older builds left behind. It moves with the directory.
+  const unexpectedEntries = fs
+    .readdirSync(manifestDir)
+    .filter((entry) => !entry.startsWith(".") && !expectedEntries.has(entry));
   if (unexpectedEntries.length > 0) {
     throw dynamicError(
       "DYNAMIC_RETRY_EXPANSION_INVALID",

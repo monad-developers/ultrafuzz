@@ -363,21 +363,21 @@ test("explicit source retry archives a complete expansion generation and rejects
   ]);
 
   // Unrecognized manifest state is refused before anything is reset or moved.
-  const locked = expansionFixture({ runId: "retry-archive-locked", items: [item(0)] });
-  locked.invoke();
-  fs.writeFileSync(path.join(locked.runRoot, "dynamic-expansions", ".expansion.lock"), "other-owner\n", "utf8");
+  const unrecognized = expansionFixture({ runId: "retry-archive-unrecognized", items: [item(0)] });
+  unrecognized.invoke();
+  fs.writeFileSync(path.join(unrecognized.runRoot, "dynamic-expansions", "notes.txt"), "operator note\n", "utf8");
   assert.throws(
     () =>
       planDynamicExpansionRetryArchive({
-        projectRoot: locked.runRoot,
-        runRoot: locked.runRoot,
+        projectRoot: unrecognized.runRoot,
+        runRoot: unrecognized.runRoot,
         sourceNodeIds: ["node:planner"]
       }),
     (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_RETRY_EXPANSION_INVALID"
   );
-  assert.deepEqual(fs.readdirSync(path.join(locked.runRoot, "dynamic-expansions")).sort(), [
-    ".expansion.lock",
-    "fanout.json"
+  assert.deepEqual(fs.readdirSync(path.join(unrecognized.runRoot, "dynamic-expansions")).sort(), [
+    "fanout.json",
+    "notes.txt"
   ]);
 });
 
@@ -496,7 +496,7 @@ test("explicit source retry re-derives the base runtime controls after archiving
   );
 });
 
-test("a lock file left by a killed materializer does not block expansion", () => {
+test("a lock file left by a killed materializer blocks neither expansion nor a source retry", () => {
   // Earlier builds serialized every expansion read behind this file and never reclaimed it, so a
   // process killed while holding it failed every later render and admission check (#1142).
   const fixture = expansionFixture({ runId: "stale-lock", items: [item(0)] });
@@ -506,6 +506,15 @@ test("a lock file left by a killed materializer does not block expansion", () =>
   const created = fixture.invoke();
   assert.equal(created.items.length, 1);
   assert.deepEqual(fixture.invoke(), created);
+  const plan = planDynamicExpansionRetryArchive({
+    projectRoot: fixture.runRoot,
+    runRoot: fixture.runRoot,
+    sourceNodeIds: ["node:planner"]
+  });
+  assert.deepEqual(
+    plan?.manifests.map((manifest) => manifest.group_node_id),
+    ["fanout"]
+  );
 });
 
 test("runtime materialization preserves required inputs and allows partial review joins", () => {
