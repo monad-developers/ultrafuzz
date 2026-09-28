@@ -157,8 +157,8 @@ variant and use the separate GPT-5.6 Sol `xhigh` judge. The benchmark adapter
 converts either lane into the normal `EvalSuiteSpec` and can project one runner
 for an isolated Modal pair while retaining the fixed judge.
 
-After a generation finishes and has been scored, append it and regenerate all
-nine SVG charts in one transaction:
+After a generation finishes and has been scored, append it and regenerate the
+three README SVG charts in one transaction:
 
 ```bash
 ultrafuzz eval history <eval-run-id> \
