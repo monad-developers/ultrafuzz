@@ -330,6 +330,16 @@ function instantiateDynamicGraphNode(input: {
   };
 }
 
+/**
+ * Continuation lets independent tasks settle; it does not make a strategy's required inputs
+ * optional. Only the review group reconciles partial results, so only its tasks treat a continuing
+ * producer's output as optional (#1120). The compiler and dynamic lowering share this one rule; the
+ * task-manifest gate checks only that optional inputs come from continuing producers.
+ */
+export function reconcilesPartialResults(task: Pick<CompiledSmithersTask, "metadata">): boolean {
+  return task.metadata.node.group === "review";
+}
+
 function lowerTaskDynamicDependencies(
   task: CompiledSmithersTask,
   groups: readonly CompiledSmithersDynamicGroup[],
@@ -370,7 +380,7 @@ function lowerTaskDynamicDependencies(
     dependencies.push(...generated.map((candidate) => candidate.attemptId));
     dependencySmithersNodeIds.push(...generated.map((candidate) => candidate.verifierSmithersNodeId));
     dependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
-    if (group.continueOnFail && task.metadata.node.group === "review") {
+    if (group.continueOnFail && reconcilesPartialResults(task)) {
       optionalDependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
     }
     concreteNodeIds.push(...manifest.items.map((item) => item.node_id));

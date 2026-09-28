@@ -69,6 +69,7 @@ import {
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
 import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
+import { reconcilesPartialResults } from "./dynamic-runtime.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -4077,12 +4078,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const nonBlockingAttemptIdSet = new Set(nonBlockingAttemptIds);
   const tasks = compiledTasks.map((task) => ({
     ...task,
-    // Continuation lets independent tasks settle. It does not make a strategy's
-    // required inputs optional; only the review group reconciles partial results.
-    optionalDependencyArtifactDirs:
-      task.metadata.node.group === "review"
-        ? task.dependencyArtifactDirs.filter((directory) => nonBlockingAttemptIdSet.has(path.basename(directory)))
-        : []
+    optionalDependencyArtifactDirs: reconcilesPartialResults(task)
+      ? task.dependencyArtifactDirs.filter((directory) => nonBlockingAttemptIdSet.has(path.basename(directory)))
+      : []
   }));
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });

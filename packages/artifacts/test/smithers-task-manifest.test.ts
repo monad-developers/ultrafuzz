@@ -428,7 +428,7 @@ test("rejects missing graph coverage, extra tasks, and graph dependency drift", 
   );
 });
 
-test("only review tasks treat inputs from continuing groups as optional", () => {
+test("optional task inputs must come from producers that continue on failure", () => {
   const continuingGraph = graph();
   continuingGraph.groups = {
     specialists: { defaults: { failure_policy: "continue" } },
@@ -482,21 +482,27 @@ test("only review tasks treat inputs from continuing groups as optional", () => 
       withDependencies(dependent("reviewer", reviewerOptional), "review")
     ]);
 
-  // A continuing specialist's own inputs stay required (#1132's stateful topology).
-  assert.doesNotThrow(() =>
-    assertSmithersTaskManifestMatchesPlannedGraph(current([], ["/runs/run-1/artifacts/producer"]), continuingGraph)
-  );
+  const producer = "/runs/run-1/artifacts/producer";
+
+  // Which consumers opt in is compiler policy, so the gate accepts every shape it has emitted: only
+  // the review task opts in (#1120), every consumer opts in (before #1120), or a review task keeps the
+  // input required (dynamic lowering of an empty expansion keeps its source required).
+  const emittedShapes: Array<[consumerOptional: string[], reviewerOptional: string[]]> = [
+    [[], [producer]],
+    [[producer], [producer]],
+    [[], []]
+  ];
+  for (const [consumerOptional, reviewerOptional] of emittedShapes) {
+    assert.doesNotThrow(() =>
+      assertSmithersTaskManifestMatchesPlannedGraph(current(consumerOptional, reviewerOptional), continuingGraph)
+    );
+  }
+  // A producer that halts on failure can never become optional.
+  const haltingGraph = structuredClone(continuingGraph);
+  haltingGraph.groups.specialists = {};
   assert.throws(
-    () =>
-      assertSmithersTaskManifestMatchesPlannedGraph(
-        current(["/runs/run-1/artifacts/producer"], ["/runs/run-1/artifacts/producer"]),
-        continuingGraph
-      ),
-    /"consumer" optional dependency artifact directories/u
-  );
-  assert.throws(
-    () => assertSmithersTaskManifestMatchesPlannedGraph(current([], []), continuingGraph),
-    /"reviewer" optional dependency artifact directories/u
+    () => assertSmithersTaskManifestMatchesPlannedGraph(current([], [producer]), haltingGraph),
+    /task "reviewer" marks dependency "producer" optional, but that producer does not continue on failure/u
   );
 });
 

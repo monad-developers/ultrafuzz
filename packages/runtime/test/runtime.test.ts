@@ -32,10 +32,12 @@ import {
   GOAL_PLAN_JSON_SCHEMA_ID,
   THREAT_MODEL_JSON_SCHEMA_ID,
   appendEvent,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
   manifestDigest,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -52,6 +54,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import {
   MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  loadAuditProfileCatalog,
   parseProjectConfigToml,
   parseResolvedConfigJsonBytes,
   resolveConfig,
@@ -10507,6 +10510,59 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
     assert.equal(body.includes("unavailable/"), false);
     fs.accessSync(expected, fs.constants.R_OK);
   }
+});
+
+test("every packaged audit profile compiles into a task plan the launch manifest gate accepts", async () => {
+  // #1140: after #1120 changed which inputs the compiler marks optional, this gate rejected the
+  // default, exhaustive, and invariant-only launches before any model ran.
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  const rejected: string[] = [];
+  try {
+    for (const auditProfile of Object.keys(loadAuditProfileCatalog().profiles)) {
+      const runId = `packaged-${auditProfile}`;
+      const plan = await planRun({ projectRoot: project, runId, env: {}, runtimeOverrides: { auditProfile } });
+      assert.ok(plan.ok && plan.value, `${auditProfile}: ${JSON.stringify(plan.diagnostics)}`);
+      const { graph, expanded_graph, layout, rendered_prompts, resolved_config } = plan.value;
+      const compiled = compileSmithersWorkflow({
+        projectRoot: project,
+        config: resolved_config,
+        graph: expanded_graph,
+        runLayout: layout,
+        workflowName: `ultrafuzz-${runId}`,
+        renderedPrompts: rendered_prompts
+      });
+      // Launch binds each planned node to its compiled tasks before it runs the gate.
+      for (const node of graph.nodes) {
+        const taskNodeIds = compiled.tasks
+          .filter((task) => task.concreteNodeId === node.id)
+          .map((task) => task.smithersNodeId);
+        const [primary] = taskNodeIds;
+        if (primary !== undefined) node.workflow = { node_id: primary, task_node_ids: taskNodeIds };
+      }
+      try {
+        assertSmithersTaskManifestMatchesPlannedGraph(
+          parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath)),
+          graph
+        );
+      } catch (error) {
+        rejected.push(`${auditProfile}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+  assert.deepEqual(rejected, []);
 });
 
 test("project and runtime topology paths override a profile topology atomically", async () => {
