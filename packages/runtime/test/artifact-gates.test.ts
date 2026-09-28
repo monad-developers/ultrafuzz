@@ -3900,6 +3900,81 @@ test("host aggregation intake keys a directly consumed dynamic producer by its s
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+test("host aggregation intake follows the sealed closure below a dynamic group's direct dependent", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-transitive-dynamic" });
+  const source = aggregationFixtureNode("goal-plan", {
+    outputs: [boundOutput("goal-plan.md", "ultrafuzz/nonempty-markdown@1", true)]
+  });
+  const { template, generated } = aggregationDynamicGoalNodes(source.id);
+  const join = aggregationFixtureNode("goal-join", {
+    group: "review",
+    dependsOn: [generated.id],
+    outputs: [boundOutput("goal-join.md", "ultrafuzz/nonempty-markdown@1", true)]
+  });
+  const strategy = aggregationFixtureNode("strategy-a", { group: "strategies" });
+  const unrelated = aggregationFixtureNode("strategy-z", { group: "strategies" });
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [join.id, strategy.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [source, template, generated, join, strategy, unrelated, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const sourceTask = sealedTaskForNode(layout, source);
+  const generatedTask = sealedTaskForNode(layout, generated, [sourceTask], AGGREGATION_DYNAMIC_STORAGE_ID);
+  const joinTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, join, [generatedTask]),
+    optionalDependencyArtifactDirs: [generatedTask.artifactDir]
+  };
+  const strategyTask = sealedTaskForNode(layout, strategy);
+  const unrelatedTask = sealedTaskForNode(layout, unrelated);
+  // Dynamic lowering extends only a group's direct dependents, so the sealed
+  // closure of this grandchild keeps its compile-time ancestors and never
+  // names the generated attempt that the lowered planned graph reaches.
+  const aggregationTaskWithClosure = (closure: readonly SmithersTaskManifestTask[]): SmithersTaskManifestTask => ({
+    ...smithersTaskForNode({
+      layout,
+      node: aggregationNode,
+      attemptId: aggregationNode.id,
+      dependencies: [joinTask.attemptId, strategyTask.attemptId],
+      dependencyArtifactDirs: closure.map((task) => task.artifactDir)
+    }),
+    optionalDependencyArtifactDirs: closure
+      .filter((task) => task.metadata.node.group === "strategies")
+      .map((task) => task.artifactDir)
+  });
+  const aggregationTask = aggregationTaskWithClosure([sourceTask, joinTask, strategyTask]);
+  const tasks = [sourceTask, generatedTask, joinTask, strategyTask, unrelatedTask, aggregationTask];
+  writeDeclaredArtifactNode(layout, sourceTask.attemptId, source.outputs, { "goal-plan.md": "# Goal plan\n" });
+  finalizeGeneratedTestsProducer(layout, generated, AGGREGATION_DYNAMIC_STORAGE_ID);
+  const strategySource = finalizeGeneratedTestsProducer(layout, strategy);
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, [strategySource]);
+  const admitted = [sourceTask.attemptId, joinTask.attemptId, strategyTask.attemptId];
+  const result = verifyAggregationAttempt(layout, aggregationTask, tasks, admitted);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // Only generated attempts may be absent; the closure still may not reach
+  // outside the planned ancestors.
+  const widenedTask = aggregationTaskWithClosure([sourceTask, joinTask, strategyTask, unrelatedTask]);
+  const widened = verifyAggregationAttempt(
+    layout,
+    widenedTask,
+    tasks.map((task) => (task === aggregationTask ? widenedTask : task)),
+    admitted
+  );
+  assert.equal(widened.ok, false);
+  assert.ok(
+    widened.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        `artifact ancestor closure does not match the exact planned set; unexpected: ${JSON.stringify(unrelatedTask.artifactDir)}`
+      )
+    ),
+    JSON.stringify(widened.diagnostics)
+  );
+});
+
 test("review lifecycle and strategy gates authenticate every dedupe, triage, and severity transition", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-review-lifecycle" });
   const artifactPaths = {

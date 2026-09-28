@@ -3279,13 +3279,19 @@ function assertExactSealedAttemptAuthority(
   }
 
   const ancestorNodeIds = plannedAncestorIds(graph, plannedConsumer);
-  const expectedAncestorAttempts = graph.nodes
-    .filter((node) => ancestorNodeIds.has(node.id))
-    .flatMap(plannedAttemptIdsForAuthority);
-  const expectedAncestorDirectories = expectedAncestorAttempts.map((attemptId) =>
-    getNodeArtifactDir(layout, attemptId)
-  );
   const actualAncestorDirectories = authority.task.dependencyArtifactDirs.map((directory) => path.resolve(directory));
+  const sealedAncestorDirectories = new Set(actualAncestorDirectories);
+  // Dynamic lowering extends only a group's direct dependents, so a deeper
+  // descendant's sealed closure omits the generated attempts the lowered graph
+  // reaches through them. Gate contexts read ancestors through the sealed
+  // closure, exactly as the in-workflow verifier admitted them.
+  const expectedAncestorDirectories = graph.nodes
+    .filter((node) => ancestorNodeIds.has(node.id))
+    .flatMap((node) =>
+      plannedAttemptIdsForAuthority(node)
+        .map((attemptId) => getNodeArtifactDir(layout, attemptId))
+        .filter((directory) => node.dynamic_generated === undefined || sealedAncestorDirectories.has(directory))
+    );
   assertExactStringSet(
     actualAncestorDirectories,
     expectedAncestorDirectories,
