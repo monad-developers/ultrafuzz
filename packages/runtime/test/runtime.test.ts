@@ -134,6 +134,9 @@ import {
 const runningUnderBun = typeof process.versions.bun === "string";
 const BUN_ADAPTER_TEST_PREFIX = "Bun adapter contract: ";
 const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_000 }), BUN_ADAPTER_TEST_PREFIX);
+// Generated adapters load their route helper from the runtime module the
+// rendered workflow names; point them at this build.
+if (runningUnderBun) process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/index.js", import.meta.url).href;
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
   "SMITHERS_FAKE_CLOUD_ENV_LOG",
@@ -3899,7 +3902,7 @@ test("init does not modify a regular file swapped after the anchored open", { co
 });
 
 bunAdapterTest(
-  "generated Codex commands accept a sealed ambient proxy and reject drift",
+  "generated Codex commands ignore ambient proxies and reject endpoint drift",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -3917,6 +3920,7 @@ bunAdapterTest(
         "http_proxy",
         "https_proxy",
         "no_proxy",
+        "OPENAI_BASE_URL",
         "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
         "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
       ],
@@ -3925,23 +3929,33 @@ bunAdapterTest(
     process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
     process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
     try {
+      const config = { execution: { mode: "local" }, agents: {} } as never;
       process.env.HTTPS_PROXY = "https://proxy.a.invalid";
-      const hash = crypto
-        .createHash("sha256")
-        .update(
-          JSON.stringify({ agent: "CodexAgent", config: null, route: [["HTTPS_PROXY", process.env.HTTPS_PROXY]] })
-        )
-        .digest("hex");
-      fs.writeFileSync(authority, `{"required_source_destinations":["model:codex-route-${hash}"]}`, "utf8");
-      const build = () =>
-        new CompatibleCodexAgent().buildCommand({ prompt: "Contract only", cwd: project, options: {} });
-      const accepted = await build();
-      await accepted.cleanup?.();
+      process.env.OPENAI_BASE_URL = "https://gateway.a.invalid/v1";
+      fs.writeFileSync(
+        authority,
+        JSON.stringify({ required_source_destinations: [modelDestination("CodexAgent", config, process.env)] })
+      );
+      const build = async () => {
+        const command = await new CompatibleCodexAgent().buildCommand({
+          prompt: "Contract only",
+          cwd: project,
+          options: {}
+        });
+        await command.cleanup?.();
+      };
+      await build();
+      // A proxy does not change which provider receives the traffic, so a run
+      // resumed from a shell with another proxy, or none, keeps its route.
+      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
+      await build();
+      delete process.env.HTTPS_PROXY;
+      await build();
       assert.throws(
         () =>
           workflowControlChildEnvironment(
             {
-              HTTPS_PROXY: "https://proxy.b.invalid",
+              OPENAI_BASE_URL: "https://gateway.b.invalid/v1",
               ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(project, "forged.json")
             },
             process.env,
@@ -3949,7 +3963,7 @@ bunAdapterTest(
           ),
         /provider route changed/u
       );
-      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
+      process.env.OPENAI_BASE_URL = "https://gateway.b.invalid/v1";
       await assert.rejects(build(), /provider route changed/u);
     } finally {
       for (const name of names) {
@@ -4031,9 +4045,21 @@ bunAdapterTest("planned routes equal final generated-adapter validation", { time
         workflowControlChildEnvironment({}, { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" }, { agent: "ClaudeAgent" }),
       /provider route changed/u
     );
+    // Once Bedrock is selected, its AWS settings are part of the route.
+    const bedrockEnv = { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" },
+      bedrockDestination = modelDestination("ClaudeAgent", config, bedrockEnv);
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [bedrockDestination] }));
+    assert.doesNotThrow(() => workflowControlChildEnvironment({}, bedrockEnv, { agent: "ClaudeAgent" }));
+    assert.throws(
+      () => workflowControlChildEnvironment({}, { ...bedrockEnv, AWS_REGION: "eu-west-1" }, { agent: "ClaudeAgent" }),
+      /provider route changed/u
+    );
     assert.equal(codexDestination.startsWith("model:codex-route-"), true);
     assert.equal(openRouterDestination, "model:openrouter");
-    assert.equal(claudeDestination.startsWith("model:claude-route-"), true);
+    // AWS_REGION alone routes nothing: Claude Code reads it only for an
+    // AWS-hosted platform such as Bedrock.
+    assert.equal(claudeDestination, "model:anthropic");
+    assert.equal(bedrockDestination.startsWith("model:claude-route-"), true);
   } finally {
     for (const name of names) {
       const value = saved[name];
@@ -4072,6 +4098,135 @@ bunAdapterTest(
       { agent: "ClaudeAgent", configDir: claudeHome }
     );
     assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
+  }
+);
+
+bunAdapterTest(
+  "generated Codex adapter keeps its acknowledged route when the CLI rewrites unrelated config",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const homes = temporaryRoot("ufz-codex-rewrite-"),
+      codexHome = path.join(homes, "codex", "configured"),
+      configPath = path.join(codexHome, "config.toml"),
+      snapshot = path.join(project, "route-snapshot"),
+      authority = path.join(snapshot, "controls/data-governance.json"),
+      names = [
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "OPENAI_BASE_URL",
+        "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+        "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+      ],
+      saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    const providerConfig = [
+      'model = "gpt-5.5"',
+      'model_provider = "gateway"',
+      "",
+      "[model_providers.gateway]",
+      'name = "Gateway"',
+      'base_url = "https://gateway.invalid/v1"',
+      'env_key = "GATEWAY_API_KEY"',
+      'wire_api = "responses"',
+      ""
+    ].join("\n");
+    fs.writeFileSync(
+      configPath,
+      `${providerConfig}\n[marketplaces.openai-bundled]\nlast_updated = "2026-08-25T13:35:06Z"\n`
+    );
+    for (const name of names) Reflect.deleteProperty(process.env, name);
+    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+    try {
+      const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
+        destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
+      assert.match(destination, /^model:codex-route-/u);
+      fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] }));
+      const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+      const build = async () => {
+        const command = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({
+          prompt: "route",
+          cwd: project,
+          options: {}
+        });
+        await command.cleanup?.();
+      };
+      await build();
+      // What the Codex CLI itself writes while running: marketplace refresh
+      // timestamps and project trust levels (#908).
+      fs.writeFileSync(
+        configPath,
+        `${providerConfig}\n[marketplaces.openai-bundled]\nlast_updated = "2026-09-28T00:00:00Z"\n\n` +
+          `[projects."/workspace/target"]\ntrust_level = "trusted"\n`
+      );
+      await build();
+      fs.writeFileSync(configPath, providerConfig.replace("gateway.invalid", "other-gateway.invalid"));
+      await assert.rejects(build(), /provider route changed/u);
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated Claude route ignores ambient cloud settings until a cloud platform is selected",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const snapshot = path.join(project, "route-snapshot"),
+      authority = path.join(snapshot, "controls", "data-governance.json");
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    const config = { execution: { mode: "local" }, agents: {} } as never,
+      env = {
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-claude-ambient-"),
+        AWS_PROFILE: "operator-a",
+        GOOGLE_CLOUD_PROJECT: "project-a",
+        // Foundry's forge profile, not Microsoft Foundry.
+        FOUNDRY_PROFILE: "ci",
+        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
+      };
+    fs.writeFileSync(
+      authority,
+      JSON.stringify({ required_source_destinations: [modelDestination("ClaudeAgent", config, env)] })
+    );
+    // A run resumed from another shell sees different, unused cloud settings.
+    assert.doesNotThrow(() =>
+      workflowControlChildEnvironment(
+        {},
+        { ...env, AWS_PROFILE: "operator-b", GOOGLE_CLOUD_PROJECT: "project-b", FOUNDRY_PROFILE: "default" },
+        { agent: "ClaudeAgent" }
+      )
+    );
+    const vertex = { ...env, CLAUDE_CODE_USE_VERTEX: "1" };
+    fs.writeFileSync(
+      authority,
+      JSON.stringify({ required_source_destinations: [modelDestination("ClaudeAgent", config, vertex)] })
+    );
+    assert.doesNotThrow(() =>
+      workflowControlChildEnvironment({}, { ...vertex, AWS_PROFILE: "operator-b" }, { agent: "ClaudeAgent" })
+    );
+    assert.throws(
+      () =>
+        workflowControlChildEnvironment({}, { ...vertex, GOOGLE_CLOUD_PROJECT: "project-b" }, { agent: "ClaudeAgent" }),
+      /provider route changed/u
+    );
   }
 );
 

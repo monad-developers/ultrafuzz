@@ -93,6 +93,20 @@ remain fail-closed pending the separate R-26 disclosure authorization. Public
 Modal runs record `cloud:modal`. These controls are not a sandbox or egress
 filter: YOLO agents remain unrestricted.
 
+A model destination is `model:<provider>`, or `model:<agent>-route-<digest>`
+when any route-bearing input is present. The digest covers only that input: the
+agent's endpoint and platform environment variables, the provider that a Codex
+`config.toml` selects through `model_provider` (its id, `base_url`, `wire_api`,
+and `env_key`), Claude `settings.json` credential helpers and routing `env`
+entries, and, for Kimi subscription auth, the whole Kimi `config.toml`.
+Claude's `AWS_`, `GOOGLE_`/`CLOUD_ML_`, and `AZURE_`/`FOUNDRY_` variables count
+only while a `CLAUDE_CODE_USE_*` flag for that platform is set in the environment
+or in `settings.json` `env` (for example `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, or `CLAUDE_CODE_USE_FOUNDRY`). Proxy variables and a CLI's own rewrites of
+unrelated config sections do not change the route. Every agent
+invocation recomputes the destination with the same runtime function and fails
+if it no longer matches an acknowledged one.
+
 ## Production dependency advisories
 
 CI and release validation run `pnpm security:dependency-advisories`. The gate
