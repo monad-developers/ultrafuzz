@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
-import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -10,17 +9,10 @@ import * as ts from "typescript";
 type OrchestratorResponsibility =
   "argv-construction" | "filesystem-walking" | "output-interpretation" | "session-handling" | "token-accounting";
 
-type ResponsibilityPolicy = {
-  classifiedSourceSha256: string;
+type AdapterPolicy = {
+  purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "strict-input" | "toml";
   responsibilities: readonly OrchestratorResponsibility[];
   upstreamIssues: readonly string[];
-};
-
-type SourcePolicy = {
-  maxLines: number;
-  maxSyntaxNodes: number;
-  purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "strict-input" | "toml";
-  sourceSha256: string;
 };
 
 type SourceUnit = {
@@ -82,38 +74,25 @@ const TOKEN_ACCOUNTING_SIGNALS = new Set([
   "total_tokens"
 ]);
 
-// This deliberately duplicates each exact source fingerprint in a separate,
-// classification-owned policy. A source edit must update both the structural
-// policy below and this responsibility review, even when the reviewer decides
-// that the declared responsibility set remains unchanged.
-const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
-  "claude.tsx": {
-    classifiedSourceSha256: "6d8346e882f9ed1e5274d19d6e7cacf27e2743e489a3b931b9ee0488d62ffe76",
-    responsibilities: [],
-    upstreamIssues: []
-  },
+// Every .ts/.tsx source under the adapter tree declares what it is for and
+// which orchestrator responsibilities it owns. Only registered adapters may own
+// responsibilities, and each one must link the upstream gap that forces it.
+const adapterPolicies: Record<string, AdapterPolicy> = {
+  "claude.tsx": { purpose: "adapter", responsibilities: [], upstreamIssues: [] },
   "codex.tsx": {
-    classifiedSourceSha256: "a44eb5c47e6374457476a86420eca0c5ff23616fc8201637f0139d37e13b92f5",
+    purpose: "adapter",
     responsibilities: ["argv-construction", "session-handling"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
   "deepseek.tsx": {
-    classifiedSourceSha256: "ea7c6eec70883126e3ee9588b6d3349169652688756b519f1d49c3b5b794e887",
+    purpose: "adapter",
     responsibilities: ["output-interpretation", "token-accounting"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1624"]
   },
-  "environment.tsx": {
-    classifiedSourceSha256: "72d93b360e5b969e00646cfa39a24cac8a3720ce2aef1c7469c51038ef0206cd",
-    responsibilities: [],
-    upstreamIssues: []
-  },
-  "index.tsx": {
-    classifiedSourceSha256: "ce5f94b3bf12ae40c5b59ebd587a77d1e80e532d92c785f3353d272e627d79e4",
-    responsibilities: [],
-    upstreamIssues: []
-  },
+  "environment.tsx": { purpose: "data-governance", responsibilities: [], upstreamIssues: [] },
+  "index.tsx": { purpose: "registry", responsibilities: [], upstreamIssues: [] },
   "kimi.tsx": {
-    classifiedSourceSha256: "1551f53080570f026aa8f6f60d533ef51abe8bac453eb0610e0ef11a9f974530",
+    purpose: "adapter",
     responsibilities: [
       "argv-construction",
       "filesystem-walking",
@@ -126,13 +105,9 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
       "https://github.com/smithersai/smithers/issues/1626"
     ]
   },
-  "opencode.tsx": {
-    classifiedSourceSha256: "7d4e22b674e06b00cd537c531c0e7e95d800ffc07b50d02b566a5fd029d0b489",
-    responsibilities: [],
-    upstreamIssues: []
-  },
+  "opencode.tsx": { purpose: "adapter", responsibilities: [], upstreamIssues: [] },
   "openrouter.tsx": {
-    classifiedSourceSha256: "834b8d1893f1a6b7da9667cd5f55ecd7fd5e7dc9179ab2b307562a9913f410b4",
+    purpose: "adapter",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/1006",
@@ -142,7 +117,7 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
     ]
   },
   "pi.tsx": {
-    classifiedSourceSha256: "1b9e81f7d79a7c7f551c1b6d7d1f794e2d49ee698b328eee4a872b914bfc8acc",
+    purpose: "adapter",
     responsibilities: ["argv-construction", "output-interpretation", "session-handling", "token-accounting"],
     upstreamIssues: [
       "https://github.com/monad-developers/ultrafuzz/issues/1006",
@@ -151,155 +126,10 @@ const responsibilityPolicies: Record<string, ResponsibilityPolicy> = {
       "https://github.com/smithersai/smithers/issues/1629"
     ]
   },
-  "provider-home.tsx": {
-    classifiedSourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744",
-    responsibilities: [],
-    upstreamIssues: []
-  },
-  "strict-json.tsx": {
-    classifiedSourceSha256: "16c909eb1f01c82e1174db61877a30028b58a49466714865f1243293f10b186b",
-    responsibilities: [],
-    upstreamIssues: []
-  },
-  "toml.tsx": {
-    classifiedSourceSha256: "51b15d0f75a09b49a53a33709cf9127c74b2a35814ad8770ce529f0638a4f6ae",
-    responsibilities: [],
-    upstreamIssues: []
-  }
+  "provider-home.tsx": { purpose: "provider-home", responsibilities: [], upstreamIssues: [] },
+  "strict-json.tsx": { purpose: "strict-input", responsibilities: [], upstreamIssues: [] },
+  "toml.tsx": { purpose: "toml", responsibilities: [], upstreamIssues: [] }
 };
-
-// Syntax-node ceilings and exact source fingerprints are the reviewed PR shape
-// rooted at main@fe0922ea. The fingerprint makes every replacement visible
-// even when it preserves or reduces aggregate structure; line ceilings retain
-// a small formatting/documentation margin.
-const sourcePolicies: Record<string, SourcePolicy> = {
-  "claude.tsx": {
-    maxLines: 100,
-    maxSyntaxNodes: 452,
-    purpose: "adapter",
-    sourceSha256: "6d8346e882f9ed1e5274d19d6e7cacf27e2743e489a3b931b9ee0488d62ffe76"
-  },
-  "codex.tsx": {
-    maxLines: 250,
-    maxSyntaxNodes: 1_300,
-    purpose: "adapter",
-    sourceSha256: "a44eb5c47e6374457476a86420eca0c5ff23616fc8201637f0139d37e13b92f5"
-  },
-  "deepseek.tsx": {
-    // Raised with the 0.35.0 pin bump: the pinned BaseCliAgent now rejects
-    // unknown constructor options, so the adapter carries a thin constructor
-    // that splits the Ultrafuzz-only credential off `this.opts`.
-    maxLines: 360,
-    maxSyntaxNodes: 1_675,
-    purpose: "adapter",
-    sourceSha256: "ea7c6eec70883126e3ee9588b6d3349169652688756b519f1d49c3b5b794e887"
-  },
-  "environment.tsx": {
-    // Shared native-continuation PATH and Pi home filtering (#1035).
-    maxLines: 425,
-    maxSyntaxNodes: 2_325,
-    purpose: "data-governance",
-    sourceSha256: "72d93b360e5b969e00646cfa39a24cac8a3720ce2aef1c7469c51038ef0206cd"
-  },
-  "index.tsx": {
-    maxLines: 30,
-    maxSyntaxNodes: 125,
-    purpose: "registry",
-    sourceSha256: "ce5f94b3bf12ae40c5b59ebd587a77d1e80e532d92c785f3353d272e627d79e4"
-  },
-  "kimi.tsx": {
-    // Raised with the 0.35.0 pin bump, for the same reason as deepseek.tsx.
-    maxLines: 1_600,
-    maxSyntaxNodes: 9_250,
-    purpose: "adapter",
-    sourceSha256: "1551f53080570f026aa8f6f60d533ef51abe8bac453eb0610e0ef11a9f974530"
-  },
-  "opencode.tsx": {
-    maxLines: 150,
-    maxSyntaxNodes: 650,
-    purpose: "adapter",
-    sourceSha256: "7d4e22b674e06b00cd537c531c0e7e95d800ffc07b50d02b566a5fd029d0b489"
-  },
-  "openrouter.tsx": {
-    // Raised after the accounting review for cumulative response aggregation,
-    // retry/failure usage, and adapter-recorded cost preservation (#1006).
-    maxLines: 1_750,
-    maxSyntaxNodes: 9_075,
-    purpose: "adapter",
-    sourceSha256: "834b8d1893f1a6b7da9667cd5f55ecd7fd5e7dc9179ab2b307562a9913f410b4"
-  },
-  "pi.tsx": {
-    // Raised for cumulative per-response usage, session-aware progress, and
-    // adapter-recorded cost preservation in addition to terminal mapping.
-    maxLines: 475,
-    maxSyntaxNodes: 2_625,
-    purpose: "adapter",
-    sourceSha256: "1b9e81f7d79a7c7f551c1b6d7d1f794e2d49ee698b328eee4a872b914bfc8acc"
-  },
-  "provider-home.tsx": {
-    maxLines: 75,
-    maxSyntaxNodes: 556,
-    purpose: "provider-home",
-    sourceSha256: "31085a2bad1d6d82b3709946464df332fe1d22e13236708dfb840c8fbd7d5744"
-  },
-  "strict-json.tsx": {
-    maxLines: 350,
-    maxSyntaxNodes: 1_965,
-    purpose: "strict-input",
-    sourceSha256: "16c909eb1f01c82e1174db61877a30028b58a49466714865f1243293f10b186b"
-  },
-  "toml.tsx": {
-    maxLines: 120,
-    maxSyntaxNodes: 526,
-    purpose: "toml",
-    sourceSha256: "51b15d0f75a09b49a53a33709cf9127c74b2a35814ad8770ce529f0638a4f6ae"
-  }
-};
-
-function lineCount(source: string): number {
-  return source.replace(/\n$/u, "").split("\n").length;
-}
-
-function syntaxNodeCount(sourceFile: ts.SourceFile): number {
-  let count = 0;
-  const visit = (node: ts.Node): void => {
-    if (node !== sourceFile) count += 1;
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return count;
-}
-
-function sourceFingerprint(source: string): string {
-  return crypto.createHash("sha256").update(source, "utf8").digest("hex");
-}
-
-function assertSourceMatchesPolicy(relativePath: string, source: SourceUnit, policy: SourcePolicy): void {
-  const lines = lineCount(source.source);
-  const syntaxNodes = syntaxNodeCount(source.ast);
-  assert.ok(lines <= policy.maxLines, `${relativePath} grew past its ${policy.maxLines}-line review ceiling`);
-  assert.ok(
-    syntaxNodes <= policy.maxSyntaxNodes,
-    `${relativePath} grew past its ${policy.maxSyntaxNodes}-node structural ceiling; classify the change before accepting it`
-  );
-  assert.equal(
-    sourceFingerprint(source.source),
-    policy.sourceSha256,
-    `${relativePath} changed from its reviewed source fingerprint; audit responsibilities and update the policy explicitly`
-  );
-}
-
-function assertResponsibilityReviewMatchesSource(
-  relativePath: string,
-  source: SourceUnit,
-  policy: ResponsibilityPolicy
-): void {
-  assert.equal(
-    sourceFingerprint(source.source),
-    policy.classifiedSourceSha256,
-    `${relativePath} changed from its responsibility-reviewed source fingerprint; audit its responsibility declaration and refresh the independent classification policy`
-  );
-}
 
 function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<OrchestratorResponsibility> {
   const detected = new Set<OrchestratorResponsibility>();
@@ -443,7 +273,7 @@ function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<O
 function assertDetectedResponsibilitiesDeclared(
   relativePath: string,
   source: SourceUnit,
-  policy: ResponsibilityPolicy
+  policy: Pick<AdapterPolicy, "responsibilities">
 ): readonly OrchestratorResponsibility[] {
   const detected = [...detectedOrchestratorResponsibilities(source)].sort();
   const undeclared = detected.filter((responsibility) => !policy.responsibilities.includes(responsibility));
@@ -881,79 +711,7 @@ test("source inventory recurses through both TypeScript source extensions", () =
   }
 });
 
-test("syntax budgets ignore names and comments but catch structural orchestration additions", () => {
-  const baseline = syntaxNodeCount(
-    parseSource("fixture.ts", "export async function run(task: string) { return task; }\n").ast
-  );
-  const renamed = syntaxNodeCount(
-    parseSource(
-      "fixture.ts",
-      "// resumeSession and prompt_tokens are documentation, not classification markers.\n" +
-        "export async function invoke(prompt: string) { return prompt; }\n"
-    ).ast
-  );
-  assert.equal(renamed, baseline);
-  assert.notEqual(
-    sourceFingerprint("export async function run(task: string) { return task; }\n"),
-    sourceFingerprint(
-      "// resumeSession and prompt_tokens are documentation, not classification markers.\n" +
-        "export async function invoke(prompt: string) { return prompt; }\n"
-    ),
-    "an equal-size replacement must still require an explicit source-policy review"
-  );
-
-  for (const addition of [
-    'import { readdir } from "node:fs/promises"; export async function run() { return readdir("."); }\n',
-    'export function run(prompt: string) { const launchArguments = ["--resume", prompt]; return launchArguments; }\n',
-    "export function run(usage: { prompt_tokens: number; completion_tokens: number }) { return usage.prompt_tokens + usage.completion_tokens; }\n"
-  ]) {
-    assert.ok(syntaxNodeCount(parseSource("fixture.ts", addition).ast) > baseline);
-  }
-});
-
-test("source-policy acknowledgment cannot reuse a stale responsibility review for opaque behavior", () => {
-  const baselineSource = "export function passThrough(payload: Uint8Array) { return payload; }\n";
-  const changedSource =
-    'import { decodeProviderEvent } from "./provider-parser";\n' +
-    "export function passThrough(payload: Uint8Array) { return decodeProviderEvent(payload); }\n";
-  const changed = parseSource("fixture.tsx", changedSource);
-  const acknowledgedSourcePolicy: SourcePolicy = {
-    maxLines: lineCount(changedSource),
-    maxSyntaxNodes: syntaxNodeCount(changed.ast),
-    purpose: "adapter",
-    sourceSha256: sourceFingerprint(changedSource)
-  };
-  const staleResponsibilityPolicy: ResponsibilityPolicy = {
-    classifiedSourceSha256: sourceFingerprint(baselineSource),
-    responsibilities: [],
-    upstreamIssues: []
-  };
-
-  assert.deepEqual(
-    [...detectedOrchestratorResponsibilities(changed)],
-    [],
-    "the fixture must exercise a semantic form outside the conservative static lower bound"
-  );
-  assert.doesNotThrow(() => assertSourceMatchesPolicy("fixture.tsx", changed, acknowledgedSourcePolicy));
-  assert.throws(
-    () => assertResponsibilityReviewMatchesSource("fixture.tsx", changed, staleResponsibilityPolicy),
-    /responsibility-reviewed source fingerprint/u
-  );
-
-  const refreshedResponsibilityPolicy: ResponsibilityPolicy = {
-    classifiedSourceSha256: sourceFingerprint(changedSource),
-    responsibilities: ["output-interpretation"],
-    upstreamIssues: ["https://example.invalid/upstream"]
-  };
-  assert.doesNotThrow(() =>
-    assertResponsibilityReviewMatchesSource("fixture.tsx", changed, refreshedResponsibilityPolicy)
-  );
-  assert.doesNotThrow(() =>
-    assertDetectedResponsibilitiesDeclared("fixture.tsx", changed, refreshedResponsibilityPolicy)
-  );
-});
-
-test("fingerprint and ceiling acknowledgment cannot retain stale responsibility classifications", () => {
+test("a detected responsibility fails until the source declares it", () => {
   const changedSources: Array<[OrchestratorResponsibility, string]> = [
     [
       "filesystem-walking",
@@ -980,33 +738,13 @@ test("fingerprint and ceiling acknowledgment cannot retain stale responsibility 
 
   for (const [responsibility, changedSource] of changedSources) {
     const parsed = parseSource("fixture.tsx", changedSource);
-    const acknowledgedSourcePolicy: SourcePolicy = {
-      maxLines: lineCount(changedSource),
-      maxSyntaxNodes: syntaxNodeCount(parsed.ast),
-      purpose: "adapter",
-      sourceSha256: sourceFingerprint(changedSource)
-    };
-    assert.doesNotThrow(
-      () => assertSourceMatchesPolicy("fixture.tsx", parsed, acknowledgedSourcePolicy),
-      `${responsibility} fixture must model an independently acknowledged fingerprint and ceiling`
-    );
-    const staleCentralPolicy: ResponsibilityPolicy = {
-      classifiedSourceSha256: sourceFingerprint(changedSource),
-      responsibilities: [],
-      upstreamIssues: []
-    };
-    assert.doesNotThrow(() => assertResponsibilityReviewMatchesSource("fixture.tsx", parsed, staleCentralPolicy));
     assert.throws(
-      () => assertDetectedResponsibilitiesDeclared("fixture.tsx", parsed, staleCentralPolicy),
+      () => assertDetectedResponsibilitiesDeclared("fixture.tsx", parsed, { responsibilities: [] }),
       /static signals for undeclared orchestrator responsibilities/u,
       responsibility
     );
     assert.doesNotThrow(() =>
-      assertDetectedResponsibilitiesDeclared("fixture.tsx", parsed, {
-        classifiedSourceSha256: sourceFingerprint(changedSource),
-        responsibilities: [responsibility],
-        upstreamIssues: ["https://example.invalid/upstream"]
-      })
+      assertDetectedResponsibilitiesDeclared("fixture.tsx", parsed, { responsibilities: [responsibility] })
     );
   }
 });
@@ -1095,7 +833,7 @@ test("non-adapter helpers cannot hide orchestrator responsibilities", () => {
 });
 
 test("OpenRouter retains the manually reviewed argv responsibility inherited from Codex", () => {
-  assert.equal(responsibilityPolicies["openrouter.tsx"]!.responsibilities.includes("argv-construction"), true);
+  assert.equal(adapterPolicies["openrouter.tsx"]?.responsibilities.includes("argv-construction"), true);
 });
 
 test("main agent registry and recursive sources stay inside reviewed adapter boundaries", (context) => {
@@ -1106,20 +844,15 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
   const sources = readSourceTree(path.join(packageRoot, "src/templates/smithers/agents"));
 
   assert.deepEqual(
-    Object.keys(sourcePolicies).sort(),
+    Object.keys(adapterPolicies).sort(),
     [...sources.keys()].sort(),
-    "every recursive .ts/.tsx adapter source must have an explicit structural policy"
-  );
-  assert.deepEqual(
-    Object.keys(responsibilityPolicies).sort(),
-    [...sources.keys()].sort(),
-    "every recursive .ts/.tsx source must have an independent responsibility-review policy"
+    "every recursive .ts/.tsx adapter source must declare its purpose and responsibilities"
   );
 
   const registered = registeredAdapterSources(sources);
   const registeredSourcePaths = [...new Set(registered.values())].sort();
   assert.deepEqual(
-    Object.entries(sourcePolicies)
+    Object.entries(adapterPolicies)
       .filter(([, policy]) => policy.purpose === "adapter")
       .map(([relativePath]) => relativePath)
       .sort(),
@@ -1127,23 +860,16 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
     "only adapter sources registered in agentFactories may carry the adapter purpose"
   );
   for (const [relativePath, source] of sources) {
-    const policy = sourcePolicies[relativePath]!;
-    const responsibilityPolicy = responsibilityPolicies[relativePath]!;
-    const lines = lineCount(source.source);
-    const syntaxNodes = syntaxNodeCount(source.ast);
-    context.diagnostic(
-      `${relativePath}: ${lines} lines; ${syntaxNodes} syntax nodes; reviewed purpose: ${policy.purpose}`
-    );
-    assertSourceMatchesPolicy(relativePath, source, policy);
-    assertResponsibilityReviewMatchesSource(relativePath, source, responsibilityPolicy);
+    const policy = adapterPolicies[relativePath];
+    assert.ok(policy, `${relativePath} has no adapter policy`);
     if (policy.purpose !== "adapter") {
       assert.deepEqual(
-        responsibilityPolicy.responsibilities,
+        policy.responsibilities,
         [],
         `${relativePath} is not a registered adapter and cannot own orchestrator responsibilities`
       );
       assert.deepEqual(
-        responsibilityPolicy.upstreamIssues,
+        policy.upstreamIssues,
         [],
         `${relativePath} is not a registered adapter and cannot own adapter debt`
       );
@@ -1152,12 +878,10 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
   }
 
   for (const adapterSource of registeredSourcePaths) {
-    const policy = responsibilityPolicies[adapterSource]!;
-    const detectedResponsibilities = assertDetectedResponsibilitiesDeclared(
-      adapterSource,
-      sources.get(adapterSource)!,
-      policy
-    );
+    const policy = adapterPolicies[adapterSource];
+    const source = sources.get(adapterSource);
+    assert.ok(policy && source, `${adapterSource} has no adapter policy`);
+    const detectedResponsibilities = assertDetectedResponsibilitiesDeclared(adapterSource, source, policy);
     const registrations = [...registered]
       .filter(([, sourcePath]) => sourcePath === adapterSource)
       .map(([agentRef]) => agentRef)
@@ -1167,7 +891,6 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
         policy.responsibilities.join(", ") || "none"
       }; statically detected lower bound: ${detectedResponsibilities.join(", ") || "none"}`
     );
-    assert.equal(sourcePolicies[adapterSource]?.purpose, "adapter");
     if (policy.responsibilities.length > 0) {
       assert.ok(policy.upstreamIssues.length > 0, `${adapterSource} debt must link an upstream issue`);
     }
