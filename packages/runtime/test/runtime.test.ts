@@ -26682,33 +26682,6 @@ test("resume continues a run-level render failure in place without a no-op rewin
   );
 });
 
-test("unverified dependency detection reads a dependent prepare failure off the run row", async () => {
-  const { smithersSnapshotUnverifiedDependencies } = await import("../src/smithers.js");
-  const runError = {
-    name: "SmithersError",
-    code: "SESSION_ERROR",
-    message: "Task failed: prepare:property-specification-fanin",
-    cause: {
-      message:
-        "artifact-contract failure: artifact dependency has not passed verification " +
-        "property-specification-crytic for property-specification-fanin"
-    }
-  };
-  const snapshot = {
-    command: ["inspect", "ultrafuzz-r43", "--format", "json"],
-    ok: true,
-    stdout: "",
-    stderr: "",
-    json: { ok: true, data: { run: { id: "ultrafuzz-r43", status: "failed", error: runError } } }
-  };
-
-  assert.deepEqual(smithersSnapshotUnverifiedDependencies(snapshot), ["property-specification-crytic"]);
-  assert.deepEqual(
-    smithersSnapshotUnverifiedDependencies({ ...snapshot, json: undefined, stderr: "unrelated failure" }),
-    []
-  );
-});
-
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

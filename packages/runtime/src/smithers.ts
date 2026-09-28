@@ -6164,32 +6164,6 @@ function requiredCurrentInspectEnum<const Values extends readonly string[]>(
   return value as Values[number];
 }
 
-/**
- * Dependency attempt ids whose verified artifacts no longer match their verification marker.
- * The message is emitted by the generated workflow's own `assertVerifiedDependency`, so the shape
- * is stable, and it is the only signal that reaches the resume side: the failure lands on the
- * dependent's `prepare:` task and leaves no failed node behind, so the run row's `error_json` is
- * where it surfaces. Recovery on top of this is tracked separately in #288.
- */
-export function smithersSnapshotUnverifiedDependencies(snapshot: SmithersCommandSnapshot): string[] {
-  const evidence = [
-    snapshot.stdout,
-    snapshot.stderr,
-    snapshot.error ?? "",
-    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
-  ].join("\n");
-  const dependencies = new Set<string>();
-  for (const match of evidence.matchAll(
-    /artifact dependency has not passed verification ([A-Za-z0-9._-]+) for [A-Za-z0-9._-]+/gu
-  )) {
-    const dependency = match[1];
-    if (dependency !== undefined && dependency.trim() !== "" && !dependency.includes("..")) {
-      dependencies.add(dependency);
-    }
-  }
-  return [...dependencies].sort();
-}
-
 function isCompatibleSmithersRunId(value: string): boolean {
   return /^[a-z0-9_-]{1,64}$/u.test(value);
 }
