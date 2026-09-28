@@ -324,7 +324,9 @@ they are not resume authorization. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
 fork completed work. Agent adapters in the continued workflow read the same
-agent config as at launch, from the run's `smithers/execution-config.toml`.
+agent config as at launch, from the run's `smithers/execution-config.toml`. If
+resume cannot prune stale task-worktree registrations, it reports a
+`WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
 
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to

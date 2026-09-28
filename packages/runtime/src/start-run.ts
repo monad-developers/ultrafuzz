@@ -54,6 +54,7 @@ import {
   prepareTrustedCliEnvironment,
   runTrustedJsonValidatorPreflight,
   TRUSTED_CLI_ENVIRONMENT_VARIABLES,
+  ULTRAFUZZ_TRUSTED_BIN_ENV,
   type TrustedCliEnvironment
 } from "./trusted-cli.js";
 import { hasRuntimeErrors, runtimeFailure, runtimeResult } from "./utils.js";
@@ -478,6 +479,7 @@ export async function resumeRun(input: WorkflowLifecycleInput) {
 
 async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
   let releaseLifecycleLock: (() => Promise<void>) | undefined;
+  const diagnostics: RuntimeDiagnostic[] = [];
   try {
     const projectRoot = path.resolve(input.projectRoot);
     const runsRoot = await runsRootForProject(projectRoot);
@@ -597,9 +599,23 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         });
         if (prepared.active) runTrustedJsonValidatorPreflight({ layout, trusted: prepared });
         trustedCli = prepared;
-      } catch {
+      } catch (error) {
         // Historical validator identity is task setup provenance, not authority
-        // to prevent Smithers from continuing the workflow.
+        // to prevent Smithers from continuing the workflow. Keep the run-owned
+        // launcher first on PATH anyway: it re-verifies its closure on every
+        // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
+        const trustedBin = path.join(layout.root, "trusted-bin");
+        const launcherKept = fs.existsSync(
+          path.join(trustedBin, process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz")
+        );
+        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = trustedBin;
+        diagnostics.push(
+          resumeWarning(
+            "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
+            `resume could not re-verify the run's trusted Ultrafuzz CLI${launcherKept ? "; tasks keep calling the run-owned launcher, which checks itself on every call" : ""}`,
+            error
+          )
+        );
       }
     }
     const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
@@ -615,7 +631,15 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       assertCurrentCloudAgentCredentialEnvironment(config, tasks, lifecycleEnvironment);
     }
     if (typeof metadata.source_revision === "string") {
-      repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
+      try {
+        repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
+      } catch (error) {
+        // Pruning is cleanup: a stale registration it leaves behind surfaces
+        // when Smithers recreates that task's worktree, so do not stop here.
+        diagnostics.push(
+          resumeWarning("WORKFLOW_WORKTREE_REPAIR_FAILED", "resume could not prune stale task worktrees", error)
+        );
+      }
     }
     const result = await runSmithersLifecycleCommand({
       action: "resume",
@@ -677,14 +701,21 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     if (result.alreadyRunning !== true) {
       recordNativeContinuationState({ layout, config, requestedConcurrency: input.maxConcurrency });
     }
-    return runtimeResult(true, {
-      run_id: runId,
-      workflow_run_id: smithersRunId,
-      action: "resume" as const,
-      submitted: !result.alreadyRunning
-    });
+    return runtimeResult(
+      true,
+      {
+        run_id: runId,
+        workflow_run_id: smithersRunId,
+        action: "resume" as const,
+        submitted: !result.alreadyRunning
+      },
+      diagnostics
+    );
   } catch (error) {
-    return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
+    return runtimeFailure<WorkflowLifecycleValue>([
+      smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED"),
+      ...diagnostics
+    ]);
   } finally {
     await releaseLifecycleLock?.();
   }
@@ -777,6 +808,11 @@ function recordNativeContinuationState(input: {
     // Mutable Ultrafuzz projection is best effort after Smithers accepts the
     // continuation. Malformed legacy state must not become a new hard gate.
   }
+}
+
+function resumeWarning(code: string, context: string, error: unknown): RuntimeDiagnostic {
+  const diagnostic = smithersDiagnostic(error, code);
+  return { ...diagnostic, message: `${context}: ${diagnostic.message}`, severity: "warning", source: "runtime" };
 }
 
 export async function replayRun(input: WorkflowLifecycleInput) {

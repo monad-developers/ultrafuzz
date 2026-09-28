@@ -84,9 +84,11 @@ a working-tree rebuild cannot change an active run. Ambient Node loader/search
 variables are removed and both ESM and CommonJS module resolution must stay
 inside that snapshot; document reads are unaffected. A path lookup alone is not
 a preflight. Ordinary resume now delegates continuation to Smithers instead of
-using the historical launcher or closure as an authorization gate. A current
-controller refresh publishes a new controller path without rewriting the
-historical closure.
+using the historical launcher or closure as an authorization gate. When resume
+cannot re-verify the launcher, it reports a `WORKFLOW_TRUSTED_CLI_UNVERIFIED`
+warning and keeps the run-owned launcher first on `PATH`; that launcher still
+verifies its closure before every dispatch. A current controller refresh
+publishes a new controller path without rewriting the historical closure.
 
 Exit `0` establishes portable document-shape conformance only. Cross-file
 joins, projected-key uniqueness, filesystem and Git facts, digest relationships,

@@ -25046,11 +25046,14 @@ test("native continuation does not use historical trusted CLI identity as an aut
   writeSmallTopology(project);
   const runId = "controller-refresh-trusted-cli";
   const env = controllerRefreshTerminalEnv(project, runId);
+  const upPathLog = path.join(project, "fake-smithers-up-path.log");
+  logFakeRunnerUpVariable(env, "PATH", upPathLog);
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
   const trustedMetadataPath = path.join(launched.value!.run_root, "trusted-cli.json");
   fs.writeFileSync(trustedMetadataPath, "{}\n", "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  fs.writeFileSync(upPathLog, "", "utf8");
 
   const ordinary = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
@@ -25060,6 +25063,23 @@ test("native continuation does not use historical trusted CLI identity as an aut
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
   assert.equal(refreshed.value?.submitted, true);
   assert.equal(fs.readFileSync(trustedMetadataPath, "utf8"), "{}\n");
+  // The run-owned launcher, which re-verifies itself on every call, stays
+  // first on the runner's PATH instead of leaving tasks to whatever
+  // `ultrafuzz` the operator's PATH holds, and the failure is reported (#1143).
+  const upPaths = fs.readFileSync(upPathLog, "utf8").trim().split("\n");
+  assert.equal(upPaths.length, 2);
+  for (const upPath of upPaths) {
+    assert.equal(upPath.split(path.delimiter)[0], path.join(path.dirname(trustedMetadataPath), "trusted-bin"));
+  }
+  for (const resumed of [ordinary, refreshed]) {
+    assert.equal(
+      resumed.diagnostics.some(
+        (diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED" && diagnostic.severity === "warning"
+      ),
+      true,
+      JSON.stringify(resumed.diagnostics)
+    );
+  }
   assert.equal(
     fs
       .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
@@ -26498,6 +26518,52 @@ test("ordinary resume checks active-run ownership before detached preflight", as
   assert.match(forcedCommands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
   assert.doesNotMatch(forcedCommands, /^up /mu);
   assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
+});
+
+test("resume continues with a warning when stale task-worktree cleanup fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "worktree-cleanup-failure";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  // Cleanup runs only for runs launched from a Git revision.
+  const metadataPath = path.join(runRoot, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, source_revision: "0".repeat(40) }, null, 2)}\n`);
+  // Git lists a prunable registration owned by this run, then cannot remove it.
+  const previousPath = process.env.PATH ?? "";
+  const gitBin = temporaryRoot("ufz-failing-git-");
+  fs.writeFileSync(
+    path.join(gitBin, "git"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      `  *"worktree list --porcelain"*) printf 'worktree %s\\nbranch refs/heads/ultrafuzz/%s/stale\\nprunable\\n\\n' ${shellQuote(path.join(runRoot, "workspaces", "stale"))} ${runId} ;;`,
+      '  *"worktree remove"*) echo "fatal: synthetic removal failure" >&2; exit 1 ;;',
+      `  *) PATH=${shellQuote(previousPath)} exec git "$@" ;;`,
+      "esac",
+      ""
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  process.env.PATH = [gitBin, previousPath].join(path.delimiter);
+  const resumed = await resumeRun({ projectRoot: project, runId, env }).finally(() => {
+    process.env.PATH = previousPath;
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_WORKTREE_REPAIR_FAILED");
+  assert.ok(warning, JSON.stringify(resumed.diagnostics));
+  assert.equal(warning.severity, "warning");
+  assert.match(warning.message, /synthetic removal failure/u);
+  assert.match(fs.readFileSync(commandLog, "utf8"), /^up .*--resume ultrafuzz-worktree-cleanup-failure/mu);
 });
 
 test("resume derives reset identities from the canonical nodes of a failed workflow", async () => {
