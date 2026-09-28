@@ -7914,7 +7914,10 @@ function compileTask(input: {
     timeoutMs,
     heartbeatTimeoutMs,
     retries,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
+    // Retries wait 60s, 120s, 240s, then Smithers' 5-minute cap. A 1s base
+    // spent a three-attempt budget in about 25s, inside the minute a
+    // contended Claude Code OAuth refresh can take to clear (#1084).
+    retryPolicy: { backoff: "exponential", initialDelayMs: 60_000 },
     ...(input.sourceRevision === undefined
       ? {}
       : { sourceRevision: input.sourceRevision, sourceRef: input.sourceRef! }),

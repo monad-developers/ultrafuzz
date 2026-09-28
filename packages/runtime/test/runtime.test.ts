@@ -11782,7 +11782,7 @@ test("compileSmithersWorkflow exhausts same-profile retries before ordered fallb
     ]
   );
   assert.equal(task.retries, 3);
-  assert.deepEqual(task.retryPolicy, { backoff: "exponential", initialDelayMs: 1_000 });
+  assert.deepEqual(task.retryPolicy, { backoff: "exponential", initialDelayMs: 60_000 });
   assert.deepEqual(task.metadata.retryPolicy, {
     maxAttempts: 4,
     sameAgentAttempts: 3,
@@ -26870,92 +26870,83 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   );
 });
 
-testWhen(realSmithersGraphUnavailable() === false)(
-  "compiled Smithers workflow passes a real non-executing graph smoke",
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    fs.symlinkSync(
-      path.join(workspaceRoot(), ".smithers", "node_modules"),
-      path.join(project, ".smithers", "node_modules"),
-      "dir"
-    );
+test("compiled Smithers workflow passes a real non-executing graph smoke", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  fs.symlinkSync(
+    path.dirname(fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs"))),
+    path.join(project, ".smithers", "node_modules"),
+    "dir"
+  );
 
-    const plan = await planRun({ projectRoot: project, runId: "graph-smoke", env: {} });
-    assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-    const { compileSmithersWorkflow } = await import("../src/smithers.js");
-    const compiled = compileSmithersWorkflow({
-      projectRoot: project,
-      config: plan.value!.resolved_config,
-      graph: plan.value!.expanded_graph,
-      runLayout: plan.value!.layout,
-      workflowName: "ultrafuzz-graph-smoke",
-      renderedPrompts: plan.value!.rendered_prompts,
-      operatorPrompt: "graph smoke"
-    });
+  const plan = await planRun({ projectRoot: project, runId: "graph-smoke", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value.resolved_config,
+    graph: plan.value.expanded_graph,
+    runLayout: plan.value.layout,
+    workflowName: "ultrafuzz-graph-smoke",
+    renderedPrompts: plan.value.rendered_prompts,
+    operatorPrompt: "graph smoke"
+  });
 
-    const graphProcess = spawnSync(
-      "smithers",
-      [
-        "graph",
-        compiled.evidenceWorkflowPath,
-        "--run-id",
-        compiled.smithersRunId,
-        "--root",
-        project,
-        "--input",
-        fs.readFileSync(compiled.inputPath, "utf8"),
-        "--compact",
-        "--format",
-        "json"
-      ],
-      {
-        cwd: project,
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024 * 16,
-        env: { ...process.env, OPENAI_API_KEY: "test-openai-api-key" }
+  const graphProcess = spawnSync(
+    path.join(process.cwd(), "node_modules", ".bin", "smithers"),
+    [
+      "graph",
+      compiled.evidenceWorkflowPath,
+      "--run-id",
+      compiled.smithersRunId,
+      "--root",
+      project,
+      "--input",
+      fs.readFileSync(compiled.inputPath, "utf8"),
+      "--compact",
+      "--format",
+      "json"
+    ],
+    {
+      cwd: project,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024 * 16,
+      env: {
+        ...process.env,
+        OPENAI_API_KEY: "test-openai-api-key",
+        // No launch staged the sealed module copies the workflow imports by
+        // default; render against this checkout's builds instead.
+        ULTRAFUZZ_ARTIFACTS_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/artifacts/dist/index.js")).href,
+        ULTRAFUZZ_RUNTIME_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/runtime/dist/index.js")).href
       }
-    );
-    if (graphProcess.status !== 0 || graphProcess.stdout.trim() === "") {
-      throw (
-        graphProcess.error ??
-        new Error(
-          [
-            `smithers graph exited ${String(graphProcess.status)}`,
-            graphProcess.stderr.trim(),
-            graphProcess.stdout.trim()
-          ]
-            .filter(Boolean)
-            .join("\n")
-        )
-      );
     }
-    const graphJson = graphProcess.stdout;
-    const graph = JSON.parse(graphJson) as { tasks?: Array<{ nodeId?: string }> };
-    assert.equal(graph.tasks?.[0]?.nodeId, "prepare:project-discovery");
-    assert.equal(
-      graph.tasks?.some((task) => task.nodeId === "node:project-discovery"),
-      true
+  );
+  if (graphProcess.status !== 0 || graphProcess.stdout.trim() === "") {
+    throw (
+      graphProcess.error ??
+      new Error(
+        [`smithers graph exited ${String(graphProcess.status)}`, graphProcess.stderr.trim(), graphProcess.stdout.trim()]
+          .filter(Boolean)
+          .join("\n")
+      )
     );
-    assert.equal(
-      graph.tasks?.some((task) => task.nodeId === "verify:project-discovery"),
-      true
-    );
   }
-);
-
-function realSmithersGraphUnavailable(): string | false {
-  try {
-    execFileSync("smithers", ["graph", "--help"], { stdio: "ignore" });
-  } catch {
-    return "smithers CLI is not installed";
-  }
-  if (!fs.existsSync(path.join(workspaceRoot(), ".smithers", "node_modules", "smthrs"))) {
-    return ".smithers Smithers dependencies are not installed";
-  }
-  return false;
-}
+  const graph = JSON.parse(graphProcess.stdout) as { tasks?: Array<{ nodeId?: string; retryPolicy?: unknown }> };
+  assert.equal(graph.tasks?.[0]?.nodeId, "prepare:project-discovery");
+  // Smithers receives the planned chain as the whole retry budget: a real wait
+  // between attempts and no identical-failure stall verdict (#1084).
+  assert.deepEqual(graph.tasks?.find((task) => task.nodeId === "node:project-discovery")?.retryPolicy, {
+    backoff: "exponential",
+    initialDelayMs: 60_000,
+    maxIdenticalFailures: 0
+  });
+  assert.equal(
+    graph.tasks?.some((task) => task.nodeId === "verify:project-discovery"),
+    true
+  );
+});
 
 function workspaceRoot(): string {
   let current = process.cwd();

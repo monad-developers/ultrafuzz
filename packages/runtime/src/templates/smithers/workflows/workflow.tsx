@@ -10110,7 +10110,11 @@ export default smithers((ctx) => {
                 timeoutMs={task.timeoutMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={task.retries}
-                retryPolicy={task.retryPolicy}
+                // The planned chain is the whole retry budget. Smithers'
+                // default stall verdict would end it after three identical
+                // failures, before later same-agent attempts or fallback
+                // profiles run (#1084).
+                retryPolicy={{ ...task.retryPolicy, maxIdenticalFailures: 0 }}
                 metadata={task.metadata}
               >
                 {fullTaskPrompt}
