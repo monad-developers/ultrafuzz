@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -2957,12 +2958,7 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
 
 test("report bundle manifest records files it could not package", async () => {
   const project = tempProject();
-  assert.equal((await cli(project, ["init", "--force"])).code, 0);
-  writeReportTopology(project);
-  const env = fakeSmithersEnv(project);
-  const run = await cli(project, ["run", "--run-id", "report-bundle-omissions", "--json"], env);
-  assert.equal(run.code, 0, run.stderr);
-  const runData = parseJson(run).data as { run_id: string; run_root: string };
+  const runData = await createReportRun(project, "report-bundle-omissions");
 
   const engineLogDir = path.join(runData.run_root, "smithers", "logs");
   fs.mkdirSync(engineLogDir, { recursive: true });
@@ -2972,6 +2968,12 @@ test("report bundle manifest records files it could not package", async () => {
   fs.writeFileSync(oversizedLog, "");
   fs.truncateSync(oversizedLog, oversizedBytes);
   fs.symlinkSync(path.join(engineLogDir, "small.ndjson"), path.join(engineLogDir, "linked.ndjson"));
+  execFileSync("mkfifo", [path.join(engineLogDir, "pipe.ndjson")]);
+  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const oversizedUnsafe = path.join(artifactDir, "big\\name.bin");
+  fs.writeFileSync(oversizedUnsafe, "");
+  fs.truncateSync(oversizedUnsafe, oversizedBytes);
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(bundled.code, 0, `${bundled.stderr}\n${bundled.stdout}`);
@@ -2985,7 +2987,9 @@ test("report bundle manifest records files it could not package", async () => {
   assert.equal(manifest.scope, undefined);
   assert.equal(validateReportBundleManifest(manifest).ok, true);
   assert.deepEqual(manifest.omitted_files, [
+    { path: "artifacts/project-discovery/big\\name.bin", reason: "unsafe-path", bytes: oversizedBytes },
     { path: "engine-logs/linked.ndjson", reason: "symlink" },
+    { path: "engine-logs/pipe.ndjson", reason: "not-regular-file" },
     { path: "engine-logs/stream.ndjson", reason: "file-size-limit", bytes: oversizedBytes }
   ]);
   assertNoSmithersSurface(manifest);

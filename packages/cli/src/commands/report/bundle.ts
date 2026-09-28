@@ -566,16 +566,16 @@ function collectDirectory(
       collectDirectory(runRoot, absolutePath, files, diagnostics, omissions, rename);
       continue;
     }
-    if (entry.isFile()) {
-      const archivePath =
-        rename === undefined
-          ? displayRelativePath(runRoot, absolutePath)
-          : `${rename.archiveRoot}/${portableArchiveRelativePath(displayRelativePath(rename.sourceRoot, absolutePath))}`;
-      if (shouldExcludeArchivePath(archivePath)) {
-        continue;
-      }
-      addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, omissions, sourceArchivePath);
+    // Everything else (regular files, FIFOs, sockets, devices) goes through
+    // addBundleFile, which packages regular files and records the rest.
+    const archivePath =
+      rename === undefined
+        ? displayRelativePath(runRoot, absolutePath)
+        : `${rename.archiveRoot}/${portableArchiveRelativePath(displayRelativePath(rename.sourceRoot, absolutePath))}`;
+    if (shouldExcludeArchivePath(archivePath)) {
+      continue;
     }
+    addBundleFile(runRoot, absolutePath, archivePath, files, diagnostics, omissions, sourceArchivePath);
   }
 }
 
@@ -622,13 +622,12 @@ function classifyOmission(absolutePath: string, archivePath: string): Omit<Bundl
   if (stat === undefined) return { reason: "unreadable" };
   if (stat.isSymbolicLink()) return { reason: "symlink" };
   if (!stat.isFile()) return { reason: "not-regular-file" };
-  if (stat.size > MAX_BUNDLE_FILE_BYTES) return { reason: "file-size-limit", bytes: stat.size };
   try {
     normalizeArchivePath(archivePath);
   } catch {
     return { reason: "unsafe-path", bytes: stat.size };
   }
-  return { reason: "unreadable", bytes: stat.size };
+  return { reason: stat.size > MAX_BUNDLE_FILE_BYTES ? "file-size-limit" : "unreadable", bytes: stat.size };
 }
 
 function portableArchiveRelativePath(relativePath: string): string {

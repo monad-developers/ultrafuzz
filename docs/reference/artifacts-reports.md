@@ -656,7 +656,9 @@ included in a full run bundle. Older generations and unchecked report
 directories are excluded. Files a full-run bundle finds but cannot package
 (over the 64 MiB per-file limit, symlinks, non-regular files, unsafe archive
 names, or unreadable files) stay on disk and are listed in the manifest's
-`omitted_files` with their run-relative path, reason, and size when known. If full-run verification fails, the default bundle
+`omitted_files` with their path (run-relative, or `engine-logs/<name>` for
+engine logs), reason, and size when known.
+If full-run verification fails, the default bundle
 contains only `report.json`, `report.md`, and `bundle-manifest.json`; the
 manifest and command result identify `scope: "report-only"` and the report's
 verification status. Arbitrary unchecked run artifacts are not included. Use
