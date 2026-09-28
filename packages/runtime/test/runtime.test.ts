@@ -18333,6 +18333,48 @@ test("parseCurrentSmithersInspect admits the 0.35.0 envelope and bounds its new 
   );
 });
 
+test("parseCurrentSmithersInspect reads the run-level error loosely and never fails on its shape", async () => {
+  const { parseCurrentSmithersInspect } = await import("../src/smithers.js");
+  const workflowRunId = "ultrafuzz-run-error";
+  const runError = (error: unknown) =>
+    parseCurrentSmithersInspect(
+      {
+        command: ["inspect"],
+        ok: true,
+        stdout: "",
+        stderr: "",
+        json: workflowInspect({
+          workflowRunId,
+          status: "failed",
+          state: "failed",
+          error,
+          steps: [{ id: "node:a", state: "pending" }]
+        })
+      },
+      workflowRunId
+    ).runError;
+
+  // The runner records what was thrown as `cause` under its own summary and recovery advice.
+  assert.deepEqual(
+    runError({
+      code: "WORKFLOW_RENDER_FAILED",
+      message: 'Rendering workflow "w.tsx" threw: boom. Resume with: smithers up w.tsx --resume true',
+      cause: { name: "Error", message: "boom" }
+    }),
+    { code: "WORKFLOW_RENDER_FAILED", message: "boom" }
+  );
+  assert.deepEqual(runError({ message: "Task failed: prepare:x", cause: "opaque" }), {
+    message: "Task failed: prepare:x"
+  });
+  // The text reaches a printed diagnostic, so it is redacted and bounded like other runner output.
+  assert.deepEqual(runError({ message: "token=sk-private-secret" }), { message: "token=<redacted>" });
+  assert.equal(runError({ message: "x".repeat(5_000) })?.message.length, 1_000);
+  // Advisory only: an unexpected shape yields nothing rather than a new parse failure.
+  for (const opaque of ["opaque", 7, null, [], { code: 7 }, { code: "X", message: " " }]) {
+    assert.equal(runError(opaque), undefined, JSON.stringify(opaque));
+  }
+});
+
 // Acceptance criterion 4: a stopped 0.34.0 run's durable store must survive the
 // four migrations 0.35.0 adds (0041-0044) with its history intact, and the
 // upgrade must be re-runnable and recoverable. The migrations are forward-only
@@ -19621,7 +19663,7 @@ test("syncRun reports a typed diagnostic when a terminal workflow failure has no
       workflowRunId,
       status: "failed",
       state: "failed",
-      error: { message: "Task failed: ultrafuzz-agent-tasks" },
+      error: { name: "SmithersError", code: "SESSION_ERROR", message: "Task failed: ultrafuzz-agent-tasks" },
       failedChildKeys: ["ultrafuzz-agent-tasks::0"],
       steps: [
         { id: "ultrafuzz-agent-tasks", state: "failed" },
@@ -19645,6 +19687,8 @@ test("syncRun reports a typed diagnostic when a terminal workflow failure has no
   assert.equal(diagnostic?.severity, "error");
   assert.deepEqual(diagnostic?.details?.failed_workflow_tasks, ["ultrafuzz-agent-tasks"]);
   assert.equal(diagnostic?.details?.workflow_state, "failed");
+  // A failure no durable node owns is otherwise unexplained, so the message carries the runner's own error.
+  assert.match(diagnostic?.message ?? "", /; workflow run error SESSION_ERROR: Task failed: ultrafuzz-agent-tasks$/u);
 });
 
 test("syncRun records an unattributed terminal workflow failure durably and only once", async () => {

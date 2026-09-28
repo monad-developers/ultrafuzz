@@ -325,6 +325,14 @@ reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
 fork completed work.
 
+A run that ends `failed` with no failed durable node was stopped by something
+no task owns, for example an exception thrown while rendering the workflow.
+`status` reports it as `WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE` and appends the
+workflow runner's own error to the message. Fix that cause, then `resume` the
+same run; it continues from the tasks that already finished. While the cause
+persists, the resume either fails with `WORKFLOW_LIFECYCLE_FAILED` or the run
+fails again.
+
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
 that same Smithers run. It does not publish or authenticate a historical

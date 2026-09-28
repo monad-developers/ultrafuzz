@@ -3149,6 +3149,8 @@ export interface CurrentSmithersInspect {
   nodes: CurrentSmithersInspectNode[];
   failedChildKeys: string[];
   exhaustedLoops: CurrentSmithersExhaustedLoop[];
+  /** The runner's run-level error (for example WORKFLOW_RENDER_FAILED), redacted and capped. Advisory text only. */
+  runError?: { code?: string; message: string };
 }
 
 /**
@@ -5965,7 +5967,30 @@ export function parseCurrentSmithersInspect(
   if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded" && parsedRunState !== "succeeded-with-failures") {
     throw new Error("Smithers inspect data.exhaustedLoops is only valid for a succeeded workflow state");
   }
-  return { runStatus, runState: parsedRunState, nodes, failedChildKeys, exhaustedLoops };
+  const runError = currentSmithersRunError(run.error);
+  return {
+    runStatus,
+    runState: parsedRunState,
+    nodes,
+    failedChildKeys,
+    exhaustedLoops,
+    ...(runError === undefined ? {} : { runError })
+  };
+}
+
+// A run-level failure (for example a render exception) names no task, so the
+// run row's error is the only record of why the run stopped. Read it loosely:
+// it explains a stop and never gates one, so an unexpected shape yields nothing.
+function currentSmithersRunError(value: unknown): CurrentSmithersInspect["runError"] {
+  if (!isObjectRecord(value)) return undefined;
+  // The runner records the thrown error as `cause` under its own summary.
+  const cause = isObjectRecord(value.cause) ? value.cause.message : undefined;
+  const message = [cause, value.message].find((text): text is string => typeof text === "string" && text.trim() !== "");
+  if (message === undefined) return undefined;
+  return {
+    ...(typeof value.code === "string" ? { code: value.code } : {}),
+    message: scrubWorkflowRunnerText(redactSecretsInText(message)).slice(0, 1_000)
+  };
 }
 
 function parseCurrentSmithersExhaustedLoops(value: unknown): CurrentSmithersExhaustedLoop[] {
