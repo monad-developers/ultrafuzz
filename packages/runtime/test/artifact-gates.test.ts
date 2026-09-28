@@ -8395,6 +8395,19 @@ test("property implementation gate rejects an unknown finding property reference
   );
 });
 
+/** A registry gate's failures in a host gate result, by in-document path. */
+function gateIssuePaths(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>, gate: string): string[] {
+  return result.diagnostics
+    .filter((diagnostic) => diagnostic.details?.gate === gate)
+    .map((diagnostic) => diagnostic.path?.slice(diagnostic.path.indexOf("#") + 1) ?? "");
+}
+
+function campaignJoinIssues(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>): string[] {
+  return result.diagnostics
+    .filter((diagnostic) => diagnostic.details?.gate === "property-campaign-context-joins")
+    .map((diagnostic) => `${diagnostic.path?.slice(diagnostic.path.indexOf("#") + 1)}: ${diagnostic.message}`);
+}
+
 test("campaign gate accepts non-property findings and validates property-derived failures", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign" });
   writeArtifact(
@@ -8469,7 +8482,10 @@ test("campaign gate accepts non-property findings and validates property-derived
   );
   const dropped = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(dropped.ok, false);
-  assert.ok(dropped.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
+  assert.ok(
+    gateIssuePaths(dropped, "property-campaign-context-joins").includes("$.findings_ref#0.property_ids"),
+    JSON.stringify(dropped.diagnostics)
+  );
 
   writeArtifact(
     layout,
@@ -8491,7 +8507,10 @@ test("campaign gate accepts non-property findings and validates property-derived
   );
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
-  assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+  assert.ok(
+    gateIssuePaths(unknown, "property-campaign-context-joins").includes("$.failures[0].property_ids[0]"),
+    JSON.stringify(unknown.diagnostics)
+  );
 
   writeArtifact(
     layout,
@@ -8657,7 +8676,10 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+  assert.ok(
+    gateIssuePaths(result, "property-campaign-context-joins").includes("$.failures[0].property_ids[0]"),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("campaign gates select custom declared paths and ignore undeclared conventional files", () => {
@@ -10364,9 +10386,7 @@ function runCampaignTimeoutGate(
  * separate host implementation of these rules.
  */
 function timeoutEvidenceIssuePaths(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>): string[] {
-  return result.diagnostics
-    .filter((diagnostic) => diagnostic.details?.gate === "property-campaign-timeout-evidence")
-    .map((diagnostic) => diagnostic.path?.slice(diagnostic.path.indexOf("#") + 1) ?? "");
+  return gateIssuePaths(result, "property-campaign-timeout-evidence");
 }
 
 function withCampaignCommand(fixture: CampaignTimeoutFixture, command: string): void {
@@ -10757,11 +10777,7 @@ test("campaign gate accepts many counterexamples of one property deduplicated in
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
-    []
-  );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("current campaign gate accepts the exact R55 partition: 29 counterexamples, two findings", () => {
@@ -10805,11 +10821,7 @@ test("current campaign gate accepts the exact R55 partition: 29 counterexamples,
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
-    []
-  );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("current campaign gate requires partition metadata and accepts an explicit complete partition", () => {
@@ -10840,16 +10852,9 @@ test("current campaign gate requires partition metadata and accepts an explicit 
   };
   const current = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(current.ok, false);
-  assert.ok(current.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REQUIRED"));
-  assert.equal(
-    current.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED").length,
-    2
-  );
-  assert.ok(
-    current.diagnostics
-      .filter((diagnostic) => diagnostic.code.startsWith("PROPERTY_CAMPAIGN_PARTITION_"))
-      .every((diagnostic) => diagnostic.severity === "error")
-  );
+  const currentPaths = gateIssuePaths(current, "property-campaign-context-joins");
+  assert.ok(currentPaths.includes("$.findings_ref#0"), JSON.stringify(current.diagnostics));
+  assert.equal(currentPaths.filter((issuePath) => issuePath === "$.failures").length, 2);
 
   const completePartition = accountedCampaignFinding("failure-1", ["property-1"], ["failure-1", "failure-2"]);
   writeArtifact(layout, campaignId, "findings.json", JSON.stringify([completePartition]));
@@ -10882,14 +10887,14 @@ test("campaign partition rejects unknown contributions and per-finding count mis
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  for (const code of [
-    "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
-    "PROPERTY_CAMPAIGN_PARTITION_COUNT_MISMATCH",
-    "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED"
+  for (const issuePath of [
+    "$.findings_ref#0.contributing_backend_failures[0]",
+    "$.findings_ref#0.deduplication.pre_dedup_count",
+    "$.failures"
   ]) {
     assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === code),
-      code
+      gateIssuePaths(result, "property-campaign-context-joins").includes(issuePath),
+      `${issuePath}: ${JSON.stringify(result.diagnostics)}`
     );
   }
 });
@@ -10930,9 +10935,14 @@ test("campaign partition rejects duplicate claims and property subset mismatches
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_DUPLICATE"));
+  const issues = campaignJoinIssues(result);
   assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
+    issues.some((entry) => entry.includes('"failure-2" must be claimed by exactly one finding')),
+    JSON.stringify(issues)
+  );
+  assert.ok(
+    issues.some((entry) => entry.startsWith("$.findings_ref#0.property_ids:")),
+    JSON.stringify(issues)
   );
 });
 
@@ -10972,10 +10982,9 @@ test("campaign partition requires each finding ID to represent one of its contri
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.equal(
-    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REPRESENTATIVE_MISMATCH")
-      .length,
-    2
+  assert.deepEqual(
+    gateIssuePaths(result, "property-campaign-context-joins").filter((issuePath) => issuePath.endsWith(".id")),
+    ["$.findings_ref#0.id", "$.findings_ref#1.id"]
   );
 });
 
@@ -11015,10 +11024,11 @@ test("campaign partition requires a finding's properties to equal its contributi
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.equal(
-    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
-      .length,
-    1
+  assert.deepEqual(
+    gateIssuePaths(result, "property-campaign-context-joins").filter((issuePath) =>
+      issuePath.endsWith(".property_ids")
+    ),
+    ["$.findings_ref#0.property_ids"]
   );
 });
 
@@ -11061,9 +11071,7 @@ test("campaign partition binds finding backend provenance to its exact contribut
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH")
-  );
+  assert.deepEqual(gateIssuePaths(result, "findings-campaign-provenance-coherence"), ["$[0]"]);
 });
 
 test("campaign contributions bind raw_result_ref to the authenticated campaign artifact", () => {
@@ -11103,16 +11111,74 @@ test("campaign contributions bind raw_result_ref to the authenticated campaign a
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_RAW_RESULT_MISMATCH")
+  assert.deepEqual(gateIssuePaths(result, "property-campaign-context-joins"), [
+    "$.findings_ref#0.contributing_backend_failures[0].raw_result_ref"
+  ]);
+});
+
+// The registry gate requires raw_result_ref to be the declared relative path;
+// the deleted host copy required its basename, so no value satisfied both.
+test("campaign contributions name a nested campaign result by its declared relative path", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-nested-campaign-raw-result-ref",
+    resolvedConfigToml: '[invariants]\ninvariant_testing_fuzzer_timeout = "1h"\n'
+  });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "custom-fuzz-stage";
+  const campaignOutput = boundOutput("custom/results.json", "ultrafuzz/property-campaign@3", true);
+  const findingsOutput = boundOutput("custom/candidates.json", "ultrafuzz/findings@2");
+  const campaignPlanOutput = boundOutput("custom/plan.json", "ultrafuzz/invariant-campaign-plan@2");
+  const campaignSummaryOutput = boundOutput("custom/summary.json", "ultrafuzz/campaign-summary@2");
+  const campaign = {
+    ...currentCampaign(["property-1"], [{ id: "failure-1", property_ids: ["property-1"] }]),
+    campaign_plan_ref: campaignPlanOutput.path,
+    findings_ref: findingsOutput.path,
+    campaign_summary_ref: campaignSummaryOutput.path
+  };
+  writeDeclaredArtifactNode(
+    layout,
+    campaignId,
+    [campaignOutput, findingsOutput, campaignPlanOutput, campaignSummaryOutput],
+    {
+      [campaignOutput.path]: JSON.stringify(campaign),
+      [findingsOutput.path]: JSON.stringify([
+        accountedCampaignFinding(
+          "failure-1",
+          ["property-1"],
+          [{ fuzzer_backend: "recon", failure_id: "failure-1", raw_result_ref: campaignOutput.path }]
+        )
+      ]),
+      [campaignPlanOutput.path]: JSON.stringify(currentCampaignPlan()),
+      [campaignSummaryOutput.path]: JSON.stringify({
+        schema_version: "ultrafuzz.campaign-summary.v2",
+        outcome: "partial",
+        sequence_length: 100,
+        implemented_property_suite_refs: ["implemented-properties.json"],
+        campaign_plan_ref: campaignPlanOutput.path,
+        backend_results: [{ fuzzer_backend: "recon", status: "partial", result_ref: campaignOutput.path }],
+        finding_refs: ["failure-1"],
+        reproducer_refs: [
+          { finding_id: "failure-1", path: `${campaignFixturePaths.reproducers}/failure-1.t.sol`, blocker: null }
+        ],
+        failure_counts: { pre_deduplication: 1, post_deduplication: 1 }
+      })
+    }
   );
-  assert.ok(
-    result.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
-        diagnostic.details?.gate === "property-campaign-context-joins"
-    )
-  );
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: campaignId,
+    logical_id: campaignId,
+    display_name: campaignId,
+    artifact_dir: `artifacts/${campaignId}`,
+    depends_on: ["stateful-invariant-implement-properties"],
+    timeout_seconds: 7200,
+    outputs: [campaignOutput, findingsOutput, campaignPlanOutput, campaignSummaryOutput]
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("campaign failures and findings cannot name selected but non-implemented properties", () => {
@@ -11162,17 +11228,10 @@ test("campaign failures and findings cannot name selected but non-implemented pr
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID").length >=
-      2
-  );
-  assert.ok(
-    result.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
-        diagnostic.details?.gate === "property-campaign-context-joins"
-    )
-  );
+  const issuePaths = gateIssuePaths(result, "property-campaign-context-joins");
+  for (const issuePath of ["$.failures[0].property_ids[0]", "$.findings_ref#0.property_ids[0]"]) {
+    assert.ok(issuePaths.includes(issuePath), `${issuePath}: ${JSON.stringify(result.diagnostics)}`);
+  }
 });
 
 test("campaign contract rejects v2 bytes without converting or rewriting them", () => {
@@ -11252,12 +11311,10 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
         diagnostic.details?.gate === "campaign-summary-count-coupling"
     )
   );
-  assert.deepEqual(
-    mismatched.diagnostics
-      .filter((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_MISMATCH")
-      .map((diagnostic) => diagnostic.path?.split(".").at(-1)),
-    ["pre_deduplication", "post_deduplication"]
-  );
+  assert.deepEqual(gateIssuePaths(mismatched, "campaign-summary-count-coupling"), [
+    "$.failure_counts.pre_deduplication",
+    "$.failure_counts.post_deduplication"
+  ]);
 
   const legacyPath = writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify({ outcome: "partial" }));
   const legacyBytes = fs.readFileSync(legacyPath);
@@ -11316,9 +11373,10 @@ test("campaign gate still rejects a property-derived failure no finding covers",
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
-  assert.ok(missing);
-  assert.match(missing?.path ?? "", /failures\[1\]/u);
+  assert.ok(
+    campaignJoinIssues(result).some((entry) => entry.includes('"failure-2" must be claimed by exactly one finding')),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("campaign gate does not let an unrelated finding cover a campaign failure", () => {
@@ -11346,43 +11404,10 @@ test("campaign gate does not let an unrelated finding cover a campaign failure",
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"));
-});
-
-test("campaign gate names only the genuinely uncovered property of a partially covered failure", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partial" });
-  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(
-      currentCampaign(
-        ["property-1", "property-2"],
-        [
-          { id: "failure-1", property_ids: ["property-1", "property-2"] },
-          { id: "failure-2", property_ids: ["property-1"] }
-        ]
-      )
-    )
+  assert.ok(
+    campaignJoinIssues(result).some((entry) => entry.includes('"failure-1" must be claimed by exactly one finding')),
+    JSON.stringify(result.diagnostics)
   );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-2", ["property-1"])]));
-  writeCampaignSummary(layout, campaignId, 2, 1);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(result.ok, false);
-  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
-  assert.ok(missing);
-  assert.match(missing?.message ?? "", /property-2/u);
-  // property-1 is covered by the finding, so naming it would send the retry
-  // after an artifact that is already correct.
-  assert.doesNotMatch(missing?.message ?? "", /property-1/u);
 });
 
 test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", () => {
@@ -11417,7 +11442,7 @@ test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", (
   };
   const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(ambiguous.ok, false);
-  assert.ok(ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS"));
+  assert.deepEqual(gateIssuePaths(ambiguous, "findings-id-uniqueness"), ["$[1]"]);
 
   // A finding that claims a failure's ID must still carry that failure's properties,
   // even though other failures may now be covered by a different finding.
@@ -11430,7 +11455,12 @@ test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", (
   writeCampaignSummary(layout, campaignId, 2, 2);
   const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(mismatched.ok, false);
-  assert.ok(mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
+  assert.ok(
+    campaignJoinIssues(mismatched).some((entry) =>
+      entry.includes('"failure-1" must be claimed by exactly one finding')
+    ),
+    JSON.stringify(mismatched.diagnostics)
+  );
 });
 
 test("campaign gate rejects a failure whose property combination no single finding claims", () => {
@@ -11469,9 +11499,10 @@ test("campaign gate rejects a failure whose property combination no single findi
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
-  assert.ok(missing);
-  assert.match(missing?.message ?? "", /failure-3/u);
+  assert.ok(
+    campaignJoinIssues(result).some((entry) => entry.includes('"failure-3" must be claimed by exactly one finding')),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("campaign gate accepts a deduplicated finding that unions the properties of the failures it covers", () => {
@@ -11509,11 +11540,7 @@ test("campaign gate accepts a deduplicated finding that unions the properties of
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
-    []
-  );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("campaign gate rejects a finding that claims a property no failure ever reported", () => {
@@ -11532,7 +11559,7 @@ test("campaign gate rejects a finding that claims a property no failure ever rep
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-2"])])
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1", "property-2"], ["failure-1"])])
   );
   writeCampaignSummary(layout, campaignId, 1, 1);
   const node = {
@@ -11543,12 +11570,7 @@ test("campaign gate rejects a finding that claims a property no failure ever rep
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const unobserved = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"
-  );
-  assert.ok(unobserved);
-  assert.match(unobserved?.message ?? "", /property-2/u);
-  assert.doesNotMatch(unobserved?.message ?? "", /property-1/u);
+  assert.deepEqual(gateIssuePaths(result, "property-campaign-context-joins"), ["$.findings_ref#0.property_ids"]);
 });
 
 test("campaign gate rejects a property claim anchored to a failure that reported no property", () => {
@@ -11563,7 +11585,12 @@ test("campaign gate rejects a property claim anchored to a failure that reported
     "recon-fuzzer-results.json",
     JSON.stringify(currentCampaign(["property-1"], [{ id: "failure-1", property_ids: [] }]))
   );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"])])
+  );
   writeCampaignSummary(layout, campaignId, 1, 1);
   const node = {
     ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
@@ -11574,8 +11601,10 @@ test("campaign gate rejects a property claim anchored to a failure that reported
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
   assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"),
-    `expected an unobserved-property diagnostic, got ${JSON.stringify(result.diagnostics.map((d) => d.code))}`
+    gateIssuePaths(result, "property-campaign-context-joins").includes(
+      "$.findings_ref#0.contributing_backend_failures[0]"
+    ),
+    JSON.stringify(result.diagnostics)
   );
 });
 
