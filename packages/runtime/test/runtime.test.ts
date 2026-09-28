@@ -13390,6 +13390,55 @@ test("a node whose outputs fail validation names each failing artifact in its la
   );
 });
 
+test("status keeps reporting runner health when run-state synchronization fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "observer-survives-sync-failure";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+    ]),
+    status: currentStatusEnvelope(workflowRunId)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  const failEvents = path.join(project, "fail-events");
+  prependFakeSmithersCase(
+    env,
+    "events",
+    `    if [ -f ${shellQuote(failEvents)} ]; then printf '%s\\n' 'event store busy' >&2; exit 1; fi\n`
+  );
+  const reportedHealth = async (label: string) => {
+    const health = await getRunHealth({ projectRoot: project, runId, env });
+    assert.equal(health.ok, true, `${label}: ${JSON.stringify(health.diagnostics)}`);
+    assert.equal(health.value?.verdict, "running-healthy", label);
+    return health.diagnostics;
+  };
+
+  fs.writeFileSync(failEvents, "");
+  const failedQuery = await reportedHealth("failed events query");
+  assert.ok(
+    failedQuery.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_FAILED" && diagnostic.severity === "warning"),
+    JSON.stringify(failedQuery)
+  );
+  fs.rmSync(failEvents);
+
+  // A torn ledger append makes the synchronization itself throw.
+  fs.appendFileSync(path.join(runRoot, "usage.jsonl"), '{"torn":');
+  await reportedHealth("torn usage ledger");
+});
+
 test("a failed deadline cancel is a warning and the next status requests it again", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

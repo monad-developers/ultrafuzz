@@ -386,7 +386,25 @@ export interface WorkflowSynchronizationControl {
   allowMissingWorkflowRun?: boolean;
   /** Status synchronization authenticates published evidence without taking or repairing control state. */
   observeOnly?: boolean;
+  /** Evidence an observer already authenticated for this run, so the pass does not verify it again. */
+  evidence?: LinkedWorkflowEvidence;
 }
+
+/**
+ * Synchronization failures an observer reports as warnings: a runner query failed or returned
+ * unusable output, or the observation budget ran out. Local state stays the last coherent snapshot
+ * and the next poll retries.
+ */
+export const TRANSIENT_SYNC_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set([
+  "WORKFLOW_INSPECT_FAILED",
+  "WORKFLOW_INSPECT_INVALID",
+  "WORKFLOW_EVENTS_FAILED",
+  "WORKFLOW_EVENTS_INVALID",
+  "WORKFLOW_TOKEN_EVENTS_FAILED",
+  "WORKFLOW_TOKEN_EVENTS_INVALID",
+  "WORKFLOW_SYNC_CANCELLED",
+  "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
+]);
 
 const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
 
@@ -1394,9 +1412,11 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
 
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
-    ...(control.observeOnly === true ? { observeOnly: true } : {})
-  });
+  const evidence =
+    control.evidence ??
+    (await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+      ...(control.observeOnly === true ? { observeOnly: true } : {})
+    }));
   if (!evidence.ok) {
     return { ok: false, diagnostics: evidence.diagnostics };
   }

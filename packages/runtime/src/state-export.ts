@@ -44,8 +44,13 @@ import { summarizeRunProgress } from "./run-progress.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagnostics.js";
-import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
 import {
+  linkedWorkflowExecutionEnvironment,
+  readLinkedWorkflowEvidence,
+  type LinkedWorkflowEvidence
+} from "./start-run.js";
+import {
+  TRANSIENT_SYNC_DIAGNOSTIC_CODES,
   describeObservationSynchronizationDeadline,
   observationSynchronizationDeadline,
   synchronizeLinkedWorkflowRun
@@ -269,10 +274,7 @@ export async function getRunHealth(input: {
   const syncDiagnostics: RuntimeDiagnostic[] = [...controlDiagnostics];
   if (controlDiagnostics.length === 0) {
     syncDiagnostics.push(
-      ...(await synchronizeObservedWorkflowRun(
-        { projectRoot, runId: input.runId, env: input.env },
-        evidence.layout.root
-      ))
+      ...(await synchronizeObservedWorkflowRun({ projectRoot, runId: input.runId, env: input.env }, evidence))
     );
   } else {
     syncDiagnostics.push({
@@ -358,35 +360,41 @@ export async function getRunHealth(input: {
  * Observe-only synchronization reads state.json and run.json strictly while the run's controller, or
  * another concurrent `status`, keeps replacing them by atomic rename, so it can hit the same transient
  * snapshot race the direct reads in `getRunHealth` retry. It is retried within the same bounded
- * budget. Once that budget is spent the run is still reported: health comes from the workflow runner
- * and local run state is simply the last coherent snapshot, which is said in a warning, the way a
- * skipped synchronization is reported. Every other failure propagates unchanged.
+ * budget.
  *
- * The refresh is also bounded by the opt-in observation deadline when one is configured. Health below
- * comes from the direct runner query, so an exceeded deadline is a warning about possibly stale local
- * state, not a failure. One absolute deadline spans every retry, so racing reads cannot extend the
- * observer's wall-clock budget.
+ * Health below comes from the direct runner query, so a refresh that fails never hides it: a failed
+ * or malformed runner query, an exceeded opt-in observation deadline, an exhausted race budget, and any
+ * other synchronization error are warnings that local run state may be stale. One absolute deadline
+ * spans every retry, so racing reads cannot extend the observer's wall-clock budget.
  */
-async function synchronizeObservedWorkflowRun(input: SyncRunInput, runRoot: string): Promise<RuntimeDiagnostic[]> {
+async function synchronizeObservedWorkflowRun(
+  input: SyncRunInput,
+  evidence: LinkedWorkflowEvidence
+): Promise<RuntimeDiagnostic[]> {
   const deadlineMs = observationSynchronizationDeadline(input.env);
   try {
     const sync = await retryTransientSnapshotObservation(() =>
-      synchronizeLinkedWorkflowRun(input, { observeOnly: true, deadlineMs })
+      synchronizeLinkedWorkflowRun(input, {
+        observeOnly: true,
+        tolerateInvalidEventStreams: true,
+        deadlineMs,
+        evidence
+      })
     );
     return sync.diagnostics.map((diagnostic) =>
-      diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
+      TRANSIENT_SYNC_DIAGNOSTIC_CODES.has(diagnostic.code)
         ? describeObservationSynchronizationDeadline({ ...diagnostic, severity: "warning" as const })
         : diagnostic
     );
   } catch (error) {
-    if (!isTransientSnapshotRace(error)) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
     return [
       {
-        code: "WORKFLOW_STATE_SYNC_RACED",
-        message: `run state synchronization was skipped because ${error.message}; reported counts come from the workflow runner and local run state may be stale`,
+        code: isTransientSnapshotRace(error) ? "WORKFLOW_STATE_SYNC_RACED" : "WORKFLOW_STATE_SYNC_FAILED",
+        message: `run state synchronization was skipped because ${reason}; reported counts come from the workflow runner and local run state may be stale`,
         severity: "warning",
         source: "runtime",
-        path: runRoot
+        path: evidence.layout.root
       }
     ];
   }
