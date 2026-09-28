@@ -2687,9 +2687,8 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
 
 it("retains threat-model, goal-plan and vulnerability-database artifacts per row when the run produced them", () => {
   // #183 requires the real generated documents to be retrievable. They cannot
-  // reach the bundle any other way: `reporting.artifacts.include` is consumed
-  // only by `uploadsForManifest`, which delivers to `this.input.reporters`, and
-  // the public worker runs `eval run --provider none` with an empty reporter list.
+  // reach the bundle any other way: nothing in the eval runner reads
+  // `reporting.artifacts.include`.
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-threat-"));
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-threat-model";

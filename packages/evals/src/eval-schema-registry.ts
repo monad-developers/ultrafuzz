@@ -51,7 +51,6 @@ export const EVAL_STATUS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:status:1" as co
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;
 export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
 export const EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:public-eval-diagnostics:2" as const;
-export const EVAL_TELEMETRY_CURSOR_SCHEMA_ID = "urn:ultrafuzz:schema:evals:telemetry-cursor:1" as const;
 
 const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
 
@@ -226,11 +225,6 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     role: "runtime-state",
     typescriptExport: "evalInstanceClustersJsonSchema",
     semanticGates: ["eval-instance-clusters-identity-joins"]
-  },
-  "telemetry-cursor.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "evalTelemetryCursorJsonSchema",
-    semanticGates: []
   }
 });
 
@@ -289,7 +283,6 @@ export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary
 export const evalStatusJsonSchema = loadSchemaDocument("eval-status.schema.json");
 export const evalSuiteJsonSchema = loadSchemaDocument("eval-suite.schema.json");
 export const evalEvmbenchCohortJsonSchema = loadSchemaDocument("evmbench-cohort.schema.json");
-export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
 
 export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalAdjudicationHandoffJsonSchema,
@@ -319,8 +312,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalScoreSummaryJsonSchema,
   evalStatusJsonSchema,
   evalSuiteJsonSchema,
-  evalEvmbenchCohortJsonSchema,
-  evalTelemetryCursorJsonSchema
+  evalEvmbenchCohortJsonSchema
 });
 
 const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
@@ -351,8 +343,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "finding-manifest.schema.json": evalFindingManifestJsonSchema,
   "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
   "instance-clusters.schema.json": evalInstanceClustersJsonSchema,
-  "eval-llm-judge-result.schema.json": evalLlmJudgeResultJsonSchema,
-  "telemetry-cursor.schema.json": evalTelemetryCursorJsonSchema
+  "eval-llm-judge-result.schema.json": evalLlmJudgeResultJsonSchema
 });
 
 let cachedRegistry: readonly SchemaRegistryEntry[] | undefined;

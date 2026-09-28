@@ -63,11 +63,6 @@
       "propertyNames": { "minLength": 1 },
       "additionalProperties": { "type": "string" }
     },
-    "nonNegativeIntegerMap": {
-      "type": "object",
-      "propertyNames": { "minLength": 1 },
-      "additionalProperties": { "$ref": "#/$defs/nonNegativeInteger" }
-    },
     "runtimeDiagnostic": {
       "type": "object",
       "additionalProperties": false,
@@ -1616,45 +1611,6 @@
         "review_queue_path": { "$ref": "#/$defs/nonEmptyString" },
         "recovery_equivalence": { "$ref": "#/$defs/recoveryEquivalenceSummary" },
         "provenance": { "$ref": "#/$defs/summaryProvenance" }
-      }
-    },
-    "telemetryCursor": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "byteOffset",
-        "deliveredEventIds",
-        "uploadedArtifacts",
-        "lastHeartbeatAt",
-        "providerIds",
-        "findingsCountByNode"
-      ],
-      "properties": {
-        "schemaVersion": { "const": "ultrafuzz.eval.telemetry-cursor.v1" },
-        "byteOffset": { "$ref": "#/$defs/nonNegativeInteger" },
-        "deliveredEventIds": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/nonEmptyString" },
-          "maxItems": 4096,
-          "uniqueItems": true
-        },
-        "uploadedArtifacts": {
-          "type": "object",
-          "propertyNames": { "minLength": 1 },
-          "additionalProperties": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-        },
-        "lastHeartbeatAt": {
-          "type": "object",
-          "propertyNames": { "minLength": 1 },
-          "additionalProperties": { "$ref": "#/$defs/timestamp" }
-        },
-        "providerIds": {
-          "type": "object",
-          "propertyNames": { "minLength": 1 },
-          "additionalProperties": { "$ref": "#/$defs/nonEmptyString" }
-        },
-        "findingsCountByNode": { "$ref": "#/$defs/nonNegativeIntegerMap" }
       }
     }
   }

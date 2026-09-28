@@ -797,5 +797,4 @@ candidate repository, immutable source artifact, and publication URL flags.
 performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
-[Eval Suites](evals.md) for configuration, architecture, and telemetry policy
-details.
+[Eval Suites](evals.md) for configuration and architecture details.

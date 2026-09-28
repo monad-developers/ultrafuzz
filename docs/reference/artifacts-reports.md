@@ -857,7 +857,6 @@ runs.jsonl
 scores.jsonl
 summary.json
 summary.md
-telemetry/
 ```
 
 `eval.json` records the resolved suite plus candidate and benchmark lineage,
@@ -892,10 +891,8 @@ available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the
 effective deterministic or optional-judge mode.
 
-`telemetry/` holds durable per-row telemetry cursors with byte offsets, event
-deduplication state, and artifact hashes for the local observer loop. Historical
-publication cursor documents remain readable, but there is no external
-publication command. The underlying Ultrafuzz runs live inside each target
+Historical publication cursor documents remain readable, but there is no
+external publication command. The underlying Ultrafuzz runs live inside each target
 checkout, not under the eval project; eval artifacts reference them by run ID.
 Grading and these artifacts do not depend on a reporting service.
 See [Eval Suites](evals.md).

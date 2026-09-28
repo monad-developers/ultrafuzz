@@ -1,13 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import {
-  readPlannedGraphDocument,
-  readRunPlanDocument,
-  readRunState,
-  writeFileDurable,
-  type RunState
-} from "@ultrafuzz/artifacts";
+import { readRunPlanDocument, readRunState, writeFileDurable, type RunState } from "@ultrafuzz/artifacts";
 import {
   auditProfile,
   loadAuditProfileCatalog,
@@ -28,14 +22,12 @@ import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
 import { appendEvalRunRecord, writeEvalMatrix, writeEvalRunManifest, writeEvalRunSummary } from "./eval-durable.js";
 import { evalRunExpansion } from "./expansion.js";
-import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
   buildEvalRunProvenance,
   DEFAULT_EVAL_POLL_INTERVAL_MS,
   DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS
 } from "./lineage.js";
 import { classifyRecoveryEquivalence } from "./recovery-equivalence.js";
-import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { resolveEvalProvider } from "./reporters/index.js";
 import { evalWorkflowInputSchema, planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
 import {
@@ -103,7 +95,7 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   provider?: string;
   /** `[eval]` section of resolved config; only the final provider selection is inspected. */
   evalProviderConfig?: EvalConfig;
-  /** Poll runs to terminal state and stream node telemetry (default: reporting.node_telemetry). */
+  /** Poll runs to terminal state (default: reporting.node_telemetry). */
   watch?: boolean;
   watchTimeoutSeconds?: number;
   pollIntervalMs?: number;
@@ -142,7 +134,6 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
   fs.mkdirSync(root, { recursive: true });
 
   const diagnostics: RuntimeDiagnostic[] = [];
-  const reporters: EvalReporter[] = [];
   const watch = input.watch ?? planned.suite.reporting.node_telemetry;
   const resolvedProvenance = buildEvalRunProvenance(planned, {
     watch,
@@ -165,9 +156,6 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     suite: plan.suite,
     provenance
   });
-  for (const reporter of reporters) {
-    await reporter.onPlan(plan);
-  }
 
   const selectedRows = selectRows(plan.matrix, input.rowIds);
   const records = await mapLimit(selectedRows, plan.suite.run.max_parallel_runs ?? 1, async (row) => {
@@ -189,7 +177,6 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
         plan,
         row,
         record,
-        reporters,
         evalRunRoot: root,
         ...(input.env !== undefined ? { env: input.env } : {}),
         ...(input.sync !== undefined ? { sync: input.sync } : {}),
@@ -576,7 +563,6 @@ export interface WatchEvalRowInput {
   plan: EvalPlanValue;
   row: EvalMatrixRow;
   record: EvalRunRecord;
-  reporters: EvalReporter[];
   evalRunRoot: string;
   env?: Record<string, string | undefined>;
   sync?: RowSync;
@@ -585,9 +571,9 @@ export interface WatchEvalRowInput {
 }
 
 /**
- * Drive the row's telemetry pump from the driver poll loop: sync the detached
- * workflow, drain the journal after every tick, and finish with one final
- * catch-up drain plus `onRowFinish` once the run reaches a terminal state.
+ * Poll the detached workflow until its durable state is terminal or the watch
+ * deadline passes: sync, read `state.json`, sleep. A failed sync is counted and
+ * recorded on the row; it does not end the watch.
  */
 export async function watchEvalRow(
   input: WatchEvalRowInput
@@ -597,13 +583,6 @@ export async function watchEvalRow(
   if (runRoot === undefined) {
     return { record: input.record, diagnostics };
   }
-  const pump = new NodeTelemetryPump({
-    runRoot,
-    row: input.row,
-    reporters: input.reporters,
-    policy: input.plan.suite.reporting,
-    cursorPath: path.join(input.evalRunRoot, "telemetry", `${input.row.id}.cursor.json`)
-  });
   const sync: RowSync = input.sync ?? defaultRowSync;
   const pollIntervalMs = input.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS;
   const deadline = Date.now() + (input.timeoutSeconds ?? DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS) * 1000;
@@ -613,27 +592,6 @@ export async function watchEvalRow(
   let lastSyncFailureAt: string | undefined;
   let lastSyncFailureMessage: string | undefined;
 
-  // The detached subprocess writes graph.json only after DAG planning, which
-  // can be seconds to tens of seconds after launch. Defer onRowStart until the
-  // graph is on disk so reporters see the real node list (an empty graph would
-  // orphan every node run under a never-created "default" group). `force`
-  // falls back to the empty graph so onRowStart always precedes drains/finish.
-  let rowStarted = false;
-  const startRowIfReady = async (force: boolean): Promise<void> => {
-    if (rowStarted) {
-      return;
-    }
-    const graph = readGraph(runRoot);
-    if (graph === undefined && !force) {
-      return;
-    }
-    rowStarted = true;
-    for (const reporter of input.reporters) {
-      await reporter.onRowStart(input.row, graphFromPlannedGraph(graph, input.row.id));
-    }
-  };
-
-  await startRowIfReady(false);
   let state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   while (state !== undefined && !isTerminalRunStatus(state.status) && Date.now() < deadline) {
     try {
@@ -652,11 +610,6 @@ export async function watchEvalRow(
       lastSyncFailureAt = observedAt;
       lastSyncFailureMessage = error instanceof Error ? error.message : String(error);
     }
-    await startRowIfReady(false);
-    if (rowStarted) {
-      const drained = await pump.drain();
-      diagnostics.push(...drained.warnings);
-    }
     state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
     if (state !== undefined && isTerminalRunStatus(state.status)) {
       break;
@@ -664,11 +617,6 @@ export async function watchEvalRow(
     await sleep(pollIntervalMs);
   }
 
-  // Final catch-up after the row reaches terminal state (or times out).
-  await startRowIfReady(true);
-  const finalDrain = await pump.drain();
-  diagnostics.push(...finalDrain.warnings);
-  state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
   const syncFailureDiagnostic: RuntimeDiagnostic | undefined =
     syncFailureCount === 0
@@ -702,26 +650,9 @@ export async function watchEvalRow(
           policy: input.plan.suite.recovery_equivalence
         })
       : undefined;
-  const result: EvalRowResult = {
-    status: watchTimedOut ? "timed-out" : rowStatus(state),
-    ...(input.record.ultrafuzz_run_id !== undefined ? { runId: input.record.ultrafuzz_run_id } : {}),
-    runRoot,
-    ...(state?.started_at !== undefined ? { startedAt: state.started_at } : {}),
-    ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
-    ...(input.record.graph_fingerprint !== undefined ? { graphFingerprint: input.record.graph_fingerprint } : {}),
-    ...(input.record.config_fingerprint !== undefined ? { configFingerprint: input.record.config_fingerprint } : {}),
-    ...(input.record.execution_artifact_id !== undefined
-      ? { executionArtifactId: input.record.execution_artifact_id }
-      : {}),
-    ...(recoveryEquivalence === undefined ? {} : { recoveryEquivalence }),
-    diagnostics
-  };
-  for (const reporter of input.reporters) {
-    await reporter.onRowFinish(input.row, result);
-  }
   const updatedRecord: EvalRunRecord = {
     ...input.record,
-    final_status: result.status,
+    final_status: watchTimedOut ? "timed-out" : rowStatus(state),
     ...(state === undefined
       ? {}
       : {
@@ -760,19 +691,6 @@ const defaultRowSync: RowSync = async (input) => {
     throw new Error(summary === "" ? "workflow synchronization failed without diagnostics" : summary);
   }
 };
-
-function readGraph(runRoot: string): unknown {
-  const graphPath = path.join(runRoot, "graph.json");
-  try {
-    fs.lstatSync(graphPath);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return undefined;
-    }
-    throw error;
-  }
-  return readPlannedGraphDocument(graphPath);
-}
 
 function readStateSafe(runRoot: string, expectedRunId?: string): RunState | undefined {
   const statePath = path.join(runRoot, "state.json");
@@ -880,7 +798,7 @@ export function isTerminalRunStatus(status: string): boolean {
   return isTerminalWorkflowStatus(status);
 }
 
-function rowStatus(state: RunState | undefined): EvalRowResult["status"] {
+function rowStatus(state: RunState | undefined): NonNullable<EvalRunRecord["final_status"]> {
   if (state === undefined) {
     return "launched";
   }

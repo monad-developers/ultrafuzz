@@ -45,7 +45,7 @@ reporting: # policy only — provider selection/credentials live in ultrafuzz.to
   node_telemetry: true
   heartbeat_interval_seconds: 60
   experiment_prefix: bug-finding
-  artifacts:
-    mode: manifest-only # forced default when target.sensitivity == private; opt in to "upload"
+  artifacts: # still validated, but nothing reads the artifacts policy
+    mode: manifest-only
     include: ["report.md", "report.json"]
     max_file_bytes: 5000000

@@ -16,7 +16,6 @@ import {
   parseEvalRunRecord,
   parseEvalRunSummary,
   parseEvalScoreSummary,
-  parseTelemetryCursor,
   readEvalFindingScores,
   readEvalMatrix,
   readEvalPublicationState,
@@ -242,17 +241,6 @@ describe("eval durable schema registry", () => {
         schema_version: "ultrafuzz.eval.publication.v1",
         status: "publishable",
         diagnostics: []
-      })
-    ).toBeDefined();
-    expect(
-      parseTelemetryCursor({
-        schemaVersion: "ultrafuzz.eval.telemetry-cursor.v1",
-        byteOffset: 0,
-        deliveredEventIds: [],
-        uploadedArtifacts: {},
-        lastHeartbeatAt: {},
-        providerIds: {},
-        findingsCountByNode: {}
       })
     ).toBeDefined();
   });

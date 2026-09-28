@@ -35,14 +35,14 @@ provider = "none"
 
 See `.ultrafuzz/evals/bug-finding.yml` for the default suite. It defines model
 profiles, targets (repo/ref/ground truth/sensitivity), variants, trial counts,
-grading metrics, and the `reporting:` telemetry policy. Nothing in the YAML
-names a provider, an endpoint, or an env var.
+grading metrics, and the `reporting:` block. Nothing in the YAML names a
+provider, an endpoint, or an env var.
 
-The generic telemetry API retains `reporting.artifacts` policies for explicit
-programmatic observers. Private targets default to `manifest-only`; payload
-access requires an explicit allowlist and is checked against path containment,
-regular-file status, size, and SHA-256 digest. This policy does not install a
-reporter or cause the built-in CLI to upload artifacts.
+`reporting.node_telemetry` decides whether `ultrafuzz eval run` watches
+launched rows by default; `--no-watch` overrides it. It and
+`reporting.heartbeat_interval_seconds` remain inputs to the execution-policy
+fingerprint. `reporting.experiment_prefix` and `reporting.artifacts` are still
+validated, but nothing reads them.
 
 ### Suite contract and workflow input
 
@@ -220,27 +220,14 @@ graph-inconsistent execution ledgers fail closed as non-comparable.
 
 ## Architecture
 
-Reporting is **event-sourced from the run journal**, never wired inline into
-the workflow runner:
-
-- `packages/evals/src/reporter.ts` defines the generic `EvalReporter` observer
-  interface. Ultrafuzz owns the local loop and writes `matrix.json`,
-  `runs.jsonl`, `scores.jsonl`, and `summary.json`. No built-in external
-  implementation is registered; a TOML connection profile cannot add one.
-- `packages/evals/src/node-telemetry.ts` is the pump: a cursor over
-  `events.jsonl` + `state.json` + artifact manifests, driven from the eval
-  driver's poll loop. The cursor (byte offset + `event_id` dedup ring +
-  uploaded-artifact hashes) is reloaded and persisted under a per-cursor lease.
-  Delivery is at-least-once: callbacks happen before the durable cursor commit,
-  so a crash or cursor persistence failure can replay a callback. Reporters must
-  make those callbacks idempotent with the stable `idempotencyKey` supplied on
-  every event envelope and artifact upload. Event keys are derived from the eval
-  row plus journal `event_id`; artifact keys are derived from row, node, relative
-  path, and SHA-256. Exhausted provider delivery retries degrade to warnings;
-  cursor lock, validation, and persistence failures stop the drain.
-- Heartbeat liveness is bounded by the sync poll cadence: state transitions
-  and partial artifacts appear within one poll interval. That is the correct
-  trade for a detached orchestrator.
+The eval driver owns the local loop and writes `matrix.json`, `runs.jsonl`,
+`scores.jsonl`, and `summary.json`; nothing is wired into the workflow runner.
+`ultrafuzz eval run` launches each row as a detached Ultrafuzz run. When it
+watches a row, it repeats three steps until the run's durable `state.json` is
+terminal or the watch deadline passes: synchronize the run, read `state.json`,
+and sleep for the poll interval. A failed synchronization is counted and
+recorded on the row as `EVAL_ROW_SYNC_FAILED`; it does not end the watch.
+There is no reporter or telemetry-export interface.
 
 ## Versioned lineage
 
@@ -281,7 +268,7 @@ differences that were waived.
 
 ```bash
 ultrafuzz eval plan      # validate config + suite, print the matrix
-ultrafuzz eval run       # launch rows, poll to terminal state, retain local telemetry
+ultrafuzz eval run       # launch rows and poll them to a terminal state
 ultrafuzz eval status    # observe every row's durable node progress and ETA
 ultrafuzz eval score     # grade reports against ground truth (optional --llm-judge)
 ultrafuzz eval report    # show the scored variant ranking
@@ -506,7 +493,7 @@ LLM result cannot downgrade a deterministic true positive.
 
 Full per-command flags are in the [CLI reference](cli.md#eval). Local eval
 artifacts (`eval.json`, `matrix.json`, `runs.jsonl`, `scores.jsonl`,
-`summary.json`, `summary.md`, telemetry cursors) are documented in
+`summary.json`, `summary.md`) are documented in
 [Run Artifacts and Reports](artifacts-reports.md#eval-run-artifacts). For a
 task-oriented walkthrough, see
 [Run Eval Suites](../how-to/run-evals.md).
