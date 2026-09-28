@@ -10,6 +10,7 @@ import {
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   artifactContractSchemaBinding
 } from "@ultrafuzz/artifacts";
+import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
 import { expandTopology, loadTopology } from "../src/index.js";
 
@@ -487,6 +488,40 @@ describe("packaged topology collection", () => {
     // A guard that checks nothing would pass silently if the pins were simply deleted, which is the
     // other way to lose a reviewed window.
     expect(pinsChecked, "the shipped topologies must still pin an agentic timeout somewhere").toBeGreaterThan(0);
+  });
+
+  // #1150. The triage and severity-classification prompts tell the agent that "the topology gives
+  // this review node an extended timeout". No shipped topology did: the review group lost its pin in
+  // v0.0.2, so the widest fan-in and the per-finding panel stages ran on the run default while every
+  // strategy lane had the reviewed window. Each promise is checked against the expanded graph, so a
+  // prompt and its topology cannot drift apart again.
+  it("gives every node whose prompt promises an extended timeout more than the default", { timeout: 30_000 }, () => {
+    const shadowed = largestShadowedDefault();
+    const promisingPrompts = new Set(
+      loadBuiltInPromptAssets()
+        .filter((asset) => /extended\s+timeout/u.test(asset.markdown))
+        .map((asset) => asset.relativePath)
+    );
+    let promisesChecked = 0;
+    for (const name of PACKAGED_TOPOLOGY_IDS) {
+      const topologyPath = path.join(TOPOLOGY_ROOT, `${name}.yml`);
+      const graph = expandTopology(loadTopology(REPOSITORY_ROOT, { topologyPath, requirePromptFiles: true }), {
+        projectRoot: REPOSITORY_ROOT
+      });
+      for (const node of graph.nodes) {
+        if (node.promptPath === undefined || !promisingPrompts.has(node.promptPath)) {
+          continue;
+        }
+        promisesChecked += 1;
+        expect(
+          node.timeoutSeconds ?? shadowed.seconds,
+          `${name}.yml node \`${node.id}\` promises an extended timeout but resolves to ${
+            node.timeoutSeconds ?? `${shadowed.source}=${shadowed.seconds}`
+          }`
+        ).toBeGreaterThan(shadowed.seconds);
+      }
+    }
+    expect(promisesChecked, "no shipped node promises an extended timeout; retire this guard").toBeGreaterThan(0);
   });
 
   // The other half of the #672/#677 window decision, updated for #708's config-owned retry budget.
