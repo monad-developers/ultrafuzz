@@ -222,6 +222,18 @@ test("the English word bearer does not redact following prose while Bearer token
   );
 });
 
+test("the JWT rule requires eyJ header and payload segments, so dotted identifiers publish", () => {
+  const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  assert.equal(redactSecretsInText(`session=${jwt};`, undefined, [], "positive-only"), "session=<redacted>;");
+  for (const fixture of [
+    "ReentrancyGuardUpgradeable.nonReentrantModifier.lockedStateCheck",
+    "IExampleLendingPoolCore.liquidationCall.healthFactorBefore",
+    "auditProfileResolution.settingOrigins.property_priority_threshold"
+  ]) {
+    assert.equal(containsSensitiveSecrets(fixture, [], "positive-only"), false, fixture);
+  }
+});
+
 test("in-content secretlint-disable comments cannot suppress detection", () => {
   // Scanned content is agent-controlled; the filter-comments rule is disabled
   // so contaminated output cannot exempt itself from the fail-closed gate.

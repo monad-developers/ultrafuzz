@@ -1118,6 +1118,23 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
     )
   );
 
+  // The positive rules must not fire on ordinary contract output either: a
+  // qualified identifier with three long dotted segments was JWT-shaped until
+  // the rule required the eyJ header and payload.
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        [
+          "setup/call-graph.md",
+          Buffer.from(
+            "`ReentrancyGuardUpgradeable.nonReentrantModifier.lockedStateCheck` reverts on re-entry\n",
+            "utf8"
+          )
+        ]
+      ])
+    )
+  );
+
   // Every credential format the previous hand-rolled patterns could name is
   // still rejected — via a secretlint library finding or a documented
   // supplemental pattern.
