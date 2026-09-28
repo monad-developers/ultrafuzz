@@ -76,7 +76,7 @@ import {
   type SemanticReviewStageContext,
   type WorkspacePatchManifest
 } from "@ultrafuzz/artifacts";
-import { parseProjectConfigToml } from "@ultrafuzz/config";
+import { invariantPropertyPrioritySelection, parseProjectConfigToml, type InvariantConfig } from "@ultrafuzz/config";
 import { decodeHTML } from "entities";
 import { fromMarkdown } from "mdast-util-from-markdown";
 
@@ -3450,14 +3450,15 @@ function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifa
   return undefined;
 }
 
-function readConfiguredInvariantFuzzerTimeoutSeconds(layout: RunLayout): number | undefined {
+/** The run's resolved `[invariants]` settings, read with the project config parser. */
+function resolvedInvariantConfig(layout: RunLayout): Partial<InvariantConfig> | undefined {
   if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
   try {
     const parsed = parseProjectConfigToml(
       fs.readFileSync(layout.resolvedConfigPath, "utf8"),
       layout.resolvedConfigPath
     );
-    return parsed.ok ? parsed.value.invariants?.invariantTestingFuzzerTimeoutSeconds : undefined;
+    return parsed.ok ? parsed.value.invariants : undefined;
   } catch {
     return undefined;
   }
@@ -3481,7 +3482,7 @@ function semanticPropertyCampaignTimeoutContext(
   node: PlannedGraphNode,
   attemptId: string
 ): SemanticPropertyCampaignTimeoutContext | undefined {
-  const configuredFuzzerTimeoutSeconds = readConfiguredInvariantFuzzerTimeoutSeconds(layout);
+  const configuredFuzzerTimeoutSeconds = resolvedInvariantConfig(layout)?.invariantTestingFuzzerTimeoutSeconds;
   const plannedTimeoutSeconds = plannedCampaignTimeoutSeconds(node, attemptId);
   if (configuredFuzzerTimeoutSeconds === undefined || plannedTimeoutSeconds === undefined) return undefined;
   return {
@@ -5343,17 +5344,13 @@ function readConfiguredInvariantPrioritySelection(layout: RunLayout):
       reference_expectation_selection?: "priority" | "mandatory";
     }
   | undefined {
-  if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
-  const contents = fs.readFileSync(layout.resolvedConfigPath, "utf8");
-  const match = /^\s*property_priority_threshold\s*=\s*["'](high|medium|low)["']\s*$/mu.exec(contents);
-  if (match === null) return undefined;
-  const priority_threshold = match[1] as "high" | "medium" | "low";
-  const order = ["high", "medium", "low"] as const;
-  const policy = /^\s*reference_expectation_selection\s*=\s*["'](priority|mandatory)["']\s*$/mu.exec(contents);
+  const invariants = resolvedInvariantConfig(layout);
+  const priority_threshold = invariants?.propertyPriorityThreshold;
+  if (priority_threshold === undefined) return undefined;
   return {
     priority_threshold,
-    priorities: order.slice(0, order.indexOf(priority_threshold) + 1),
-    reference_expectation_selection: policy?.[1] as "priority" | "mandatory" | undefined
+    priorities: invariantPropertyPrioritySelection(priority_threshold).priorities,
+    reference_expectation_selection: invariants?.referenceExpectationSelection
   };
 }
 

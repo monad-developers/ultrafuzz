@@ -8028,12 +8028,11 @@ test("property consumers reject a finalized catalog whose typed Markdown compani
   );
 });
 
-test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
-  const layout = createRunLayout({
-    projectRoot: tempProject(),
-    runId: "run-producer-free-implementation",
-    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
-  });
+function producerFreeImplementationGate(
+  runId: string,
+  resolvedConfigToml: string
+): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId, resolvedConfigToml });
   const output = boundOutput("handoffs/implementation-v3.json", "ultrafuzz/implemented-properties@3", true);
   const node: PlannedGraphNode = {
     ...plannedNode([]),
@@ -8052,15 +8051,30 @@ test("property implementation accepts an intentional producer-free empty catalog
     })
   });
   writePlannedGraph(layout, [node]);
+  return verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id, sealedFixtureAuthority(layout, node.id));
+}
 
-  const result = verifyRuntimeRequiredArtifactsForAttempt(
-    layout,
-    node,
-    node.id,
-    sealedFixtureAuthority(layout, node.id)
+test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
+  const result = producerFreeImplementationGate(
+    "run-producer-free-implementation",
+    '[invariants]\nproperty_priority_threshold = "high"\n'
   );
-
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+// The gate reads config.resolved.toml with the project config parser, so any
+// valid TOML spelling of the setting counts, not only one line shape.
+test("property implementation reads the resolved priority threshold as TOML", () => {
+  for (const [label, resolvedConfigToml] of [
+    ["trailing comment", '[invariants]\nproperty_priority_threshold = "high" # operator note\n'],
+    ["inline table", 'invariants = { property_priority_threshold = "high" }\n']
+  ] as const) {
+    const result = producerFreeImplementationGate(
+      `run-priority-toml-${label.replaceAll(" ", "-")}`,
+      resolvedConfigToml
+    );
+    assert.equal(result.ok, true, `${label}: ${JSON.stringify(result.diagnostics)}`);
+  }
 });
 
 test("property implementation gate enforces declared selection coverage and actionable blockers", () => {
