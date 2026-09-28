@@ -14794,6 +14794,50 @@ test("snapshot recovery removes a nested read-only stale current-generation publ
   assert.equal(fs.existsSync(savedSnapshot), true);
 });
 
+// Publication is fsync-bound: a snapshot holds thousands of dependency files.
+test("publishing an execution snapshot flushes each file once", async (context) => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "snapshot-single-flush";
+  const run = await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const evidence = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const published = evidence.executionSnapshot.root;
+  fs.chmodSync(published, 0o700);
+  fs.renameSync(published, `${path.dirname(published)}.saved-${evidence.verifiedControl.generation}`);
+
+  const flushes = context.mock.method(fs, "fsyncSync");
+  const started = performance.now();
+  const republished = materializeWorkflowExecutionSnapshot({
+    projectRoot: project,
+    layout: evidence.layout,
+    snapshot: evidence.verifiedControl
+  });
+  const elapsed = Math.round(performance.now() - started);
+  flushes.mock.restore();
+
+  // Recursive readdir would follow the snapshot's dependency links, which form cycles.
+  let files = 0;
+  let directories = 0;
+  const pending = [republished.root];
+  for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
+    directories += 1;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+      else if (entry.isFile()) files += 1;
+    }
+  }
+  assert.ok(files > 100, `expected a dependency-sized snapshot, got ${files} files`);
+  const observed = `${flushes.mock.callCount()} flushes for ${files} files in ${directories} directories (${elapsed} ms)`;
+  context.diagnostic(observed);
+  // One flush per file. Each directory adds one when it is created (its parent) and one when it is
+  // sealed, and the publishing rename adds one.
+  assert.ok(flushes.mock.callCount() <= files + 2 * directories + 1, observed);
+});
+
 test("snapshot recovery rejects matching symlink and non-directory publications without escaping", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
