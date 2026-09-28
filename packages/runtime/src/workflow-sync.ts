@@ -22,6 +22,7 @@ import {
   createNodeAttemptLedgerEntry,
   createUsageLedgerEntry,
   getNodeArtifactDir,
+  isTerminalRunStatus,
   layoutForRunRoot,
   manifestDigest,
   nodeAttemptLedgerIdentity,
@@ -1650,7 +1651,10 @@ export async function synchronizeLinkedWorkflowRun(
   if (preControlMutationBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
   }
-  if (workflowControl.changed || deadlineApplied) {
+  // Only an explicit synchronization of a live run persists a lease renewal on its own. Otherwise every
+  // status poll, and every observation of a finished run, would rewrite state.json with a new clock.
+  const persistObservation = control.observeOnly !== true && !isTerminalRunStatus(workflowControl.state.status);
+  if (deadlineApplied || (workflowControl.changed && (persistObservation || !workflowControl.observationOnly))) {
     writeRunState(layout, workflowControl.state, { forbiddenSecretValues });
   }
   if (deadlineApplied) {

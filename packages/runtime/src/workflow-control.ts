@@ -32,6 +32,8 @@ export interface WorkflowControlProjectionInput {
 export interface WorkflowControlProjection {
   state: RunState;
   changed: boolean;
+  /** The only change is the lease renewal and concurrency clock that every projection advances. */
+  observationOnly: boolean;
   transitioned: boolean;
   deadlineExceeded: boolean;
   recoveryDue: boolean;
@@ -233,13 +235,29 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
     !isTerminalRunStatus(state.status) &&
     state.status !== "paused";
 
+  const changed = JSON.stringify(state) !== JSON.stringify(input.state);
   return {
     state,
-    changed: JSON.stringify(state) !== JSON.stringify(input.state),
+    changed,
+    observationOnly:
+      changed &&
+      JSON.stringify(withoutObservationClock(state)) === JSON.stringify(withoutObservationClock(input.state)),
     transitioned: controlTransition,
     deadlineExceeded,
     recoveryDue
   };
+}
+
+function withoutObservationClock(state: RunState): unknown {
+  const { renewed_at: _renewedAt, expires_at: _expiresAt, ...lease } = state.controller_lease;
+  const {
+    observed_at: _observedAt,
+    queued_duration_ms: _queuedMs,
+    active_duration_ms: _activeMs,
+    idle_duration_ms: _idleMs,
+    ...concurrency
+  } = state.concurrency;
+  return { ...state, controller_lease: lease, concurrency };
 }
 
 function assertExactWorkflowStates(

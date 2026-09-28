@@ -307,7 +307,7 @@ export async function getRunHealth(input: {
       }))
     ]);
   }
-  const health = parseRunHealth(snapshot.json, evidence.smithersRunId);
+  const health = parseRunHealth(snapshot.json, evidence.smithersRunId, input.runId);
   if (health === undefined) {
     return runtimeFailure<RunHealthValue>([
       ...syncDiagnostics,
@@ -830,7 +830,8 @@ export const CURRENT_SMITHERS_STATUS_KEY_CONTRACT = {
 
 function parseRunHealth(
   value: unknown,
-  expectedWorkflowRunId: string
+  expectedWorkflowRunId: string,
+  runId: string
 ):
   | Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id" | "ended" | "report" | keyof RunProgressSummary>
   | undefined {
@@ -978,7 +979,7 @@ function parseRunHealth(
   return {
     workflow_status: workflowStatus,
     verdict,
-    reason: publicHealthReason(reason),
+    reason: publicHealthReason(reason, runId),
     counts: typedCounts,
     model_mix: modelMix,
     throughput: {
@@ -1165,9 +1166,13 @@ function parseRunHealthOneshotControl(value: unknown): RunHealthValue["oneshot_c
   };
 }
 
-function publicHealthReason(value: string): string {
-  // `ultrafuzz why` now wraps the engine diagnosis, so recommend it directly.
-  return value.replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`").replace(/smithers/giu, "workflow runner");
+function publicHealthReason(value: string, runId: string): string {
+  // Point at the Ultrafuzz commands that wrap the runner's own: `ultrafuzz why` for its diagnosis and
+  // `ultrafuzz resume` to continue an orphaned run.
+  return value
+    .replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`")
+    .replace(/`?smithers\s+supervise\s+-r\s+[^\s`;,]+`?/giu, `\`ultrafuzz resume ${runId}\``)
+    .replace(/smithers/giu, "workflow runner");
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {

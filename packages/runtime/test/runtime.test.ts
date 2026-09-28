@@ -13130,6 +13130,146 @@ function prependFakeSmithersCase(env: Record<string, string | undefined>, subcom
   fs.writeFileSync(smithers, source.replace(`  ${subcommand})\n`, `  ${subcommand})\n${script}`));
 }
 
+test("repeated observations leave an unchanged finished or orphaned run byte-identical", async () => {
+  for (const scenario of ["finished", "orphaned"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+    const runId = `idempotent-observation-${scenario}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const status = currentStatusEnvelope(workflowRunId);
+    Object.assign(
+      status.data as Record<string, unknown>,
+      scenario === "finished"
+        ? {
+            status: "finished",
+            verdict: "done",
+            reason: "run finished",
+            liveness: { state: "succeeded" },
+            finishedAtMs: 2_000
+          }
+        : { verdict: "orphaned", reason: "engine heartbeat is stale", liveness: { state: "orphaned" } }
+    );
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect:
+        scenario === "finished"
+          ? workflowInspect({ workflowRunId, steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }] })
+          : workflowInspect({
+              workflowRunId,
+              status: "running",
+              state: "orphaned",
+              steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+            }),
+      events: workflowEvents(
+        workflowRunId,
+        scenario === "finished"
+          ? [
+              { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+              { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+              { type: "RunFinished" }
+            ]
+          : [{ type: "RunStarted" }, { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }]
+      ),
+      status
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    if (scenario === "finished") {
+      writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+    }
+    const first = await getRunHealth({ projectRoot: project, runId, env });
+    assert.equal(first.ok, true, `${scenario}: ${JSON.stringify(first.diagnostics)}`);
+    const settled = readRunState(layoutForRunRoot(runRoot, runId));
+    assert.equal(settled.status, scenario === "finished" ? "succeeded" : "running");
+    assert.equal(settled.controller_lease.status, scenario === "finished" ? "active" : "expired");
+    const before = runStateDocumentBytes(runRoot);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const second = await getRunHealth({ projectRoot: project, runId, env });
+
+    assert.equal(second.ok, true, `${scenario}: ${JSON.stringify(second.diagnostics)}`);
+    assert.equal(second.value?.verdict, scenario === "finished" ? "done" : "orphaned");
+    assert.deepEqual(runStateDocumentBytes(runRoot), before, `${scenario}: a repeated status rewrote run state`);
+    if (scenario === "finished") {
+      const explicit = await syncRun({ projectRoot: project, runId, env });
+      assert.equal(explicit.ok, true, JSON.stringify(explicit.diagnostics));
+      assert.deepEqual(runStateDocumentBytes(runRoot), before, "an explicit sync renewed a finished run's lease");
+    }
+  }
+});
+
+test("an explicit synchronization keeps renewing a live run's controller lease", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "renewed-live-lease";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  assert.equal((await syncRun({ projectRoot: project, runId, env })).ok, true);
+  const renewedAt = readRunState(layout).controller_lease.renewed_at;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal((await syncRun({ projectRoot: project, runId, env })).ok, true);
+
+  // The eval and Modal pumps rely on this renewal to see that a run is still owned.
+  assert.ok(Date.parse(readRunState(layout).controller_lease.renewed_at) > Date.parse(renewedAt));
+});
+
+test("status reports a runner query that stops answering instead of waiting on it", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "stalled-runner-query";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    status: currentStatusEnvelope(workflowRunId)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  prependFakeSmithersCase(env, "status", "    sleep 60\n");
+  let timer: NodeJS.Timeout | undefined;
+
+  const outcome = await Promise.race([
+    getRunHealth({ projectRoot: project, runId, env: { ...env, ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS: "3000" } }),
+    new Promise<"waiting">((resolve) => {
+      timer = setTimeout(() => resolve("waiting"), 40_000);
+    })
+  ]);
+
+  clearTimeout(timer);
+  if (outcome === "waiting") assert.fail("status waited on a runner query that stopped answering");
+  assert.equal(outcome.ok, false);
+  const failure = outcome.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_STATUS_FAILED");
+  assert.match(
+    failure?.message ?? "",
+    /exceeded its time limit.*ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS=3000/u,
+    JSON.stringify(outcome.diagnostics)
+  );
+});
+
 test("a failed deadline cancel is a warning and the next status requests it again", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -13688,7 +13828,11 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
       data: {
         ...base,
         verdict,
-        reason: `run is ${verdict}`,
+        // The orphaned reason is the pinned runner's own wording, remediation included.
+        reason:
+          verdict === "orphaned"
+            ? "engine heartbeat is stale and its process is gone (last heartbeat 2026-08-13T00:00:00.000Z); the run is orphaned — resume it with `smithers supervise -r ultrafuzz-health-034-shapes`"
+            : `run is ${verdict}`,
         liveness: {
           state: verdict,
           unhealthy: { kind: "engine-heartbeat-stale", lastHeartbeatAt: "2026-08-13T00:00:00.000Z" }
@@ -13712,6 +13856,13 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
     const health = await getRunHealth({ projectRoot: project, runId: "health-034-shapes", env });
     assert.equal(health.ok, true, `${verdict}: ${JSON.stringify(health.diagnostics)}`);
     assert.equal(health.value?.verdict, verdict);
+    if (verdict === "orphaned") {
+      // `workflow runner supervise -r ...` is not a command an operator can run; resume is.
+      assert.match(
+        health.value?.reason ?? "",
+        /the run is orphaned — resume it with `ultrafuzz resume health-034-shapes`$/u
+      );
+    }
     assert.equal(health.value?.started_by?.session_id, "session-1");
     assert.equal(health.value?.attention?.crossed_count, 2);
     assert.equal(health.value?.oneshot_control?.message_id, "message-1");
