@@ -480,6 +480,13 @@ failing. Both outcomes append
 distinct product events. Failures use the stable `WORKFLOW_CANCEL_FAILED`
 diagnostic.
 
+`pause` and `cancel` read run evidence the way `status` does, without the
+workflow control lock. A run whose sealed control documents diverged, for
+example a hand-patched published workflow or a planned graph that no longer
+matches the current build's artifact contracts after a rebuild, can therefore
+still be paused or cancelled; `status` reports the divergence. Like `status`,
+they still refuse a run whose published execution snapshot files changed.
+
 `why` returns a deterministic diagnosis: a summary, the current node, and typed
 blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,
 `waiting_since`, `attempt`, and `max_attempts`. Blocker kinds are

@@ -789,7 +789,12 @@ export async function forkRun(input: WorkflowLifecycleInput) {
 
 export async function pauseRun(input: PauseRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  // Like `cancel`, pausing only asks the runner to park the linked run, so diverged control
+  // documents must not block it.
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    tolerateControlDivergence: true,
+    observeOnly: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<PauseRunValue>(evidence.diagnostics);
   }
@@ -1323,9 +1328,9 @@ export async function readLinkedWorkflowEvidence(
       throw new Error("run metadata workflow IDs do not exactly match the active workflow run");
     }
 
-    // Observers pass `tolerateControlDivergence` so a divergent control file downgrades to a reported
-    // warning instead of hiding a live run entirely (issue #674). Execution callers omit it and keep
-    // failing closed.
+    // Observers, `pause` and `cancel` pass `tolerateControlDivergence` so a divergent control file
+    // downgrades to a reported warning instead of hiding a live run entirely, or leaving it unstoppable
+    // (issue #674). Execution callers omit it and keep failing closed.
     const tolerateDivergence = options.tolerateControlDivergence === true;
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, { tolerateDivergence });
     // A live document replaced under the completeness re-derivation is a transient race, not a

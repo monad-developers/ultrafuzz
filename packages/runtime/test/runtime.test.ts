@@ -1916,6 +1916,10 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "      exit 2",
       "    fi",
       "    ;;",
+      "  cancel)",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancelled"}}\'',
+      "    exit 2",
+      "    ;;",
       "  inspect)",
       `    if [ -f ${shellQuote(inspectStateOverride)} ]; then`,
       `      inspect_state=$(cat ${shellQuote(inspectStateOverride)})`,
@@ -13302,6 +13306,20 @@ test("a divergent published control file leaves status readable while native res
   assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
   assert.equal(skipped[0]?.severity, "warning");
 
+  // The operator can still stop the run: pause and cancel reach the runner, and a confirmed
+  // cancellation is still persisted as the terminal state.
+  const paused = await pauseRun({ projectRoot: project, runId, env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.status, "pause-requested");
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled.diagnostics));
+  assert.equal(cancelled.value?.run_status, "canceled");
+  assert.ok(run.value);
+  assert.equal(readRunState(layoutForRunRoot(run.value.run_root)).status, "canceled");
+  const commands = fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8");
+  assert.match(commands, new RegExp(`^pause ultrafuzz-${runId} --format json`, "mu"));
+  assert.match(commands, new RegExp(`^cancel ultrafuzz-${runId} --format json`, "mu"));
+
   // The divergence is never silently repaired.
   assert.equal(fs.readFileSync(snapshotWorkflowPath, "utf8"), `${pristine}\n// diverged\n`);
 });
@@ -13338,6 +13356,11 @@ test("an observer still refuses a run whose sealed execution files diverged", as
   const health = await getRunHealth({ projectRoot: project, runId, env });
   assert.equal(health.ok, false);
   assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  // Cancel reaches the runner through the same snapshot environment, so it refuses before invoking it.
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.doesNotMatch(fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8"), /^cancel /mu);
 });
 
 test("a sealed manifest that stops re-deriving leaves status readable while native resume delegates", async () => {
@@ -13378,9 +13401,6 @@ test("a sealed manifest that stops re-deriving leaves status readable while nati
   }
   const resumed = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const cancelled = await cancelRun({ projectRoot: project, runId, env });
-  assert.equal(cancelled.ok, false);
-  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 
   // An observer reads the same run and is told which document stopped agreeing, naming the task the
   // re-derivation tripped on so the divergence is diagnosable without reproducing it by hand.
@@ -13413,6 +13433,11 @@ test("a sealed manifest that stops re-deriving leaves status readable while nati
   const skipped = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED");
   assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
   assert.equal(skipped[0]?.severity, "warning");
+
+  // The divergence does not keep the operator from stopping the run either.
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled.diagnostics));
+  assert.equal(cancelled.value?.run_status, "canceled");
 
   // Reporting the divergence must never repair it.
   assert.equal(
@@ -13453,9 +13478,6 @@ test("a planned graph that stops matching this build's contracts leaves status r
   assert.equal(strict.ok, false);
   const resumed = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const cancelled = await cancelRun({ projectRoot: project, runId, env });
-  assert.equal(cancelled.ok, false);
-  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 
   const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
   assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
@@ -13489,6 +13511,14 @@ test("a planned graph that stops matching this build's contracts leaves status r
     1,
     JSON.stringify(health.diagnostics)
   );
+
+  // A checkout that moved on must not cost the operator the ability to stop the run.
+  const paused = await pauseRun({ projectRoot: project, runId, env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.status, "pause-requested");
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled.diagnostics));
+  assert.equal(cancelled.value?.run_status, "canceled");
 });
 
 test("sealed Bun startup controls from another build are reported, not equated", () => {
