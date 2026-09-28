@@ -459,13 +459,16 @@ an available agent-written report.
 
 `pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
 finish, and the run settles in the resumable `paused` state. `resume` reports
-`submitted: false` instead of launching a duplicate continuation when the linked
-workflow is still in an active state (running, in-progress, started, queued,
-retrying, or waiting). `resume --reset-node` retries one failed workflow node and
-its dependents in the same linked run; the applied reset is recorded so retrying
-the command after a failed continuation resumes the already-reset run instead of
-repeating the reset. `fork` may start from a checkpoint frame and may reset one
-workflow node before starting the fork.
+`submitted: false` (text output `Run already active`) instead of launching a
+duplicate continuation when the linked workflow is still active (its Smithers
+run state is `running`, `recovering`, or one of the `waiting-*` states), and
+leaves the run's recorded state and workflow deadline unchanged. A run still
+finishing its in-flight tasks after `pause` is still active; resume it again
+once `status` reports `paused`. `resume --reset-node` retries one failed
+workflow node and its dependents in the same linked run; the applied reset is
+recorded so retrying the command after a failed continuation resumes the
+already-reset run instead of repeating the reset. `fork` may start from a
+checkpoint frame and may reset one workflow node before starting the fork.
 
 Every command in this section takes an Ultrafuzz run ID and resolves the linked
 workflow run from existing product evidence; none of them require the

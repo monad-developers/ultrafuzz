@@ -40,7 +40,11 @@ export default class Resume extends Command {
     emitCommandResult(
       this,
       "resume",
-      commandFromRuntime("resume", result, (value) => `Submitted ${value.action}: ${value.workflow_run_id}\n`),
+      commandFromRuntime("resume", result, (value) =>
+        value.submitted
+          ? `Submitted ${value.action}: ${value.workflow_run_id}\n`
+          : `Run already active: ${value.workflow_run_id}; no new controller was started. If a pause is still draining, resume again once status reports paused.\n`
+      ),
       flags.json === true
     );
   }

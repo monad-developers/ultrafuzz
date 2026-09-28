@@ -26463,6 +26463,11 @@ test("ordinary resume checks active-run ownership before detached preflight", as
   });
   const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  // An attach starts no controller, so the run's state (status, lease and
+  // workflow deadline) must stay exactly as its live owner left it (#1153).
+  assert.ok(run.value);
+  const statePath = path.join(run.value.run_root, "state.json");
+  const stateBefore = fs.readFileSync(statePath, "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   // A duplicate `up --resume --detach` renders the workflow before Smithers
   // checks ownership. Keep that path fatal so this regression proves active
@@ -26492,6 +26497,7 @@ test("ordinary resume checks active-run ownership before detached preflight", as
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(forcedCommands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
   assert.doesNotMatch(forcedCommands, /^up /mu);
+  assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
 });
 
 test("resume derives reset identities from the canonical nodes of a failed workflow", async () => {

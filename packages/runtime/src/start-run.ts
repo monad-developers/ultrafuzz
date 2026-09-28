@@ -672,12 +672,11 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli.environmentVariableNames
       )
     });
-    recordNativeContinuationState({
-      layout,
-      config,
-      requestedConcurrency: input.maxConcurrency,
-      alreadyRunning: result.alreadyRunning ?? false
-    });
+    // Attaching to an already-active run started no controller. Its state
+    // (status, lease, deadline) belongs to the live owner, so leave it alone.
+    if (result.alreadyRunning !== true) {
+      recordNativeContinuationState({ layout, config, requestedConcurrency: input.maxConcurrency });
+    }
     return runtimeResult(true, {
       run_id: runId,
       workflow_run_id: smithersRunId,
@@ -743,7 +742,6 @@ function recordNativeContinuationState(input: {
   layout: RunLayout;
   config: ResolvedConfig | undefined;
   requestedConcurrency: number | undefined;
-  alreadyRunning: boolean;
 }): void {
   try {
     const submittedAt = new Date().toISOString();
@@ -753,19 +751,17 @@ function recordNativeContinuationState(input: {
     state.status = "running";
     state.started_at ??= submittedAt;
     delete state.finished_at;
-    if (!input.alreadyRunning) {
-      const leaseDurationMs =
-        (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
-      state.controller_lease = {
-        ...state.controller_lease,
-        status: "active",
-        duration_ms: leaseDurationMs,
-        renewed_at: submittedAt,
-        expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
-      };
-      state.concurrency.requested_concurrency =
-        input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
-    }
+    const leaseDurationMs =
+      (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
+    state.controller_lease = {
+      ...state.controller_lease,
+      status: "active",
+      duration_ms: leaseDurationMs,
+      renewed_at: submittedAt,
+      expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
+    };
+    state.concurrency.requested_concurrency =
+      input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
     if (input.config !== undefined) {
       state.workflow_deadline_at = new Date(
         submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000

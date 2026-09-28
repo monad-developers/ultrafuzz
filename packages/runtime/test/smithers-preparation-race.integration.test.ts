@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -226,6 +226,96 @@ process.stdout.write(JSON.stringify(result));`
   }
 });
 
+// #1153 asked Ultrafuzz for its own controller-generation fence around pause
+// and continuation handoff. The pinned engine already provides the guarantee:
+// a graceful pause lets in-flight tasks finish instead of aborting them, a
+// second controller is refused while the owner is alive (`--force` does not
+// take ownership), and a resume after the park runs only the remaining work.
+// Pin those facts so an engine bump that regresses them fails here.
+test("graceful pause drains in-flight tasks and refuses a second controller until the run parks", async () => {
+  const root = temporaryRoot("ultrafuzz-smithers-pause-handoff-");
+  const workflowDir = path.join(root, ".smithers", "workflows");
+  const workflowPath = path.join(workflowDir, "pause-handoff.tsx");
+  const traceLog = path.join(root, "trace.log");
+  const releasePath = path.join(root, "release-in-flight");
+  const runId = `pause-handoff-${process.pid}-${Date.now()}`;
+  const runner = (args: string[]) =>
+    spawnSync(smithersBinary(), args, {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, SMITHERS_POST_FAILURE: "0" }
+    });
+  const trace = (): string[] =>
+    fs.existsSync(traceLog) ? fs.readFileSync(traceLog, "utf8").trim().split("\n").filter(Boolean) : [];
+  const pidOf = (lines: readonly string[], event: string) =>
+    lines.find((line) => line.endsWith(` ${event}`))?.split(" ")[0];
+
+  try {
+    fs.mkdirSync(workflowDir, { recursive: true });
+    initFixtureRepository(root);
+    const smithersPackageRoot = fs.realpathSync(path.join(runtimePackageRoot(), "node_modules", "smthrs"));
+    fs.symlinkSync(path.dirname(smithersPackageRoot), path.join(root, ".smithers", "node_modules"), "dir");
+    fs.writeFileSync(workflowPath, pauseHandoffWorkflowSource({ traceLog, releasePath }), "utf8");
+
+    const launched = runner([
+      "up",
+      workflowPath,
+      "--detach",
+      "--run-id",
+      runId,
+      "--root",
+      root,
+      "--input",
+      "{}",
+      "--format",
+      "json"
+    ]);
+    assert.equal(launched.status, 0, launched.stderr);
+    await waitUntil(() => trace().filter((line) => line.endsWith(" start")).length === 2, 60_000, "a and b start");
+
+    const pause = runner(["pause", runId, "--format", "json"]);
+    assert.match(pause.stdout, /"pause-requested"/u, pause.stderr);
+    // Both in-flight tasks are held open, so the owner is still draining: a
+    // replacement controller and a node reset are refused despite `--force`.
+    for (const takeover of [
+      ["up", workflowPath, "--resume", runId, "--run-id", runId, "--force", "--detach", "--format", "json"],
+      ["timetravel", workflowPath, "--run-id", runId, "--node-id", "a", "--no-vcs", "--force", "--format", "json"]
+    ]) {
+      const refused = runner(takeover);
+      assert.notEqual(refused.status, 0, takeover.join(" "));
+      assert.match(refused.stdout + refused.stderr, /RUN_OWNER_ALIVE/u, takeover.join(" "));
+    }
+    // The draining run still reports an active state, so `ultrafuzz resume`
+    // only attaches to it instead of starting a controller.
+    const draining = JSON.parse(runner(["inspect", runId, "--format", "json", "--full-output"]).stdout) as {
+      data?: { runState?: { state?: string } };
+    };
+    assert.equal(draining.data?.runState?.state, "running");
+    assert.equal(trace().length, 2, "no task ended or started while the pause drained");
+
+    fs.writeFileSync(releasePath, "", "utf8");
+    await waitForStatus(root, runId, "paused", 60_000);
+    const parked = trace();
+    const ownerPid = pidOf(parked, "a start");
+    assert.equal(pidOf(parked, "a end"), ownerPid, "the draining owner finished a");
+    assert.equal(pidOf(parked, "b end"), ownerPid, "the draining owner finished b");
+    assert.equal(pidOf(parked, "c start"), undefined, "the pause stopped new scheduling");
+
+    const resumed = runner(["up", workflowPath, "--resume", runId, "--run-id", runId, "--detach", "--format", "json"]);
+    assert.equal(resumed.status, 0, resumed.stderr);
+    await waitForSuccessfulCompletion(root, runId, 60_000);
+    const finished = trace();
+    for (const event of ["a start", "b start", "c start"]) {
+      const runs = finished.filter((line) => line.endsWith(` ${event}`)).length;
+      assert.equal(runs, 1, `${event} ran ${runs} times: ${JSON.stringify(finished)}`);
+    }
+    assert.notEqual(pidOf(finished, "c start"), ownerPid, "only the replacement controller ran c");
+  } finally {
+    fs.writeFileSync(releasePath, "", "utf8");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function initFixtureRepository(root: string): void {
   execGit(root, ["init", "--quiet", "--initial-branch=main"]);
   execGit(root, ["config", "user.name", "Ultrafuzz Synthetic Test"]);
@@ -368,6 +458,45 @@ export default smithers((ctx) => (
 `;
 }
 
+function pauseHandoffWorkflowSource(input: { traceLog: string; releasePath: string }): string {
+  return `/** @jsxImportSource smthrs */
+import fs from "node:fs";
+import { createSmithers } from "smthrs";
+import { z } from "zod/v4";
+
+const traceLog = ${JSON.stringify(input.traceLog)};
+const releasePath = ${JSON.stringify(input.releasePath)};
+const trace = (event) => fs.appendFileSync(traceLog, process.pid + " " + event + "\\n", "utf8");
+const { Workflow, Task, Parallel, Sequence, smithers, outputs } = createSmithers({
+  input: z.object({}),
+  step: z.object({ done: z.literal(true) })
+});
+// Hold each in-flight task until the test releases it, bounded so a failed
+// test cannot leave the detached engine polling forever.
+const held = (id) => async () => {
+  trace(id + " start");
+  const deadline = Date.now() + 120000;
+  while (!fs.existsSync(releasePath) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  trace(id + " end");
+  return { done: true };
+};
+
+export default smithers(() => (
+  <Workflow name="pause-handoff">
+    <Sequence>
+      <Parallel id="in-flight">
+        <Task id="a" output={outputs.step} retries={0}>{held("a")}</Task>
+        <Task id="b" output={outputs.step} retries={0}>{held("b")}</Task>
+      </Parallel>
+      <Task id="c" output={outputs.step} retries={0}>{() => (trace("c start"), { done: true })}</Task>
+    </Sequence>
+  </Workflow>
+));
+`;
+}
+
 async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -377,7 +506,20 @@ async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
   throw new Error(`timed out waiting for ${filePath}`);
 }
 
+async function waitUntil(condition: () => boolean, timeoutMs: number, label: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`timed out waiting until ${label}`);
+}
+
 async function waitForSuccessfulCompletion(root: string, runId: string, timeoutMs: number): Promise<void> {
+  await waitForStatus(root, runId, "finished", timeoutMs);
+}
+
+async function waitForStatus(root: string, runId: string, expected: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let status = "unknown";
   while (Date.now() < deadline) {
@@ -393,13 +535,13 @@ async function waitForSuccessfulCompletion(root: string, runId: string, timeoutM
       await new Promise((resolve) => setTimeout(resolve, 100));
       continue;
     }
-    if (status === "finished") return;
+    if (status === expected) return;
     if (["failed", "cancelled", "canceled"].includes(status)) {
       throw new Error(`synthetic Smithers workflow ended with status ${status}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`synthetic Smithers workflow did not finish; final status ${status}`);
+  throw new Error(`synthetic Smithers workflow did not reach ${expected}; final status ${status}`);
 }
 
 function smithersNodeOutput(root: string, runId: string, nodeId: string): Buffer {
