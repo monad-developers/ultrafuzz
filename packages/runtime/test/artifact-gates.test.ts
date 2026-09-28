@@ -12969,10 +12969,16 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   ]) {
     publish(evidence, `${scopedMarkdown}\n## Notes\n\n${unscopedProducerScore}\n`);
     const hiddenProducerScope = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-    assert.equal(hiddenProducerScope.ok, false, unscopedProducerScore);
+    // Prose scores are advisory; the typed evidence and canonical section bind the result.
+    assert.equal(
+      hiddenProducerScope.ok,
+      true,
+      `${unscopedProducerScore}: ${JSON.stringify(hiddenProducerScope.diagnostics)}`
+    );
     assert.ok(
-      hiddenProducerScope.diagnostics.some((diagnostic) =>
-        /^UNSCOPED_COVERAGE_(?:FRACTION|PERCENTAGE)$/u.test(diagnostic.code)
+      hiddenProducerScope.diagnostics.some(
+        (diagnostic) =>
+          /^UNSCOPED_COVERAGE_(?:FRACTION|PERCENTAGE)$/u.test(diagnostic.code) && diagnostic.severity === "warning"
       ),
       JSON.stringify(hiddenProducerScope.diagnostics)
     );
@@ -13304,13 +13310,22 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     JSON.stringify(contradictoryScopedFraction.diagnostics)
   );
 
-  publish(evidence, `${scopedMarkdown}\n## Notes\n\nRetry 1/2 reproduced the same revert.\n`);
-  const ordinaryFraction = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(ordinaryFraction.ok, false);
-  assert.ok(
-    ordinaryFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_SCORE"),
-    JSON.stringify(ordinaryFraction.diagnostics)
-  );
+  for (const ordinaryProse of [
+    "Retry 1/2 reproduced the same revert.",
+    "Handlers reachable: 7/9",
+    "Target: 90% of Recon-selected declarations.",
+    "After iteration 2 we covered 41 of 57 functions."
+  ]) {
+    publish(evidence, `${scopedMarkdown}\n## Notes\n\n${ordinaryProse}\n`);
+    const ordinary = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(ordinary.ok, true, `${ordinaryProse}: ${JSON.stringify(ordinary.diagnostics)}`);
+    assert.ok(
+      ordinary.diagnostics.some(
+        (diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_SCORE" && diagnostic.severity === "warning"
+      ),
+      `${ordinaryProse}: ${JSON.stringify(ordinary.diagnostics)}`
+    );
+  }
 
   const staleGoal = structuredClone(goal);
   staleGoal.current_measurement.covered_ranges = 0;
@@ -14116,6 +14131,24 @@ test("coverage gate authenticates Vyper declaration boundaries in the Recon sele
   );
 });
 
+/** Natural-language coverage scores are reported only as advisory warnings, never as gate errors. */
+function assertAdvisoryCoverageScore(
+  result: ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt>,
+  code: "UNSCOPED_COVERAGE_PERCENTAGE" | "UNSCOPED_COVERAGE_FRACTION",
+  label: string
+): void {
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === code && diagnostic.severity === "warning"),
+    `${label}: ${JSON.stringify(result.diagnostics)}`
+  );
+  assert.ok(
+    result.diagnostics.every(
+      (diagnostic) => !diagnostic.code.startsWith("UNSCOPED_COVERAGE_") || diagnostic.severity === "warning"
+    ),
+    `${label}: ${JSON.stringify(result.diagnostics)}`
+  );
+}
+
 test("final report preserves typed coverage evidence and its canonical Markdown projection", () => {
   const lcovArtifactPath = "reports/2026/08/coverage-input.lcov";
   const layout = createRunLayout({
@@ -14495,16 +14528,12 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(mixed.ok, false, mixedScore);
     const normalizedMixedScore = mixedScore.normalize("NFKC").replace(/[\u2044\u2215\u29f8]/gu, "/");
-    assert.ok(
-      mixed.diagnostics.some(
-        (diagnostic) =>
-          diagnostic.code ===
-          (/%|٪|&(?:percnt|#0*37|#x0*25);|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
-            ? "UNSCOPED_COVERAGE_PERCENTAGE"
-            : "UNSCOPED_COVERAGE_FRACTION")
-      ),
+    assertAdvisoryCoverageScore(
+      mixed,
+      /%|٪|&(?:percnt|#0*37|#x0*25);|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
+        ? "UNSCOPED_COVERAGE_PERCENTAGE"
+        : "UNSCOPED_COVERAGE_FRACTION",
       mixedScore
     );
   }
@@ -14617,11 +14646,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${crossRenderedLineScope}\n`);
     const crossLine = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(crossLine.ok, false, crossRenderedLineScope);
-    assert.ok(
-      crossLine.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-      `${crossRenderedLineScope}: ${JSON.stringify(crossLine.diagnostics)}`
-    );
+    assert.equal(crossLine.ok, true, `${crossRenderedLineScope}: ${JSON.stringify(crossLine.diagnostics)}`);
+    assertAdvisoryCoverageScore(crossLine, "UNSCOPED_COVERAGE_PERCENTAGE", crossRenderedLineScope);
   }
 
   for (const implicitlyVisibleScore of [
@@ -14653,11 +14679,7 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
     const visibleAfterImplicitClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(visibleAfterImplicitClose.ok, false, implicitlyVisibleScore);
-    assert.ok(
-      visibleAfterImplicitClose.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-      `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterImplicitClose.diagnostics)}`
-    );
+    assertAdvisoryCoverageScore(visibleAfterImplicitClose, "UNSCOPED_COVERAGE_PERCENTAGE", implicitlyVisibleScore);
   }
 
   for (const paragraphClosingTag of [
@@ -14676,11 +14698,12 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     const implicitlyVisibleScore = `<p hidden>x<${paragraphClosingTag}${openAttribute}>Overall coverage was 100%.</${paragraphClosingTag}>`;
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
     const visibleAfterParagraphClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(visibleAfterParagraphClose.ok, false, implicitlyVisibleScore);
-    assert.ok(
-      visibleAfterParagraphClose.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+    assert.equal(
+      visibleAfterParagraphClose.ok,
+      true,
       `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterParagraphClose.diagnostics)}`
     );
+    assertAdvisoryCoverageScore(visibleAfterParagraphClose, "UNSCOPED_COVERAGE_PERCENTAGE", implicitlyVisibleScore);
   }
 
   writeArtifact(
@@ -14695,11 +14718,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   const nestedHtml = `${"<span>".repeat(4_000)}Coverage was 100%.${"</span>".repeat(4_000)}`;
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${nestedHtml}\n`);
   const deeplyNestedHtml = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(deeplyNestedHtml.ok, false);
-  assert.ok(
-    deeplyNestedHtml.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-    JSON.stringify(deeplyNestedHtml.diagnostics)
-  );
+  assert.equal(deeplyNestedHtml.ok, true, JSON.stringify(deeplyNestedHtml.diagnostics));
+  assertAdvisoryCoverageScore(deeplyNestedHtml, "UNSCOPED_COVERAGE_PERCENTAGE", "deeply nested HTML");
 
   writeArtifact(
     layout,
@@ -14805,18 +14825,18 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized score: 100%.\n`);
   const disguisedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(disguisedPercentage.ok, false);
-  assert.ok(disguisedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(disguisedPercentage.ok, true, JSON.stringify(disguisedPercentage.diagnostics));
+  assertAdvisoryCoverageScore(disguisedPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "disguisedPercentage");
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nOverall coverage reached 99.5%.\n`);
   const decimalPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(decimalPercentage.ok, false);
-  assert.ok(decimalPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(decimalPercentage.ok, true, JSON.stringify(decimalPercentage.diagnostics));
+  assertAdvisoryCoverageScore(decimalPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "decimalPercentage");
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n100&#37; standardized coverage.\n`);
   const encodedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(encodedPercentage.ok, false);
-  assert.ok(encodedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(encodedPercentage.ok, true, JSON.stringify(encodedPercentage.diagnostics));
+  assertAdvisoryCoverageScore(encodedPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "encodedPercentage");
 
   writeArtifact(
     layout,
@@ -14825,13 +14845,13 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     `${scopedMarkdown}\n## Notes\n\nStandardized coverage was 100&percnt;.\n`
   );
   const namedEntityPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(namedEntityPercentage.ok, false);
-  assert.ok(namedEntityPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(namedEntityPercentage.ok, true, JSON.stringify(namedEntityPercentage.diagnostics));
+  assertAdvisoryCoverageScore(namedEntityPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "namedEntityPercentage");
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized coverage: 39/39.\n`);
   const disguisedFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(disguisedFraction.ok, false);
-  assert.ok(disguisedFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"));
+  assert.equal(disguisedFraction.ok, true, JSON.stringify(disguisedFraction.diagnostics));
+  assertAdvisoryCoverageScore(disguisedFraction, "UNSCOPED_COVERAGE_FRACTION", "disguisedFraction");
 
   writeArtifact(
     layout,
@@ -14937,11 +14957,27 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [coverageProseIssue] }))
   );
   const proseInTypedReport = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(proseInTypedReport.ok, false);
-  assert.ok(
-    proseInTypedReport.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-    JSON.stringify(proseInTypedReport.diagnostics)
-  );
+  assert.equal(proseInTypedReport.ok, true, JSON.stringify(proseInTypedReport.diagnostics));
+  assertAdvisoryCoverageScore(proseInTypedReport, "UNSCOPED_COVERAGE_PERCENTAGE", "typed report prose");
+
+  for (const [note, code] of [
+    ["Recon reached 85% line coverage on Vault.sol.", "UNSCOPED_COVERAGE_PERCENTAGE"],
+    ["Coverage of withdraw() was 3/4 branches in the replay.", "UNSCOPED_COVERAGE_FRACTION"]
+  ] as const) {
+    const campaignProseIssue = {
+      ...structuredClone(coverageProseIssue),
+      notes: ["triage_reason=public path is reachable", note]
+    };
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.json",
+      JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [campaignProseIssue] }))
+    );
+    const campaignProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(campaignProse.ok, true, `${note}: ${JSON.stringify(campaignProse.diagnostics)}`);
+    assertAdvisoryCoverageScore(campaignProse, code, note);
+  }
 
   for (const noteSequence of [["Coverage:\n\n100%."], ["Coverage overview:\n\n100%."], ["Coverage:", "100%."]]) {
     const jsonBypassIssue = {
@@ -14955,11 +14991,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
       JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [jsonBypassIssue] }))
     );
     const jsonBypass = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(jsonBypass.ok, false, JSON.stringify(noteSequence));
-    assert.ok(
-      jsonBypass.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-      `${JSON.stringify(noteSequence)}: ${JSON.stringify(jsonBypass.diagnostics)}`
-    );
+    assert.equal(jsonBypass.ok, true, `${JSON.stringify(noteSequence)}: ${JSON.stringify(jsonBypass.diagnostics)}`);
+    assertAdvisoryCoverageScore(jsonBypass, "UNSCOPED_COVERAGE_PERCENTAGE", JSON.stringify(noteSequence));
   }
 
   const persistentCoverageLabelIssue = {
@@ -15051,11 +15084,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [evaluatorFractionIssue] }))
   );
   const evaluatorFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(evaluatorFraction.ok, false);
-  assert.ok(
-    evaluatorFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"),
-    JSON.stringify(evaluatorFraction.diagnostics)
-  );
+  assert.equal(evaluatorFraction.ok, true, JSON.stringify(evaluatorFraction.diagnostics));
+  assertAdvisoryCoverageScore(evaluatorFraction, "UNSCOPED_COVERAGE_FRACTION", "evaluator fraction");
 
   const nestedCoverageReport = currentReport(layout.runId, { coverage_evidence: evidence }) as Record<string, unknown>;
   nestedCoverageReport.coverage = { score: "100%" };

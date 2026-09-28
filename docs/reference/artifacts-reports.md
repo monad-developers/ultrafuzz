@@ -737,9 +737,12 @@ Blockers:
 ```
 
 Repeat blocker and evidence rows in artifact order. Runtime publication compares
-this section with the typed handoff and rejects missing, duplicated, reordered,
-or bare coverage scores. Raw `covg-eval` output is for iteration only and
-defines neither published declaration-completeness view.
+this section with the typed handoff and rejects missing, duplicated, or
+reordered scores. A coverage score elsewhere in the Markdown or in `report.json`
+text that names no exact declaration-completeness scope is reported as a
+warning rather than failing publication, although a document with more than
+2,048 score candidates still fails the scan limit. Raw `covg-eval` output is
+for iteration only and defines neither published declaration-completeness view.
 
 Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
 `threat-model.json`, and `goal-plan.json`, plus source-node provenance for each

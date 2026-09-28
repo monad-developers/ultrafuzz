@@ -7454,7 +7454,7 @@ function unscopedCoverageScoreDiagnostics(
           {
             code: "UNSCOPED_COVERAGE_SCORE",
             message: "Published coverage scores must name an exact declaration-completeness scope on the same line",
-            severity: "error" as const,
+            severity: "warning" as const,
             source: "coverage-evidence",
             path: `${artifactPath}:${occurrence.line}`
           },
@@ -7512,13 +7512,18 @@ function reportCoverageScoreDiagnostic(
       path: `${artifactPath}:${occurrence.line}`
     };
   }
+  // Prose scores are advisory. This natural-language scan runs only on the
+  // host, after the in-workflow verifier accepted the attempt, and it matches
+  // ordinary sentences such as "Recon reached 85% line coverage" or "Handlers
+  // reachable: 7/9". The typed coverage evidence and its canonical Markdown
+  // section remain errors when they disagree.
   const percentage = occurrence.kind === "percentage";
   return {
     code: percentage ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
     message: percentage
       ? "Coverage percentages must name an exact declaration-completeness scope on the same rendered line"
       : "Coverage fractions must name an exact declaration-completeness scope on the same rendered line",
-    severity: "error",
+    severity: "warning",
     source: "coverage-evidence",
     path: `${artifactPath}:${occurrence.line}`
   };
