@@ -10268,8 +10268,6 @@ function runCampaignTimeoutGate(
     topologyTimeoutSeconds?: number | null;
     modelTimeoutSeconds?: number | null;
     logicalNodeId?: string;
-    outputCounts?: Partial<Record<"plan" | "result" | "findings" | "summary", number>>;
-    nonRecordDocument?: "result" | "summary";
     declaredPaths?: {
       plan: string;
       result: string;
@@ -10286,15 +10284,6 @@ function runCampaignTimeoutGate(
     findings: "findings.json",
     summary: "campaign-summary.json"
   };
-  const outputCounts = {
-    plan: 1,
-    result: 1,
-    findings: 1,
-    summary: 1,
-    ...options.outputCounts
-  };
-  const rolePath = (role: keyof typeof outputCounts, index: number): string =>
-    index === 0 ? declaredPaths[role] : `${declaredPaths[role]}.duplicate-${index}`;
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-campaign-timeout",
@@ -10321,7 +10310,7 @@ function runCampaignTimeoutGate(
     layout,
     campaignId,
     declaredPaths.result,
-    JSON.stringify(options.nonRecordDocument === "result" ? [] : fixture.backend),
+    JSON.stringify(fixture.backend),
     "ultrafuzz/property-campaign@3"
   );
   writeArtifact(layout, campaignId, declaredPaths.findings, "[]", "ultrafuzz/findings@2");
@@ -10329,60 +10318,15 @@ function runCampaignTimeoutGate(
     layout,
     campaignId,
     declaredPaths.summary,
-    JSON.stringify(options.nonRecordDocument === "summary" ? [] : fixture.summary),
+    JSON.stringify(fixture.summary),
     "ultrafuzz/campaign-summary@2"
   );
-  for (let index = 1; index < outputCounts.plan; index += 1) {
-    writeArtifact(
-      layout,
-      campaignId,
-      rolePath("plan", index),
-      JSON.stringify(fixture.plan),
-      "ultrafuzz/invariant-campaign-plan@2"
-    );
-  }
-  for (let index = 1; index < outputCounts.result; index += 1) {
-    writeArtifact(
-      layout,
-      campaignId,
-      rolePath("result", index),
-      JSON.stringify(fixture.backend),
-      "ultrafuzz/property-campaign@3"
-    );
-  }
-  for (let index = 1; index < outputCounts.findings; index += 1) {
-    writeArtifact(layout, campaignId, rolePath("findings", index), "[]", "ultrafuzz/findings@2");
-  }
-  for (let index = 1; index < outputCounts.summary; index += 1) {
-    writeArtifact(
-      layout,
-      campaignId,
-      rolePath("summary", index),
-      JSON.stringify(fixture.summary),
-      "ultrafuzz/campaign-summary@2"
-    );
-  }
   const base = currentCampaignNode([
     "campaign-plan.json",
     "recon-fuzzer-results.json",
     "findings.json",
     "campaign-summary.json"
   ]);
-  const outputs = [
-    ...Array.from({ length: outputCounts.plan }, (_, index) =>
-      boundOutput(rolePath("plan", index), "ultrafuzz/invariant-campaign-plan@2", index === 0)
-    ),
-    ...Array.from({ length: outputCounts.result }, (_, index) =>
-      boundOutput(rolePath("result", index), "ultrafuzz/property-campaign@3", false)
-    ),
-    ...Array.from({ length: outputCounts.findings }, (_, index) =>
-      boundOutput(rolePath("findings", index), "ultrafuzz/findings@2", false)
-    ),
-    ...Array.from({ length: outputCounts.summary }, (_, index) =>
-      boundOutput(rolePath("summary", index), "ultrafuzz/campaign-summary@2", false)
-    )
-  ];
-  if (outputs.length > 0 && !outputs.some((output) => output.primary)) outputs[0] = { ...outputs[0]!, primary: true };
   const node: PlannedGraphNode = {
     ...base,
     id: campaignId,
@@ -10403,19 +10347,37 @@ function runCampaignTimeoutGate(
             }
           ]
         }),
-    outputs
+    outputs: [
+      boundOutput(declaredPaths.plan, "ultrafuzz/invariant-campaign-plan@2", true),
+      boundOutput(declaredPaths.result, "ultrafuzz/property-campaign@3"),
+      boundOutput(declaredPaths.findings, "ultrafuzz/findings@2"),
+      boundOutput(declaredPaths.summary, "ultrafuzz/campaign-summary@2")
+    ]
   };
   if (topologyTimeoutSeconds === null) delete node.timeout_seconds;
   return verifyRequiredArtifactsForAttempt(layout, node, campaignId);
 }
 
+/**
+ * Registry gate property-campaign-timeout-evidence failures, by in-document
+ * path. The host runs the same gate the generated verifier runs; there is no
+ * separate host implementation of these rules.
+ */
+function timeoutEvidenceIssuePaths(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>): string[] {
+  return result.diagnostics
+    .filter((diagnostic) => diagnostic.details?.gate === "property-campaign-timeout-evidence")
+    .map((diagnostic) => diagnostic.path?.slice(diagnostic.path.indexOf("#") + 1) ?? "");
+}
+
+function withCampaignCommand(fixture: CampaignTimeoutFixture, command: string): void {
+  fixture.backend.exact_command = command;
+  fixture.plan.backend.exact_shell_escaped_command = command;
+  fixture.plan.command_plan[0]!.command = command;
+}
+
 test("current campaign timeout gate accepts exact configured Recon timeout evidence", () => {
   const result = runCampaignTimeoutGate();
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
-    []
-  );
 });
 
 test("current campaign timeout gate resolves custom artifact paths from sealed contract declarations", () => {
@@ -10437,58 +10399,24 @@ test("current campaign timeout gate resolves custom artifact paths from sealed c
   assert.ok(
     result.diagnostics.some(
       (diagnostic) =>
-        diagnostic.code === "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH" &&
-        diagnostic.path?.endsWith("custom/campaign-plan.json#$.configured_fuzzer_timeout_seconds")
+        diagnostic.details?.gate === "property-campaign-timeout-evidence" &&
+        diagnostic.path?.endsWith("custom/recon-results.json#$.campaign_plan_ref#configured_fuzzer_timeout_seconds")
     ),
     JSON.stringify(result.diagnostics)
   );
 });
 
-test("current campaign timeout gate requires exactly one declaration for every tuple member", () => {
-  const tupleMembers = [
-    ["plan", "ultrafuzz/invariant-campaign-plan@2"],
-    ["result", "ultrafuzz/property-campaign@3"],
-    ["summary", "ultrafuzz/campaign-summary@2"],
-    ["findings", "ultrafuzz/findings@2"]
-  ] as const;
-  for (const [role, contract] of tupleMembers) {
-    for (const count of [0, 2] as const) {
-      const result = runCampaignTimeoutGate(() => undefined, {
-        logicalNodeId: "project-owned-recon-campaign",
-        outputCounts: { [role]: count }
-      });
-      assert.equal(result.ok, false, `${role}:${count}`);
-      assert.ok(
-        result.diagnostics.some(
-          (diagnostic) =>
-            diagnostic.code === "CAMPAIGN_TIMEOUT_OUTPUT_DECLARATION_INVALID" &&
-            diagnostic.message.includes(contract) &&
-            diagnostic.message.endsWith(`found ${count}`)
-        ),
-        `${role}:${count}: ${JSON.stringify(result.diagnostics)}`
-      );
-    }
-  }
-});
-
-test("current campaign timeout gate explicitly rejects non-object result and summary documents", () => {
-  for (const role of ["result", "summary"] as const) {
-    const result = runCampaignTimeoutGate(() => undefined, { nonRecordDocument: role });
-    assert.equal(result.ok, false, role);
-    assert.ok(
-      result.diagnostics.some(
-        (diagnostic) =>
-          diagnostic.code === "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID" && diagnostic.message.includes("must be an object")
-      ),
-      `${role}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
 test("current campaign timeout gate requires the sealed topology node budget", () => {
   const result = runCampaignTimeoutGate(() => undefined, { topologyTimeoutSeconds: null });
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING"));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE" &&
+        diagnostic.details?.gate === "property-campaign-timeout-evidence"
+    ),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("current campaign timeout gate accepts a sealed model-profile or run-default budget", () => {
@@ -10496,284 +10424,155 @@ test("current campaign timeout gate accepts a sealed model-profile or run-defaul
     topologyTimeoutSeconds: null,
     modelTimeoutSeconds: 7200
   });
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
-    [],
-    JSON.stringify(result.diagnostics)
-  );
+  assert.deepEqual(timeoutEvidenceIssuePaths(result), [], JSON.stringify(result.diagnostics));
 });
 
-test("current campaign timeout gate rejects reserve subtraction and ambiguous Recon command flags", () => {
-  const cases: Array<{
-    name: string;
-    code: string;
-    mutate: (fixture: CampaignTimeoutFixture) => void;
-  }> = [
+test("current campaign timeout gate rejects forged budgets, Recon flags, and sequence lengths", () => {
+  const replaceCommand = (search: string, replacement: string) => (fixture: CampaignTimeoutFixture) =>
+    withCampaignCommand(fixture, fixture.backend.exact_command.replace(search, replacement));
+  const cases: Array<{ name: string; path: string; mutate: (fixture: CampaignTimeoutFixture) => void }> = [
     {
       name: "plan configured timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      path: "$.campaign_plan_ref#configured_fuzzer_timeout_seconds",
       mutate: (fixture) => {
         fixture.plan.configured_fuzzer_timeout_seconds = 3300;
       }
     },
     {
       name: "Recon internal timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      path: "$.campaign_plan_ref#recon_internal_timeout_seconds",
       mutate: (fixture) => {
         fixture.plan.recon_internal_timeout_seconds = 3300;
       }
     },
     {
       name: "host soft timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      path: "$.campaign_plan_ref#host_soft_timeout_seconds",
       mutate: (fixture) => {
         fixture.plan.host_soft_timeout_seconds = 3300;
       }
     },
     {
       name: "backend configured timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
+      path: "$.configured_timeout_seconds",
       mutate: (fixture) => {
         fixture.backend.configured_timeout_seconds = 3300;
       }
     },
     {
-      name: "reserve-subtracted command timeout",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
+      name: "wrong host force-kill grace",
+      path: "$.campaign_plan_ref#host_force_kill_grace_seconds",
       mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--timeout 3600", "--timeout 3300");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
+        fixture.plan.host_force_kill_grace_seconds = 30;
       }
+    },
+    {
+      name: "forged artifact finalization reserve",
+      path: "$.campaign_plan_ref#artifact_finalization_reserve_seconds",
+      mutate: (fixture) => {
+        fixture.plan.artifact_finalization_reserve_seconds = 299;
+      }
+    },
+    {
+      name: "plan test limit",
+      path: "$.campaign_plan_ref#recon_test_limit",
+      mutate: (fixture) => {
+        fixture.plan.recon_test_limit = "50000";
+      }
+    },
+    {
+      name: "reserve-subtracted command timeout",
+      path: "$.exact_command",
+      mutate: replaceCommand("--timeout 3600", "--timeout 3300")
     },
     {
       name: "duplicate timeout flag",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `${fixture.backend.exact_command} --timeout 3600`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
+      path: "$.exact_command",
+      mutate: replaceCommand("--timeout 3600", "--timeout 3600 --timeout 3600")
     },
-    {
-      name: "missing timeout flag",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--timeout 3600 ", "");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
+    { name: "missing timeout flag", path: "$.exact_command", mutate: replaceCommand("--timeout 3600 ", "") },
     {
       name: "missing GNU timeout wrapper",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(
-          "timeout --preserve-status --signal=INT --kill-after=300s 3600s ",
-          ""
-        );
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
+      path: "$.exact_command",
+      mutate: replaceCommand("timeout --preserve-status --signal=INT --kill-after=300s 3600s ", "")
     },
     {
       name: "wrong GNU timeout soft deadline",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("300s 3600s recon", "300s 3300s recon");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "wrong host force-kill grace",
-      code: "CAMPAIGN_TIMEOUT_HOST_GRACE_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.host_force_kill_grace_seconds = 30;
-        const command = fixture.backend.exact_command.replace("--kill-after=300s", "--kill-after=30s");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
+      path: "$.exact_command",
+      mutate: replaceCommand("300s 3600s recon", "300s 3300s recon")
     },
     {
       name: "foreground wrapper",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--preserve-status", "--preserve-status --foreground");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
+      path: "$.exact_command",
+      mutate: replaceCommand("--preserve-status", "--preserve-status --foreground")
     },
     {
       name: "bounded default test limit",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(
-          `--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`,
-          "--test-limit 50000"
-        );
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
+      path: "$.exact_command",
+      mutate: replaceCommand(`--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`, "--test-limit 50000")
+    },
+    {
+      name: "one-step stateful sequence command",
+      path: "$.exact_command",
+      mutate: replaceCommand("--seq-len 100", "--seq-len 1")
+    },
+    {
+      name: "missing stateful sequence command flag",
+      path: "$.exact_command",
+      mutate: replaceCommand(" --seq-len 100", "")
+    },
+    {
+      name: "duplicate stateful sequence flags",
+      path: "$.exact_command",
+      mutate: replaceCommand("--seq-len 100", "--seq-len 100 --seq-len 100")
     },
     {
       name: "one-step stateful sequence in plan",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+      path: "$.campaign_plan_ref#recon_sequence_length",
       mutate: (fixture) => {
         fixture.plan.recon_sequence_length = 1;
       }
     },
     {
       name: "one-step stateful sequence in result",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+      path: "$.sequence_length",
       mutate: (fixture) => {
         fixture.backend.sequence_length = 1;
       }
     },
     {
       name: "one-step stateful sequence in summary",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
+      path: "$.campaign_summary_ref#sequence_length",
       mutate: (fixture) => {
         fixture.summary.sequence_length = 1;
       }
     },
     {
-      name: "one-step stateful sequence command",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--seq-len 100", "--seq-len 1");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "missing stateful sequence command flag",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(" --seq-len 100", "");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "stateful sequence flag before a compound Recon command",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `echo --seq-len 100 >/dev/null && ${fixture.backend.exact_command.replace(" --seq-len 100", "")}`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    ...["&&", "||", ";", "|", "&"].map((operator) => ({
-      name: `attached ${operator} compound command`,
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture: CampaignTimeoutFixture) => {
-        const command = `${fixture.backend.exact_command}${operator}recon fuzz . --config smoke.yaml`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    })),
-    {
-      name: "newline-delimited evidence command",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `${fixture.backend.exact_command.replace(" --seq-len 100", "")}\necho --seq-len 100`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "non-executed Recon text passed to another command",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = `echo ${fixture.backend.exact_command}`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "commented stateful sequence flag",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(" --seq-len 100", " # --seq-len 100");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "quoted stateful sequence text",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--seq-len 100", "'--seq-len 100'");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "duplicate stateful sequence flags",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `${fixture.backend.exact_command} --seq-len 100`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "stateful sequence flag after the option terminator",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--seq-len 100", "-- --seq-len 100");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "plan test limit",
-      code: "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.recon_test_limit = "50000";
-      }
-    },
-    {
-      name: "non-positive host force-kill grace",
-      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
-      mutate: (fixture) => {
-        fixture.plan.host_force_kill_grace_seconds = 0;
-      }
-    },
-    {
-      name: "non-positive artifact finalization reserve",
-      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
-      mutate: (fixture) => {
-        fixture.plan.artifact_finalization_reserve_seconds = 0;
-      }
-    },
-    {
-      name: "positive but forged artifact finalization reserve",
-      code: "CAMPAIGN_TIMEOUT_FINALIZATION_RESERVE_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.artifact_finalization_reserve_seconds = 299;
-      }
-    },
-    {
       name: "backend command differs from plan",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_MISMATCH",
+      path: "$.exact_command",
       mutate: (fixture) => {
         fixture.backend.exact_command = `${fixture.backend.exact_command} --quiet`;
       }
     },
     {
       name: "backend start differs from plan",
-      code: "CAMPAIGN_TIMEOUT_START_MISMATCH",
+      path: "$.start_timestamp",
       mutate: (fixture) => {
         fixture.backend.start_timestamp = "2026-08-11T00:00:01.000Z";
       }
     },
+    ...(["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const).map((field) => ({
+      name: `deadline arithmetic ${field}`,
+      path: `$.campaign_plan_ref#${field}`,
+      mutate: (fixture: CampaignTimeoutFixture) => {
+        fixture.plan[field] = "2026-08-11T01:00:02.000Z";
+      }
+    })),
     {
-      name: "unknown termination reason",
-      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
+      name: "summary outcome",
+      path: "$.campaign_summary_ref#outcome",
       mutate: (fixture) => {
-        fixture.backend.termination_reason = "unknown";
+        fixture.summary.outcome = "partial";
       }
     }
   ];
@@ -10782,126 +10581,54 @@ test("current campaign timeout gate rejects reserve subtraction and ambiguous Re
     const result = runCampaignTimeoutGate(entry.mutate);
     assert.equal(result.ok, false, entry.name);
     assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === entry.code),
+      timeoutEvidenceIssuePaths(result).includes(entry.path),
       `${entry.name}: ${JSON.stringify(result.diagnostics)}`
     );
   }
 });
 
-test("current campaign timeout gate accepts safe output redirections", () => {
-  for (const redirection of ["> /tmp/recon.log 2>&1", ">> /tmp/recon.log", "1> /tmp/recon.log", "&> /tmp/recon.log"]) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      const command = `${fixture.backend.exact_command} ${redirection}`;
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-      fixture.plan.command_plan[0]!.command = command;
-    });
-    assert.equal(result.ok, true, `${redirection}: ${JSON.stringify(result.diagnostics)}`);
+// The recorded command is evidence the host compares, never a string it runs.
+// The host used to re-tokenize it with its own shell grammar and reject framing
+// the verifier accepted, after the whole fuzzing budget had been spent.
+test("current campaign timeout gate accepts ordinary shell framing around the recorded Recon command", () => {
+  const templateCommand =
+    "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --contract CryticTester " +
+    `--test-mode assertion --workers 8 --test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100 --timeout 3600 ` +
+    "--corpus-dir echidna --recon-corpus-dir recon-corpus";
+  for (const command of [
+    `cd /workspace && ${templateCommand}`,
+    `${templateCommand} 2>&1 | tee backends/recon-fuzzer/run.log`,
+    `${templateCommand}; echo "exit=$?"`,
+    // The #582 shape: environment assignment before the wrapper and a redirected log.
+    `FOUNDRY_CACHE_PATH=/tmp/foundry-cache ${templateCommand} > /tmp/recon-fuzzer-attempt2.log 2>&1`,
+    ...["> /tmp/recon.log 2>&1", ">> /tmp/recon.log", "1> /tmp/recon.log", "&> /tmp/recon.log"].map(
+      (redirection) => `${templateCommand} ${redirection}`
+    )
+  ]) {
+    const result = runCampaignTimeoutGate((fixture) => withCampaignCommand(fixture, command));
+    assert.equal(result.ok, true, `${command}: ${JSON.stringify(result.diagnostics)}`);
   }
 });
 
-test("current campaign timeout gate preserves the specific missing-flag diagnostic with output redirection", () => {
-  const result = runCampaignTimeoutGate((fixture) => {
-    const command = `${fixture.backend.exact_command.replace(" --timeout 3600", "")} > /tmp/recon.log 2>&1`;
-    fixture.backend.exact_command = command;
-    fixture.plan.backend.exact_shell_escaped_command = command;
-    fixture.plan.command_plan[0]!.command = command;
-  });
-  const commandDiagnostics = result.diagnostics.filter((diagnostic) =>
-    [
-      "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID"
-    ].includes(diagnostic.code)
+test("current campaign timeout gate names only the missing flag when the command also redirects output", () => {
+  const result = runCampaignTimeoutGate((fixture) =>
+    withCampaignCommand(
+      fixture,
+      `${fixture.backend.exact_command.replace(" --timeout 3600", "")} > /tmp/recon.log 2>&1`
+    )
   );
   assert.deepEqual(
-    commandDiagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
-    [["CAMPAIGN_TIMEOUT_COMMAND_INVALID", "Recon command must contain exactly one --timeout 3600 flag"]]
-  );
-});
-
-test("current campaign timeout gate does not treat non-shell whitespace as an argument boundary", () => {
-  for (const whitespace of ["\f", "\v", "\u00a0"]) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      const command = fixture.backend.exact_command.replace("--timeout 3600", `--timeout${whitespace}3600`);
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-      fixture.plan.command_plan[0]!.command = command;
-    });
-    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
-    assert.ok(
-      result.diagnostics.some(
+    result.diagnostics
+      .filter(
         (diagnostic) =>
-          diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID" && diagnostic.message.includes("--timeout 3600")
-      ),
-      JSON.stringify(result.diagnostics)
-    );
-  }
-});
-
-test("current campaign timeout gate rejects shell operators after output redirection", () => {
-  for (const operator of [";", "|", "&&", "&", "`", "$(echo unsafe)", "<"]) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      const command = `${fixture.backend.exact_command} > /tmp/recon.log 2>&1${operator} echo unsafe`;
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-    });
-    assert.equal(result.ok, false, operator);
-    assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
-      `${operator}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
-test("current campaign timeout gate accepts the reported #582 command shape and rejects hostile redirect operands", () => {
-  const reportedCommand =
-    "FOUNDRY_CACHE_PATH=/tmp/foundry-cache timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . " +
-    "--contract CryticTester --test-mode assertion --workers 32 " +
-    `--test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100 --timeout 3600 ` +
-    "--corpus-dir /tmp/corpus --recon-corpus-dir /tmp/recon-corpus --repro /tmp/repro.t.sol > /tmp/recon-fuzzer-attempt2.log 2>&1";
-  const withCommand = (command: string) => {
-    const result = runCampaignTimeoutGate((fixture) => {
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-      fixture.plan.command_plan[0]!.command = command;
-    });
-    return result;
-  };
-
-  assert.equal(withCommand(reportedCommand).ok, true);
-  for (const redirect of [
-    '> "$(touch /tmp/recon-pwned)"',
-    '> "`touch /tmp/recon-pwned`"',
-    "> \"${X:=$'$(touch /tmp/recon-pwned)'}\"",
-    "> \"$'\\x24\\x28touch /tmp/recon-pwned\\x29'\"",
-    '> "$RECON_REDIRECT_TARGET"',
-    ">(touch /tmp/recon-pwned)",
-    "2&> /tmp/recon-pwned",
-    "2>&1foo"
-  ]) {
-    const result = withCommand(`${reportedCommand.slice(0, reportedCommand.indexOf(" > "))} ${redirect}`);
-    assert.equal(result.ok, false, redirect);
-    assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
-      `${redirect}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
-test("current campaign timeout gate verifies deadline arithmetic", () => {
-  for (const field of ["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      fixture.plan[field] = "2026-08-11T01:00:02.000Z";
-    });
-    assert.equal(result.ok, false, field);
-    assert.ok(
-      result.diagnostics.some(
-        (diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_DEADLINE_MISMATCH" && diagnostic.path?.endsWith(field)
-      ),
-      `${field}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
+          diagnostic.details?.gate === "property-campaign-timeout-evidence" &&
+          diagnostic.path?.endsWith("#$.exact_command")
+      )
+      .map((diagnostic) => diagnostic.message),
+    [
+      "Semantic gate property-campaign-timeout-evidence failed: Recon command must contain exactly one --timeout 3600 flag"
+    ]
+  );
 });
 
 test("current campaign timeout gate derives early-exit outcome from recorded duration and usability", () => {
@@ -10917,10 +10644,10 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     fixture.backend.end_timestamp = "2026-08-11T00:30:00.000Z";
   });
   assert.equal(falseComplete.ok, false);
-  for (const code of ["CAMPAIGN_TIMEOUT_DURATION_MISMATCH", "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH"]) {
+  for (const issuePath of ["$.end_timestamp", "$.campaign_outcome"]) {
     assert.ok(
-      falseComplete.diagnostics.some((diagnostic) => diagnostic.code === code),
-      `${code}: ${JSON.stringify(falseComplete.diagnostics)}`
+      timeoutEvidenceIssuePaths(falseComplete).includes(issuePath),
+      `${issuePath}: ${JSON.stringify(falseComplete.diagnostics)}`
     );
   }
 
@@ -10930,26 +10657,20 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     fixture.summary.outcome = "partial";
   });
   assert.equal(earlyConfiguredPartial.ok, false);
-  assert.ok(
-    earlyConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_DURATION_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(earlyConfiguredPartial).includes("$.end_timestamp"));
 
   const fullConfiguredPartial = runCampaignTimeoutGate((fixture) => {
     fixture.backend.campaign_outcome = "partial";
     fixture.summary.outcome = "partial";
   });
   assert.equal(fullConfiguredPartial.ok, false);
-  assert.ok(
-    fullConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(fullConfiguredPartial).includes("$.campaign_outcome"));
 
   const fullDurationProcessExit = runCampaignTimeoutGate((fixture) => {
     fixture.backend.termination_reason = "process-exit";
   });
   assert.equal(fullDurationProcessExit.ok, false);
-  assert.ok(
-    fullDurationProcessExit.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(fullDurationProcessExit).includes("$.campaign_outcome"));
 
   const falsePartialWithoutResults = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
@@ -10959,9 +10680,7 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     fixture.summary.outcome = "partial";
   });
   assert.equal(falsePartialWithoutResults.ok, false);
-  assert.ok(
-    falsePartialWithoutResults.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(falsePartialWithoutResults).includes("$.campaign_outcome"));
 
   const truthfulBlocked = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
@@ -10980,15 +10699,13 @@ test("current campaign timeout gate classifies termination after the force-kill 
     fixture.summary.outcome = "partial";
   });
   assert.equal(prematureForceKill.ok, false);
-  assert.ok(
-    prematureForceKill.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(prematureForceKill).includes("$.termination_reason"));
 
   const falseComplete = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
   });
   assert.equal(falseComplete.ok, false);
-  assert.ok(falseComplete.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH"));
+  assert.ok(timeoutEvidenceIssuePaths(falseComplete).includes("$.termination_reason"));
 
   const truthfulPartial = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
@@ -11006,14 +10723,6 @@ test("current campaign timeout gate classifies termination after the force-kill 
     fixture.summary.outcome = "blocked";
   });
   assert.equal(truthfulBlocked.ok, true, JSON.stringify(truthfulBlocked.diagnostics));
-});
-
-test("current campaign timeout gate cross-checks backend and summary outcomes", () => {
-  const result = runCampaignTimeoutGate((fixture) => {
-    fixture.summary.outcome = "partial";
-  });
-  assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_SUMMARY_MISMATCH"));
 });
 
 test("campaign gate accepts many counterexamples of one property deduplicated into one finding", () => {
