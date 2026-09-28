@@ -617,7 +617,7 @@ function writeSealedFixtureTaskAuthority(
   suppliedTasks?: readonly SmithersTaskManifestTask[]
 ): void {
   const sealedNodes = nodes.map((node) => {
-    if (node.kind !== "agentic" || node.workflow !== undefined) return node;
+    if (node.kind !== "agentic" || node.workflow !== undefined || node.dynamic !== undefined) return node;
     const attempts = fixtureAttemptIds(node);
     return {
       ...node,
@@ -3624,6 +3624,281 @@ for (const markerAuthority of ["dangling leaf", "symlinked root"] as const) {
     );
   });
 }
+
+const AGGREGATION_FIXTURE_GROUPS = {
+  strategies: { defaults: { failure_policy: "continue" } },
+  goals: { defaults: { failure_policy: "continue" } },
+  review: {}
+};
+const AGGREGATION_DYNAMIC_STORAGE_ID = "dynamic-goal-template-0123456789abcdef0123456789abcdef";
+
+interface AggregationFixtureSource {
+  attemptId: string;
+  logicalNodeId: string;
+  manifestPath: string;
+  manifestSha256: string;
+  testRelativePath: string;
+  testPath: string;
+  testBytes: Buffer;
+}
+
+function aggregationFixtureNode(
+  id: string,
+  options: { group?: string; dependsOn?: string[]; outputs?: PlannedGraphNode["outputs"] } = {}
+): PlannedGraphNode {
+  return {
+    ...plannedNode([]),
+    id,
+    logical_id: id,
+    display_name: id,
+    ...(options.group === undefined ? {} : { group: options.group }),
+    depends_on: options.dependsOn ?? [],
+    artifact_dir: `artifacts/${id}`,
+    prompt_id: id,
+    prompt_path: `strategies/${id}.md`,
+    outputs: options.outputs ?? [boundOutput("generated-tests.json", "ultrafuzz/generated-tests@3", true)]
+  };
+}
+
+/** A goal template and one materialized goal, with the identity split `materializeDynamicRuntime` writes. */
+function aggregationDynamicGoalNodes(sourceNodeId: string): {
+  template: PlannedGraphNode;
+  generated: PlannedGraphNode;
+} {
+  const template: PlannedGraphNode = {
+    ...aggregationFixtureNode("goal-template", { group: "goals", dependsOn: [sourceNodeId] }),
+    dynamic: {
+      from: { node: sourceNodeId, path: "goal-plan.md" },
+      key: "id",
+      node_id: "dynamic:threat:{{ item.id }}",
+      status: "pending"
+    }
+  };
+  const generated: PlannedGraphNode = {
+    ...template,
+    id: "dynamic:threat:t1",
+    display_name: "goal-template: t1",
+    artifact_dir: `artifacts/${AGGREGATION_DYNAMIC_STORAGE_ID}`,
+    artifact_dirs: [`artifacts/${AGGREGATION_DYNAMIC_STORAGE_ID}`],
+    model_fanout: [
+      {
+        attempt_id: AGGREGATION_DYNAMIC_STORAGE_ID,
+        model_profile_id: "default",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ],
+    workflow: {
+      node_id: `node:${AGGREGATION_DYNAMIC_STORAGE_ID}`,
+      task_node_ids: [`node:${AGGREGATION_DYNAMIC_STORAGE_ID}`]
+    },
+    dynamic: undefined,
+    dynamic_generated: {
+      group_node_id: template.id,
+      source_node_id: sourceNodeId,
+      source_attempt_id: sourceNodeId,
+      expansion_key: "t1",
+      item_sha256: "a".repeat(64),
+      storage_id: AGGREGATION_DYNAMIC_STORAGE_ID,
+      manifest_path: `dynamic-expansions/${template.id}.json`
+    }
+  };
+  return { template, generated };
+}
+
+/** Publish and controller-finalize a generated-tests producer attempt holding one test file. */
+function finalizeGeneratedTestsProducer(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  attemptId = node.id
+): AggregationFixtureSource {
+  const testRelativePath = `generated-tests/${node.logical_id}.t.sol`;
+  const testBytes = Buffer.from(`contract GeneratedBy${attemptId.length} {}\n`, "utf8");
+  registerArtifactNode(layout, attemptId, node.outputs);
+  const testPath = writeArtifactFile(layout, attemptId, testRelativePath, testBytes);
+  const manifestPath = writeArtifactFile(
+    layout,
+    attemptId,
+    "generated-tests.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: layout.runId,
+      node_id: node.logical_id,
+      framework: "foundry",
+      generated_tests: [
+        {
+          path: testRelativePath,
+          size_bytes: testBytes.byteLength,
+          sha256: createHash("sha256").update(testBytes).digest("hex")
+        }
+      ],
+      support_files: []
+    })
+  );
+  finalizeArtifactNode(layout, attemptId, node.outputs, { concreteNodeId: node.id, logicalNodeId: node.logical_id }, [
+    testRelativePath
+  ]);
+  return {
+    attemptId,
+    logicalNodeId: node.logical_id,
+    manifestPath,
+    manifestSha256: createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex"),
+    testRelativePath,
+    testPath,
+    testBytes
+  };
+}
+
+/** The aggregation manifest an agent writes after copying every listed source bundle into its workspace. */
+function writeAggregationManifestCopying(
+  layout: ReturnType<typeof createRunLayout>,
+  aggregationNode: PlannedGraphNode,
+  sources: readonly AggregationFixtureSource[]
+): void {
+  const workspace = path.join(layout.workspacesDir, aggregationNode.id);
+  fs.mkdirSync(workspace, { recursive: true });
+  const bundleIdentity = (source: AggregationFixtureSource) => ({
+    strategy: source.logicalNodeId,
+    node_id: source.logicalNodeId,
+    source_attempt_id: source.attemptId,
+    attempt_index: 0,
+    source_manifest_path: source.manifestPath,
+    source_manifest_relative_path: "generated-tests.json",
+    source_manifest_sha256: source.manifestSha256
+  });
+  const files = sources.map((source) => {
+    const destinationRelativePath = `test/foundry/${source.logicalNodeId}/attempt-0/${path.basename(source.testPath)}`;
+    const destinationPath = path.join(workspace, ...destinationRelativePath.split("/"));
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.writeFileSync(destinationPath, source.testBytes);
+    return {
+      ...bundleIdentity(source),
+      source_artifact_path: source.testPath,
+      source_relative_path: source.testRelativePath,
+      destination_path: destinationPath,
+      destination_relative_path: destinationRelativePath,
+      size_bytes: source.testBytes.byteLength,
+      sha256: createHash("sha256").update(source.testBytes).digest("hex")
+    };
+  });
+  writeArtifactFile(
+    layout,
+    aggregationNode.id,
+    "aggregation.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.aggregation-manifest.v1",
+      source_generated_tests: sources.length,
+      copied_generated_tests: sources.length,
+      source_support_files: 0,
+      copied_support_files: 0,
+      source_bundles: sources.map((source) => ({
+        ...bundleIdentity(source),
+        source_run_id: layout.runId,
+        framework: "foundry",
+        generated_test_count: 1,
+        support_file_count: 0,
+        disposition: "copied"
+      })),
+      files,
+      support_files: [],
+      skipped_files: []
+    })
+  );
+}
+
+/** Run the host gate the way finalization does: on the persisted graph node with its sealed task set. */
+function verifyAggregationAttempt(
+  layout: ReturnType<typeof createRunLayout>,
+  aggregationTask: SmithersTaskManifestTask,
+  tasks: SmithersTaskManifestTask[],
+  admittedDependencyAttemptIds: string[]
+): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph;
+  const node = graph.nodes.find((candidate) => candidate.id === aggregationTask.concreteNodeId);
+  assert.ok(node);
+  return verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    aggregationTask.attemptId,
+    { task: aggregationTask, tasks, admittedDependencyAttemptIds },
+    authenticatedSnapshotsForNode(layout, node, aggregationTask.attemptId)
+  );
+}
+
+test("host aggregation intake skips a failed optional generated-tests producer the verifier did not admit", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-failed-optional" });
+  const verified = aggregationFixtureNode("strategy-a", { group: "strategies" });
+  const failed = aggregationFixtureNode("strategy-b", { group: "strategies" });
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [verified.id, failed.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [verified, failed, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const verifiedTask = sealedTaskForNode(layout, verified);
+  const failedTask = sealedTaskForNode(layout, failed);
+  const aggregationTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, aggregationNode, [verifiedTask, failedTask]),
+    optionalDependencyArtifactDirs: [verifiedTask.artifactDir, failedTask.artifactDir]
+  };
+  const tasks = [verifiedTask, failedTask, aggregationTask];
+  const source = finalizeGeneratedTestsProducer(layout, verified);
+  // The continue-policy strategy failed before its verifier wrote a marker.
+  registerArtifactNode(layout, failedTask.attemptId, failed.outputs);
+  updateNodeState(layout, failedTask.attemptId, { status: "failed" });
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, [source]);
+  const result = verifyAggregationAttempt(layout, aggregationTask, tasks, [verifiedTask.attemptId]);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // The admitted producer is still part of the authority: omitting it fails.
+  writeAggregationManifestCopying(layout, aggregationNode, []);
+  const omitted = verifyAggregationAttempt(layout, aggregationTask, tasks, [verifiedTask.attemptId]);
+  assert.equal(omitted.ok, false);
+  assert.ok(
+    omitted.diagnostics.some((diagnostic) => diagnostic.message.includes("omits authenticated source bundle")),
+    JSON.stringify(omitted.diagnostics)
+  );
+});
+
+test("host aggregation intake keys a directly consumed dynamic producer by its storage attempt ID", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-direct-dynamic" });
+  const source = aggregationFixtureNode("goal-plan", {
+    outputs: [boundOutput("goal-plan.md", "ultrafuzz/nonempty-markdown@1", true)]
+  });
+  const { template, generated } = aggregationDynamicGoalNodes(source.id);
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [generated.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [source, template, generated, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const sourceTask = sealedTaskForNode(layout, source);
+  const generatedTask = sealedTaskForNode(layout, generated, [sourceTask], AGGREGATION_DYNAMIC_STORAGE_ID);
+  const aggregationTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, aggregationNode, [generatedTask]),
+    optionalDependencyArtifactDirs: [generatedTask.artifactDir]
+  };
+  const tasks = [sourceTask, generatedTask, aggregationTask];
+  writeDeclaredArtifactNode(layout, sourceTask.attemptId, source.outputs, { "goal-plan.md": "# Goal plan\n" });
+  const dynamicSource = finalizeGeneratedTestsProducer(layout, generated, AGGREGATION_DYNAMIC_STORAGE_ID);
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, [dynamicSource]);
+  const result = verifyAggregationAttempt(layout, aggregationTask, tasks, [
+    sourceTask.attemptId,
+    AGGREGATION_DYNAMIC_STORAGE_ID
+  ]);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
 
 test("review lifecycle and strategy gates authenticate every dedupe, triage, and severity transition", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-review-lifecycle" });

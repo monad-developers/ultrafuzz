@@ -2237,8 +2237,13 @@ function semanticGateContextForArtifact(input: {
     input.schemaFilename === "aggregation-manifest.schema.json"
       ? authenticatedAggregationSemanticContext({
           layout: input.layout,
-          node: input.node,
-          attemptId: input.attemptId
+          attemptId: input.attemptId,
+          producers: finalizedDeclaredContractProducers(
+            input.layout,
+            "ultrafuzz/generated-tests@3",
+            input.node,
+            input.attemptAuthority
+          )
         })
       : undefined;
   const propertyCampaignEvidence =
