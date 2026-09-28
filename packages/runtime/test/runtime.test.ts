@@ -7851,6 +7851,86 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated Pi adapter leaves inconsistent usage uncounted instead of aborting the invocation",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { createPiAgent } = await loadGeneratedPiAgent(project);
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouter: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-not-a-real-openrouter-credential";
+    try {
+      const cost = { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 };
+      const assistant = (responseId: string, text: string, usage: Record<string, unknown>) => ({
+        type: "message_end",
+        message: { role: "assistant", responseId, content: [{ type: "text", text }], usage }
+      });
+      const lines = [
+        { type: "session", id: "inconsistent-usage-session" },
+        // A provider that folds reasoning into totalTokens, one that omits the
+        // cost breakdown, and one whose cost total disagrees with its parts.
+        assistant("reasoning-in-total", "first", {
+          input: 1,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 9,
+          cost
+        }),
+        assistant("no-cost", "second", { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3 }),
+        assistant("cost-mismatch", "third", {
+          input: 1,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 3,
+          cost: { ...cost, total: 1 }
+        }),
+        assistant("consistent", "final answer", {
+          input: 4,
+          output: 5,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 9,
+          cost
+        }),
+        { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "final answer" }] }] }
+      ];
+      const agent = createPiAgent({ model: "openai/gpt-mini-latest" });
+      agent.buildCommand = async () => ({
+        command: process.execPath,
+        args: ["-e", lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")],
+        outputFormat: "stream-json"
+      });
+
+      // A short idle timeout turns a stalled invocation into a prompt failure
+      // instead of waiting for the node timeout.
+      const result = await agent.generate({ prompt: "inconsistent usage", timeout: { idleMs: 5_000 } });
+
+      assert.equal(result.text, "final answer");
+      // Only the consistent response is counted.
+      assert.deepEqual(result.usage, {
+        inputTokens: 4,
+        inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        outputTokens: 5,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 0 },
+        totalTokens: 9,
+        reportedCostUsd: 0.003
+      });
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouter;
+    }
+  }
+);
+
+bunAdapterTest(
   "generated OpenCode adapter preserves its isolated environment and keeps credentials out of argv",
   { timeout: 30_000 },
   async () => {
@@ -8725,7 +8805,7 @@ function kimiCompletedEvent(events: unknown): KimiInterpreterEvent {
 }
 
 bunAdapterTest(
-  "generated Kimi adapter strictly parses credentials and resume hints without normalization",
+  "generated Kimi adapter strictly parses credentials and ignores ambiguous resume hints",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -8837,26 +8917,23 @@ bunAdapterTest(
     const hintAgent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
     const hintInterpreter = hintAgent.createOutputInterpreter();
     const session = "00000000-0000-0000-0000-000000000301";
-    assert.throws(
-      () =>
-        hintInterpreter.onStdoutLine?.(
-          `{"type":"session.resume_hint","type":"session.resume_hint","session_id":${JSON.stringify(session)}}`
-        ),
-      /duplicate/iu
-    );
-    assert.throws(
-      () => hintInterpreter.onStdoutLine?.(JSON.stringify({ type: "session.resume_hint", session_id: ` ${session}` })),
-      /session_id is invalid/iu
-    );
-    assert.throws(
-      () =>
-        hintInterpreter.onStdoutLine?.(
-          " ".repeat(1024 * 1024) + JSON.stringify({ type: "session.resume_hint", session_id: session })
-        ),
-      /1048576-byte limit/iu
-    );
-    assert.throws(() => hintInterpreter.onStdoutLine?.('{"provider_status":'), /Kimi output JSON is invalid/iu);
-    assert.doesNotThrow(() => hintInterpreter.onStdoutLine?.("Kimi Code provider banner"));
+    // These hooks run inside the child's stdout/stderr listeners, where a throw
+    // escapes the invocation, so an ambiguous line carries no session instead.
+    for (const line of [
+      `{"type":"session.resume_hint","type":"session.resume_hint","session_id":${JSON.stringify(session)}}`,
+      JSON.stringify({ type: "session.resume_hint", session_id: ` ${session}` }),
+      JSON.stringify({ type: "session.resume_hint", session_id: 301 }),
+      " ".repeat(1024 * 1024) + JSON.stringify({ type: "session.resume_hint", session_id: session }),
+      '{"provider_status":',
+      "{ code: 'ECONNRESET', errno: -104 }",
+      "Kimi Code provider banner"
+    ]) {
+      assert.doesNotThrow(() => hintInterpreter.onStdoutLine?.(line), line.slice(0, 60));
+      assert.doesNotThrow(() => hintInterpreter.onStderrLine?.(line), line.slice(0, 60));
+    }
+    assert.equal(hintAgent.issuedSessionId, undefined);
+    hintInterpreter.onStdoutLine?.(JSON.stringify({ type: "session.resume_hint", session_id: session }));
+    assert.equal(hintAgent.issuedSessionId, session);
   }
 );
 
@@ -9222,112 +9299,193 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated Kimi adapter rejects malformed wire records instead of fabricating tokens",
-  { timeout: 30_000 },
+  "generated Kimi adapter reports no usage for an unreadable wire instead of failing the invocation",
+  { timeout: 60_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-malformed");
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-unreadable");
     const options = kimiSubscriptionOptions(sourceConfig);
+    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+    const wire = (home: string, name: string) =>
+      path.join(home, "sessions", `wd_${name}`, "session-303", "agents", "main", "wire.jsonl");
+    const anomalies: Array<{ label: string; write: (home: string) => void }> = [
+      {
+        label: "malformed records beside a valid one",
+        write: (home) =>
+          writeKimiWire(home, "wd_malformed/session-203", "main", [
+            "not json at all",
+            "{",
+            JSON.stringify({
+              type: "usage.record",
+              usage: { inputOther: "12", output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
+            }),
+            JSON.stringify({ type: "usage.record", usage: { inputOther: 4, output: 2, inputCacheRead: 1 } }),
+            kimiUsageRecordLine(33, 7, 2, 1)
+          ])
+      },
+      ...[
+        [
+          "duplicate key",
+          '{"type":"usage.record","type":"usage.record","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}\n'
+        ],
+        ["invalid UTF-8", Buffer.from([0x7b, 0xff, 0x7d, 0x0a])],
+        ["oversize line", `${JSON.stringify({ type: "message.appended", padding: "x".repeat(1024 * 1024) })}\n`],
+        ["excessive depth", `{"type":"message.appended","future":${tooDeep}}\n`],
+        ["torn final record", '{"type":"message.appended"'],
+        [
+          "unsafe aggregate",
+          `${kimiUsageRecordLine(Number.MAX_SAFE_INTEGER, 0, 0, 0)}\n${kimiUsageRecordLine(0, 1, 0, 0)}\n`
+        ]
+      ].map(([label, bytes]) => ({
+        label: label as string,
+        write: (home: string) => {
+          const target = wire(home, (label as string).replaceAll(" ", "_"));
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, bytes as string | Buffer);
+        }
+      })),
+      {
+        label: "wire file budget",
+        write: (home) => {
+          for (let index = 0; index < 513; index += 1) {
+            writeKimiWire(home, "wd_budget/session-211", `agent-${index.toString().padStart(3, "0")}`, [
+              kimiUsageRecordLine(1, 1, 0, 0)
+            ]);
+          }
+        }
+      }
+    ];
+    for (const anomaly of anomalies) {
+      const agent = new KimiCode029Agent(options);
+      const command = await agent.buildCommand({ prompt: anomaly.label, cwd: project, options: {} });
+      const home = command.env?.KIMI_CODE_HOME;
+      assert.ok(home);
+      anomaly.write(home);
+      let events: unknown;
+      assert.doesNotThrow(() => {
+        events = agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args));
+      }, anomaly.label);
+      const completed = kimiCompletedEvent(events);
+      assert.equal(completed.ok, true, anomaly.label);
+      // Unknown usage stays absent; it is never partially counted or fabricated.
+      assert.equal(Object.prototype.hasOwnProperty.call(completed, "usage"), false, anomaly.label);
+      await command.cleanup?.();
+    }
 
-    const malformed = new KimiCode029Agent(options);
-    const malformedCommand = await malformed.buildCommand({
-      prompt: "Malformed usage",
+    // A resumed session whose stored wire was torn by an earlier, killed
+    // attempt still launches; its usage is unknown rather than miscounted.
+    const session = "00000000-0000-0000-0000-000000000210";
+    const bucket = "wd_target_000000000210";
+    const storedSessionDir = path.join(sourceConfig, "sessions", bucket, session);
+    const storedWire = writeKimiWire(sourceConfig, `${bucket}/${session}`, "main", [
+      kimiUsageRecordLine(1_000, 200, 3_000, 40)
+    ]);
+    fs.appendFileSync(storedWire, '{"type":"usage.record","usage":{"inputOther":5', "utf8");
+    fs.writeFileSync(
+      path.join(storedSessionDir, "state.json"),
+      `${JSON.stringify({
+        workDir: "/workspace/target",
+        agents: {
+          main: { homedir: path.join(storedSessionDir, "agents", "main"), type: "agent", parentAgentId: null }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(sourceConfig, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: session, sessionDir: storedSessionDir, workDir: "/workspace/target" })}\n`,
+      "utf8"
+    );
+    const torn = new KimiCode029Agent(options);
+    const tornCommand = await torn.buildCommand({
+      prompt: "Resume a torn wire",
       cwd: "/workspace/target",
-      options: {}
+      options: { resumeSession: session }
     });
-    const malformedHome = malformedCommand.env?.KIMI_CODE_HOME;
-    assert.ok(malformedHome);
-    writeKimiWire(malformedHome, "wd_target_000000000203/session-203", "main", [
-      "not json at all",
-      "{",
-      JSON.stringify({
-        type: "usage.record",
-        usage: { inputOther: "12", output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
-      }),
-      JSON.stringify({
-        type: "usage.record",
-        usage: { inputOther: -5, output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
-      }),
-      JSON.stringify({ type: "usage.record", usage: { inputOther: 4, output: 2, inputCacheRead: 1 } }),
-      JSON.stringify({ type: "usage.record", model: "kimi-k3" }),
-      JSON.stringify({ type: "message.appended", usage: { inputOther: 999, output: 999 } }),
-      kimiUsageRecordLine(33, 7, 2, 1)
-    ]);
-    assert.throws(
-      () => malformed.createOutputInterpreter().onExit?.(kimiExitResult(malformedCommand.args)),
-      /invalid strict JSON/iu
+    const tornHome = tornCommand.env?.KIMI_CODE_HOME;
+    assert.ok(tornHome);
+    fs.appendFileSync(
+      path.join(tornHome, "sessions", bucket, session, "agents", "main", "wire.jsonl"),
+      `\n${kimiUsageRecordLine(99, 88, 77, 66)}\n`,
+      "utf8"
     );
-    await malformedCommand.cleanup?.();
+    const tornCompleted = kimiCompletedEvent(torn.createOutputInterpreter().onExit?.(kimiExitResult(tornCommand.args)));
+    assert.equal(Object.prototype.hasOwnProperty.call(tornCompleted, "usage"), false);
+    assert.equal(tornCompleted.resume, session);
+    await tornCommand.cleanup?.();
 
-    const absent = new KimiCode029Agent(options);
-    const absentCommand = await absent.buildCommand({ prompt: "No usage", cwd: "/workspace/target", options: {} });
-    const absentHome = absentCommand.env?.KIMI_CODE_HOME;
-    assert.ok(absentHome);
-    writeKimiWire(absentHome, "wd_target_000000000204/session-204", "main", [
-      kimiWireHeaderLine("session-204"),
-      "still not json",
-      JSON.stringify({ type: "usage.record", usage: { inputOther: Number.NaN } })
-    ]);
-    assert.throws(
-      () => absent.createOutputInterpreter().onExit?.(kimiExitResult(absentCommand.args)),
-      /invalid strict JSON/iu
+    // A resumed wire replaced during the invocation is no longer comparable
+    // with its baseline, so its usage is unknown too.
+    fs.writeFileSync(storedWire, `${kimiUsageRecordLine(1_000, 200, 3_000, 40)}\n`, "utf8");
+    const replaced = new KimiCode029Agent(options);
+    const replacedCommand = await replaced.buildCommand({
+      prompt: "Replaced resumed wire",
+      cwd: "/workspace/target",
+      options: { resumeSession: session }
+    });
+    const replacedHome = replacedCommand.env?.KIMI_CODE_HOME;
+    assert.ok(replacedHome);
+    const runtimeWire = path.join(replacedHome, "sessions", bucket, session, "agents", "main", "wire.jsonl");
+    fs.rmSync(runtimeWire);
+    fs.writeFileSync(runtimeWire, `${kimiUsageRecordLine(99, 88, 77, 66)}\n`, "utf8");
+    const replacedCompleted = kimiCompletedEvent(
+      replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args))
     );
-    await absentCommand.cleanup?.();
+    assert.equal(Object.prototype.hasOwnProperty.call(replacedCompleted, "usage"), false);
+    await replacedCommand.cleanup?.();
   }
 );
 
 bunAdapterTest(
-  "generated Kimi adapter rejects ambiguous, invalidly encoded, oversized, or deep wire JSON",
+  "generated Kimi adapter completes when its output and telemetry are malformed",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
     const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const sourceConfig = writeKimiSourceConfig(project, "kimi-wire-strict-json");
-    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
-    const invalidWires: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
-      {
-        label: "duplicate key",
-        bytes: Buffer.from(
-          '{"type":"usage.record","type":"usage.record","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}\n'
-        ),
-        expected: /duplicate/iu
-      },
-      { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d, 0x0a]), expected: /UTF-8/iu },
-      {
-        label: "oversize line",
-        bytes: Buffer.from(`${JSON.stringify({ type: "message.appended", padding: "x".repeat(1024 * 1024) })}\n`),
-        expected: /line exceeded its byte budget/iu
-      },
-      {
-        label: "excessive depth",
-        bytes: Buffer.from(`{"type":"message.appended","future":${tooDeep}}\n`),
-        expected: /nesting-depth limit of 32/iu
-      },
-      {
-        label: "torn final record",
-        bytes: Buffer.from('{"type":"message.appended"'),
-        expected: /torn or unterminated/iu
-      }
-    ];
-    for (const [index, fixture] of invalidWires.entries()) {
-      const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
-      const command = await agent.buildCommand({ prompt: fixture.label, cwd: project, options: {} });
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-malformed-output");
+    const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const originalBuildCommand = agent.buildCommand.bind(agent);
+    agent.buildCommand = async (params) => {
+      const command = await originalBuildCommand(params);
       const home = command.env?.KIMI_CODE_HOME;
       assert.ok(home);
-      const wire = path.join(home, "sessions", `bucket-${index}`, "session-303", "agents", "main", "wire.jsonl");
-      fs.mkdirSync(path.dirname(wire), { recursive: true });
-      fs.writeFileSync(wire, fixture.bytes);
-      assert.throws(
-        () => agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)),
-        fixture.expected,
-        fixture.label
-      );
-      await command.cleanup?.();
-    }
+      const wire = path.join(home, "sessions", "wd_target_000000000401", "session-401", "agents", "main", "wire.jsonl");
+      const script = [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        `fs.mkdirSync(path.dirname(${JSON.stringify(wire)}), { recursive: true });`,
+        // A usage record torn mid-write, as a killed CLI leaves it.
+        `fs.writeFileSync(${JSON.stringify(wire)}, ${JSON.stringify('{"type":"usage.record"')});`,
+        // A Node util.inspect dump on stderr and a truncated JSON line on stdout.
+        `console.error(${JSON.stringify("{ code: 'ECONNRESET', errno: -104 }")});`,
+        `console.log(${JSON.stringify('{"provider_status":')});`,
+        `console.log(${JSON.stringify(JSON.stringify({ role: "assistant", content: "Done." }))});`
+      ].join("\n");
+      return {
+        ...command,
+        command: process.execPath,
+        args: ["-e", script],
+        stdin: undefined,
+        outputFormat: "stream-json"
+      };
+    };
+
+    // A short idle timeout turns a stalled invocation into a prompt failure
+    // instead of waiting for the node timeout.
+    const result = (await agent.generate({
+      prompt: "Malformed output",
+      rootDir: project,
+      timeout: { idleMs: 5_000 }
+    })) as { text?: string; usage?: { inputTokens?: number; totalTokens?: number } };
+
+    assert.equal(result.text, "Done.");
+    // The torn wire record leaves this invocation's usage unknown.
+    assert.equal(result.usage?.inputTokens, undefined);
+    assert.equal(result.usage?.totalTokens, undefined);
   }
 );
 
@@ -9372,111 +9530,6 @@ bunAdapterTest(
       total_tokens: 110
     });
     await command.cleanup?.();
-  }
-);
-
-bunAdapterTest(
-  "generated Kimi adapter fails telemetry closed on unsafe wire bounds and replacement",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    const init = initProject({ projectRoot: project, force: true });
-    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-bounds");
-    const options = kimiSubscriptionOptions(sourceConfig);
-
-    const oversized = new KimiCode029Agent(options);
-    const oversizedCommand = await oversized.buildCommand({
-      prompt: "Oversized usage wire",
-      cwd: "/workspace/target",
-      options: {}
-    });
-    const oversizedHome = oversizedCommand.env?.KIMI_CODE_HOME;
-    assert.ok(oversizedHome);
-    const oversizedWire = writeKimiWire(oversizedHome, "wd_target_000000000208/session-208", "main", [
-      kimiUsageRecordLine(9, 8, 7, 6)
-    ]);
-    fs.appendFileSync(oversizedWire, "x".repeat(1024 * 1024 + 1), "utf8");
-    assert.throws(
-      () => oversized.createOutputInterpreter().onExit?.(kimiExitResult(oversizedCommand.args)),
-      /torn or unterminated|line exceeded/iu
-    );
-    await oversizedCommand.cleanup?.();
-
-    const overflowing = new KimiCode029Agent(options);
-    const overflowingCommand = await overflowing.buildCommand({
-      prompt: "Overflowing usage values",
-      cwd: "/workspace/target",
-      options: {}
-    });
-    const overflowingHome = overflowingCommand.env?.KIMI_CODE_HOME;
-    assert.ok(overflowingHome);
-    writeKimiWire(overflowingHome, "wd_target_000000000209/session-209", "main", [
-      kimiUsageRecordLine(Number.MAX_SAFE_INTEGER, 0, 0, 0),
-      // Each component total is independently safe, but the combined total is not.
-      kimiUsageRecordLine(0, 1, 0, 0)
-    ]);
-    assert.throws(
-      () => overflowing.createOutputInterpreter().onExit?.(kimiExitResult(overflowingCommand.args)),
-      /safe integer range/iu
-    );
-    await overflowingCommand.cleanup?.();
-
-    const tooMany = new KimiCode029Agent(options);
-    const tooManyCommand = await tooMany.buildCommand({
-      prompt: "Too many usage wires",
-      cwd: "/workspace/target",
-      options: {}
-    });
-    const tooManyHome = tooManyCommand.env?.KIMI_CODE_HOME;
-    assert.ok(tooManyHome);
-    for (let index = 0; index < 513; index += 1) {
-      writeKimiWire(tooManyHome, "wd_target_000000000211/session-211", `agent-${index.toString().padStart(3, "0")}`, [
-        kimiUsageRecordLine(1, 1, 0, 0)
-      ]);
-    }
-    assert.throws(
-      () => tooMany.createOutputInterpreter().onExit?.(kimiExitResult(tooManyCommand.args)),
-      /file budget/iu
-    );
-    await tooManyCommand.cleanup?.();
-
-    const session = "00000000-0000-0000-0000-000000000210";
-    const bucket = "wd_target_000000000210";
-    const storedSessionDir = path.join(sourceConfig, "sessions", bucket, session);
-    writeKimiWire(sourceConfig, `${bucket}/${session}`, "main", [kimiUsageRecordLine(1_000, 200, 3_000, 40)]);
-    fs.writeFileSync(
-      path.join(storedSessionDir, "state.json"),
-      `${JSON.stringify({
-        workDir: "/workspace/target",
-        agents: {
-          main: { homedir: path.join(storedSessionDir, "agents", "main"), type: "agent", parentAgentId: null }
-        }
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(
-      path.join(sourceConfig, "session_index.jsonl"),
-      `${JSON.stringify({ sessionId: session, sessionDir: storedSessionDir, workDir: "/workspace/target" })}\n`,
-      "utf8"
-    );
-    const replaced = new KimiCode029Agent(options);
-    const replacedCommand = await replaced.buildCommand({
-      prompt: "Replaced resumed wire",
-      cwd: "/workspace/target",
-      options: { resumeSession: session }
-    });
-    const replacedHome = replacedCommand.env?.KIMI_CODE_HOME;
-    assert.ok(replacedHome);
-    const runtimeWire = path.join(replacedHome, "sessions", bucket, session, "agents", "main", "wire.jsonl");
-    fs.rmSync(runtimeWire);
-    fs.writeFileSync(runtimeWire, `${kimiUsageRecordLine(99, 88, 77, 66)}\n`, "utf8");
-    assert.throws(
-      () => replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args)),
-      /replaced or truncated/iu
-    );
-    await replacedCommand.cleanup?.();
   }
 );
 

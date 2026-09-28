@@ -99,7 +99,10 @@ export class CompatiblePiAgent extends SmithersPiAgent {
     return {
       ...interpreter,
       onStdoutLine: (line) => {
-        const observation = observePiLine(usage, line);
+        // This runs inside the child's stdout listener, where a throw escapes
+        // the invocation instead of failing it and leaves the task waiting for
+        // its timeout. A usage event Pi reports inconsistently stays uncounted.
+        const observation = failOpen(() => observePiLine(usage, line));
         sessionId = observation?.sessionId ?? sessionId;
         // A fresh Smithers interpreter sees only the latest authoritative
         // assistant message and subsequent deltas. Reusing it as an oracle
@@ -274,10 +277,10 @@ function safePiUsageSum(left: number, right: number): number {
 
 function reportedPiUsage(totals: PiInvocationUsage): PiReportedUsage | undefined {
   if (totals.messageCount === 0) return undefined;
-  const inputTokens = safePiUsageSum(
-    safePiUsageSum(totals.freshInputTokens, totals.cacheReadTokens),
-    totals.cacheWriteTokens
-  );
+  const inputTokens = totals.freshInputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+  const totalTokens = inputTokens + totals.outputTokens;
+  // An aggregate outside the safe-integer range is unknown usage, not a failure.
+  if (!Number.isSafeInteger(totalTokens)) return undefined;
   return {
     inputTokens,
     freshInputTokens: totals.freshInputTokens,
@@ -285,7 +288,7 @@ function reportedPiUsage(totals: PiInvocationUsage): PiReportedUsage | undefined
     cacheReadTokens: totals.cacheReadTokens,
     cacheWriteTokens: totals.cacheWriteTokens,
     reasoningTokens: totals.reasoningTokens,
-    totalTokens: safePiUsageSum(inputTokens, totals.outputTokens),
+    totalTokens,
     reportedCostUsd: totals.reportedCostUsd
   };
 }
@@ -360,6 +363,14 @@ function piTerminalAssistantState(line: string): { error?: string } | undefined 
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function failOpen<T>(read: () => T): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
 }
 
 function applyPiTerminalAnswer<T>(

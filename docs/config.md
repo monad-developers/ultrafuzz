@@ -198,7 +198,9 @@ Kimi's four components — uncached input, output, cache reads, and cache
 creation — are reported independently; Kimi already folds thinking tokens into
 output, so no separate reasoning total is published. Malformed or absent usage
 stays absent rather than becoming zeros, which keeps accounting honest about
-what it does not know. Kimi model pricing resolves against the Moonshot
+what it does not know. An unreadable wire, including inherited history torn by
+a killed attempt, leaves that invocation's usage absent instead of failing the
+invocation. Kimi model pricing resolves against the Moonshot
 provider entry in the pricing catalog, so the configured alias must match a
 Moonshot catalog model id such as `kimi-k3`; anything else is reported as an
 unresolved model instead of being priced from a same-named third-party entry.
