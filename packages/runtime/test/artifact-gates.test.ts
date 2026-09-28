@@ -3822,7 +3822,7 @@ function writeAggregationManifestCopying(
     source_manifest_sha256: source.manifestSha256
   });
   const files = sources.map((source) => {
-    const destinationRelativePath = `test/foundry/${source.logicalNodeId}/attempt-0/${path.basename(source.testPath)}`;
+    const destinationRelativePath = `test/foundry/${source.attemptId}/${path.basename(source.testPath)}`;
     const destinationPath = path.join(workspace, ...destinationRelativePath.split("/"));
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     fs.writeFileSync(destinationPath, source.testBytes);
@@ -3947,6 +3947,70 @@ test("host aggregation intake keys a directly consumed dynamic producer by its s
     sourceTask.attemptId,
     AGGREGATION_DYNAMIC_STORAGE_ID
   ]);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("host aggregation intake attributes model-fanout bundles to the loop attempt index the verifier uses", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-model-fanout" });
+  const fanout: PlannedGraphNode = {
+    ...aggregationFixtureNode("strategy-a", { group: "strategies" }),
+    model_fanout: [0, 1].map((modelIndex) => ({
+      model_profile_id: `model-${modelIndex}`,
+      agent_ref: "CodexAgent",
+      model_name: "gpt-test",
+      reasoning_effort: "high",
+      model_index: modelIndex,
+      loop_index: 0,
+      attempt_index: modelIndex
+    }))
+  };
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [fanout.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [fanout, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const fanoutTasks = [0, 1].map((modelIndex) =>
+    smithersTaskForNode({
+      layout,
+      node: fanout,
+      attemptId: `${fanout.id}__model_${modelIndex}__attempt_${modelIndex}`,
+      modelIndex
+    })
+  );
+  const aggregationTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, aggregationNode, fanoutTasks),
+    optionalDependencyArtifactDirs: fanoutTasks.map((task) => task.artifactDir)
+  };
+  const tasks = [...fanoutTasks, aggregationTask];
+  const sources = fanoutTasks.map((task) => {
+    const source = finalizeGeneratedTestsProducer(layout, fanout, task.attemptId);
+    // The controller records the model attempt index (here 0 and 1) in each
+    // producer manifest; the verifier attributes both bundles to loop attempt 0.
+    const manifestPath = path.join(task.artifactDir, "artifact-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { provenance: { attempt_index?: number } };
+    manifest.provenance.attempt_index = task.metadata.model.attemptIndex;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const state = readRunState(layout);
+    const provenance = state.nodes[task.attemptId]?.provenance;
+    assert.ok(provenance !== undefined && "output_contracts" in provenance && provenance.output_contracts);
+    provenance.output_contracts.artifact_manifest_sha256 = createHash("sha256")
+      .update(fs.readFileSync(manifestPath))
+      .digest("hex");
+    writeRunState(layout, state);
+    return source;
+  });
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, sources);
+  const result = verifyAggregationAttempt(
+    layout,
+    aggregationTask,
+    tasks,
+    fanoutTasks.map((task) => task.attemptId)
+  );
 
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
