@@ -123,6 +123,12 @@ const replacementValue = nonEmptyString
     message:
       "Replacement values must be a human-readable title, not a serialized JSON record: keep the record in the " +
       "artifact directory and reference it by path so the goal sentence stays one sentence"
+  })
+  // The dynamic-node renderer resolves `{{...}}` inside replacement values, and a reference it cannot
+  // bind throws inside the workflow render, which fails the whole run on every resume. A label has no
+  // reason to carry template syntax, so reject it here, where the failure is goal-plan's own verify.
+  .refine((value) => !value.includes("{{"), {
+    message: "Replacement values must be plain-text labels and must not contain template braces '{{'"
   });
 
 const replacementsSchema = z

@@ -1678,13 +1678,13 @@ function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: str
     ["operator_prompt", values.operatorPrompt],
     ["task_prompt", values.taskPrompt]
   ]);
-  const rendered = agentPromptTemplate.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu, (match: string, key: string) =>
-    replacements.has(key) ? replacements.get(key)! : match
-  );
-  if (/\{\{\s*[A-Za-z0-9_]+\s*\}\}/u.test(rendered)) {
-    throw new Error("agent prompt template contains an unresolved variable");
-  }
-  return rendered;
+  // Check only the trusted template's own placeholders. The inserted prompts may legitimately
+  // contain literal `{{word}}` text, and rejecting it here would fail every render of the run.
+  return agentPromptTemplate.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu, (_match: string, key: string) => {
+    const value = replacements.get(key);
+    if (value === undefined) throw new Error(`agent prompt template contains an unresolved variable: ${key}`);
+    return value;
+  });
 }
 
 function sourceUsesPinnedBranch(): boolean {

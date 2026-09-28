@@ -10,6 +10,7 @@ import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
 import { z } from "zod/v4";
+import { loadAgentPreambleTemplate } from "@ultrafuzz/prompts";
 
 import {
   artifactContractDefinition,
@@ -506,6 +507,24 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
     observedTimeoutMs: () => observedTimeout,
     budgetMs: loaded.budgetMs
   };
+}
+
+type AgentPromptRenderer = (values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }) => string;
+
+function loadAgentPromptRenderer(template: string): AgentPromptRenderer {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function renderAgentPrompt");
+  const helperEnd = source.indexOf("\nfunction sourceUsesPinnedBranch", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "agentPromptTemplate",
+    "authorizedDefensiveSecurityContext",
+    "untrustedContentBoundary",
+    `${helper}; return renderAgentPrompt;`
+  )(template, "SECURITY CONTEXT", "UNTRUSTED BOUNDARY") as AgentPromptRenderer;
 }
 
 function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
@@ -6739,6 +6758,25 @@ test("generated validator preflight budgets a contended CLI start and reports th
       assert.equal(normalizeNodeAttemptFailureMessage(reported), reported);
       return true;
     }
+  );
+});
+
+test("generated agent prompt inserts literal braces from task and operator prompts verbatim", () => {
+  const render = loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"));
+  // Model-authored goal text, an escaped prompt example and an operator note are all inserted text,
+  // not placeholders of the trusted template. Any one of them used to throw inside every render.
+  const taskPrompt = "Find where a late tick lets {{amount}} round down.\nThe plan escaped \\{{window}} on purpose.\n";
+  const operatorPrompt = "Prefer {{ reentrancy }} leads.\n\n";
+  assert.equal(
+    render({ runtimeContext: "## Topology Runtime Context", operatorPrompt, taskPrompt }),
+    `SECURITY CONTEXT\n\nUNTRUSTED BOUNDARY\n\n## Topology Runtime Context\n\n${operatorPrompt}${taskPrompt}`
+  );
+
+  // A placeholder the template itself cannot bind is still a controller defect, reported by name.
+  const unbound = loadAgentPromptRenderer("{{runtime_context}}\n{{retry_failure}}\n{{task_prompt}}");
+  assert.throws(
+    () => unbound({ runtimeContext: "context", operatorPrompt: "", taskPrompt: "task" }),
+    /agent prompt template contains an unresolved variable: retry_failure$/u
   );
 });
 

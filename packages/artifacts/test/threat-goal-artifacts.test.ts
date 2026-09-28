@@ -1348,6 +1348,34 @@ test("goal-plan replacements are bounded titles, not inlined JSON records", () =
   assert.equal(validateGoalPlan(withReplacement(true)).ok, true);
 });
 
+test("goal-plan replacement values cannot carry template placeholders into the dynamic render", () => {
+  const plan = goalPlanFixture();
+  const threatId = "liquidation:overdue";
+  const withReplacement = (value: string): Record<string, unknown> => {
+    const next = structuredClone(plan);
+    const [goal] = next.threat_goals as Array<Record<string, unknown>>;
+    assert.ok(goal);
+    goal.replacements = { [threatId]: value };
+    return next;
+  };
+
+  // The renderer resolves `{{...}}` inside a replacement value, and an unbound name such as `amount`
+  // throws inside the workflow render. Item references and escaped braces are template syntax too,
+  // which a label never needs, so the verifier rejects every form rather than re-deriving the renderer.
+  for (const label of [
+    "Late tick lets {{amount}} round down",
+    "Overdue liquidation of {{item.id}}",
+    "Late tick lets \\{{amount}} round down"
+  ]) {
+    const rejected = validateGoalPlan(withReplacement(label));
+    assert.equal(rejected.ok, false, label);
+    assert.match(rejected.issues.map((issue) => issue.message).join("; "), /must not contain template braces/u);
+  }
+
+  // Single braces are prose, as in the bounded-titles test above.
+  assert.equal(validateGoalPlan(withReplacement("{withdraw} settles before the late tick")).ok, true);
+});
+
 test("escaped required goal placeholders are rejected instead of rendering as literals", () => {
   const plan = goalPlanFixture();
   const goal = (plan.threat_goals as Array<Record<string, unknown>>)[0]!;
