@@ -11,7 +11,6 @@ import {
   MAX_SEMANTIC_GATE_ISSUES,
   SEMANTIC_GATE_REGISTRY,
   SEMANTIC_GATE_SCOPES,
-  artifactContractDefinition,
   executeOfflineSchemaSemanticGates,
   executeSchemaSemanticGates,
   executeSemanticGate,
@@ -44,79 +43,6 @@ const partialReportCompletion = {
 function reportWithCompletion(completion: unknown, runId = "run-a"): unknown {
   return { run_metadata: { run_id: runId }, completion };
 }
-
-const validPlannedOutput = {
-  path: "report.md",
-  contract: "ultrafuzz/nonempty-markdown@1",
-  contract_digest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
-  primary: true
-};
-
-const validPlannedNode = {
-  id: "node-a",
-  artifact_dir: "artifacts/node-a",
-  depends_on: [] as string[],
-  outputs: [validPlannedOutput],
-  loop: { index: 0, count: 1, attempt_index: 0 },
-  model_fanout: [] as unknown[]
-};
-
-const validPlannedGraph = { nodes: [validPlannedNode] };
-
-const smithersManifestOutput = {
-  path: validPlannedOutput.path,
-  contract: validPlannedOutput.contract,
-  contractDigest: validPlannedOutput.contract_digest,
-  primary: validPlannedOutput.primary
-};
-
-const smithersIdentityTask = {
-  attemptId: "attempt-a",
-  concreteNodeId: "node-a",
-  logicalNodeId: "logical-a",
-  smithersNodeId: "node:attempt-a",
-  verifierSmithersNodeId: "verify:attempt-a",
-  agentRef: "agent-a",
-  agentChain: [{ profileId: "profile-a", agentRef: "agent-a", role: "primary" }],
-  dependencies: [] as string[],
-  dependencySmithersNodeIds: [] as string[],
-  timeoutMs: 1_000,
-  heartbeatTimeoutMs: 500,
-  retries: 0,
-  artifactDir: "artifacts/node-a",
-  execution: { mode: "local", resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 1 } },
-  metadata: {
-    run: { ultrafuzzRunId: "run-a", smithersWorkflowName: "workflow-a" },
-    node: {
-      attemptId: "attempt-a",
-      concreteNodeId: "node-a",
-      logicalNodeId: "logical-a",
-      label: "Node A"
-    },
-    model: {
-      agentRef: "agent-a",
-      agentChain: [{ profileId: "profile-a", agentRef: "agent-a", role: "primary" }]
-    },
-    dependencies: { attemptIds: [] as string[], smithersNodeIds: [] as string[], concreteNodeIds: [] as string[] },
-    timeout: { milliseconds: 1_000, seconds: 1, heartbeatTimeoutMs: 500 },
-    retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
-    execution: { mode: "local", resources: { cpu: 1, memoryMiB: 512, timeoutSeconds: 1 } },
-    artifacts: { dir: "artifacts/node-a", outputs: [smithersManifestOutput] },
-    loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 }
-  }
-};
-
-const pinnedSubmoduleExpectation = {
-  schema_version: "ultrafuzz.pinned-submodules-expectation.v1",
-  source_commit: "a".repeat(40),
-  source_tree: "b".repeat(40),
-  manifest_sha256: "c".repeat(64),
-  top_level_roots: ["vendor/dependency"],
-  recursive_gitlinks: [{ path: "vendor/dependency", commit: "d".repeat(40), tree: "e".repeat(40) }],
-  entry_count: 1,
-  file_count: 0,
-  total_file_bytes: 0
-};
 
 const analysisBundleAccountingGatePositive = {
   run_count: 1,
@@ -450,18 +376,6 @@ const fixtures = {
     positive: { surfaces: [{ surface_id: "a" }], coverage_notes: [{ surface_id: "a" }] },
     negative: { surfaces: [{ surface_id: "a" }], coverage_notes: [{ surface_id: "missing" }] }
   },
-  "agent-source-proof-ref-uniqueness": {
-    positive: { refs: [{ name: "refs/heads/a" }] },
-    negative: { refs: [{ name: "refs/heads/a" }, { name: "refs/heads/a" }] }
-  },
-  "agent-source-proof-dependency-lineage": {
-    positive: { commit: "a".repeat(40), tree: "b".repeat(40), dependencies: pinnedSubmoduleExpectation },
-    negative: {
-      commit: "a".repeat(40),
-      tree: "b".repeat(40),
-      dependencies: { ...pinnedSubmoduleExpectation, source_commit: "f".repeat(40) }
-    }
-  },
   "aggregation-count-coupling": {
     positive: {
       source_generated_tests: 2,
@@ -689,34 +603,6 @@ const fixtures = {
       finished_at: "2026-01-01T00:00:01Z"
     }
   },
-  "artifact-manifest-file-path-uniqueness": {
-    positive: { files: [{ path: "a" }] },
-    negative: { files: [{ path: "a" }, { path: "a" }] }
-  },
-  "artifact-manifest-output-path-uniqueness": {
-    positive: { output_contracts: [{ path: "a" }] },
-    negative: { output_contracts: [{ path: "a" }, { path: "a" }] }
-  },
-  "artifact-manifest-prerequisite-node-uniqueness": {
-    positive: { prerequisite_manifests: [{ node_id: "a" }] },
-    negative: { prerequisite_manifests: [{ node_id: "a" }, { node_id: "a" }] }
-  },
-  "artifact-verification-artifact-path-uniqueness": {
-    positive: { artifacts: [{ path: "a" }] },
-    negative: { artifacts: [{ path: "a" }, { path: "a" }] }
-  },
-  "artifact-verification-exactly-one-primary": {
-    positive: { artifacts: [{ primary: true }] },
-    negative: { artifacts: [{ primary: false }] }
-  },
-  "artifact-verification-publication-digest-correspondence": {
-    positive: { artifacts: [{ path: "a", sha256: "1" }], publications: [{ path: "a", sha256: "1" }] },
-    negative: { artifacts: [{ path: "a", sha256: "1" }], publications: [{ path: "a", sha256: "2" }] }
-  },
-  "artifact-verification-publication-path-uniqueness": {
-    positive: { publications: [{ path: "a" }] },
-    negative: { publications: [{ path: "a" }, { path: "a" }] }
-  },
   "attempt-order": {
     positive: { lifecycle: { started_at: "2026-01-01T00:00:00Z", finished_at: "2026-01-01T00:00:01Z" } },
     negative: { lifecycle: { started_at: "2026-01-01T00:00:01Z", finished_at: "2026-01-01T00:00:00Z" } }
@@ -740,20 +626,6 @@ const fixtures = {
   "campaign-summary-backend-uniqueness": {
     positive: { backend_results: [{ fuzzer_backend: "a" }] },
     negative: { backend_results: [{ fuzzer_backend: "a" }, { fuzzer_backend: "a" }] }
-  },
-  "config-redactions-path-key-equality": {
-    positive: {
-      entries: [{ path: ["models", "profiles", "default", "model"], key: "models.profiles.default.model" }]
-    },
-    negative: { entries: [{ path: ["models", "profiles", "default", "model"], key: "wrong.path" }] }
-  },
-  "config-redactions-path-uniqueness": {
-    positive: {
-      entries: [{ path: ["models", "profiles", "a", "model"] }, { path: ["models", "profiles", "b", "model"] }]
-    },
-    negative: {
-      entries: [{ path: ["models", "profiles", "a", "model"] }, { path: ["models", "profiles", "a", "model"] }]
-    }
   },
   "coverage-evidence-reconciliation": {
     positive: validCoverageEvidence,
@@ -932,47 +804,6 @@ const fixtures = {
     positive: { records: [{ dedupe_key: "a" }] },
     negative: { records: [{ dedupe_key: "a" }, { dedupe_key: "a" }] }
   },
-  "finding-campaign-provenance-coherence": {
-    positive: {
-      property_ids: ["property-1"],
-      fuzzer_backend: "recon",
-      contributing_backend_failures: [
-        {
-          fuzzer_backend: "recon",
-          failure_id: "failure-1",
-          raw_result_ref: "recon-fuzzer-results.json"
-        }
-      ],
-      deduplication: { pre_dedup_count: 1 }
-    },
-    negative: {
-      property_ids: ["property-1"],
-      fuzzer_backend: "medusa",
-      contributing_backend_failures: [
-        {
-          fuzzer_backend: "recon",
-          failure_id: "failure-1",
-          raw_result_ref: "recon-fuzzer-results.json"
-        }
-      ],
-      deduplication: { pre_dedup_count: 1 }
-    }
-  },
-  "finding-evidence-span-consistency": {
-    positive: {
-      evidence: [{ line: 4, end_line: 8 }, { line_ranges: [{ line: 10, end_line: 12 }, { line: 14 }] }]
-    },
-    negative: { evidence: [{ line: 8, end_line: 4 }] }
-  },
-  "finding-projected-reference-uniqueness": {
-    positive: { family_variants: [{ id: "a", dedupe_key: "a" }] },
-    negative: {
-      family_variants: [
-        { id: "a", dedupe_key: "a" },
-        { id: "a", dedupe_key: "b" }
-      ]
-    }
-  },
   "findings-id-uniqueness": {
     positive: [{ id: "a" }],
     negative: [{ id: "a" }, { id: "a" }]
@@ -1073,97 +904,6 @@ const fixtures = {
   "invariant-source-proof-path-uniqueness": {
     positive: { files: [{ path: "a" }] },
     negative: { files: [{ path: "a" }, { path: "a" }] }
-  },
-  "invariant-suite-file-path-uniqueness": {
-    positive: { files: [{ path: "a" }] },
-    negative: { files: [{ path: "a" }, { path: "a" }] }
-  },
-  "invariant-suite-file-tombstone-disjointness": {
-    positive: { files: [{ path: "a" }], tombstones: ["b"] },
-    negative: { files: [{ path: "a" }], tombstones: ["a"] }
-  },
-  "invariant-suite-tombstone-uniqueness": {
-    positive: { tombstones: ["a"] },
-    negative: { tombstones: ["a", "a"] }
-  },
-  "planned-graph-acyclicity": {
-    positive: validPlannedGraph,
-    negative: {
-      nodes: [
-        { ...validPlannedNode, id: "a", depends_on: ["b"] },
-        { ...validPlannedNode, id: "b", depends_on: ["a"] }
-      ]
-    }
-  },
-  "planned-graph-artifact-dir-identity": {
-    positive: validPlannedGraph,
-    negative: { nodes: [{ ...validPlannedNode, artifact_dir: "artifacts/other" }] }
-  },
-  "planned-graph-contract-identity": {
-    positive: validPlannedGraph,
-    negative: {
-      nodes: [{ ...validPlannedNode, outputs: [{ ...validPlannedOutput, contract_digest: "0".repeat(64) }] }]
-    }
-  },
-  "planned-graph-dependency-join": {
-    positive: validPlannedGraph,
-    negative: { nodes: [{ ...validPlannedNode, depends_on: ["missing"] }] }
-  },
-  "planned-graph-exactly-one-primary": {
-    positive: validPlannedGraph,
-    negative: { nodes: [{ ...validPlannedNode, outputs: [{ ...validPlannedOutput, primary: false }] }] }
-  },
-  "planned-graph-loop-coupling": {
-    positive: validPlannedGraph,
-    negative: { nodes: [{ ...validPlannedNode, loop: { index: 1, count: 1, attempt_index: 1 } }] }
-  },
-  "planned-graph-model-fanout-uniqueness": {
-    positive: validPlannedGraph,
-    negative: {
-      nodes: [
-        {
-          ...validPlannedNode,
-          model_fanout: [
-            { model_profile_id: "m", model_index: 0, loop_index: 0, attempt_index: 0 },
-            { model_profile_id: "m", model_index: 0, loop_index: 0, attempt_index: 0 }
-          ]
-        }
-      ]
-    }
-  },
-  "planned-graph-model-loop-coupling": {
-    positive: validPlannedGraph,
-    negative: {
-      nodes: [
-        {
-          ...validPlannedNode,
-          model_fanout: [{ model_profile_id: "m", model_index: 0, loop_index: 1, attempt_index: 0 }]
-        }
-      ]
-    }
-  },
-  "planned-graph-node-id-uniqueness": {
-    positive: validPlannedGraph,
-    negative: { nodes: [validPlannedNode, { ...validPlannedNode }] }
-  },
-  "planned-graph-output-path-uniqueness": {
-    positive: validPlannedGraph,
-    negative: {
-      nodes: [{ ...validPlannedNode, outputs: [validPlannedOutput, { ...validPlannedOutput, primary: false }] }]
-    }
-  },
-  "planned-graph-workflow-node-join": {
-    positive: { nodes: [{ ...validPlannedNode, workflow: { node_id: "a", task_node_ids: ["a"] } }] },
-    negative: { nodes: [{ ...validPlannedNode, workflow: { node_id: "a", task_node_ids: ["b"] } }] }
-  },
-  "planned-graph-workflow-task-uniqueness": {
-    positive: { nodes: [{ ...validPlannedNode, workflow: { node_id: "a", task_node_ids: ["a"] } }] },
-    negative: {
-      nodes: [
-        { ...validPlannedNode, workflow: { node_id: "a", task_node_ids: ["a"] } },
-        { ...validPlannedNode, id: "node-b", workflow: { node_id: "a", task_node_ids: ["a"] } }
-      ]
-    }
   },
   "property-campaign-coverage-metric-uniqueness": {
     positive: { coverage: { metrics: [{ name: "branches" }] } },
@@ -1308,28 +1048,6 @@ const fixtures = {
       }
     }
   },
-  "run-metadata-accounting-workflow-identity": {
-    positive: {
-      workflow: { run_id: "workflow-a" },
-      accounting: { workflow_run_id: "workflow-a", current: { workflow_run_id: "workflow-a" } }
-    },
-    negative: {
-      workflow: { run_id: "workflow-a" },
-      accounting: { workflow_run_id: "workflow-b", current: { workflow_run_id: "workflow-b" } }
-    }
-  },
-  "run-metadata-current-segment-equality": {
-    positive: { accounting: { current: { total_tokens: 2 }, segments: [{ total_tokens: 1 }, { total_tokens: 2 }] } },
-    negative: { accounting: { current: { total_tokens: 1 }, segments: [{ total_tokens: 1 }, { total_tokens: 2 }] } }
-  },
-  "run-metadata-workflow-id-equality": {
-    positive: { workflow_ids: ["workflow-a"], workflow: { run_id: "workflow-a" } },
-    negative: { workflow_ids: ["workflow-b"], workflow: { run_id: "workflow-a" } }
-  },
-  "run-plan-attempt-id-uniqueness": {
-    positive: { rendered_prompts: [{ attempt_id: "a" }, { attempt_id: "b" }] },
-    negative: { rendered_prompts: [{ attempt_id: "a" }, { attempt_id: "a" }] }
-  },
   "run-state-node-key-equality": {
     positive: { nodes: { a: { node_id: "a" } } },
     negative: { nodes: { a: { node_id: "b" } } }
@@ -1359,75 +1077,6 @@ const fixtures = {
   "severity-classification-matrix": {
     positive: [{ severity: "Medium", impact: "High", likelihood: "Low" }],
     negative: [{ severity: "High", impact: "High", likelihood: "Low" }]
-  },
-  "smithers-task-attempt-id-uniqueness": {
-    positive: { tasks: [{ attemptId: "a" }] },
-    negative: { tasks: [{ attemptId: "a" }, { attemptId: "a" }] }
-  },
-  "smithers-task-workflow-id-uniqueness": {
-    positive: { tasks: [{ smithersNodeId: "node:a", verifierSmithersNodeId: "verify:a" }] },
-    negative: {
-      tasks: [
-        { smithersNodeId: "node:a", verifierSmithersNodeId: "verify:a" },
-        { smithersNodeId: "node:a", verifierSmithersNodeId: "verify:b" }
-      ]
-    }
-  },
-  "smithers-task-document-identity": {
-    positive: { run_id: "run-a", workflow_name: "workflow-a", tasks: [smithersIdentityTask] },
-    negative: {
-      run_id: "run-a",
-      workflow_name: "workflow-a",
-      tasks: [{ ...smithersIdentityTask, smithersNodeId: "node:wrong" }]
-    }
-  },
-  "smithers-task-pinned-submodule-expectation": {
-    positive: { pinned_submodules: pinnedSubmoduleExpectation, tasks: [{ execution: { mode: "cloud" } }] },
-    negative: {
-      pinned_submodules: { ...pinnedSubmoduleExpectation, file_count: 2 },
-      tasks: [{ execution: { mode: "cloud" } }]
-    }
-  },
-  "smithers-task-dependency-join": {
-    positive: {
-      tasks: [
-        { attemptId: "a", verifierSmithersNodeId: "verify:a", dependencies: [], dependencySmithersNodeIds: [] },
-        {
-          attemptId: "b",
-          verifierSmithersNodeId: "verify:b",
-          dependencies: ["a"],
-          dependencySmithersNodeIds: ["verify:a"]
-        }
-      ]
-    },
-    negative: {
-      tasks: [
-        {
-          attemptId: "b",
-          verifierSmithersNodeId: "verify:b",
-          dependencies: ["missing"],
-          dependencySmithersNodeIds: ["verify:missing"]
-        }
-      ]
-    }
-  },
-  "smithers-task-dependency-acyclicity": {
-    positive: {
-      tasks: [
-        { attemptId: "a", verifierSmithersNodeId: "verify:a", dependencySmithersNodeIds: [] },
-        { attemptId: "b", verifierSmithersNodeId: "verify:b", dependencySmithersNodeIds: ["verify:a"] }
-      ]
-    },
-    negative: {
-      tasks: [
-        { attemptId: "a", verifierSmithersNodeId: "verify:a", dependencySmithersNodeIds: ["verify:b"] },
-        { attemptId: "b", verifierSmithersNodeId: "verify:b", dependencySmithersNodeIds: ["verify:a"] }
-      ]
-    }
-  },
-  "source-run-not-self": {
-    positive: { run_id: "run-new", source_run_id: "run-source" },
-    negative: { run_id: "run-same", source_run_id: "run-same" }
   },
   "strategy-detection-dedupe-key-uniqueness": {
     positive: [{ dedupe_key: "a" }],
@@ -1564,36 +1213,32 @@ test("severity and report vocabulary gates reject renamed reachability tokens at
 
 test("property references alone do not claim fuzzer campaign provenance", () => {
   assert.equal(
-    executeSemanticGate("finding-campaign-provenance-coherence", {
-      document: { property_ids: ["property-1"] }
-    }).status,
-    "passed"
-  );
-  assert.equal(
     executeSemanticGate("findings-campaign-provenance-coherence", {
       document: [{ property_ids: ["property-1"] }]
     }).status,
     "passed"
   );
   assert.equal(
-    executeSemanticGate("finding-campaign-provenance-coherence", {
-      document: { property_ids: ["property-1"], fuzzer_backend: "recon" }
+    executeSemanticGate("findings-campaign-provenance-coherence", {
+      document: [{ property_ids: ["property-1"], fuzzer_backend: "recon" }]
     }).status,
     "passed"
   );
   assert.equal(
-    executeSemanticGate("finding-campaign-provenance-coherence", {
-      document: { property_ids: ["property-1"], fuzzer_backend: "recon", deduplication: { pre_dedup_count: 1 } }
+    executeSemanticGate("findings-campaign-provenance-coherence", {
+      document: [{ property_ids: ["property-1"], fuzzer_backend: "recon", deduplication: { pre_dedup_count: 1 } }]
     }).status,
     "passed"
   );
   assert.equal(
-    executeSemanticGate("finding-campaign-provenance-coherence", {
-      document: {
-        property_ids: ["property-1"],
-        fuzzer_backend: "recon",
-        contributing_backend_failures: [{ fuzzer_backend: "recon", failure_id: "failure-1" }]
-      }
+    executeSemanticGate("findings-campaign-provenance-coherence", {
+      document: [
+        {
+          property_ids: ["property-1"],
+          fuzzer_backend: "recon",
+          contributing_backend_failures: [{ fuzzer_backend: "recon", failure_id: "failure-1" }]
+        }
+      ]
     }).status,
     "failed"
   );
@@ -1755,13 +1400,6 @@ test("workspace patch path gate reports exact nonduplicated field diagnostics", 
 
 test("canonical finding span semantics run for every embedding schema", () => {
   const cases = [
-    {
-      filename: "finding.schema.json",
-      gate: "finding-evidence-span-consistency",
-      positive: { evidence: [{ line: 3, end_line: 5 }] },
-      negative: { evidence: [{ line: 5, end_line: 3 }] },
-      path: "$.evidence[0].end_line"
-    },
     {
       filename: "findings.schema.json",
       gate: "findings-evidence-span-consistency",
@@ -2642,12 +2280,10 @@ test("every contextual registration executes real positive and negative checks",
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-semantic-gates-"));
   try {
     fs.mkdirSync(path.join(root, "generated-tests"));
-    fs.writeFileSync(path.join(root, "artifact.json"), "artifact\n");
     fs.writeFileSync(path.join(root, "generated-tests", "test.sol"), "test\n");
     fs.writeFileSync(path.join(root, "generated-tests", "helper.sol"), "helper\n");
     fs.writeFileSync(path.join(root, "generated-tests", "binary.dat"), Buffer.from([0xff]));
     fs.writeFileSync(path.join(root, "copied.sol"), "test\n");
-    const digest = crypto.createHash("sha256").update("artifact\n").digest("hex");
     const contentDigest = crypto.createHash("sha256").update("snapshot", "utf8").digest("hex");
     const aggregationSourceBytes = Buffer.from("test\n", "utf8");
     const aggregationSourceDigest = crypto.createHash("sha256").update(aggregationSourceBytes).digest("hex");
@@ -2723,16 +2359,6 @@ test("every contextual registration executes real positive and negative checks",
       Exclude<SemanticGateName, keyof typeof fixtures>,
       { positive: unknown; negative: unknown; context: SemanticGateContext }
     > = {
-      "agent-source-proof-commit-binding": {
-        positive: { commit: "c", tree: "t", refs: [{ name: "r", object: "o" }] },
-        negative: { commit: "wrong", tree: "t", refs: [{ name: "r", object: "o" }] },
-        context: { git: { commit: "c", tree: "t", refs: { r: "o" } } }
-      },
-      "analysis-bundle-file-digest": {
-        positive: { files: [{ path: "artifact.json", sha256: digest, size_bytes: 9 }] },
-        negative: { files: [{ path: "artifact.json", sha256: "0".repeat(64), size_bytes: 9 }] },
-        context: { filesystem: { rootDirectory: root } }
-      },
       "analysis-bundle-inclusion-omission-coverage": {
         positive: {
           omissions: [
@@ -2794,16 +2420,6 @@ test("every contextual registration executes real positive and negative checks",
             ]
           }
         }
-      },
-      "artifact-manifest-file-digest": {
-        positive: { files: [{ path: "artifact.json", sha256: digest, size_bytes: 9 }] },
-        negative: { files: [{ path: "missing.json", sha256: digest, size_bytes: 9 }] },
-        context: { filesystem: { rootDirectory: root } }
-      },
-      "artifact-verification-plan-contract-identity": {
-        positive: { node_id: "a", artifacts: [{ ...validPlannedOutput }] },
-        negative: { node_id: "b", artifacts: [{ ...validPlannedOutput }] },
-        context: { plannedGraph: { node: { id: "a", outputs: [{ ...validPlannedOutput }] } } }
       },
       "attempt-reuse-source-link": {
         positive: {
@@ -3543,108 +3159,6 @@ test("every contextual registration executes real positive and negative checks",
           }
         }
       },
-      "run-state-fingerprint": {
-        positive: { graph_fingerprint: "g", config_fingerprint: "c" },
-        negative: { graph_fingerprint: "wrong", config_fingerprint: "c" },
-        context: { runtimeState: { graphFingerprint: "g", configFingerprint: "c" } }
-      },
-      "smithers-task-planned-graph-coverage": {
-        positive: {
-          tasks: [{ attemptId: "node-a", concreteNodeId: "node-a" }]
-        },
-        negative: { tasks: [] },
-        context: {
-          plannedGraph: {
-            document: {
-              nodes: [
-                {
-                  ...validPlannedNode,
-                  logical_id: "logical-a",
-                  display_name: "Node A",
-                  kind: "agentic"
-                }
-              ]
-            }
-          }
-        }
-      },
-      "smithers-task-planned-graph-identity": {
-        positive: {
-          tasks: [
-            {
-              attemptId: "node-a",
-              concreteNodeId: "node-a",
-              logicalNodeId: "logical-a",
-              metadata: {
-                node: { logicalNodeId: "logical-a", label: "Node A" },
-                loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
-                artifacts: { outputs: [smithersManifestOutput] }
-              }
-            }
-          ]
-        },
-        negative: {
-          tasks: [
-            {
-              attemptId: "node-a",
-              concreteNodeId: "node-a",
-              logicalNodeId: "wrong",
-              metadata: {
-                node: { logicalNodeId: "wrong", label: "Node A" },
-                loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
-                artifacts: { outputs: [smithersManifestOutput] }
-              }
-            }
-          ]
-        },
-        context: {
-          plannedGraph: {
-            document: {
-              nodes: [
-                {
-                  ...validPlannedNode,
-                  logical_id: "logical-a",
-                  display_name: "Node A",
-                  kind: "agentic",
-                  loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "smithers-task-planned-graph-dependency-join": {
-        positive: {
-          tasks: [
-            {
-              concreteNodeId: "node-a",
-              dependencies: ["node-b"],
-              dependencySmithersNodeIds: ["verify:node-b"],
-              metadata: { dependencies: { concreteNodeIds: ["node-b"] } }
-            }
-          ]
-        },
-        negative: {
-          tasks: [
-            {
-              concreteNodeId: "node-a",
-              dependencies: [],
-              dependencySmithersNodeIds: [],
-              metadata: { dependencies: { concreteNodeIds: [] } }
-            }
-          ]
-        },
-        context: {
-          plannedGraph: {
-            document: {
-              nodes: [
-                { ...validPlannedNode, id: "node-a", depends_on: ["node-b"], kind: "agentic" },
-                { ...validPlannedNode, id: "node-b", depends_on: [], kind: "agentic" }
-              ]
-            }
-          }
-        }
-      },
       "usage-ledger-event-order": {
         positive: { workflow_run_id: "workflow-a", source_event_sequence: 2, control_generation: "a".repeat(64) },
         negative: { workflow_run_id: "workflow-a", source_event_sequence: 0, control_generation: "a".repeat(64) },
@@ -3732,170 +3246,6 @@ test("every contextual registration executes real positive and negative checks",
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("Smithers planned dependency semantics omit unresolved dynamic groups only", () => {
-  const pendingGraph = {
-    nodes: [
-      {
-        ...validPlannedNode,
-        id: "consumer",
-        depends_on: ["fanout"],
-        dynamic_dependencies: ["fanout"],
-        kind: "agentic"
-      },
-      {
-        ...validPlannedNode,
-        id: "fanout",
-        depends_on: [],
-        kind: "agentic",
-        dynamic: { status: "pending" }
-      }
-    ]
-  };
-  const pendingTask = {
-    tasks: [
-      {
-        concreteNodeId: "consumer",
-        dependencies: [],
-        dependencySmithersNodeIds: [],
-        metadata: { dependencies: { concreteNodeIds: [] } }
-      }
-    ]
-  };
-
-  assert.equal(
-    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-      document: pendingTask,
-      context: { plannedGraph: { document: pendingGraph } }
-    }).status,
-    "passed"
-  );
-
-  const compiledPendingTask = {
-    tasks: [
-      {
-        ...structuredClone(pendingTask.tasks[0]!),
-        metadata: { dependencies: { concreteNodeIds: ["fanout"] } }
-      }
-    ]
-  };
-  assert.equal(
-    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-      document: compiledPendingTask,
-      context: { plannedGraph: { document: pendingGraph } }
-    }).status,
-    "passed"
-  );
-
-  const twoPendingGraph = {
-    nodes: [
-      {
-        ...structuredClone(pendingGraph.nodes[0]!),
-        depends_on: ["fanout", "fanout-second"],
-        dynamic_dependencies: ["fanout", "fanout-second"]
-      },
-      structuredClone(pendingGraph.nodes[1]!),
-      {
-        ...structuredClone(pendingGraph.nodes[1]!),
-        id: "fanout-second"
-      }
-    ]
-  };
-  assert.equal(
-    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-      document: compiledPendingTask,
-      context: { plannedGraph: { document: twoPendingGraph } }
-    }).status,
-    "failed"
-  );
-
-  const materializedGraph = {
-    nodes: [
-      { ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["generated"] },
-      {
-        ...structuredClone(pendingGraph.nodes[1]!),
-        dynamic: { status: "expanded" }
-      },
-      { ...validPlannedNode, id: "generated", depends_on: [], kind: "agentic" }
-    ]
-  };
-  const materializedTask = {
-    tasks: [
-      {
-        concreteNodeId: "consumer",
-        dependencies: ["generated"],
-        dependencySmithersNodeIds: ["verify:generated"],
-        metadata: { dependencies: { concreteNodeIds: ["generated"] } }
-      }
-    ]
-  };
-  assert.equal(
-    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-      document: materializedTask,
-      context: { plannedGraph: { document: materializedGraph } }
-    }).status,
-    "passed"
-  );
-
-  const staleExpandedGraph = structuredClone(materializedGraph);
-  staleExpandedGraph.nodes.find((node) => node.id === "consumer")!.depends_on = ["fanout"];
-  assert.equal(
-    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-      document: pendingTask,
-      context: { plannedGraph: { document: staleExpandedGraph } }
-    }).status,
-    "failed"
-  );
-
-  const alignedStaleExpandedTask = {
-    tasks: [
-      {
-        ...structuredClone(pendingTask.tasks[0]!),
-        dependencies: ["fanout"],
-        dependencySmithersNodeIds: ["verify:fanout"],
-        metadata: { dependencies: { concreteNodeIds: ["fanout"] } }
-      }
-    ]
-  };
-  const alignedStaleExpanded = executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-    document: alignedStaleExpandedTask,
-    context: { plannedGraph: { document: staleExpandedGraph } }
-  });
-  assert.equal(alignedStaleExpanded.status, "failed");
-  assert.ok(
-    alignedStaleExpanded.status === "failed" &&
-      alignedStaleExpanded.issues.some((entry) =>
-        /retains expanded dynamic dependency placeholder/u.test(entry.message)
-      )
-  );
-
-  const ordinaryGraph = {
-    nodes: [
-      { ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["fanout", "ordinary"] },
-      structuredClone(pendingGraph.nodes[1]!),
-      { ...validPlannedNode, id: "ordinary", depends_on: [], kind: "agentic" }
-    ]
-  };
-  assert.equal(
-    executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-      document: pendingTask,
-      context: { plannedGraph: { document: ordinaryGraph } }
-    }).status,
-    "failed"
-  );
-
-  const missingGraph = {
-    nodes: [{ ...structuredClone(pendingGraph.nodes[0]!), depends_on: ["missing"] }]
-  };
-  const missing = executeSemanticGate("smithers-task-planned-graph-dependency-join", {
-    document: pendingTask,
-    context: { plannedGraph: { document: missingGraph } }
-  });
-  assert.equal(missing.status, "failed");
-  assert.ok(
-    missing.status === "failed" && missing.issues.some((entry) => /planned dependency node/u.test(entry.message))
-  );
 });
 
 test("strict final reports preserve dropped false positives as exactly one non-production row", () => {
