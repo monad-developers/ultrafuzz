@@ -99,7 +99,6 @@ import { parseRuntimeDocumentBytes } from "./runtime-document-codec.js";
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import { diagnosticFromError } from "./utils.js";
-import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
 import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 import { loadFinalizedNodeOutputSnapshot, type VerifiedOutputArtifactSnapshot } from "./verified-output.js";
 import { renderCoverageEvidenceMarkdownSection } from "./final-report-markdown.js";
@@ -422,7 +421,6 @@ export function verifyRequiredArtifactsForAttempt(
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
     }
   }
-  diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node, authenticated));
   try {
     diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node, attemptAuthority, authenticated));
   } catch (error) {
@@ -3829,41 +3827,6 @@ function sealedArtifactSchemaPath(layout: RunLayout, schemaFile: string): string
   );
   assertRegularFileInside(snapshotRoot, schemaPath, "sealed artifact schema");
   return schemaPath;
-}
-
-function verifySeverityMatrixArtifacts(
-  artifactDir: string,
-  node: PlannedGraphNode,
-  authenticated?: AuthenticatedArtifactGateSnapshots
-): RuntimeDiagnostic[] {
-  const artifact = severityArtifactForNode(node);
-  if (artifact === undefined) {
-    return [];
-  }
-  const artifactPath = safeResolveInside(artifactDir, artifact.path, "severity artifact output");
-  try {
-    const document = parseCurrentArtifactJson(artifactDir, artifactPath, authenticated);
-    if (document === undefined) return [];
-    return validateSeverityMatrixArtifact({
-      artifact: document,
-      artifactPath,
-      kind: artifact.kind
-    });
-  } catch (error) {
-    return [diagnosticFromError(error, "severity-matrix", "SEVERITY_ARTIFACT_READ_FAILED")];
-  }
-}
-
-function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifactKind; path: string } | undefined {
-  const logicalId = node.logical_id ?? node.id;
-  if (logicalId === "severity-classification") {
-    return { kind: "severity-classification", path: "severity-classified-findings.json" };
-  }
-  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
-  if (reportOutputs.length === 1) {
-    return { kind: "final-report", path: reportOutputs[0]!.path };
-  }
-  return undefined;
 }
 
 const RECON_MAX_TEST_LIMIT = "18446744073709551615";

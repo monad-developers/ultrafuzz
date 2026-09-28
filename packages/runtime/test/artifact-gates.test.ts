@@ -2508,6 +2508,57 @@ test("severity classification gates preserve triaged fields and enforce the fina
   );
 });
 
+test("severity classification keeps a false-positive record without severity, impact, or likelihood", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-severity-false-positive" });
+  const triageNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "triage",
+    logical_id: "triage",
+    artifact_dir: "artifacts/triage",
+    outputs: [boundOutput("triaged-findings.json", "ultrafuzz/triaged-findings@1", true)]
+  };
+  const severityNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "severity-classification",
+    logical_id: "severity-classification",
+    depends_on: [triageNode.id],
+    artifact_dir: "artifacts/severity-classification",
+    outputs: [boundOutput("severity-classified-findings.json", "ultrafuzz/severity-classified-findings@1", true)]
+  };
+  const nodes = [triageNode, severityNode];
+  writePlannedGraph(layout, nodes);
+  const triageTask = sealedTaskForNode(layout, triageNode);
+  const severityTask = sealedTaskForNode(layout, severityNode, [triageTask]);
+  const tasks = [triageTask, severityTask];
+  // The schema requires the severity fields only for true positives, and the
+  // prompt forbids guessing them for records it keeps but does not promote.
+  const falsePositive = currentFinding("finding-unreachable", {
+    status: "false-positive",
+    triage_classification: "false-positive",
+    notes: [
+      "triage_reason=the state is unreachable through the public path",
+      "demotion_reason=no public entrypoint reaches the failing state"
+    ]
+  });
+  writeDeclaredArtifactNode(layout, triageTask.attemptId, triageNode.outputs, {
+    "triaged-findings.json": JSON.stringify([falsePositive])
+  });
+  writeDeclaredArtifactNode(layout, severityTask.attemptId, severityNode.outputs, {
+    "severity-classified-findings.json": JSON.stringify([falsePositive])
+  });
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  const result = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    severityNode,
+    severityTask.attemptId,
+    { task: severityTask, tasks },
+    authenticatedSnapshotsForNode(layout, severityNode, severityTask.attemptId)
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("triage gates preserve every deduped finding and upstream note", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-triage-preservation" });
   const dedupeNode: PlannedGraphNode = {
