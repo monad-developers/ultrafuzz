@@ -1492,4 +1492,11 @@ test("public projection keeps a redacted path followed by a parenthesis as liter
     nodes.some((node) => node.type === "paragraph" && node.text === "The reproducer at [redacted-path](line 12) fails.")
   );
   assertPublicProjectionFixedPoint(published);
+
+  // An escape inserted before `]` would read as a UNC path after a doubled backslash, and would
+  // extend a redacted assignment value so the fixed-point re-scan redacts it again.
+  for (const description of ["Match a literal \\](x) in the parser.", "Set token=synthetic-escape-secret](x)."]) {
+    issue.description = description;
+    assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+  }
 });
