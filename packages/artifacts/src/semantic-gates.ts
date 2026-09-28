@@ -6748,13 +6748,9 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
         issue("$.exact_command", `Recon command must contain exactly one --test-limit ${RECON_MAX_TEST_LIMIT} flag`)
       );
     }
-    if (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== String(RECON_STATEFUL_SEQUENCE_LENGTH)) {
-      issues.push(
-        issue(
-          "$.exact_command",
-          `Recon command must contain exactly one --seq-len ${RECON_STATEFUL_SEQUENCE_LENGTH} flag`
-        )
-      );
+    const sequenceLength = String(RECON_STATEFUL_SEQUENCE_LENGTH);
+    if (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== sequenceLength) {
+      issues.push(issue("$.exact_command", `Recon command must contain exactly one --seq-len ${sequenceLength} flag`));
     }
     if (!hasExactCampaignHostTimeoutWrapper(resultCommand, configuredTimeoutSeconds)) {
       issues.push(

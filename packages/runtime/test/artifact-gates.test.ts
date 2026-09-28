@@ -10503,7 +10503,7 @@ function timeoutEvidenceIssuePaths(result: ReturnType<typeof verifyRequiredArtif
 function withCampaignCommand(fixture: CampaignTimeoutFixture, command: string): void {
   fixture.backend.exact_command = command;
   fixture.plan.backend.exact_shell_escaped_command = command;
-  fixture.plan.command_plan[0]!.command = command;
+  fixture.plan.command_plan = [{ phase: "campaign", command }];
 }
 
 test("current campaign timeout gate accepts exact configured Recon timeout evidence", () => {
@@ -10558,157 +10558,161 @@ test("current campaign timeout gate accepts a sealed model-profile or run-defaul
   assert.deepEqual(timeoutEvidenceIssuePaths(result), [], JSON.stringify(result.diagnostics));
 });
 
-test("current campaign timeout gate rejects forged budgets, Recon flags, and sequence lengths", () => {
-  const replaceCommand = (search: string, replacement: string) => (fixture: CampaignTimeoutFixture) =>
-    withCampaignCommand(fixture, fixture.backend.exact_command.replace(search, replacement));
-  const cases: Array<{ name: string; path: string; mutate: (fixture: CampaignTimeoutFixture) => void }> = [
-    {
-      name: "plan configured timeout",
-      path: "$.campaign_plan_ref#configured_fuzzer_timeout_seconds",
-      mutate: (fixture) => {
-        fixture.plan.configured_fuzzer_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "Recon internal timeout",
-      path: "$.campaign_plan_ref#recon_internal_timeout_seconds",
-      mutate: (fixture) => {
-        fixture.plan.recon_internal_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "host soft timeout",
-      path: "$.campaign_plan_ref#host_soft_timeout_seconds",
-      mutate: (fixture) => {
-        fixture.plan.host_soft_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "backend configured timeout",
-      path: "$.configured_timeout_seconds",
-      mutate: (fixture) => {
-        fixture.backend.configured_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "wrong host force-kill grace",
-      path: "$.campaign_plan_ref#host_force_kill_grace_seconds",
-      mutate: (fixture) => {
-        fixture.plan.host_force_kill_grace_seconds = 30;
-      }
-    },
-    {
-      name: "forged artifact finalization reserve",
-      path: "$.campaign_plan_ref#artifact_finalization_reserve_seconds",
-      mutate: (fixture) => {
-        fixture.plan.artifact_finalization_reserve_seconds = 299;
-      }
-    },
-    {
-      name: "plan test limit",
-      path: "$.campaign_plan_ref#recon_test_limit",
-      mutate: (fixture) => {
-        fixture.plan.recon_test_limit = "50000";
-      }
-    },
-    {
-      name: "reserve-subtracted command timeout",
-      path: "$.exact_command",
-      mutate: replaceCommand("--timeout 3600", "--timeout 3300")
-    },
-    {
-      name: "duplicate timeout flag",
-      path: "$.exact_command",
-      mutate: replaceCommand("--timeout 3600", "--timeout 3600 --timeout 3600")
-    },
-    { name: "missing timeout flag", path: "$.exact_command", mutate: replaceCommand("--timeout 3600 ", "") },
-    {
-      name: "missing GNU timeout wrapper",
-      path: "$.exact_command",
-      mutate: replaceCommand("timeout --preserve-status --signal=INT --kill-after=300s 3600s ", "")
-    },
-    {
-      name: "wrong GNU timeout soft deadline",
-      path: "$.exact_command",
-      mutate: replaceCommand("300s 3600s recon", "300s 3300s recon")
-    },
-    {
-      name: "foreground wrapper",
-      path: "$.exact_command",
-      mutate: replaceCommand("--preserve-status", "--preserve-status --foreground")
-    },
-    {
-      name: "bounded default test limit",
-      path: "$.exact_command",
-      mutate: replaceCommand(`--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`, "--test-limit 50000")
-    },
-    {
-      name: "one-step stateful sequence command",
-      path: "$.exact_command",
-      mutate: replaceCommand("--seq-len 100", "--seq-len 1")
-    },
-    {
-      name: "missing stateful sequence command flag",
-      path: "$.exact_command",
-      mutate: replaceCommand(" --seq-len 100", "")
-    },
-    {
-      name: "duplicate stateful sequence flags",
-      path: "$.exact_command",
-      mutate: replaceCommand("--seq-len 100", "--seq-len 100 --seq-len 100")
-    },
-    {
-      name: "one-step stateful sequence in plan",
-      path: "$.campaign_plan_ref#recon_sequence_length",
-      mutate: (fixture) => {
-        fixture.plan.recon_sequence_length = 1;
-      }
-    },
-    {
-      name: "one-step stateful sequence in result",
-      path: "$.sequence_length",
-      mutate: (fixture) => {
-        fixture.backend.sequence_length = 1;
-      }
-    },
-    {
-      name: "one-step stateful sequence in summary",
-      path: "$.campaign_summary_ref#sequence_length",
-      mutate: (fixture) => {
-        fixture.summary.sequence_length = 1;
-      }
-    },
-    {
-      name: "backend command differs from plan",
-      path: "$.exact_command",
-      mutate: (fixture) => {
-        fixture.backend.exact_command = `${fixture.backend.exact_command} --quiet`;
-      }
-    },
-    {
-      name: "backend start differs from plan",
-      path: "$.start_timestamp",
-      mutate: (fixture) => {
-        fixture.backend.start_timestamp = "2026-08-11T00:00:01.000Z";
-      }
-    },
-    ...(["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const).map((field) => ({
-      name: `deadline arithmetic ${field}`,
-      path: `$.campaign_plan_ref#${field}`,
-      mutate: (fixture: CampaignTimeoutFixture) => {
-        fixture.plan[field] = "2026-08-11T01:00:02.000Z";
-      }
-    })),
-    {
-      name: "summary outcome",
-      path: "$.campaign_summary_ref#outcome",
-      mutate: (fixture) => {
-        fixture.summary.outcome = "partial";
-      }
+const withReplacedCampaignCommand = (search: string, replacement: string) => (fixture: CampaignTimeoutFixture) =>
+  withCampaignCommand(fixture, fixture.backend.exact_command.replace(search, replacement));
+const forgedCampaignTimeoutCases: Array<{
+  name: string;
+  path: string;
+  mutate: (fixture: CampaignTimeoutFixture) => void;
+}> = [
+  {
+    name: "plan configured timeout",
+    path: "$.campaign_plan_ref#configured_fuzzer_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.plan.configured_fuzzer_timeout_seconds = 3300;
     }
-  ];
+  },
+  {
+    name: "Recon internal timeout",
+    path: "$.campaign_plan_ref#recon_internal_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.plan.recon_internal_timeout_seconds = 3300;
+    }
+  },
+  {
+    name: "host soft timeout",
+    path: "$.campaign_plan_ref#host_soft_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.plan.host_soft_timeout_seconds = 3300;
+    }
+  },
+  {
+    name: "backend configured timeout",
+    path: "$.configured_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.backend.configured_timeout_seconds = 3300;
+    }
+  },
+  {
+    name: "wrong host force-kill grace",
+    path: "$.campaign_plan_ref#host_force_kill_grace_seconds",
+    mutate: (fixture) => {
+      fixture.plan.host_force_kill_grace_seconds = 30;
+    }
+  },
+  {
+    name: "forged artifact finalization reserve",
+    path: "$.campaign_plan_ref#artifact_finalization_reserve_seconds",
+    mutate: (fixture) => {
+      fixture.plan.artifact_finalization_reserve_seconds = 299;
+    }
+  },
+  {
+    name: "plan test limit",
+    path: "$.campaign_plan_ref#recon_test_limit",
+    mutate: (fixture) => {
+      fixture.plan.recon_test_limit = "50000";
+    }
+  },
+  {
+    name: "reserve-subtracted command timeout",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--timeout 3600", "--timeout 3300")
+  },
+  {
+    name: "duplicate timeout flag",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--timeout 3600", "--timeout 3600 --timeout 3600")
+  },
+  { name: "missing timeout flag", path: "$.exact_command", mutate: withReplacedCampaignCommand("--timeout 3600 ", "") },
+  {
+    name: "missing GNU timeout wrapper",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("timeout --preserve-status --signal=INT --kill-after=300s 3600s ", "")
+  },
+  {
+    name: "wrong GNU timeout soft deadline",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("300s 3600s recon", "300s 3300s recon")
+  },
+  {
+    name: "foreground wrapper",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--preserve-status", "--preserve-status --foreground")
+  },
+  {
+    name: "bounded default test limit",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand(`--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`, "--test-limit 50000")
+  },
+  {
+    name: "one-step stateful sequence command",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--seq-len 100", "--seq-len 1")
+  },
+  {
+    name: "missing stateful sequence command flag",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand(" --seq-len 100", "")
+  },
+  {
+    name: "duplicate stateful sequence flags",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--seq-len 100", "--seq-len 100 --seq-len 100")
+  },
+  {
+    name: "one-step stateful sequence in plan",
+    path: "$.campaign_plan_ref#recon_sequence_length",
+    mutate: (fixture) => {
+      fixture.plan.recon_sequence_length = 1;
+    }
+  },
+  {
+    name: "one-step stateful sequence in result",
+    path: "$.sequence_length",
+    mutate: (fixture) => {
+      fixture.backend.sequence_length = 1;
+    }
+  },
+  {
+    name: "one-step stateful sequence in summary",
+    path: "$.campaign_summary_ref#sequence_length",
+    mutate: (fixture) => {
+      fixture.summary.sequence_length = 1;
+    }
+  },
+  {
+    name: "backend command differs from plan",
+    path: "$.exact_command",
+    mutate: (fixture) => {
+      fixture.backend.exact_command = `${fixture.backend.exact_command} --quiet`;
+    }
+  },
+  {
+    name: "backend start differs from plan",
+    path: "$.start_timestamp",
+    mutate: (fixture) => {
+      fixture.backend.start_timestamp = "2026-08-11T00:00:01.000Z";
+    }
+  },
+  ...(["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const).map((field) => ({
+    name: `deadline arithmetic ${field}`,
+    path: `$.campaign_plan_ref#${field}`,
+    mutate: (fixture: CampaignTimeoutFixture) => {
+      fixture.plan[field] = "2026-08-11T01:00:02.000Z";
+    }
+  })),
+  {
+    name: "summary outcome",
+    path: "$.campaign_summary_ref#outcome",
+    mutate: (fixture) => {
+      fixture.summary.outcome = "partial";
+    }
+  }
+];
 
-  for (const entry of cases) {
+test("current campaign timeout gate rejects forged budgets, Recon flags, and sequence lengths", () => {
+  for (const entry of forgedCampaignTimeoutCases) {
     const result = runCampaignTimeoutGate(entry.mutate);
     assert.equal(result.ok, false, entry.name);
     assert.ok(

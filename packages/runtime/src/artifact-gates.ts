@@ -4966,10 +4966,12 @@ function verifyLensReferenceExpectationAuthority(
     (output) => output.contract === PROPERTY_LENS_CONTRACT
   );
   const plannedOutputs = node.outputs.filter((output) => output.contract === PROPERTY_LENS_CONTRACT);
+  const declaration = sealedOutputs.length === 1 ? sealedOutputs[0] : undefined;
+  const plannedOutput = plannedOutputs.length === 1 ? plannedOutputs[0] : undefined;
   if (
-    sealedOutputs.length !== 1 ||
-    plannedOutputs.length !== 1 ||
-    !smithersOutputMatchesPlanned(sealedOutputs[0]!, plannedOutputs[0]!)
+    declaration === undefined ||
+    plannedOutput === undefined ||
+    !smithersOutputMatchesPlanned(declaration, plannedOutput)
   ) {
     return [
       {
@@ -4981,7 +4983,6 @@ function verifyLensReferenceExpectationAuthority(
       }
     ];
   }
-  const declaration = sealedOutputs[0]!;
   const lensPath = safeResolveInside(artifactDir, declaration.path, "property lens output");
   const lensDocument = parseCurrentArtifactJson(artifactDir, lensPath, authenticated);
   if (lensDocument === undefined) {

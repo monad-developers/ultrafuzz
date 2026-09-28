@@ -24561,7 +24561,9 @@ test("artifact gates validate a historical bundle through its active sealed sche
       fs.readFileSync(path.join(layout.root, "smithers", "tasks.json"), "utf8")
     ) as SmithersTaskManifestDocument
   ).tasks;
-  const attemptAuthority = { task: sealedTasks.find((task) => task.attemptId === node.id)!, tasks: sealedTasks };
+  const sealedTask = sealedTasks.find((task) => task.attemptId === node.id);
+  assert.ok(sealedTask);
+  const attemptAuthority = { task: sealedTask, tasks: sealedTasks };
   const verified = verifyRequiredArtifactsForAttempt(layout, node, node.id, attemptAuthority);
   assert.equal(verified.ok, true, JSON.stringify(verified.diagnostics));
 
