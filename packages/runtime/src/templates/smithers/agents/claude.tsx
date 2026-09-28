@@ -59,9 +59,9 @@ function claudeAuthOptions(): ClaudeAuthOptions {
     return { apiKey: requiredEnv(config.api_key_env ?? "ANTHROPIC_API_KEY"), configDir };
   }
   if (auth === "subscription") {
-    // ClaudeCodeAgent clears ANTHROPIC_API_KEY itself so the logged-in
-    // Claude subscription (`claude -p`) is used; we only forward an
-    // isolated config directory when one is configured.
+    // ClaudeCodeAgent clears ANTHROPIC_API_KEY so the logged-in subscription (`claude -p`)
+    // is used. configDir is always forwarded; without config_dir or ULTRAFUZZ_PROVIDER_HOME_ROOT,
+    // resolveProviderHome falls back to $CLAUDE_CONFIG_DIR, then ~/.claude.
     return { configDir };
   }
   throw new Error(`unsupported ClaudeAgent auth mode in ultrafuzz.toml: ${auth}`);
