@@ -904,11 +904,15 @@ export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath =
       workflowPath,
       identityWorkflowPath || workflowPath,
     );`;
-// Restores exactly the two states upstream's `isTerminalState` calls terminal
-// unconditionally: `finished` and `skipped`. `failed`, `cancelled` and Smithers
-// 0.35.0's new `stalled` are deliberately NOT restored, and the omission of
-// `stalled` is the deliberate half of that rule, not an oversight from the
-// 0.35.0 bump. Upstream classes `stalled` with `failed` ("it behaves exactly
+// Restores only `finished`, the one state backed by a durable output row.
+// `skipped` is re-derived instead: it is a verdict on prerequisites that a reset
+// (`resume --retry-failed`, `--reset-node`) can overturn, and restoring it kept a
+// recovered producer's verifier and every descendant skipped (#1141). The flag
+// set here makes the session re-render before it schedules anything, so the
+// workflow's skip predicates see the restored states.
+// `failed`, `cancelled` and Smithers 0.35.0's new `stalled` are deliberately NOT
+// restored, and the omission of `stalled` is not an oversight from the 0.35.0
+// bump. Upstream classes `stalled` with `failed` ("it behaves exactly
 // like `failed`, including the continueOnFail escape hatch"), and a resume's
 // whole purpose is to re-attempt what did not finish -- restoring `stalled` but
 // not `failed` would make a stalled node strictly less retryable than an
@@ -924,11 +928,30 @@ const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
       Effect.sync(() => {
         for (const task of tasks) {
-          if (task.state !== "finished" && task.state !== "skipped") continue;
+          if (task.state !== "finished") continue;
           state.states.set(stateKeyFor(task), task.state);
         }
+        state.rerenderRestoredStates = true;
       }),
     getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),`;
+// Ultrafuzz's skip predicates read other nodes' states, so a predicate is only
+// as current as the render that computed it. Upstream re-renders after a node
+// finishes or fails, but schedules on stale predicates in two places, and this
+// re-renders before both:
+// - the first decision of a resumed session: its graph was rendered before
+//   hydration restored anything, so a still-failed agent's verifier would run;
+// - a decision pass re-entered (`depth > 0`) after changing node states without
+//   dispatching any, which for Ultrafuzz means after skipping nodes: the skip
+//   makes dependents runnable whose predicates never saw it, so each descendant
+//   of a failed agent ran its preparation and failed instead of being skipped.
+const SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE = `    if (!state.graph) {
+      return { _tag: "Wait", reason: { _tag: "ExternalTrigger" } };
+    }`;
+const SMITHERS_SCHEDULER_SKIP_RERENDER_PATCH = `${SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE}
+    if (state.rerenderRestoredStates || depth > 0) {
+      state.rerenderRestoredStates = false;
+      return { _tag: "ReRender", context: renderContext(state, undefined, { reason: "skip-check" }) };
+    }`;
 // Anchored immediately after the resume path's `startRunRuntime()`, which is
 // where Smithers cancels stale in-progress attempts and rewrites their nodes back
 // to `pending`. Hydrating before that reset would restore a node as finished and
@@ -946,9 +969,6 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
           const durableOutputs = await loadOutputs(db, schema, runId);
           const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
           const terminalTaskStates = durableNodes.flatMap((node) => {
-            if (node.state === "skipped") {
-              return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
-            }
             if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
             const rows = durableOutputs[node.outputTable];
             const hasOutput =
@@ -2436,6 +2456,7 @@ export type SmithersCompatibilityPatchId =
   | "supervisor_descriptor"
   | "resume_snapshot_transfer"
   | "terminal_state_restore"
+  | "skip_predicate_rerender"
   | "resume_hydration"
   | "engine_agent_event_ownership"
   | "engine_agent_usage_progress"
@@ -2565,6 +2586,15 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patchable: SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
     patched: SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
     // Upstream growing its own terminal-state restoration retires this patch.
+    upstreamAbsent: ["restoreTerminalTaskStates"]
+  },
+  {
+    id: "skip_predicate_rerender",
+    packageName: "@smthrs/scheduler",
+    sourceRelativePath: "src/makeWorkflowSession.js",
+    patchable: SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE,
+    patched: SMITHERS_SCHEDULER_SKIP_RERENDER_PATCH,
+    // Consumes the flag `terminal_state_restore` sets; retires with it.
     upstreamAbsent: ["restoreTerminalTaskStates"]
   },
   {
@@ -6990,16 +7020,18 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   }
   assertRegularFileInside(nodeModules, engineWorkflowHashSource, "installed Smithers workflow hash implementation");
 
-  const schedulerContents = fs.readFileSync(schedulerSource, "utf8");
-  writeFileDurable(
-    schedulerSource,
-    applyRequiredSmithersPatch(
-      schedulerContents,
+  let schedulerContents = fs.readFileSync(schedulerSource, "utf8");
+  for (const [source, patched, label] of [
+    [
       SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
       SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
       "terminal-state restoration"
-    )
-  );
+    ],
+    [SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE, SMITHERS_SCHEDULER_SKIP_RERENDER_PATCH, "skip predicate re-render"]
+  ] as const) {
+    schedulerContents = applyRequiredSmithersPatch(schedulerContents, source, patched, label);
+  }
+  writeFileDurable(schedulerSource, schedulerContents);
 
   let workflowHashContents = fs.readFileSync(engineWorkflowHashSource, "utf8");
   for (const [source, patched, label] of [
