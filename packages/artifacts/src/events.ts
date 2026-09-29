@@ -14,7 +14,7 @@ import { type RunLayout } from "./run-layout.js";
 import { SAFE_ID_PATTERN, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import {
-  appendStrictJsonlRecordsAfterTail,
+  appendStrictJsonlRecordAfterTail,
   parseStrictJsonlBytes,
   readStrictJsonlSnapshot,
   type StrictJsonlCodec
@@ -1181,14 +1181,21 @@ export function appendEvent(layout: RunLayout, input: AppendEventInput): EventRe
   // The event ID hashes the timestamp and timestamps never decrease, so only the
   // trailing records that share this timestamp can repeat the ID. Checking that
   // window keeps an append from costing a parse of the whole journal.
-  appendStrictJsonlRecordsAfterTail(
+  return appendStrictJsonlRecordAfterTail(
     layout.eventsPath,
-    [record],
+    // The final event is later than this record after the wall clock steps back
+    // (an NTP step, a VM snapshot restore), or when another process appended
+    // since the record was built. One millisecond after the final event keeps
+    // timestamps nondecreasing, and no recorded event shares that time, so an
+    // identical event still gets a new ID.
+    (final) =>
+      input.timestamp === undefined && final !== undefined && record.timestamp < final.timestamp
+        ? createEventRecord(layout, { ...input, timestamp: new Date(Date.parse(final.timestamp) + 1).toISOString() })
+        : record,
     eventRecordCodec(layout.runId),
     (existing) => existing.timestamp === record.timestamp,
     layout.root
   );
-  return record;
 }
 
 export function createEventRecord(layout: Pick<RunLayout, "runId">, input: AppendEventInput): EventRecord {

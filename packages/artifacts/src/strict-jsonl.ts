@@ -164,24 +164,25 @@ export function appendStrictJsonlRecords<RecordType>(
 }
 
 /**
- * Append records after validating them against only the journal's trailing
+ * Append one record after validating it against only the journal's trailing
  * records: the final record, then earlier ones while `inWindow` holds for
- * them. This suits journals whose history rules relate a record only to the
+ * them. `build` makes the record from the final record, and this returns it.
+ * This suits journals whose history rules relate a record only to the
  * records inside that window. It does not count records, so it is for
  * journals bounded by bytes alone. Readers still validate the whole journal,
  * and the byte length read here still fences the write.
  */
-export function appendStrictJsonlRecordsAfterTail<RecordType>(
+export function appendStrictJsonlRecordAfterTail<RecordType>(
   filePath: string,
-  records: readonly RecordType[],
+  build: (final: RecordType | undefined) => RecordType,
   codec: StrictJsonlCodec<RecordType>,
   inWindow: (existing: RecordType) => boolean,
   trustedRoot?: string
-): void {
-  if (records.length === 0) return;
+): RecordType {
   const bytes = readStrictJsonlBytes(filePath, codec);
   const tail = bytes === undefined ? [] : parseStrictJsonlTail(bytes, codec, inWindow);
-  const canonicalRecords = canonicalStrictJsonlRecords(records, codec, (index) => `$[new ${String(index)}]`);
+  const record = build(tail.at(-1));
+  const canonicalRecords = canonicalStrictJsonlRecords([record], codec, (index) => `$[new ${String(index)}]`);
   validateStrictJsonlHistory([...tail, ...canonicalRecords], codec);
   writeStrictJsonlRecords(
     filePath,
@@ -190,6 +191,7 @@ export function appendStrictJsonlRecordsAfterTail<RecordType>(
     codec,
     trustedRoot
   );
+  return record;
 }
 
 function parseStrictJsonlTail<RecordType>(

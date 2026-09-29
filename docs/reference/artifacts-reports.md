@@ -38,10 +38,12 @@ workspaces.json
 `events.jsonl` is the only event journal: event queries filter it, and SQLite
 events are not part of the artifact contract. An append checks the new event
 against the final event and any trailing events with the same timestamp;
-`replayEvents` and `queryEvents` validate the whole journal. The journal has no
-record-count limit; its 64 MiB byte limit still applies. Runs created before
-this change may also have an `events.index/` directory. Nothing reads it, and
-report bundles still copy it.
+`replayEvents` and `queryEvents` validate the whole journal. Event timestamps
+never decrease: if the host clock is behind the final event, a new event is
+stamped 1 ms after it, so event times can run ahead of the wall clock until the
+clock catches up. The journal has no record-count limit; its 64 MiB byte limit
+still applies. Runs created before this change may also have an `events.index/`
+directory. Nothing reads it, and report bundles still copy it.
 
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
 Each entry's immutable identity is the exact Smithers pair
