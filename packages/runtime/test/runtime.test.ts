@@ -25981,6 +25981,42 @@ test("launch observation rechecks a seal published while state remains pending",
   }
 });
 
+test("a launch that has sealed its controls but not written its link journal reads as incomplete, not legacy", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "launch-link-pending";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  // Launch publishes the execution snapshot after sealing its controls and before writing the link
+  // journal, with the run still pending. `pause`, `cancel` and `status` take no control lock, so they
+  // can read exactly this state while that publication runs.
+  writeRunState(layout, { ...readRunState(layout), status: "pending" });
+  const journalPath = path.join(layout.root, "smithers", "workflow-run-link-journal.json");
+  fs.unlinkSync(journalPath);
+  const commandLog = path.join(project, "smithers-commands.log");
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  for (const result of [
+    await pauseRun({ projectRoot: project, runId, env }),
+    await cancelRun({ projectRoot: project, runId, env })
+  ]) {
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_PENDING", JSON.stringify(result.diagnostics));
+    assert.equal(result.diagnostics[0]?.path, journalPath);
+    assert.match(result.diagnostics[0]?.message ?? "", /Launcher liveness is unknown/u);
+    assert.doesNotMatch(result.diagnostics[0]?.message ?? "", /new run ID|cannot be safely upgraded/u);
+  }
+  assert.doesNotMatch(fs.readFileSync(commandLog, "utf8"), /^(?:pause|cancel) /mu);
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.verdict, "launch-incomplete");
+  assert.equal(readRunState(layout).status, "pending");
+});
+
 test("native continuation restores only authenticated snapshot governance before launch", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
