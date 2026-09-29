@@ -329,10 +329,13 @@ fork completed work.
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
 that same Smithers run. It does not publish or authenticate a historical
-controller generation. Refresh rejects an actively owned workflow. Because
-Smithers admits changed workflow source, replay determinism is the operator's
-responsibility; inspect the retained source and Smithers workflow hash when
-auditing a continuation.
+controller generation. The refreshed workflow rebinds each declared output to
+the installed schema bundle but keeps its recorded contract digest and validator
+build, so after a rebuild that changed only the validator build its verification
+markers still match the run's sealed plan. Refresh rejects an actively owned
+workflow. Because Smithers admits changed workflow source, replay determinism is
+the operator's responsibility; inspect the retained source and Smithers workflow
+hash when auditing a continuation.
 
 `status` human output is watch-friendly:
 

@@ -124,6 +124,7 @@ import { loadReportSnapshot } from "../src/unverified-report.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
+import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import {
   shippedReferenceCatalog,
@@ -11152,18 +11153,21 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
     attemptId: string;
     continueOnFail: boolean;
-    outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string }>;
+    outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string; validatorBuild?: string }>;
     promptPath?: string;
   }>;
   assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
   const reboundOutput = specs
     .flatMap((task) => task.outputs)
     .find((output) => output.contract === historicalOutput.contract);
-  assert.equal(reboundOutput?.contractDigest, artifactContractDefinition(historicalOutput.contract).digest);
   assert.equal(
     reboundOutput?.schemaBundleSha256,
     artifactContractSchemaBinding(historicalOutput.contract)?.schema_bundle_sha256
   );
+  // Only the schema is rebound (#982). The contract digest and validator build are provenance that the
+  // refreshed verifier copies into markers compared with the sealed plan, so they keep the run's values.
+  assert.equal(reboundOutput?.contractDigest, historicalOutput.contractDigest);
+  assert.equal(reboundOutput?.validatorBuild, historicalOutput.validatorBuild);
   const plannedPrompt = persistedPlan.rendered_prompts.find((prompt) => prompt.attempt_id === promptedTask.attemptId);
   assert.ok(plannedPrompt);
   const snapshotPath = path.join(plan.value!.layout.root, plannedPrompt.rendered_prompt_snapshot_path);
@@ -13423,18 +13427,6 @@ test("a sealed manifest that stops re-deriving leaves status readable while nati
   );
 });
 
-// Appends a comment to one of the five compiled modules VALIDATOR_BUILD_IDENTITY hashes, exactly as a
-// comment-only rebuild does, but only for the child process that loads it.
-const REBUILT_VALIDATOR_PRELOAD = String.raw`
-import fs from "node:fs";
-const rebuilt = process.env.ULTRAFUZZ_TEST_REBUILT_VALIDATOR_MODULE;
-const readFileSync = fs.readFileSync;
-fs.readFileSync = function (file, ...rest) {
-  const contents = readFileSync.call(this, file, ...rest);
-  return file === rebuilt && Buffer.isBuffer(contents) ? Buffer.concat([contents, Buffer.from("\n// rebuilt\n")]) : contents;
-};
-`;
-
 const REBUILT_VALIDATOR_OPERATOR = String.raw`
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -13517,18 +13509,14 @@ test("a validator rebuild after launch leaves lifecycle commands, status and sch
   assert.ok(plannedBuilds.length > 0);
   assert.ok(plannedBuilds.every((build) => build === VALIDATOR_BUILD_IDENTITY));
 
-  const artifactsModule = import.meta.resolve("@ultrafuzz/artifacts");
-  const scripts = temporaryRoot("ufz-rebuilt-validator-");
-  fs.writeFileSync(path.join(scripts, "preload.mjs"), REBUILT_VALIDATOR_PRELOAD, "utf8");
-  fs.writeFileSync(path.join(scripts, "operator.mjs"), REBUILT_VALIDATOR_OPERATOR, "utf8");
-  fs.writeFileSync(
-    path.join(scripts, "input.json"),
-    JSON.stringify({
+  const operator = runWithRebuiltValidator(
+    REBUILT_VALIDATOR_OPERATOR,
+    {
       project,
       runId,
       runRoot,
       env,
-      artifactsModule,
+      artifactsModule: ARTIFACTS_MODULE_URL,
       runtimeModule: new URL("../src/index.js", import.meta.url).href,
       cliEntrypoint: fakeUltrafuzzCliEntrypoint(project),
       cancelEnv: fakeLifecycleSmithersEnv(project, {
@@ -13539,32 +13527,8 @@ test("a validator rebuild after launch leaves lifecycle commands, status and sch
           steps: [{ id: "node:project-discovery", state: "in-progress" }]
         })
       })
-    }),
-    "utf8"
-  );
-  const operator = JSON.parse(
-    execFileSync(
-      process.execPath,
-      [
-        "--import",
-        pathToFileURL(path.join(scripts, "preload.mjs")).href,
-        path.join(scripts, "operator.mjs"),
-        path.join(scripts, "input.json")
-      ],
-      {
-        cwd: project,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          ULTRAFUZZ_TEST_REBUILT_VALIDATOR_MODULE: path.join(
-            path.dirname(fileURLToPath(artifactsModule)),
-            "strict-json.js"
-          )
-        },
-        maxBuffer: 16 * 1024 * 1024,
-        timeout: 600_000
-      }
-    )
+    },
+    project
   ) as {
     validatorBuild: string;
     strict: unknown;

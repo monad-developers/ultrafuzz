@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
+import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -1962,4 +1963,86 @@ test("a refresh repairs control evidence a rebound task manifest permanently inv
     path.join(fixture.runRoot, planned.rendered_prompt_snapshot_path),
     "the repaired controller must still bind the authenticated retained snapshot"
   );
+});
+
+const REBUILT_VALIDATOR_REFRESH = String.raw`
+import fs from "node:fs";
+const input = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const artifacts = await import(input.artifactsModule);
+const { renderCurrentSmithersController } = await import(input.smithersModule);
+const workflowPath = renderCurrentSmithersController({
+  projectRoot: input.project,
+  layout: artifacts.layoutForRunRoot(input.runRoot),
+  smithersRunId: input.smithersRunId,
+  tasks: artifacts.parseSmithersTaskManifestBytes(fs.readFileSync(input.tasksPath)),
+  config: input.config
+});
+process.stdout.write(JSON.stringify({ validatorBuild: artifacts.VALIDATOR_BUILD_IDENTITY, workflowPath }));
+`;
+
+/**
+ * #921: `resume --refresh-controller` re-renders the workflow with the operator's current build, and a
+ * rebuild that changed only the validator build must not change what that workflow records for the
+ * run's outputs. Its first tick republishes the runtime task plan that every gated command re-derives
+ * from the sealed base, and its verifier copies each declared output into the marker that
+ * synchronization compares with `graph.json`. The refresh runs in a child whose rebuilt validator
+ * module yields a different identity; the run was launched by this process.
+ */
+test("a controller refresh by a rebuilt validator keeps the run's recorded output bindings", async () => {
+  const fixture = await createDynamicFixture({ runId: "refresh-rebuilt-validator" });
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const tasksPath = path.join(fixture.runRoot, "smithers", "tasks.json");
+  const refreshed = runWithRebuiltValidator(
+    REBUILT_VALIDATOR_REFRESH,
+    {
+      artifactsModule: ARTIFACTS_MODULE_URL,
+      smithersModule: new URL("../src/smithers.js", import.meta.url).href,
+      project: fixture.project,
+      runRoot: fixture.runRoot,
+      smithersRunId: evidence.smithersRunId,
+      tasksPath,
+      config: JSON.parse(resolvedConfig.contents.toString("utf8")) as unknown
+    },
+    fixture.project
+  ) as { validatorBuild: string; workflowPath: string };
+  assert.notEqual(refreshed.validatorBuild, VALIDATOR_BUILD_IDENTITY, "the refresh must run a rebuilt validator");
+  const compiled = compiledControllerConstants(fs.readFileSync(refreshed.workflowPath, "utf8"));
+
+  // Replay the refreshed workflow's first-tick materialization with its own literals.
+  const rematerialized = materializeDynamicRuntime({
+    runId: fixture.runId,
+    projectRoot: fixture.project,
+    runRoot: fixture.runRoot,
+    graphPath: path.join(fixture.runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: compiled.baseTasks,
+    groups: compiled.groups,
+    readyGroupIds: ["fanout"]
+  });
+  const readmitted = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(readmitted.ok, true, "diagnostics" in readmitted ? JSON.stringify(readmitted.diagnostics) : "");
+
+  // A generated attempt the refreshed workflow verifies: its marker records the refreshed declaration.
+  const generated = rematerialized.tasks.find((task) => task.attemptId === fixture.generatedTasks[0]?.attemptId);
+  assert.ok(generated);
+  writeFinding(generated);
+  const planner = plannerSuccessEvidence(fixture);
+  setLifecycle(
+    fixture,
+    [...planner.steps, { id: generated.smithersNodeId, state: "finished", attempt: 1 }],
+    [
+      ...planner.events,
+      { type: "NodeStarted", nodeId: generated.smithersNodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId: generated.smithersNodeId, attempt: 1 }
+    ]
+  );
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  assert.equal(readState(fixture).nodes[generated.attemptId]?.status, "succeeded");
 });
