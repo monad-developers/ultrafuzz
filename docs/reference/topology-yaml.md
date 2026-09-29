@@ -346,9 +346,16 @@ Generated children use the same global concurrency scheduler as static nodes.
 exceeding it fails explicitly and never truncates the source array.
 
 The first successful expansion is persisted under
-`dynamic-expansions/<group-id>.json`. Resume reuses that exact manifest and
-rejects changes to its source bytes, prompt template, topology contract, or
-dynamic-node limit instead of silently changing the graph.
+`dynamic-expansions/<group-id>.json`, and from then on that manifest alone
+decides the group's generated nodes. Resume reuses it and rejects changes to its
+prompt template, topology contract, or dynamic-node limit instead of silently
+changing the graph. The source artifact is read only to create the manifest, so
+a source node that runs again, for example after a reset, leaves the published
+fan-out unchanged. The exception is `resume --retry-failed` for a source whose
+verifier failed: it moves the published manifests to
+`dynamic-expansion-history/` before the source runs again (and refuses if
+another source published any of them), so the group expands again from the new
+output.
 
 ## Model Fan-Out
 
