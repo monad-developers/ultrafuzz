@@ -7,7 +7,6 @@ import lockfile from "proper-lockfile";
 
 import {
   ARTIFACT_MANIFEST_FILE,
-  MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
@@ -20,7 +19,6 @@ import {
   assertPathInside,
   assertRegularFileInside,
   createNodeState,
-  createNodeAttemptLedgerEntry,
   createUsageLedgerEntry,
   getNodeArtifactDir,
   isTerminalRunStatus,
@@ -30,7 +28,6 @@ import {
   queryNodeAttempts,
   readRegularFileSnapshot,
   readRunMetadataDocument,
-  reconcileNodeAttemptLedgerEntry,
   replayEvents,
   replayNodeAttempts,
   readRunState,
@@ -125,11 +122,9 @@ import {
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
-import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import {
   inspectSmithersAttemptAgentSelection,
-  reconcileSmithersAttemptAgentSelection,
-  smithersTaskAgentId
+  type SmithersAttemptAgentSelection
 } from "./smithers-attempt-authority.js";
 import { isRecord } from "@ultrafuzz/artifacts";
 
@@ -177,11 +172,11 @@ interface TerminalWorkflowAttempt {
   outcome: NodeAttemptOutcome;
   failureCategory?: NodeAttemptFailureCategory;
   failureMessage?: string;
-}
-
-interface TerminalAttemptSupersessionContext {
-  crossedRunActivation: boolean;
-  supersedingStartedSequence: number;
+  /**
+   * A later NodeStarted reused this (node, iteration, attempt) numbering, as a
+   * reset does, so Smithers' attempt row now describes the replacement.
+   */
+  superseded: boolean;
 }
 
 type SmithersNodeAttemptAuthorities = ReadonlyMap<string, unknown>;
@@ -334,6 +329,8 @@ interface AttemptWorkflowEvidence {
   evidence: NodeWorkflowEvidence;
   source: "agent" | "verifier" | "preparation";
   taskId: string;
+  /** The agent task's own attempt number; a verifier numbers its attempts independently. */
+  agentAttempt?: number;
 }
 
 interface ObservedTaskEvidence {
@@ -410,6 +407,12 @@ export const TRANSIENT_SYNC_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set([
 ]);
 
 const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
+/**
+ * `smithers events` returns at most this many events, oldest first, and says
+ * nothing when it stops there. The pinned CLI has no sequence cursor to page
+ * past it, so synchronization can only report that the rest is missing.
+ */
+const SMITHERS_EVENTS_LIMIT = 100_000;
 
 /**
  * Optionally bound the state refresh performed before read-only observer
@@ -533,7 +536,7 @@ export async function refinalizeControllerFailures(
     }
 
     const eventsSnapshot = await runSmithersInspectionCommand({
-      args: ["events", input.workflowRunId, "--limit", "100000", "--json"],
+      args: ["events", input.workflowRunId, "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
       projectRoot: input.projectRoot,
       env: inspectionEnvironment
     });
@@ -614,7 +617,8 @@ export async function refinalizeControllerFailures(
         (attempt) =>
           attempt.nodeId === task.verifierSmithersNodeId &&
           attempt.retry === verifierAttempt &&
-          attempt.outcome === "succeeded"
+          attempt.outcome === "succeeded" &&
+          !attempt.superseded
       );
       if (matchingAttempts.length !== 1) {
         throw new Error(`linked workflow does not contain one exact finished verifier attempt for ${task.attemptId}`);
@@ -1058,253 +1062,6 @@ function parseFinishedVerifierOutput(
   };
 }
 
-/**
- * Preserve failed local executor occurrences while their exact selected-agent
- * detail still exists. Only a stopped-run reset calls this checkpoint; normal
- * continuation, active force resets and success publication keep their existing
- * paths. It never finalizes artifacts, projects run state or resolves pricing.
- */
-export async function preserveFailedWorkflowAttemptsBeforeReset(
-  input: SyncRunInput & { inspection: SmithersCommandSnapshot }
-): Promise<void> {
-  const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { observeOnly: true });
-  if (!evidence.ok) throw new Error(evidence.diagnostics.map((entry) => entry.message).join("; "));
-  const loaded = loadSynchronizationInputs({
-    graph: evidence.verifiedControl.contents.graph,
-    tasks: evidence.verifiedControl.contents.tasks
-  });
-  if (!loaded.ok) throw new Error(loaded.diagnostics.map((entry) => entry.message).join("; "));
-  const environment = linkedWorkflowExecutionEnvironment(evidence, input.env);
-  const inspect = parseCurrentSmithersInspect(input.inspection, evidence.smithersRunId);
-  const readEvents = async (): Promise<SmithersCommandSnapshot> => {
-    const snapshot = await runSmithersInspectionCommand({
-      args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
-      projectRoot,
-      env: environment
-    });
-    if (!snapshot.ok) throw new Error(workflowSnapshotDiagnostic(snapshot, "WORKFLOW_EVENTS_FAILED").message);
-    return snapshot;
-  };
-  const eventsSnapshot = await readEvents();
-  const events = parseWorkflowEvents(eventsSnapshot.stdout, evidence.smithersRunId);
-  const allExisting = replayNodeAttempts(evidence.layout).entries;
-  const recordedSequences = recordedTerminalAttemptSequencesFromEntries(allExisting, evidence.smithersRunId);
-  const tasksByNodeId = new Map(
-    loaded.tasks.filter((task) => task.execution.mode === "local").map((task) => [task.smithersNodeId, task])
-  );
-  const failures = resetTerminalFailureAttempts({
-    layout: evidence.layout,
-    workflowRunId: evidence.smithersRunId,
-    tasksByNodeId,
-    events,
-    recordedSequences
-  });
-  if (failures.length === 0) return;
-  const terminalSequences = new Set(
-    failures
-      .filter((attempt) => !recordedSequences.has(attempt.finishedSequence))
-      .map((attempt) => attempt.finishedSequence)
-  );
-  const authorities = await inspectTerminalAttemptAuthorities({
-    projectRoot,
-    workflowRunId: evidence.smithersRunId,
-    tasks: loaded.tasks,
-    events,
-    layout: evidence.layout,
-    env: environment,
-    control: {},
-    terminalSequences
-  });
-  const forbiddenSecretValues = sensitiveEnvironmentValues(
-    input.env ?? process.env,
-    loaded.tasks.flatMap((task) => [
-      ...task.execution.agentCredentialEnv,
-      ...(task.execution.modal?.credentialEnv ?? [])
-    ])
-  );
-  const pending = failedResetAttemptInputs({
-    layout: evidence.layout,
-    workflowRunId: evidence.smithersRunId,
-    controlGeneration: evidence.controlGeneration,
-    tasksByNodeId,
-    failures,
-    authorities,
-    allExisting,
-    forbiddenSecretValues
-  });
-  validateFailedResetAttemptInputs({ layout: evidence.layout, pending, allExisting, events });
-  await assertStoppedResetAuthorityUnchanged({
-    evidence,
-    projectRoot,
-    environment,
-    inspect,
-    events,
-    readEvents
-  });
-  appendNodeAttempts(evidence.layout, pending);
-}
-
-function resetTerminalFailureAttempts(input: {
-  layout: RunLayout;
-  workflowRunId: string;
-  tasksByNodeId: ReadonlyMap<string, StoredWorkflowTask>;
-  events: WorkflowEvent[];
-  recordedSequences: ReadonlySet<number>;
-}): TerminalWorkflowAttempt[] {
-  const relevantEvents = input.events.filter(
-    (event) => event.type === "RunStarted" || input.tasksByNodeId.has(stringField(event.payload, "nodeId") ?? "")
-  );
-  return terminalWorkflowAttempts(relevantEvents, {
-    recordedTerminalSequences: input.recordedSequences,
-    authorizeUnrecordedSuperseded: (attempt, context) => {
-      const task = input.tasksByNodeId.get(attempt.nodeId);
-      return (
-        context.crossedRunActivation &&
-        task !== undefined &&
-        supersededSuccessfulAttemptHasTraceAuthority(
-          input.layout,
-          input.workflowRunId,
-          task,
-          attempt,
-          input.events,
-          context
-        )
-      );
-    }
-  }).filter((attempt) => attempt.outcome === "failed" || attempt.outcome === "timed-out");
-}
-
-function failedResetAttemptInputs(input: {
-  layout: RunLayout;
-  workflowRunId: string;
-  controlGeneration: string;
-  tasksByNodeId: ReadonlyMap<string, StoredWorkflowTask>;
-  failures: readonly TerminalWorkflowAttempt[];
-  authorities: SmithersNodeAttemptAuthorities;
-  allExisting: readonly NodeAttemptLedgerEntry[];
-  forbiddenSecretValues: readonly string[];
-}): AppendNodeAttemptInput[] {
-  const existing = new Map(input.allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry]));
-  return input.failures.flatMap((attempt): AppendNodeAttemptInput[] => {
-    const task = input.tasksByNodeId.get(attempt.nodeId);
-    if (task === undefined) throw new Error("failed reset attempt has no sealed task authority");
-    const prior = existing.get(JSON.stringify([input.workflowRunId, attempt.finishedSequence]));
-    if (
-      prior === undefined &&
-      inspectSmithersAttemptAgentSelection(
-        task,
-        input.authorities.get(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration)),
-        attempt.retry
-      ) === undefined
-    )
-      return [];
-    return [
-      {
-        workflowRunId: input.workflowRunId,
-        // Recompute immutable authority; only an already-recorded agent selection
-        // can replace mutable detail removed by an interrupted reset.
-        controlGeneration: input.controlGeneration,
-        nodeId: task.metadata.node.storageId ?? task.concreteNodeId,
-        strategyAttemptId: task.attemptId,
-        iteration: attempt.iteration,
-        attempt: attempt.retry,
-        startedEventSequence: attempt.startedSequence,
-        sourceEventSequence: attempt.finishedSequence,
-        startedAt: attempt.startedAt,
-        finishedAt: attempt.finishedAt,
-        outcome: attempt.outcome,
-        inputManifestDigest: taskAttemptInputManifestDigest(input.layout, task),
-        ...(prior === undefined
-          ? { agent: nodeAttemptAgentProvenance(task, attempt, input.authorities) }
-          : prior.agent === undefined
-            ? {}
-            : { agent: prior.agent }),
-        ...(attempt.failureCategory === undefined ? {} : { failureCategory: attempt.failureCategory }),
-        ...(attempt.failureMessage === undefined ? {} : { failureMessage: attempt.failureMessage }),
-        forbiddenSecretValues: input.forbiddenSecretValues
-      }
-    ];
-  });
-}
-
-function validateFailedResetAttemptInputs(input: {
-  layout: RunLayout;
-  pending: readonly AppendNodeAttemptInput[];
-  allExisting: readonly NodeAttemptLedgerEntry[];
-  events: readonly WorkflowEvent[];
-}): void {
-  const existingByIdentity = new Map(input.allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry]));
-  const candidates = input.pending.map((entry) => {
-    const candidate = createNodeAttemptLedgerEntry(input.layout, entry);
-    const prior = existingByIdentity.get(nodeAttemptLedgerIdentity(candidate));
-    if (prior === undefined) return candidate;
-    const reconciled = reconcileNodeAttemptLedgerEntry(prior, candidate, { failureMessage: entry.failureMessage });
-    if (reconciled === undefined)
-      throw new Error("recorded failed attempt no longer matches its immutable event authority");
-    return reconciled;
-  });
-  const proposedEntries = [
-    ...input.allExisting,
-    ...candidates.filter((entry) => !existingByIdentity.has(nodeAttemptLedgerIdentity(entry)))
-  ];
-  for (const candidate of candidates) {
-    const diagnostics = runtimeSemanticGateDiagnostics({
-      schemaFilename: "node-attempt-ledger.schema.json",
-      document: candidate,
-      artifactPath: input.layout.attemptLedgerPath,
-      context: {
-        attemptLedger: { entries: proposedEntries, sourceEntries: [] },
-        eventLog: {
-          events: input.events.map((event) => ({
-            workflow_run_id: event.workflowRunId,
-            source_event_sequence: event.sourceEventSequence,
-            timestamp_ms: event.timestampMs,
-            type: event.type,
-            payload: event.payload
-          }))
-        }
-      }
-    });
-    const errors = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
-    if (errors.length > 0) throw new Error(errors.map((entry) => entry.message).join("; "));
-  }
-}
-
-async function assertStoppedResetAuthorityUnchanged(input: {
-  evidence: LinkedWorkflowEvidence;
-  projectRoot: string;
-  environment: Record<string, string | undefined>;
-  inspect: CurrentSmithersInspect;
-  events: readonly WorkflowEvent[];
-  readEvents: () => Promise<SmithersCommandSnapshot>;
-}): Promise<void> {
-  const currentEvents = await input.readEvents();
-  const currentInspect = await runSmithersInspectionCommand({
-    args: ["inspect", input.evidence.smithersRunId, "--format", "json", "--full-output"],
-    projectRoot: input.projectRoot,
-    env: input.environment
-  });
-  if (
-    !currentInspect.ok ||
-    !isDeepStrictEqual(parseCurrentSmithersInspect(currentInspect, input.evidence.smithersRunId), input.inspect) ||
-    !isDeepStrictEqual(parseWorkflowEvents(currentEvents.stdout, input.evidence.smithersRunId), input.events)
-  ) {
-    throw new Error("stopped workflow changed while preserving failed attempts before reset");
-  }
-  const currentEvidence = await readLinkedWorkflowEvidence(input.projectRoot, input.evidence.layout.runId, {
-    observeOnly: true
-  });
-  if (
-    !currentEvidence.ok ||
-    currentEvidence.smithersRunId !== input.evidence.smithersRunId ||
-    currentEvidence.controlGeneration !== input.evidence.controlGeneration ||
-    !currentEvidence.verifiedControl.contents.tasks.equals(input.evidence.verifiedControl.contents.tasks)
-  ) {
-    throw new Error("sealed workflow authority changed while preserving failed attempts before reset");
-  }
-}
-
 /** Controls of passes that hold their run's synchronization lock. */
 const exclusiveSynchronizations = new WeakSet<WorkflowSynchronizationControl>();
 
@@ -1488,7 +1245,7 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
   const eventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
@@ -1499,7 +1256,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: [postEventsBudgetDiagnostic] };
   }
   const tokenEventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--type", "token", "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
@@ -1549,9 +1306,23 @@ export async function synchronizeLinkedWorkflowRun(
       diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_TOKEN_EVENTS_INVALID")]
     };
   }
-  let attemptAuthorities: SmithersNodeAttemptAuthorities;
+  for (const [stream, consequence, parsed] of [
+    ["lifecycle", "node evidence and the attempt ledger can be incomplete", events],
+    ["token", "usage accounting can be incomplete", tokenEvents]
+  ] as const) {
+    const last = parsed.at(-1);
+    if (parsed.length < SMITHERS_EVENTS_LIMIT || last === undefined) continue;
+    diagnostics.push({
+      code: "WORKFLOW_EVENTS_TRUNCATED",
+      message: `Smithers returned its ${String(SMITHERS_EVENTS_LIMIT)}-event limit for the ${stream} stream; events after sequence ${String(last.sourceEventSequence)} are not synchronized, so ${consequence}`,
+      severity: "warning",
+      source: "workflow"
+    });
+  }
+  // Attempt-ledger bookkeeping never blocks reconciling node and run state.
+  let attemptAuthorities: SmithersNodeAttemptAuthorities = new Map();
   try {
-    attemptAuthorities = await inspectTerminalAttemptAuthorities({
+    const inspected = await inspectTerminalAttemptAuthorities({
       projectRoot,
       workflowRunId: evidence.smithersRunId,
       tasks: loaded.tasks,
@@ -1560,13 +1331,15 @@ export async function synchronizeLinkedWorkflowRun(
       env: linkedWorkflowExecutionEnvironment(evidence, input.env),
       control
     });
+    attemptAuthorities = inspected.authorities;
+    diagnostics.push(...inspected.diagnostics);
   } catch (error) {
     const interrupted = synchronizationInterruptionDiagnostic(error);
     if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
-    return {
-      ok: false,
-      diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_ATTEMPT_INSPECT_FAILED")]
-    };
+    diagnostics.push({
+      ...diagnosticFromError(error, "workflow", "WORKFLOW_ATTEMPT_INSPECT_FAILED"),
+      severity: "warning"
+    });
   }
   let syncResult;
   try {
@@ -1650,16 +1423,24 @@ export async function synchronizeLinkedWorkflowRun(
   if (preAccountingBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
   }
-  const accountingResult = await synchronizeWorkflowAccounting({
-    layout,
-    workflowRunId: evidence.smithersRunId,
-    controlGeneration: evidence.controlGeneration,
-    events: tokenEvents,
-    tasks: loaded.tasks,
-    attemptEvents: events,
-    control,
-    env: input.env ?? process.env
-  });
+  // Usage accounting is a projection of the usage ledger: a failure is reported
+  // and retried on the next pass, never allowed to block run status.
+  let accountingResult: Awaited<ReturnType<typeof synchronizeWorkflowAccounting>> = {
+    changed: false,
+    available: false
+  };
+  try {
+    accountingResult = await synchronizeWorkflowAccounting({
+      layout,
+      workflowRunId: evidence.smithersRunId,
+      controlGeneration: evidence.controlGeneration,
+      events: tokenEvents,
+      control,
+      env: input.env ?? process.env
+    });
+  } catch (error) {
+    diagnostics.push({ ...diagnosticFromError(error, "workflow", "WORKFLOW_ACCOUNTING_FAILED"), severity: "warning" });
+  }
   if (accountingResult.budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
   }
@@ -2140,6 +1921,14 @@ function inspectionExecutionControl(
   };
 }
 
+/**
+ * Fetch `smithers node` detail for the local occurrences that still need agent
+ * provenance: those neither recorded nor superseded (a superseded occurrence's
+ * attempt row now describes its replacement). Synchronization therefore
+ * inspects only attempts it has not recorded; an unsuperseded pre-agent failure
+ * is not recorded, so it is inspected again on each pass. A failed inspection is
+ * a warning that defers the node's occurrences to a later pass.
+ */
 async function inspectTerminalAttemptAuthorities(input: {
   projectRoot: string;
   workflowRunId: string;
@@ -2148,63 +1937,29 @@ async function inspectTerminalAttemptAuthorities(input: {
   layout: RunLayout;
   env: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
-  terminalSequences?: ReadonlySet<number>;
-}): Promise<SmithersNodeAttemptAuthorities> {
-  const tasksByNodeId = new Map(input.tasks.map((task) => [task.smithersNodeId, task]));
+}): Promise<{ authorities: SmithersNodeAttemptAuthorities; diagnostics: RuntimeDiagnostic[] }> {
   const localTaskNodeIds = new Set(
     input.tasks.filter((task) => task.execution.mode === "local").map((task) => task.smithersNodeId)
   );
-  const relevantEvents = input.events.filter((event) => {
-    if (event.type === "RunStarted") return true;
-    const nodeId = stringField(event.payload, "nodeId");
-    return nodeId !== undefined && localTaskNodeIds.has(nodeId);
-  });
-  const recordedTerminalSequences = recordedTerminalAttemptSequences(input.layout, input.workflowRunId);
-  const pending = terminalWorkflowAttempts(relevantEvents, {
-    tolerateMissingStarts: true,
-    recordedTerminalSequences,
-    authorizeUnrecordedSuperseded: (attempt, context) => {
-      const task = tasksByNodeId.get(attempt.nodeId);
-      return (
-        context.crossedRunActivation &&
-        task !== undefined &&
-        supersededSuccessfulAttemptHasTraceAuthority(
-          input.layout,
-          input.workflowRunId,
-          task,
-          attempt,
-          input.events,
-          context
-        )
-      );
+  const recorded = recordedTerminalAttemptSequences(replayNodeAttempts(input.layout).entries, input.workflowRunId);
+  const pending = new Map<string, TerminalWorkflowAttempt>();
+  for (const attempt of terminalWorkflowAttempts(input.events)) {
+    if (localTaskNodeIds.has(attempt.nodeId) && !attempt.superseded && !recorded.has(attempt.finishedSequence)) {
+      pending.set(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration), attempt);
     }
-  }).filter(
-    (attempt) =>
-      tasksByNodeId.get(attempt.nodeId)?.execution.mode === "local" &&
-      (input.terminalSequences === undefined || input.terminalSequences.has(attempt.finishedSequence))
-  );
-  const grouped = new Map<string, TerminalWorkflowAttempt[]>();
-  for (const attempt of pending) {
-    const key = smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration);
-    const entries = grouped.get(key) ?? [];
-    entries.push(attempt);
-    grouped.set(key, entries);
-  }
-  if (grouped.size > input.tasks.length) {
-    throw new Error("Smithers attempt authority inspection exceeds the sealed task bound");
   }
   const authorities = new Map<string, unknown>();
-  for (const [key, attempts] of grouped) {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [key, attempt] of pending) {
     assertSynchronizationBudget(input.control);
-    const first = attempts[0]!;
     const snapshot = await runSmithersInspectionCommand({
       args: [
         "node",
-        first.nodeId,
+        attempt.nodeId,
         "-r",
         input.workflowRunId,
         "-i",
-        String(first.iteration),
+        String(attempt.iteration),
         "--format",
         "json",
         "--full-output"
@@ -2215,15 +1970,15 @@ async function inspectTerminalAttemptAuthorities(input: {
     });
     assertSynchronizationBudget(input.control);
     if (!snapshot.ok || snapshot.json === undefined) {
-      throw new Error(workflowSnapshotDiagnostic(snapshot, "WORKFLOW_ATTEMPT_INSPECT_FAILED").message);
-    }
-    const task = tasksByNodeId.get(first.nodeId)!;
-    for (const attempt of attempts) {
-      inspectSmithersAttemptAgentSelection(task, snapshot.json, attempt.retry);
+      diagnostics.push({
+        ...workflowSnapshotDiagnostic(snapshot, "WORKFLOW_ATTEMPT_INSPECT_FAILED"),
+        severity: "warning"
+      });
+      continue;
     }
     authorities.set(key, snapshot.json);
   }
-  return authorities;
+  return { authorities, diagnostics };
 }
 
 function smithersNodeAttemptAuthorityKey(nodeId: string, iteration: number): string {
@@ -2235,8 +1990,6 @@ async function synchronizeWorkflowAccounting(input: {
   workflowRunId: string;
   controlGeneration: string;
   events: WorkflowEvent[];
-  tasks: readonly StoredWorkflowTask[];
-  attemptEvents: WorkflowEvent[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
@@ -2251,18 +2004,17 @@ async function synchronizeWorkflowAccounting(input: {
   if (metadata.workflow.control_generation !== input.controlGeneration) {
     throw new Error("run.json workflow control generation does not match the linked Smithers run");
   }
-  const storedAccounting =
-    metadata.accounting === undefined ? undefined : storedAccountingDocument(metadata.accounting, input.workflowRunId);
-  const existingUsageReplay = replayUsageEvents(input.layout);
-  if (storedAccounting !== undefined) {
-    assertAccountingMatchesUsageLedger(storedAccounting, existingUsageReplay.entries, "run.json#$.accounting");
-  }
+  // run.json accounting is a cache derived from usage.jsonl: every pass rebuilds
+  // it from the ledger and reads the prior copy only for its cached prices. A
+  // pass stopped between the ledger append and the run.json write therefore
+  // leaves a stale cache that the next pass replaces (#1138).
+  const storedAccounting = cachedAccountingDocument(metadata.accounting, input.workflowRunId);
   const preparedUsage = prepareWorkflowUsageEvents(
     input.layout,
     input.workflowRunId,
     input.controlGeneration,
     input.events,
-    existingUsageReplay
+    replayUsageEvents(input.layout)
   );
 
   const stateSourceRunId = readRunState(input.layout).source_run_id;
@@ -2270,7 +2022,7 @@ async function synchronizeWorkflowAccounting(input: {
     throw new Error("run.json and state.json disagree on source_run_id");
   }
   if (preparedUsage.entries.length === 0) {
-    if (storedAccounting !== undefined) {
+    if (metadata.accounting !== undefined) {
       throw new Error("run.json accounting cannot exist when the usage ledger is empty");
     }
     return { changed: false, available: false };
@@ -2278,8 +2030,13 @@ async function synchronizeWorkflowAccounting(input: {
 
   const storedPricingCatalog = storedAccounting?.pricingCatalog;
   const storedPricing = storedAccounting?.pricing ?? new Map<string, ModelPricing>();
-  const previouslyUnresolvedModels =
-    storedPricingCatalog?.status === "disabled" ? new Set(storedPricingCatalog.unresolved_models) : new Set<string>();
+  // A model that a disabled or successfully fetched catalog does not list stays
+  // unpriced; only an unavailable catalog is fetched again on a later pass.
+  const previouslyUnresolvedModels = new Set(
+    storedPricingCatalog === undefined || storedPricingCatalog.status === "unavailable"
+      ? []
+      : storedPricingCatalog.unresolved_models
+  );
   const latestLedgerEvents = workflowEventsFromUsageLedger(latestUsageLedgerEntriesByAttempt(preparedUsage.entries));
   const requiredModels = modelsRequiringPricing(latestLedgerEvents);
   const missingModels = requiredModels.filter(
@@ -2356,8 +2113,6 @@ async function synchronizeWorkflowAccounting(input: {
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
   const nextMetadata = assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
-  const validatedAccounting = storedAccountingDocument(nextMetadata.accounting, input.workflowRunId);
-  assertAccountingMatchesUsageLedger(validatedAccounting, preparedUsage.entries, "proposed run.json#$.accounting");
 
   if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
     return { changed: false, available: true };
@@ -2371,12 +2126,7 @@ async function synchronizeWorkflowAccounting(input: {
     return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
   }
 
-  if (preparedUsage.inputs.length > 0) {
-    const appended = appendUsageEvents(input.layout, preparedUsage.inputs);
-    if (!isDeepStrictEqual(appended.replay.entries, preparedUsage.entries)) {
-      throw new Error("usage ledger changed after its immutable validation snapshot");
-    }
-  }
+  if (preparedUsage.inputs.length > 0) appendUsageEvents(input.layout, preparedUsage.inputs);
   if (accountingChanged) {
     writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
   }
@@ -2498,70 +2248,25 @@ function prepareWorkflowUsageEvents(
   events: WorkflowEvent[],
   existingReplay: UsageLedgerReplay
 ): PreparedUsageLedgerAppend {
-  const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
-  const existingByIdentity = new Map(
-    existingReplay.entries.map((entry) => [usageLedgerIdentity(entry), entry] as const)
-  );
-  const candidateInputs = new Map<string, AppendUsageEventInput>();
-  const candidates = new Map<string, UsageLedgerEntry>();
-  for (const event of usageEvents) {
-    const candidateInput = normalizedUsageLedgerInput(workflowRunId, controlGeneration, event);
-    const candidate = createUsageLedgerEntry(layout, candidateInput);
-    const identity = usageLedgerIdentity(candidate);
-    const duplicateCandidate = candidates.get(identity);
-    if (duplicateCandidate !== undefined) {
-      if (!isDeepStrictEqual(duplicateCandidate, candidate)) {
-        throw new Error(`usage event ${identity} appears with conflicting immutable data in the source snapshot`);
-      }
-      continue;
-    }
-    const existing = existingByIdentity.get(identity);
-    if (existing !== undefined) {
-      if (!isDeepStrictEqual(existing, candidate)) {
-        throw new Error(`usage event ${identity} was already recorded with different immutable data`);
-      }
-      continue;
-    }
-    candidates.set(identity, candidate);
-    candidateInputs.set(identity, candidateInput);
-  }
-
-  const entries = existingReplay.entries.map((entry) => candidates.get(usageLedgerIdentity(entry)) ?? entry);
+  // A usage event is recorded once by its Smithers identity and never
+  // re-derived, so a row written by an earlier build cannot become a conflict.
+  const recorded = new Set(existingReplay.entries.map((entry) => usageLedgerIdentity(entry)));
+  const entries = [...existingReplay.entries];
   const pendingEntries: UsageLedgerEntry[] = [];
   const inputs: AppendUsageEventInput[] = [];
-  for (const [identity, candidate] of candidates) {
-    if (existingByIdentity.has(identity)) continue;
-    entries.push(candidate);
-    pendingEntries.push(candidate);
-    inputs.push(candidateInputs.get(identity)!);
-  }
-  const context = {
-    usageLedger: { entries },
-    eventLog: {
-      events: events.map((event) => ({
-        workflow_run_id: event.workflowRunId,
-        source_event_sequence: event.sourceEventSequence,
-        timestamp_ms: event.timestampMs,
-        type: event.type,
-        payload: event.payload
-      }))
-    }
-  };
-  for (const candidate of candidates.values()) {
-    const diagnostics = runtimeSemanticGateDiagnostics({
-      schemaFilename: "usage-ledger.schema.json",
-      document: candidate,
-      artifactPath: layout.usageLedgerPath,
-      context
+  for (const event of events) {
+    if (event.type !== "TokenUsageReported") continue;
+    const identity = usageLedgerIdentity({
+      workflow_run_id: event.workflowRunId,
+      source_event_sequence: event.sourceEventSequence
     });
-    if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-      throw new Error(
-        diagnostics
-          .filter((diagnostic) => diagnostic.severity === "error")
-          .map((diagnostic) => diagnostic.message)
-          .join("; ")
-      );
-    }
+    if (recorded.has(identity)) continue;
+    recorded.add(identity);
+    const usageInput = normalizedUsageLedgerInput(workflowRunId, controlGeneration, event);
+    const entry = createUsageLedgerEntry(layout, usageInput);
+    entries.push(entry);
+    pendingEntries.push(entry);
+    inputs.push(usageInput);
   }
   return { inputs, entries, pendingEntries };
 }
@@ -2575,6 +2280,7 @@ function normalizedUsageLedgerInput(
     throw new Error("usage ledger input is not an exact TokenUsageReported event for the linked workflow");
   }
   const payload = event.payload;
+  assertWorkflowEventCorrelation(payload, "TokenUsageReported");
   return {
     workflowRunId,
     controlGeneration,
@@ -2748,6 +2454,16 @@ function emptyAccountingSummary(): AccountingSummary {
     models: [],
     agents: []
   };
+}
+
+function cachedAccountingDocument(value: unknown, workflowRunId: string): StoredAccountingDocument | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return storedAccountingDocument(value, workflowRunId);
+  } catch {
+    // An unreadable cache is recomputed from the usage ledger, not trusted.
+    return undefined;
+  }
 }
 
 function storedAccountingDocument(value: unknown, expectedWorkflowRunId?: string): StoredAccountingDocument {
@@ -4138,6 +3854,7 @@ async function synchronizeTasks(input: {
     concreteAttempts.push(task.attemptId);
     taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
     let retryCount = previous?.retry_count ?? 0;
+    let currentAttemptExecuted = false;
     try {
       const ledger = appendTerminalTaskAttempts({
         layout: input.layout,
@@ -4147,17 +3864,22 @@ async function synchronizeTasks(input: {
         events: [...runActivationEvents, ...(eventsByNode.get(task.smithersNodeId) ?? [])].sort(
           (left, right) => left.sourceEventSequence - right.sourceEventSequence
         ),
-        authorityEvents: input.events,
-        currentAttempt: evidence.attempt,
+        currentAttempt: attemptEvidence.agentAttempt,
         currentStatus: patchStatus,
         finalization,
         attemptAuthorities: input.attemptAuthorities,
         forbiddenSecretValues: input.forbiddenSecretValues
       });
+      diagnostics.push(...ledger.diagnostics);
       retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
+      currentAttemptExecuted = ledger.currentAttemptExecuted;
       changed ||= ledger.appended;
     } catch (error) {
-      diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+      // The next pass retries the append; the node itself still synchronizes.
+      diagnostics.push({
+        ...diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"),
+        severity: "warning"
+      });
     }
     if (previousIsImmutable) {
       // A successful publication and a terminal invalid-output disposition are
@@ -4165,7 +3887,15 @@ async function synchronizeTasks(input: {
       // evidence, but it cannot re-finalize the node, clear its failure, create
       // a manifest, or recover it from files that appeared after completion.
       // Operational failures remain recoverable only when newer Smithers task
-      // evidence reaches the finalization path above.
+      // evidence reaches the finalization path above. The retry count is
+      // attempt bookkeeping, not finalization: once the ledger holds the current
+      // executed attempt, it follows attempts that the finalizing pass deferred.
+      if (currentAttemptExecuted && previous?.retry_count !== retryCount) {
+        updateNodeState(input.layout, task.attemptId, { retry_count: retryCount }, undefined, {
+          forbiddenSecretValues: input.forbiddenSecretValues
+        });
+        changed = true;
+      }
       syncedNodes += 1;
       continue;
     }
@@ -5124,58 +4854,64 @@ function appendTerminalTaskAttempts(input: {
   workflowRunId: string;
   controlGeneration: string;
   events: WorkflowEvent[];
-  authorityEvents: WorkflowEvent[];
+  /** The agent task's own Smithers attempt number, never its verifier's. */
   currentAttempt?: number;
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
   attemptAuthorities: SmithersNodeAttemptAuthorities;
   forbiddenSecretValues: readonly string[];
-}): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
+}): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean; diagnostics: RuntimeDiagnostic[] } {
   const allExisting = replayNodeAttempts(input.layout).entries;
-  const observedTerminalAttempts = terminalWorkflowAttempts(input.events, {
-    recordedTerminalSequences: recordedTerminalAttemptSequencesFromEntries(allExisting, input.workflowRunId),
-    authorizeUnrecordedSuperseded: (attempt, context) =>
-      context.crossedRunActivation &&
-      supersededSuccessfulAttemptHasTraceAuthority(
-        input.layout,
-        input.workflowRunId,
-        input.task,
-        attempt,
-        input.authorityEvents,
-        context
-      )
-  });
-  const terminalAttempts =
-    input.task.execution.mode === "local"
-      ? observedTerminalAttempts.filter((attempt) => {
-          const detail = input.attemptAuthorities.get(
-            smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration)
-          );
-          if (detail === undefined) {
-            throw new Error(
-              `Smithers attempt authority is unavailable for attempt ${String(attempt.retry)} of ${JSON.stringify(attempt.nodeId)}`
-            );
-          }
-          return inspectSmithersAttemptAgentSelection(input.task, detail, attempt.retry) !== undefined;
-        })
-      : observedTerminalAttempts;
+  const recordedByIdentity = new Map(allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const));
+  const terminalAttempts = terminalWorkflowAttempts(input.events);
   const state = readRunState(input.layout);
   const inputManifestDigest = taskAttemptInputManifestDigest(input.layout, input.task);
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
   const existing = allExisting.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
-  const existingByIdentity = new Map(allExisting.map((entry) => [nodeAttemptLedgerIdentity(entry), entry] as const));
   const sourceEntries = sourceNodeAttempts(input.layout, state.source_run_id, input.task.attemptId);
   const currentTerminalAttempt =
     input.currentAttempt === undefined
       ? undefined
-      : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt).at(-1);
+      : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt && !attempt.superseded).at(-1);
   const pending: AppendNodeAttemptInput[] = [];
-  const candidates: NodeAttemptLedgerEntry[] = [];
-  const candidatesByIdentity = new Map<string, NodeAttemptLedgerEntry>();
+  const diagnostics: RuntimeDiagnostic[] = [];
   let currentAttemptExecuted = false;
   for (const attempt of terminalAttempts) {
     const isCurrent = attempt === currentTerminalAttempt;
+    // An occurrence is recorded once and never re-derived, so later node
+    // status, finalization or manifest changes cannot turn it into a conflict.
+    const recorded = recordedByIdentity.get(
+      nodeAttemptLedgerIdentity({
+        workflow_run_id: input.workflowRunId,
+        source_event_sequence: attempt.finishedSequence
+      })
+    );
+    if (recorded !== undefined) {
+      currentAttemptExecuted ||= isCurrent && recorded.reuse.status === "executed";
+      continue;
+    }
+    let agent: NodeAttemptAgentProvenance | undefined;
+    // A superseded occurrence is recorded without agent provenance, because
+    // Smithers' attempt row now describes its replacement. That includes a
+    // pre-agent failure, which then counts as an executed attempt.
+    if (input.task.execution.mode === "local" && !attempt.superseded) {
+      const detail = input.attemptAuthorities.get(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration));
+      // Inspection was unavailable this pass; a later pass retries the occurrence.
+      if (detail === undefined) continue;
+      try {
+        const selection = inspectSmithersAttemptAgentSelection(input.task, detail, attempt.retry);
+        // Smithers never selected an agent-chain rung, so no model ran.
+        if (selection === undefined) continue;
+        agent = nodeAttemptAgentProvenance(selection);
+      } catch (error) {
+        // Agent provenance is optional evidence: record the occurrence without it.
+        diagnostics.push({
+          ...diagnosticFromError(error, "workflow", "WORKFLOW_ATTEMPT_INSPECT_FAILED"),
+          severity: "warning"
+        });
+      }
+    }
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
     let failureMessage = attempt.failureMessage;
@@ -5196,8 +4932,10 @@ function appendTerminalTaskAttempts(input: {
     // artifact-validation failure.  The attempt ledger is immutable, so wait
     // for a later synchronization pass with the manifest instead of turning a
     // successful executor outcome into a permanent phantom failure (#352).
-    if (outcome === "succeeded" && outputDigest === undefined) continue;
-    if (isCurrent && ["failed", "timed-out", "canceled"].includes(outcome)) {
+    // A finished occurrence that a reset superseded before it was recorded has
+    // no output of its own left to record: the manifest is the replacement's.
+    if (outcome === "succeeded" && (outputDigest === undefined || attempt.superseded)) continue;
+    if (isCurrent && (outcome === "failed" || outcome === "timed-out")) {
       failureMessage = input.finalization.lastError ?? failureMessage;
     }
     const reuseSource =
@@ -5211,15 +4949,7 @@ function appendTerminalTaskAttempts(input: {
     if (reuseSource !== undefined && outputDigest === undefined) {
       outputDigest = reuseSource.outputManifestDigest;
     }
-    const reuse =
-      reuseSource === undefined
-        ? undefined
-        : {
-            status: "reused" as const,
-            sourceWorkflowRunId: reuseSource.workflowRunId,
-            sourceEventSequence: reuseSource.sourceEventSequence
-          };
-    const appendInput: AppendNodeAttemptInput = {
+    pending.push({
       workflowRunId: input.workflowRunId,
       controlGeneration: input.controlGeneration,
       nodeId: input.task.metadata.node.storageId ?? input.task.concreteNodeId,
@@ -5232,96 +4962,35 @@ function appendTerminalTaskAttempts(input: {
       finishedAt: attempt.finishedAt,
       outcome,
       inputManifestDigest,
-      ...(input.task.execution.mode === "local"
-        ? { agent: nodeAttemptAgentProvenance(input.task, attempt, input.attemptAuthorities) }
-        : {}),
+      ...(agent === undefined ? {} : { agent }),
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
-      ...(reuse === undefined ? {} : { reuse }),
+      ...(reuseSource === undefined
+        ? {}
+        : {
+            reuse: {
+              status: "reused" as const,
+              sourceWorkflowRunId: reuseSource.workflowRunId,
+              sourceEventSequence: reuseSource.sourceEventSequence
+            }
+          }),
       ...(failureCategory === undefined ? {} : { failureCategory }),
       ...(failureMessage === undefined ? {} : { failureMessage }),
       forbiddenSecretValues: input.forbiddenSecretValues
-    };
-    const candidate = createNodeAttemptLedgerEntry(input.layout, appendInput);
-    const identity = nodeAttemptLedgerIdentity(candidate);
-    const duplicateCandidate = candidatesByIdentity.get(identity);
-    if (duplicateCandidate !== undefined) {
-      if (!isDeepStrictEqual(duplicateCandidate, candidate)) {
-        throw new Error(`node attempt ${identity} appears with conflicting immutable data in the source snapshot`);
-      }
-      currentAttemptExecuted ||= isCurrent && duplicateCandidate.reuse.status === "executed";
-      continue;
-    }
-    const recordedEntry = existingByIdentity.get(identity);
-    if (recordedEntry !== undefined) {
-      const reconciled = reconcileNodeAttemptLedgerEntry(recordedEntry, candidate, {
-        failureMessage
-      });
-      if (reconciled === undefined) {
-        throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
-      }
-      candidatesByIdentity.set(identity, reconciled);
-      candidates.push(reconciled);
-      currentAttemptExecuted ||= isCurrent && recordedEntry.reuse.status === "executed";
-      continue;
-    }
-    candidatesByIdentity.set(identity, candidate);
-    candidates.push(candidate);
-    pending.push(appendInput);
-    currentAttemptExecuted ||= isCurrent && reuse?.status !== "reused";
-  }
-  const proposedEntries = [
-    ...allExisting,
-    ...candidates.filter((candidate) => !existingByIdentity.has(nodeAttemptLedgerIdentity(candidate)))
-  ];
-  const gateContext = {
-    attemptLedger: { entries: proposedEntries, sourceEntries },
-    eventLog: {
-      events: input.events.map((event) => ({
-        workflow_run_id: event.workflowRunId,
-        source_event_sequence: event.sourceEventSequence,
-        timestamp_ms: event.timestampMs,
-        type: event.type,
-        payload: event.payload
-      }))
-    }
-  };
-  for (const candidate of candidates) {
-    const diagnostics = runtimeSemanticGateDiagnostics({
-      schemaFilename: "node-attempt-ledger.schema.json",
-      document: candidate,
-      artifactPath: input.layout.attemptLedgerPath,
-      context: gateContext
     });
-    if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-      throw new Error(
-        diagnostics
-          .filter((diagnostic) => diagnostic.severity === "error")
-          .map((diagnostic) => diagnostic.message)
-          .join("; ")
-      );
-    }
+    currentAttemptExecuted ||= isCurrent && reuseSource === undefined;
   }
-  const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);
-  const allEntries = proposedEntries.filter((entry) => entry.strategy_attempt_id === input.task.attemptId);
+  const appended = appendNodeAttempts(input.layout, pending).filter((result) => result.appended);
   return {
-    appended: results.some((result) => result.appended),
-    executedAttempts: allEntries.filter((entry) => entry.reuse.status === "executed").length,
-    currentAttemptExecuted
+    appended: appended.length > 0,
+    executedAttempts: [...existing, ...appended.map((result) => result.entry)].filter(
+      (entry) => entry.reuse.status === "executed"
+    ).length,
+    currentAttemptExecuted,
+    diagnostics
   };
 }
 
-function nodeAttemptAgentProvenance(
-  task: StoredWorkflowTask,
-  attempt: Pick<TerminalWorkflowAttempt, "nodeId" | "iteration" | "retry">,
-  authorities: SmithersNodeAttemptAuthorities
-): NodeAttemptAgentProvenance {
-  const detail = authorities.get(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration));
-  if (detail === undefined) {
-    throw new Error(
-      `Smithers attempt authority is unavailable for attempt ${attempt.retry} of ${JSON.stringify(attempt.nodeId)}`
-    );
-  }
-  const selection = reconcileSmithersAttemptAgentSelection(task, detail, attempt.retry);
+function nodeAttemptAgentProvenance(selection: SmithersAttemptAgentSelection): NodeAttemptAgentProvenance {
   const agent = selection.profile;
   return {
     chain_index: selection.chainIndex,
@@ -5336,415 +5005,77 @@ function nodeAttemptAgentProvenance(
   };
 }
 
-function terminalWorkflowAttempts(
-  events: WorkflowEvent[],
-  options: {
-    tolerateMissingStarts?: boolean;
-    recordedTerminalSequences?: ReadonlySet<number>;
-    authorizeUnrecordedSuperseded?: (
-      attempt: TerminalWorkflowAttempt,
-      context: TerminalAttemptSupersessionContext
-    ) => boolean;
-  } = {}
-): TerminalWorkflowAttempt[] {
+/**
+ * Pair each Smithers attempt occurrence's NodeStarted with its terminal event.
+ *
+ * An occurrence is identified by its terminal event sequence, so it stays
+ * recordable after a reset (timetravel / retry-task) restarts the attempt
+ * numbering: the earlier occurrence is only marked `superseded`, because
+ * Smithers upserts the attempt row for the replacement (#1099). Unpairable
+ * events are skipped, never fatal. A start without a terminal was abandoned
+ * (Smithers cancels in-progress rows at the next RunStarted without an event),
+ * and a terminal without a live start in the same activation, such as a
+ * NodeCancelled for an attempt that already ended or never started, is not an
+ * occurrence (#1139). Nor is a terminal stamped before its start, which no
+ * ledger row can hold: Smithers stamps a run cancellation's NodeCancelled with
+ * an instant it takes before its transaction, so a start that commits meanwhile
+ * can carry a later timestamp.
+ */
+function terminalWorkflowAttempts(events: readonly WorkflowEvent[]): TerminalWorkflowAttempt[] {
   const active = new Map<
     string,
     Pick<TerminalWorkflowAttempt, "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt">
   >();
-  const attempts = new Map<string, TerminalWorkflowAttempt>();
-  const terminalActivations = new Map<string, number>();
-  let activation = 0;
+  const latestByIdentity = new Map<string, TerminalWorkflowAttempt>();
+  const attempts: TerminalWorkflowAttempt[] = [];
   for (const event of events) {
     if (event.type === "RunStarted") {
-      // Smithers cancels stale in-progress rows before each resumed activation,
-      // but does not emit NodeCancelled for those abandoned occurrences. Keep
-      // duplicate starts fail-closed within one activation while allowing the
-      // next activation to reuse the same durable attempt number.
       active.clear();
-      activation += 1;
       continue;
     }
-    if (event.type !== "NodeStarted" && event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
-    const payload = event.payload;
-    const nodeId = requiredWorkflowEventString(payload.nodeId, `${event.type} nodeId`);
-    const retry = requiredWorkflowEventCount(payload.attempt, `${event.type} attempt`);
-    const iteration = requiredWorkflowEventCount(payload.iteration, `${event.type} iteration`);
+    if (!["NodeStarted", "NodeFinished", "NodeFailed", "NodeCancelled"].includes(event.type)) continue;
+    const { nodeId, iteration, attempt: retry } = event.payload;
+    // A NodeCancelled for a node with no live attempt carries `attempt: null`.
+    if (typeof nodeId !== "string" || !Number.isSafeInteger(iteration) || !Number.isSafeInteger(retry)) continue;
     const identity = JSON.stringify([nodeId, iteration, retry]);
     const timestamp = new Date(event.timestampMs).toISOString();
     if (event.type === "NodeStarted") {
-      if (active.has(identity)) throw new Error(`Smithers attempt ${identity} has multiple active NodeStarted events`);
-      const superseded = attempts.get(identity);
-      if (superseded !== undefined) {
-        const terminalActivation = terminalActivations.get(identity);
-        if (terminalActivation === undefined) {
-          throw new Error(`Smithers attempt ${identity} is missing its terminal activation authority`);
-        }
-        if (
-          !options.recordedTerminalSequences?.has(superseded.finishedSequence) &&
-          options.authorizeUnrecordedSuperseded?.(superseded, {
-            crossedRunActivation: activation > terminalActivation,
-            supersedingStartedSequence: event.sourceEventSequence
-          }) !== true
-        ) {
-          throw new Error(
-            `Smithers attempt ${identity} supersedes terminal event ${superseded.finishedSequence} before durable attempt recording`
-          );
-        }
-        attempts.delete(identity);
-        terminalActivations.delete(identity);
-      }
+      const previous = latestByIdentity.get(identity);
+      if (previous !== undefined) previous.superseded = true;
       active.set(identity, {
-        retry,
-        iteration,
+        retry: retry as number,
+        iteration: iteration as number,
         nodeId,
         startedSequence: event.sourceEventSequence,
         startedAt: timestamp
       });
       continue;
     }
-    const terminal = terminalOutcomeForEvent(event);
-    if (terminal === undefined) continue;
     const started = active.get(identity);
-    if (started === undefined) {
-      if (options.tolerateMissingStarts === true) continue;
-      throw new Error(`Smithers terminal event has no preceding NodeStarted for ${identity}`);
-    }
+    const terminal = terminalOutcomeForEvent(event);
+    if (started === undefined || terminal === undefined || event.timestampMs < Date.parse(started.startedAt)) continue;
     active.delete(identity);
-    attempts.set(identity, {
+    const occurrence: TerminalWorkflowAttempt = {
       ...started,
       finishedSequence: event.sourceEventSequence,
       finishedAt: timestamp,
       outcome: terminal.outcome,
       ...(terminal.failureCategory === undefined ? {} : { failureCategory: terminal.failureCategory }),
-      ...(terminal.failureMessage === undefined ? {} : { failureMessage: terminal.failureMessage })
-    });
-    terminalActivations.set(identity, activation);
+      ...(terminal.failureMessage === undefined ? {} : { failureMessage: terminal.failureMessage }),
+      superseded: false
+    };
+    latestByIdentity.set(identity, occurrence);
+    attempts.push(occurrence);
   }
-  return [...attempts.values()].sort((left, right) => left.finishedSequence - right.finishedSequence);
+  return attempts;
 }
 
-function recordedTerminalAttemptSequences(layout: RunLayout, workflowRunId: string): ReadonlySet<number> {
-  return recordedTerminalAttemptSequencesFromEntries(replayNodeAttempts(layout).entries, workflowRunId);
-}
-
-function recordedTerminalAttemptSequencesFromEntries(
+function recordedTerminalAttemptSequences(
   entries: readonly NodeAttemptLedgerEntry[],
   workflowRunId: string
 ): ReadonlySet<number> {
   return new Set(
     entries.filter((entry) => entry.workflow_run_id === workflowRunId).map((entry) => entry.source_event_sequence)
-  );
-}
-
-function supersededSuccessfulAttemptHasTraceAuthority(
-  layout: RunLayout,
-  workflowRunId: string,
-  task: StoredWorkflowTask,
-  attempt: TerminalWorkflowAttempt,
-  events: readonly WorkflowEvent[],
-  context: TerminalAttemptSupersessionContext
-): boolean {
-  if (attempt.outcome !== "succeeded") return false;
-  if (!successfulAttemptHasExactTraceAuthority(workflowRunId, task, attempt, events)) return false;
-
-  const current = readRunState(layout).nodes[task.attemptId];
-  const manifestPath = path.join(getNodeArtifactDir(layout, task.attemptId), ARTIFACT_MANIFEST_FILE);
-  let manifestAuthority:
-    { status: "missing" } | { status: "invalid" } | { status: "valid"; manifest: ArtifactManifest; digest: string };
-  try {
-    const stat = fs.lstatSync(manifestPath);
-    if (!stat.isFile()) {
-      manifestAuthority = { status: "invalid" };
-    } else {
-      const bytes = readRegularFileSnapshot(manifestPath, MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES);
-      try {
-        const value = parseStrictJsonBytes(bytes, {
-          maxBytes: MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES
-        });
-        const validation = validateArtifactManifest(value);
-        manifestAuthority = validation.ok
-          ? { status: "valid", manifest: value as ArtifactManifest, digest: sha256Bytes(bytes) }
-          : { status: "invalid" };
-      } catch {
-        manifestAuthority = { status: "invalid" };
-      }
-    }
-  } catch (error) {
-    if (
-      typeof error !== "object" ||
-      error === null ||
-      !("code" in error) ||
-      (error as { code?: unknown }).code !== "ENOENT"
-    ) {
-      throw error;
-    }
-    manifestAuthority = { status: "missing" };
-  }
-
-  if (manifestAuthority.status === "missing") {
-    // A failed task-output disposition is the controller's immutable rejection
-    // of this otherwise successful executor occurrence. It is exactly the
-    // state retry-failed may replace at a later run activation.
-    return !immutableTerminalFinalization(current) || current?.status === "failed";
-  }
-  if (manifestAuthority.status === "invalid") return false;
-  return currentPublishedReplacementOccurrenceHasAuthority({
-    layout,
-    workflowRunId,
-    task,
-    attempt,
-    events,
-    context,
-    current,
-    manifest: manifestAuthority.manifest,
-    manifestDigest: manifestAuthority.digest
-  });
-}
-
-function successfulAttemptHasExactTraceAuthority(
-  workflowRunId: string,
-  task: StoredWorkflowTask,
-  attempt: TerminalWorkflowAttempt,
-  events: readonly WorkflowEvent[]
-): boolean {
-  const summaries = events.filter(
-    (event) =>
-      event.type === "AgentTraceSummary" &&
-      event.sourceEventSequence > attempt.startedSequence &&
-      event.sourceEventSequence < attempt.finishedSequence &&
-      event.workflowRunId === workflowRunId &&
-      event.payload.nodeId === attempt.nodeId &&
-      event.payload.iteration === attempt.iteration &&
-      event.payload.attempt === attempt.retry
-  );
-  if (summaries.length !== 1) return false;
-  const summaryEvent = summaries[0]!;
-  const summary = recordField(summaryEvent.payload, "summary");
-  if (
-    summary?.runId !== workflowRunId ||
-    summary.nodeId !== attempt.nodeId ||
-    summary.iteration !== attempt.iteration ||
-    summary.attempt !== attempt.retry
-  ) {
-    return false;
-  }
-  const traceStartedAtMs = numberField(summary, "traceStartedAtMs");
-  const traceFinishedAtMs = numberField(summary, "traceFinishedAtMs");
-  if (
-    traceStartedAtMs === undefined ||
-    traceFinishedAtMs === undefined ||
-    traceFinishedAtMs !== summaryEvent.timestampMs ||
-    traceStartedAtMs < Date.parse(attempt.startedAt) ||
-    traceFinishedAtMs > Date.parse(attempt.finishedAt)
-  ) {
-    return false;
-  }
-  const agentId = stringField(summary, "agentId");
-  const model = stringField(summary, "model");
-  if (agentId === undefined || model === undefined) return false;
-  const selections = task.agentChain
-    .map((profile, chainIndex) => ({ profile, chainIndex }))
-    .filter(({ chainIndex }) => smithersTaskAgentId(task, chainIndex) === agentId);
-  if (selections.length !== 1) return false;
-  const profile = selections[0]!.profile;
-  return profile.modelName === undefined || profile.modelName === model;
-}
-
-function currentPublishedReplacementOccurrenceHasAuthority(input: {
-  layout: RunLayout;
-  workflowRunId: string;
-  task: StoredWorkflowTask;
-  attempt: TerminalWorkflowAttempt;
-  events: readonly WorkflowEvent[];
-  context: TerminalAttemptSupersessionContext;
-  current: NodeState | undefined;
-  manifest: ArtifactManifest;
-  manifestDigest: string;
-}): boolean {
-  if (!input.context.crossedRunActivation || input.current?.status !== "succeeded") return false;
-  const workflow = recordField(input.current.provenance, "workflow");
-  const verifierAttempt = numberField(workflow, "attempt");
-  if (
-    workflow?.run_id !== input.workflowRunId ||
-    workflow.task_id !== input.task.verifierSmithersNodeId ||
-    workflow.agent_task_id !== input.task.smithersNodeId ||
-    workflow.verifier_task_id !== input.task.verifierSmithersNodeId ||
-    workflow.state !== "finished" ||
-    verifierAttempt === undefined
-  ) {
-    return false;
-  }
-
-  const supersedingStarts = input.events.filter(
-    (event) =>
-      event.sourceEventSequence === input.context.supersedingStartedSequence &&
-      event.type === "NodeStarted" &&
-      event.payload.nodeId === input.attempt.nodeId &&
-      event.payload.iteration === input.attempt.iteration &&
-      event.payload.attempt === input.attempt.retry
-  );
-  if (supersedingStarts.length !== 1) return false;
-  const supersedingStart = supersedingStarts[0]!;
-  const verifierIteration = input.task.metadata.loop.index;
-  const verifierStarts = input.events.filter(
-    (event) =>
-      event.sourceEventSequence > supersedingStart.sourceEventSequence &&
-      event.type === "NodeStarted" &&
-      event.payload.nodeId === input.task.verifierSmithersNodeId &&
-      event.payload.iteration === verifierIteration &&
-      event.payload.attempt === verifierAttempt &&
-      new Date(event.timestampMs).toISOString() === input.current?.started_at
-  );
-  if (verifierStarts.length !== 1) return false;
-  const verifierStart = verifierStarts[0]!;
-  const verifierTerminals = input.events.filter(
-    (event) =>
-      event.sourceEventSequence > verifierStart.sourceEventSequence &&
-      event.type === "NodeFinished" &&
-      event.payload.nodeId === input.task.verifierSmithersNodeId &&
-      event.payload.iteration === verifierIteration &&
-      event.payload.attempt === verifierAttempt &&
-      new Date(event.timestampMs).toISOString() === input.current?.finished_at
-  );
-  if (verifierTerminals.length !== 1) return false;
-  const verifierTerminal = verifierTerminals[0]!;
-
-  // The occurrence that first reuses a historical attempt identity may itself
-  // be abandoned at the next activation. Bind authority to the final producer
-  // occurrence before the exact published verifier instead of assuming that
-  // the reused occurrence must be the publisher. Every intervening abandoned
-  // producer must cross a RunStarted boundary without a terminal event; this
-  // keeps overlapping starts and unrelated completed occurrences fail-closed.
-  const producerStarts = input.events
-    .filter(
-      (event) =>
-        event.sourceEventSequence >= supersedingStart.sourceEventSequence &&
-        event.sourceEventSequence < verifierStart.sourceEventSequence &&
-        event.type === "NodeStarted" &&
-        event.payload.nodeId === input.attempt.nodeId &&
-        event.payload.iteration === input.attempt.iteration
-    )
-    .sort((left, right) => left.sourceEventSequence - right.sourceEventSequence);
-  const replacementStart = producerStarts.at(-1);
-  if (replacementStart === undefined) return false;
-  let activeProducerAttempt: number | undefined = input.attempt.retry;
-  for (const event of input.events) {
-    if (
-      event.sourceEventSequence <= supersedingStart.sourceEventSequence ||
-      event.sourceEventSequence >= replacementStart.sourceEventSequence
-    ) {
-      continue;
-    }
-    if (event.type === "RunStarted") {
-      activeProducerAttempt = undefined;
-      continue;
-    }
-    if (event.payload.nodeId !== input.attempt.nodeId || event.payload.iteration !== input.attempt.iteration) {
-      continue;
-    }
-    if (event.type === "NodeStarted") {
-      if (activeProducerAttempt !== undefined) return false;
-      const retry = numberField(event.payload, "attempt");
-      if (retry === undefined || !Number.isSafeInteger(retry) || retry < input.attempt.retry) return false;
-      activeProducerAttempt = retry;
-      continue;
-    }
-    if (event.type === "NodeFinished" || event.type === "NodeFailed") return false;
-  }
-  if (replacementStart !== supersedingStart && activeProducerAttempt !== undefined) return false;
-  const replacementRetry = numberField(replacementStart.payload, "attempt");
-  if (
-    replacementRetry === undefined ||
-    !Number.isSafeInteger(replacementRetry) ||
-    replacementRetry < input.attempt.retry
-  ) {
-    return false;
-  }
-  const nextBoundarySequence = input.events
-    .filter(
-      (event) =>
-        event.sourceEventSequence > replacementStart.sourceEventSequence &&
-        (event.type === "RunStarted" ||
-          (event.type === "NodeStarted" &&
-            event.payload.nodeId === input.attempt.nodeId &&
-            event.payload.iteration === input.attempt.iteration))
-    )
-    .map((event) => event.sourceEventSequence)
-    .sort((left, right) => left - right)[0];
-  const replacementTerminals = input.events.filter(
-    (event) =>
-      event.sourceEventSequence > replacementStart.sourceEventSequence &&
-      (nextBoundarySequence === undefined || event.sourceEventSequence < nextBoundarySequence) &&
-      (event.type === "NodeFinished" || event.type === "NodeFailed") &&
-      event.payload.nodeId === input.attempt.nodeId &&
-      event.payload.iteration === input.attempt.iteration &&
-      event.payload.attempt === replacementRetry
-  );
-  if (replacementTerminals.length !== 1 || replacementTerminals[0]!.type !== "NodeFinished") return false;
-  const replacementTerminal = replacementTerminals[0]!;
-  const replacementAttempt: TerminalWorkflowAttempt = {
-    retry: replacementRetry,
-    iteration: input.attempt.iteration,
-    nodeId: input.attempt.nodeId,
-    startedSequence: replacementStart.sourceEventSequence,
-    finishedSequence: replacementTerminal.sourceEventSequence,
-    startedAt: new Date(replacementStart.timestampMs).toISOString(),
-    finishedAt: new Date(replacementTerminal.timestampMs).toISOString(),
-    outcome: "succeeded"
-  };
-  if (!successfulAttemptHasExactTraceAuthority(input.workflowRunId, input.task, replacementAttempt, input.events)) {
-    return false;
-  }
-
-  if (replacementTerminal.sourceEventSequence >= verifierStart.sourceEventSequence) return false;
-  // A finished producer may leave its verifier pending until a later run
-  // activation. Only a new producer occurrence before that verifier, or a
-  // boundary/restart inside the verifier occurrence itself, breaks the link.
-  if (
-    input.events.some(
-      (event) =>
-        event.sourceEventSequence > replacementTerminal.sourceEventSequence &&
-        event.sourceEventSequence < verifierTerminal.sourceEventSequence &&
-        event.type === "NodeStarted" &&
-        event.payload.nodeId === input.attempt.nodeId &&
-        event.payload.iteration === input.attempt.iteration
-    ) ||
-    input.events.some(
-      (event) =>
-        event.sourceEventSequence > verifierStart.sourceEventSequence &&
-        event.sourceEventSequence < verifierTerminal.sourceEventSequence &&
-        (event.type === "RunStarted" ||
-          (event.type === "NodeStarted" &&
-            event.payload.nodeId === input.task.verifierSmithersNodeId &&
-            event.payload.iteration === verifierIteration))
-    )
-  ) {
-    return false;
-  }
-
-  const outputContracts = recordField(input.current.provenance, "output_contracts");
-  if (
-    outputContracts?.ok !== true ||
-    !Array.isArray(outputContracts.missing) ||
-    outputContracts.missing.length !== 0 ||
-    outputContracts.artifact_manifest_sha256 !== input.manifestDigest
-  ) {
-    return false;
-  }
-  const markerDigest = input.manifest.provenance.verification_marker_sha256;
-  if (markerDigest === undefined) return false;
-  const expectedProvenance = JSON.parse(
-    JSON.stringify({
-      run_id: input.layout.runId,
-      ...artifactProvenance(input.task, input.workflowRunId, markerDigest)
-    })
-  ) as ArtifactProvenance;
-  return (
-    input.manifest.run_id === input.layout.runId &&
-    input.manifest.node_id === input.task.attemptId &&
-    input.manifest.producer_node_id === (input.task.metadata.node.producerNodeId ?? input.task.attemptId) &&
-    Date.parse(input.manifest.created_at) >= Date.parse(input.current.finished_at ?? "") &&
-    isDeepStrictEqual(input.manifest.provenance, expectedProvenance)
   );
 }
 
@@ -5763,6 +5094,11 @@ function terminalOutcomeForEvent(event: WorkflowEvent):
       return errorLooksLikeTimeout(event.payload.error)
         ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
         : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
+    }
+    case "NodeCancelled": {
+      // Smithers names the cancellation: run-cancelled, unmounted or aborted.
+      const reason = stringField(event.payload, "reason");
+      return { outcome: "canceled", failureCategory: "canceled", ...(reason ? { failureMessage: reason } : {}) };
     }
     default:
       return undefined;
@@ -5791,23 +5127,15 @@ function finalizationFailureCategory(
   if (outcome === "timed-out") {
     return "timeout";
   }
-  if (outcome === "canceled") {
-    return "canceled";
-  }
   if (outcome !== "failed") {
     return undefined;
   }
-  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_VALIDATION_FAILED")) {
-    return "invalid-output";
-  }
-  if (
-    finalization.diagnostics.some(
-      (diagnostic) => diagnostic.code === "ARTIFACT_MANIFEST_WRITE_FAILED" || diagnostic.code.includes("ARTIFACT")
-    )
-  ) {
-    return "artifact-validation";
-  }
-  return "unknown";
+  // Only a finished executor occurrence reaches this overlay, so its node
+  // failed after the executor finished: a verifier or artifact-gate rejection,
+  // or a cancellation while the verifier ran.
+  return finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_VALIDATION_FAILED")
+    ? "invalid-output"
+    : "artifact-validation";
 }
 
 function reusedSourceAttempt(input: {
@@ -5946,13 +5274,14 @@ function completionEvidenceForTask(
   if (agentEvidence === undefined) {
     return undefined;
   }
+  const agentAttempt = agentEvidence.attempt === undefined ? {} : { agentAttempt: agentEvidence.attempt };
   if (agentEvidence.status !== "succeeded") {
-    return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId };
+    return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId, ...agentAttempt };
   }
   if (verifierEvidence === undefined) {
     return undefined;
   }
-  return { evidence: verifierEvidence, source: "verifier", taskId: task.verifierSmithersNodeId };
+  return { evidence: verifierEvidence, source: "verifier", taskId: task.verifierSmithersNodeId, ...agentAttempt };
 }
 
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {
@@ -6411,16 +5740,15 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
 }
 
 /**
- * The closed-world key contract Ultrafuzz enforces on the pinned runner's
- * `TokenUsageReported` payload, which `synchronizeLinkedWorkflowRun` reads on
- * every status, state, diagnose and evals row sync. Exported so a test can diff
- * it against the engine's own emitters: the check is exact-key and re-throws
- * everywhere except `stats`, so a key added upstream takes out synchronization
- * for every run on its first agent task -- which is exactly what 0.35.0's
- * `freshInputTokens` and `costUsd` did.
+ * The keys of the pinned runner's `TokenUsageReported` payload. Synchronization
+ * validates each accounting field it reads and ignores any other key, so a key
+ * added upstream no longer takes out synchronization the way 0.35.0's
+ * `freshInputTokens` and `costUsd` did. A test diffs this list against the
+ * engine's own emitters, so a new usage field is noticed at the pin bump
+ * rather than silently left out of accounting.
  */
 export const CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT = {
-  allowed: [
+  known: [
     "type",
     "runId",
     "nodeId",
@@ -6506,16 +5834,14 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
   return events;
 }
 
+/**
+ * Usage fields are validated where the usage ledger records them, inside the
+ * accounting pass, so a malformed `TokenUsageReported` event is an accounting
+ * warning rather than a failure to read the run's events.
+ */
 function validateSmithersEventPayload(type: string, payload: Record<string, unknown>, lineNumber: number): void {
   const label = `Smithers ${type} payload at line ${lineNumber}`;
-  const attemptEventTypes = new Set([
-    "NodeStarted",
-    "NodeFinished",
-    "NodeFailed",
-    "NodeRetrying",
-    "TokenUsageReported"
-  ]);
-  if (attemptEventTypes.has(type)) {
+  if (["NodeStarted", "NodeFinished", "NodeFailed", "NodeRetrying"].includes(type)) {
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
     requiredWorkflowEventCount(payload.attempt, `${label} attempt`);
@@ -6523,21 +5849,6 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
   }
-  if (type !== "TokenUsageReported") return;
-  if (!hasOnlyKeys(payload, CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed)) {
-    throw new Error(`${label} contains unsupported fields`);
-  }
-  assertWorkflowEventCorrelation(payload, label);
-  requiredWorkflowEventString(payload.model, `${label} model`);
-  requiredWorkflowEventString(payload.agent, `${label} agent`);
-  requiredWorkflowEventCount(payload.inputTokens, `${label} inputTokens`);
-  requiredWorkflowEventCount(payload.outputTokens, `${label} outputTokens`);
-  for (const field of ["freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
-    if (payload[field] !== undefined) requiredWorkflowEventCount(payload[field], `${label} ${field}`);
-  }
-  // Cost is a fractional USD estimate, not a token count, so it gets the
-  // finite-non-negative bound rather than the safe-integer one.
-  if (payload.costUsd !== undefined) requiredWorkflowEventCostUsd(payload.costUsd, `${label} costUsd`);
 }
 
 function requiredWorkflowEventString(value: unknown, label: string): string {

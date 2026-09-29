@@ -1312,7 +1312,7 @@ test("dynamic child failure, skip, and timeout keep strict joins blocked with du
     const ledgerOutcome = readLedger(fixture).find(
       (entry) => entry.strategy_attempt_id === generated.attemptId
     )?.outcome;
-    // The current strict attempt ledger records only NodeFinished/NodeFailed terminal authorities.
+    // The attempt ledger records only NodeFinished/NodeFailed/NodeCancelled terminal events.
     // A skip or heartbeat timeout remains durable in state without inventing a ledger terminal
     // event that the workflow runner did not emit.
     assert.equal(ledgerOutcome, outcome === "failed" ? "failed" : undefined, outcome);
