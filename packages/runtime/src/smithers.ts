@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { isBuiltin } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -60,7 +60,7 @@ import {
   type ExpandedNode,
   type ModelFanoutProvenance
 } from "@ultrafuzz/topology";
-import * as ts from "typescript";
+import type * as TypeScript from "typescript";
 
 import {
   DATA_GOVERNANCE_PROVENANCE_PATH,
@@ -3887,6 +3887,8 @@ function assertRefreshedModuleAuthority(
   }
   const dependencies = new Set(Object.keys(issuers[0]!.dependencies));
   const executablePaths = new Set(dependencyMap.executable_paths);
+  // Required here rather than imported: every ultrafuzz CLI process imports this module.
+  const ts = createRequire(import.meta.url)("typescript") as typeof TypeScript;
   for (const file of files) {
     if (file.executable !== executablePaths.has(file.snapshotPath)) {
       throw new Error(`controller module ${moduleName} changed executable authority for ${file.snapshotPath}`);

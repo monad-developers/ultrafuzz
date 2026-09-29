@@ -9985,6 +9985,25 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
   const destructuredShadow = await validateProject({ projectRoot: project, env: {} });
   assert.equal(destructuredShadow.ok, false);
   assert.ok(destructuredShadow.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
+
+  const frozenRegistry = `${factories}export const agentFactories = Object.freeze(core);\n`;
+  for (const importShadow of [
+    "import Object from './claude';",
+    "import * as Object from './claude';",
+    "import { Object } from './claude';",
+    "import { createClaudeAgent as Object } from './claude';",
+    "import Object, { createClaudeAgent } from './claude';"
+  ]) {
+    fs.writeFileSync(registryPath, `${importShadow}\n${frozenRegistry}`, "utf8");
+    const imported = await validateProject({ projectRoot: project, env: {} });
+    assert.ok(
+      imported.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"),
+      importShadow
+    );
+  }
+  fs.writeFileSync(registryPath, `import { createClaudeAgent } from './claude';\n${frozenRegistry}`, "utf8");
+  const unrelatedImport = await validateProject({ projectRoot: project, env: {} });
+  assert.ok(!unrelatedImport.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
 });
 
 test("validate rejects unsafe or oversized canonical agent registries with diagnostics", async () => {

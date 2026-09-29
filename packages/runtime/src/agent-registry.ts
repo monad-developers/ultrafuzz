@@ -1,8 +1,14 @@
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import { readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts";
-import * as ts from "typescript";
+import type * as TypeScript from "typescript";
 import { errorMessage } from "@ultrafuzz/artifacts";
+
+// Required by analyzeAgentRegistry rather than imported: every ultrafuzz CLI process imports this
+// package's index, including each agent's `json validate` call, and only `validate` and `init` analyze a
+// registry. (Smithers engine processes load TypeScript through smthrs anyway.)
+let ts: typeof TypeScript;
 
 export const AGENT_REGISTRY_RELATIVE_PATH = ".smithers/agents/index.ts";
 const MAX_AGENT_REGISTRY_BYTES = 256 * 1024;
@@ -50,6 +56,7 @@ export function agentRegistryRegisters(inspection: AgentRegistryInspection, agen
 const SAFE_AGENT_REF_PATTERN = /^(?!.*\.\.)[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/u;
 
 function analyzeAgentRegistry(sourceText: string): ReadonlySet<string> {
+  ts = createRequire(import.meta.url)("typescript") as typeof TypeScript;
   const source = ts.createSourceFile(
     AGENT_REGISTRY_RELATIVE_PATH,
     sourceText,
@@ -57,7 +64,8 @@ function analyzeAgentRegistry(sourceText: string): ReadonlySet<string> {
     false,
     ts.ScriptKind.TS
   );
-  const parseDiagnostics = (source as ts.SourceFile & { parseDiagnostics: readonly ts.Diagnostic[] }).parseDiagnostics;
+  const parseDiagnostics = (source as TypeScript.SourceFile & { parseDiagnostics: readonly TypeScript.Diagnostic[] })
+    .parseDiagnostics;
   if (parseDiagnostics.length > 0) throw new Error("agent registry contains invalid TypeScript syntax");
   const exported = exportedAgentFactoriesLocalNames(source);
   if (exported.size !== 1) {
@@ -65,10 +73,10 @@ function analyzeAgentRegistry(sourceText: string): ReadonlySet<string> {
   }
   const bindings = topLevelConstBindings(source);
   const objectIsShadowed = topLevelNameIsBound(source, "Object");
-  const memo = new Map<ts.Expression, ReadonlyMap<string, boolean> | null>();
+  const memo = new Map<TypeScript.Expression, ReadonlyMap<string, boolean> | null>();
   let steps = 0;
 
-  const evaluate = (expression: ts.Expression, depth: number): ReadonlyMap<string, boolean> | undefined => {
+  const evaluate = (expression: TypeScript.Expression, depth: number): ReadonlyMap<string, boolean> | undefined => {
     steps += 1;
     if (steps > MAX_ANALYSIS_STEPS) throw new Error("agent registry static analysis exceeded its step budget");
     if (depth > MAX_ANALYSIS_DEPTH) throw new Error("agent registry static analysis exceeded its depth budget");
@@ -127,14 +135,14 @@ function analyzeAgentRegistry(sourceText: string): ReadonlySet<string> {
 }
 
 function objectMemberIsUsableFactory(
-  property: ts.ObjectLiteralElementLike,
-  bindings: ReadonlyMap<string, ts.Expression>,
+  property: TypeScript.ObjectLiteralElementLike,
+  bindings: ReadonlyMap<string, TypeScript.Expression>,
   visiting: ReadonlySet<string>,
   depth: number
 ): boolean {
   if (depth > MAX_ANALYSIS_DEPTH) throw new Error("agent registry factory analysis exceeded its depth budget");
   if (ts.isMethodDeclaration(property)) return true;
-  let expression: ts.Expression | undefined;
+  let expression: TypeScript.Expression | undefined;
   if (ts.isPropertyAssignment(property)) expression = property.initializer;
   else if (ts.isShorthandPropertyAssignment(property))
     expression = property.objectAssignmentInitializer ?? property.name;
@@ -149,8 +157,8 @@ function objectMemberIsUsableFactory(
 }
 
 function factoryExpressionIsNonNullish(
-  expression: ts.Expression,
-  bindings: ReadonlyMap<string, ts.Expression>,
+  expression: TypeScript.Expression,
+  bindings: ReadonlyMap<string, TypeScript.Expression>,
   visiting: ReadonlySet<string>,
   depth: number
 ): boolean {
@@ -164,7 +172,7 @@ function factoryExpressionIsNonNullish(
   return factoryExpressionIsNonNullish(initializer, bindings, new Set([...visiting, current.text]), depth + 1);
 }
 
-function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<string> {
+function exportedAgentFactoriesLocalNames(source: TypeScript.SourceFile): ReadonlySet<string> {
   const localNames = new Set<string>();
   for (const statement of source.statements) {
     if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
@@ -191,8 +199,8 @@ function exportedAgentFactoriesLocalNames(source: ts.SourceFile): ReadonlySet<st
   return localNames;
 }
 
-function topLevelConstBindings(source: ts.SourceFile): ReadonlyMap<string, ts.Expression> {
-  const bindings = new Map<string, ts.Expression>();
+function topLevelConstBindings(source: TypeScript.SourceFile): ReadonlyMap<string, TypeScript.Expression> {
+  const bindings = new Map<string, TypeScript.Expression>();
   for (const statement of source.statements) {
     if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
     for (const declaration of statement.declarationList.declarations) {
@@ -203,25 +211,10 @@ function topLevelConstBindings(source: ts.SourceFile): ReadonlyMap<string, ts.Ex
   return bindings;
 }
 
-function topLevelNameIsBound(source: ts.SourceFile, name: string): boolean {
+function topLevelNameIsBound(source: TypeScript.SourceFile, name: string): boolean {
   for (const statement of source.statements) {
     if (ts.isImportEqualsDeclaration(statement) && statement.name.text === name) return true;
-    if (ts.isImportDeclaration(statement)) {
-      const clause = statement.importClause;
-      if (clause?.name?.text === name) return true;
-      if (
-        clause?.namedBindings &&
-        ts.isNamespaceImport(clause.namedBindings) &&
-        clause.namedBindings.name.text === name
-      )
-        return true;
-      if (
-        clause?.namedBindings &&
-        ts.isNamedImports(clause.namedBindings) &&
-        clause.namedBindings.elements.some((entry) => entry.name.text === name)
-      )
-        return true;
-    }
+    if (ts.isImportDeclaration(statement) && importClauseBindsName(statement.importClause, name)) return true;
     if (
       ts.isVariableStatement(statement) &&
       statement.declarationList.declarations.some((declaration) => bindingNameContains(declaration.name, name))
@@ -235,7 +228,14 @@ function topLevelNameIsBound(source: ts.SourceFile, name: string): boolean {
   return false;
 }
 
-function bindingNameContains(binding: ts.BindingName, name: string): boolean {
+function importClauseBindsName(clause: TypeScript.ImportClause | undefined, name: string): boolean {
+  if (clause?.name?.text === name) return true;
+  const bindings = clause?.namedBindings;
+  if (bindings !== undefined && ts.isNamespaceImport(bindings)) return bindings.name.text === name;
+  return bindings !== undefined && bindings.elements.some((entry) => entry.name.text === name);
+}
+
+function bindingNameContains(binding: TypeScript.BindingName, name: string): boolean {
   if (ts.isIdentifier(binding)) return binding.text === name;
   return binding.elements.some(
     (element) => !ts.isOmittedExpression(element) && bindingNameContains(element.name, name)
@@ -243,9 +243,9 @@ function bindingNameContains(binding: ts.BindingName, name: string): boolean {
 }
 
 function isUnshadowedObjectFreeze(
-  expression: ts.Expression,
+  expression: TypeScript.Expression,
   objectIsShadowed: boolean
-): expression is ts.CallExpression {
+): expression is TypeScript.CallExpression {
   return (
     !objectIsShadowed &&
     ts.isCallExpression(expression) &&
@@ -257,18 +257,18 @@ function isUnshadowedObjectFreeze(
   );
 }
 
-function hasExportModifier(node: ts.VariableStatement): boolean {
+function hasExportModifier(node: TypeScript.VariableStatement): boolean {
   return ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false;
 }
 
-function unwrapTypeExpressions(expression: ts.Expression): ts.Expression {
+function unwrapTypeExpressions(expression: TypeScript.Expression): TypeScript.Expression {
   let current = expression;
   while (ts.isAsExpression(current) || ts.isSatisfiesExpression(current) || ts.isParenthesizedExpression(current))
     current = current.expression;
   return current;
 }
 
-function objectMemberName(property: ts.ObjectLiteralElementLike): string | undefined {
+function objectMemberName(property: TypeScript.ObjectLiteralElementLike): string | undefined {
   if (
     !ts.isPropertyAssignment(property) &&
     !ts.isShorthandPropertyAssignment(property) &&
