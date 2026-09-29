@@ -367,9 +367,13 @@ async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void
   const [workflowRunId] = launched.workflow_ids;
   assert.ok(workflowRunId !== undefined, "run did not report its workflow run ID");
 
-  const held = await waitFor(`${INTERRUPTED_NODE} to start`, 15 * MINUTE, () =>
-    agentCalls(campaign).find((call) => call.node === INTERRUPTED_NODE && call.event === "held")
-  );
+  const held = await waitFor(`${INTERRUPTED_NODE} to start`, 15 * MINUTE, () => {
+    const call = agentCalls(campaign).find((entry) => entry.node === INTERRUPTED_NODE && entry.event === "held");
+    if (call === undefined && processesMentioning(workflowRunId).length === 0) {
+      assert.fail(`the workflow stopped before ${INTERRUPTED_NODE} started`);
+    }
+    return call;
+  });
   // A host crash takes down the detached engine and the supervisor that would otherwise restart it.
   const controller = processesMentioning(workflowRunId);
   assert.ok(controller.length > 0, "no detached controller process is running the workflow");
@@ -409,11 +413,15 @@ test(
       mark("resume submitted");
       assert.equal(resumed.submitted, true);
 
-      const health = await waitFor("the resumed run to end", 15 * MINUTE, async () => {
-        const current = await ultrafuzz<HealthValue>(campaign, ["status", runId]);
-        return current.ended ? current : undefined;
+      // `events` reads the engine's event log without synchronizing the run, so it is the cheaper poll.
+      const events = await waitFor("the resumed workflow to finish", 15 * MINUTE, async () => {
+        const current = await ultrafuzz<{ events: WorkflowEvent[]; truncated: boolean }>(campaign, ["events", runId]);
+        const ended = ["RunFinished", "RunFailed", "RunCancelled"];
+        return current.events.some((event) => ended.includes(event.category)) ? current : undefined;
       });
+      const health = await ultrafuzz<HealthValue>(campaign, ["status", runId]);
       mark("run ended");
+      assert.equal(health.ended, true);
       assert.equal(health.status, "succeeded");
       assert.deepEqual(
         {
@@ -439,7 +447,6 @@ test(
         AGENT_NODES.map((node) => [node, starts.filter((call) => call.node === node).length]),
         AGENT_NODES.map((node) => [node, node === INTERRUPTED_NODE ? 2 : 1])
       );
-      const events = await ultrafuzz<{ events: WorkflowEvent[]; truncated: boolean }>(campaign, ["events", runId]);
       assert.equal(events.truncated, false);
       assert.equal(events.events.filter((event) => event.category === "RunStarted").length, 2);
       assertNoFinishedTaskRestarted(events.events);
