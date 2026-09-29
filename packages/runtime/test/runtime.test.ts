@@ -14224,6 +14224,21 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
     assert.equal(health.value?.oneshot_control?.message_id, "message-1");
   }
 
+  // The pinned runner's paused reason, which names its own resume command.
+  setFakeSmithersStatus(project, {
+    ...envelope,
+    data: {
+      ...base,
+      status: "paused",
+      verdict: "paused",
+      reason: "run was gracefully paused; resume with `smithers up --resume <runId>`",
+      liveness: { state: "paused" }
+    }
+  });
+  const paused = await getRunHealth({ projectRoot: project, runId: "smithers-034-shapes", env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.reason, "run was gracefully paused; resume with `ultrafuzz resume smithers-034-shapes`");
+
   setFakeSmithersStatus(project, {
     ...envelope,
     data: {

@@ -1186,11 +1186,11 @@ function parseRunHealthOneshotControl(value: unknown): RunHealthValue["oneshot_c
 
 function publicHealthReason(value: string, runId: string): string {
   // Point at the Ultrafuzz commands that wrap the runner's own: `ultrafuzz why` for its diagnosis and
-  // `ultrafuzz resume` to continue an orphaned run. The run ID is joined in after the generic rename,
-  // which would otherwise rewrite an ID that contains "smithers".
+  // `ultrafuzz resume` to continue an orphaned or paused run. The run ID is joined in after the generic
+  // rename, which would otherwise rewrite an ID that contains "smithers".
   return value
     .replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`")
-    .split(/`?smithers\s+supervise\s+-r\s+[^\s`;,]+`?/giu)
+    .split(/`?smithers\s+(?:supervise\s+-r|up\s+--resume)\s+[^\s`;,]+`?/giu)
     .map((part) => scrubWorkflowRunnerText(part))
     .join(`\`ultrafuzz resume ${runId}\``);
 }
