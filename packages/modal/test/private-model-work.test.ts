@@ -95,6 +95,22 @@ it("reads model work from records the runtime keys by model attempt ID", () => {
   );
 });
 
+it("keeps the flag when a model node has no run-state record", () => {
+  const target = privateRunFixture({
+    status: "failed",
+    graphNodes: [
+      { id: "reference", kind: "reference", model_fanout: [] },
+      { id: "model", kind: "agentic", model_fanout: [] }
+    ],
+    stateNodes: { reference: { node_id: "reference", status: "succeeded" } },
+    mutateState: (state) => {
+      delete state.nodes.model;
+    }
+  });
+
+  expect(privateEvalModelWorkEvidence(target)).toBe("unknown");
+});
+
 it("rejects malformed present graph evidence while treating a missing graph as unavailable", () => {
   const corrupt = privateRunFixture({
     status: "failed",
