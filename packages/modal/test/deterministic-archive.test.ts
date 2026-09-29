@@ -204,6 +204,13 @@ describe("deterministic archive descriptor traversal", () => {
     fs.writeFileSync(path.join(source, "input.txt"), "input\n");
     const output = path.join(outputParent, "result.tar.gz");
     const closes: number[] = [];
+    let outputDescriptor: number | undefined;
+    const originalOpenSync = fs.openSync.bind(fs);
+    vi.spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      const descriptor = originalOpenSync(...args);
+      if (String(args[0]).endsWith("result.tar.gz")) outputDescriptor = descriptor;
+      return descriptor;
+    }) as typeof fs.openSync);
     const originalClose = fs.close.bind(fs);
     const originalCloseSync = fs.closeSync.bind(fs);
     vi.spyOn(fs, "close").mockImplementation(((descriptor: number, callback?: fs.NoParamCallback) => {
@@ -232,6 +239,8 @@ describe("deterministic archive descriptor traversal", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(replaced).toBe(true);
+    expect(outputDescriptor).toBeTypeOf("number");
+    expect(closes.filter((descriptor) => descriptor === outputDescriptor)).toHaveLength(1);
     expect(closes.filter((descriptor, index) => closes.indexOf(descriptor) !== index)).toEqual([]);
   });
 });
