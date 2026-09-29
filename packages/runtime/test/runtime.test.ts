@@ -14809,7 +14809,13 @@ test("publishing an execution snapshot flushes each file once", async (context) 
   fs.chmodSync(published, 0o700);
   fs.renameSync(published, `${path.dirname(published)}.saved-${evidence.verifiedControl.generation}`);
 
-  const flushes = context.mock.method(fs, "fsyncSync");
+  // Directory flushes are not counted: only regular-file descriptors.
+  const fsyncSync = fs.fsyncSync;
+  let fileFlushes = 0;
+  const flushes = context.mock.method(fs, "fsyncSync", (descriptor: number) => {
+    if (fs.fstatSync(descriptor).isFile()) fileFlushes += 1;
+    fsyncSync(descriptor);
+  });
   const started = performance.now();
   const republished = materializeWorkflowExecutionSnapshot({
     projectRoot: project,
@@ -14821,21 +14827,17 @@ test("publishing an execution snapshot flushes each file once", async (context) 
 
   // Recursive readdir would follow the snapshot's dependency links, which form cycles.
   let files = 0;
-  let directories = 0;
   const pending = [republished.root];
   for (let directory = pending.pop(); directory !== undefined; directory = pending.pop()) {
-    directories += 1;
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
       else if (entry.isFile()) files += 1;
     }
   }
   assert.ok(files > 100, `expected a dependency-sized snapshot, got ${files} files`);
-  const observed = `${flushes.mock.callCount()} flushes for ${files} files in ${directories} directories (${elapsed} ms)`;
+  const observed = `${fileFlushes} file flushes for ${files} files (${flushes.mock.callCount()} flushes in all, ${elapsed} ms)`;
   context.diagnostic(observed);
-  // One flush per file. Each directory adds one when it is created (its parent) and one when it is
-  // sealed, and the publishing rename adds one.
-  assert.ok(flushes.mock.callCount() <= files + 2 * directories + 1, observed);
+  assert.equal(fileFlushes, files, observed);
 });
 
 test("snapshot recovery rejects matching symlink and non-directory publications without escaping", async () => {
@@ -14997,7 +14999,13 @@ test(
         } catch {
           // Leave the candidate empty when this descriptor cannot be resolved.
         }
-        if (!swapped && /(?:^|\/)\.[0-9a-f]{64}\.tmp-/u.test(candidate) && fs.existsSync(snapshotsRoot)) {
+        // Swap on the first directory seal, once every file has been written.
+        if (
+          !swapped &&
+          fs.fstatSync(args[0] as number).isDirectory() &&
+          /(?:^|\/)\.[0-9a-f]{64}\.tmp-/u.test(candidate) &&
+          fs.existsSync(snapshotsRoot)
+        ) {
           swapped = true;
           fs.renameSync(snapshotsRoot, displacedRoot);
           fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
@@ -15071,7 +15079,7 @@ test(
   }
 );
 
-test("snapshot permission sealing cannot chmod a swapped outside leaf", { concurrency: false }, async () => {
+test("snapshot writes reject a swapped leaf without touching the outside file", { concurrency: false }, async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);

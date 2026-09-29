@@ -1918,8 +1918,9 @@ function sealSnapshotPermissions(root: string, boundary: SnapshotPublicationBoun
 /**
  * Make every snapshot directory read-only, deepest first. Files already carry
  * their final mode from `writeSnapshotFile` and links have none, so neither is
- * reopened here; publication verification then checks every entry's type,
- * mode, link count, and bytes.
+ * reopened here. Publication verification then checks each file's mode, link
+ * count, and bytes, each link's target, that every directory is read-only, and
+ * that no entry is missing or unexpected.
  */
 function sealSnapshotDirectoryPermissions(
   boundary: SnapshotPublicationBoundary,
