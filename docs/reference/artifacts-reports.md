@@ -638,10 +638,12 @@ of production issues and, in bounded classification mode, the triage
 classification, lifecycle enrichment, and severity assessment of production
 issues.
 
-New runs use `run.completion_policy = "best-effort"` by default. Stock strategy
-groups continue after ordinary task failures. Independent work can finish;
-work that needs a missing required result is skipped. Review uses successful
-results that pass the existing input checks. User-authored topologies retain
+New runs use `run.completion_policy = "best-effort"` by default. The stock
+property-lens, goal, strategy, and specialist groups continue after ordinary
+task failures. Independent work can finish; work that needs a missing required
+result is skipped. Nodes that combine another group's results, such as the
+property fan-in and review, use the successful results that pass the existing
+input checks. User-authored topologies retain
 their declared failure policies. The configured attempts and time limits remain
 in effect; reporting does not restart analysis or add recovery attempts.
 

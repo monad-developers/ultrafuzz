@@ -97,10 +97,13 @@ completed agent session whose required output is missing or schema-invalid;
 that post-agent contract failure is terminal.
 
 `failure_policy: continue` marks every node in that group as nonblocking. The
-generated workflow waits for such a node to settle, consumes its artifacts only
-when its verifier succeeded, and lets unrelated or downstream reconciliation
-continue when it failed or was skipped. Use this only for optional specialist
-lanes; ordinary groups retain fail-closed `halt` semantics.
+generated workflow waits for such a node to settle and consumes its artifacts
+only when its verifier succeeded. When it fails or is skipped, unrelated work
+continues and nodes in other groups run with the results that did succeed,
+while a node of the same group that depends on it is skipped, so a chain inside
+one group never runs without its predecessor. The packaged topologies use this
+for the property lenses, goals, strategies, and specialists; ordinary groups
+retain fail-closed `halt` semantics.
 
 ## Node Fields
 
