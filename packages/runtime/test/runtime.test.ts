@@ -24407,6 +24407,50 @@ test("syncRun records model fan-out attempts independently", async () => {
   ]);
 });
 
+test("syncRun synchronizes a model fan-out run again after recording its attempts", async () => {
+  const project = tempProject();
+  writeFanoutProject(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-fanout-repeat";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      steps: [
+        { id: "node:project-discovery__model_0__attempt_0", state: "in-progress", attempt: 1 },
+        { id: "node:project-discovery__model_1__attempt_1", state: "in-progress", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery__model_0__attempt_0", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:project-discovery__model_1__attempt_1", attempt: 1 }
+    ]),
+    status: currentStatusEnvelope(workflowRunId)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const statePath = path.join(run.value.run_root, "state.json");
+
+  const first = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  // The first pass adds a state record for each model attempt, keyed by attempt ID.
+  assert.equal(readRunState(statePath).nodes["project-discovery__model_1__attempt_1"]?.status, "running");
+
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.deepEqual(
+    health.diagnostics.filter((diagnostic) =>
+      ["WORKFLOW_CONTROL_EVIDENCE_DIVERGED", "WORKFLOW_STATE_SYNC_SKIPPED"].includes(diagnostic.code)
+    ),
+    [],
+    JSON.stringify(health.diagnostics)
+  );
+  const second = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  assert.equal(second.value?.status, "running");
+});
+
 test("controller refresh selects current source without rewriting historical evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

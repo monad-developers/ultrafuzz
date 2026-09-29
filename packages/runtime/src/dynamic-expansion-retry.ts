@@ -150,10 +150,10 @@ export function planDynamicExpansionRetryArchive(input: {
  * runtime graph and task plan are then re-derived from the sealed base with no
  * ready group, exactly as the next render would publish them, so the control
  * admission check re-derives cleanly before that render happens. Finally the
- * generation's node records leave `state.json`: the admission check refuses a
- * run state that names a node outside the re-derived runtime graph, so leaving
- * them would close every observer until the group re-expanded with identical
- * storage IDs.
+ * generation's node records leave `state.json`. The synchronizer creates a
+ * record only for an attempt that has none and never re-finalizes a successful
+ * one, so a regenerated attempt that reuses a storage ID would otherwise start
+ * from the archived record, and an archived success would stand in for it.
  */
 export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan): DynamicExpansionRetryArchive {
   const archiveRoot = path.join(plan.runRoot, "dynamic-expansion-history");
