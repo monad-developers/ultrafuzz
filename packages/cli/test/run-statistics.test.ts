@@ -42,7 +42,12 @@ function attempt(
   nodeId: string,
   strategyAttemptId: string,
   sourceEventSequence: number,
-  options: { runId?: string; startedAt?: string; finishedAt?: string; outcome?: "succeeded" | "failed" } = {}
+  options: {
+    runId?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    outcome?: "succeeded" | "failed" | "canceled";
+  } = {}
 ): NodeAttemptLedgerEntry {
   const outcome = options.outcome ?? "succeeded";
   return createNodeAttemptLedgerEntry(
@@ -61,7 +66,7 @@ function attempt(
       outcome,
       inputManifestDigest: manifestDigest("input"),
       outputManifestDigest: outcome === "succeeded" ? manifestDigest("output") : null,
-      ...(outcome === "failed" ? { failureCategory: "executor-error" as const } : {})
+      ...(outcome === "succeeded" ? {} : { failureCategory: outcome === "failed" ? "executor-error" : "canceled" })
     }
   );
 }
@@ -225,6 +230,17 @@ test("stats counts a failed node whose task Smithers cancelled as canceled", () 
   // Run state records a cancelled task as failed; `status` counts it apart from failures (#1087).
   assert.deepEqual(status("cancelled"), ["canceled", 0, 1]);
   assert.deepEqual(status("failed"), ["failed", 1, 0]);
+});
+
+test("stats reports a node's latest attempt outcome in event order, not ledger row order", () => {
+  const outcome = (attempts: NodeAttemptLedgerEntry[]) =>
+    deriveRunStatistics(evidence({ attempts }), Date.parse(FINISHED_AT)).value.nodes[0]?.outcome;
+  const abandoned = attempt("node", "node", 1, { outcome: "canceled" });
+  const replacement = attempt("node", "node", 2);
+
+  assert.equal(outcome([abandoned, replacement]), "succeeded");
+  // A run synchronized by an earlier version records the abandoned attempt after its replacement.
+  assert.equal(outcome([replacement, abandoned]), "succeeded");
 });
 
 test("stats counts only the latest cumulative usage snapshot for each attempt", () => {

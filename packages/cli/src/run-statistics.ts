@@ -817,9 +817,20 @@ function aggregateNodeStatus(states: readonly NodeState[]): NodeStatisticsStatus
 }
 
 function aggregateAttemptOutcome(attempts: readonly NodeAttemptLedgerEntry[]): NodeAttemptOutcome | "mixed" | null {
-  const latestByStrategy = new Map<string, NodeAttemptOutcome>();
-  for (const attempt of attempts) latestByStrategy.set(attempt.strategy_attempt_id, attempt.outcome);
-  const outcomes = [...new Set(latestByStrategy.values())];
+  const latestByStrategy = new Map<string, NodeAttemptLedgerEntry>();
+  for (const attempt of attempts) {
+    const previous = latestByStrategy.get(attempt.strategy_attempt_id);
+    // Rows are appended as they are recorded, so a version that records more
+    // attempts can append an earlier attempt of a workflow run after a later one.
+    if (
+      previous?.workflow_run_id === attempt.workflow_run_id &&
+      previous.source_event_sequence > attempt.source_event_sequence
+    ) {
+      continue;
+    }
+    latestByStrategy.set(attempt.strategy_attempt_id, attempt);
+  }
+  const outcomes = [...new Set([...latestByStrategy.values()].map((attempt) => attempt.outcome))];
   if (outcomes.length === 0) return null;
   return outcomes.length === 1 ? outcomes[0]! : "mixed";
 }
