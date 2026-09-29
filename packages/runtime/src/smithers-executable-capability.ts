@@ -224,18 +224,23 @@ export function acquireSmithersExecutableAnchor(
     if (bunControls !== undefined)
       for (const [name, identity] of Object.entries(capability.bunStartup!))
         assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
+    // An unsealed native continuation has no startup controls. It still runs in
+    // the target repository, so it must not load that repository's bunfig.toml
+    // (and its preload) or .env either.
     const interpreterArguments =
-      capability.interpreter.runtime === "bun" && bunControls !== undefined
-        ? [
-            `--config=${bunControls!.config}`,
-            `--env-file=${bunControls!.environment}`,
-            "--no-env-file",
-            "--no-install",
-            "--no-addons",
-            "--preserve-symlinks-main",
-            `--preload=${bunControls!.confinement}`
-          ]
-        : [];
+      capability.interpreter.runtime !== "bun"
+        ? []
+        : bunControls === undefined
+          ? ["--config=/dev/null", "--no-env-file", "--no-install", "--no-addons"]
+          : [
+              `--config=${bunControls.config}`,
+              `--env-file=${bunControls.environment}`,
+              "--no-env-file",
+              "--no-install",
+              "--no-addons",
+              "--preserve-symlinks-main",
+              `--preload=${bunControls.confinement}`
+            ];
     let closed = false;
     const assertCurrent = (): void => {
       if (closed) throw new Error("workflow runner executable anchor is already closed");
