@@ -566,11 +566,17 @@ class DashboardApp {
     const candidates = fs
       .readdirSync(runsRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => {
-        const runId = validateSafeId(entry.name, "run ID");
-        const root = path.join(runsRoot, runId);
-        const metadata = readRunMetadataDocument(path.join(root, "run.json"), runId);
-        return { runId, createdAt: metadata.created_at, mtimeMs: fs.statSync(root).mtimeMs };
+      .flatMap((entry) => {
+        // A launch that failed before writing run.json leaves its directory behind, and `listRuns`
+        // reports it as unreadable. It is not the latest run, and it must not stop the dashboard starting.
+        try {
+          const runId = validateSafeId(entry.name, "run ID");
+          const root = path.join(runsRoot, runId);
+          const metadata = readRunMetadataDocument(path.join(root, "run.json"), runId);
+          return [{ runId, createdAt: metadata.created_at, mtimeMs: fs.statSync(root).mtimeMs }];
+        } catch {
+          return [];
+        }
       })
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.mtimeMs - left.mtimeMs);
     return candidates[0]?.runId;
