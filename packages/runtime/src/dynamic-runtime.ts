@@ -332,13 +332,18 @@ function instantiateDynamicGraphNode(input: {
 }
 
 /**
- * Continuation lets independent tasks settle; it does not make a strategy's required inputs
- * optional. Only the review group reconciles partial results, so only its tasks treat a continuing
- * producer's output as optional (#1120). The compiler and dynamic lowering share this one rule; the
- * task-manifest gate checks only that optional inputs come from continuing producers.
+ * Whether `consumer` treats the output of a continuing producer in `producerGroup` as optional.
+ * Consumers outside that group reconcile whichever results succeeded (the review group, and the
+ * property fan-in reading its lenses). Inside the group a chain keeps its required inputs, so a
+ * strategy or stateful stage never runs without its predecessor's output (#1120). The compiler and
+ * dynamic lowering share this one rule; the task-manifest gate checks only that optional inputs
+ * come from continuing producers.
  */
-export function reconcilesPartialResults(task: Pick<CompiledSmithersTask, "metadata">): boolean {
-  return task.metadata.node.group === "review";
+export function reconcilesPartialResults(
+  consumer: Pick<CompiledSmithersTask, "metadata">,
+  producerGroup: string | undefined
+): boolean {
+  return consumer.metadata.node.group !== producerGroup;
 }
 
 function lowerTaskDynamicDependencies(
@@ -381,8 +386,12 @@ function lowerTaskDynamicDependencies(
     dependencies.push(...generated.map((candidate) => candidate.attemptId));
     dependencySmithersNodeIds.push(...generated.map((candidate) => candidate.verifierSmithersNodeId));
     dependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
-    if (group.continueOnFail && reconcilesPartialResults(task)) {
-      optionalDependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
+    if (group.continueOnFail) {
+      optionalDependencyArtifactDirs.push(
+        ...generated
+          .filter((candidate) => reconcilesPartialResults(task, candidate.metadata.node.group))
+          .map((candidate) => candidate.artifactDir)
+      );
     }
     concreteNodeIds.push(...manifest.items.map((item) => item.node_id));
   }

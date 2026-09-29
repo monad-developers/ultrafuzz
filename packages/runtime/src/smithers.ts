@@ -3768,19 +3768,21 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         workflowName
       })
     );
-  const nonBlockingAttemptIds = compiledTasks
-    .filter((task) => {
+  const nonBlockingGroupByAttemptId = new Map(
+    compiledTasks.flatMap((task) => {
       const group = task.metadata.node.group;
-      return group !== undefined && input.graph.groups[group]?.defaults?.failure_policy === "continue";
+      return group !== undefined && input.graph.groups[group]?.defaults?.failure_policy === "continue"
+        ? [[task.attemptId, group] as const]
+        : [];
     })
-    .map((task) => task.attemptId)
-    .sort();
-  const nonBlockingAttemptIdSet = new Set(nonBlockingAttemptIds);
+  );
+  const nonBlockingAttemptIds = [...nonBlockingGroupByAttemptId.keys()].sort();
   const tasks = compiledTasks.map((task) => ({
     ...task,
-    optionalDependencyArtifactDirs: reconcilesPartialResults(task)
-      ? task.dependencyArtifactDirs.filter((directory) => nonBlockingAttemptIdSet.has(path.basename(directory)))
-      : []
+    optionalDependencyArtifactDirs: task.dependencyArtifactDirs.filter((directory) => {
+      const producerGroup = nonBlockingGroupByAttemptId.get(path.basename(directory));
+      return producerGroup !== undefined && reconcilesPartialResults(task, producerGroup);
+    })
   }));
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });

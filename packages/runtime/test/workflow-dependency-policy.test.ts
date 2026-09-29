@@ -40,21 +40,22 @@ function dependencyStateHelpers(): {
   >;
 }
 
-test("workflow dependency policy preserves required strategy inputs and partial review fan-in", () => {
+test("workflow dependency policy keeps inputs inside a continuing group required and lets another group reconcile", () => {
   const projectRoot = temporaryRoot("ufz-dependency-policy-");
   const runId = "dependency-policy";
   const runLayout = createRunLayout({ outputRoot: path.join(projectRoot, "runs"), runId });
+  // Any group can reconcile a continuing group's results; the name `review` is not special.
   const topology: ProjectTopology = {
     version: 2,
     defaults: { strategy_loops: 1 },
-    groups: { strategies: { defaults: { failure_policy: "continue" } }, review: {} },
+    groups: { strategies: { defaults: { failure_policy: "continue" } }, catalog: {} },
     nodes: [
       { id: "__start__", kind: "meta", role: "start", depends_on: [] },
       ...[
         { id: "producer", group: "strategies", depends_on: ["__start__"] },
         { id: "dependent", group: "strategies", depends_on: ["producer"] },
         { id: "independent", group: "strategies", depends_on: ["__start__"] },
-        { id: "review", group: "review", depends_on: ["dependent", "independent"] }
+        { id: "review", group: "catalog", depends_on: ["dependent", "independent"] }
       ].map((node) => ({
         ...node,
         kind: "agentic" as const,
