@@ -691,6 +691,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: [postInspectionBudgetDiagnostic] };
   }
   const diagnostics = [
+    ...publishedPromptDriftDiagnostics(evidence),
     ...(eventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED")]),
     ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
   ];
@@ -1040,6 +1041,29 @@ export async function synchronizeLinkedWorkflowRun(
       synced_nodes: syncResult.syncedNodes
     }
   };
+}
+
+const PROMPT_DRIFT_SAMPLE = 3;
+
+/**
+ * Runtime-rendered prompts the admission re-derivation kept as published although this build renders
+ * them differently, which an upgrade that changed a renderer or projection causes. The run is still
+ * synchronized, so this is one warning per pass rather than a divergence. It is also what a process
+ * that rewrote a published prompt looks like, which is why it is reported at all.
+ */
+function publishedPromptDriftDiagnostics(evidence: LinkedWorkflowEvidence): RuntimeDiagnostic[] {
+  const attemptIds = evidence.verifiedControl.promptDriftAttemptIds;
+  if (attemptIds.length === 0) return [];
+  const omitted = attemptIds.length - PROMPT_DRIFT_SAMPLE;
+  return [
+    {
+      code: "WORKFLOW_PUBLISHED_PROMPT_DRIFT",
+      message: `${String(attemptIds.length)} published runtime prompt(s) differ from what this build renders and were kept as published: ${attemptIds.slice(0, PROMPT_DRIFT_SAMPLE).join(", ")}${omitted > 0 ? `, +${String(omitted)} more` : ""}`,
+      severity: "warning",
+      source: "workflow",
+      path: evidence.layout.root
+    }
+  ];
 }
 
 function requiresCompleteRun(evidence: LinkedWorkflowEvidence): boolean {

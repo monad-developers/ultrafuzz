@@ -5,7 +5,13 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { createInitialRunState, createNodeState, readRunState, writeRunState } from "@ultrafuzz/artifacts";
+import {
+  createInitialRunState,
+  createNodeState,
+  promptArtifactAuthorityPathSelectorId,
+  readRunState,
+  writeRunState
+} from "@ultrafuzz/artifacts";
 
 import {
   DynamicExpansionError,
@@ -82,7 +88,11 @@ function item(index: number): Record<string, unknown> {
 }
 
 /** A run whose sealed runtime controls fan `goals` from `planner` out into `fanout`, joined by `join`. */
-function sealedDynamicRun(runId: string, goals: Array<Record<string, unknown>>) {
+function sealedDynamicRun(
+  runId: string,
+  goals: Array<Record<string, unknown>>,
+  template = "Investigate {{item.goal_prompt}}.\n"
+) {
   const projectRoot = tempDirectory();
   const runRoot = path.join(projectRoot, "runs", runId);
   const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
@@ -95,7 +105,7 @@ function sealedDynamicRun(runId: string, goals: Array<Record<string, unknown>>) 
   fs.mkdirSync(path.dirname(templatePath), { recursive: true });
   fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
   fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals })}\n`, "utf8");
-  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
+  fs.writeFileSync(templatePath, template, "utf8");
   const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
   const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
   const group: CompiledSmithersDynamicGroup = {
@@ -658,6 +668,55 @@ test("a re-run dynamic source keeps the published fan-out for renders and admiss
   assert.deepEqual(
     tasks.tasks.flatMap((task) => task.metadata.node.dynamic?.expansionKey ?? []),
     ["goal-0", "goal-1"]
+  );
+});
+
+test("a published prompt this build renders differently is kept for renders and admission", () => {
+  const { controls } = sealedDynamicRun(
+    "prompt-drift",
+    [item(0)],
+    "Investigate {{item.goal_prompt}} in {{ancestor_artifact_path_authority:reports/a.json,reports/B.json}}.\n"
+  );
+  const generated = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }).tasks.find(
+    (task) => task.metadata.node.dynamic !== undefined
+  );
+  assert.ok(generated?.renderedPromptPath);
+  // Builds before #1195 identified this selector by its host-collated path order, so the prompt such
+  // a build published embeds a selector ID this build no longer renders.
+  const rendered = fs.readFileSync(generated.renderedPromptPath, "utf8");
+  const currentId = promptArtifactAuthorityPathSelectorId(["reports/B.json", "reports/a.json"]);
+  const published = rendered.replaceAll(
+    currentId,
+    promptArtifactAuthorityPathSelectorId(["reports/a.json", "reports/B.json"])
+  );
+  assert.notEqual(published, rendered);
+  fs.writeFileSync(generated.renderedPromptPath, published, "utf8");
+
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).promptDriftAttemptIds, [generated.attemptId]);
+  assert.deepEqual(materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }).promptDriftAttemptIds, [
+    generated.attemptId
+  ]);
+  assert.equal(fs.readFileSync(generated.renderedPromptPath, "utf8"), published);
+
+  // Only the prompt bytes are adopted: the manifest and template the prompt derives from still bind.
+  const manifestPath = path.join(controls.runRoot, "dynamic-expansions", "fanout.json");
+  const manifestBytes = fs.readFileSync(manifestPath, "utf8");
+  const manifest = JSON.parse(manifestBytes) as { items: Array<{ item_sha256: string }> };
+  const [expansionItem] = manifest.items;
+  assert.ok(expansionItem);
+  expansionItem.item_sha256 = "0".repeat(64);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, "utf8");
+  assert.throws(
+    () => verifyDynamicRuntimeMaterialization(controls),
+    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_MANIFEST_INVALID"
+  );
+  fs.writeFileSync(manifestPath, manifestBytes, "utf8");
+  const templatePath = controls.groups[0]?.templatePath;
+  assert.ok(templatePath);
+  fs.appendFileSync(templatePath, "Changed.\n", "utf8");
+  assert.throws(
+    () => verifyDynamicRuntimeMaterialization(controls),
+    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_TEMPLATE_CHANGED"
   );
 });
 

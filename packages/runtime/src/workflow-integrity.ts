@@ -145,6 +145,11 @@ export interface VerifiedWorkflowControlSnapshot {
    * option unset and therefore still fail closed on the first divergence.
    */
   divergences: readonly string[];
+  /**
+   * Runtime-rendered prompts kept as published although this build renders them differently. Not a
+   * divergence: synchronization reports it as `WORKFLOW_PUBLISHED_PROMPT_DRIFT` and still runs.
+   */
+  promptDriftAttemptIds: readonly string[];
 }
 
 /**
@@ -605,6 +610,7 @@ export function verifyWorkflowControlSnapshot(
   if (runtimeControlsChanged && (baseGraph === undefined || baseTasks === undefined)) {
     reportDivergence("sealed workflow graph or task plan changed");
   }
+  let promptDriftAttemptIds: readonly string[] = [];
   if (runtimeControlsChanged && baseGraph !== undefined && baseTasks !== undefined) {
     const taskDocument = parseRecordJson(baseTasks.contents, "sealed base workflow task manifest");
     if (!Array.isArray(taskDocument.tasks) || !Array.isArray(taskDocument.dynamic_groups)) {
@@ -621,7 +627,7 @@ export function verifyWorkflowControlSnapshot(
     // So an observer records that the expansion no longer re-derives and reports the run; execution
     // callers still take the throw from `reportDivergence`.
     try {
-      verifyDynamicRuntimeMaterialization({
+      ({ promptDriftAttemptIds } = verifyDynamicRuntimeMaterialization({
         runId: layout.runId,
         projectRoot,
         runRoot: layout.root,
@@ -631,7 +637,7 @@ export function verifyWorkflowControlSnapshot(
         baseTasksPath: baseTasks.verifiedPath,
         baseTasks: taskDocument.tasks as CompiledSmithersTask[],
         groups: taskDocument.dynamic_groups as CompiledSmithersDynamicGroup[]
-      });
+      }));
     } catch (error) {
       reportDivergence(
         `published dynamic runtime controls no longer re-derive from their sealed base: ${error instanceof Error ? error.message : String(error)}`
@@ -678,11 +684,13 @@ export function verifyWorkflowControlSnapshot(
   // snapshot there would substitute the remembered empty list for what this
   // pass just observed and report a corrupted run as clean to every tolerant
   // reader, which is the `status` blindness issue #866 exists to prevent.
+  // Prompt drift is outside those bytes too, so it must match as well.
   const reusableSnapshot =
     divergences.length === 0 &&
     reusable !== undefined &&
     sealContents.equals(reusable.snapshot.integrityContents) &&
-    WORKFLOW_CONTROL_FILE_KEYS.every((key) => verifiedContents[key].equals(reusable.snapshot.contents[key]))
+    WORKFLOW_CONTROL_FILE_KEYS.every((key) => verifiedContents[key].equals(reusable.snapshot.contents[key])) &&
+    JSON.stringify(reusable.snapshot.promptDriftAttemptIds) === JSON.stringify(promptDriftAttemptIds)
       ? reusable.snapshot
       : undefined;
   const verified: VerifiedWorkflowControlSnapshot = reusableSnapshot ?? {
@@ -692,7 +700,8 @@ export function verifyWorkflowControlSnapshot(
     executionFiles,
     bindings: seal.bindings,
     integrityContents: sealContents,
-    divergences
+    divergences,
+    promptDriftAttemptIds
   };
   if (hasPublishedSnapshot && divergences.length === 0 && snapshotChangeTokensBefore !== undefined) {
     const snapshotChangeTokensAfter = captureWorkflowControlSnapshotChangeTokens(publishedSnapshotRoot, protectedPaths);

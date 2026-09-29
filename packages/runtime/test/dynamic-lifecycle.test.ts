@@ -725,6 +725,44 @@ test("a half-published dynamic expansion stays readable while execution stays cl
   assert.equal(fs.existsSync(generated.renderedPromptPath!), false);
 });
 
+test("runtime prompts an earlier build published keep the run synchronizable and are reported", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-prompt-drift" });
+  const planner = plannerSuccessEvidence(fixture);
+  setLifecycle(fixture, planner.steps, planner.events);
+  // Held so that the next verification of these control bytes may reuse this clean snapshot.
+  const clean = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(clean.ok, true, "diagnostics" in clean ? JSON.stringify(clean.diagnostics) : "");
+  // What an upgrade that changed a renderer or projection sees (#1176, #1195): the join, like the
+  // stock final report, renders only after the group expands.
+  const prompts = [fixture.joinTask, ...fixture.generatedTasks].map((task) => {
+    assert.ok(task.renderedPromptPath);
+    const published = `${fs.readFileSync(task.renderedPromptPath, "utf8")}\nRendered by an earlier build.\n`;
+    fs.writeFileSync(task.renderedPromptPath, published, "utf8");
+    return { path: task.renderedPromptPath, published };
+  });
+
+  const strict = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(strict.ok, true, "diagnostics" in strict ? JSON.stringify(strict.diagnostics) : "");
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  const health = await getRunHealth({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  for (const result of [synced, health]) {
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    const drift = result.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_PUBLISHED_PROMPT_DRIFT");
+    assert.equal(drift.length, 1, JSON.stringify(result.diagnostics));
+    assert.equal(drift[0]?.severity, "warning");
+    assert.match(drift[0]?.message ?? "", /^2 published runtime prompt\(s\) differ .*: strict-join, /u);
+    for (const diagnostic of result.diagnostics) {
+      assert.doesNotMatch(
+        diagnostic.code,
+        /^WORKFLOW_(CONTROL_EVIDENCE_|STATE_SYNC_SKIPPED)/u,
+        JSON.stringify(diagnostic)
+      );
+    }
+  }
+  for (const prompt of prompts) assert.equal(fs.readFileSync(prompt.path, "utf8"), prompt.published);
+  if (clean.ok) assert.deepEqual(clean.verifiedControl.promptDriftAttemptIds, []);
+});
+
 test("a re-running dynamic source keeps published controls admissible and observable", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-source-retry-events" });
   const [firstTask] = fixture.generatedTasks;

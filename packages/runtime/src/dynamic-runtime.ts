@@ -48,6 +48,8 @@ export interface DynamicRuntimeMaterialization {
   graph: PlannedGraph;
   expandedGroupIds: string[];
   unresolvedGroupIds: string[];
+  /** Attempts whose published prompt this build renders differently; each was kept as published. */
+  promptDriftAttemptIds: string[];
 }
 
 /**
@@ -62,7 +64,8 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
 /**
  * Re-derives an already-published dynamic graph/task extension from the sealed base controls and
  * digest-bound expansion manifests. This is the admission check used before lifecycle commands trust
- * mutable runtime state; it never creates a manifest, prompt, graph, or task document.
+ * mutable runtime state; it never creates a manifest, prompt, graph, or task document. A published
+ * prompt it renders differently is returned in `promptDriftAttemptIds`, not refused.
  */
 export function verifyDynamicRuntimeMaterialization(
   input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
@@ -158,7 +161,7 @@ function deriveDynamicRuntime(
 
   assertRuntimeIdentityUniqueness(runtimeGraph, tasks, generatedTasks);
 
-  renderReadyRuntimePrompts({
+  const promptDriftAttemptIds = renderReadyRuntimePrompts({
     tasks,
     graph: runtimeGraph,
     groups,
@@ -205,7 +208,8 @@ function deriveDynamicRuntime(
     unresolvedGroupIds: groups
       .map((group) => group.groupNodeId)
       .filter((groupId) => !manifests.has(groupId))
-      .sort()
+      .sort(),
+    promptDriftAttemptIds
   };
 }
 
@@ -453,9 +457,10 @@ function renderReadyRuntimePrompts(input: {
   runRoot: string;
   runId: string;
   publishMissing: boolean;
-}): void {
+}): string[] {
   const groupContext = input.groups[0]?.promptContext;
-  if (groupContext === undefined) return;
+  if (groupContext === undefined) return [];
+  const promptDriftAttemptIds: string[] = [];
   const graphContext = promptGraphContext(input.graph, input.tasks);
   for (const task of input.tasks) {
     if (task.promptTemplatePath === undefined) continue;
@@ -506,9 +511,11 @@ function renderReadyRuntimePrompts(input: {
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     if (fs.existsSync(promptPath)) {
       assertRegularFileInside(input.runRoot, promptPath, `runtime rendered prompt for ${task.attemptId}`);
-      if (fs.readFileSync(promptPath, "utf8") !== result.renderedMarkdown) {
-        throw new Error(`runtime rendered prompt changed for ${task.attemptId}`);
-      }
+      // A published prompt is what its task was, or will be, handed, so it is kept as published.
+      // Refusing one this build renders differently stranded a run across any renderer or
+      // projection change (#1176, #1195): every later render and lifecycle admission failed. The
+      // controller keeps it silently; synchronization reports the drift.
+      if (fs.readFileSync(promptPath, "utf8") !== result.renderedMarkdown) promptDriftAttemptIds.push(task.attemptId);
     } else if (input.publishMissing) {
       writeFileDurable(promptPath, result.renderedMarkdown);
     } else {
@@ -516,6 +523,7 @@ function renderReadyRuntimePrompts(input: {
     }
     task.renderedPromptPath = promptPath;
   }
+  return promptDriftAttemptIds;
 }
 
 /**
