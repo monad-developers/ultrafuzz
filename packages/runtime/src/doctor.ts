@@ -53,8 +53,6 @@ const AGENT_EXECUTABLES: Record<string, string> = {
  * Operational superset of `validate`: reports configuration posture plus the
  * local toolchain and pinned workflow-engine install posture. It never changes
  * project or run state and never installs, upgrades, or repairs dependencies.
- * Cloud toolchain checks may create the configured provider app on first use
- * and always use a transient sandbox so they inspect the launch image itself.
  */
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -133,10 +131,9 @@ export async function diagnoseProject(input: DoctorInput) {
       : await (
           input.requiredCommandProbe === undefined
             ? probeCommandsForExecution(
-                resolved.config,
                 commandRequirements.map((entry) => entry.name),
                 env,
-                { includeVersions: true, cwd: projectRoot, createProviderAppIfMissing: true }
+                { includeVersions: true, cwd: projectRoot }
               )
             : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
         ).catch((error: unknown) => {

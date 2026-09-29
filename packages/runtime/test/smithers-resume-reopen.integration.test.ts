@@ -159,7 +159,7 @@ function syntheticWorkflowSource(root: string, sideTask: string): string {
     "utf8"
   );
   const start = template.indexOf("type WorkflowTaskStateContext =");
-  const end = template.indexOf("type DependencyVerificationProducer =", start);
+  const end = template.indexOf("const agentPromptTemplate =", start);
   assert.ok(start >= 0 && end > start);
   return `/** @jsxImportSource smthrs */
 import fs from "node:fs";

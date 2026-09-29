@@ -23,12 +23,10 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-supporting",
     description: "Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts",
     gates: "runtime-supporting",
-    // Once relocated cloud-worker tests run to completion, this lane also
-    // reaches the subprocess-heavy lifecycle suite. Shared-runner contention
-    // can push that complete pass beyond 75 minutes, so retain a bounded budget
-    // that covers the full fail-closed validation instead of canceling it late.
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    // The subprocess-heavy lifecycle suite can exceed 75 minutes under
+    // shared-runner contention, so retain a bounded budget that covers the
+    // full fail-closed validation instead of canceling it late.
+    timeout_minutes: 120
   },
   {
     lane: "runtime-1",
@@ -36,29 +34,25 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     gates: "runtime-1",
     // A slow hosted runner passed 59 of shard 4's 67 tests before the old
     // 75-minute cutoff. Give every shard the same bounded completion budget.
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "runtime-2",
     description: "Node.js 24 runtime integration tests, shard 2/4",
     gates: "runtime-2",
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "runtime-3",
     description: "Node.js 24 runtime integration tests, shard 3/4",
     gates: "runtime-3",
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "runtime-4",
     description: "Node.js 24 runtime integration tests, shard 4/4",
     gates: "runtime-4",
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "cli",

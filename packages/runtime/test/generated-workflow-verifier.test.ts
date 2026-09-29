@@ -115,15 +115,6 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     operator_input: { tickets: [1, true, null, "three"] }
   };
   assert.equal(inputSchema.safeParse(local).success, true);
-  const cloud = {
-    cloud_worker: true,
-    task_id: "node:one",
-    attempt_id: "one",
-    execution_generation: "base",
-    selected_task: {},
-    operator_prompt: "focus"
-  };
-  assert.equal(inputSchema.safeParse(cloud).success, true);
 
   for (const invalid of [
     { ...local, unexpected: true },
@@ -132,9 +123,8 @@ test("generated workflow input is an exact current-only envelope with bounded JS
     { ...local, run_id: local.ultrafuzz_run_id },
     { schema_version: local.schema_version, ultrafuzz_run_id: local.ultrafuzz_run_id },
     { ...local, tasks: [{ ...local.tasks[0], extra: true }] },
-    { ...cloud, tasks: [{ id: "smuggled" }] },
-    { ...cloud, selected_task: undefined },
-    { cloud_worker: false, task_id: "node:one" }
+    // The removed cloud-worker dispatch envelope is an unknown key now.
+    { ...local, cloud_worker: true, task_id: "node:one" }
   ]) {
     assert.equal(inputSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
   }
@@ -152,54 +142,28 @@ test("generated workflow input accepts the nulls its input table reads back for 
   // The runner tables this schema by walking `shape`, so every declared key
   // becomes a column and a column the submission never set reads back as SQL
   // null, not as undefined. Declaring the envelope keys `.optional()` -- which
-  // accepts undefined only -- therefore made a local dispatch, which by
-  // definition leaves all five cloud-worker keys unset, fail its own
-  // re-validation in parseWorkflowInput before the first task ever rendered.
+  // accepts undefined only -- therefore made a dispatch that leaves an optional
+  // key unset fail its own re-validation in parseWorkflowInput before the first
+  // task ever rendered.
   const inputSchema = loadGeneratedWorkflowInputSchema();
   const localThroughTheInputTable = {
     schema_version: "ultrafuzz.smithers.workflow.v4",
     ultrafuzz_run_id: "run-1",
     tasks: [{ id: "node:one", prompt_path: ".ultrafuzz/prompts/one.md" }],
-    cloud_worker: null,
-    task_id: null,
-    attempt_id: null,
-    execution_generation: null,
-    selected_task: null,
     operator_prompt: null,
     operator_input: null
   };
   assert.equal(
     inputSchema.safeParse(localThroughTheInputTable).success,
     true,
-    "a local dispatch read back through the input table carries explicit nulls for every cloud-worker key"
-  );
-  const cloudThroughTheInputTable = {
-    cloud_worker: true,
-    task_id: "node:one",
-    attempt_id: "one",
-    execution_generation: "base",
-    selected_task: {},
-    schema_version: null,
-    ultrafuzz_run_id: null,
-    tasks: null,
-    operator_prompt: null,
-    operator_input: null
-  };
-  assert.equal(
-    inputSchema.safeParse(cloudThroughTheInputTable).success,
-    true,
-    "a cloud dispatch read back through the input table carries explicit nulls for every local key"
+    "a dispatch read back through the input table carries explicit nulls for unset optional keys"
   );
 
-  // Null is absence, never a stand-in for a key the selected envelope requires,
-  // and a null-filled local input must not read as a cloud dispatch.
+  // Null is absence, never a stand-in for a required key.
   for (const invalid of [
     { ...localThroughTheInputTable, tasks: null },
     { ...localThroughTheInputTable, schema_version: null },
-    { ...localThroughTheInputTable, ultrafuzz_run_id: null },
-    { ...cloudThroughTheInputTable, selected_task: null },
-    { ...cloudThroughTheInputTable, execution_generation: null },
-    { ...cloudThroughTheInputTable, schema_version: "ultrafuzz.smithers.workflow.v4" }
+    { ...localThroughTheInputTable, ultrafuzz_run_id: null }
   ]) {
     assert.equal(inputSchema.safeParse(invalid).success, false, JSON.stringify(invalid));
   }
@@ -893,15 +857,12 @@ function loadWorkflowControlPathResolvers(): {
     persistedWorkflowPath: string | undefined;
     persistedExecutionSnapshotRoot: string | undefined;
   };
-  taskWorkflowControlPaths: (
-    executionMode: "local" | "cloud",
-    controls: {
-      loadedWorkflowPath: string;
-      loadedExecutionSnapshotRoot: string | undefined;
-      persistedWorkflowPath: string | undefined;
-      persistedExecutionSnapshotRoot: string | undefined;
-    }
-  ) => {
+  taskWorkflowControlPaths: (controls: {
+    loadedWorkflowPath: string;
+    loadedExecutionSnapshotRoot: string | undefined;
+    persistedWorkflowPath: string | undefined;
+    persistedExecutionSnapshotRoot: string | undefined;
+  }) => {
     promptExecutionSnapshotRoot: string | undefined;
     workflowPath: string | undefined;
     executionSnapshotRoot: string | undefined;
@@ -910,7 +871,7 @@ function loadWorkflowControlPathResolvers(): {
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("type AdmittedWorkflowControls");
-  const helperEnd = source.indexOf("\n\nfunction cloudSnapshotRelativePath", helperStart);
+  const helperEnd = source.indexOf("\n\ntype WorkflowTaskStateContext", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
@@ -925,35 +886,6 @@ function loadWorkflowControlPathResolvers(): {
     "realpathSync",
     `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath };`
   )(path, fs.existsSync, fs.realpathSync) as ReturnType<typeof loadWorkflowControlPathResolvers>;
-}
-
-type GeneratedDependencyVerificationProducer = {
-  attemptId: string;
-  verifierId: string;
-  optional: boolean;
-};
-
-type GeneratedVerificationAuthorityOutput = {
-  verification_marker_sha256: string;
-  verification_marker_size_bytes: number;
-};
-
-function loadDependencyVerificationAuthoritiesForTask(): (
-  task: { dependencyVerificationProducers: readonly GeneratedDependencyVerificationProducer[] },
-  outputForProducer: (
-    producer: GeneratedDependencyVerificationProducer
-  ) => GeneratedVerificationAuthorityOutput | undefined
-) => Array<{ attempt_id: string; marker_sha256: string; size_bytes: number }> | undefined {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("type DependencyVerificationProducer");
-  const helperEnd = source.indexOf("\nconst usesCloudExecution", helperStart);
-  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
-  const emitted = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  return new Function(`${emitted}; return dependencyVerificationAuthoritiesForTask;`)() as ReturnType<
-    typeof loadDependencyVerificationAuthoritiesForTask
-  >;
 }
 
 type GeneratedPromptArtifactAuthorityTask = {
@@ -1890,7 +1822,6 @@ type VerifyArtifactsTask = {
     plannedTimeoutSeconds: number;
     finalizationReserveSeconds: number;
   } | null;
-  execution?: { agentCredentialEnv?: string[]; modal?: { credentialEnv?: string[] } };
   metadata: {
     run: { ultrafuzzRunId: string };
     artifacts: { dir: string };
@@ -1917,8 +1848,6 @@ function loadVerifyArtifactsHarness(
     onSemanticGate?: () => void;
     onPublishArtifacts?: () => void;
     generatedTestFiles?: (artifactRoot: string, manifest: unknown) => Array<{ path: string; contents: Buffer }>;
-    /** Scan the real process environment before publication; off by default so host variables cannot leak in. */
-    scanProcessEnvironment?: boolean;
   } = {}
 ): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
@@ -2206,7 +2135,7 @@ function loadVerifyArtifactsHarness(
     () => undefined,
     createHash,
     assertArtifactPublicationsContainNoSecrets,
-    options.scanProcessEnvironment === true ? sensitiveEnvironmentValues : () => [],
+    () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -2750,53 +2679,6 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("generated Smithers verifier refuses to publish the value of any credential the task is configured with", () => {
-  const root = fs.realpathSync(temporaryRoot("ultrafuzz-configured-secret-output-"));
-  // A cloud task carries the credential names its agents and its Modal sandbox are configured with.
-  // Neither name below looks like a credential to the environment-name heuristic, and neither value
-  // has a vendor format, so only those configured lists can keep the values out of an artifact.
-  const credentials: Array<[string, string, NonNullable<VerifyArtifactsTask["execution"]>]> = [
-    [
-      "ULTRAFUZZ_TEST_GATEWAY_KEY",
-      "q7Vx2Lm9Rt4Wz8Kp3Nb6Hc1Jd5Fg0Sa",
-      { agentCredentialEnv: ["ULTRAFUZZ_TEST_GATEWAY_KEY"] }
-    ],
-    [
-      "ULTRAFUZZ_TEST_SANDBOX_KEY",
-      "Zr5Pw1Mx8Qn3Lc6Vb9Kt2Hj7Gf4Ds0Ae",
-      { modal: { credentialEnv: ["ULTRAFUZZ_TEST_SANDBOX_KEY"] } }
-    ]
-  ];
-  const previous = credentials.map(([name]) => [name, process.env[name]] as const);
-  try {
-    for (const [name, value, execution] of credentials) {
-      process.env[name] = value;
-      fs.writeFileSync(path.join(root, "result.json"), `analysis ${value}\n`, "utf8");
-
-      const unconfigured = singleOutputVerificationTask(root, "ultrafuzz/text@1");
-      const control = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
-      control.verifyArtifacts(unconfigured, control.captureTaskOutputs(unconfigured));
-      assert.equal(control.publications.size, 1, `${name} is published when the task does not name it`);
-
-      const configured = { ...singleOutputVerificationTask(root, "ultrafuzz/text@1"), execution };
-      const harness = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
-      assert.throws(
-        () => harness.verifyArtifacts(configured, harness.captureTaskOutputs(configured)),
-        /contains sensitive data/u,
-        name
-      );
-      assert.equal(harness.publications.size, 0, name);
-      assert.equal(harness.markerWrites.length, 0, name);
-    }
-  } finally {
-    for (const [name, value] of previous) {
-      if (value === undefined) Reflect.deleteProperty(process.env, name);
-      else process.env[name] = value;
-    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -6051,263 +5933,6 @@ test("generated Smithers workflow prepares output directories without creating a
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
-test("generated cloud handoff derives durable marker authorities on pre-sync and restart rerenders", () => {
-  const derive = loadDependencyVerificationAuthoritiesForTask();
-  const producers = [
-    {
-      attemptId: "required-root__model_0__attempt_0",
-      verifierId: "verify:required-root__model_0__attempt_0",
-      optional: false
-    },
-    { attemptId: "optional-branch", verifierId: "verify:optional-branch", optional: true },
-    {
-      attemptId: "required-root__model_1__attempt_1",
-      verifierId: "verify:required-root__model_1__attempt_1",
-      optional: false
-    }
-  ] as const;
-  const task = { dependencyVerificationProducers: producers };
-  const first = {
-    verification_marker_sha256: "a".repeat(64),
-    verification_marker_size_bytes: 1_024
-  };
-  const second = {
-    verification_marker_sha256: "b".repeat(64),
-    verification_marker_size_bytes: 2_048
-  };
-  const optional = {
-    verification_marker_sha256: "c".repeat(64),
-    verification_marker_size_bytes: 4_096
-  };
-  const durableRows = new Map<string, GeneratedVerificationAuthorityOutput>();
-  const reads: string[] = [];
-  const outputForProducer = (producer: GeneratedDependencyVerificationProducer) => {
-    reads.push(producer.verifierId);
-    return durableRows.get(producer.verifierId);
-  };
-
-  assert.equal(derive(task, outputForProducer), undefined, "the pre-sync frame must wait for required output");
-  assert.deepEqual(reads, [producers[0].verifierId]);
-
-  durableRows.set(producers[0].verifierId, first);
-  durableRows.set(producers[2].verifierId, second);
-  reads.length = 0;
-  const preSyncHandoff = derive(task, outputForProducer);
-  assert.deepEqual(preSyncHandoff, [
-    { attempt_id: producers[0].attemptId, marker_sha256: first.verification_marker_sha256, size_bytes: 1_024 },
-    { attempt_id: producers[2].attemptId, marker_sha256: second.verification_marker_sha256, size_bytes: 2_048 }
-  ]);
-  assert.deepEqual(
-    reads,
-    producers.map((producer) => producer.verifierId)
-  );
-
-  durableRows.set(producers[1].verifierId, optional);
-  const completeHandoff = derive(task, outputForProducer);
-  assert.deepEqual(completeHandoff, [
-    { attempt_id: producers[0].attemptId, marker_sha256: first.verification_marker_sha256, size_bytes: 1_024 },
-    { attempt_id: producers[1].attemptId, marker_sha256: optional.verification_marker_sha256, size_bytes: 4_096 },
-    { attempt_id: producers[2].attemptId, marker_sha256: second.verification_marker_sha256, size_bytes: 2_048 }
-  ]);
-
-  const restartedRows = new Map([...durableRows].map(([nodeId, output]) => [nodeId, structuredClone(output)] as const));
-  assert.deepEqual(
-    derive(task, (producer) => restartedRows.get(producer.verifierId)),
-    completeHandoff,
-    "a fresh render process must reproduce the authority array from durable outputs"
-  );
-
-  restartedRows.delete(producers[2].verifierId);
-  assert.equal(
-    derive(task, (producer) => restartedRows.get(producer.verifierId)),
-    undefined,
-    "an absent required fanout verifier must suppress the cloud handoff"
-  );
-
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.match(source, /ctx\.outputMaybe\(outputs\.verification, \{ nodeId: producer\.verifierId \}\)/u);
-  assert.match(source, /if \(dependencyVerificationAuthorities === undefined && !skipAgent\) return null/u);
-  const sandboxStart = source.indexOf("<Sandbox", source.indexOf("const dependencyVerificationAuthorities ="));
-  const sandboxEnd = source.indexOf("/>", sandboxStart);
-  assert.ok(sandboxStart >= 0 && sandboxEnd > sandboxStart);
-  const sandbox = source.slice(sandboxStart, sandboxEnd);
-  assert.match(sandbox, /dependency_verification_authorities: dependencyVerificationAuthorities \?\? \[\]/u);
-  assert.match(sandbox, /skipIf=\{skipAgent\}/u);
-  assert.match(source, /schema_version: "ultrafuzz\.modal\.node\.v2"/u);
-});
-
-test("Smithers rerenders a cloud Sandbox only after its required verifier output is persisted", async () => {
-  type ModalAuthorityInput = {
-    schema_version: "ultrafuzz.modal.node.v2";
-    dependency_verification_authorities: Array<{
-      attempt_id: string;
-      marker_sha256: string;
-      size_bytes: number;
-    }>;
-  };
-  type EngineTask = { nodeId: string; meta?: Record<string, unknown> };
-  type EngineTestWorkflow = { tasks: EngineTask[] };
-  type EngineSimulation = {
-    run(): Promise<unknown>;
-    status: string;
-    executed: string[];
-    outputs: Record<string, unknown[]>;
-  };
-  const derive = loadDependencyVerificationAuthoritiesForTask();
-  const producer = {
-    attemptId: "required-producer__model_0__attempt_0",
-    verifierId: "verify:required-producer__model_0__attempt_0",
-    optional: false
-  } as const;
-  const marker = {
-    verification_marker_sha256: "d".repeat(64),
-    verification_marker_size_bytes: 12_345
-  } as const;
-  const expectedSandboxInput: ModalAuthorityInput = {
-    schema_version: "ultrafuzz.modal.node.v2",
-    dependency_verification_authorities: [
-      {
-        attempt_id: producer.attemptId,
-        marker_sha256: marker.verification_marker_sha256,
-        size_bytes: marker.verification_marker_size_bytes
-      }
-    ]
-  };
-
-  const require = createRequire(import.meta.url);
-  const testing = (await import(pathToFileURL(require.resolve("smthrs/testing")).href)) as {
-    renderWorkflow(
-      workflow: unknown,
-      options?: { runId?: string; outputs?: Record<string, unknown[]> }
-    ): Promise<EngineTestWorkflow>;
-    simulate(workflow: unknown, options?: { mocks?: Record<string, unknown> }): EngineSimulation;
-  };
-  const smithersRoot = packageRootForEntry(require.resolve("smthrs"));
-  const smithersRequire = createRequire(path.join(smithersRoot, "package.json"));
-  const React = smithersRequire("react") as {
-    createElement(type: unknown, props: Record<string, unknown> | null, ...children: unknown[]): unknown;
-  };
-  const components = (await import(pathToFileURL(smithersRequire.resolve("@smthrs/components")).href)) as {
-    Workflow: unknown;
-    Task: unknown;
-    Sandbox: unknown;
-  };
-  const verificationSchema = z.strictObject({
-    verification_marker_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
-    verification_marker_size_bytes: z.number().int().positive()
-  });
-  const sandboxResultSchema = z.strictObject({ summary: z.string() });
-  const renderedSandboxInputs: Array<ModalAuthorityInput | undefined> = [];
-  const workflow = {
-    opts: {},
-    schemaRegistry: new Map([
-      ["verification", { table: { name: "verification" }, zodSchema: verificationSchema }],
-      ["sandbox_result", { table: { name: "sandbox_result" }, zodSchema: sandboxResultSchema }]
-    ]),
-    build: (ctx: {
-      outputMaybe(output: string, key: { nodeId: string }): GeneratedVerificationAuthorityOutput | undefined;
-    }) => {
-      const authorities = derive({ dependencyVerificationProducers: [producer] }, (candidate) =>
-        ctx.outputMaybe("verification", { nodeId: candidate.verifierId })
-      );
-      const sandboxInput =
-        authorities === undefined
-          ? undefined
-          : {
-              schema_version: "ultrafuzz.modal.node.v2" as const,
-              dependency_verification_authorities: authorities
-            };
-      renderedSandboxInputs.push(sandboxInput === undefined ? undefined : structuredClone(sandboxInput));
-      return React.createElement(
-        components.Workflow,
-        { name: "verification-authority-rerender" },
-        React.createElement(components.Task, { id: producer.verifierId, output: "verification" }, marker),
-        sandboxInput === undefined
-          ? null
-          : React.createElement(components.Sandbox, {
-              id: "cloud-consumer",
-              output: "sandbox_result",
-              provider: { id: "modal-test-provider" },
-              input: sandboxInput,
-              meta: { executionMode: "cloud" }
-            })
-      );
-    }
-  };
-
-  const beforeVerification = await testing.renderWorkflow(workflow, { runId: "authority-rerender" });
-  assert.deepEqual(
-    beforeVerification.tasks.map((task) => task.nodeId),
-    [producer.verifierId],
-    "the cloud Sandbox must not exist before its required verifier row"
-  );
-
-  renderedSandboxInputs.length = 0;
-  const simulation = testing.simulate(workflow, {
-    mocks: { "cloud-consumer": { summary: "cloud handoff accepted" } }
-  });
-  await simulation.run();
-  assert.equal(simulation.status, "finished");
-  assert.deepEqual(simulation.executed, [producer.verifierId, "cloud-consumer"]);
-  assert.deepEqual(simulation.outputs.verification, [marker]);
-  assert.equal(renderedSandboxInputs[0], undefined, "the scheduler's initial frame must omit the Sandbox");
-  assert.ok(renderedSandboxInputs.length > 1, "persisting verifier output must trigger a rerender");
-  for (const input of renderedSandboxInputs.slice(1)) {
-    assert.deepEqual(input, expectedSandboxInput);
-  }
-
-  const persistedOutputs = {
-    verification: [
-      {
-        runId: "authority-rerender",
-        nodeId: producer.verifierId,
-        iteration: 0,
-        ...marker
-      }
-    ]
-  };
-  const afterVerification = await testing.renderWorkflow(workflow, {
-    runId: "authority-rerender",
-    outputs: persistedOutputs
-  });
-  const cloudTask = afterVerification.tasks.find((task) => task.nodeId === "cloud-consumer");
-  assert.ok(cloudTask, "the persisted verifier row must mount the cloud Sandbox without workflow sync");
-  assert.deepEqual(cloudTask.meta?.__sandboxInput, expectedSandboxInput);
-
-  const restarted = await testing.renderWorkflow(workflow, {
-    runId: "authority-rerender",
-    outputs: structuredClone(persistedOutputs)
-  });
-  const restartedCloudTask = restarted.tasks.find((task) => task.nodeId === "cloud-consumer");
-  assert.ok(restartedCloudTask, "a fresh renderer must recover the Sandbox solely from durable verifier rows");
-  assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, expectedSandboxInput);
-  assert.deepEqual(restartedCloudTask.meta?.__sandboxInput, cloudTask.meta?.__sandboxInput);
-
-  const skippedWorkflow = {
-    ...workflow,
-    build: () =>
-      React.createElement(
-        components.Workflow,
-        { name: "verification-authority-skipped" },
-        React.createElement(components.Sandbox, {
-          id: "cloud-consumer",
-          output: "sandbox_result",
-          provider: { id: "modal-test-provider" },
-          input: { schema_version: "ultrafuzz.modal.node.v2", dependency_verification_authorities: [] },
-          skipIf: true,
-          meta: { executionMode: "cloud" }
-        })
-      )
-  };
-  const skipped = testing.simulate(skippedWorkflow, {
-    mocks: { "cloud-consumer": { summary: "must not dispatch" } }
-  });
-  await skipped.run();
-  assert.equal(skipped.status, "finished");
-  assert.deepEqual(skipped.executed, [], "missing marker authorities may mount only a skipped, undispatched Sandbox");
-  assert.deepEqual(skipped.outputs.sandbox_result ?? [], []);
-});
-
 test("generated Smithers workflow quarantines optional tasks and reads only verified optional ancestors", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const taskProjectionStart = source.indexOf("function hydrateTaskSpec");
@@ -6354,14 +5979,9 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
     source,
     /assertDependencyArtifactAdmissionCurrent\(task\);\s*const admitted = baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u
   );
-  assert.match(taskProjection, /const dependencyArtifactRelativeDirs = \[\.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(
     taskProjection,
     /dependencyArtifactDirs: task\.dependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
-  );
-  assert.match(
-    taskProjection,
-    /const optionalDependencyArtifactRelativeDirs = \[\.\.\.task\.optionalDependencyArtifactDirs\]/u
   );
   assert.match(
     taskProjection,
@@ -6370,11 +5990,8 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\]/u);
   assert.doesNotMatch(baseAgent, /taskManifestPath|executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
-  assert.match(workflow, /dependency_artifact_dirs: task\.dependencyArtifactRelativeDirs/u);
-  assert.match(workflow, /optional_dependency_artifact_dirs: task\.optionalDependencyArtifactRelativeDirs/u);
-  assert.doesNotMatch(workflow, /optional_dependency_artifact_dirs: task\.optionalDependencyArtifactDirs/u);
   assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
-  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
 });
 
 test("generated optional admission rejects a present malformed marker before publishing agent access", () => {
@@ -6500,8 +6117,8 @@ test("rerenders retain one dependency admission epoch and fresh modules reauthen
   const workflowSource = source.slice(source.indexOf("export default smithers"));
   assert.equal(
     workflowSource.match(/taskSpecs = reconcileTaskSpecIdentities\(/gu)?.length,
-    2,
-    "dynamic controller and cloud-worker rerenders must both retain stable task identities"
+    1,
+    "dynamic controller rerenders must retain stable task identities"
   );
   const reconciliationStart = source.indexOf("function reconcileTaskSpecIdentities");
   const reconciliationEnd = source.indexOf("\n\nconst INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS", reconciliationStart);
@@ -6821,10 +6438,10 @@ test("generated verifiers require the runtime-owned process marker before publis
     finalizer.indexOf("clearArtifactVerificationMarker(task)") < finalizer.indexOf("agentProcessOutput.safeParse")
   );
   assert.ok(finalizer.indexOf("agentProcessOutput.safeParse") < finalizer.indexOf("prepareArtifactMirror(task"));
-  assert.equal(workflow.match(/needs=\{\{ agent: task\.id \}\}/gu)?.length, 2);
-  assert.equal(workflow.match(/deps=\{\{ agent: outputs\.agentProcess \}\}/gu)?.length, 2);
-  assert.equal(workflow.match(/depsOptional/gu)?.length, 2);
-  assert.equal(workflow.match(/\{\(deps\) => finalizeAndVerifyArtifacts\(task, deps\.agent\)\}/gu)?.length, 2);
+  assert.equal(workflow.match(/needs=\{\{ agent: task\.id \}\}/gu)?.length, 1);
+  assert.equal(workflow.match(/deps=\{\{ agent: outputs\.agentProcess \}\}/gu)?.length, 1);
+  assert.equal(workflow.match(/depsOptional/gu)?.length, 1);
+  assert.equal(workflow.match(/\{\(deps\) => finalizeAndVerifyArtifacts\(task, deps\.agent\)\}/gu)?.length, 1);
   assert.doesNotMatch(workflow, /\{\(\) => finalizeAndVerifyArtifacts\(task\)\}/u);
 });
 
@@ -7249,7 +6866,7 @@ test("a task prompt comes from its relocatable prompt path before the dispatch i
   assert.equal(promptForTask(task, { prompt: "dispatch prompt", prompt_path: inputPromptPath }), "dispatch prompt");
 });
 
-test("generated local and cloud prompt relocation rebases task-local authority paths without exposing controls", () => {
+test("generated prompt relocation rebases task-local authority paths without exposing controls", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const promptStart = source.indexOf("function promptForTask");
   const helperStart = source.indexOf("function relocatePromptPath");
@@ -7274,7 +6891,6 @@ test("generated local and cloud prompt relocation rebases task-local authority p
 
   const sourceRoot = "/tmp/controller-a's-`project";
   const localRoot = "/tmp/local-b's-`project";
-  const cloudRoot = "/workspace/cloud-b's-`project";
   const sourceArtifactDir = `${sourceRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
   const sourceWorkspace = `${sourceRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`;
   const sourceAuthority = `${sourceWorkspace}/.ultrafuzz/authorities/task-0.json`;
@@ -7291,10 +6907,7 @@ test("generated local and cloud prompt relocation rebases task-local authority p
   ].join("\n");
   assert.doesNotMatch(rendered, /tasks\.json|execution-snapshots|\/controls\//u);
 
-  for (const [label, destinationRoot] of [
-    ["local", localRoot],
-    ["cloud", cloudRoot]
-  ] as const) {
+  for (const [label, destinationRoot] of [["local", localRoot]] as const) {
     const destinationArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
     const mirroredTaskArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`;
     const expectedAuthority = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/authorities/task-0.json`;
@@ -7601,10 +7214,7 @@ test(
     assert.ok(projectionStart >= 0, source);
     assert.ok(projectionEnd > projectionStart, source);
     const projection = source.slice(projectionStart, projectionEnd);
-    assert.match(
-      projection,
-      /const controlPaths = taskWorkflowControlPaths\(task\.execution\.mode, admittedWorkflowControls\)/u
-    );
+    assert.match(projection, /const controlPaths = taskWorkflowControlPaths\(admittedWorkflowControls\)/u);
     assert.match(projection, /sealedTaskPromptPath\(task\.attemptId, controlPaths\.promptExecutionSnapshotRoot\)/u);
     assert.match(projection, /workflowPath: controlPaths\.workflowPath \?\?/u);
     assert.match(projection, /executionSnapshotRoot: controlPaths\.executionSnapshotRoot/u);
@@ -7631,12 +7241,8 @@ test(
       const descriptorRoot = `/proc/self/fd/${descriptor}`;
       const loadedWorkflowPath = path.join(descriptorRoot, workflowRelativePath);
       const admitted = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
-      const localControls = taskWorkflowControlPaths("local", admitted);
+      const localControls = taskWorkflowControlPaths(admitted);
       const localPromptPath = sealedTaskPromptPath("project-discovery", localControls.promptExecutionSnapshotRoot);
-      const directCloudControls = taskWorkflowControlPaths(
-        "cloud",
-        admitWorkflowControls(loadedWorkflowPath, undefined)
-      );
 
       assert.equal(admitted.loadedExecutionSnapshotRoot, descriptorRoot);
       assert.equal(localControls.promptExecutionSnapshotRoot, generationRoot);
@@ -7644,12 +7250,6 @@ test(
       assert.equal(localControls.executionSnapshotRoot, generationRoot);
       assert.equal(localPromptPath, persistedPromptPath);
       assert.doesNotMatch(JSON.stringify(localControls), /\/proc\/(?:self|[1-9][0-9]*)\/fd\//u);
-      // Keep the pre-existing cloud rule pinned: without an explicit persisted
-      // binding, direct admission may read its sealed prompt but cannot hand a
-      // generation root to the provider.
-      assert.equal(directCloudControls.promptExecutionSnapshotRoot, descriptorRoot);
-      assert.equal(directCloudControls.workflowPath, loadedWorkflowPath);
-      assert.equal(directCloudControls.executionSnapshotRoot, undefined);
 
       fs.closeSync(descriptor);
       descriptor = undefined;
@@ -7710,7 +7310,7 @@ test("generated workflow controls admit the same persisted native workflow outsi
     assert.equal(admitted.persistedWorkflowPath, workflowPath);
     assert.equal(admitted.loadedExecutionSnapshotRoot, undefined);
     assert.equal(admitted.persistedExecutionSnapshotRoot, undefined);
-    assert.deepEqual(taskWorkflowControlPaths("local", admitted), {
+    assert.deepEqual(taskWorkflowControlPaths(admitted), {
       promptExecutionSnapshotRoot: undefined,
       workflowPath: undefined,
       executionSnapshotRoot: undefined
@@ -7852,7 +7452,7 @@ test("runtime task reconstruction preserves source identity and rejects undefine
   );
 
   const baseStart = source.indexOf("function worktreeBaseBranch");
-  const baseEnd = source.indexOf("\nfunction readCloudExecutionGeneration", baseStart);
+  const baseEnd = source.indexOf("\nfunction promptForTask", baseStart);
   assert.ok(baseStart >= 0, source);
   assert.ok(baseEnd > baseStart, source);
   const baseSource = ts.transpileModule(source.slice(baseStart, baseEnd), {
@@ -7863,7 +7463,6 @@ test("runtime task reconstruction preserves source identity and rejects undefine
       attemptId: string;
       sourceRevision?: string | null;
       sourceRef?: string | null;
-      execution: { mode: string };
     },
     pinned: boolean,
     governedCommit?: string
@@ -7876,32 +7475,16 @@ test("runtime task reconstruction preserves source identity and rejects undefine
       `${baseSource}; return worktreeBaseBranch(task);`
     )(task, pinned, "ultrafuzz-pinned", governedCommit === undefined ? undefined : { commit: governedCommit });
 
+  assert.equal(resolveBase({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }, false), revision);
   assert.equal(
-    resolveBase(
-      { attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref, execution: { mode: "local" } },
-      false
-    ),
-    revision
-  );
-  assert.equal(
-    resolveBase(
-      { attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref, execution: { mode: "local" } },
-      true
-    ),
+    resolveBase({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }, true),
     "ultrafuzz-pinned"
   );
   assert.equal(
-    resolveBase(
-      { attemptId: "dynamic-one", sourceRevision: null, sourceRef: null, execution: { mode: "local" } },
-      false,
-      "b".repeat(40)
-    ),
+    resolveBase({ attemptId: "dynamic-one", sourceRevision: null, sourceRef: null }, false, "b".repeat(40)),
     "b".repeat(40)
   );
-  assert.throws(
-    () => resolveBase({ attemptId: "dynamic-one", execution: { mode: "local" } }, false),
-    /unnormalized source identity/u
-  );
+  assert.throws(() => resolveBase({ attemptId: "dynamic-one" }, false), /unnormalized source identity/u);
 });
 
 test("recorded source identity, not later ref creation, selects pinned worktree mode", () => {
@@ -7934,12 +7517,12 @@ test("recorded source identity, not later ref creation, selects pinned worktree 
   );
 });
 
-test("generated Smithers cloud source proof records the sealed submodule expectation", () => {
+test("generated Smithers source proof records the sealed submodule expectation", () => {
   const preservePinnedSourceProof = loadPreservePinnedSourceProof();
-  const root = temporaryRoot("ultrafuzz-cloud-source-proof-");
+  const root = temporaryRoot("ultrafuzz-source-proof-");
   const workspace = path.join(root, "workspace");
-  const artifactDir = path.join(root, "artifacts", "cloud-attempt");
-  const proofPath = path.join(root, "source-proofs", "cloud-attempt.json");
+  const artifactDir = path.join(root, "artifacts", "pinned-attempt");
+  const proofPath = path.join(root, "source-proofs", "pinned-attempt.json");
   const git = (args: string[]): string =>
     execFileSync("git", args, {
       cwd: workspace,
@@ -7968,7 +7551,7 @@ test("generated Smithers cloud source proof records the sealed submodule expecta
     };
 
     preservePinnedSourceProof({
-      attemptId: "cloud-attempt",
+      attemptId: "pinned-attempt",
       workspacePath: workspace,
       metadata: { artifacts: { dir: artifactDir } },
       pinnedSubmodules: expectation
@@ -8371,59 +7954,48 @@ test("a resumed activation's first dispatch carries no stale continuation pointe
 
 test("agent failures redact configured credentials before Smithers can retain them", async () => {
   const agentCredentialName = "ULTRAFUZZ_TEST_AGENT_CREDENTIAL";
-  const modalCredentialName = "ULTRAFUZZ_TEST_MODAL_CREDENTIAL";
   const agentCredential = "agent credential value that rotated";
-  const modalCredential = "modal credential value that rotated";
-  await withEnvironment(
-    { [agentCredentialName]: agentCredential, [modalCredentialName]: modalCredential },
-    async () => {
-      const originalFailure = Object.assign(
-        new Error(`provider echoed ${agentCredential}; modal echoed ${modalCredential}`, {
-          cause: { response: agentCredential }
-        }),
-        {
-          code: "AGENT_QUOTA_EXCEEDED",
-          details: {
-            failureQuota: true,
-            quotaResetAtMs: 1_800_000_000_000,
-            failureRetryable: true,
-            retryAfterMs: 2_500,
-            discardResumeSession: false,
-            discardAgentCheckpoint: true,
-            underlying: agentCredential
-          },
-          summary: `raw summary ${agentCredential}`,
-          docsUrl: `https://example.invalid/${agentCredential}`,
-          custom: agentCredential
-        }
-      );
-      originalFailure.stack = `raw provider stack ${agentCredential}`;
-      const normalized = await captureAgentFailure(originalFailure, {
-        agentChain: [{}],
-        execution: {
-          agentCredentialEnv: [agentCredentialName],
-          modal: { credentialEnv: [modalCredentialName] }
-        }
-      });
-      assert.notEqual(normalized, originalFailure);
-      assert.equal(normalized.message, "provider echoed <redacted>; modal echoed <redacted>");
-      assert.equal(normalized.code, "AGENT_QUOTA_EXCEEDED");
-      assert.deepEqual(normalized.details, {
-        failureQuota: true,
-        failureRetryable: true,
-        discardResumeSession: false,
-        discardAgentCheckpoint: true,
-        quotaResetAtMs: 1_800_000_000_000,
-        retryAfterMs: 2_500
-      });
-      assert.deepEqual(Object.keys(normalized).sort(), ["code", "details"]);
-      for (const key of ["cause", "summary", "docsUrl", "custom"]) assert.equal(key in normalized, false);
-      assert.doesNotMatch(
-        `${normalized.stack}\n${normalized.message}`,
-        /raw provider stack|credential value that rotated/u
-      );
-    }
-  );
+  await withEnvironment({ [agentCredentialName]: agentCredential }, async () => {
+    const originalFailure = Object.assign(
+      new Error(`provider echoed ${agentCredential}`, {
+        cause: { response: agentCredential }
+      }),
+      {
+        code: "AGENT_QUOTA_EXCEEDED",
+        details: {
+          failureQuota: true,
+          quotaResetAtMs: 1_800_000_000_000,
+          failureRetryable: true,
+          retryAfterMs: 2_500,
+          discardResumeSession: false,
+          discardAgentCheckpoint: true,
+          underlying: agentCredential
+        },
+        summary: `raw summary ${agentCredential}`,
+        docsUrl: `https://example.invalid/${agentCredential}`,
+        custom: agentCredential
+      }
+    );
+    originalFailure.stack = `raw provider stack ${agentCredential}`;
+    const normalized = await captureAgentFailure(originalFailure, { agentChain: [{}] });
+    assert.notEqual(normalized, originalFailure);
+    assert.equal(normalized.message, "provider echoed <redacted>");
+    assert.equal(normalized.code, "AGENT_QUOTA_EXCEEDED");
+    assert.deepEqual(normalized.details, {
+      failureQuota: true,
+      failureRetryable: true,
+      discardResumeSession: false,
+      discardAgentCheckpoint: true,
+      quotaResetAtMs: 1_800_000_000_000,
+      retryAfterMs: 2_500
+    });
+    assert.deepEqual(Object.keys(normalized).sort(), ["code", "details"]);
+    for (const key of ["cause", "summary", "docsUrl", "custom"]) assert.equal(key in normalized, false);
+    assert.doesNotMatch(
+      `${normalized.stack}\n${normalized.message}`,
+      /raw provider stack|credential value that rotated/u
+    );
+  });
 });
 
 test("agent failure normalization preserves only validated Smithers recovery controls", async () => {
@@ -8480,10 +8052,7 @@ test("agent failure normalization preserves only validated Smithers recovery con
         return `provider echoed ${credential}`;
       }
     });
-    const normalizedInvalid = await captureAgentFailure(invalid, {
-      agentChain: [{}],
-      execution: { agentCredentialEnv: [credentialName] }
-    });
+    const normalizedInvalid = await captureAgentFailure(invalid, { agentChain: [{}] });
     assert.equal(normalizedInvalid.message, "provider echoed <redacted>");
     assert.equal(messageReads, 1);
     assert.equal(throwingDetailReads, 1);
@@ -8499,11 +8068,7 @@ test("agent preflight failures redact configured credentials without retaining t
     const originalFailure = new Error(`preflight provider echoed ${credential}`, {
       cause: { response: credential }
     });
-    const normalized = await captureAgentFailure(
-      originalFailure,
-      { agentChain: [{}], execution: { agentCredentialEnv: [credentialName] } },
-      true
-    );
+    const normalized = await captureAgentFailure(originalFailure, { agentChain: [{}] }, true);
     assert.notEqual(normalized, originalFailure);
     assert.equal(normalized.message, "preflight provider echoed <redacted>");
     assert.equal("cause" in normalized, false);
@@ -9204,20 +8769,6 @@ test("a non-Codex fallback cannot forge final-report producer authority through 
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("single-rung final-report authority survives a worker restart without a run-ID lookup", () => {
-  const execution = {
-    planned_chain: [{ attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }],
-    failed_attempts: [],
-    producer: { attempt: 1, profile_id: "primary", agent_ref: "CodexAgent", role: "primary" }
-  };
-  const authority = loadFinalReportAgentExecutionAuthority({ execution });
-  assert.deepEqual(
-    authority.read({ attemptId: "final-report", execution: { mode: "cloud" }, agentChain: [{ profileId: "primary" }] }),
-    execution
-  );
-  assert.equal(authority.smithersReads(), 0);
 });
 
 test("multi-rung report-producer authority budgets a contended Smithers read and reports its wall time", () => {

@@ -2,6 +2,9 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
+      // Operators run the eval runner from the repository root with `pnpm exec ultrafuzz-modal`
+      // (docs/how-to/run-evals-on-modal.md); nothing imports the package by name.
+      "ignoreDependencies": ["@ultrafuzz/modal"],
       "entry": ["scripts/validate-audit-profile-package.mjs", "scripts/ci/prepare-modal-benchmarks.mjs"]
     },
     "packages/dashboard": {
@@ -25,7 +28,7 @@
     },
     "packages/runtime": {
       "entry": ["src/templates/**/*.tsx"],
-      "ignoreDependencies": ["@moonshot-ai/kimi-code", "@smthrs/driver", "react"],
+      "ignoreDependencies": ["@moonshot-ai/kimi-code", "@smthrs/driver"],
       "ignoreUnresolved": ["^__ULTRAFUZZ_WORKFLOW_IMPORT__$", "^\\.\\./agents/index\\.ts$"]
     }
   }

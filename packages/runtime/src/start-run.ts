@@ -73,7 +73,6 @@ import {
   requestSmithersPause,
   runSmithersLifecycleCommand,
   type SmithersResumeInspection,
-  assertCurrentCloudAgentCredentialEnvironment,
   assertSealedDataGovernance,
   smithersExecutionControlFiles,
   smithersDiagnostic,
@@ -142,7 +141,6 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
   "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
   "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
-  "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
@@ -209,8 +207,7 @@ export async function startRun(input: StartRunInput) {
   const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env, [
     ...Object.values(plan.resolved_config.agents).flatMap((agent) =>
       agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : []
-    ),
-    ...(plan.resolved_config.execution.providers.modal?.credentialEnv ?? [])
+    )
   ]);
   let releaseControlLock: () => Promise<void>;
   try {
@@ -296,7 +293,6 @@ export async function startRun(input: StartRunInput) {
         providerCredentialNames
       )
     };
-    assertCurrentCloudAgentCredentialEnvironment(plan.resolved_config, compiled.tasks, submissionEnvironment);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -367,11 +363,8 @@ async function requiredCommandPreflightDiagnostics(
   try {
     commandProbes =
       input.requiredCommandProbe === undefined
-        ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env, {
-            cwd: path.resolve(input.projectRoot),
-            // Normal cloud launch creates its configured app on first use.
-            // Preflight must preserve that behavior to inspect the real image.
-            createProviderAppIfMissing: true
+        ? await probeCommandsForExecution(requiredCommands, input.env ?? process.env, {
+            cwd: path.resolve(input.projectRoot)
           })
         : await input.requiredCommandProbe(requiredCommands);
     if (!Array.isArray(commandProbes)) {
@@ -638,9 +631,6 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       ...process.env,
       ...providerScopedControllerEnvironment(continuedEnvironment, providerCredentialNames)
     };
-    if (config !== undefined && taskDocument !== undefined) {
-      assertCurrentCloudAgentCredentialEnvironment(config, tasks, lifecycleEnvironment);
-    }
     if (typeof metadata.source_revision === "string") {
       try {
         repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
@@ -985,7 +975,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       evidence.verifiedControl.executionFiles,
       lifecycleEnvironment.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES
     );
-    assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -1967,15 +1956,6 @@ function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRe
     names.push(agent.apiKeyEnv);
     if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
   }
-  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
-    const provider = config.execution.providers[config.execution.provider];
-    if (provider !== undefined) {
-      for (const name of provider.credentialEnv) {
-        assertCredentialEnvironmentVariableName(name);
-        names.push(name);
-      }
-    }
-  }
   return [...new Set(names)].sort();
 }
 
@@ -2003,15 +1983,6 @@ function agentEnvironmentVariableNames(
     if (agentRef === "ClaudeAgent") names.push("CLAUDE_CONFIG_DIR");
     if (agentRef === "CodexAgent") names.push("OPENAI_BASE_URL");
   }
-  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
-    const provider = config.execution.providers[config.execution.provider];
-    if (provider !== undefined) {
-      pushEnvironmentVariableNames(names, provider.credentialEnv);
-      if (config.execution.provider === "modal") {
-        names.push("MODAL_ENVIRONMENT", "MODAL_PROFILE");
-      }
-    }
-  }
   const extra = env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
   if (extra !== undefined && extra.trim() !== "") {
     names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
@@ -2024,19 +1995,6 @@ function agentEnvironmentVariableNames(
     }
   }
   return [...new Set(names)].sort();
-}
-
-function pushEnvironmentVariableNames(names: string[], value: unknown): void {
-  if (!Array.isArray(value)) {
-    return;
-  }
-  for (const name of value) {
-    if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
-      throw new Error("workflow environment allowlist contains an invalid environment variable name");
-    }
-    assertCredentialEnvironmentVariableName(name);
-    names.push(name);
-  }
 }
 
 function assertCredentialEnvironmentVariableName(name: string): void {

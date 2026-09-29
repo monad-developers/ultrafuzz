@@ -13,9 +13,7 @@ import {
   sha256Bytes,
   type ObservedReportCompletion,
   reportSchema,
-  type ReportVerification,
-  type SmithersTaskManifestExecution,
-  type SmithersTaskManifestTask
+  type ReportVerification
 } from "@ultrafuzz/artifacts";
 import { loadGoalSearchCoverageSnapshot } from "./final-report-markdown.js";
 import { ReportUnavailableError } from "./report-unavailable.js";
@@ -265,7 +263,7 @@ function readAgentReport(
     parsed.data.observed_completion !== undefined
   )
     throw new ReportUnavailableError("the agent report contains runtime-owned completion metadata");
-  if (attempt.rejected) assertRejectedReportHasNoSecrets(outputPath, parsed.data, attempt.execution);
+  if (attempt.rejected) assertRejectedReportHasNoSecrets(outputPath, parsed.data);
   return parsed.data;
 }
 
@@ -273,17 +271,13 @@ function readAgentReport(
  * The verifier runs its secret gate just before it publishes, so a report it
  * rejected may never have passed that gate. Scan the parsed report, which holds
  * all agent-written presentation content, for the values the verifier refuses,
- * including those its task names as credentials, and keep it unavailable on a
- * hit rather than rewrite agent content. JSON escapes a quote, a backslash and
- * a control character, so the decoded strings are scanned beside the JSON text.
- * They are joined by NUL, which no pattern treats as a word gap, so words that
- * end one field and start the next never read as one phrase.
+ * and keep it unavailable on a hit rather than rewrite agent content. JSON
+ * escapes a quote, a backslash and a control character, so the decoded strings
+ * are scanned beside the JSON text. They are joined by NUL, which no pattern
+ * treats as a word gap, so words that end one field and start the next never
+ * read as one phrase.
  */
-function assertRejectedReportHasNoSecrets(
-  outputPath: string,
-  report: unknown,
-  execution: SmithersTaskManifestExecution | undefined
-): void {
+function assertRejectedReportHasNoSecrets(outputPath: string, report: unknown): void {
   const strings: string[] = [];
   const json = JSON.stringify(report, (_key, value: unknown) => {
     if (typeof value === "string") strings.push(value);
@@ -295,10 +289,7 @@ function assertRejectedReportHasNoSecrets(
         [outputPath, Buffer.from(json, "utf8")],
         [`${outputPath} strings`, Buffer.from(strings.join("\0"), "utf8")]
       ]),
-      sensitiveEnvironmentValues(process.env, [
-        ...(execution?.agentCredentialEnv ?? []),
-        ...(execution?.modal?.credentialEnv ?? [])
-      ])
+      sensitiveEnvironmentValues(process.env)
     );
   } catch {
     throw new ReportUnavailableError("the rejected report-agent JSON did not pass the artifact secret gate");
@@ -311,15 +302,13 @@ function currentReportAttempt(
   nodes: JsonRecord,
   runId: unknown,
   manifestBytes: Buffer | undefined
-): { id: string; rejected: boolean; execution: SmithersTaskManifestExecution | undefined } {
-  let tasks: SmithersTaskManifestTask[] = [];
+): { id: string; rejected: boolean } {
   let attempts = [producerId];
   if (manifestBytes !== undefined) {
     try {
       const manifest = parseSmithersTaskManifestBytes(manifestBytes);
       if (manifest.run_id !== runId) throw new Error("task manifest belongs to another run");
-      tasks = manifest.tasks.filter((task) => task.concreteNodeId === producerId);
-      attempts = tasks.map((task) => task.attemptId);
+      attempts = manifest.tasks.filter((task) => task.concreteNodeId === producerId).map((task) => task.attemptId);
     } catch {
       throw new ReportUnavailableError("the current report-agent attempt cannot be identified from the task manifest");
     }
@@ -329,9 +318,7 @@ function currentReportAttempt(
   const attempt = candidates[0];
   if (candidates.length !== 1 || attempt === undefined)
     throw new ReportUnavailableError("no unique successful report-agent attempt is recorded");
-  // Without a readable manifest no explicit names are known; local tasks never carry any.
-  const execution = tasks.find((task) => task.attemptId === attempt)?.execution;
-  return { id: attempt, rejected: successful.length === 0, execution };
+  return { id: attempt, rejected: successful.length === 0 };
 }
 
 /**

@@ -197,8 +197,8 @@ Node statuses are:
 Synchronization records a node as `timed-out` from Smithers' typed deadline
 codes (`TASK_TIMEOUT`, `TASK_HEARTBEAT_TIMEOUT`, `PROCESS_TIMEOUT`,
 `PROCESS_IDLE_TIMEOUT`) and heartbeat-timeout events, not from error text: a
-failure whose message mentions a timeout, or a deadline reported only as text
-such as a Modal cloud-node deadline, is `failed`.
+failure whose message mentions a timeout, or a deadline reported only as text,
+is `failed`.
 
 Every nonterminal node records `wait_since`, a typed `wait_reason`, and a typed
 `next_eligible_action`. Wait reasons distinguish ready work, capacity and

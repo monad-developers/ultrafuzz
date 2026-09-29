@@ -1814,7 +1814,6 @@ function workflowSnapshotEnvironment(
   let env: Record<string, string> = {
     ULTRAFUZZ_ARTIFACTS_MODULE: moduleUrl("artifacts"),
     ULTRAFUZZ_RUNTIME_MODULE: moduleUrl("runtime"),
-    ...(moduleUrl("modal") === "" ? {} : { ULTRAFUZZ_MODAL_MODULE: moduleUrl("modal") }),
     ULTRAFUZZ_CONFIG_PATH: configPath,
     ULTRAFUZZ_DATA_GOVERNANCE_PATH: governancePath,
     ULTRAFUZZ_BUN_MODULE_CONFINEMENT: path.join(snapshotRoot, ...BUN_MODULE_CONFINEMENT_PATH.split("/")),

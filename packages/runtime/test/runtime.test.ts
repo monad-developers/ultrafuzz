@@ -55,7 +55,6 @@ import {
   SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
 import {
-  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
   loadAuditProfileCatalog,
   parseProjectConfigToml,
   parseResolvedConfigJsonBytes,
@@ -2918,14 +2917,10 @@ async function compileInvariantCampaignBudgetFixture(input: {
   smokeTimeoutSeconds: number;
   fuzzerTimeoutSeconds: number;
   runId: string;
-  cloud?: { globalTimeoutSeconds?: number; nodeTimeoutSeconds?: number };
 }) {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  if (input.cloud !== undefined) {
-    fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
-  }
   const plan = await planRun({ projectRoot: project, runId: input.runId, env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const node = plan.value!.expanded_graph.nodes.find((candidate) => candidate.id === "project-discovery");
@@ -2948,24 +2943,6 @@ async function compileInvariantCampaignBudgetFixture(input: {
   });
   plan.value!.resolved_config.invariants.invariantTestingSmokeTimeoutSeconds = input.smokeTimeoutSeconds;
   plan.value!.resolved_config.invariants.invariantTestingFuzzerTimeoutSeconds = input.fuzzerTimeoutSeconds;
-  if (input.cloud !== undefined) {
-    const execution = plan.value?.resolved_config.execution;
-    if (execution === undefined) throw new Error("missing cloud fixture config");
-    execution.mode = "cloud";
-    execution.provider = "modal";
-    execution.providers.modal = {
-      app: "offline-campaign-budget-test",
-      image: "offline-test-image",
-      credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-    };
-    if (input.cloud.globalTimeoutSeconds !== undefined) {
-      execution.resources.timeoutSeconds = input.cloud.globalTimeoutSeconds;
-      execution.resourceTimeoutOrigin = "project-config";
-    }
-    if (input.cloud.nodeTimeoutSeconds !== undefined) {
-      execution.nodes[input.logicalNodeId] = { resources: { timeoutSeconds: input.cloud.nodeTimeoutSeconds } };
-    }
-  }
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   return compileSmithersWorkflow({
     projectRoot: project,
@@ -11175,7 +11152,7 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
     { attemptId: "direct-strategy", verifierId: "verify:direct-strategy", optional: false },
     { attemptId: "optional-specialist", verifierId: "verify:optional-specialist", optional: true }
   ]);
-  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
+  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
 });
 
 test("current-controller rendering preserves prompts idempotently and continue policy for a leaf task", async () => {
@@ -11435,261 +11412,6 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
     }
   ];
   assert.throws(() => compileSmithersWorkflow(compileInput), /invalid prompt artifact authority path selector group/u);
-});
-
-test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
-  const project = tempProject();
-  writeFanoutProject(project);
-  fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
-  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
-  fs.writeFileSync(
-    topologyPath,
-    fs.readFileSync(topologyPath, "utf8").replace(
-      `  - id: __finish__
-    kind: meta
-    role: finish
-    depends_on:
-      - signal-analysis
-`,
-      `  - id: cloud-consumer
-    kind: agentic
-    prompt: setup/project-discovery.md
-    depends_on:
-      - signal-analysis
-    outputs:
-      - path: setup/project-discovery.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@2
-  - id: __finish__
-    kind: meta
-    role: finish
-    depends_on:
-      - cloud-consumer
-`
-    ),
-    "utf8"
-  );
-  const promptMarker = "CLOUD_PROMPT_ONLY_PRIVATE_MARKER";
-  fs.appendFileSync(
-    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
-    `\n${promptMarker}\n`,
-    "utf8"
-  );
-
-  const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  plan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: {
-      cpu: 4,
-      memoryMiB: 8192,
-      timeoutSeconds: 7200
-    },
-    nodes: {
-      "project-discovery": {
-        resources: {
-          cpu: 8,
-          memoryMiB: 16384
-        }
-      }
-    },
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-      }
-    }
-  };
-  const { assertCurrentCloudAgentCredentialEnvironment, compileSmithersWorkflow } = await import("../src/smithers.js");
-  const cloudEnv = {
-    ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
-      "claude_code_use_bedrock,AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_SHARED_TOKEN,MAINNET_RPC_URL,PRIVATE_RPC_URL",
-    CLAUDE_CODE_USE_BEDROCK: "1",
-    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF", // gitleaks:allow -- fake credential fixture for the redaction tests
-    AWS_REGION: "us-east-1",
-    AWS_SESSION_TOKEN: "secret",
-    aws_case_token: "case-variant-claude-token",
-    CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
-    MAINNET_RPC_URL: "https://rpc.invalid",
-    PRIVATE_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`
-  };
-  const compiled = compileSmithersWorkflow({
-    projectRoot: project,
-    config: plan.value!.resolved_config,
-    env: cloudEnv,
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
-    workflowName: "ultrafuzz-cloud-nodes",
-    renderedPrompts: plan.value!.rendered_prompts
-  });
-
-  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
-  assert.ok(discovery);
-  assert.equal(discovery.retries, 0);
-  assert.deepEqual(discovery.execution.resources, {
-    cpu: 8,
-    memoryMiB: 16384,
-    timeoutSeconds: 7200
-  });
-  assert.deepEqual(discovery.execution.agentCredentialEnv, [
-    "AWS_REGION",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "MAINNET_RPC_URL",
-    "OPENAI_API_KEY",
-    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
-  ]);
-  assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_REGION",
-    "AWS_SESSION_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "MAINNET_RPC_URL",
-    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
-    "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
-    "aws_case_token"
-  ]);
-  assert.doesNotThrow(() =>
-    assertCurrentCloudAgentCredentialEnvironment(
-      plan.value!.resolved_config,
-      compiled.tasks,
-      Object.fromEntries(Object.entries(cloudEnv).reverse())
-    )
-  );
-  assert.throws(
-    () =>
-      assertCurrentCloudAgentCredentialEnvironment(plan.value!.resolved_config, compiled.tasks, {
-        ...cloudEnv,
-        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`
-      }),
-    /cloud agent credential classification changed after workflow compilation/u
-  );
-  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  assert.match(workflowSource, /<Sandbox/);
-  assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
-  assert.match(
-    workflowSource,
-    /timeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
-  );
-  assert.match(
-    workflowSource,
-    /heartbeatTimeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
-  );
-  assert.match(workflowSource, /timeout_seconds: task\.execution\.resources\.timeoutSeconds/u);
-  assert.match(workflowSource, /timeoutMs=\{task\.timeoutMs\}/u);
-  assert.match(
-    workflowSource,
-    /<Task[\s\S]*?agent=\{skipAgent \? undefined : agentForTask\(task, fullTaskPrompt\)\}[\s\S]*?retries=\{task\.retries\}/u
-  );
-  assert.match(workflowSource, /createModalNodeSandboxProvider/);
-  assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v2"/);
-  assert.match(workflowSource, /run_id: "cloud-nodes"/u);
-  assert.doesNotMatch(workflowSource, /run_id: cloud-nodes/u);
-  assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
-  assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
-  assert.match(workflowSource, /"prompt": ""/u);
-  assert.doesNotMatch(workflowSource, new RegExp(promptMarker, "u"));
-  assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
-  assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
-  assert.match(workflowSource, /"dependencyArtifactDirs": \[/u);
-  const fanIn = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "signal-analysis");
-  assert.equal(fanIn?.dependencyArtifactDirs.length, 2);
-  assert.ok(
-    fanIn?.dependencyArtifactDirs.every((directory) =>
-      directory.startsWith(path.join(project, ".ultrafuzz", "runs", "cloud-nodes", "artifacts"))
-    )
-  );
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    dependencyVerificationProducers: Array<{
-      attemptId: string;
-      verifierId: string;
-      optional: boolean;
-    }>;
-  }>;
-  const consumer = specs.find((task) => task.attemptId === "cloud-consumer");
-  assert.deepEqual(consumer?.dependencyVerificationProducers, [
-    {
-      attemptId: "project-discovery__model_0__attempt_0",
-      verifierId: "verify:project-discovery__model_0__attempt_0",
-      optional: false
-    },
-    {
-      attemptId: "project-discovery__model_1__attempt_1",
-      verifierId: "verify:project-discovery__model_1__attempt_1",
-      optional: false
-    },
-    {
-      attemptId: "signal-analysis__model_0__attempt_0",
-      verifierId: "verify:signal-analysis__model_0__attempt_0",
-      optional: false
-    },
-    {
-      attemptId: "signal-analysis__model_1__attempt_1",
-      verifierId: "verify:signal-analysis__model_1__attempt_1",
-      optional: false
-    }
-  ]);
-  assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
-  assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
-});
-
-test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fallback credentials", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs
-      .readFileSync(configPath, "utf8")
-      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")
-      .replace(
-        '[agents.KimiAgent]\nauth = "subscription"',
-        '[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"'
-      ),
-    "utf8"
-  );
-
-  const plan = await planRun({ projectRoot: project, runId: "cloud-kimi-nodes", agent: "KimiAgent", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  plan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 7200 },
-    nodes: {},
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-      }
-    }
-  };
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
-  const compiled = compileSmithersWorkflow({
-    projectRoot: project,
-    config: plan.value!.resolved_config,
-    env: { KIMI_BASE_URL: "https://kimi.example.invalid/v1" },
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
-    workflowName: "ultrafuzz-cloud-kimi-nodes",
-    renderedPrompts: plan.value!.rendered_prompts
-  });
-
-  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
-  assert.ok(discovery);
-  assert.equal(discovery.agentRef, "KimiAgent");
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "KIMI_BASE_URL", "MOONSHOT_API_KEY"]);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -12137,52 +11859,6 @@ test("four-hour invariant campaign reserves smoke, shutdown and finalization out
   );
 });
 
-test("cloud campaign inherits its full task envelope and preserves explicit global and node caps", async () => {
-  const fixture = {
-    logicalNodeId: "stateful-invariant-campaign",
-    nodeTimeoutSeconds: 16200,
-    smokeTimeoutSeconds: 600,
-    fuzzerTimeoutSeconds: 14400
-  };
-  const compiled = await compileInvariantCampaignBudgetFixture({
-    ...fixture,
-    runId: "cloud-campaign-inherited",
-    cloud: {}
-  });
-  const campaign = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === fixture.logicalNodeId);
-  assert.equal(campaign?.execution.resources.timeoutSeconds, 16200);
-  assert.equal((campaign?.execution.resources.timeoutSeconds ?? 0) + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS, 18000);
-  for (const [label, cloud, setting] of [
-    ["global", { globalTimeoutSeconds: 15000 }, /execution\.resources\.timeout_seconds/u],
-    [
-      "node",
-      { globalTimeoutSeconds: 18000, nodeTimeoutSeconds: 15000 },
-      /execution\.nodes\.stateful-invariant-campaign\.resources\.timeout_seconds/u
-    ]
-  ] as const) {
-    await assert.rejects(
-      compileInvariantCampaignBudgetFixture({ ...fixture, runId: `cloud-campaign-${label}-too-short`, cloud }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED/u);
-        assert.match(error.message, /15000s.*16200s/u);
-        assert.match(error.message, setting);
-        return true;
-      }
-    );
-  }
-  const explicit = await compileInvariantCampaignBudgetFixture({
-    ...fixture,
-    runId: "cloud-campaign-explicit-node",
-    cloud: { globalTimeoutSeconds: 15000, nodeTimeoutSeconds: 17000 }
-  });
-  assert.equal(
-    explicit.tasks.find((task) => task.metadata.node.logicalNodeId === fixture.logicalNodeId)?.execution.resources
-      .timeoutSeconds,
-    17000
-  );
-});
-
 test("invariant campaign budget honors an explicit larger node timeout", async () => {
   const compiled = await compileInvariantCampaignBudgetFixture({
     logicalNodeId: "stateful-invariant-campaign",
@@ -12419,7 +12095,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   );
   const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
   assert.match(workflowSource, /smthrs/);
-  for (const moduleName of ["artifacts", "runtime", "modal"] as const) {
+  for (const moduleName of ["artifacts", "runtime"] as const) {
     const sealedRelativeEntry = `../../modules/@ultrafuzz/${moduleName}/dist/index.js`;
     assert.equal(
       workflowSource.includes(`new URL(${JSON.stringify(sealedRelativeEntry)}, import.meta.url).href`),
@@ -12431,16 +12107,14 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
       false,
       `${moduleName} fallback must not capture the operator checkout`
     );
-    if (moduleName !== "modal") {
-      const sealedWorkflowUrl = pathToFileURL(
-        path.join(localExecutionSnapshot, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")
-      );
-      assert.equal(
-        fs.statSync(fileURLToPath(new URL(sealedRelativeEntry, sealedWorkflowUrl))).isFile(),
-        true,
-        `${moduleName} fallback must identify a sealed snapshot module`
-      );
-    }
+    const sealedWorkflowUrl = pathToFileURL(
+      path.join(localExecutionSnapshot, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")
+    );
+    assert.equal(
+      fs.statSync(fileURLToPath(new URL(sealedRelativeEntry, sealedWorkflowUrl))).isFile(),
+      true,
+      `${moduleName} fallback must identify a sealed snapshot module`
+    );
   }
   assert.match(workflowSource, /const agentProcessOutput = z\.strictObject\(\{[\s\S]*?completed: z\.literal\(true\)/u);
   assert.doesNotMatch(workflowSource, /const taskOutput|summary: z\.string\(\)\.min\(1\)/u);
@@ -25342,11 +25016,6 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   });
   assert.equal(resetResumed.ok, true, JSON.stringify(resetResumed.diagnostics));
   assert.equal(resetResumed.value?.submitted, true);
-  const cloudGeneration = JSON.parse(
-    fs.readFileSync(path.join(run.value!.run_root, "smithers", "cloud-execution-generation.json"), "utf8")
-  ) as { generation?: string; reset_node?: string };
-  assert.match(cloudGeneration.generation ?? "", /^[0-9a-f-]{36}$/u);
-  assert.equal(cloudGeneration.reset_node, "node:project-discovery");
 
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
@@ -25723,7 +25392,7 @@ test("planning errors that need no run directory leave none behind", async () =>
   assert.equal(fs.existsSync(path.join(graphProject, ".ultrafuzz", "runs", "no-vulnerability-database")), false);
 
   // An operator setup error: a pinned reference whose cache was never synced. It is reported before
-  // provider preflight, which can create a cloud app.
+  // provider preflight.
   const cacheProject = tempProject();
   assert.equal(initProject({ projectRoot: cacheProject, force: true }).ok, true);
   writeReferenceTopology(cacheProject);

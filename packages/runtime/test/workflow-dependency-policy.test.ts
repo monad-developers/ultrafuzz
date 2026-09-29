@@ -30,7 +30,7 @@ function dependencyStateHelpers(): {
 } {
   const source = workflowTemplateSource();
   const start = source.indexOf("type WorkflowTaskStateContext =");
-  const end = source.indexOf("type DependencyVerificationProducer =", start);
+  const end = source.indexOf("const agentPromptTemplate =", start);
   assert.ok(start >= 0 && end > start);
   const emitted = ts.transpileModule(source.slice(start, end), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }

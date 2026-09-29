@@ -73,8 +73,8 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
     applyRuntimeOverrides(config, input.runtimeOverrides, diagnostics);
   }
 
-  // Preserve whether the global cloud timeout was deliberately set. A default
-  // allocation can follow a longer task; an explicit allocation is a cap.
+  // Record whether execution.resources.timeout_seconds was set explicitly, so
+  // the serialized resolved config leaves an inherited default out.
   config.execution.resourceTimeoutOrigin =
     input.runtimeOverrides?.execution?.resources?.timeoutSeconds !== undefined
       ? "runtime-override"

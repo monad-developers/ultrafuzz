@@ -555,7 +555,6 @@ test("pinned local compilation carries the exact manifest through sealed executi
   writeSmallTopology(fixture.source);
   const plan = await planRun({ projectRoot: fixture.source, runId: "pinned-closure", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  delete plan.value!.resolved_config.execution.providers.modal;
   const compiled = compileSmithersWorkflow({
     projectRoot: fixture.source,
     config: plan.value!.resolved_config,
