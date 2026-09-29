@@ -23569,7 +23569,7 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
   );
 });
 
-test("syncRun keeps an immutable output-validation failure when its successful occurrence is superseded", async () => {
+test("syncRun judges a replacement that started after a sealed output-validation failure on its own output", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -23693,8 +23693,17 @@ test("syncRun keeps an immutable output-validation failure when its successful o
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
   assert.equal(fs.existsSync(path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json")), false);
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node node:project-discovery /mu);
-  // The replacement executor finished but the host rejected its output, and the
-  // sealed disposition carries no finalization diagnostic to classify it by.
+  // The replacement started after the sealed verdict, so the host judges its
+  // output, rejects it again, and seals the node at the replacement verifier's
+  // finish.
+  const node = readRunState(layout).nodes["project-discovery"];
+  assert.equal(node?.finished_at, new Date(base + 900).toISOString());
+  assert.equal(
+    (node?.provenance as { terminal_disposition?: { kind: string } } | undefined)?.terminal_disposition?.kind,
+    "task-output-validation-failure"
+  );
+  // Its finished executor is recorded as rejected, with no findings-validation
+  // diagnostic to classify it as invalid output.
   const entries = fs
     .readFileSync(layout.attemptLedgerPath, "utf8")
     .trim()
