@@ -437,51 +437,39 @@ test("a malformed present document fails differently from a genuinely missing do
   assert.throws(() => readRunMetadataDocument(missingPath), /cannot open regular file/u);
 });
 
-/**
- * The race is run repeatedly on purpose.
- *
- * A rename over the path leaves the open descriptor on the original inode, so dev, ino and size are
- * all unchanged and the only evidence besides the link count is the ctime bump from the unlink --
- * which the kernel records at timestamp granularity, not instruction granularity. Open, read, rename
- * and fstat routinely complete inside a single tick, and a single attempt then proves nothing: before
- * the link count was compared, one attempt passed roughly a fifth of the time on a fast disk purely
- * by losing the race. Every attempt in the loop must be caught, which no longer depends on the clock.
- */
-const ATOMIC_REPLACEMENT_ATTEMPTS = 24;
-
-test("a runtime document read rejects an atomic path replacement during its snapshot", (t) => {
+test("a runtime document read ignores a hard link or an atomic replacement made during its snapshot", (t) => {
   const root = temporaryDirectory();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, "source-run.json");
+  const replacementPath = path.join(root, "replacement.json");
   const original = canonicalSourceRun();
   const replacement = canonicalSourceRun({ run_id: "run-replacement" });
+  writeSourceRunDocument(sourcePath, original);
+  writeSourceRunDocument(replacementPath, replacement);
+  assert.deepEqual(readSourceRunDocument(sourcePath, original.run_id), original);
 
   const originalReadSync = fs.readSync;
-  let sourcePath = "";
-  let pendingReplacement: string | undefined;
+  let midRead: (() => void) | undefined;
   t.mock.method(fs, "readSync", ((...args: unknown[]) => {
     const bytesRead = Reflect.apply(originalReadSync, fs, args) as number;
-    if (pendingReplacement !== undefined && bytesRead > 0) {
-      const replacementPath = pendingReplacement;
-      pendingReplacement = undefined;
-      fs.renameSync(replacementPath, sourcePath);
-    }
+    const action = midRead;
+    midRead = undefined;
+    action?.();
     return bytesRead;
   }) as typeof fs.readSync);
 
-  for (let attempt = 0; attempt < ATOMIC_REPLACEMENT_ATTEMPTS; attempt += 1) {
-    sourcePath = path.join(root, `source-run-${attempt}.json`);
-    const replacementPath = path.join(root, `replacement-${attempt}.json`);
-    writeSourceRunDocument(sourcePath, original);
-    writeSourceRunDocument(replacementPath, replacement);
-    pendingReplacement = replacementPath;
-    assert.throws(
-      () => readSourceRunDocument(sourcePath, original.run_id),
-      /file changed while it was read/u,
-      `attempt ${attempt}`
-    );
-    assert.equal(pendingReplacement, undefined, `attempt ${attempt} must have replaced the path mid-read`);
-    assert.deepEqual(readSourceRunDocument(sourcePath, replacement.run_id), replacement, `attempt ${attempt}`);
-  }
+  // pnpm links one store inode into every node_modules that installs the package, so an install
+  // anywhere on the host changes the link count and ctime of a file while it is read.
+  midRead = () => fs.linkSync(sourcePath, path.join(root, "linked-elsewhere.json"));
+  assert.deepEqual(readSourceRunDocument(sourcePath, original.run_id), original);
+  assert.equal(fs.statSync(sourcePath).nlink, 2);
+
+  // Writers publish whole documents by rename, which leaves the open descriptor on the complete
+  // original: the read returns the document as it was when it was opened.
+  midRead = () => fs.renameSync(replacementPath, sourcePath);
+  assert.deepEqual(readSourceRunDocument(sourcePath, original.run_id), original);
+  assert.equal(midRead, undefined);
+  assert.deepEqual(readSourceRunDocument(sourcePath, replacement.run_id), replacement);
 });
 
 test("runtime document reads detect same-file mutation and refuse symlinks", (t) => {

@@ -12643,14 +12643,21 @@ test("listRuns requires the exact current Smithers ps envelope and row shape", a
 /**
  * Replaces a live run document by atomic rename at the one moment the strict reader is exposed to it:
  * after the reader has consumed the bytes and before its second fstat, from inside the reading
- * process. The rename is real and so is the reader's verdict; only the timing is controlled, which
- * turns the race issue #1054 describes from a matter of chance into a deterministic reproduction.
+ * process. With `append`, a byte is written to the document in place instead, and its length is
+ * restored once the reader closes it. The change is real and so is the reader's verdict; only the
+ * timing is controlled, which turns the race issue #1054 describes from a matter of chance into a
+ * deterministic reproduction.
  * `node:fs`'s default export is the shared CommonJS module object, so the reader observes the wrapped
  * calls. A read is armed only while replacements remain and, when `onlyWhen` is given, only when the
  * reader's synchronous call stack satisfies it.
  */
 async function observeWhileReplacingRunDocument<T>(
-  input: { documentPath: string; replacements: number; onlyWhen?: (synchronousFrames: string[]) => boolean },
+  input: {
+    documentPath: string;
+    replacements: number;
+    append?: true;
+    onlyWhen?: (synchronousFrames: string[]) => boolean;
+  },
   observe: () => Promise<T>
 ): Promise<{ value: T; replaced: number }> {
   const bytes = fs.readFileSync(input.documentPath);
@@ -12658,6 +12665,7 @@ async function observeWhileReplacingRunDocument<T>(
   const originalReadSync = fs.readSync;
   const originalCloseSync = fs.closeSync;
   const armed = new Set<number>();
+  const appended = new Set<number>();
   let replaced = 0;
   fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
     const descriptor = originalOpenSync(...args);
@@ -12673,9 +12681,14 @@ async function observeWhileReplacingRunDocument<T>(
   fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
     const read = originalReadSync(...args);
     if (armed.delete(args[0])) {
-      const temporary = `${input.documentPath}.replacement-${String(replaced)}`;
-      fs.writeFileSync(temporary, bytes);
-      fs.renameSync(temporary, input.documentPath);
+      if (input.append === true) {
+        fs.appendFileSync(input.documentPath, "\n");
+        appended.add(args[0]);
+      } else {
+        const temporary = `${input.documentPath}.replacement-${String(replaced)}`;
+        fs.writeFileSync(temporary, bytes);
+        fs.renameSync(temporary, input.documentPath);
+      }
       replaced += 1;
     }
     return read;
@@ -12683,6 +12696,7 @@ async function observeWhileReplacingRunDocument<T>(
   fs.closeSync = ((descriptor: number) => {
     armed.delete(descriptor);
     originalCloseSync(descriptor);
+    if (appended.delete(descriptor)) fs.truncateSync(input.documentPath, bytes.byteLength);
   }) as typeof fs.closeSync;
   try {
     const value = await observe();
@@ -12705,7 +12719,7 @@ function synchronousStackFrames(): string[] {
   }
 }
 
-test("listRuns, observers and status re-read live run documents replaced while they were read", async () => {
+test("listRuns, observers and status survive live run documents replaced while they were read", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -12723,50 +12737,13 @@ test("listRuns, observers and status re-read live run documents replaced while t
   };
 
   // A live run's controller, and observe-only synchronization from a concurrent `status`, republish
-  // state.json and run.json by atomic rename. The strict reader detects a replacement it straddled
-  // and used to fail `ps` and `status` outright on it (issue #1054). Both documents are re-read.
-  const stateReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, listed);
-  assert.deepEqual(stateReplaced, { value: [[runId, "running"]], replaced: 1 });
-  const metadataReplaced = await observeWhileReplacingRunDocument(
-    { documentPath: metadataPath, replacements: 1 },
-    listed
-  );
-  assert.deepEqual(metadataReplaced, { value: [[runId, "running"]], replaced: 1 });
-  const twiceReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, listed);
-  assert.deepEqual(twiceReplaced, { value: [[runId, "running"]], replaced: 2 });
-
-  // The budget is bounded: a document that changes under three consecutive reads exhausts it, and the
-  // last race names the file. One run that cannot be read must not fail the whole listing (#1080), so
-  // `ps` still lists the run, as unreadable, and reports the exhausted race as the reason in a warning.
-  // The run reads normally again once its documents hold still.
-  const exhausted = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 3 }, () =>
-    listRuns({ projectRoot: project, env })
-  );
-  assert.equal(exhausted.value.ok, true, JSON.stringify(exhausted.value.diagnostics));
-  assert.equal(exhausted.replaced, 3);
-  const unreadable = exhausted.value.value?.product_runs.find((entry) => entry.run_id === runId);
-  assert.ok(unreadable, JSON.stringify(exhausted.value.value));
-  assert.equal(unreadable.status, "unreadable");
-  assert.equal(unreadable.run_root, run.value.run_root);
-  assert.deepEqual(unreadable.workflow_ids, []);
-  const unreadableWarnings = exhausted.value.diagnostics.filter(
-    (diagnostic) => diagnostic.code === "RUN_LIST_ENTRY_UNREADABLE"
-  );
-  assert.equal(unreadableWarnings.length, 1, JSON.stringify(exhausted.value.diagnostics));
-  assert.equal(unreadableWarnings[0]?.severity, "warning");
-  assert.equal(unreadableWarnings[0]?.path, run.value.run_root);
-  assert.ok(
-    unreadableWarnings[0]?.message.includes(
-      `run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}`
-    ),
-    unreadableWarnings[0]?.message
-  );
-  assert.equal(
-    exhausted.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
-    0,
-    JSON.stringify(exhausted.value.diagnostics)
-  );
-  assert.deepEqual(await listed(), [[runId, "running"]]);
+  // state.json and run.json by atomic rename. That used to fail `ps` and `status` outright (issue
+  // #1054). A read that straddles the rename keeps the complete document it opened, so `ps` reads
+  // each document once, even when every read of it is raced.
+  for (const documentPath of [statePath, metadataPath]) {
+    const replaced = await observeWhileReplacingRunDocument({ documentPath, replacements: 3 }, listed);
+    assert.deepEqual(replaced, { value: [[runId, "running"]], replaced: 1 }, documentPath);
+  }
 
   // An observer derives the evidence again when a live document was replaced under one of its strict
   // reads. The first such read is the completeness re-derivation inside the control snapshot
@@ -12836,25 +12813,27 @@ test("listRuns, observers and status re-read live run documents replaced while t
     JSON.stringify(healthAfterEvidenceRace.value.diagnostics)
   );
 
-  // Observe-only synchronization reads state.json itself, outside any retry of its own. `status`
-  // retries the whole synchronization within the same budget, and once that is spent it still reports
-  // the run and says its local state may be stale, instead of failing.
+  // Observe-only synchronization reads state.json itself, outside any retry of its own, and keeps the
+  // complete document it opened too: a replacement under each of those reads is not a race.
   const synchronizationOwnRead = (frames: string[]) =>
     frames.some((frame) => frame.includes("workflow-sync.js")) &&
     !frames.some((frame) => frame.includes("observation-snapshot.js"));
   const recovered = await observeWhileReplacingRunDocument(
-    { documentPath: statePath, replacements: 1, onlyWhen: synchronizationOwnRead },
+    { documentPath: statePath, replacements: 3, onlyWhen: synchronizationOwnRead },
     () => getRunHealth({ projectRoot: project, runId, env })
   );
   assert.equal(recovered.value.ok, true, JSON.stringify(recovered.value.diagnostics));
   assert.equal(recovered.value.value?.run_id, runId);
-  assert.equal(recovered.replaced, 1);
+  assert.equal(recovered.replaced, 3);
   assert.deepEqual(
     recovered.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED"),
     []
   );
+  // A write in place under one of those reads is still a race the strict reader rejects. `status`
+  // retries the whole synchronization within the same budget, and once that is spent it still reports
+  // the run and says its local state may be stale, instead of failing.
   const raced = await observeWhileReplacingRunDocument(
-    { documentPath: statePath, replacements: 3, onlyWhen: synchronizationOwnRead },
+    { documentPath: statePath, replacements: 3, append: true, onlyWhen: synchronizationOwnRead },
     () => getRunHealth({ projectRoot: project, runId, env })
   );
   assert.equal(raced.value.ok, true, JSON.stringify(raced.value.diagnostics));
@@ -12873,6 +12852,79 @@ test("listRuns, observers and status re-read live run documents replaced while t
     raced.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
     0,
     JSON.stringify(raced.value.diagnostics)
+  );
+});
+
+/**
+ * Launches a run and calls `touch` on an execution source each time the launch's stable read of it has
+ * consumed its bytes, before the read's closing stat -- exactly where another process on the host
+ * would interleave. The launch reads every source it seals by the same function, so one run-owned
+ * source stands in for the node_modules files pnpm hard-links from its shared store.
+ */
+async function launchWhileTouchingExecutionSource(
+  project: string,
+  runId: string,
+  touch: (sourcePath: string) => void
+): Promise<{ run: Awaited<ReturnType<typeof startRun>>; touched: number }> {
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const armed = new Map<number, string>();
+  let touched = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const descriptor = originalOpenSync(...args);
+    if (path.basename(String(args[0])) === "execution-tsconfig.json") armed.set(descriptor, String(args[0]));
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+    const read = originalReadSync(...args);
+    const sourcePath = armed.get(args[0]);
+    if (sourcePath !== undefined) {
+      armed.delete(args[0]);
+      touch(sourcePath);
+      touched += 1;
+    }
+    return read;
+  }) as typeof fs.readSync;
+  fs.closeSync = ((descriptor: number) => {
+    armed.delete(descriptor);
+    originalCloseSync(descriptor);
+  }) as typeof fs.closeSync;
+  try {
+    return { run: await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) }), touched };
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+}
+
+test("a hard link added to an execution source while the launch seals it does not fail the launch", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  // `pnpm install` anywhere on the host links the same store inodes into another node_modules: the
+  // link count and ctime change, and not one byte does. The launch used to fail on exactly that.
+  let links = 0;
+  const linked = await launchWhileTouchingExecutionSource(project, "hard-linked-source", (sourcePath) => {
+    links += 1;
+    const elsewhere = path.join(path.dirname(project), `${path.basename(project)}-pnpm-link-${String(links)}`);
+    registerTemporaryPath(elsewhere);
+    fs.linkSync(sourcePath, elsewhere);
+  });
+  assert.equal(linked.run.ok, true, JSON.stringify(linked.run.diagnostics));
+  assert.ok(linked.touched > 0, "the launch must have read the source while its link count changed");
+
+  // A real write still fails the launch rather than sealing a torn read.
+  const written = await launchWhileTouchingExecutionSource(project, "written-source", (sourcePath) => {
+    fs.appendFileSync(sourcePath, " ");
+  });
+  assert.equal(written.touched, 1);
+  assert.equal(written.run.ok, false);
+  assert.deepEqual(
+    written.run.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
+    [["WORKFLOW_SUBMISSION_FAILED", "workflow execution file tsconfig.json changed while reading"]]
   );
 });
 
