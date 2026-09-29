@@ -3,7 +3,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { EVENT_SCHEMA_VERSION, assertEventRecord, createNodeAttemptLedgerEntry } from "@ultrafuzz/artifacts";
+import {
+  EVENT_SCHEMA_VERSION,
+  assertEventRecord,
+  createNodeAttemptLedgerEntry,
+  readRunState
+} from "@ultrafuzz/artifacts";
 import { initProject } from "@ultrafuzz/runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -1341,6 +1346,48 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
     expect(watched.record.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
   });
+
+  it("records the terminal status another writer reached while the watch slept past its deadline", async () => {
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-final-sleep-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: currentRunState({
+        runId: "run-1",
+        status: "running",
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      })
+    });
+    // Compile the state validator first so the one poll starts well inside the 1 s deadline.
+    readRunState(path.join(runRoot, "state.json"));
+    const evalRunRoot = path.join(base, "eval-run");
+    let syncCalls = 0;
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
+      evalRunRoot,
+      sync: async () => {
+        syncCalls += 1;
+        // Another syncer (`ultrafuzz status`, the dashboard) finishes the run during the 1.5 s sleep.
+        setTimeout(() => terminalRunFixture(runRoot), 300);
+      },
+      pollIntervalMs: 1_500,
+      timeoutSeconds: 1
+    });
+
+    expect(syncCalls).toBe(1);
+    expect(watched.record).toMatchObject({
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true }
+    });
+    expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("EVAL_ROW_WATCH_TIMEOUT");
+  }, 20_000);
 
   it("coalesces and persists workflow synchronization failures", async () => {
     const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-sync-failure-"));

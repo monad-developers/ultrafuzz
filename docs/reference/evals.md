@@ -225,8 +225,11 @@ The eval driver owns the local loop and writes `matrix.json`, `runs.jsonl`,
 `ultrafuzz eval run` launches each row as a detached Ultrafuzz run. When it
 watches a row, it repeats three steps until the run's durable `state.json` is
 terminal or the watch deadline passes: synchronize the run, read `state.json`,
-and sleep for the poll interval. A failed synchronization is counted and
-recorded on the row as `EVAL_ROW_SYNC_FAILED`; it does not end the watch.
+and sleep for the poll interval. It reads `state.json` once more before
+recording the row, so a run that another command synchronized to a terminal
+state during the last sleep is not recorded as timed out. A failed
+synchronization is counted and recorded on the row as `EVAL_ROW_SYNC_FAILED`;
+it does not end the watch.
 There is no reporter or telemetry-export interface.
 
 ## Versioned lineage

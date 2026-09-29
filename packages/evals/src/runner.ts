@@ -617,6 +617,9 @@ export async function watchEvalRow(
     await sleep(pollIntervalMs);
   }
 
+  // Other syncers (`ultrafuzz status`, the dashboard) also write state.json; a
+  // run they finished during the final sleep is terminal, not timed out.
+  state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
   const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
   const syncFailureDiagnostic: RuntimeDiagnostic | undefined =
     syncFailureCount === 0
