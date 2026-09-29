@@ -14037,9 +14037,9 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId: "health-034-shapes", env });
+  const run = await startRun({ projectRoot: project, runId: "smithers-034-shapes", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const envelope = currentStatusEnvelope("ultrafuzz-health-034-shapes");
+  const envelope = currentStatusEnvelope("ultrafuzz-smithers-034-shapes");
   const base = envelope.data as Record<string, unknown>;
 
   for (const verdict of ["orphaned", "cancel-pending"] as const) {
@@ -14048,10 +14048,11 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
       data: {
         ...base,
         verdict,
-        // The orphaned reason is the pinned runner's own wording, remediation included.
+        // The orphaned reason is the pinned runner's own wording, remediation included. The run ID
+        // contains "smithers" so the recommended command is shown to keep a chosen ID intact.
         reason:
           verdict === "orphaned"
-            ? "engine heartbeat is stale and its process is gone (last heartbeat 2026-08-13T00:00:00.000Z); the run is orphaned — resume it with `smithers supervise -r ultrafuzz-health-034-shapes`"
+            ? "engine heartbeat is stale and its process is gone (last heartbeat 2026-08-13T00:00:00.000Z); the run is orphaned — resume it with `smithers supervise -r ultrafuzz-smithers-034-shapes`"
             : `run is ${verdict}`,
         liveness: {
           state: verdict,
@@ -14073,14 +14074,14 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
         oneshotControl: { kind: "steer", status: "agent-acked", messageId: "message-1", timestampMs: 2_002 }
       }
     });
-    const health = await getRunHealth({ projectRoot: project, runId: "health-034-shapes", env });
+    const health = await getRunHealth({ projectRoot: project, runId: "smithers-034-shapes", env });
     assert.equal(health.ok, true, `${verdict}: ${JSON.stringify(health.diagnostics)}`);
     assert.equal(health.value?.verdict, verdict);
     if (verdict === "orphaned") {
       // `workflow runner supervise -r ...` is not a command an operator can run; resume is.
       assert.match(
         health.value?.reason ?? "",
-        /the run is orphaned — resume it with `ultrafuzz resume health-034-shapes`$/u
+        /the run is orphaned — resume it with `ultrafuzz resume smithers-034-shapes`$/u
       );
     }
     assert.equal(health.value?.started_by?.session_id, "session-1");
@@ -14105,7 +14106,7 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
       liveness: { state: "waiting-quota" }
     }
   });
-  const quota = await getRunHealth({ projectRoot: project, runId: "health-034-shapes", env });
+  const quota = await getRunHealth({ projectRoot: project, runId: "smithers-034-shapes", env });
   assert.equal(quota.ok, true, JSON.stringify(quota.diagnostics));
   assert.equal(quota.value?.quota?.parked_count, 5);
   assert.equal(quota.value?.gating[0]?.state, "quota-parked");

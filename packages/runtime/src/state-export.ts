@@ -1181,11 +1181,13 @@ function parseRunHealthOneshotControl(value: unknown): RunHealthValue["oneshot_c
 
 function publicHealthReason(value: string, runId: string): string {
   // Point at the Ultrafuzz commands that wrap the runner's own: `ultrafuzz why` for its diagnosis and
-  // `ultrafuzz resume` to continue an orphaned run.
+  // `ultrafuzz resume` to continue an orphaned run. The run ID is joined in after the generic rename,
+  // which would otherwise rewrite an ID that contains "smithers".
   return value
     .replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`")
-    .replace(/`?smithers\s+supervise\s+-r\s+[^\s`;,]+`?/giu, `\`ultrafuzz resume ${runId}\``)
-    .replace(/smithers/giu, "workflow runner");
+    .split(/`?smithers\s+supervise\s+-r\s+[^\s`;,]+`?/giu)
+    .map((part) => part.replace(/smithers/giu, "workflow runner"))
+    .join(`\`ultrafuzz resume ${runId}\``);
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
