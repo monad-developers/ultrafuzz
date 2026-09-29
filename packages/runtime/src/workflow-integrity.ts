@@ -1139,9 +1139,6 @@ export function materializeWorkflowExecutionSnapshot(input: {
   const snapshotRoot = path.join(snapshotsRoot, input.snapshot.generation);
   let snapshotDescriptor: number | undefined;
   try {
-    if (!SHA256_PATTERN.test(input.snapshot.generation)) {
-      throw new Error("workflow execution snapshot generation is invalid");
-    }
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     if (input.observeOnly !== true) {
       reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);

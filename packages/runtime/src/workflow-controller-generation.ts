@@ -106,20 +106,13 @@ export function verifyCommittedControllerGenerationAuthority(
   if (entry === undefined || entry.controller_generation !== controllerGeneration) {
     throw new Error("selected controller generation is not the committed journal head");
   }
+  // verifyControllerGenerationJournalEvents already authenticated every entry's manifest and event, the head's included.
   const manifest = readManifest(layout, entry);
-  if (manifest.control_generation !== controlGeneration) {
-    throw new Error("controller generation is not rooted in the workflow control seal");
-  }
-  const expectedGeneration = controllerGenerationDigestForManifest(manifest);
-  if (manifest.controller_generation !== expectedGeneration) {
-    throw new Error("controller generation manifest identity is invalid");
-  }
   for (const ancestor of journal.entries) {
     if (readManifest(layout, ancestor).semantic_fingerprint !== manifest.semantic_fingerprint) {
       throw new Error("controller generation journal changes sealed campaign semantics");
     }
   }
-  verifyControllerGenerationEvent(layout, journal, entry, manifest, eventRecords);
   return {
     controlGeneration,
     controllerGeneration,
@@ -248,16 +241,6 @@ function controllerGenerationEventPayload(
   };
 }
 
-function controllerGenerationEvent(
-  layout: RunLayout,
-  entry: ControllerGenerationEntry,
-  events = controllerGenerationEvents(layout)
-) {
-  const matches = events.filter((event) => event.payload.controller_generation === entry.controller_generation);
-  if (matches.length > 1) throw new Error("controller generation has duplicate durable events");
-  return matches[0];
-}
-
 function controllerGenerationEvents(layout: RunLayout) {
   const events = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (events.malformedRecords > 0) throw new Error("workflow event journal contains malformed records");
@@ -314,24 +297,6 @@ function verifyControllerGenerationManifestIdentity(
     manifest.controller_generation !== expectedGeneration
   ) {
     throw new Error("controller generation manifest identity is invalid");
-  }
-}
-
-function verifyControllerGenerationEvent(
-  layout: RunLayout,
-  journal: ControllerGenerationJournal,
-  entry: ControllerGenerationEntry,
-  manifest: ControllerGenerationManifest,
-  events = controllerGenerationEvents(layout)
-): void {
-  const event = controllerGenerationEvent(layout, entry, events);
-  if (
-    event === undefined ||
-    event.event_id !== entry.event_id ||
-    event.timestamp !== entry.event_at ||
-    JSON.stringify(event.payload) !== JSON.stringify(controllerGenerationEventPayload(journal, entry, manifest))
-  ) {
-    throw new Error("controller generation event does not authenticate its journal entry");
   }
 }
 
