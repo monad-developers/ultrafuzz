@@ -342,6 +342,8 @@ interface AttemptWorkflowEvidence {
   taskId: string;
   /** The agent task's own attempt number; a verifier numbers its attempts independently. */
   agentAttempt?: number;
+  /** When the agent task's latest occurrence started, which is before its verifier starts. */
+  agentStartedAt?: string;
 }
 
 interface NodeFinalization {
@@ -2998,8 +3000,8 @@ async function synchronizeTasks(input: {
     }
     const evidence = attemptEvidence.evidence;
 
-    const previousIsImmutable = immutableTerminalFinalization(previous, evidence);
-    const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
+    const previousIsImmutable = immutableTerminalFinalization(previous, attemptEvidence);
+    const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence);
     const needsFinalization = !previousIsImmutable && terminalStatus(evidence.status) && evidenceSupersedesPrevious;
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
@@ -4452,7 +4454,10 @@ function completionEvidenceForTask(
   if (agentEvidence === undefined) {
     return undefined;
   }
-  const agentAttempt = agentEvidence.attempt === undefined ? {} : { agentAttempt: agentEvidence.attempt };
+  const agentAttempt = {
+    ...(agentEvidence.attempt === undefined ? {} : { agentAttempt: agentEvidence.attempt }),
+    ...(agentEvidence.startedAt === undefined ? {} : { agentStartedAt: agentEvidence.startedAt })
+  };
   if (agentEvidence.status !== "succeeded") {
     return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId, ...agentAttempt };
   }
@@ -4770,12 +4775,15 @@ function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
 }
 
-function immutableTerminalFinalization(previous: NodeState | undefined, evidence: NodeWorkflowEvidence): boolean {
+function immutableTerminalFinalization(
+  previous: NodeState | undefined,
+  attemptEvidence: AttemptWorkflowEvidence
+): boolean {
   if (previous === undefined || !terminalStatus(previous.status)) return false;
   if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
   // An invalid-output verdict seals the occurrence it judged, not the task: a
   // rerun by `resume --retry-failed` or `--reset-node` is judged on its output.
-  if (startedAfterRecordedOccurrence(previous, evidence)) return false;
+  if (startedAfterRecordedOccurrence(previous, attemptEvidence)) return false;
   const disposition = recordField(previous.provenance, "terminal_disposition");
   if (disposition === undefined) return false;
   try {
@@ -4788,24 +4796,30 @@ function immutableTerminalFinalization(previous: NodeState | undefined, evidence
 /**
  * Whether the evidence comes from a Smithers occurrence that started after the
  * recorded one. A reset reruns a task from attempt 1, so the attempt number
- * cannot tell the rerun from the recorded occurrence, but its start can. The
- * recorded occurrence's own later terminal events keep its start: a trailing
- * `NodeCancelled`, or a run cancellation that Smithers stamped before that
- * start, which is why the bound includes the recorded start.
+ * cannot tell the rerun from the recorded occurrence, but its start can. A
+ * rerun's agent task starts while its verifier still reads `pending`, so either
+ * task's start counts. The recorded occurrence's own later terminal events keep
+ * its start: a trailing `NodeCancelled`, or a run cancellation that Smithers
+ * stamped before that start, which is why the bound includes the recorded start.
  */
-function startedAfterRecordedOccurrence(previous: NodeState | undefined, evidence: NodeWorkflowEvidence): boolean {
-  if (previous?.finished_at === undefined || evidence.startedAt === undefined) return false;
+function startedAfterRecordedOccurrence(
+  previous: NodeState | undefined,
+  attemptEvidence: AttemptWorkflowEvidence
+): boolean {
+  if (previous?.finished_at === undefined) return false;
   const recorded = Math.max(Date.parse(previous.finished_at), Date.parse(previous.started_at ?? previous.finished_at));
-  return Date.parse(evidence.startedAt) > recorded;
+  return [attemptEvidence.evidence.startedAt, attemptEvidence.agentStartedAt].some(
+    (startedAt) => startedAt !== undefined && Date.parse(startedAt) > recorded
+  );
 }
 
 function workflowEvidenceSupersedesPrevious(
   previous: NodeState | undefined,
-  taskId: string,
-  evidence: NodeWorkflowEvidence
+  attemptEvidence: AttemptWorkflowEvidence
 ): boolean {
+  const { evidence, taskId } = attemptEvidence;
   if (previous === undefined || previous.status !== evidence.status) return true;
-  if (startedAfterRecordedOccurrence(previous, evidence)) return true;
+  if (startedAfterRecordedOccurrence(previous, attemptEvidence)) return true;
   const workflow = recordField(previous.provenance, "workflow");
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
 }

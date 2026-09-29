@@ -27451,21 +27451,22 @@ test("resume --retry-failed recovers a node whose verifier rejected its output",
     history.push(
       { type: "RunStarted" },
       { type: "NodeStarted", nodeId, attempt: 1 },
-      { type: "NodeFinished", nodeId, attempt: 1 },
-      { type: "NodeStarted", nodeId: verifierId, attempt: 1 }
+      { type: "NodeFinished", nodeId, attempt: 1 }
     );
   const verify = (rejection?: string) =>
     history.push(
+      { type: "NodeStarted", nodeId: verifierId, attempt: 1 },
       rejection === undefined
         ? { type: "NodeFinished", nodeId: verifierId, attempt: 1 }
         : { type: "NodeFailed", nodeId: verifierId, attempt: 1, error: { message: rejection } },
       { type: rejection === undefined ? "RunFinished" : "RunFailed" }
     );
-  const smithers = (verifier: "in-progress" | "failed" | "finished") =>
+  // A reset leaves the verifier `pending` until it starts again, after its producer.
+  const smithers = (verifier: "pending" | "failed" | "finished") =>
     fakeLifecycleSmithersEnv(project, {
       inspect: workflowInspect({
         workflowRunId,
-        ...(verifier === "in-progress" ? { status: "running" as const } : {}),
+        ...(verifier === "pending" ? { status: "running" as const } : {}),
         ...(verifier === "failed" ? { status: "failed" as const, state: "failed" as const } : {}),
         steps: [
           { id: nodeId, state: "finished", attempt: 1 },
@@ -27526,12 +27527,14 @@ test("resume --retry-failed recovers a node whose verifier rejected its output",
   assert.equal(node()?.last_error, "artifact-contract failure: findings.json is still missing");
   assert.equal(disposition(), "task-output-validation-failure");
 
+  // The seal lifts when the rerun's producer starts: a sync before its
+  // verifier starts neither shows the old verdict nor records the producer's
+  // attempt with it.
   await retryFailed();
   produce();
-  env = smithers("in-progress");
+  env = smithers("pending");
   assert.equal(await sync(), "running");
-  assert.equal(node()?.status, "running");
-  // The rerun's producer is recorded with the rerun's verdict, not the old one.
+  assert.equal(node()?.status, "pending");
   assert.equal(attemptLedgerRows(runRoot).length, 2);
   writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
   verify();
