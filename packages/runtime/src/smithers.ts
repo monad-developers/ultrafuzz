@@ -5980,17 +5980,28 @@ export function parseCurrentSmithersInspect(
 
 // A run-level failure (for example a render exception) names no task, so the
 // run row's error is the only record of why the run stopped. Read it loosely:
-// it explains a stop and never gates one, so an unexpected shape yields nothing.
+// an unexpected shape yields nothing and never fails the parse.
 function currentSmithersRunError(value: unknown): CurrentSmithersInspect["runError"] {
   if (!isObjectRecord(value)) return undefined;
-  // The runner records the thrown error as `cause` under its own summary.
+  const nonBlank = (field: unknown): field is string => typeof field === "string" && field.trim() !== "";
+  // The runner records what was thrown as `cause`. Its `summary` is its own
+  // message before it appends a docs link and raw runner resume commands.
   const cause = isObjectRecord(value.cause) ? value.cause.message : undefined;
-  const message = [cause, value.message].find((text): text is string => typeof text === "string" && text.trim() !== "");
+  const message = [cause, value.summary, value.message].find(nonBlank);
   if (message === undefined) return undefined;
   return {
-    ...(typeof value.code === "string" ? { code: value.code } : {}),
-    message: scrubWorkflowRunnerText(redactSecretsInText(message)).slice(0, 1_000)
+    ...(nonBlank(value.code) ? { code: runErrorText(value.code, 100) } : {}),
+    message: runErrorText(message, 1_000)
   };
+}
+
+// Redacted and scrubbed like other runner text, since it is printed. The runner
+// stores error text untruncated and redaction cost grows with the square of one
+// long token, so only a prefix is redacted. For the message, eight times the
+// kept length still holds a whole PEM private key (3,300 characters at RSA-4096)
+// that starts in the kept text, so it is redacted as one block.
+function runErrorText(value: string, limit: number): string {
+  return scrubWorkflowRunnerText(redactSecretsInText(value.slice(0, limit * 8))).slice(0, limit);
 }
 
 function parseCurrentSmithersExhaustedLoops(value: unknown): CurrentSmithersExhaustedLoop[] {

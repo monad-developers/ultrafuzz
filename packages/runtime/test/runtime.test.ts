@@ -18358,17 +18358,37 @@ test("parseCurrentSmithersInspect reads the run-level error loosely and never fa
   assert.deepEqual(
     runError({
       code: "WORKFLOW_RENDER_FAILED",
+      summary: 'Rendering workflow "w.tsx" threw: boom.',
       message: 'Rendering workflow "w.tsx" threw: boom. Resume with: smithers up w.tsx --resume true',
       cause: { name: "Error", message: "boom" }
     }),
     { code: "WORKFLOW_RENDER_FAILED", message: "boom" }
   );
+  // Without a cause, `summary` is the message minus the docs link and raw runner commands appended to it.
+  assert.deepEqual(
+    runError({
+      code: "DUPLICATE_ID",
+      summary: "Duplicate Task id detected: dependent",
+      message:
+        "Duplicate Task id detected: dependent See https://smithers.sh/reference/errors Resume with: smithers up w.tsx --run-id r --resume true"
+    }),
+    { code: "DUPLICATE_ID", message: "Duplicate Task id detected: dependent" }
+  );
   assert.deepEqual(runError({ message: "Task failed: prepare:x", cause: "opaque" }), {
     message: "Task failed: prepare:x"
   });
-  // The text reaches a printed diagnostic, so it is redacted and bounded like other runner output.
-  assert.deepEqual(runError({ message: "token=sk-private-secret" }), { message: "token=<redacted>" });
+  // Both fields reach a printed diagnostic, so they are redacted and bounded like other runner output.
+  assert.deepEqual(runError({ code: "sk-private-code", message: "token=sk-private-secret" }), {
+    code: "<redacted>",
+    message: "token=<redacted>"
+  });
+  assert.equal(runError({ code: "C".repeat(500), message: "m" })?.code?.length, 100);
   assert.equal(runError({ message: "x".repeat(5_000) })?.message.length, 1_000);
+  // The runner stores error text untruncated and every sync, status and resume parses it, so one
+  // long unbroken token (calldata, bytecode) must not make each parse take seconds.
+  const started = performance.now();
+  assert.equal(runError({ message: `0x${"0123456789abcdef".repeat(12_500)}` })?.message.length, 1_000);
+  assert.ok(performance.now() - started < 2_000, `parse took ${Math.round(performance.now() - started)} ms`);
   // Advisory only: an unexpected shape yields nothing rather than a new parse failure.
   for (const opaque of ["opaque", 7, null, [], { code: 7 }, { code: "X", message: " " }]) {
     assert.equal(runError(opaque), undefined, JSON.stringify(opaque));
