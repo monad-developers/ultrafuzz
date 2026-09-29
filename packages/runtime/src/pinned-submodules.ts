@@ -247,7 +247,8 @@ export function enablePinnedSubmoduleWorktreeConfig(
 
 /**
  * Restore a fresh or retried task worktree. All sealed bytes are staged and
- * verified before any existing dependency root is replaced.
+ * verified before any existing dependency root is replaced. A transaction left
+ * by a hydration that did not finish is removed first.
  */
 export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
   executionSnapshotRoot?: string;
@@ -258,7 +259,7 @@ export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
   const loaded = loadSealedSnapshot(input.executionSnapshotRoot, input.expectation);
   assertSourceIdentity(workspaceRoot, loaded.snapshot);
-  assertNoStaleTransactions(workspaceRoot);
+  removeStaleTransactions(workspaceRoot);
   configureTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot);
 
   const transactionRoot = fs.mkdtempSync(path.join(workspaceRoot, TRANSACTION_PREFIX));
@@ -862,6 +863,18 @@ function compareConfigEntries(left: GitConfigEntry, right: GitConfigEntry): numb
 function assertNoStaleTransactions(workspaceRoot: string): void {
   if (fs.readdirSync(workspaceRoot).some((entry) => entry.startsWith(TRANSACTION_PREFIX))) {
     throw new Error("stale pinned submodule transaction is present");
+  }
+}
+
+/**
+ * A hydration the controller did not survive (SIGKILL, OOM, reboot) leaves its
+ * transaction directory behind, possibly holding a root it had moved aside.
+ * Nothing in it is needed: the hydration that follows replaces every root from
+ * the sealed snapshot, and a root that is missing is simply hydrated.
+ */
+function removeStaleTransactions(workspaceRoot: string): void {
+  for (const name of fs.readdirSync(workspaceRoot).filter((entry) => entry.startsWith(TRANSACTION_PREFIX))) {
+    fs.rmSync(path.join(workspaceRoot, name), { recursive: true, force: true });
   }
 }
 

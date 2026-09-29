@@ -1004,6 +1004,39 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     expect(summary.incomplete).toBe(0);
   });
 
+  it("publishes the run summary when a watched row's run evidence cannot be read", async () => {
+    const { project, groundTruthRoot, suitePath } = initializationFixture("ufz-evals-run-invalid-graph-");
+    const row = testRow(testSuite(groundTruthRoot));
+    const runId = expectedRowRunId("eval-invalid-graph", row);
+    const runRoot = path.join(path.dirname(project), "target", ".ultrafuzz", "runs", runId);
+    terminalRunFixture(runRoot, "succeeded", runId);
+    fs.writeFileSync(path.join(runRoot, "graph.json"), "{}\n", "utf8");
+
+    const result = await runEvalSuite({
+      projectRoot: project,
+      suitePath,
+      evalRunId: "eval-invalid-graph",
+      groundTruthRoot,
+      provider: "none",
+      launcher: async () => ({ ok: true, runId, runRoot, workflowIds: ["workflow-1"], diagnostics: [] })
+    });
+
+    expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 1 });
+    expect(result.records[0]).not.toHaveProperty("final_status");
+    const summary = JSON.parse(fs.readFileSync(path.join(result.eval_run_root, "run-summary.json"), "utf8")) as {
+      incomplete: number;
+      records: Array<{ diagnostics: Array<{ code: string; message: string }> }>;
+    };
+    expect(summary.incomplete).toBe(1);
+    const failure = summary.records[0]?.diagnostics.find((diagnostic) => diagnostic.code === "EVAL_ROW_WATCH_FAILED");
+    expect(failure?.message).toContain(`eval row ${row.id} could not be watched`);
+    expect(
+      readEvalRunRecords(path.join(result.eval_run_root, "runs.jsonl"))
+        .at(-1)
+        ?.diagnostics.map((diagnostic) => diagnostic.code)
+    ).toContain("EVAL_ROW_WATCH_FAILED");
+  });
+
   it("counts a watched row as incomplete when it misses the watch deadline", async () => {
     const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-run-watch-timeout-"));
     const project = path.join(base, "project");
@@ -1042,6 +1075,8 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       provider: "none",
       watchTimeoutSeconds: 1,
       pollIntervalMs: 1,
+      // The fixture has no workflow runner; a sync that succeeds keeps this about the deadline.
+      sync: async () => undefined,
       launcher: async () => ({
         ok: true,
         runId,
@@ -1438,5 +1473,59 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
         .at(-1)
         ?.diagnostics.map((diagnostic) => diagnostic.code)
     ).toContain("EVAL_ROW_SYNC_FAILED");
+  });
+
+  it("stops watching after ten identical consecutive synchronization failures", async () => {
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-sync-abandoned-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: currentRunState({
+        runId: "run-1",
+        status: "running",
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      }),
+      graph: currentPlannedGraph([], undefined)
+    });
+    let syncCalls = 0;
+    const evalRunRoot = path.join(base, "eval-run");
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
+      evalRunRoot,
+      sync: async () => {
+        syncCalls += 1;
+        // Bounds a watch that never gives up, which would otherwise poll until its six-hour deadline.
+        if (syncCalls === 40) terminalRunFixture(runRoot);
+        // The different tenth failure restarts the count, so the watch stops at the twentieth.
+        throw new Error(
+          syncCalls === 10
+            ? "WORKFLOW_EVENTS_FAILED: runner database is busy"
+            : "WORKFLOW_CONTROL_EVIDENCE_INVALID: run state node set does not exactly match the sealed graph"
+        );
+      },
+      pollIntervalMs: 1
+    });
+
+    expect(syncCalls).toBe(20);
+    expect(watched.record).toMatchObject({
+      final_status: "launched",
+      workflow: { status: "running", terminal: false }
+    });
+    expect(watched.record.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      "EVAL_ROW_SYNC_FAILED",
+      "EVAL_ROW_SYNC_ABANDONED"
+    ]);
+    expect(
+      readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))
+        .at(-1)
+        ?.diagnostics.map((diagnostic) => diagnostic.code)
+    ).toContain("EVAL_ROW_SYNC_ABANDONED");
   });
 });

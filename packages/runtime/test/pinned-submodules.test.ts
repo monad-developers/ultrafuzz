@@ -229,7 +229,7 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   );
 });
 
-test("a failed immediate submodule restore preserves the transaction backup", (context) => {
+test("the next hydration clears a transaction an interrupted one left behind", (context) => {
   const fixture = nestedSubmoduleFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
 
@@ -248,42 +248,40 @@ test("a failed immediate submodule restore preserves the transaction backup", (c
   git(fixture.source, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
   const dependencyRoot = path.join(task, "vendor/dependency");
   fs.writeFileSync(path.join(dependencyRoot, "preexisting.txt"), "recoverable bytes\n");
+  const snapshotInput = { executionSnapshotRoot: executionRoot, workspaceRoot: task, expectation };
+  const hydrate = () => hydratePinnedSubmodulesFromExecutionSnapshot(snapshotInput);
+  const transactions = () =>
+    fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
 
+  // The root moved aside, nothing moved in: what a controller killed between the two renames leaves too.
   const originalRenameSync = fs.renameSync;
   fs.renameSync = ((oldPath, newPath) => {
-    const source = oldPath.toString();
-    const destination = newPath.toString();
-    const transactionSource = source.includes(`${path.sep}.ultrafuzz-submodule-transaction-`);
     if (
-      destination === dependencyRoot &&
-      transactionSource &&
-      (source.includes(`${path.sep}staged${path.sep}`) || source.includes(`${path.sep}backup${path.sep}`))
+      newPath.toString() === dependencyRoot &&
+      oldPath.toString().includes(`${path.sep}.ultrafuzz-submodule-transaction-`)
     ) {
       throw new Error("injected rename failure");
     }
     originalRenameSync(oldPath, newPath);
   }) as typeof fs.renameSync;
   try {
-    assert.throws(
-      () =>
-        hydratePinnedSubmodulesFromExecutionSnapshot({
-          executionSnapshotRoot: executionRoot,
-          workspaceRoot: task,
-          expectation
-        }),
-      /transaction rollback is incomplete/u
-    );
+    assert.throws(hydrate, /transaction rollback is incomplete/u);
   } finally {
     fs.renameSync = originalRenameSync;
   }
-
-  const transactions = fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
-  assert.equal(transactions.length, 1);
+  const [stale] = transactions();
+  assert.ok(stale !== undefined);
+  assert.deepEqual(transactions(), [stale]);
   assert.equal(fs.existsSync(dependencyRoot), false);
   assert.equal(
-    fs.readFileSync(path.join(task, transactions[0]!, "backup/vendor/dependency/preexisting.txt"), "utf8"),
+    fs.readFileSync(path.join(task, stale, "backup/vendor/dependency/preexisting.txt"), "utf8"),
     "recoverable bytes\n"
   );
+
+  assert.deepEqual(hydrate(), captured);
+  assert.deepEqual(transactions(), []);
+  assert.equal(fs.existsSync(path.join(dependencyRoot, "preexisting.txt")), false);
+  assert.deepEqual(verifyPinnedSubmodulesFromExecutionSnapshot(snapshotInput), captured);
 });
 
 test("Aave-shaped nine-pin task worktree is restored transactionally and verified after agent work", (context) => {
@@ -481,10 +479,20 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
 
   const staleTransaction = path.join(task, ".ultrafuzz-submodule-transaction-crashed");
   fs.mkdirSync(staleTransaction);
+  // Not something a crash leaves, but nothing stops an agent writing either into its worktree.
+  const staleFile = path.join(task, ".ultrafuzz-submodule-transaction-file");
+  fs.writeFileSync(staleFile, "not a transaction\n");
+  const outsideDirectory = path.join(fixture.root, "outside-the-task-worktree");
+  fs.mkdirSync(outsideDirectory);
+  fs.writeFileSync(path.join(outsideDirectory, "kept.txt"), "outside bytes\n");
+  const staleLink = path.join(task, ".ultrafuzz-submodule-transaction-link");
+  fs.symlinkSync(outsideDirectory, staleLink);
   assert.throws(verify, /stale pinned submodule transaction/u);
-  assert.throws(hydrate, /stale pinned submodule transaction/u);
-  assert.equal(fs.existsSync(staleTransaction), true);
-  fs.rmdirSync(staleTransaction);
+  hydrate();
+  assert.equal(fs.existsSync(staleTransaction), false);
+  assert.equal(fs.existsSync(staleFile), false);
+  assert.equal(fs.lstatSync(staleLink, { throwIfNoEntry: false }), undefined);
+  assert.equal(fs.readFileSync(path.join(outsideDirectory, "kept.txt"), "utf8"), "outside bytes\n");
   verify();
 
   const directRoot = captured.top_level_roots[0]!;

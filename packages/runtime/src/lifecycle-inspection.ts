@@ -17,6 +17,7 @@ import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagn
 import {
   requestSmithersCancel,
   runSmithersInspectionCommand,
+  scrubWorkflowRunnerText,
   smithersDiagnostic,
   streamSmithersCommand,
   type SmithersCommandSnapshot,
@@ -1933,13 +1934,16 @@ const PUBLIC_WORKFLOW_COMMANDS = new Set([
 
 /** Strips secrets and engine branding from anything that reaches an operator. */
 function publicWorkflowText(value: string): string {
-  return redactSecretsInText(value)
-    .replace(/(`?)\bsmithers\s+([a-z][a-z-]*)(`?)/giu, (_match, open: string, command: string, close: string) =>
-      PUBLIC_WORKFLOW_COMMANDS.has(command.toLowerCase())
-        ? `\`ultrafuzz ${command.toLowerCase()}\``
-        : `${open}workflow runner ${command}${close}`
+  return scrubWorkflowRunnerText(
+    redactSecretsInText(value).replace(
+      // Not after a path separator or dot: `.../bin/smithers ENOENT` names a file, not a runner command.
+      /(`?)\b(?<![\\/.])smithers\s+([a-z][a-z-]*)(`?)/giu,
+      (_match, open: string, command: string, close: string) =>
+        PUBLIC_WORKFLOW_COMMANDS.has(command.toLowerCase())
+          ? `\`ultrafuzz ${command.toLowerCase()}\``
+          : `${open}workflow runner ${command}${close}`
     )
-    .replace(/smithers/giu, "workflow runner");
+  );
 }
 
 function timestampFromMs(value: number): string;

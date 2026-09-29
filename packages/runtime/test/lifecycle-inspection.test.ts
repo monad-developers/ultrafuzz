@@ -464,6 +464,28 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
   assert.match(smithersLog(project), new RegExp(`why ${WORKFLOW_RUN_ID} --format json`, "u"));
 });
 
+test("diagnoseRun keeps a runner path intact in public text", async () => {
+  const workflowPath = "/work/target/.smithers/workflows/ultrafuzz-inspect-run.tsx";
+  const { project, env } = await launchedProject({
+    why: {
+      runId: WORKFLOW_RUN_ID,
+      status: "running",
+      summary: `smithers could not reload ${workflowPath}`,
+      generatedAtMs: 1_700_000_000_000,
+      currentNodeId: "node:project-discovery",
+      warnings: [],
+      information: ["spawn /opt/runner/bin/smithers ENOENT"],
+      blockers: []
+    }
+  });
+
+  const diagnosis = await diagnoseRun({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.diagnostics));
+  assert.equal(diagnosis.value?.summary, `workflow runner could not reload ${workflowPath}`);
+  assert.deepEqual(diagnosis.value?.notes, ["spawn /opt/runner/bin/smithers ENOENT"]);
+});
+
 test("diagnoseRun rejects an unexpected engine response", async () => {
   const { project, env } = await launchedProject({});
   fs.writeFileSync(path.join(project, "fake-why.json"), "not json\n", "utf8");

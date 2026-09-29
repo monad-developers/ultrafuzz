@@ -86,6 +86,23 @@ test("serves logical topology flow with expanded attempt details", async () => {
   }
 });
 
+test("starts on the latest readable run when a half-launched run directory has no run.json", async () => {
+  const projectRoot = makeProject();
+  writeSmallTopology(projectRoot);
+  const plan = await planRun({ projectRoot, runId: "readable-run", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  fs.mkdirSync(path.join(path.dirname(plan.value.layout.root), "half-launched"));
+
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const session = await getJson<{ runId: string }>(apiUrl(handle.url, "/api/session"), "sessionResponse");
+    assert.equal(session.runId, "readable-run");
+  } finally {
+    await handle.close();
+  }
+});
+
 test("does not replace a malformed present topology with an empty preview", async () => {
   const projectRoot = makeProject();
   fs.writeFileSync(path.join(projectRoot, ".ultrafuzz", "topology.yml"), "version: [\n", "utf8");

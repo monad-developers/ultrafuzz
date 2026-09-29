@@ -42,7 +42,12 @@ import {
 } from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
-import { parseCurrentSmithersInspect, runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
+import {
+  parseCurrentSmithersInspect,
+  runSmithersInspectionCommand,
+  scrubWorkflowRunnerText,
+  type SmithersCommandSnapshot
+} from "./smithers.js";
 import { workflowControlDivergenceDiagnostics } from "./control-divergence-diagnostics.js";
 import {
   linkedWorkflowExecutionEnvironment,
@@ -1186,7 +1191,7 @@ function publicHealthReason(value: string, runId: string): string {
   return value
     .replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`")
     .split(/`?smithers\s+supervise\s+-r\s+[^\s`;,]+`?/giu)
-    .map((part) => part.replace(/smithers/giu, "workflow runner"))
+    .map((part) => scrubWorkflowRunnerText(part))
     .join(`\`ultrafuzz resume ${runId}\``);
 }
 
@@ -1326,7 +1331,7 @@ function workflowDiagnosticMessage(snapshot: { error?: string; stderr?: string }
   if (source === undefined || source.trim().length === 0) {
     return "workflow inspection failed";
   }
-  return source.replace(/smithers/giu, "workflow runner");
+  return scrubWorkflowRunnerText(source);
 }
 
 function lstatIfPresent(filePath: string): fs.Stats | undefined {

@@ -49,8 +49,14 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
 
   const runId = `evmbench-${profile.id}`;
   const runRoot = path.join(auditRoot, ".ultrafuzz", "runs", runId);
+  const pollIntervalMs = profile.poll_interval_seconds * 1_000;
+  const readStatus = async () =>
+    commandData(
+      "status",
+      await pollStatus(() => execute(["status", runId, "--project", auditRoot, "--json"]), pollIntervalMs, wait)
+    );
   if (fs.existsSync(runRoot)) {
-    const existing = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
+    const existing = await readStatus();
     assertEvmbenchVerdictCanProgress(runId, existing.verdict, existing.reason, existing.status, true);
     if (!evmbenchRunConverged(existing.verdict, existing.status)) {
       commandData(
@@ -88,17 +94,17 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
 
   const deadline = now() + profile.workflow_timeout_seconds * 1_000;
   while (true) {
-    const status = commandData("status", execute(["status", runId, "--project", auditRoot, "--json"]));
-    const verdict = status.verdict;
-    if (evmbenchRunConverged(verdict, status.status)) break;
-    assertEvmbenchVerdictCanProgress(runId, verdict, status.reason, status.status, false);
+    const current = await readStatus();
+    const verdict = current.verdict;
+    if (evmbenchRunConverged(verdict, current.status)) break;
+    assertEvmbenchVerdictCanProgress(runId, verdict, current.reason, current.status, false);
     if (!WAITABLE_VERDICTS.has(verdict)) {
       throw new Error(`Ultrafuzz run ${runId} returned an unknown status verdict: ${verdict}`);
     }
     if (now() >= deadline) {
       throw new Error(`Ultrafuzz run ${runId} did not finish within the ${profile.id} profile timeout`);
     }
-    await wait(profile.poll_interval_seconds * 1_000);
+    await wait(pollIntervalMs);
   }
 
   const report = commandData(
@@ -241,6 +247,29 @@ function commandData<Command extends EvmbenchCliCommand>(
   return parseEvmbenchCliResult(command, value);
 }
 
+/**
+ * One `status` result. The run is detached, so a failed or slow call (a busy runner database, a call past
+ * the five-minute limit) says nothing about its health: the call is retried after 2, 4, 8 and 16 poll
+ * intervals, and only the fifth failure in a row ends the benchmark attempt.
+ */
+async function pollStatus(
+  call: () => unknown,
+  pollIntervalMs: number,
+  wait: (milliseconds: number) => Promise<void>
+): Promise<unknown> {
+  for (let failures = 1; ; failures += 1) {
+    try {
+      return call();
+    } catch (error) {
+      if (failures === MAX_CONSECUTIVE_STATUS_FAILURES) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Ultrafuzz status failed ${String(failures)} consecutive times: ${reason}`, { cause: error });
+      }
+      await wait(pollIntervalMs * 2 ** failures);
+    }
+  }
+}
+
 function rewriteAgentForSubscription(config: string): string {
   const blockPattern = /(\[agents\.CodexAgent\]\s*\n)([\s\S]*?)(?=\n\[[^\n]+\]|\s*$)/u;
   const match = blockPattern.exec(config);
@@ -289,6 +318,7 @@ function assertInside(root: string, target: string, label: string): void {
 }
 
 const WAITABLE_VERDICTS = new Set(["running-healthy", "progressing", "stalled", "waiting-quota"]);
+const MAX_CONSECUTIVE_STATUS_FAILURES = 5;
 
 function degradedRunError(runId: string, reason: string): Error {
   return new Error(
