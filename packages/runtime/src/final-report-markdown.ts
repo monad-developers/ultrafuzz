@@ -258,9 +258,11 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (!markdown.includes("\n## Property provenance\n")) {
     return "missing property provenance";
   }
+  // Report prose is preserved byte-for-byte from upstream artifacts that the agent cannot repair, so
+  // the only rule left is one escaped prose cannot match: publicProse escapes `<`, and only
+  // unescaped inline-code values can still carry raw HTML.
   const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
-  const proseViolation = finalReportProseDirectiveViolation(prose);
-  if (proseViolation !== undefined) return proseViolation;
+  if (/<[A-Za-z][^>]*>/u.test(prose)) return "contains raw HTML outside fenced code";
   const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const expectedHeadings = rendered.map(renderedIssueHeading);
   const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
@@ -343,26 +345,6 @@ function completionFindingsViolation(
     return "complete report contains partial completion claims";
   }
   return undefined;
-}
-
-function finalReportProseDirectiveViolation(prose: string): string | undefined {
-  // Critical is not a supported report severity, but the word remains valid in explanatory prose
-  // (for example, "a critical invariant"). Reject only a standalone severity-like label rather than
-  // rewriting or discarding the validated finding text.
-  const forbiddenPatterns: ReadonlyArray<readonly [RegExp, string]> = [
-    [/(?:^|\n)(?:#{1,6}\s+|-\s+)?(?:\*\*)?Critical(?:\*\*)?\s*$/imu, "contains the unsupported Critical severity"],
-    [/(?:^|\n)#### Sources\s*$/imu, "contains a legacy Sources section"],
-    [/\*\*Source (?:Node|Property) Id\*\*/iu, "contains a legacy source identifier field"],
-    [/(?:^|\n)- \*\*Item \d+\*\*/imu, "contains a legacy numbered-item field"],
-    [/(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu, "contains a legacy report section"],
-    [/(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu, "contains a legacy issue subsection"],
-    [
-      /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu,
-      "contains legacy run metadata"
-    ],
-    [/<[A-Za-z][^>]*>/u, "contains raw HTML outside fenced code"]
-  ];
-  return forbiddenPatterns.find(([pattern]) => pattern.test(prose))?.[1];
 }
 
 function validateReport(report: unknown): JsonRecord {
@@ -830,8 +812,10 @@ function appendArtifactValidationWarnings(lines: string[], value: unknown): void
     ""
   );
   for (const warning of value.filter(isRecord)) {
+    // Codes render as plain text. Only `](` is escaped, so the bytes of real gate codes do not change.
+    const code = inlineValue(warning.code).replaceAll("](", "]\\(");
     lines.push(
-      `- ${inlineValue(warning.code)} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+      `- ${code} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
     );
     if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
   }

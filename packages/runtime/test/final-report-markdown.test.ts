@@ -1082,7 +1082,7 @@ test("directive validation rejects injected or presentation-divergent Markdown",
   const projection = projectCanonicalFinalReport(renderableReport());
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      `${projection.markdown}\n## Executive summary\n\nInjected presentation.\n`,
+      `${projection.markdown}\n<img src="https://example.com/p.png">\n`,
       projection.report
     ),
     false
@@ -1094,17 +1094,13 @@ test("directive validation rejects injected or presentation-divergent Markdown",
     ),
     false
   );
-  for (const obsoleteLine of [
-    "- Strategy loops: `3`",
-    `- Prompt digest: \`${"a".repeat(64)}\``,
-    "### Strategy\n\n| Strategy | Detection rate |\n| --- | --- |\n| stateful-invariant | 2/3 |"
-  ]) {
-    assert.equal(
-      isDirectiveConformingFinalReportMarkdown(`${projection.markdown}\n${obsoleteLine}\n`, projection.report),
-      false,
-      obsoleteLine
-    );
-  }
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace("\n## Property provenance\n", "\n## Provenance\n"),
+      projection.report
+    ),
+    false
+  );
 });
 
 test("directive conformance requires both coverage headings without an opt-out", () => {
@@ -1133,34 +1129,26 @@ test("directive validation treats fenced proof code as code while retaining pros
   const input = renderableReport();
   const issue = (input.issues as Array<Record<string, unknown>>)[0]!;
   issue.proof_of_concept = {
-    scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."],
+    scenario: ["Prepare the state where balance <b> exceeds <a>.", "Execute the transition and observe the mismatch."],
     language: "solidity",
     code: [
-      "contract CriticalStateProbe {",
-      '    string internal constant label = "#### Sources";',
-      "    // **Source Node Id** and ### Strategy provenance are target identifiers here.",
+      "contract MarkupProbe {",
+      '    string internal constant label = "<b>bold</b>";',
+      "    // <script>probe()</script> is a target string here.",
       "}"
     ].join("\n")
   };
 
   const projection = projectCanonicalFinalReport(input);
-  assert.match(projection.markdown, /contract CriticalStateProbe/u);
-  assert.match(projection.markdown, /#### Sources/u);
+  assert.match(projection.markdown, /<script>probe\(\)<\/script>/u);
+  assert.match(projection.markdown, /balance &lt;b&gt; exceeds &lt;a&gt;\./u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      projection.markdown.replace("### Proof of Concept\n", "### Proof of Concept\n\nCritical\n"),
+      projection.markdown.replace("### Proof of Concept\n", "### Proof of Concept\n\n<b>bold</b>\n"),
       projection.report
     ),
     false
-  );
-  assert.equal(
-    isDirectiveConformingFinalReportMarkdown(
-      projection.markdown.replace("Prepare the bounded state.", "Prepare the critical invariant state."),
-      projection.report
-    ),
-    true,
-    "the unsupported severity label must not ban ordinary explanatory prose"
   );
 });
 
@@ -1174,11 +1162,10 @@ test("directive validation recognizes CommonMark tilde fences and matching close
   const tildeProof = insertProofBlock(
     [
       "   ~~~~solidity",
-      "contract CriticalStateProbe {",
-      '    string internal constant label = "#### Sources";',
-      "    // **Source Node Id**, ## Executive summary, and ### Strategy provenance are code.",
+      "contract MarkupProbe {",
+      '    string internal constant label = "<b>bold</b>";',
       "```",
-      "Critical",
+      "<i>still code after a backtick line</i>",
       "~~~",
       "<script>proofOnly()</script>",
       "~~~~   "
@@ -1190,7 +1177,7 @@ test("directive validation recognizes CommonMark tilde fences and matching close
     isDirectiveConformingFinalReportMarkdown(
       tildeProof.replace(
         "~~~~   \n\n## Property implementation coverage",
-        "~~~~   \n\nCritical\n\n## Property implementation coverage"
+        "~~~~   \n\n<b>bold</b>\n\n## Property implementation coverage"
       ),
       projection.report
     ),
@@ -1198,7 +1185,7 @@ test("directive validation recognizes CommonMark tilde fences and matching close
   );
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      insertProofBlock(["    ~~~solidity", "Critical", "    ~~~"].join("\n")),
+      insertProofBlock(["    ~~~solidity", "<script>proofOnly()</script>", "    ~~~"].join("\n")),
       projection.report
     ),
     false,
@@ -1447,6 +1434,62 @@ test("upstream prose with link or image syntax renders as literal text", () => {
   );
   assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === description));
   assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === "Call handlers[id](payload)."));
+});
+
+test("artifact validation warning codes with link or image syntax render as literal text", () => {
+  const report = renderableReport();
+  const codes = ["[notice](https://example.com/x)", "![t](https://example.com/p.png)"];
+  const warnings = codes.map((code) => ({
+    code,
+    artifact_path: "artifacts/dedupe/strategy-detections.json",
+    field_path: "$[5].family_id",
+    message: "Optional metadata is missing",
+    gate: "strategy-detection-review-stage-reconciliation"
+  }));
+  (report.run_metadata as Record<string, unknown>).artifact_validation_warnings = warnings;
+
+  for (const markdown of [
+    projectCanonicalFinalReport(report).markdown,
+    projectPublicArtifactValidationWarnings(warnings).markdown
+  ]) {
+    const nodes = markdownNodes(markdown);
+    assert.deepEqual(
+      nodes.filter((node) => node.type === "image" || (node.type === "link" && !node.url?.startsWith("#"))),
+      []
+    );
+    for (const code of codes) {
+      assert.ok(
+        nodes.some((node) => node.type === "paragraph" && node.text.startsWith(`${code} — `)),
+        code
+      );
+    }
+  }
+});
+
+test("upstream prose that reads like a legacy report label still renders", () => {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.family_variants = [
+    { id: "variant-1", title: "Item 1", summary: "The first sibling path.", dedupe_key: "variant-1" },
+    { id: "variant-2", title: "Source Node Id", summary: "Mislabelled identifiers.", dedupe_key: "variant-2" }
+  ];
+  (report.property_implementation_coverage as Record<string, unknown>).blocker_summaries = [
+    "Critical",
+    "Strategy loops: 4"
+  ];
+
+  const items = markdownNodes(projectCanonicalFinalReport(report).markdown)
+    .filter((node) => node.type === "listItem")
+    .map((node) => node.text);
+  for (const text of [
+    "Item 1: The first sibling path.",
+    "Source Node Id: Mislabelled identifiers.",
+    "Critical",
+    "Strategy loops: 4"
+  ]) {
+    assert.ok(items.includes(text), text);
+  }
 });
 
 test("issue titles with non-ASCII letters render with index anchors that resolve to their headings", () => {
