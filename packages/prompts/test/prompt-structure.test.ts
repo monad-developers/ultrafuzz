@@ -188,9 +188,10 @@ describe("shipped prompt structure", () => {
     let references = 0;
     for (const asset of loadBuiltInPromptAssets()) {
       expect(asset.markdown, asset.relativePath).not.toContain("packages/artifacts/schema/");
-      // Dots only between name segments, so a sentence-final period is not part of the filename.
+      // Dots only between name segments, so a sentence-final period is not part of the filename. The
+      // name must also end the path, so `findings.schema.json/obsolete` does not match as a shipped file.
       for (const [reference, filename = ""] of asset.markdown.matchAll(
-        /\{\{schema_path\}\}\/([\w-]+(?:\.[\w-]+)*)/gu
+        /\{\{schema_path\}\}\/([\w-]+(?:\.[\w-]+)*)(?![\w/-])/gu
       )) {
         references += 1;
         expect(shipped.has(filename), `${asset.relativePath}: ${reference}`).toBe(true);
