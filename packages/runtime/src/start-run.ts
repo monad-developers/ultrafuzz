@@ -1328,9 +1328,10 @@ export async function readLinkedWorkflowEvidence(
       throw new Error("run metadata workflow IDs do not exactly match the active workflow run");
     }
 
-    // Observers, `pause` and `cancel` pass `tolerateControlDivergence` so a divergent control file
-    // downgrades to a reported warning instead of hiding a live run entirely, or leaving it unstoppable
-    // (issue #674). Execution callers omit it and keep failing closed.
+    // Observers, `pause` and `cancel` pass `tolerateControlDivergence` so a divergent control file is
+    // collected in `divergences` instead of failing the read: observers report it as a warning, and
+    // `pause` and `cancel` still reach the runner (issue #674). Execution callers omit it and keep
+    // failing closed.
     const tolerateDivergence = options.tolerateControlDivergence === true;
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, { tolerateDivergence });
     // A live document replaced under the completeness re-derivation is a transient race, not a
