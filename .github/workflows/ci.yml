@@ -169,10 +169,12 @@ jobs:
           sudo rm -rf /usr/share/dotnet
 
       # Every test that launches a run copies a sealed execution snapshot of
-      # thousands of files and fsyncs each one. eatmydata makes fsync a no-op
-      # for the lane; an ephemeral runner has nothing to protect across a crash.
+      # thousands of files and fsyncs each one in the test process, where
+      # eatmydata makes fsync a no-op. The Smithers engine's environment is
+      # built from an allowlist without LD_PRELOAD, so engine processes still
+      # sync. An ephemeral runner has nothing to protect across a crash.
       - name: Install eatmydata
-        run: sudo apt-get install -y eatmydata
+        run: command -v eatmydata || { sudo apt-get update && sudo apt-get install -y eatmydata; }
 
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

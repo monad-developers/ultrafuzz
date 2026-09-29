@@ -45,12 +45,14 @@ formatting, lint, dead-code checks, the workspace build, strict lint of changed
 lines, bundle budgets, and dependency policy) and all eight release validation
 lanes: package gates, one runtime supporting lane that includes the Bun adapter
 contracts, four runtime integration shards, the CLI suite, and benchmark history
-with the workspace typecheck. The lanes do not wait for the build gates, run
-their tests under `eatmydata` (which turns `fsync` into a no-op), and run at
-most eight at a time. Feature branches are validated only by the pull-request
-event, avoiding a duplicate push run. A newer push to a pull request cancels
-that pull request's older run; a push to `main` never cancels another run. On
-`main`, the lane results are merged into one JSON report in stable gate order.
+with the workspace typecheck. The lanes do not wait for the build gates and run
+at most eight at a time. They run their tests under `eatmydata`, which turns
+`fsync` into a no-op in the test processes but not in the Smithers engine
+processes those tests launch. Feature branches are validated only by the
+pull-request event, avoiding a duplicate push run. A newer push to a pull
+request cancels that pull request's older run; a push to `main` never cancels
+another run. On `main`, the lane results are merged into one JSON report in
+stable gate order.
 
 ## Package Checks
 
