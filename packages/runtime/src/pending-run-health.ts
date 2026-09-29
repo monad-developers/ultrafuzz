@@ -9,7 +9,6 @@ import {
   validateSafeId
 } from "@ultrafuzz/artifacts";
 
-import { retryTransientSnapshotRead } from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
 import { readReportPublicationStatus } from "./report-publication-status.js";
 import type { RunHealthCounts, RunHealthValue, RuntimeDiagnostic } from "./types.js";
@@ -27,10 +26,8 @@ export async function readPendingRunHealth(
   const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
   assertPathInside(runsRoot, layout.root, "run root");
   assertNoSymlinkComponents(runsRoot, layout.root, "run root");
-  const { state, metadata } = retryTransientSnapshotRead(() => ({
-    state: readRunState(layout),
-    metadata: readRunMetadataDocument(layout.runMetadataPath, safeRunId)
-  }));
+  const state = readRunState(layout);
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, safeRunId);
   if (state.status !== "pending") return undefined;
   const counts: RunHealthCounts = {
     finished: 0,

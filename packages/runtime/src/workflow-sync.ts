@@ -342,6 +342,8 @@ interface AttemptWorkflowEvidence {
   taskId: string;
   /** The agent task's own attempt number; a verifier numbers its attempts independently. */
   agentAttempt?: number;
+  /** When the agent task's latest occurrence started, which is before its verifier starts. */
+  agentStartedAt?: string;
 }
 
 interface NodeFinalization {
@@ -2998,8 +3000,8 @@ async function synchronizeTasks(input: {
     }
     const evidence = attemptEvidence.evidence;
 
-    const previousIsImmutable = immutableTerminalFinalization(previous);
-    const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
+    const previousIsImmutable = immutableTerminalFinalization(previous, attemptEvidence);
+    const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence);
     const needsFinalization = !previousIsImmutable && terminalStatus(evidence.status) && evidenceSupersedesPrevious;
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
@@ -3060,10 +3062,11 @@ async function synchronizeTasks(input: {
       });
     }
     if (previousIsImmutable) {
-      // A successful publication and a terminal invalid-output disposition are
-      // immutable. A later synchronization may finish recording source-ledger
-      // evidence, but it cannot re-finalize the node, clear its failure, create
-      // a manifest, or recover it from files that appeared after completion.
+      // A successful publication is immutable, and so is a terminal invalid-output
+      // disposition until the task runs again. A later synchronization may finish
+      // recording source-ledger evidence, but it cannot re-finalize the node,
+      // clear its failure, create a manifest, or recover it from files that
+      // appeared after completion.
       // Operational failures remain recoverable only when newer Smithers task
       // evidence reaches the finalization path above. The retry count is
       // attempt bookkeeping, not finalization: once the ledger holds the current
@@ -4451,7 +4454,10 @@ function completionEvidenceForTask(
   if (agentEvidence === undefined) {
     return undefined;
   }
-  const agentAttempt = agentEvidence.attempt === undefined ? {} : { agentAttempt: agentEvidence.attempt };
+  const agentAttempt = {
+    ...(agentEvidence.attempt === undefined ? {} : { agentAttempt: agentEvidence.attempt }),
+    ...(agentEvidence.startedAt === undefined ? {} : { agentStartedAt: agentEvidence.startedAt })
+  };
   if (agentEvidence.status !== "succeeded") {
     return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId, ...agentAttempt };
   }
@@ -4769,9 +4775,15 @@ function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
 }
 
-function immutableTerminalFinalization(previous: NodeState | undefined): boolean {
+function immutableTerminalFinalization(
+  previous: NodeState | undefined,
+  attemptEvidence: AttemptWorkflowEvidence
+): boolean {
   if (previous === undefined || !terminalStatus(previous.status)) return false;
   if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
+  // An invalid-output verdict seals the occurrence it judged, not the task: a
+  // rerun by `resume --retry-failed` or `--reset-node` is judged on its output.
+  if (startedAfterRecordedOccurrence(previous, attemptEvidence)) return false;
   const disposition = recordField(previous.provenance, "terminal_disposition");
   if (disposition === undefined) return false;
   try {
@@ -4781,12 +4793,33 @@ function immutableTerminalFinalization(previous: NodeState | undefined): boolean
   }
 }
 
+/**
+ * Whether the evidence comes from a Smithers occurrence that started after the
+ * recorded one. A reset reruns a task from attempt 1, so the attempt number
+ * cannot tell the rerun from the recorded occurrence, but its start can. A
+ * rerun's agent task starts while its verifier still reads `pending`, so either
+ * task's start counts. The recorded occurrence's own later terminal events keep
+ * its start: a trailing `NodeCancelled`, or a run cancellation that Smithers
+ * stamped before that start, which is why the bound includes the recorded start.
+ */
+function startedAfterRecordedOccurrence(
+  previous: NodeState | undefined,
+  attemptEvidence: AttemptWorkflowEvidence
+): boolean {
+  if (previous?.finished_at === undefined) return false;
+  const recorded = Math.max(Date.parse(previous.finished_at), Date.parse(previous.started_at ?? previous.finished_at));
+  return [attemptEvidence.evidence.startedAt, attemptEvidence.agentStartedAt].some(
+    (startedAt) => startedAt !== undefined && Date.parse(startedAt) > recorded
+  );
+}
+
 function workflowEvidenceSupersedesPrevious(
   previous: NodeState | undefined,
-  taskId: string,
-  evidence: NodeWorkflowEvidence
+  attemptEvidence: AttemptWorkflowEvidence
 ): boolean {
+  const { evidence, taskId } = attemptEvidence;
   if (previous === undefined || previous.status !== evidence.status) return true;
+  if (startedAfterRecordedOccurrence(previous, attemptEvidence)) return true;
   const workflow = recordField(previous.provenance, "workflow");
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
 }

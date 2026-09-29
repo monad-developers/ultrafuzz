@@ -12641,57 +12641,100 @@ test("listRuns requires the exact current Smithers ps envelope and row shape", a
 });
 
 /**
- * Replaces a live run document by atomic rename at the one moment the strict reader is exposed to it:
- * after the reader has consumed the bytes and before its second fstat, from inside the reading
- * process. The rename is real and so is the reader's verdict; only the timing is controlled, which
- * turns the race issue #1054 describes from a matter of chance into a deterministic reproduction.
+ * Calls `act` on a file at the one moment a strict reader is exposed to a change of it: after the
+ * reader has consumed the bytes and before its closing stat, from inside the reading process. The
+ * change is real and so is the reader's verdict; only the timing is controlled, which turns a race
+ * such as the one issue #1054 describes from a matter of chance into a deterministic reproduction.
  * `node:fs`'s default export is the shared CommonJS module object, so the reader observes the wrapped
- * calls. A read is armed only while replacements remain and, when `onlyWhen` is given, only when the
- * reader's synchronous call stack satisfies it.
+ * calls. A read is armed when `matches` accepts the opened path, only while fewer than `limit` acts
+ * have run and, when `onlyWhen` is given, only when the reader's synchronous call stack satisfies it.
+ * `afterClose` runs once the reader has closed a file `act` changed.
  */
-async function observeWhileReplacingRunDocument<T>(
-  input: { documentPath: string; replacements: number; onlyWhen?: (synchronousFrames: string[]) => boolean },
-  observe: () => Promise<T>
-): Promise<{ value: T; replaced: number }> {
-  const bytes = fs.readFileSync(input.documentPath);
+async function actDuringStrictRead<T>(
+  input: {
+    matches: (filePath: string) => boolean;
+    act: (filePath: string, acted: number) => void;
+    afterClose?: ((filePath: string) => void) | undefined;
+    limit?: number;
+    onlyWhen?: ((synchronousFrames: string[]) => boolean) | undefined;
+  },
+  run: () => Promise<T>
+): Promise<{ value: T; acted: number }> {
   const originalOpenSync = fs.openSync;
   const originalReadSync = fs.readSync;
   const originalCloseSync = fs.closeSync;
-  const armed = new Set<number>();
-  let replaced = 0;
+  const armed = new Map<number, string>();
+  const changed = new Map<number, string>();
+  let acted = 0;
   fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
     const descriptor = originalOpenSync(...args);
+    const filePath = path.resolve(String(args[0]));
     if (
-      replaced < input.replacements &&
-      path.resolve(String(args[0])) === input.documentPath &&
+      acted < (input.limit ?? Number.POSITIVE_INFINITY) &&
+      input.matches(filePath) &&
       (input.onlyWhen === undefined || input.onlyWhen(synchronousStackFrames()))
     ) {
-      armed.add(descriptor);
+      armed.set(descriptor, filePath);
     }
     return descriptor;
   }) as typeof fs.openSync;
   fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
     const read = originalReadSync(...args);
-    if (armed.delete(args[0])) {
-      const temporary = `${input.documentPath}.replacement-${String(replaced)}`;
-      fs.writeFileSync(temporary, bytes);
-      fs.renameSync(temporary, input.documentPath);
-      replaced += 1;
+    const filePath = armed.get(args[0]);
+    if (filePath !== undefined) {
+      armed.delete(args[0]);
+      input.act(filePath, acted);
+      acted += 1;
+      changed.set(args[0], filePath);
     }
     return read;
   }) as typeof fs.readSync;
   fs.closeSync = ((descriptor: number) => {
     armed.delete(descriptor);
     originalCloseSync(descriptor);
+    const filePath = changed.get(descriptor);
+    changed.delete(descriptor);
+    if (filePath !== undefined) input.afterClose?.(filePath);
   }) as typeof fs.closeSync;
   try {
-    const value = await observe();
-    return { value, replaced };
+    const value = await run();
+    return { value, acted };
   } finally {
     fs.openSync = originalOpenSync;
     fs.readSync = originalReadSync;
     fs.closeSync = originalCloseSync;
   }
+}
+
+/**
+ * Replaces a live run document by atomic rename under `actDuringStrictRead`. With `append`, a byte is
+ * written to the document in place instead, and its length is restored once the reader closes it.
+ */
+async function observeWhileReplacingRunDocument<T>(
+  input: {
+    documentPath: string;
+    replacements: number;
+    append?: true;
+    onlyWhen?: (synchronousFrames: string[]) => boolean;
+  },
+  observe: () => Promise<T>
+): Promise<{ value: T; replaced: number }> {
+  const bytes = fs.readFileSync(input.documentPath);
+  const { value, acted } = await actDuringStrictRead(
+    {
+      matches: (filePath) => filePath === input.documentPath,
+      act: (filePath, index) => {
+        if (input.append === true) return fs.appendFileSync(filePath, "\n");
+        fs.writeFileSync(`${filePath}.replacement-${String(index)}`, bytes);
+        fs.renameSync(`${filePath}.replacement-${String(index)}`, filePath);
+      },
+      afterClose: input.append === true ? (filePath) => fs.truncateSync(filePath, bytes.byteLength) : undefined,
+      limit: input.replacements,
+      onlyWhen: input.onlyWhen
+    },
+    observe
+  );
+  return { value, replaced: acted };
 }
 
 /** The frames of the current synchronous call chain, without the `async` frames of awaiting callers. */
@@ -12705,7 +12748,7 @@ function synchronousStackFrames(): string[] {
   }
 }
 
-test("listRuns, observers and status re-read live run documents replaced while they were read", async () => {
+test("listRuns, observers and status survive live run documents replaced while they were read", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -12723,50 +12766,13 @@ test("listRuns, observers and status re-read live run documents replaced while t
   };
 
   // A live run's controller, and observe-only synchronization from a concurrent `status`, republish
-  // state.json and run.json by atomic rename. The strict reader detects a replacement it straddled
-  // and used to fail `ps` and `status` outright on it (issue #1054). Both documents are re-read.
-  const stateReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 1 }, listed);
-  assert.deepEqual(stateReplaced, { value: [[runId, "running"]], replaced: 1 });
-  const metadataReplaced = await observeWhileReplacingRunDocument(
-    { documentPath: metadataPath, replacements: 1 },
-    listed
-  );
-  assert.deepEqual(metadataReplaced, { value: [[runId, "running"]], replaced: 1 });
-  const twiceReplaced = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 2 }, listed);
-  assert.deepEqual(twiceReplaced, { value: [[runId, "running"]], replaced: 2 });
-
-  // The budget is bounded: a document that changes under three consecutive reads exhausts it, and the
-  // last race names the file. One run that cannot be read must not fail the whole listing (#1080), so
-  // `ps` still lists the run, as unreadable, and reports the exhausted race as the reason in a warning.
-  // The run reads normally again once its documents hold still.
-  const exhausted = await observeWhileReplacingRunDocument({ documentPath: statePath, replacements: 3 }, () =>
-    listRuns({ projectRoot: project, env })
-  );
-  assert.equal(exhausted.value.ok, true, JSON.stringify(exhausted.value.diagnostics));
-  assert.equal(exhausted.replaced, 3);
-  const unreadable = exhausted.value.value?.product_runs.find((entry) => entry.run_id === runId);
-  assert.ok(unreadable, JSON.stringify(exhausted.value.value));
-  assert.equal(unreadable.status, "unreadable");
-  assert.equal(unreadable.run_root, run.value.run_root);
-  assert.deepEqual(unreadable.workflow_ids, []);
-  const unreadableWarnings = exhausted.value.diagnostics.filter(
-    (diagnostic) => diagnostic.code === "RUN_LIST_ENTRY_UNREADABLE"
-  );
-  assert.equal(unreadableWarnings.length, 1, JSON.stringify(exhausted.value.diagnostics));
-  assert.equal(unreadableWarnings[0]?.severity, "warning");
-  assert.equal(unreadableWarnings[0]?.path, run.value.run_root);
-  assert.ok(
-    unreadableWarnings[0]?.message.includes(
-      `run evidence changed during 3 consecutive snapshot read attempts: file changed while it was read: ${statePath}`
-    ),
-    unreadableWarnings[0]?.message
-  );
-  assert.equal(
-    exhausted.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
-    0,
-    JSON.stringify(exhausted.value.diagnostics)
-  );
-  assert.deepEqual(await listed(), [[runId, "running"]]);
+  // state.json and run.json by atomic rename. That used to fail `ps` and `status` outright (issue
+  // #1054). A read that straddles the rename keeps the complete document it opened, so `ps` reads
+  // each document once, even when every read of it is raced.
+  for (const documentPath of [statePath, metadataPath]) {
+    const replaced = await observeWhileReplacingRunDocument({ documentPath, replacements: 3 }, listed);
+    assert.deepEqual(replaced, { value: [[runId, "running"]], replaced: 1 }, documentPath);
+  }
 
   // An observer derives the evidence again when a live document was replaced under one of its strict
   // reads. The first such read is the completeness re-derivation inside the control snapshot
@@ -12836,25 +12842,29 @@ test("listRuns, observers and status re-read live run documents replaced while t
     JSON.stringify(healthAfterEvidenceRace.value.diagnostics)
   );
 
-  // Observe-only synchronization reads state.json itself, outside any retry of its own. `status`
-  // retries the whole synchronization within the same budget, and once that is spent it still reports
-  // the run and says its local state may be stale, instead of failing.
+  // Observe-only synchronization reads state.json itself, outside any retry of its own, and keeps the
+  // complete document it opened too: a replacement under each of those reads is not a race.
   const synchronizationOwnRead = (frames: string[]) =>
     frames.some((frame) => frame.includes("workflow-sync.js")) &&
     !frames.some((frame) => frame.includes("observation-snapshot.js"));
   const recovered = await observeWhileReplacingRunDocument(
-    { documentPath: statePath, replacements: 1, onlyWhen: synchronizationOwnRead },
+    { documentPath: statePath, replacements: 3, onlyWhen: synchronizationOwnRead },
     () => getRunHealth({ projectRoot: project, runId, env })
   );
   assert.equal(recovered.value.ok, true, JSON.stringify(recovered.value.diagnostics));
   assert.equal(recovered.value.value?.run_id, runId);
-  assert.equal(recovered.replaced, 1);
+  assert.equal(recovered.replaced, 3);
   assert.deepEqual(
     recovered.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED"),
     []
   );
+  // A write in place under one of those reads is still a race the strict reader rejects. It stands in
+  // for an event-journal append: this pass reads the journal only when it records an event or sees a
+  // stopped workflow, and its attempt-ledger reads degrade to warnings instead of reaching this retry.
+  // `status` retries the whole synchronization within the same budget, and once that is spent it still
+  // reports the run and says its local state may be stale, instead of failing.
   const raced = await observeWhileReplacingRunDocument(
-    { documentPath: statePath, replacements: 3, onlyWhen: synchronizationOwnRead },
+    { documentPath: statePath, replacements: 3, append: true, onlyWhen: synchronizationOwnRead },
     () => getRunHealth({ projectRoot: project, runId, env })
   );
   assert.equal(raced.value.ok, true, JSON.stringify(raced.value.diagnostics));
@@ -12873,6 +12883,39 @@ test("listRuns, observers and status re-read live run documents replaced while t
     raced.value.diagnostics.filter((diagnostic) => diagnostic.severity === "error").length,
     0,
     JSON.stringify(raced.value.diagnostics)
+  );
+});
+
+test("a hard link added to an execution source while the launch seals it does not fail the launch", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  // The launch reads every source it seals by the same stable read, so one run-owned source stands in
+  // for the node_modules files pnpm hard-links from its shared store.
+  const launchWhileChangingSource = (runId: string, act: (sourcePath: string, acted: number) => void) =>
+    actDuringStrictRead({ matches: (filePath) => path.basename(filePath) === "execution-tsconfig.json", act }, () =>
+      startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) })
+    );
+
+  // `pnpm install` anywhere on the host links the same store inodes into another node_modules: the
+  // link count and ctime change, and not one byte does. The launch used to fail on exactly that.
+  const linked = await launchWhileChangingSource("hard-linked-source", (sourcePath, acted) => {
+    const elsewhere = path.join(path.dirname(project), `${path.basename(project)}-pnpm-link-${String(acted)}`);
+    registerTemporaryPath(elsewhere);
+    fs.linkSync(sourcePath, elsewhere);
+  });
+  assert.equal(linked.value.ok, true, JSON.stringify(linked.value.diagnostics));
+  assert.ok(linked.acted > 0, "the launch must have read the source while its link count changed");
+
+  // A real write still fails the launch rather than sealing a torn read.
+  const written = await launchWhileChangingSource("written-source", (sourcePath) => {
+    fs.appendFileSync(sourcePath, " ");
+  });
+  assert.equal(written.acted, 1);
+  assert.equal(written.value.ok, false);
+  assert.deepEqual(
+    written.value.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
+    [["WORKFLOW_SUBMISSION_FAILED", "workflow execution file tsconfig.json changed while reading"]]
   );
 });
 
@@ -14223,6 +14266,21 @@ test("getRunHealth accepts strict 0.35 orphan, cancel-pending, quota, and operat
     assert.equal(health.value?.attention?.crossed_count, 2);
     assert.equal(health.value?.oneshot_control?.message_id, "message-1");
   }
+
+  // The pinned runner's paused reason, which names its own resume command.
+  setFakeSmithersStatus(project, {
+    ...envelope,
+    data: {
+      ...base,
+      status: "paused",
+      verdict: "paused",
+      reason: "run was gracefully paused; resume with `smithers up --resume <runId>`",
+      liveness: { state: "paused" }
+    }
+  });
+  const paused = await getRunHealth({ projectRoot: project, runId: "smithers-034-shapes", env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.reason, "run was gracefully paused; resume with `ultrafuzz resume smithers-034-shapes`");
 
   setFakeSmithersStatus(project, {
     ...envelope,
@@ -23559,7 +23617,7 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
   );
 });
 
-test("syncRun keeps an immutable output-validation failure when its successful occurrence is superseded", async () => {
+test("syncRun judges a replacement that started after a sealed output-validation failure on its own output", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -23683,8 +23741,17 @@ test("syncRun keeps an immutable output-validation failure when its successful o
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
   assert.equal(fs.existsSync(path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json")), false);
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node node:project-discovery /mu);
-  // The replacement executor finished but the host rejected its output, and the
-  // sealed disposition carries no finalization diagnostic to classify it by.
+  // The replacement started after the sealed verdict, so the host judges its
+  // output, rejects it again, and seals the node at the replacement verifier's
+  // finish.
+  const node = readRunState(layout).nodes["project-discovery"];
+  assert.equal(node?.finished_at, new Date(base + 900).toISOString());
+  assert.equal(
+    (node?.provenance as { terminal_disposition?: { kind: string } } | undefined)?.terminal_disposition?.kind,
+    "task-output-validation-failure"
+  );
+  // Its finished executor is recorded as rejected, with no findings-validation
+  // diagnostic to classify it as invalid output.
   const entries = fs
     .readFileSync(layout.attemptLedgerPath, "utf8")
     .trim()
@@ -27424,6 +27491,187 @@ test("resume --retry-failed after a pre-agent failure keeps synchronizing the re
     readRunState(layoutForRunRoot(fixture.runRoot, fixture.runId)).nodes["project-discovery"]?.retry_count,
     1
   );
+});
+
+test("resume --retry-failed recovers a node whose verifier rejected its output", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "retry-rejected-output";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierId = "verify:project-discovery";
+  const history: Parameters<typeof workflowEvents>[1] = [];
+  // Every occurrence runs the producer, then its verifier. A reset restarts
+  // Smithers' attempt numbering, so every occurrence is attempt 1.
+  const produce = () =>
+    history.push(
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId, attempt: 1 }
+    );
+  const verify = (rejection?: string) =>
+    history.push(
+      { type: "NodeStarted", nodeId: verifierId, attempt: 1 },
+      rejection === undefined
+        ? { type: "NodeFinished", nodeId: verifierId, attempt: 1 }
+        : { type: "NodeFailed", nodeId: verifierId, attempt: 1, error: { message: rejection } },
+      { type: rejection === undefined ? "RunFinished" : "RunFailed" }
+    );
+  // A reset leaves the verifier `pending` until it starts again, after its producer.
+  const smithers = (verifier: "pending" | "failed" | "finished") =>
+    fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        ...(verifier === "pending" ? { status: "running" as const } : {}),
+        ...(verifier === "failed" ? { status: "failed" as const, state: "failed" as const } : {}),
+        steps: [
+          { id: nodeId, state: "finished", attempt: 1 },
+          { id: verifierId, state: verifier, attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, history)
+    });
+  produce();
+  verify("artifact-contract failure: findings.json is missing");
+  let env = smithers("failed");
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.ok(run.value, JSON.stringify(run.diagnostics));
+  const runRoot = run.value.run_root;
+  const layout = layoutForRunRoot(runRoot, runId);
+  const artifactDir = path.join(runRoot, "artifacts", "project-discovery");
+  const commandLog = fakeRunnerPath(env, "SMITHERS_FAKE_LOG");
+  const node = () => readRunState(layout).nodes["project-discovery"];
+  const disposition = () =>
+    (node()?.provenance as { terminal_disposition?: { kind: string } } | undefined)?.terminal_disposition?.kind;
+  const sync = async () => {
+    const synced = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+    assert.ok(
+      !synced.diagnostics.some((diagnostic) => /^(NODE|WORKFLOW)_ATTEMPT_/u.test(diagnostic.code)),
+      JSON.stringify(synced.diagnostics)
+    );
+    return synced.value?.status;
+  };
+  const retryFailed = async () => {
+    fs.writeFileSync(commandLog, "");
+    const resumed = await resumeRun({ projectRoot: project, runId, retryFailed: true, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.match(fs.readFileSync(commandLog, "utf8"), /^timetravel .* --node-id node:project-discovery /mu);
+  };
+
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  assert.equal(await sync(), "failed");
+  const rejected = node();
+  assert.equal(disposition(), "task-output-validation-failure");
+
+  // Output written after the verdict, and a later terminal event for the same
+  // attempt, belong to the rejected occurrence, so its verdict stands.
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  history.push({ type: "NodeCancelled", nodeId: verifierId, attempt: 1 });
+  env = smithers("failed");
+  assert.equal(await sync(), "failed");
+  assert.deepEqual(node(), rejected);
+  assert.equal(fs.existsSync(path.join(artifactDir, "artifact-manifest.json")), false);
+
+  // A rerun is judged on its own output, even when the verifier rejects it too.
+  await retryFailed();
+  fs.rmSync(path.join(artifactDir, "findings.json"));
+  produce();
+  verify("artifact-contract failure: findings.json is still missing");
+  env = smithers("failed");
+  assert.equal(await sync(), "failed");
+  assert.equal(node()?.last_error, "artifact-contract failure: findings.json is still missing");
+  assert.equal(disposition(), "task-output-validation-failure");
+
+  // The seal lifts when the rerun's producer starts: a sync before its
+  // verifier starts neither shows the old verdict nor records the producer's
+  // attempt with it.
+  await retryFailed();
+  produce();
+  env = smithers("pending");
+  assert.equal(await sync(), "running");
+  assert.equal(node()?.status, "pending");
+  assert.equal(attemptLedgerRows(runRoot).length, 2);
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  verify();
+  env = smithers("finished");
+  assert.equal(await sync(), "succeeded");
+  assert.equal(node()?.status, "succeeded");
+  assert.equal(node()?.retry_count, 2);
+  assert.equal(disposition(), undefined);
+  assert.equal(fs.existsSync(path.join(artifactDir, "artifact-manifest.json")), true);
+  assert.deepEqual(
+    attemptLedgerRows(runRoot).map((entry) => entry.outcome),
+    ["failed", "failed", "succeeded"]
+  );
+});
+
+test("syncRun keeps a verifier occurrence whose cancellation is stamped before its start", async () => {
+  // Smithers stamps a run cancellation's NodeCancelled with an instant taken
+  // before its transaction, so a verifier that started meanwhile is recorded
+  // as finishing before it started. Later syncs must still treat it as the same
+  // occurrence, whether its output was rejected (sealed) or accepted: files
+  // changed after the verdict do not change the record, and the verdict's
+  // diagnostics are not reported again.
+  for (const findingsAtVerdict of [false, true]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+    const runId = `cancel-stamped-before-start-${String(findingsAtVerdict)}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const nodeId = "node:project-discovery";
+    const verifierId = "verify:project-discovery";
+    const base = Date.parse("2026-07-03T00:00:00.000Z");
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "cancelled",
+        state: "cancelled",
+        steps: [
+          { id: nodeId, state: "finished", attempt: 1 },
+          { id: verifierId, state: "cancelled", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "RunStarted", timestampMs: base },
+        { type: "NodeStarted", nodeId, attempt: 1, timestampMs: base + 100 },
+        { type: "NodeFinished", nodeId, attempt: 1, timestampMs: base + 200 },
+        { type: "NodeStarted", nodeId: verifierId, attempt: 1, timestampMs: base + 400 },
+        { type: "NodeCancelled", nodeId: verifierId, attempt: 1, timestampMs: base + 300 },
+        { type: "RunCancelled", timestampMs: base + 300 }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.ok(run.value, JSON.stringify(run.diagnostics));
+    const runRoot = run.value.run_root;
+    const layout = layoutForRunRoot(runRoot, runId);
+    const findings = path.join(runRoot, "artifacts", "project-discovery", "findings.json");
+    writeRequiredArtifactSet(runRoot, "project-discovery", [
+      GENERIC_RUNTIME_MARKDOWN_PATH,
+      ...(findingsAtVerdict ? ["findings.json"] : [])
+    ]);
+    const first = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+    const recorded = readRunState(layout).nodes["project-discovery"];
+    assert.equal(recorded?.status, "failed");
+    assert.equal(
+      (recorded?.provenance as { terminal_disposition?: { kind: string } } | undefined)?.terminal_disposition?.kind,
+      findingsAtVerdict ? undefined : "task-output-validation-failure"
+    );
+
+    if (findingsAtVerdict) fs.rmSync(findings);
+    else writeRequiredArtifactSet(runRoot, "project-discovery", ["findings.json"]);
+    const second = await syncRun({ projectRoot: project, runId, env });
+
+    assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+    assert.deepEqual(readRunState(layout).nodes["project-discovery"], recorded);
+    assert.deepEqual(
+      second.diagnostics.filter((diagnostic) => diagnostic.severity === "error"),
+      [],
+      JSON.stringify(second.diagnostics)
+    );
+  }
 });
 
 function fakeRunnerPath(env: Record<string, string | undefined>, name: string): string {

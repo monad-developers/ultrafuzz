@@ -1,44 +1,23 @@
-/** How many times an observer reads live run evidence that keeps being replaced under it before it fails. */
+/** How many times an observer reads live run evidence that keeps changing under it before it fails. */
 export const OBSERVATION_SNAPSHOT_ATTEMPTS = 3;
 
 /**
- * How the strict readers report an atomic path replacement they straddled: the descriptor they hold
- * is left on the unlinked inode, so its link count drops (or the path now names another inode). The
- * artifacts reader behind `readRunState` and `readRunMetadataDocument` says "file changed while it was
- * read: <path>"; the workflow-control reader says "<document> changed while reading". For a caller
- * that holds control authority either is a lock violation and must fail closed. For an observer
- * reading a live run, whose controller (or another observe-only synchronization) keeps publishing
- * complete documents by atomic rename, it is a transient race: the next read returns a complete,
- * fully validated document.
+ * How the strict readers report live evidence that changed while they read it. The artifacts reader
+ * behind the JSONL ledgers says "file changed while it was read: <path>" when a writer appended to the
+ * file it held; the workflow-control reader says "<document> changed while reading" when the path was
+ * republished by atomic rename. For a caller that holds control authority either is a lock violation
+ * and must fail closed. For an observer reading a live run, whose controller keeps appending and
+ * republishing, it is a transient race: the next read returns a complete, fully validated snapshot.
  */
 const TRANSIENT_SNAPSHOT_RACE_MARKERS = ["file changed while it was read", "changed while reading"];
 
 /**
- * Re-read live run evidence that a durable writer replaced while it was being read.
- *
- * Every attempt runs `read` in full, so each retry repeats the strict open, size, identity, parse,
- * schema and semantic checks and no unvalidated snapshot is ever returned. Only the race above is
- * retried; every other failure propagates from the first attempt. The budget is bounded, so evidence
- * under continuous change still fails, with the last race's message (and so the offending path)
- * preserved in the thrown error.
- */
-export function retryTransientSnapshotRead<T>(read: () => T, attempts: number = OBSERVATION_SNAPSHOT_ATTEMPTS): T {
-  assertSnapshotAttempts(attempts);
-  let lastRace: unknown;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      return read();
-    } catch (error) {
-      if (!isTransientSnapshotRace(error)) throw error;
-      lastRace = error;
-    }
-  }
-  throw exhaustedSnapshotRaceError(attempts, lastRace);
-}
-
-/**
- * The asynchronous counterpart of `retryTransientSnapshotRead` for an observation that performs
- * several strict reads internally and surfaces the race by rejecting.
+ * Re-run an observation that performs several strict reads internally and surfaces the race by
+ * rejecting. Every attempt runs `observe` in full, so each retry repeats the strict open, size,
+ * identity, parse, schema and semantic checks and no unvalidated snapshot is ever returned. Only the
+ * race above is retried; every other failure propagates from the first attempt. The budget is bounded,
+ * so evidence under continuous change still fails, with the last race's message (and so the offending
+ * path) preserved in the rejection.
  */
 export async function retryTransientSnapshotObservation<T>(
   observe: () => Promise<T>,

@@ -43,6 +43,7 @@ import {
   type PauseRunInput,
   type PauseRunValue,
   type RuntimeDiagnostic,
+  type RuntimeResult,
   type StartRunInput,
   type StartRunValue,
   type WorkflowLifecycleInput,
@@ -474,7 +475,7 @@ function openRouterCredentialPreflightDiagnostics(
   ];
 }
 
-export async function resumeRun(input: WorkflowLifecycleInput) {
+export async function resumeRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
   return submitSmithersContinuation(input);
 }
 
@@ -795,11 +796,11 @@ function resumeWarning(code: string, context: string, error: unknown): RuntimeDi
   return { ...diagnostic, message: `${context}: ${diagnostic.message}`, severity: "warning", source: "runtime" };
 }
 
-export async function replayRun(input: WorkflowLifecycleInput) {
+export async function replayRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
   return submitLifecycleAction(input, "replay");
 }
 
-export async function forkRun(input: WorkflowLifecycleInput) {
+export async function forkRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
   return submitLifecycleAction(input, "fork");
 }
 
@@ -1285,12 +1286,13 @@ async function persistSmithersEvidence(
 
 /**
  * run.json and state.json are republished by atomic rename while a run is live, by its controller and
- * by observe-only synchronization from a concurrent `status`, and every strict reader below reports a
- * replacement it straddled as a mid-read change. An observer holds no control lock, so for it that is
- * a transient race, not evidence of anything: the evidence is derived again (`observationAttempt`
- * counts the derivations), within the bounded observation budget, and only an exhausted budget is
- * reported, as the race and naming the document. Execution callers hold the lock; for them the same
- * detection is a violation and keeps failing closed on the first read.
+ * by observe-only synchronization from a concurrent `status`. The workflow-control reader below
+ * re-checks that the path still names the inode it read, so it reports a replacement it straddled as a
+ * mid-read change. An observer holds no control lock, so for it that is a transient race, not evidence
+ * of anything: the evidence is derived again (`observationAttempt` counts the derivations), within the
+ * bounded observation budget, and only an exhausted budget is reported, as the race and naming the
+ * document. Execution callers hold the lock; for them the same detection is a violation and keeps
+ * failing closed on the first read.
  */
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,

@@ -16,11 +16,14 @@ import {
   cancelRun,
   diagnoseProject,
   diagnoseRun,
+  type forkRun,
   getRunTimeline,
   getWorkflowNode,
   initProject,
   listRunSnapshots,
   queryWorkflowEvents,
+  type replayRun,
+  type resumeRun,
   startRun as runtimeStartRun,
   validateProject,
   watchWorkflowEvents,
@@ -332,13 +335,14 @@ function projectWithFakeRunner(): { project: string; env: Record<string, string 
 }
 
 async function launchedProject(
-  fixtures: FakeInspectionFixtures
+  fixtures: FakeInspectionFixtures,
+  runId = "inspect-run"
 ): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
   const { project, env } = projectWithFakeRunner();
   writeInspectionFixtures(project, fixtures);
   const run = await startRun({
     projectRoot: project,
-    runId: "inspect-run",
+    runId,
     env,
     ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project)
   });
@@ -470,6 +474,16 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
   }
 });
 
+test("resume, replay and fork declare workflow_run_id on every lifecycle value", () => {
+  // Compile-time check: each reader stops type-checking if the value its
+  // function returns lets workflow_run_id be undefined.
+  const resume = (value: NonNullable<Awaited<ReturnType<typeof resumeRun>>["value"]>): string => value.workflow_run_id;
+  const replay = (value: NonNullable<Awaited<ReturnType<typeof replayRun>>["value"]>): string => value.workflow_run_id;
+  const fork = (value: NonNullable<Awaited<ReturnType<typeof forkRun>>["value"]>): string => value.workflow_run_id;
+  const value = { run_id: "run", workflow_run_id: "ultrafuzz-run", action: "resume", submitted: true } as const;
+  assert.deepEqual([resume(value), replay(value), fork(value)], ["ultrafuzz-run", "ultrafuzz-run", "ultrafuzz-run"]);
+});
+
 test("diagnoseRun adapts the engine diagnosis without engine-branded public text", async () => {
   const { project, env } = await inspectedRun({
     why: {
@@ -562,6 +576,103 @@ test("diagnoseRun keeps a runner path intact in public text", async () => {
   assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.diagnostics));
   assert.equal(diagnosis.value?.summary, `workflow runner could not reload ${workflowPath}`);
   assert.deepEqual(diagnosis.value?.notes, ["spawn /opt/runner/bin/smithers ENOENT"]);
+});
+
+test("diagnoseRun names the ultrafuzz command for each recovery the runner suggests", async () => {
+  // A run ID naming the runner shows the rebuilt commands are not put through the runner-name scrub.
+  const runId = "smithers-probe";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const { project, env } = await launchedProject({}, runId);
+  // The pinned runner's own suggestions, which name its CLI, its workflow file and its run ID.
+  const workflow = `/work/target/.smithers/workflows/${workflowRunId}.tsx`;
+  const resume = `smithers up ${workflow} --run-id ${workflowRunId} --resume true`;
+  const retryTask = `smithers retry-task ${workflow} --run-id ${workflowRunId} --node-id node:project-discovery --iteration 0`;
+  const diagnose = async (
+    status: string,
+    summary: string,
+    blockers: Array<{ kind: string; unblocker: string; nodeId?: string; iteration?: null }>,
+    notes: { warnings?: string[]; information?: string[] } = {}
+  ) => {
+    const data = {
+      runId: workflowRunId,
+      status,
+      summary,
+      generatedAtMs: 1_700_000_000_000,
+      currentNodeId: null,
+      warnings: notes.warnings ?? [],
+      information: notes.information ?? [],
+      blockers: blockers.map((row) => ({
+        nodeId: "node:project-discovery",
+        iteration: 0,
+        reason: row.kind,
+        waitingSince: 1_699_999_000_000,
+        ...row
+      }))
+    };
+    const envelope = { ok: true, data, meta: { command: "why", duration: "1ms" } };
+    fs.writeFileSync(path.join(project, "fake-why.json"), `${JSON.stringify(envelope)}\n`, "utf8");
+    const diagnosis = await diagnoseRun({ projectRoot: project, runId, env });
+    assert.ok(diagnosis.value, JSON.stringify(diagnosis.diagnostics));
+    return diagnosis.value;
+  };
+
+  // A plain resume leaves a failed node failed, so on a failed run every retry goes through --retry-failed.
+  const failed = await diagnose(
+    "failed",
+    `Run ${workflowRunId} is failed`,
+    [
+      { kind: "retries-exhausted", nodeId: "verify:project-discovery", unblocker: resume },
+      { kind: "stalled", unblocker: retryTask }
+    ],
+    {
+      information: [
+        `Last good checkpoint: frame 29. Resume in place with \`${resume}\` or replay from the checkpoint with \`smithers replay ${workflow} --run-id ${workflowRunId} --frame 29\`.`
+      ]
+    }
+  );
+  assert.deepEqual(
+    failed.blockers.map((blocker) => blocker.unblocker),
+    ["ultrafuzz resume smithers-probe --retry-failed", "ultrafuzz resume smithers-probe --retry-failed"]
+  );
+  assert.deepEqual(failed.notes, [
+    "Last good checkpoint: frame 29. Resume in place with `ultrafuzz resume smithers-probe --retry-failed` or replay from the checkpoint with `ultrafuzz fork smithers-probe --frame 29`."
+  ]);
+
+  const running = await diagnose(
+    "running",
+    `Run ${workflowRunId} is running`,
+    [
+      {
+        kind: "side-effect-boundary-crossed",
+        nodeId: "(run-level)",
+        iteration: null,
+        unblocker: `smithers inspect ${workflowRunId}`
+      },
+      { kind: "stale-task-heartbeat", unblocker: `${retryTask} --force true` },
+      { kind: "engine-busy", nodeId: "(run-level)", iteration: null, unblocker: `smithers logs ${workflowRunId}` }
+    ],
+    {
+      warnings: [
+        "Concurrency ceiling saturated: requested demand 8, effective cap 4. Remediation: `smithers up --max-concurrency 8`."
+      ]
+    }
+  );
+  assert.deepEqual(
+    running.blockers.map((blocker) => blocker.unblocker),
+    [
+      "ultrafuzz inspect smithers-probe",
+      "ultrafuzz resume smithers-probe --reset-node node:project-discovery",
+      "ultrafuzz events smithers-probe --watch --history"
+    ]
+  );
+  // An `up` without `--resume` starts a run rather than resuming this one, so it is not rebuilt and
+  // keeps the limit it raises.
+  assert.deepEqual(running.notes, [
+    "Concurrency ceiling saturated: requested demand 8, effective cap 4. Remediation: `workflow runner up --max-concurrency 8`."
+  ]);
+
+  const paused = await diagnose("paused", "Run was gracefully paused; resume with `smithers up --resume <runId>`.", []);
+  assert.equal(paused.summary, "Run was gracefully paused; resume with `ultrafuzz resume smithers-probe`.");
 });
 
 test("diagnoseRun rejects an unexpected engine response", async () => {
@@ -1588,6 +1699,43 @@ test("diagnoseProject warns when the temporary directory has little free space",
     doctor.diagnostics.find((entry) => entry.code === "DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED")?.message ?? "",
     /has less than 2 GiB free/u
   );
+});
+
+test("diagnoseProject reports a lower bound once sizing many controller roots runs out of time", async (context) => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const temporary = temporaryRoot("ufz-doctor-many-roots-");
+  for (let index = 0; index < 100; index += 1) {
+    const root = path.join(temporary, `ultrafuzz-controller-${String(index)}`);
+    fs.mkdirSync(root);
+    // A sparse 1 MiB file, so the size is counted without writing the bytes.
+    fs.writeFileSync(path.join(root, "engine.js"), "");
+    fs.truncateSync(path.join(root, "engine.js"), 1024 * 1024);
+  }
+  // A slow filesystem: each clock reading is 100 ms after the previous one, so
+  // sizing all 100 roots would take far longer than doctor's budget.
+  let now = 0;
+  context.mock.method(performance, "now", () => (now += 100));
+  const readdirSync = context.mock.method(fs, "readdirSync");
+
+  const doctor = await withTemporaryDirectory(temporary, () =>
+    diagnoseProject({
+      projectRoot: project,
+      env: { PATH: "/usr/bin" },
+      offline: true,
+      requiredCommandProbe: allAvailable
+    })
+  );
+
+  const summary = doctor.value?.checks.find((check) => check.name === "temporary-directory")?.summary ?? "";
+  const sized = /; 100 ultrafuzz-controller-\* directories hold at least (\d+) MiB/u.exec(summary);
+  assert.ok(sized !== null, summary);
+  assert.ok(Number(sized[1]) < 100, summary);
+  // Each root holds 1 MiB, so every root doctor opens is counted except the
+  // one being read when the budget runs out. No root is opened after that.
+  const opened = readdirSync.mock.calls.filter((call) => path.dirname(String(call.arguments[0])) === temporary);
+  assert.ok(opened.length <= Number(sized[1]) + 1, `${String(opened.length)} roots opened; ${summary}`);
 });
 
 async function allAvailable(names: readonly string[]) {

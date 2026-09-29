@@ -184,21 +184,15 @@ export function readRegularFileSnapshot(filePath: string, maxBytes: number): Buf
       chunks.push(chunk.subarray(0, read));
     }
     const after = fs.fstatSync(descriptor, { bigint: true });
+    // Link count and ctime are not compared. A hard link made anywhere on the host (pnpm linking the
+    // same store inode into another node_modules) changes both without changing a byte, and a rename
+    // over the path leaves this descriptor reading the complete original. A write updates mtime along
+    // with ctime, so size and mtime still catch one.
     if (
       before.dev !== after.dev ||
       before.ino !== after.ino ||
       before.size !== after.size ||
       before.mtimeNs !== after.mtimeNs ||
-      before.ctimeNs !== after.ctimeNs ||
-      // An atomic path replacement leaves this descriptor on the original
-      // inode, so dev/ino/size are all still identical and the only other
-      // evidence is a ctime bump -- which the kernel records at timestamp
-      // granularity, not instruction granularity. Open, read, rename and fstat
-      // routinely complete inside a single tick on a fast disk, and the
-      // replacement then went undetected. The unlink that rename performs drops
-      // the original inode's link count to zero, which is exact and carries no
-      // dependence on the clock.
-      before.nlink !== after.nlink ||
       after.size !== BigInt(offset)
     ) {
       throw new Error(`file changed while it was read: ${filePath}`);

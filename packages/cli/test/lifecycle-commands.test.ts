@@ -98,6 +98,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
   const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const whyPath = path.join(project, "fake-why.json");
+  const whyFailurePath = path.join(project, "fake-why-failure.json");
   const timelinePath = path.join(project, "fake-timeline.json");
   const snapshotsPath = path.join(project, "fake-snapshots.json");
   const nodePath = path.join(project, "fake-node.json");
@@ -207,7 +208,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
             iteration: 0,
             reason: "3 identical failures in a row",
             waitingSince: 1_699_999_700_000,
-            unblocker: "smithers resume --retry-failed"
+            // The pinned runner's own suggestion names its CLI, its workflow file and its run ID.
+            unblocker: `smithers retry-task ${path.join(project, ".smithers", "workflows", `${WORKFLOW_RUN_ID}.tsx`)} --run-id ${WORKFLOW_RUN_ID} --node-id node:strategy --iteration 0`
           }
         ]
       },
@@ -303,7 +305,11 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
-      `  why) cat ${shellQuote(whyPath)} ;;`,
+      "  why)",
+      // Like the pinned runner, a failed query prints its error envelope and exits nonzero.
+      `    if [ -f ${shellQuote(whyFailurePath)} ]; then cat ${shellQuote(whyFailurePath)}; exit 1; fi`,
+      `    cat ${shellQuote(whyPath)}`,
+      "    ;;",
       `  timeline) cat ${shellQuote(timelinePath)} ;;`,
       `  snapshots) cat ${shellQuote(snapshotsPath)} ;;`,
       "  node)",
@@ -395,6 +401,7 @@ test("why reports the diagnosis in human and JSON output", async (t) => {
   assert.match(human.stdout, /^Current node: node:project-discovery$/mu);
   assert.match(human.stdout, /waiting-approval: waiting on a human approval \(attempt 1\/3\)/u);
   assert.match(human.stdout, /unblock with: approve the pending request/u);
+  assert.match(human.stdout, /^ {2}unblock with: ultrafuzz resume lifecycle-cli-run --reset-node node:strategy$/mu);
   assert.doesNotMatch(human.stdout, /smithers/iu);
 
   const json = await cli(project, ["why", RUN_ID, "--json"], env);
@@ -407,6 +414,34 @@ test("why reports the diagnosis in human and JSON output", async (t) => {
   assert.equal(data.blockers[0]?.kind, "waiting-approval");
   assert.equal(data.blockers[1]?.kind, "stalled");
   assert.equal(data.blockers[1]?.node_id, "node:strategy");
+});
+
+test("why reports a runner failure in the runner's words, without its advice", async (t) => {
+  const { project, env } = await launchedProject(t);
+  const database = path.join(project, "smithers.db");
+  // The pinned runner's `why` answer when the store holds no run history.
+  fs.writeFileSync(
+    path.join(project, "fake-why-failure.json"),
+    `${JSON.stringify({
+      ok: false,
+      error: {
+        code: "WHY_FAILED",
+        message: `No Smithers run history found at ${database}. Run 'smithers up <workflow>' to start a run first. See https://smithers.sh/reference/errors`
+      },
+      meta: { command: "why", duration: "1ms" }
+    })}\n`,
+    "utf8"
+  );
+
+  const failed = await cli(project, ["why", RUN_ID], env);
+
+  assert.equal(failed.code, 1);
+  assert.deepEqual(
+    failed.stderr.split("\n").filter((line) => line.includes("WORKFLOW_DIAGNOSIS_FAILED")),
+    [
+      `error: WORKFLOW_DIAGNOSIS_FAILED: No workflow runner run history found at ${database}. See https://smithers.sh/reference/errors`
+    ]
+  );
 });
 
 test("timeline surfaces frame numbers for fork --frame", async (t) => {

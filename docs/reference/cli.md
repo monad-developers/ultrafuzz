@@ -554,6 +554,18 @@ blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,
 evidence first, matching single-run `status`, and `status` recommends it as the
 next step.
 
+The workflow runner's resume, task-retry, checkpoint-replay, log, and inspect
+suggestions in `unblocker`, the notes, and the summary are rebuilt as
+`ultrafuzz` commands for the run, without the runner's workflow path or run ID.
+Replaying from a checkpoint becomes `ultrafuzz fork <run-id> --frame <n>`. On a
+failed run, resuming or retrying a task becomes
+`ultrafuzz resume <run-id> --retry-failed`, because a plain resume leaves a
+failed node failed; on a live run, retrying one task becomes
+`ultrafuzz resume <run-id> --reset-node <node-id>`. A suggestion with no
+`ultrafuzz` equivalent, such as approving or signalling a task, stays in the
+runner's words with the runner called `workflow runner`; generated workflows
+never wait on either.
+
 `timeline` is read-only and returns `frames` with `frame`, `created_at`,
 `content_hash`, and fork points. Pass a listed frame number to
 `ultrafuzz fork <run-id> --frame <n>`. `--tree` adds forked runs recursively
@@ -612,9 +624,11 @@ non-launching configuration contract unchanged. Doctor reports:
   operator-owned controller;
 - the OS temporary directory, where launch and resume install that controller:
   its free space and how many `ultrafuzz-controller-*` directories it holds,
-  with their total size. Doctor warns when the directory is a RAM-backed tmpfs
-  or has less than 2 GiB free, and never removes those directories, because a
-  native resume keeps its controller there for the detached engine.
+  with their total size. Sizing them stops after about one second, and the
+  size is then reported as `at least` the bytes counted so far. Doctor warns
+  when the directory is a RAM-backed tmpfs or has less than 2 GiB free, and
+  never removes those directories, because a native resume keeps its
+  controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies. For cloud execution, checking required commands may create the
