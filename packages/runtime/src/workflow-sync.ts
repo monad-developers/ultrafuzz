@@ -115,6 +115,7 @@ import {
   parseCurrentSmithersInspect,
   requestSmithersCancel,
   runSmithersInspectionCommand,
+  scrubWorkflowRunnerText,
   smithersDiagnostic,
   smithersSnapshotReportsMissingRun,
   type CurrentSmithersInspect,
@@ -6054,7 +6055,7 @@ function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: str
   const message = snapshot.stderr.trim() || snapshot.error || "workflow inspection failed";
   return {
     code,
-    message: message.replace(/smithers/giu, "workflow runner"),
+    message: scrubWorkflowRunnerText(message),
     severity: "error",
     source: "workflow"
   };
