@@ -110,6 +110,12 @@ function writePrompt(project: string, relativePath: string, id: string, body: st
 
 function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup = false): void {
   initProject({ projectRoot: project, force: true });
+  // The fake runner never heartbeats, so a sync that runs one lease after launch parks every open node
+  // as a lost controller. Slow CI setup alone can take longer than the default 30 s lease.
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^controller_lease_seconds = 30$/mu);
+  fs.writeFileSync(configPath, config.replace(/^controller_lease_seconds = 30$/mu, "controller_lease_seconds = 3600"));
   writePrompt(project, "dynamic/planner.md", "dynamic-planner", "Write the plan to {{artifact_path}}/plan.json.");
   writePrompt(
     project,
