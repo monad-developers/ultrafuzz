@@ -12,6 +12,7 @@ import {
   manifestDigest,
   type NodeAttemptLedgerEntry,
   type NodeState,
+  type NodeWorkflowProvenance,
   type PlannedGraphDocument,
   type RunAccountingSummary,
   type RunMetadataDocument,
@@ -20,6 +21,8 @@ import {
 } from "@ultrafuzz/artifacts";
 import { assertRunMetadataAccountingUsageAuthority } from "@ultrafuzz/runtime";
 
+import { envelope } from "../src/command-shared.js";
+import { buildStatisticsCommandResult } from "../src/commands/stats.js";
 import { deriveRunStatistics, type StatisticsEvidence } from "../src/run-statistics.js";
 
 const RUN_ID = "stats-unit";
@@ -40,7 +43,12 @@ function attempt(
   nodeId: string,
   strategyAttemptId: string,
   sourceEventSequence: number,
-  options: { runId?: string; startedAt?: string; finishedAt?: string; outcome?: "succeeded" | "failed" } = {}
+  options: {
+    runId?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    outcome?: "succeeded" | "failed" | "canceled";
+  } = {}
 ): NodeAttemptLedgerEntry {
   const outcome = options.outcome ?? "succeeded";
   return createNodeAttemptLedgerEntry(
@@ -59,7 +67,7 @@ function attempt(
       outcome,
       inputManifestDigest: manifestDigest("input"),
       outputManifestDigest: outcome === "succeeded" ? manifestDigest("output") : null,
-      ...(outcome === "failed" ? { failureCategory: "executor-error" as const } : {})
+      ...(outcome === "succeeded" ? {} : { failureCategory: outcome === "failed" ? "executor-error" : "canceled" })
     }
   );
 }
@@ -168,6 +176,7 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
     running: 0,
     succeeded: 1,
     failed: 0,
+    canceled: 0,
     skipped: 0,
     "timed-out": 0,
     "reused-from-prior-run": 0,
@@ -190,6 +199,69 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
     source_run_ids: []
   });
   assert.deepEqual(derived.diagnostics, []);
+});
+
+test("stats counts a failed node whose task Smithers cancelled as canceled", () => {
+  type WorkflowState = "cancelled" | "failed";
+  const failed = (nodeId: string, logicalNodeId: string, workflow: NodeWorkflowProvenance): NodeState => ({
+    ...terminalNodeState(nodeId, logicalNodeId),
+    status: "failed",
+    outputs: [],
+    provenance: { workflow }
+  });
+  const task = (nodeId: string, logicalNodeId: string, state: WorkflowState): NodeState =>
+    failed(nodeId, logicalNodeId, {
+      run_id: WORKFLOW_RUN_ID,
+      task_id: `node:${nodeId}`,
+      agent_task_id: `node:${nodeId}`,
+      verifier_task_id: `verify:${nodeId}`,
+      state,
+      attempt: 1
+    });
+  const status = (states: NodeState[], graph?: PlannedGraphDocument) => {
+    // Smithers cancelled the tasks before it selected an agent, so no attempt was recorded.
+    const { value } = deriveRunStatistics(
+      evidence({
+        ...(graph === undefined ? {} : { graph, usage: [] }),
+        state: runState(states, "canceled"),
+        attempts: []
+      }),
+      Date.parse(FINISHED_AT)
+    );
+    // The JSON envelope is validated against the closed CLI result schema.
+    envelope("stats", buildStatisticsCommandResult(value, []));
+    return [value.nodes[0]?.status, value.totals.status_counts.failed, value.totals.status_counts.canceled];
+  };
+
+  // Run state records a cancelled task as failed; `status` counts it apart from failures (#1087).
+  assert.deepEqual(status([task("node", "node", "cancelled")]), ["canceled", 0, 1]);
+  assert.deepEqual(status([task("node", "node", "failed")]), ["failed", 1, 0]);
+  // A fan-out node's canonical state aggregates its strategy tasks and has no Smithers state of its own.
+  const fanOut = (...states: WorkflowState[]) =>
+    status(
+      [
+        failed("fan", "fan", { run_id: WORKFLOW_RUN_ID, aggregate_attempt_statuses: ["failed", "failed"] }),
+        ...states.map((state, index) => task(`fan__model_${index}__attempt_0`, "fan", state))
+      ],
+      graphDocument(
+        "fan",
+        states.map((_, index) => `node:fan__model_${index}__attempt_0`),
+        ["gpt-test", "gpt-other"]
+      )
+    );
+  assert.deepEqual(fanOut("cancelled", "cancelled"), ["canceled", 0, 1]);
+  assert.deepEqual(fanOut("cancelled", "failed"), ["failed", 1, 0]);
+});
+
+test("stats reports a node's latest attempt outcome in event order, not ledger row order", () => {
+  const outcome = (attempts: NodeAttemptLedgerEntry[]) =>
+    deriveRunStatistics(evidence({ attempts }), Date.parse(FINISHED_AT)).value.nodes[0]?.outcome;
+  const abandoned = attempt("node", "node", 1, { outcome: "canceled" });
+  const replacement = attempt("node", "node", 2);
+
+  assert.equal(outcome([abandoned, replacement]), "succeeded");
+  // A run synchronized by an earlier version records the abandoned attempt after its replacement.
+  assert.equal(outcome([replacement, abandoned]), "succeeded");
 });
 
 test("stats counts only the latest cumulative usage snapshot for each attempt", () => {

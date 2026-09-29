@@ -58,7 +58,7 @@ export interface TokenStatistics {
   models: string[];
 }
 
-export type NodeStatisticsStatus = NodeStatus | "unknown";
+export type NodeStatisticsStatus = NodeStatus | "canceled" | "unknown";
 
 export interface NodeStatistics {
   node_id: string;
@@ -484,6 +484,17 @@ function taskWorkflowAgentId(nodeState: NodeState | undefined): string | undefin
   return "agent_task_id" in provenance.workflow ? provenance.workflow.agent_task_id : undefined;
 }
 
+/** Whether Smithers ended every failed task of the node cancelled. */
+function workflowCancelled(states: readonly NodeState[]): boolean {
+  const failedTaskStates = states.flatMap((nodeState) => {
+    const provenance = nodeState.provenance;
+    if (nodeState.status !== "failed" || provenance === undefined || !("workflow" in provenance)) return [];
+    const workflow = provenance.workflow;
+    return workflow !== undefined && "state" in workflow ? [workflow.state] : [];
+  });
+  return failedTaskStates.length > 0 && failedTaskStates.every((state) => state === "cancelled");
+}
+
 function usageNodeAliases(
   descriptors: readonly NodeDescriptor[],
   diagnostics: RuntimeDiagnostic[]
@@ -548,7 +559,10 @@ function nodeStatistics(
 
   const canonicalState =
     descriptor.states.find((nodeState) => nodeState.node_id === descriptor.nodeId) ?? descriptor.states[0];
-  const status = canonicalState?.status ?? aggregateNodeStatus(descriptor.states);
+  const stateStatus = canonicalState?.status ?? aggregateNodeStatus(descriptor.states);
+  // Run state records a task that Smithers cancelled as failed; `status` does
+  // not count it as a failure (#1087).
+  const status = stateStatus === "failed" && workflowCancelled(descriptor.states) ? "canceled" : stateStatus;
   const strategyStates = descriptor.states.filter((nodeState) => nodeState.node_id !== descriptor.nodeId);
   const timedStates = strategyStates.length > 0 ? strategyStates : descriptor.states;
   const currentElapsedMs = timedStates.reduce<number | null>((total, nodeState) => {
@@ -803,9 +817,20 @@ function aggregateNodeStatus(states: readonly NodeState[]): NodeStatisticsStatus
 }
 
 function aggregateAttemptOutcome(attempts: readonly NodeAttemptLedgerEntry[]): NodeAttemptOutcome | "mixed" | null {
-  const latestByStrategy = new Map<string, NodeAttemptOutcome>();
-  for (const attempt of attempts) latestByStrategy.set(attempt.strategy_attempt_id, attempt.outcome);
-  const outcomes = [...new Set(latestByStrategy.values())];
+  const latestByStrategy = new Map<string, NodeAttemptLedgerEntry>();
+  for (const attempt of attempts) {
+    const previous = latestByStrategy.get(attempt.strategy_attempt_id);
+    // Rows are appended as they are recorded, so a version that records more
+    // attempts can append an earlier attempt of a workflow run after a later one.
+    if (
+      previous?.workflow_run_id === attempt.workflow_run_id &&
+      previous.source_event_sequence > attempt.source_event_sequence
+    ) {
+      continue;
+    }
+    latestByStrategy.set(attempt.strategy_attempt_id, attempt);
+  }
+  const outcomes = [...new Set([...latestByStrategy.values()].map((attempt) => attempt.outcome))];
   if (outcomes.length === 0) return null;
   return outcomes.length === 1 ? outcomes[0]! : "mixed";
 }
@@ -818,6 +843,7 @@ function emptyStatusCounts(): Record<NodeStatisticsStatus, number> {
     running: 0,
     succeeded: 0,
     failed: 0,
+    canceled: 0,
     skipped: 0,
     "timed-out": 0,
     "reused-from-prior-run": 0,

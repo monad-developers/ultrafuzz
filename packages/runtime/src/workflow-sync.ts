@@ -177,6 +177,19 @@ interface TerminalWorkflowAttempt {
   superseded: boolean;
 }
 
+type WorkflowAttemptStart = Pick<
+  TerminalWorkflowAttempt,
+  "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt"
+>;
+
+type TerminalAttemptOutcome = Pick<TerminalWorkflowAttempt, "outcome" | "failureCategory" | "failureMessage">;
+
+const ABANDONED_ATTEMPT_OUTCOME: TerminalAttemptOutcome = {
+  outcome: "canceled",
+  failureCategory: "canceled",
+  failureMessage: "abandoned: the controller stopped during this attempt, and the resumed run cancelled it"
+};
+
 type SmithersNodeAttemptAuthorities = ReadonlyMap<string, unknown>;
 
 interface AccountingSummary {
@@ -4169,33 +4182,56 @@ function nodeAttemptAgentProvenance(selection: SmithersAttemptAgentSelection): N
  * recordable after a reset (timetravel / retry-task) restarts the attempt
  * numbering: the earlier occurrence is only marked `superseded`, because
  * Smithers upserts the attempt row for the replacement (#1099). Unpairable
- * events are skipped, never fatal. A start without a terminal was abandoned
- * (Smithers cancels in-progress rows at the next RunStarted without an event),
- * and a terminal without a live start in the same activation, such as a
- * NodeCancelled for an attempt that already ended or never started, is not an
- * occurrence (#1139). Nor is a terminal stamped before its start, which no
- * ledger row can hold: Smithers stamps a run cancellation's NodeCancelled with
- * an instant it takes before its transaction, so a start that commits meanwhile
- * can carry a later timestamp.
+ * events are skipped, never fatal. A terminal without a live start in the same
+ * activation, such as a NodeCancelled for an attempt that already ended or
+ * never started, is not an occurrence (#1139). Nor is a terminal stamped before
+ * its start, which no ledger row can hold: Smithers stamps a run cancellation's
+ * NodeCancelled with an instant it takes before its transaction, so a start
+ * that commits meanwhile can carry a later timestamp.
+ *
+ * A start still open at the next RunStarted was abandoned by the activation
+ * that stopped, for example when its controller was killed. Smithers marks that
+ * attempt cancelled when the next activation starts, but emits no event for
+ * it. The occurrence is canceled and ends at the next event of the same task,
+ * normally its replacement's NodeStarted: one RunStarted can abandon several
+ * attempts, and each occurrence needs its own terminal event.
  */
 function terminalWorkflowAttempts(events: readonly WorkflowEvent[]): TerminalWorkflowAttempt[] {
-  const active = new Map<
-    string,
-    Pick<TerminalWorkflowAttempt, "retry" | "iteration" | "nodeId" | "startedSequence" | "startedAt">
-  >();
+  const active = new Map<string, WorkflowAttemptStart>();
+  // Starts that an earlier activation left open, keyed by task and iteration.
+  const abandoned = new Map<string, WorkflowAttemptStart>();
   const latestByIdentity = new Map<string, TerminalWorkflowAttempt>();
   const attempts: TerminalWorkflowAttempt[] = [];
+  const end = (started: WorkflowAttemptStart, event: WorkflowEvent, terminal: TerminalAttemptOutcome): void => {
+    if (event.timestampMs < Date.parse(started.startedAt)) return;
+    const occurrence: TerminalWorkflowAttempt = {
+      ...started,
+      finishedSequence: event.sourceEventSequence,
+      finishedAt: new Date(event.timestampMs).toISOString(),
+      ...terminal,
+      superseded: false
+    };
+    latestByIdentity.set(JSON.stringify([started.nodeId, started.iteration, started.retry]), occurrence);
+    attempts.push(occurrence);
+  };
   for (const event of events) {
     if (event.type === "RunStarted") {
+      for (const started of active.values()) {
+        abandoned.set(JSON.stringify([started.nodeId, started.iteration]), started);
+      }
       active.clear();
       continue;
     }
     if (!["NodeStarted", "NodeFinished", "NodeFailed", "NodeCancelled"].includes(event.type)) continue;
     const { nodeId, iteration, attempt: retry } = event.payload;
+    if (typeof nodeId !== "string" || !Number.isSafeInteger(iteration)) continue;
+    const task = JSON.stringify([nodeId, iteration]);
+    const lost = abandoned.get(task);
+    abandoned.delete(task);
+    if (lost !== undefined) end(lost, event, ABANDONED_ATTEMPT_OUTCOME);
     // A NodeCancelled for a node with no live attempt carries `attempt: null`.
-    if (typeof nodeId !== "string" || !Number.isSafeInteger(iteration) || !Number.isSafeInteger(retry)) continue;
+    if (!Number.isSafeInteger(retry)) continue;
     const identity = JSON.stringify([nodeId, iteration, retry]);
-    const timestamp = new Date(event.timestampMs).toISOString();
     if (event.type === "NodeStarted") {
       const previous = latestByIdentity.get(identity);
       if (previous !== undefined) previous.superseded = true;
@@ -4204,25 +4240,15 @@ function terminalWorkflowAttempts(events: readonly WorkflowEvent[]): TerminalWor
         iteration: iteration as number,
         nodeId,
         startedSequence: event.sourceEventSequence,
-        startedAt: timestamp
+        startedAt: new Date(event.timestampMs).toISOString()
       });
       continue;
     }
     const started = active.get(identity);
     const terminal = terminalOutcomeForEvent(event);
-    if (started === undefined || terminal === undefined || event.timestampMs < Date.parse(started.startedAt)) continue;
+    if (started === undefined || terminal === undefined) continue;
     active.delete(identity);
-    const occurrence: TerminalWorkflowAttempt = {
-      ...started,
-      finishedSequence: event.sourceEventSequence,
-      finishedAt: timestamp,
-      outcome: terminal.outcome,
-      ...(terminal.failureCategory === undefined ? {} : { failureCategory: terminal.failureCategory }),
-      ...(terminal.failureMessage === undefined ? {} : { failureMessage: terminal.failureMessage }),
-      superseded: false
-    };
-    latestByIdentity.set(identity, occurrence);
-    attempts.push(occurrence);
+    end(started, event, terminal);
   }
   return attempts;
 }
@@ -4236,13 +4262,7 @@ function recordedTerminalAttemptSequences(
   );
 }
 
-function terminalOutcomeForEvent(event: WorkflowEvent):
-  | {
-      outcome: NodeAttemptOutcome;
-      failureCategory?: NodeAttemptFailureCategory;
-      failureMessage?: string;
-    }
-  | undefined {
+function terminalOutcomeForEvent(event: WorkflowEvent): TerminalAttemptOutcome | undefined {
   switch (event.type) {
     case "NodeFinished":
       return { outcome: "succeeded" };

@@ -406,7 +406,11 @@ completed and currently elapsed execution time, token components, estimated
 spend, model, and attempt count. JSON output uses `ultrafuzz.stats.v1` inside
 the normal CLI envelope and additionally exposes retries, executed/reused
 counts, outcomes, failure categories, completeness, unattributed usage, and
-cumulative run accounting.
+cumulative run accounting. Run state records a task that Smithers cancelled,
+for example by `ultrafuzz cancel`, as failed. When Smithers cancelled every
+failed task of a node, `stats` reports the node with status `canceled` and
+counts it under `canceled` rather than `failed`; `status` likewise counts
+cancelled tasks apart from failures.
 The closed stats v1 field `pricing_complete` continues to mean complete cost
 coverage: it is the inverse of run accounting `partial_pricing`. Accounting v4's
 own `pricing_complete` field independently reports whether each event had
