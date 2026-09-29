@@ -620,6 +620,19 @@ test("cancel distinguishes a submitted request from a confirmed cancellation", a
   assert.match(humanConfirmed.stdout, /^Cancellation confirmed: lifecycle-cli-run is canceled$/mu);
 });
 
+test("plain status prints the warnings of a successful poll", async (t) => {
+  // A cancel reply outside the runner's status contract fails the deadline cancel.
+  const { project, env, runRoot } = await launchedProject(t, { cancelStatus: "busy" });
+  const statePath = path.join(runRoot, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(statePath, `${JSON.stringify({ ...state, workflow_deadline_at: "2000-01-01T00:00:00.000Z" })}\n`);
+
+  const status = await cli(project, ["status", RUN_ID], env);
+
+  assert.equal(status.code, 0, status.stderr);
+  assert.match(status.stdout, /^warning: WORKFLOW_DEADLINE_CANCEL_FAILED: /mu);
+});
+
 test("doctor reports install posture in human and JSON output", async (t) => {
   const { project, env } = await launchedProject(t);
   writeSmallTopology(project, "recon");

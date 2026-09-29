@@ -1,7 +1,7 @@
 import { Command, Flags } from "@oclif/core";
 import { initProject } from "@ultrafuzz/runtime";
 
-import { commandFromRuntime, diagnosticsText, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import { commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 
 export default class Init extends Command {
   static override summary = "Create project-owned Ultrafuzz surfaces";
@@ -22,9 +22,6 @@ export default class Init extends Command {
         ""
       ].join("\n")
     );
-    if (result.ok && result.diagnostics.length > 0) {
-      commandResult.text = `${commandResult.text ?? ""}${diagnosticsText(result.diagnostics)}`;
-    }
     emitCommandResult(this, "init", commandResult, flags.json === true);
   }
 }
