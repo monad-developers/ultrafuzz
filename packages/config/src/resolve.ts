@@ -5,7 +5,6 @@ import {
   DEFAULT_MODEL_PROFILE_ID,
   MAX_TIMEOUT_SECONDS,
   cloneResolvedConfig,
-  createDefaultPromptMetadataLayer,
   createDefaultResolvedConfig
 } from "./defaults.js";
 import {
@@ -33,7 +32,6 @@ import {
   type ConfigResult,
   type PermissionConfig,
   type ProjectConfigInput,
-  type PromptMetadataLayer,
   type ResolveConfigInput,
   type ResolvedConfig,
   type RuntimeConfigOverrides
@@ -71,10 +69,6 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
     );
   }
 
-  applyPromptMetadataLayer(config, createDefaultPromptMetadataLayer(), diagnostics);
-  if (input.promptMetadata) {
-    applyPromptMetadataLayer(config, input.promptMetadata, diagnostics);
-  }
   if (input.projectConfig) {
     applyProjectConfigLayer(config, input.projectConfig, diagnostics, "project-toml");
   }
@@ -344,41 +338,6 @@ function applyLayerSettingOrigins(
   if (layer.triage?.quorum !== undefined || runtimeLayer.triageQuorum !== undefined) origins.triage_quorum = origin;
   if (layer.triage?.panelSize !== undefined || runtimeLayer.triagePanelSize !== undefined) {
     origins.triage_panel_size = origin;
-  }
-}
-
-function applyPromptMetadataLayer(
-  config: ResolvedConfig,
-  layer: PromptMetadataLayer,
-  diagnostics: ConfigDiagnostic[]
-): void {
-  if (layer.run) {
-    applyRunConfig(config.run, layer.run);
-  }
-  if (layer.models) {
-    for (const [id, profile] of Object.entries(layer.models).sort()) {
-      if (!validProfileId(id)) {
-        diagnostics.push(
-          diagnostic(
-            "CONFIG_MODEL_PROFILE_ID_INVALID",
-            `model profile id \`${id}\` must use safe ASCII ID characters`,
-            ["models", id],
-            "prompt-metadata"
-          )
-        );
-      }
-      const existing = Object.hasOwn(config.models.profiles, id) ? config.models.profiles[id] : undefined;
-      setOwn(config.models.profiles, id, {
-        id,
-        agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
-        model: profile.model ?? existing?.model,
-        reasoning: profile.reasoning ?? existing?.reasoning,
-        timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
-      });
-      if (id === DEFAULT_MODEL_PROFILE_ID) {
-        config.models.synthesizedDefault = false;
-      }
-    }
   }
 }
 

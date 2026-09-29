@@ -2,11 +2,7 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "workspaces": {
     ".": {
-      "entry": [
-        "scripts/validate-audit-profile-package.mjs",
-        "scripts/ci/prepare-modal-benchmarks.mjs",
-        "scripts/ci/modal-benchmark-control-window.mjs"
-      ]
+      "entry": ["scripts/validate-audit-profile-package.mjs", "scripts/ci/prepare-modal-benchmarks.mjs"]
     },
     "packages/dashboard": {
       "entry": ["frontend/public/theme-bootstrap.js"]
