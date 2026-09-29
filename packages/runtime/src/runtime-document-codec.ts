@@ -1,26 +1,10 @@
-import { parseStrictJsonBytes, writeJsonDurable, type StrictJsonLimits } from "@ultrafuzz/artifacts";
+import { parseStrictJsonBytes, writeJsonDurable } from "@ultrafuzz/artifacts";
 
-import {
-  WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID,
-  type RuntimeDocumentForSchemaId,
-  type RuntimeDocumentSchemaId
-} from "./runtime-contracts.js";
+import { type RuntimeDocumentForSchemaId, type RuntimeDocumentSchemaId } from "./runtime-contracts.js";
 import { assertRuntimeJsonSchema } from "./schema-registry.js";
 import { assertRuntimeDocumentSemantics } from "./runtime-semantic-gates.js";
 
-const RUNTIME_DOCUMENT_LIMITS: StrictJsonLimits = {
-  maxBytes: 128 * 1024 * 1024,
-  maxDepth: 64,
-  maxItems: 100_000,
-  maxProperties: 500_000
-};
-
-// The parser counts items across the whole document. The control seal's schema
-// admits 100_000 execution files plus three identity arrays of up to 100_000
-// entries each, so a seal whose every array is within its schema bound can hold
-// 400_000 items. Its property total (four per execution file plus 35 fixed) stays
-// under the default limit.
-const CONTROL_SEAL_LIMITS: StrictJsonLimits = { ...RUNTIME_DOCUMENT_LIMITS, maxItems: 400_000 };
+const MAX_RUNTIME_DOCUMENT_BYTES = 128 * 1024 * 1024;
 
 export function assertRuntimeDocument<SchemaId extends RuntimeDocumentSchemaId>(
   schemaId: SchemaId,
@@ -38,10 +22,16 @@ export function parseRuntimeDocumentBytes<SchemaId extends RuntimeDocumentSchema
   bytes: Uint8Array,
   label: string
 ): RuntimeDocumentForSchemaId<SchemaId> {
-  const value = parseStrictJsonBytes(
-    bytes,
-    schemaId === WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID ? CONTROL_SEAL_LIMITS : RUNTIME_DOCUMENT_LIMITS
-  );
+  const value = parseStrictJsonBytes(bytes, {
+    maxBytes: MAX_RUNTIME_DOCUMENT_BYTES,
+    maxDepth: 64,
+    // Items are counted across the whole document, and launch writes the control seal
+    // after schema validation alone. At its schema's array bounds a seal holds 400_000
+    // items (100_000 execution files and three identity arrays of 100_000 entries) and
+    // 400_035 properties.
+    maxItems: 400_000,
+    maxProperties: 500_000
+  });
   return assertRuntimeDocument(schemaId, value, label);
 }
 

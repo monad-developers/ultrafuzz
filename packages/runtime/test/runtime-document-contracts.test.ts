@@ -230,8 +230,8 @@ test("workflow control execution-file uniqueness stays in the linear semantic ga
   assert.equal(assertRuntimeDocument(WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID, seal, "seal"), seal);
 });
 
-// Launch writes the seal after schema validation alone, so every seal the schema
-// accepts has to parse back, bindings included.
+// Launch writes the seal after schema validation alone, so a seal holding as many
+// execution files as its schema admits has to parse back.
 test("a control seal at its schema's execution-file bound parses back", () => {
   const properties = workflowControlIntegrityJsonSchema.properties as Record<string, { maxItems?: number }>;
   const maxExecutionFiles = properties.execution_files?.maxItems;
