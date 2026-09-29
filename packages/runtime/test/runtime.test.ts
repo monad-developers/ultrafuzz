@@ -27351,6 +27351,62 @@ test("syncRun reconciles node state when Smithers attempt detail is unavailable 
   );
 });
 
+test("syncRun keeps a succeeded node's retry count in step with attempts recorded after it finalized", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-immutable-retry-count";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: nodeId, state: "finished", attempt: 2 },
+        { id: verifierNodeId, state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFailed", nodeId, attempt: 1, error: { message: "provider overloaded" } },
+      { type: "NodeStarted", nodeId, attempt: 2 },
+      { type: "NodeFinished", nodeId, attempt: 2 },
+      { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  // Attempt detail is unavailable in the pass that finalizes the node as
+  // succeeded, so that pass defers both attempts.
+  const detailPath = path.join(fakeRunnerPath(env, "SMITHERS_FAKE_NODE_DETAILS"), `${nodeId}.json`);
+  const detail = fs.readFileSync(detailPath);
+  fs.rmSync(detailPath);
+  const finalizing = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(finalizing.ok, true, JSON.stringify(finalizing.diagnostics));
+  assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded");
+  assert.deepEqual(attemptLedgerRows(run.value.run_root), []);
+
+  fs.writeFileSync(detailPath, detail);
+  const recorded = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(recorded.ok, true, JSON.stringify(recorded.diagnostics));
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [entry.attempt, entry.outcome]),
+    [
+      [1, "failed"],
+      [2, "succeeded"]
+    ]
+  );
+  assert.equal(readRunState(layout).nodes["project-discovery"]?.retry_count, 1);
+});
+
 test("syncRun rebuilds run.json accounting after a pass stopped between the usage and run.json writes", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

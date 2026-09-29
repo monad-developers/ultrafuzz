@@ -3741,6 +3741,7 @@ async function synchronizeTasks(input: {
     concreteAttempts.push(task.attemptId);
     taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
     let retryCount = previous?.retry_count ?? 0;
+    let currentAttemptExecuted = false;
     try {
       const ledger = appendTerminalTaskAttempts({
         layout: input.layout,
@@ -3758,6 +3759,7 @@ async function synchronizeTasks(input: {
       });
       diagnostics.push(...ledger.diagnostics);
       retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
+      currentAttemptExecuted = ledger.currentAttemptExecuted;
       changed ||= ledger.appended;
     } catch (error) {
       // The next pass retries the append; the node itself still synchronizes.
@@ -3772,7 +3774,15 @@ async function synchronizeTasks(input: {
       // evidence, but it cannot re-finalize the node, clear its failure, create
       // a manifest, or recover it from files that appeared after completion.
       // Operational failures remain recoverable only when newer Smithers task
-      // evidence reaches the finalization path above.
+      // evidence reaches the finalization path above. The retry count is
+      // attempt bookkeeping, not finalization: once the ledger holds the current
+      // executed attempt, it follows attempts that the finalizing pass deferred.
+      if (currentAttemptExecuted && previous?.retry_count !== retryCount) {
+        updateNodeState(input.layout, task.attemptId, { retry_count: retryCount }, undefined, {
+          forbiddenSecretValues: input.forbiddenSecretValues
+        });
+        changed = true;
+      }
       syncedNodes += 1;
       continue;
     }
