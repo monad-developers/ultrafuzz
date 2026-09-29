@@ -88,6 +88,14 @@ export function loadPromptCatalog(options: LoadPromptCatalogOptions = {}): Promp
   };
 }
 
+export function getPrompt(catalog: PromptCatalog, id: string): PromptCatalogEntry {
+  const entry = catalog.entries.get(id);
+  if (!entry) {
+    throw new PromptError("missing-template-variable", `prompt id \`${id}\` was not found`);
+  }
+  return entry;
+}
+
 export function builtInPromptRelativePaths(): string[] {
   return discoverBuiltInPromptRelativePaths(builtInPromptRoot());
 }
