@@ -92,16 +92,18 @@ interface StubConfig {
 interface AgentCall {
   node: string;
   pid: number;
-  event: "started" | "held" | "completed";
+  event: "started" | "held" | "completed" | "failed";
+  error?: string;
 }
 
 /**
  * The fake `codex` binary. The engine spawns it exactly as it spawns Codex (`codex exec ... --json
- * -`, prompt on stdin). It writes every artifact the prompt's output contract names, renders the
- * final report with the `ultrafuzz report render` command the prompt gives, and prints the Codex
- * JSONL the engine parses. While `holdPath` exists, `holdNode` never finishes, so the test can kill
- * the controller in the middle of it. The function is serialized into the binary, so it may use
- * only globals.
+ * -`, prompt on stdin). It writes the `text@1` and `report@3` outputs that the prompt's output
+ * contract names, renders the final report's markdown with the `ultrafuzz report render` command
+ * the prompt gives, and prints the Codex JSONL the engine parses. While `holdPath` exists, it holds
+ * `holdNode` open for up to 10 minutes, so the test can kill the controller in the middle of it. It
+ * fails, and logs why, when the prompt no longer has the shape it parses. The function is
+ * serialized into the binary, so it may use only globals.
  */
 function stubCodex(config: StubConfig): void {
   const fs = process.getBuiltinModule("node:fs");
@@ -110,53 +112,62 @@ function stubCodex(config: StubConfig): void {
   const args = process.argv.slice(2);
   const prompt = fs.readFileSync(0, "utf8");
   const node = (process.env.SMITHERS_NODE_ID ?? "").replace(/^node:/u, "");
-  const log = (event: AgentCall["event"]): void =>
-    fs.appendFileSync(config.logPath, `${JSON.stringify({ node, pid: process.pid, event })}\n`);
+  const log = (event: AgentCall["event"], error?: string): void =>
+    fs.appendFileSync(config.logPath, `${JSON.stringify({ node, pid: process.pid, event, error })}\n`);
   log("started");
   if (node === config.holdNode && fs.existsSync(config.holdPath)) {
     log("held");
     setTimeout(() => process.exit(1), 10 * 60_000);
     return;
   }
-  const outputs = new Map<string, string>();
-  for (const [, file, contract] of prompt.matchAll(/^- Path: `([^`]+)`.*\n\s+Contract: `([^`]+)`/gmu)) {
-    if (file === undefined || contract === undefined) continue;
-    if (!["ultrafuzz/text@1", "ultrafuzz/report@3", "ultrafuzz/nonempty-markdown@1"].includes(contract)) {
-      throw new Error(`stub codex cannot write ${contract}`);
+  try {
+    const outputs = new Map<string, string>();
+    for (const [, file, contract] of prompt.matchAll(/^- Path: `([^`]+)`.*\n\s+Contract: `([^`]+)`/gmu)) {
+      if (file === undefined || contract === undefined) continue;
+      if (!["ultrafuzz/text@1", "ultrafuzz/report@3", "ultrafuzz/nonempty-markdown@1"].includes(contract)) {
+        throw new Error(`stub codex cannot write ${contract}`);
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      outputs.set(contract, file);
     }
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    outputs.set(contract, file);
-  }
-  const text = outputs.get("ultrafuzz/text@1");
-  if (text !== undefined) fs.writeFileSync(text, `stub output for ${node}\n`);
-  const report = outputs.get("ultrafuzz/report@3");
-  if (report !== undefined) {
-    // Copy the host-injected authorities the prompt names, as the final-report prompt instructs.
-    const authority = (suffix: string): Record<string, unknown> => {
-      const file = [...prompt.matchAll(/workspace-relative file "([^"]+)"/gu)]
-        .map((match) => match[1])
-        .find((candidate) => candidate?.endsWith(suffix) === true);
-      if (file === undefined) throw new Error(`stub codex found no ${suffix} authority in the prompt`);
-      return JSON.parse(fs.readFileSync(path.resolve(file), "utf8")) as Record<string, unknown>;
-    };
-    const data = authority(".final-report-prompt.json");
-    const document = {
-      schema_version: "ultrafuzz.report.v3",
-      run_metadata: { ...authority(".final-report-run-metadata.json"), agent_execution: data.agent_execution },
-      issues: [],
-      non_production_outcomes: [],
-      property_provenance: [],
-      property_implementation_coverage: data.property_implementation_coverage
-    };
-    fs.writeFileSync(report, `${JSON.stringify(document, null, 2)}\n`);
-    const render = /^ultrafuzz report render (.+)$/mu.exec(prompt)?.[1];
-    if (render === undefined) throw new Error("stub codex found no report render command in the prompt");
-    const renderArgs = [...render.matchAll(/(--[a-z-]+) '([^']+)'/gu)].flatMap(([, flag, value]) => [
-      flag ?? "",
-      value ?? ""
-    ]);
-    // The renderer writes report.md; its stdout must not interleave with the JSONL below.
-    execFileSync("ultrafuzz", ["report", "render", ...renderArgs], { stdio: ["ignore", "ignore", "inherit"] });
+    if (outputs.size === 0) throw new Error("stub codex found no output contract in the prompt");
+    const text = outputs.get("ultrafuzz/text@1");
+    if (text !== undefined) fs.writeFileSync(text, `stub output for ${node}\n`);
+    const report = outputs.get("ultrafuzz/report@3");
+    if (report !== undefined) {
+      // Copy the host-injected authorities the prompt names, as the final-report prompt instructs.
+      const authority = (suffix: string): Record<string, unknown> => {
+        const file = [...prompt.matchAll(/workspace-relative file "([^"]+)"/gu)]
+          .map((match) => match[1])
+          .find((candidate) => candidate?.endsWith(suffix) === true);
+        if (file === undefined) throw new Error(`stub codex found no ${suffix} authority in the prompt`);
+        return JSON.parse(fs.readFileSync(path.resolve(file), "utf8")) as Record<string, unknown>;
+      };
+      const data = authority(".final-report-prompt.json");
+      const document = {
+        schema_version: "ultrafuzz.report.v3",
+        run_metadata: { ...authority(".final-report-run-metadata.json"), agent_execution: data.agent_execution },
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [],
+        property_implementation_coverage: data.property_implementation_coverage
+      };
+      fs.writeFileSync(report, `${JSON.stringify(document, null, 2)}\n`);
+      const render = /^ultrafuzz report render (.+)$/mu.exec(prompt)?.[1];
+      // Every argument must be a `--flag 'value'` pair, so none is silently dropped.
+      if (render === undefined || !/^(?:--[a-z-]+ '[^']+' ?)+$/u.test(render)) {
+        throw new Error(`stub codex cannot parse the report render command: ${render}`);
+      }
+      const renderArgs = [...render.matchAll(/(--[a-z-]+) '([^']+)'/gu)].flatMap(([, flag, value]) => [
+        flag ?? "",
+        value ?? ""
+      ]);
+      // The renderer writes report.md; its stdout must not interleave with the JSONL below.
+      execFileSync("ultrafuzz", ["report", "render", ...renderArgs], { stdio: ["ignore", "ignore", "inherit"] });
+    }
+  } catch (error) {
+    log("failed", String(error));
+    throw error;
   }
   const emit = (event: object): boolean => process.stdout.write(`${JSON.stringify(event)}\n`);
   emit({ type: "thread.started", thread_id: `stub-${node}` });
@@ -194,7 +205,7 @@ interface StatsValue {
     attempt_count: number | null;
     executed_attempt_count: number | null;
   }>;
-  totals: { node_count: number; status_counts: Record<string, number>; attempts_complete: boolean };
+  totals: { node_count: number; status_counts: Record<string, number> };
 }
 
 interface WorkflowEvent {
@@ -292,24 +303,28 @@ function agentCalls(campaign: Campaign): AgentCall[] {
   return lines.map((line) => JSON.parse(line) as AgentCall);
 }
 
+/** A Linux process's command line; empty for a zombie, and undefined once it has been reaped. */
+function commandLine(pid: number | string): string | undefined {
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /** Linux PIDs whose command line mentions `needle`. */
 function processesMentioning(needle: string): number[] {
   return fs.readdirSync("/proc").flatMap((entry) => {
     if (!/^\d+$/u.test(entry) || Number(entry) === process.pid) return [];
-    try {
-      return fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").includes(needle) ? [Number(entry)] : [];
-    } catch {
-      return [];
-    }
+    return commandLine(entry)?.includes(needle) === true ? [Number(entry)] : [];
   });
 }
 
-function signal(pid: number, name: NodeJS.Signals | 0): boolean {
+function kill(pid: number): void {
   try {
-    process.kill(pid, name);
-    return true;
+    process.kill(pid, "SIGKILL");
   } catch {
-    return false;
+    // Already gone.
   }
 }
 
@@ -368,18 +383,20 @@ async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void
   assert.ok(workflowRunId !== undefined, "run did not report its workflow run ID");
 
   const held = await waitFor(`${INTERRUPTED_NODE} to start`, 15 * MINUTE, () => {
-    const call = agentCalls(campaign).find((entry) => entry.node === INTERRUPTED_NODE && entry.event === "held");
+    const calls = agentCalls(campaign);
+    const call = calls.find((entry) => entry.node === INTERRUPTED_NODE && entry.event === "held");
     if (call === undefined && processesMentioning(workflowRunId).length === 0) {
-      assert.fail(`the workflow stopped before ${INTERRUPTED_NODE} started`);
+      assert.fail(`the workflow stopped before ${INTERRUPTED_NODE} started; agent calls: ${JSON.stringify(calls)}`);
     }
     return call;
   });
   // A host crash takes down the detached engine and the supervisor that would otherwise restart it.
   const controller = processesMentioning(workflowRunId);
   assert.ok(controller.length > 0, "no detached controller process is running the workflow");
-  for (const pid of controller) signal(pid, "SIGKILL");
+  for (const pid of controller) kill(pid);
+  // The held agent is reparented once the engine dies; a zombie counts as exited.
   await waitFor("the controller and its agent to exit", MINUTE, () =>
-    processesMentioning(workflowRunId).length === 0 && !signal(held.pid, 0) ? true : undefined
+    processesMentioning(workflowRunId).length === 0 && (commandLine(held.pid) ?? "") === "" ? true : undefined
   );
   mark("controller killed");
 }
@@ -390,11 +407,19 @@ test(
   async (t) => {
     const campaign = prepareCampaign();
     const { runId } = campaign;
-    // The supervisor's command line names only the run ID; everything else names the fixture root.
-    const killLeftovers = (): void => {
-      for (const pid of [...processesMentioning(campaign.root), ...processesMentioning(runId)]) signal(pid, "SIGKILL");
+    const cleanUp = (): void => {
+      // The supervisor's command line names only the run ID; everything else names the fixture root.
+      for (const pid of [...processesMentioning(campaign.root), ...processesMentioning(runId)]) kill(pid);
+      removeTree(campaign.root);
     };
-    process.once("exit", killLeftovers);
+    // The campaign runs detached, so an interrupted test must stop it before dying of the signal.
+    const interrupted = (name: NodeJS.Signals): void => {
+      cleanUp();
+      process.kill(process.pid, name);
+    };
+    process.once("SIGINT", interrupted);
+    process.once("SIGTERM", interrupted);
+    process.once("exit", cleanUp);
     // Phase timings in the test output show where CI time goes.
     const started = Date.now();
     const mark = (phase: string): void => t.diagnostic(`${phase} after ${Math.round((Date.now() - started) / 1000)} s`);
@@ -414,13 +439,29 @@ test(
       assert.equal(resumed.submitted, true);
 
       // `events` reads the engine's event log without synchronizing the run, so it is the cheaper poll.
-      const events = await waitFor("the resumed workflow to finish", 15 * MINUTE, async () => {
+      const ended = ["RunFinished", "RunFailed", "RunCancelled"];
+      const events = await waitFor("the resumed workflow to end", 15 * MINUTE, async () => {
         const current = await ultrafuzz<{ events: WorkflowEvent[]; truncated: boolean }>(campaign, ["events", runId]);
-        const ended = ["RunFinished", "RunFailed", "RunCancelled"];
         return current.events.some((event) => ended.includes(event.category)) ? current : undefined;
       });
-      const health = await ultrafuzz<HealthValue>(campaign, ["status", runId]);
       mark("run ended");
+      const calls = agentCalls(campaign);
+      assert.equal(
+        events.events.find((event) => ended.includes(event.category))?.category,
+        "RunFinished",
+        `agent calls: ${JSON.stringify(calls)}`
+      );
+      // Every agent ran once, except the node the kill interrupted, which ran again after resume.
+      const starts = calls.filter((call) => call.event === "started");
+      assert.deepEqual(
+        AGENT_NODES.map((node) => [node, starts.filter((call) => call.node === node).length]),
+        AGENT_NODES.map((node) => [node, node === INTERRUPTED_NODE ? 2 : 1])
+      );
+      assert.equal(events.truncated, false);
+      assert.equal(events.events.filter((event) => event.category === "RunStarted").length, 2);
+      assertNoFinishedTaskRestarted(events.events);
+
+      const health = await ultrafuzz<HealthValue>(campaign, ["status", runId]);
       assert.equal(health.ended, true);
       assert.equal(health.status, "succeeded");
       assert.deepEqual(
@@ -441,16 +482,6 @@ test(
       assert.equal(reportJson.run_metadata.run_id, runId);
       assert.match(fs.readFileSync(report.markdown_path, "utf8"), /\S/u);
 
-      // Every agent ran once, except the node the kill interrupted, which ran again after resume.
-      const starts = agentCalls(campaign).filter((call) => call.event === "started");
-      assert.deepEqual(
-        AGENT_NODES.map((node) => [node, starts.filter((call) => call.node === node).length]),
-        AGENT_NODES.map((node) => [node, node === INTERRUPTED_NODE ? 2 : 1])
-      );
-      assert.equal(events.truncated, false);
-      assert.equal(events.events.filter((event) => event.category === "RunStarted").length, 2);
-      assertNoFinishedTaskRestarted(events.events);
-
       // `status` counts engine tasks and `stats` counts topology nodes; both must describe the same
       // complete run.
       const { finished, in_progress, pending, failed, skipped } = health.progress;
@@ -460,7 +491,6 @@ test(
       );
       const stats = await ultrafuzz<StatsValue>(campaign, ["stats", runId]);
       assert.equal(stats.status, "succeeded");
-      assert.equal(stats.totals.attempts_complete, true);
       assert.deepEqual(
         stats.nodes.map((node) => [node.node_id, node.status]),
         AGENT_NODES.map((node) => [node, "succeeded"])
@@ -476,7 +506,7 @@ test(
       await t.test(
         "stats counts the agent attempt the controller crash interrupted",
         {
-          todo: "attempts.jsonl is built from NodeFinished/NodeFailed events, and resume cancels this attempt without one"
+          todo: "Smithers emits no terminal event for the attempt it abandons when the resumed run starts, so attempts.jsonl never records it (#1187)"
         },
         () => {
           const statsAttempts = stats.nodes.reduce((total, node) => total + (node.attempt_count ?? 0), 0);
@@ -484,9 +514,10 @@ test(
         }
       );
     } finally {
-      killLeftovers();
-      process.removeListener("exit", killLeftovers);
-      removeTree(campaign.root);
+      process.removeListener("SIGINT", interrupted);
+      process.removeListener("SIGTERM", interrupted);
+      process.removeListener("exit", cleanUp);
+      cleanUp();
     }
   }
 );
