@@ -64,6 +64,13 @@ const gates = [
   gate("evmbench", "EVMBench package tests", "pnpm", ["--filter", "@ultrafuzz/evmbench", "test"], ["G-EVMBENCH"]),
   gate("modal", "Modal package tests", "pnpm", ["--filter", "@ultrafuzz/modal", "test"], ["G-MODAL"]),
   gate("cli", "CLI package tests", "pnpm", ["--filter", "@ultrafuzz/cli", "test"], ["G-CLI"]),
+  gate(
+    "cli-e2e",
+    "End-to-end campaign on the pinned engine",
+    "pnpm",
+    ["--filter", "@ultrafuzz/cli", "test:e2e"],
+    ["G-CLI", "G-RUNTIME"]
+  ),
   gate("benchmark-history", "Benchmark history charts", "pnpm", ["-w", "benchmark:check:prebuilt"], ["G-CLI"]),
   gate("workspace-typecheck", "Workspace typecheck", "pnpm", ["-w", "typecheck"], ["G-WORKSPACE-TYPECHECK"])
 ];
