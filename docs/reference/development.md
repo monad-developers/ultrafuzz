@@ -40,19 +40,17 @@ The root CI script runs format check, lint, build, and release validation:
 pnpm -w run ci
 ```
 
-Pull requests run CI policy checks, dependency policy, formatting, lint, the
-workspace build, and a curated runtime smoke suite. The smoke suite reuses the
-built workspace and covers runtime sharding, workflow controls, source revision
-binding, generated workflow input, and representative initialization,
-validation, planning, and workflow-compilation behavior. Feature branches are
-validated only by the pull-request event, avoiding a duplicate push run.
-
-Pull requests also require all five runtime validation lanes: one supporting
-lane, including the Bun adapter contracts, and four deterministic integration
-shards. Together these run the full runtime suite before merge. Pushes to `main`
-and manual workflow dispatches run all eight release lanes, adding package,
-CLI, and benchmark-history/typecheck checks, with at most eight jobs in parallel.
-Their results are recorded in stable gate order in the JSON report.
+Every CI run, pull requests included, runs the build gates (CI policy checks,
+formatting, lint, dead-code checks, the workspace build, strict lint of changed
+lines, bundle budgets, and dependency policy) and all eight release validation
+lanes: package gates, one runtime supporting lane that includes the Bun adapter
+contracts, four runtime integration shards, the CLI suite, and benchmark history
+with the workspace typecheck. The lanes do not wait for the build gates and run
+at most eight at a time. Feature branches are validated only by the
+pull-request event, avoiding a duplicate push run. A newer push to a pull
+request cancels that pull request's older run; a push to `main` never cancels
+another run. On `main`, the lane results are merged into one JSON report in
+stable gate order.
 
 ## Package Checks
 

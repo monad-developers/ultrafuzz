@@ -16,18 +16,18 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's older run. Every
+# other run gets its own group: a shared group would still cancel a queued run
+# on main whenever another push arrived.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   draft-and-build-gates:
-    name: "${{ github.event_name == 'pull_request' && 'PR build and Node.js 24 runtime smoke' || 'Build gates' }}"
+    name: Build gates
     runs-on: ubuntu-latest
-    # The PR path also runs the serial runtime and CLI contract smoke suites.
-    # Under runner contention they completed successfully just after the former
-    # 15-minute ceiling, so keep a bounded two-times completion budget.
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -84,14 +84,6 @@ jobs:
       - name: Enforce production dependency advisory policy
         run: pnpm -w security:dependency-advisories
 
-      - name: Run PR runtime smoke tests
-        if: github.event_name == 'pull_request'
-        run: pnpm --filter @ultrafuzz/runtime test:pr-smoke:prebuilt
-
-      - name: Run PR CLI status contract smoke tests
-        if: github.event_name == 'pull_request'
-        run: pnpm --filter @ultrafuzz/cli test:pr-smoke:prebuilt
-
   external-static-analysis:
     name: External static analysis
     runs-on: ubuntu-latest
@@ -125,10 +117,10 @@ jobs:
           VALIDATE_SHELL_SHFMT: true
           VALIDATE_YAML: true
 
-  # The lane table lives in scripts/ci/release-validation-lanes.mjs so the
-  # pull-request policy is a tested artifact instead of an invisible `if:`.
-  # While this job was gated off pull requests, every runtime test reported
-  # `skipping` on a PR and resume-path regressions merged with all checks green.
+  # The lane table lives in scripts/ci/release-validation-lanes.mjs, whose test
+  # checks that it runs every gate scripts/validate-release.mjs defines. Every
+  # lane runs on pull requests too: while lanes were gated off pull requests,
+  # regressions in the skipped suites merged with all checks green.
   release-validation-lanes:
     name: Select release validation lanes
     runs-on: ubuntu-latest
@@ -144,17 +136,14 @@ jobs:
 
       - name: Select release validation lanes
         id: select
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          echo "lanes=$(node scripts/ci/release-validation-lanes.mjs --event "$EVENT_NAME")" >> "$GITHUB_OUTPUT"
+          echo "lanes=$(node scripts/ci/release-validation-lanes.mjs)" >> "$GITHUB_OUTPUT"
 
+  # The lanes start without waiting for the build gates; release-gates still
+  # requires every job.
   release-validation:
     name: Full release validation (${{ matrix.description }})
-    needs:
-      - draft-and-build-gates
-      - external-static-analysis
-      - release-validation-lanes
+    needs: release-validation-lanes
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
