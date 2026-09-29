@@ -13,6 +13,7 @@ import {
 import {
   loadReportSnapshot,
   assertReportSnapshotRemainedCurrent,
+  publishBestEffortTerminalReport,
   ReportUnavailableError
 } from "../src/unverified-report.js";
 import { temporaryRoot } from "./temporary-root.js";
@@ -112,6 +113,72 @@ for (const status of ["failed", "pending", "running", "skipped"]) {
     const before = fs.readFileSync(file);
     assert.throws(() => loadReportSnapshot(root), /Report unavailable: no unique successful report-agent attempt/u);
     assert.deepEqual(fs.readFileSync(file), before);
+    assert.equal(fs.existsSync(path.join(root, "review")), false);
+  });
+}
+
+/** A failed report task whose failure names `causalTaskId`, with the report left in its workspace mirror. */
+function failReportAttempt(root: string, causalTaskId: string) {
+  const state = createInitialRunState({
+    runId: path.basename(root),
+    nodes: [{ id: "final-report", status: "failed" }]
+  });
+  state.status = "failed";
+  const node = state.nodes["final-report"];
+  assert.ok(node !== undefined);
+  node.provenance = {
+    workflow: {
+      run_id: "workflow",
+      task_id: causalTaskId,
+      agent_task_id: "node:final-report",
+      verifier_task_id: "verify:final-report",
+      state: "failed",
+      attempt: 1
+    },
+    failure: {
+      category: causalTaskId === "node:final-report" ? "agent-failure" : "artifact-contract",
+      causal_task_id: causalTaskId,
+      causal_failure_category: causalTaskId === "node:final-report" ? "agent-failure" : "artifact-contract",
+      dependent_task_ids: []
+    }
+  };
+  fs.writeFileSync(path.join(root, "state.json"), JSON.stringify(state));
+  const mirror = path.join(root, "workspaces", "final-report", "artifacts", "final-report");
+  fs.mkdirSync(mirror, { recursive: true });
+  const file = path.join(mirror, "report.json");
+  fs.renameSync(path.join(root, "artifacts", "final-report", "report.json"), file);
+  return { state, file };
+}
+
+test("a report its verifier rejected is still published as an unchecked PARTIAL report", () => {
+  const root = reportRun("verifier-rejected");
+  writeAgentReport(root);
+  const { state, file } = failReportAttempt(root, "verify:final-report");
+  const before = fs.readFileSync(file);
+
+  // The controller's terminal publication, as workflow synchronization runs it.
+  const published = publishBestEffortTerminalReport(root, { workflowRunId: "workflow", workflowState: "failed" });
+  assert.ok(published !== undefined);
+  assert.equal(published.verification, "not-checked");
+  assert.equal(published.artifacts.source, "unverified-runtime-report");
+  const status = writeReportPublicationStatus({ runRoot: root, state, report: published });
+  assert.deepEqual([status.status, status.completion, status.verification], ["available", "partial", "not-checked"]);
+
+  const document = reportSchema.parse(published.json);
+  assert.equal(document.run_metadata.repository, "example/repository");
+  assert.ok(document.verification?.reason_codes.includes("record-invalid"));
+  assert.match(published.markdown, /^# Ultrafuzz report — PARTIAL/u);
+  assert.match(published.markdown, /did not pass the required checks/u);
+  assert.deepEqual(fs.readFileSync(file), before);
+  assertReportSnapshotRemainedCurrent(loadReportSnapshot(root));
+});
+
+for (const causalTaskId of ["node:final-report", "prepare:final-report"]) {
+  test(`a report task that failed at ${causalTaskId} does not publish leftover workspace output`, () => {
+    const root = reportRun(`failed-at-${causalTaskId.replace(":", "-")}`);
+    writeAgentReport(root);
+    failReportAttempt(root, causalTaskId);
+    assert.throws(() => loadReportSnapshot(root), /Report unavailable: no unique successful report-agent attempt/u);
     assert.equal(fs.existsSync(path.join(root, "review")), false);
   });
 }

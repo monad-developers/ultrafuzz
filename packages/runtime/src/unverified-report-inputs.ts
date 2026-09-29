@@ -215,7 +215,7 @@ function unexpandedScopes(graph: JsonRecord | undefined): string[] | undefined {
   return scopes;
 }
 
-/** Locate the current successful report task. Never promote raw strategy results into a report. */
+/** Locate the current report-agent output. Never promote raw strategy results into a report. */
 function readAgentReport(
   reader: ReportInputReader,
   state: JsonRecord | undefined,
@@ -237,14 +237,18 @@ function readAgentReport(
   const producer = producers[0];
   if (typeof producer.id !== "string" || !NODE_REFERENCE_PATTERN.test(producer.id))
     throw new ReportUnavailableError("the current report-agent task ID is invalid");
-  const attempt = successfulReportAttempt(producer.id, nodes, state?.run_id, manifestBytes);
+  const attempt = currentReportAttempt(producer.id, nodes, state?.run_id, manifestBytes);
   const outputs = (producer.outputs as unknown[])
     .map(asRecord)
     .filter((output) => output?.contract === "ultrafuzz/report@3");
   const outputPath = outputs.length === 1 ? outputs[0]?.path : undefined;
   if (typeof outputPath !== "string" || !safeReportPath(outputPath))
     throw new ReportUnavailableError("the declared report output path is invalid");
-  const value = reader.record(`artifacts/${attempt}/${outputPath}`, false, MAX_REPORT_BYTES);
+  // Only a passing verifier publishes declared outputs into artifacts/. A report
+  // it rejected is still where the agent wrote it, in the workspace mirror.
+  if (attempt.rejected) reader.reasons.add("record-invalid");
+  const directory = attempt.rejected ? `workspaces/${attempt.id}/artifacts/${attempt.id}` : `artifacts/${attempt.id}`;
+  const value = reader.record(`${directory}/${outputPath}`, false, MAX_REPORT_BYTES);
   const parsed = reportSchema.safeParse(value);
   if (!parsed.success || parsed.data.run_metadata.run_id !== path.basename(reader.root))
     throw new ReportUnavailableError("the report-agent JSON is missing, unreadable, or invalid");
@@ -259,12 +263,13 @@ function readAgentReport(
   return parsed.data;
 }
 
-function successfulReportAttempt(
+/** A unique successful attempt, else a unique attempt whose agent finished but whose verifier failed. */
+function currentReportAttempt(
   producerId: string,
   nodes: JsonRecord,
   runId: unknown,
   manifestBytes: Buffer | undefined
-): string {
+): { id: string; rejected: boolean } {
   let attempts = [producerId];
   if (manifestBytes !== undefined) {
     try {
@@ -276,10 +281,23 @@ function successfulReportAttempt(
     }
   }
   const successful = attempts.filter((id) => asRecord(nodes[id])?.status === "succeeded");
-  const attempt = successful[0];
-  if (successful.length !== 1 || attempt === undefined)
+  const candidates = successful.length > 0 ? successful : attempts.filter((id) => verifierRejected(nodes[id]));
+  const attempt = candidates[0];
+  if (candidates.length !== 1 || attempt === undefined)
     throw new ReportUnavailableError("no unique successful report-agent attempt is recorded");
-  return attempt;
+  return { id: attempt, rejected: successful.length === 0 };
+}
+
+/** Synchronization names the verifier as the cause only after the agent task itself succeeded. */
+function verifierRejected(value: unknown): boolean {
+  const node = asRecord(value);
+  const provenance = asRecord(node?.provenance);
+  const verifier = asRecord(provenance?.workflow)?.verifier_task_id;
+  return (
+    node?.status === "failed" &&
+    typeof verifier === "string" &&
+    asRecord(provenance?.failure)?.causal_task_id === verifier
+  );
 }
 
 function safeReportPath(relative: string): boolean {

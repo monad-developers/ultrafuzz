@@ -620,16 +620,21 @@ A successful report agent produces a PARTIAL report when planned coverage is
 incomplete. If every strategy fails, review can still report missing coverage
 when its execution prerequisites and time limits permit it. If the report
 agent cannot start, fails, or exhausts its allowed attempts, the run ends with
-**report unavailable** and preserves the saved task results. The runtime does
+**report unavailable** and preserves the saved task results; a report that the
+artifact verifier rejected is the exception described below. The runtime does
 not synthesize a replacement report from raw findings. `ultrafuzz report`
-returns a clear error when no current successful report-agent output exists.
+returns a clear error when no current report-agent output is available.
 
 `ultrafuzz report <run-id>` prefers the current verified report. Local report
 verification is optional: when supporting records cannot be fully verified,
 a readable, schema-valid report from the current successful report-agent attempt
 can be formatted as an unchecked PARTIAL report under
-`review/unverified-report/<digest>/report.json` and `report.md`. These files
-preserve the agent-written content; they are not fallback analysis reports.
+`review/unverified-report/<digest>/report.json` and `report.md`. When the report
+agent finished but the artifact verifier rejected its output, a readable,
+schema-valid `report.json` in that attempt's workspace output directory is
+formatted the same way, and its reason codes include `record-invalid`. These
+files preserve the agent-written content; they are not fallback analysis
+reports.
 
 The command's JSON result includes `source` (`verified-agent-report`,
 `verified-runtime-report`, or `unverified-runtime-report`), `verification`
