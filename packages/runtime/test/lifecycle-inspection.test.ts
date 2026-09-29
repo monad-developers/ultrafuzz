@@ -495,7 +495,7 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
       // 0.35.0 spreads `warnings` onto every `buildDiagnosis` return path, and
       // raises a `stalled` blocker for a node parked on an identical-error streak.
       warnings: ["Concurrency ceiling saturated: requested demand 8, effective cap 4."],
-      information: ["smithers recorded 1 stale heartbeat"],
+      information: ["smithers recorded 1 stale heartbeat", "then run smithers inspect"],
       blockers: [
         {
           kind: "waiting-approval",
@@ -541,7 +541,8 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
   // they land together in the public `notes` with warnings first.
   assert.deepEqual(diagnosis.value?.notes, [
     "Concurrency ceiling saturated: requested demand 8, effective cap 4.",
-    "workflow runner recorded 1 stale heartbeat"
+    "workflow runner recorded 1 stale heartbeat",
+    "then run `ultrafuzz inspect`"
   ]);
   assert.equal(diagnosis.value?.blockers[0]?.kind, "waiting-approval");
   assert.equal(diagnosis.value?.blockers[0]?.attempt, 2);
@@ -566,7 +567,11 @@ test("diagnoseRun keeps a runner path intact in public text", async () => {
       generatedAtMs: 1_700_000_000_000,
       currentNodeId: "node:project-discovery",
       warnings: [],
-      information: ["spawn /opt/runner/bin/smithers ENOENT"],
+      information: [
+        "spawn /opt/runner/bin/smithers ENOENT",
+        "spawn /opt/runner/pre-smithers ENOENT",
+        "**smithers why** explains the stall"
+      ],
       blockers: []
     }
   });
@@ -575,7 +580,11 @@ test("diagnoseRun keeps a runner path intact in public text", async () => {
 
   assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.diagnostics));
   assert.equal(diagnosis.value?.summary, `workflow runner could not reload ${workflowPath}`);
-  assert.deepEqual(diagnosis.value?.notes, ["spawn /opt/runner/bin/smithers ENOENT"]);
+  assert.deepEqual(diagnosis.value?.notes, [
+    "spawn /opt/runner/bin/smithers ENOENT",
+    "spawn /opt/runner/pre-smithers ENOENT",
+    "**`ultrafuzz why`** explains the stall"
+  ]);
 });
 
 test("diagnoseRun names the ultrafuzz command for each recovery the runner suggests", async () => {

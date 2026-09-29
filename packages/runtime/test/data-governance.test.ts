@@ -608,7 +608,8 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
   assert.equal(modelDestination("CodexAgent", config, { HOME: homes }), "model:openai");
 
   // A selected provider pins its id, endpoint, wire API, and credential name,
-  // and nothing else in the file.
+  // and nothing else in the file, including the top-level openai_base_url,
+  // which redirects only the built-in openai provider.
   const selected = (lines: string[]) =>
     ['model_provider = "private"', "", "[model_providers.private]", ...lines, ""].join("\n");
   const route = (text: string) => {
@@ -619,7 +620,7 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
   assert.match(pinned, /^model:codex-route-/u);
   assert.equal(
     route(
-      `model = "gpt-5.5"\n${selected([
+      `model = "gpt-5.5"\nopenai_base_url = "https://unused.example/v1"\n${selected([
         'name = "Private gateway"',
         'base_url = "https://gateway.example/v1"',
         'env_key = "PRIVATE_KEY_ENV"',
@@ -638,7 +639,11 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
     ])}`
   ])
     assert.notEqual(route(drift), pinned, drift);
-  // Codex's endpoint override for its built-in provider pins as well.
+  // Codex's endpoint override for its built-in provider pins as well, also
+  // when that provider is selected by default, with no model_provider line.
   const builtIn = (url: string) => route(`model_provider = "openai"\nopenai_base_url = "${url}"\n`);
   assert.notEqual(builtIn("https://gateway.example/v1"), builtIn("https://other.example/v1"));
+  assert.equal(route('openai_base_url = "https://gateway.example/v1"\n'), builtIn("https://gateway.example/v1"));
+  // Codex ignores an empty openai_base_url, so that config keeps the default.
+  assert.equal(route('openai_base_url = ""\n'), "model:openai");
 });

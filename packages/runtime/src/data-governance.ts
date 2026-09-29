@@ -421,7 +421,8 @@ function routeBearingEnvironment(
  * these files themselves (Codex refreshes marketplace timestamps and project
  * trust levels, #908), so only these fields participate:
  * - Codex `config.toml`: the selected `model_provider` (a `profile` may select
- *   it), that provider's `base_url`, `wire_api`, and `env_key`, and the
+ *   it), that provider's `base_url`, `wire_api`, and `env_key`, and, when the
+ *   selected provider is the built-in `openai` one (Codex's default), the
  *   top-level `openai_base_url`;
  * - Claude `settings.json`: credential/process helper keys and routing `env`;
  * - Kimi `config.toml`: the whole file.
@@ -440,7 +441,10 @@ function codexRouteConfig(bytes: Uint8Array): unknown {
     return { unparsed: hash(bytes) };
   }
   const profile = typeof config.profile === "string" ? record(record(config.profiles)?.[config.profile]) : undefined,
-    selected = profile?.model_provider ?? config.model_provider;
+    // With no model_provider, Codex uses its built-in openai provider. Only a
+    // non-empty openai_base_url (Codex ignores "") makes that a distinct route;
+    // without one it stays model:openai.
+    selected = profile?.model_provider ?? config.model_provider ?? (config.openai_base_url ? "openai" : undefined);
   if (typeof selected !== "string") return undefined;
   const provider = record(record(config.model_providers)?.[selected]) ?? {};
   return {
@@ -448,8 +452,8 @@ function codexRouteConfig(bytes: Uint8Array): unknown {
     base_url: provider.base_url ?? null,
     wire_api: provider.wire_api ?? null,
     env_key: provider.env_key ?? null,
-    // Redirects the built-in openai provider when that is the one selected.
-    openai_base_url: config.openai_base_url ?? null
+    // Redirects only the built-in openai provider.
+    openai_base_url: selected === "openai" ? (config.openai_base_url ?? null) : null
   };
 }
 function claudeRouteConfig(bytes: Uint8Array, env: Record<string, string | undefined>): unknown {

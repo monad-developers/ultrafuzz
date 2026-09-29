@@ -1942,9 +1942,10 @@ const PUBLIC_WORKFLOW_COMMANDS = new Set([
 function publicWorkflowText(value: string): string {
   return scrubWorkflowRunnerText(
     redactSecretsInText(value).replace(
-      // Not after a path separator or dot: `.../bin/smithers ENOENT` names a file, not a runner command.
+      // Only as a standalone word: `.../bin/smithers ENOENT` and `.../pre-smithers ENOENT` name files, not
+      // commands. Emphasis counts as a word boundary, so `**smithers why**` is still a command.
       // Lowercase only: the runner's commands are, and "No Smithers run history" names the runner.
-      /(`?)\b(?<![\\/.])smithers\s+([a-z][a-z-]*)(`?)/gu,
+      /(`?)(?<=^|[\s"'`([*])smithers\s+([a-z][a-z-]*)(`?)/gu,
       (_match, open: string, command: string, close: string) =>
         PUBLIC_WORKFLOW_COMMANDS.has(command) ? `\`ultrafuzz ${command}\`` : `${open}workflow runner ${command}${close}`
     )
