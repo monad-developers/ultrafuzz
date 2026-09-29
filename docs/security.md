@@ -104,7 +104,10 @@ when route input is present. The digest covers:
   while a `CLAUDE_CODE_USE_*` flag for that platform is set to `1`, `true`,
   `yes`, or `on` (any case) in the environment or in `settings.json` `env`;
 - the provider a Codex `config.toml` selects through `model_provider` (its id,
-  `base_url`, `wire_api`, and `env_key`) plus the top-level `openai_base_url`;
+  `base_url`, `wire_api`, and `env_key`), plus the top-level `openai_base_url`
+  when that provider is the built-in `openai` one. Codex also uses that
+  provider when no `model_provider` is set, so a non-empty `openai_base_url`
+  counts on its own;
 - Claude `settings.json` credential helpers, and its `env` entries under the
   same rules as the environment;
 - for Kimi subscription auth, the whole Kimi `config.toml`.
