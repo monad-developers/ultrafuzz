@@ -9390,7 +9390,12 @@ test("producer-free final reports require the exact not-planned implementation c
       "deliverables/report.md": `# Ultrafuzz report\n\n${prose}\n`,
       "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
     });
-    const unscopedProse = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+    const unscopedProse = verifyRuntimeRequiredArtifactsForAttempt(
+      layout,
+      node,
+      node.id,
+      sealedFixtureAuthority(layout, node.id)
+    );
     assert.equal(unscopedProse.ok, true, `${prose}: ${JSON.stringify(unscopedProse.diagnostics)}`);
     assertAdvisoryCoverageScore(unscopedProse, code, prose);
   }
