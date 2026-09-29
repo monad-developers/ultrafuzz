@@ -142,13 +142,15 @@ export default smithers(() => (
 `;
 }
 
-// A production controller PATH never contains the runner's bin directory
-// (composeSmithersCommandPath), and `pnpm test` prepends node_modules/.bin, so
-// drop every entry that would resolve a bare `smithers` for the detached engine.
-const productionPath = (process.env.PATH ?? "")
-  .split(path.delimiter)
-  .filter((entry) => entry.length > 0 && !fs.existsSync(path.join(entry, path.basename(smithers))))
-  .join(path.delimiter);
+// composeSmithersCommandPath never adds the runner's bin directory to the
+// controller PATH, so a bare `smithers` resolves to whatever the operator's PATH
+// holds, if anything; `pnpm test` prepends node_modules/.bin. A failing stub
+// first on the detached engine's PATH makes a bare call fail even on a host
+// that has its own `smithers`.
+const poisonBin = temporaryRoot("ultrafuzz-poison-smithers-");
+const poisonSmithers = "#!/bin/sh\necho 'bare smithers resolved from PATH' >&2\nexit 97\n";
+fs.writeFileSync(path.join(poisonBin, "smithers"), poisonSmithers, { mode: 0o755 });
+const productionPath = `${poisonBin}${path.delimiter}${process.env.PATH ?? ""}`;
 
 function cli(root: string, args: string[]): unknown {
   return JSON.parse(

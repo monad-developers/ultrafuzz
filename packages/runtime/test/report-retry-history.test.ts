@@ -119,6 +119,10 @@ test("a restarted report producer and a restarted verifier rebuild agent_executi
   assert.deepEqual(producerProcess.selections(task, 3, 1), selections, "a correction turn keeps its attempt");
   // Controller process 3 runs only the verifier.
   assert.deepEqual(loadAuthority().read(task), prompt);
+  // A verifier in the producer's own controller uses what that controller
+  // observed, not a record rewritten after the agent started.
+  fs.writeFileSync(recordPath(task), JSON.stringify([{ attempt: 3, chainIndex: 2 }]));
+  assert.deepEqual(producerProcess.read(task), prompt, "controller memory outranks the run record");
 });
 
 test("an attempt number dispatched again after a restart replaces its own recorded selection", () => {
@@ -126,16 +130,18 @@ test("an attempt number dispatched again after a restart replaces its own record
   const first = loadAuthority();
   first.selections(task, 1, 0);
   first.selections(task, 2, 1);
-  assert.deepEqual(loadAuthority().selections(task, 2, 1), [
+  // `resume --retry-failed` resets the latest attempt, and Smithers then
+  // dispatches that attempt number again in a new controller.
+  assert.deepEqual(loadAuthority().selections(task, 2, 2), [
     { attempt: 1, chainIndex: 0 },
-    { attempt: 2, chainIndex: 1 }
+    { attempt: 2, chainIndex: 2 }
   ]);
   const verified = loadAuthority().read(task);
   assert.deepEqual(
-    verified.failed_attempts.map((row) => row.attempt),
-    [1]
+    verified.failed_attempts.map((row) => [row.attempt, row.profile_id]),
+    [[1, "primary"]]
   );
-  assert.equal(verified.producer.attempt, 2);
+  assert.deepEqual([verified.producer.attempt, verified.producer.profile_id], [2, "fallback-b"]);
 
   // A node that Smithers restarts from attempt 1 starts a new history.
   loadAuthority().selections(task, 1, 0);
