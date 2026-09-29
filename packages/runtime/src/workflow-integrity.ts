@@ -345,10 +345,6 @@ export function sealWorkflowControlFiles(input: {
   return paths;
 }
 
-export function verifyWorkflowControlFiles(projectRoot: string, layout: RunLayout): WorkflowControlPaths {
-  return verifyWorkflowControlSnapshot(projectRoot, layout).paths;
-}
-
 /**
  * Read the task manifest through the workflow-control seal without needing the
  * external project checkout that owns the generated workflow source. This is
@@ -430,10 +426,6 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
   const snapshot = { tasksPath, integrityPath, contents, integrityContents, document };
   if (verifiedControl !== undefined) sealedTaskManifestControlSnapshots.set(snapshot, verifiedControl);
   return snapshot;
-}
-
-export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
-  return verifyWorkflowControlSnapshot(projectRoot, layout).generation;
 }
 
 /** Restore only the launch policy; native continuation does not reopen mutable control projections. */

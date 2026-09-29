@@ -5356,7 +5356,7 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   return isObjectRecord(run) && isObjectRecord(run.error) && run.error.code === code;
 }
 
-export function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {
+function smithersSnapshotReportsMissingRun(snapshot: SmithersCommandSnapshot): boolean {
   if (smithersSnapshotHasErrorCode(snapshot, "RUN_NOT_FOUND")) return true;
   const envelope = snapshot.json;
   if (
@@ -8181,7 +8181,6 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       renderAgentPreambleTemplate("authorized-defensive-security-context")
     ),
     __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
-    __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__: JSON.stringify(loadAgentPreambleTemplate("retry-failure")),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
     __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),
