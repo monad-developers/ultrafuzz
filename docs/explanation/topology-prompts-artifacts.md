@@ -67,8 +67,8 @@ This makes handoffs explicit:
 
 - The prompt tells the agent what to write.
 - The topology declares a named, versioned contract for the file.
-- Planning binds that contract to an exact schema ID, schema digest, bundle
-  digest, and validator build.
+- Planning binds that contract to an exact schema ID, schema digest, and bundle
+  digest, and records the validator build that planned it.
 - Every JSON producer runs the displayed schema-validation command after its
   final write and before returning.
 - A deterministic workflow task validates the artifact before dependents start.
@@ -77,8 +77,8 @@ This makes handoffs explicit:
 - Downstream prompts reference it through typed template helpers.
 
 The displayed command resolves through a host-managed launcher placed before
-target-controlled `PATH` entries. A real fixture preflight checks that launcher,
-the schema registry, and the validator build before model work. The command is
+target-controlled `PATH` entries. A real fixture preflight checks that launcher
+and the schema identity it validates with before model work. The command is
 producer feedback, not a new inter-node message or validation-receipt schema.
 The runtime repeats shape validation and then applies contextual gates.
 

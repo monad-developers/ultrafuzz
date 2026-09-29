@@ -2934,7 +2934,6 @@ test("every contextual registration executes real positive and negative checks",
             schemaId: "schema-id",
             schemaSha256: "a".repeat(64),
             schemaBundleSha256: "b".repeat(64),
-            validatorBuild: "validator-build",
             artifactSha256: "c".repeat(64)
           }
         }

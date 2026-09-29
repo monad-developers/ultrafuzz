@@ -8,8 +8,6 @@ import {
   assertRunMetadataDocument,
   assertRunStateDocument,
   assertSealedPlannedGraph,
-  artifactContractDefinition,
-  artifactContractSchemaBinding,
   executeSemanticGate,
   layoutForRunRoot,
   parseSmithersTaskManifestBytes,
@@ -236,7 +234,6 @@ function loadTerminalReportInputs(runRoot: string): TerminalReportInputs {
   if (state.provenance?.workflow.controlGeneration !== sha256Bytes(authority.workflow_control_seal.bytes)) {
     throw invalidAuthority("terminal report control generation differs from the current seal");
   }
-  assertCurrentContractBindings(authority);
   const events = replayEvents(layout, Number.MAX_SAFE_INTEGER).records;
   const stopped = requireStoppedWorkflowEvent(layout, state, events, authority);
   const completion = deriveTerminalReportCompletion(authority);
@@ -260,23 +257,6 @@ function loadTerminalReportInputs(runRoot: string): TerminalReportInputs {
     completion,
     goalSearchCoverage: loadGoalSearchCoverageSnapshot(layout.root)
   };
-}
-
-function assertCurrentContractBindings(authority: VerifiedRunOutputAuthoritySnapshot): void {
-  const graph = assertSealedPlannedGraph(parseStrictJsonBytes(authority.graph.bytes));
-  for (const node of graph.nodes) {
-    for (const output of node.outputs) {
-      const binding = artifactContractSchemaBinding(output.contract);
-      if (
-        output.contract_digest !== artifactContractDefinition(output.contract).digest ||
-        (binding !== undefined &&
-          ["schema_file", "schema_id", "schema_sha256", "validator_build"].some(
-            (field) => Reflect.get(output, field) !== Reflect.get(binding, field)
-          ))
-      )
-        throw invalidAuthority(`terminal report found schema/control drift for ${node.id}`);
-    }
-  }
 }
 
 function createTerminalReceipt(

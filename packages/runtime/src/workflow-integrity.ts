@@ -672,8 +672,7 @@ export function verifyWorkflowControlSnapshot(
       contents,
       readBoundedRegularFile(layout.root, layout.statePath, "run state"),
       executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents,
-      runtimeStateNodeIds,
-      true
+      runtimeStateNodeIds
     );
   } catch (error) {
     reportDivergence(
@@ -2059,12 +2058,9 @@ function deriveWorkflowControlBindings(
   >,
   stateContents: Buffer,
   planContents: Buffer | undefined,
-  runtimeStateNodeIds?: readonly string[],
-  allowHistoricalSchemaBundle = false
+  runtimeStateNodeIds?: readonly string[]
 ): WorkflowControlBindings {
-  const graph = (allowHistoricalSchemaBundle ? assertSealedPlannedGraph : assertPlannedGraph)(
-    parseStrictJsonBytes(contents.graph)
-  );
+  const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
   const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
   const tasksDocument = parseSmithersTaskManifestBytes(contents.tasks);
   assertSmithersTaskManifestMatchesPlannedGraph(tasksDocument, graph);

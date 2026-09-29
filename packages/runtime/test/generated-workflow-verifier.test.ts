@@ -1655,7 +1655,7 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   const helper = source.slice(helperStart, verifierStart);
   assert.match(
     source,
-    /artifactContractDefinition,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContractBytes/u
+    /artifactContractSchemaBinding,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContractBytes/u
   );
   assert.match(source, /validateArtifactContractBytes,[\s\S]*writeFileDurable[\s\S]*= await import/u);
   assert.doesNotMatch(source, /validateArtifactContract\(/u);
@@ -6750,15 +6750,56 @@ test("generated Smithers workflow binds every planned output to the preflighted 
   );
   assert.match(binding, /for \(const output of task\.outputs\)/u);
   assert.match(binding, /artifactContractSchemaBinding\(/u);
-  for (const field of ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256", "validatorBuild"]) {
-    assert.match(binding, new RegExp(`output\\.${field}`, "u"));
-  }
   assert.match(source.slice(artifactsImportStart, artifactsImportEnd), /parseJsonValidatorPreflightSuccessEnvelope/u);
   assert.match(source, /parseJsonValidatorPreflightSuccessEnvelope\(Buffer\.from\(stdout, "utf8"\)\)/u);
   assert.doesNotMatch(
     source.slice(preflightStart, source.indexOf("function taskPublishesWorkspacePatch")),
     /JSON\.parse|parseStrictJsonBytes|\bok\??:|\bstatus\??:|registered !== true/u
   );
+});
+
+test("generated task preparation binds output schema content but not the validator build", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function assertTaskOutputSchemaBindings");
+  const end = source.indexOf("\n}\n", start) + 2;
+  assert.ok(start >= 0 && end > start, source);
+  const helper = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const planned = artifactContractSchemaBinding("ultrafuzz/findings@2");
+  assert.ok(planned);
+  let current = planned;
+  const assertTaskOutputSchemaBindings = new Function(
+    "artifactContractSchemaBinding",
+    `${helper}; return assertTaskOutputSchemaBindings;`
+  )(() => current) as (task: unknown) => void;
+  const task = {
+    outputs: [
+      {
+        path: "findings.json",
+        contract: "ultrafuzz/findings@2",
+        schemaFile: planned.schema_file,
+        schemaId: planned.schema_id,
+        schemaSha256: planned.schema_sha256,
+        schemaBundleSha256: planned.schema_bundle_sha256,
+        validatorBuild: planned.validator_build
+      }
+    ]
+  };
+  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
+  // #921: a rebuild after launch changed only the validator modules. The schemas the verifier will
+  // use are still the planned ones, so preparation proceeds.
+  current = { ...planned, validator_build: `ultrafuzz-json-validator.v1:${"9".repeat(64)}` };
+  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
+  // The installed schema content, including the whole bundle, must still be the planned one.
+  for (const field of ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"] as const) {
+    current = { ...planned, [field]: `changed-${field}` };
+    assert.throws(
+      () => assertTaskOutputSchemaBindings(task),
+      /planned schema binding changed for findings\.json/u,
+      field
+    );
+  }
 });
 
 test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
@@ -9959,6 +10000,9 @@ test("generated Smithers dependency verification fails closed before descendant 
     schema_bundle_sha256: schemaBinding.schemaBundleSha256,
     validator_build: schemaBinding.validatorBuild
   };
+  // What the running build reports for these contracts; a rebuild or upgrade changes it mid-run.
+  let currentContractDigest = "a".repeat(64);
+  let currentSchemaBinding: Record<string, string> = markerSchemaBinding;
   const taskSpecs = [
     {
       attemptId: "property-specification-fanin",
@@ -10046,8 +10090,11 @@ test("generated Smithers dependency verification fails closed before descendant 
     taskSpecs,
     () => ({ ok: true, issues: [] }),
     () => undefined,
-    (contract: string) => ({ digest: "a".repeat(64), format: contract === "ultrafuzz/text@1" ? "text" : "json" }),
-    (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : markerSchemaBinding),
+    (contract: string) => ({
+      digest: currentContractDigest,
+      format: contract === "ultrafuzz/text@1" ? "text" : "json"
+    }),
+    (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : currentSchemaBinding),
     (contract: string, contents: Uint8Array) => ({
       ok: true,
       issues: [],
@@ -10157,12 +10204,6 @@ test("generated Smithers dependency verification fails closed before descendant 
         ...validArtifact,
         contract: "ultrafuzz/findings@2"
       }
-    ],
-    [
-      {
-        ...validArtifact,
-        contract_digest: "b".repeat(64)
-      }
     ]
   ]) {
     writeMarker(artifacts);
@@ -10178,6 +10219,12 @@ test("generated Smithers dependency verification fails closed before descendant 
     /artifact dependency has not passed verification property-specification-fanin/u
   );
   fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
+  // #921: the marker's contract digest records the build that planned the output. A different one,
+  // from the declaration or from the running build, does not make the verified producer inadmissible.
+  writeMarker([{ ...validArtifact, contract_digest: "b".repeat(64) }]);
+  currentContractDigest = "e".repeat(64);
+  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  currentContractDigest = "a".repeat(64);
   writeMarker([validArtifact]);
   const verifiedAuthority = assertVerifiedDependency(task, dependency);
   assert.equal(verifiedAuthority.attemptId, "property-specification-fanin");
@@ -10244,6 +10291,36 @@ test("generated Smithers dependency verification fails closed before descendant 
     [{ path: generatedArtifact.path, sha256: generatedArtifact.sha256 }, companionPublication, supportPublication]
   );
   assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
+  // #921: a rebuilt validator or an unrelated schema edit changes the running build's bundle digest
+  // and validator build, and a refreshed controller rebinds the declared bundle digest (#982). Neither
+  // is compared here: the marker must still name the declared schema content, and its bytes stay
+  // pinned by sha256.
+  currentSchemaBinding = {
+    ...markerSchemaBinding,
+    schema_bundle_sha256: "f".repeat(64),
+    validator_build: `ultrafuzz-json-validator.v1:${"9".repeat(64)}`
+  };
+  assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
+  currentSchemaBinding = markerSchemaBinding;
+  const generatedPublications = [
+    { path: generatedArtifact.path, sha256: generatedArtifact.sha256 },
+    companionPublication,
+    supportPublication
+  ];
+  const rebuiltMarkerArtifact = {
+    ...generatedArtifact,
+    schema_bundle_sha256: "f".repeat(64),
+    validator_build: "ultrafuzz-json-validator.v1:rebuilt"
+  };
+  writeAttemptMarker("generated-tests-fanin", [rebuiltMarkerArtifact], generatedPublications);
+  assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
+  const otherSchemaMarkerArtifact = { ...generatedArtifact, schema_sha256: "0".repeat(64) };
+  writeAttemptMarker("generated-tests-fanin", [otherSchemaMarkerArtifact], generatedPublications);
+  assert.throws(
+    () => assertVerifiedDependency(task, generatedDependency),
+    /artifact dependency has not passed verification generated-tests-fanin/u
+  );
+  writeAttemptMarker("generated-tests-fanin", [generatedArtifact], generatedPublications);
   fs.writeFileSync(companionPath, "contract Tampered {}\n", "utf8");
   assert.throws(
     () => assertVerifiedDependency(task, generatedDependency),

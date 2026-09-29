@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   artifactSchemaRegistry,
+  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   readRegularFileSnapshot,
   type ArtifactSchemaRegistryEntry
 } from "./schema-registry.js";
@@ -15,7 +16,13 @@ const MAX_REGISTERED_PATTERNS = 256;
 const MAX_REGISTERED_BUNDLE_PATTERNS = 1_024;
 const MAX_REGISTERED_PATTERN_LENGTH = 1_024;
 
-/** Load a complete, physical schema bundle from an authenticated execution snapshot. */
+/**
+ * Load the complete physical schema bundle sealed in an execution snapshot, exactly as it was sealed.
+ * A later build may add, remove or re-version schema files, so the bundle is not compared with the
+ * installed registry; callers compare its bundle digest with the one an artifact was planned against.
+ * A sealed bundle is only used to validate, so a file carries the installed build's contract, gate
+ * and export metadata only when that build still registers it under the same `$id`.
+ */
 export function artifactSchemaRegistryFromDirectory(directory: string): readonly ArtifactSchemaRegistryEntry[] {
   const resolved = path.resolve(directory);
   const lexical = fs.lstatSync(resolved);
@@ -28,19 +35,11 @@ export function artifactSchemaRegistryFromDirectory(directory: string): readonly
     .readdirSync(resolved)
     .filter((filename) => filename.endsWith(".schema.json"))
     .sort();
-  const unknown = filenames.filter((filename) => !currentByFilename.has(filename));
-  const missing = [...currentByFilename.keys()].filter((filename) => !filenames.includes(filename));
-  if (unknown.length > 0 || missing.length > 0) {
-    throw new Error(
-      `schema registry mismatch${unknown.length > 0 ? `; unregistered: ${unknown.join(", ")}` : ""}${missing.length > 0 ? `; missing: ${missing.join(", ")}` : ""}`
-    );
-  }
 
   let bundleBytes = 0;
   let bundlePatterns = 0;
   return Object.freeze(
     filenames.map((filename): ArtifactSchemaRegistryEntry => {
-      const current = currentByFilename.get(filename)!;
       const snapshot = readRegularFileSnapshot(path.join(resolved, filename), MAX_REGISTERED_SCHEMA_BYTES);
       bundleBytes += snapshot.byteLength;
       if (bundleBytes > MAX_REGISTERED_BUNDLE_BYTES) {
@@ -56,7 +55,10 @@ export function artifactSchemaRegistryFromDirectory(directory: string): readonly
       if (parsed.$schema !== "https://json-schema.org/draft/2020-12/schema") {
         throw new Error(`schema must declare Draft 2020-12: ${filename}`);
       }
-      if (parsed.$id !== current.id) throw new Error(`sealed schema $id changed for ${filename}`);
+      const id = parsed.$id;
+      if (typeof id !== "string" || id.length === 0 || id.includes("#")) {
+        throw new Error(`schema must have a fragment-free non-empty $id: ${filename}`);
+      }
       bundlePatterns += assertRegisteredPatternLimits(parsed, filename);
       if (bundlePatterns > MAX_REGISTERED_BUNDLE_PATTERNS) {
         throw new Error(`registered schema bundle exceeds the ${MAX_REGISTERED_BUNDLE_PATTERNS}-pattern limit`);
@@ -65,8 +67,19 @@ export function artifactSchemaRegistryFromDirectory(directory: string): readonly
       for (const reference of localReferences) {
         if (/^https?:/iu.test(reference)) throw new Error(`remote schema reference is forbidden: ${reference}`);
       }
+      const current = currentByFilename.get(filename);
       return Object.freeze({
-        ...current,
+        ...(current?.id === id
+          ? current
+          : {
+              filename,
+              id,
+              role: "subschema" as const,
+              contractIds: Object.freeze([]),
+              maxInstanceBytes: DEFAULT_MAX_JSON_INSTANCE_BYTES,
+              semanticGates: Object.freeze([]),
+              typescriptExport: ""
+            }),
         sha256: sha256(snapshot),
         schema: deepFreezeJson(parsed),
         localReferences: Object.freeze(localReferences)
