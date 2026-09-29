@@ -22,7 +22,9 @@ import { extractPromptVariables, loadBuiltInPromptAssets, type PromptVariableRef
 //   (PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH) and the dynamic enumerator policy;
 // - the runtime reserves it in the invariant campaign's node window: the smoke and fuzzer budgets;
 // - it is the node's only view of runtime-sealed evidence: its ancestors' outputs selected by
-//   contract or path (`ancestor_*_authority`), or the goal-search census.
+//   contract or path (`ancestor_*_authority`), or the goal-search census;
+// - the goal-search census records the node's result as coverage of the goal it was generated for:
+//   the goal hunter's `item.node_id`, which picks that goal out of a goal plan listing every goal.
 // `ancestor_artifact_path_authority:<path>` is kept when any path selector in the prompt lists <path>.
 const REQUIRED_PROMPT_VARIABLES: Readonly<Record<string, readonly string[]>> = {
   "properties/property-specification-fanin.md": ["ancestor_contract_artifact_authority:ultrafuzz/property-lens@2"],
@@ -62,6 +64,7 @@ const REQUIRED_PROMPT_VARIABLES: Readonly<Record<string, readonly string[]>> = {
     "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3",
     "dynamic_strategies_enumerator"
   ],
+  "strategies/goal-hunter.mdx": ["item.node_id"],
   "strategies/invariants/coverage.md": ["coverage_evidence_markdown_projection", "invariant_testing_smoke_timeout"],
   "strategies/invariants/handlers.md": ["invariant_testing_smoke_timeout"],
   "strategies/invariants/implement-properties.md": [
@@ -185,9 +188,10 @@ describe("shipped prompt structure", () => {
     let references = 0;
     for (const asset of loadBuiltInPromptAssets()) {
       expect(asset.markdown, asset.relativePath).not.toContain("packages/artifacts/schema/");
-      // Dots only between name segments, so a sentence-final period is not part of the filename.
+      // Dots and slashes only between path segments, so a sentence-final period is not part of the
+      // path, while `sub/findings.schema.json` or `findings.schema.json/old` is read whole and rejected.
       for (const [reference, filename = ""] of asset.markdown.matchAll(
-        /\{\{schema_path\}\}\/([\w-]+(?:\.[\w-]+)*)/gu
+        /\{\{schema_path\}\}\/([\w-]+(?:[./][\w-]+)*)/gu
       )) {
         references += 1;
         expect(shipped.has(filename), `${asset.relativePath}: ${reference}`).toBe(true);
