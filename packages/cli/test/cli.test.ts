@@ -2592,7 +2592,7 @@ test("report --require-verified rejects malformed issues without rewriting stale
   const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
-  assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*required/iu);
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /JSON_SCHEMA_VIOLATION.*required/iu);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
@@ -2615,7 +2615,7 @@ test("report --require-verified rejects legacy report versions without a compati
   const result = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
 
   assert.equal(result.code, 1);
-  assert.match(JSON.stringify(parseJson(result).diagnostics), /ARTIFACT_SCHEMA_INVALID.*constant/iu);
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /JSON_SCHEMA_VIOLATION.*constant/iu);
   assert.deepEqual(fs.readFileSync(reportPath), jsonBefore);
   assert.deepEqual(fs.readFileSync(markdownPath), markdownBefore);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
