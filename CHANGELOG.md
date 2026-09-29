@@ -1,5 +1,7 @@
 # Changelog
 
+<!-- markdownlint-disable MD013 -->
+
 ## Unreleased
 
 ### Breaking changes
@@ -127,5 +129,3 @@
 ## v0.0.1
 
 - First external private release.
-
-<!-- markdownlint-disable-file MD013 -->
