@@ -9246,6 +9246,19 @@ test("producer-free final reports require the exact not-planned implementation c
   const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  for (const [prose, code] of [
+    ["Recon reached 85% line coverage on Vault.sol.", "UNSCOPED_COVERAGE_PERCENTAGE"],
+    ["Coverage of withdraw() was 3/4 branches in the replay.", "UNSCOPED_COVERAGE_FRACTION"]
+  ] as const) {
+    writeDeclaredArtifactNode(layout, node.id, outputs, {
+      "deliverables/report.md": `# Ultrafuzz report\n\n${prose}\n`,
+      "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
+    });
+    const unscopedProse = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(unscopedProse.ok, true, `${prose}: ${JSON.stringify(unscopedProse.diagnostics)}`);
+    assertAdvisoryCoverageScore(unscopedProse, code, prose);
+  }
+
   writeDeclaredArtifactNode(layout, node.id, outputs, {
     "deliverables/report.md": "# Ultrafuzz report\n\nrecon-selected-declaration-completeness: `1/1`\n",
     "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
@@ -9350,6 +9363,18 @@ test("final reports disclose planned but omitted implementation coverage without
     fs.existsSync(path.join(layout.artifactsDir, optionalTask.attemptId, "implemented-properties.json")),
     false
   );
+
+  const prose = "Recon reached 85% line coverage on Vault.sol.";
+  writeArtifactFile(layout, reportTask.attemptId, "report.md", `# Ultrafuzz report\n\n${prose}\n`);
+  const unadmittedCoverageProse = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    reportNode,
+    reportTask.attemptId,
+    { task: reportTask, tasks, admittedDependencyAttemptIds: [] },
+    authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
+  );
+  assert.equal(unadmittedCoverageProse.ok, true, JSON.stringify(unadmittedCoverageProse.diagnostics));
+  assertAdvisoryCoverageScore(unadmittedCoverageProse, "UNSCOPED_COVERAGE_PERCENTAGE", prose);
 });
 
 test("final report gate joins the default recon-only campaign backend", () => {

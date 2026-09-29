@@ -7252,8 +7252,10 @@ function verifyFinalReportCoverageEvidence(
 
   const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
   if (producerStatus === "absent") {
-    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some((occurrence) =>
-      coverageScoreHasContext(occurrence, false)
+    // A score that names an exact declaration-completeness scope claims
+    // coverage evidence; unscoped prose scores stay advisory warnings.
+    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some(
+      (occurrence) => occurrence.scopes.length > 0
     );
     if (report.coverage_evidence !== undefined || markdownClaimsCoverage) {
       diagnostics.push({
@@ -7512,11 +7514,11 @@ function reportCoverageScoreDiagnostic(
       path: `${artifactPath}:${occurrence.line}`
     };
   }
-  // Prose scores are advisory. This natural-language scan runs only on the
-  // host, after the in-workflow verifier accepted the attempt, and it matches
-  // ordinary sentences such as "Recon reached 85% line coverage" or "Handlers
-  // reachable: 7/9". The typed coverage evidence and its canonical Markdown
-  // section remain errors when they disagree.
+  // Unscoped prose scores are advisory. This natural-language scan runs only on
+  // the host, after the in-workflow verifier accepted the attempt, and it
+  // matches ordinary sentences such as "Recon reached 85% line coverage" or
+  // "Handlers reachable: 7/9". The typed coverage evidence and scores that name
+  // an exact scope are checked separately.
   const percentage = occurrence.kind === "percentage";
   return {
     code: percentage ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
