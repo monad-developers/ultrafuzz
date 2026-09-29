@@ -12641,15 +12641,74 @@ test("listRuns requires the exact current Smithers ps envelope and row shape", a
 });
 
 /**
- * Replaces a live run document by atomic rename at the one moment the strict reader is exposed to it:
- * after the reader has consumed the bytes and before its second fstat, from inside the reading
- * process. With `append`, a byte is written to the document in place instead, and its length is
- * restored once the reader closes it. The change is real and so is the reader's verdict; only the
- * timing is controlled, which turns the race issue #1054 describes from a matter of chance into a
- * deterministic reproduction.
+ * Calls `act` on a file at the one moment a strict reader is exposed to a change of it: after the
+ * reader has consumed the bytes and before its closing stat, from inside the reading process. The
+ * change is real and so is the reader's verdict; only the timing is controlled, which turns a race
+ * such as the one issue #1054 describes from a matter of chance into a deterministic reproduction.
  * `node:fs`'s default export is the shared CommonJS module object, so the reader observes the wrapped
- * calls. A read is armed only while replacements remain and, when `onlyWhen` is given, only when the
- * reader's synchronous call stack satisfies it.
+ * calls. A read is armed when `matches` accepts the opened path, only while fewer than `limit` acts
+ * have run and, when `onlyWhen` is given, only when the reader's synchronous call stack satisfies it.
+ * `afterClose` runs once the reader has closed a file `act` changed.
+ */
+async function actDuringStrictRead<T>(
+  input: {
+    matches: (filePath: string) => boolean;
+    act: (filePath: string, acted: number) => void;
+    afterClose?: ((filePath: string) => void) | undefined;
+    limit?: number;
+    onlyWhen?: ((synchronousFrames: string[]) => boolean) | undefined;
+  },
+  run: () => Promise<T>
+): Promise<{ value: T; acted: number }> {
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const armed = new Map<number, string>();
+  const changed = new Map<number, string>();
+  let acted = 0;
+  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
+    const descriptor = originalOpenSync(...args);
+    const filePath = path.resolve(String(args[0]));
+    if (
+      acted < (input.limit ?? Number.POSITIVE_INFINITY) &&
+      input.matches(filePath) &&
+      (input.onlyWhen === undefined || input.onlyWhen(synchronousStackFrames()))
+    ) {
+      armed.set(descriptor, filePath);
+    }
+    return descriptor;
+  }) as typeof fs.openSync;
+  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
+    const read = originalReadSync(...args);
+    const filePath = armed.get(args[0]);
+    if (filePath !== undefined) {
+      armed.delete(args[0]);
+      input.act(filePath, acted);
+      acted += 1;
+      changed.set(args[0], filePath);
+    }
+    return read;
+  }) as typeof fs.readSync;
+  fs.closeSync = ((descriptor: number) => {
+    armed.delete(descriptor);
+    originalCloseSync(descriptor);
+    const filePath = changed.get(descriptor);
+    changed.delete(descriptor);
+    if (filePath !== undefined) input.afterClose?.(filePath);
+  }) as typeof fs.closeSync;
+  try {
+    const value = await run();
+    return { value, acted };
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
+}
+
+/**
+ * Replaces a live run document by atomic rename under `actDuringStrictRead`. With `append`, a byte is
+ * written to the document in place instead, and its length is restored once the reader closes it.
  */
 async function observeWhileReplacingRunDocument<T>(
   input: {
@@ -12661,51 +12720,21 @@ async function observeWhileReplacingRunDocument<T>(
   observe: () => Promise<T>
 ): Promise<{ value: T; replaced: number }> {
   const bytes = fs.readFileSync(input.documentPath);
-  const originalOpenSync = fs.openSync;
-  const originalReadSync = fs.readSync;
-  const originalCloseSync = fs.closeSync;
-  const armed = new Set<number>();
-  const appended = new Set<number>();
-  let replaced = 0;
-  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
-    const descriptor = originalOpenSync(...args);
-    if (
-      replaced < input.replacements &&
-      path.resolve(String(args[0])) === input.documentPath &&
-      (input.onlyWhen === undefined || input.onlyWhen(synchronousStackFrames()))
-    ) {
-      armed.add(descriptor);
-    }
-    return descriptor;
-  }) as typeof fs.openSync;
-  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
-    const read = originalReadSync(...args);
-    if (armed.delete(args[0])) {
-      if (input.append === true) {
-        fs.appendFileSync(input.documentPath, "\n");
-        appended.add(args[0]);
-      } else {
-        const temporary = `${input.documentPath}.replacement-${String(replaced)}`;
-        fs.writeFileSync(temporary, bytes);
-        fs.renameSync(temporary, input.documentPath);
-      }
-      replaced += 1;
-    }
-    return read;
-  }) as typeof fs.readSync;
-  fs.closeSync = ((descriptor: number) => {
-    armed.delete(descriptor);
-    originalCloseSync(descriptor);
-    if (appended.delete(descriptor)) fs.truncateSync(input.documentPath, bytes.byteLength);
-  }) as typeof fs.closeSync;
-  try {
-    const value = await observe();
-    return { value, replaced };
-  } finally {
-    fs.openSync = originalOpenSync;
-    fs.readSync = originalReadSync;
-    fs.closeSync = originalCloseSync;
-  }
+  const { value, acted } = await actDuringStrictRead(
+    {
+      matches: (filePath) => filePath === input.documentPath,
+      act: (filePath, index) => {
+        if (input.append === true) return fs.appendFileSync(filePath, "\n");
+        fs.writeFileSync(`${filePath}.replacement-${String(index)}`, bytes);
+        fs.renameSync(`${filePath}.replacement-${String(index)}`, filePath);
+      },
+      afterClose: input.append === true ? (filePath) => fs.truncateSync(filePath, bytes.byteLength) : undefined,
+      limit: input.replacements,
+      onlyWhen: input.onlyWhen
+    },
+    observe
+  );
+  return { value, replaced: acted };
 }
 
 /** The frames of the current synchronous call chain, without the `async` frames of awaiting callers. */
@@ -12855,75 +12884,35 @@ test("listRuns, observers and status survive live run documents replaced while t
   );
 });
 
-/**
- * Launches a run and calls `touch` on an execution source each time the launch's stable read of it has
- * consumed its bytes, before the read's closing stat -- exactly where another process on the host
- * would interleave. The launch reads every source it seals by the same function, so one run-owned
- * source stands in for the node_modules files pnpm hard-links from its shared store.
- */
-async function launchWhileTouchingExecutionSource(
-  project: string,
-  runId: string,
-  touch: (sourcePath: string) => void
-): Promise<{ run: Awaited<ReturnType<typeof startRun>>; touched: number }> {
-  const originalOpenSync = fs.openSync;
-  const originalReadSync = fs.readSync;
-  const originalCloseSync = fs.closeSync;
-  const armed = new Map<number, string>();
-  let touched = 0;
-  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
-    const descriptor = originalOpenSync(...args);
-    if (path.basename(String(args[0])) === "execution-tsconfig.json") armed.set(descriptor, String(args[0]));
-    return descriptor;
-  }) as typeof fs.openSync;
-  fs.readSync = ((...args: Parameters<typeof fs.readSync>) => {
-    const read = originalReadSync(...args);
-    const sourcePath = armed.get(args[0]);
-    if (sourcePath !== undefined) {
-      armed.delete(args[0]);
-      touch(sourcePath);
-      touched += 1;
-    }
-    return read;
-  }) as typeof fs.readSync;
-  fs.closeSync = ((descriptor: number) => {
-    armed.delete(descriptor);
-    originalCloseSync(descriptor);
-  }) as typeof fs.closeSync;
-  try {
-    return { run: await startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) }), touched };
-  } finally {
-    fs.openSync = originalOpenSync;
-    fs.readSync = originalReadSync;
-    fs.closeSync = originalCloseSync;
-  }
-}
-
 test("a hard link added to an execution source while the launch seals it does not fail the launch", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  // The launch reads every source it seals by the same stable read, so one run-owned source stands in
+  // for the node_modules files pnpm hard-links from its shared store.
+  const launchWhileChangingSource = (runId: string, act: (sourcePath: string, acted: number) => void) =>
+    actDuringStrictRead({ matches: (filePath) => path.basename(filePath) === "execution-tsconfig.json", act }, () =>
+      startRun({ projectRoot: project, runId, env: fakeSmithersEnv(project) })
+    );
 
   // `pnpm install` anywhere on the host links the same store inodes into another node_modules: the
   // link count and ctime change, and not one byte does. The launch used to fail on exactly that.
-  let links = 0;
-  const linked = await launchWhileTouchingExecutionSource(project, "hard-linked-source", (sourcePath) => {
-    links += 1;
-    const elsewhere = path.join(path.dirname(project), `${path.basename(project)}-pnpm-link-${String(links)}`);
+  const linked = await launchWhileChangingSource("hard-linked-source", (sourcePath, acted) => {
+    const elsewhere = path.join(path.dirname(project), `${path.basename(project)}-pnpm-link-${String(acted)}`);
     registerTemporaryPath(elsewhere);
     fs.linkSync(sourcePath, elsewhere);
   });
-  assert.equal(linked.run.ok, true, JSON.stringify(linked.run.diagnostics));
-  assert.ok(linked.touched > 0, "the launch must have read the source while its link count changed");
+  assert.equal(linked.value.ok, true, JSON.stringify(linked.value.diagnostics));
+  assert.ok(linked.acted > 0, "the launch must have read the source while its link count changed");
 
   // A real write still fails the launch rather than sealing a torn read.
-  const written = await launchWhileTouchingExecutionSource(project, "written-source", (sourcePath) => {
+  const written = await launchWhileChangingSource("written-source", (sourcePath) => {
     fs.appendFileSync(sourcePath, " ");
   });
-  assert.equal(written.touched, 1);
-  assert.equal(written.run.ok, false);
+  assert.equal(written.acted, 1);
+  assert.equal(written.value.ok, false);
   assert.deepEqual(
-    written.run.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
+    written.value.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
     [["WORKFLOW_SUBMISSION_FAILED", "workflow execution file tsconfig.json changed while reading"]]
   );
 });
