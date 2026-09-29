@@ -368,40 +368,6 @@ export function writeJsonDurable(filePath: string, value: unknown): void {
   writeFileDurable(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-export function appendLineDurable(filePath: string, line: string, trustedRoot?: string): void {
-  const directory = path.dirname(filePath);
-  if (trustedRoot !== undefined) {
-    assertNoSymlinkComponents(trustedRoot, directory, "append directory");
-  }
-  fs.mkdirSync(directory, { recursive: true });
-  if (trustedRoot !== undefined) {
-    assertNoSymlinkComponents(trustedRoot, filePath, "append path");
-  }
-  const fd = fs.openSync(
-    filePath,
-    fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
-    0o600
-  );
-  runWithClosedDescriptor(fd, `failed to durably append ${filePath} and close its descriptor`, () => {
-    if (!fs.fstatSync(fd).isFile()) {
-      throw new ArtifactPathError("not-file", `append path must be a regular file: ${filePath}`);
-    }
-    if (trustedRoot !== undefined) {
-      assertNoSymlinkComponents(trustedRoot, filePath, "append path");
-    }
-    const bytes = Buffer.from(line.endsWith("\n") ? line : `${line}\n`, "utf8");
-    const written = fs.writeSync(fd, bytes);
-    if (written !== bytes.length) {
-      throw new ArtifactPathError(
-        "short-write",
-        `durable append wrote ${written} of ${bytes.length} bytes: ${filePath}`
-      );
-    }
-    fs.fsyncSync(fd);
-  });
-  fsyncDirectory(directory);
-}
-
 /**
  * Durably creates a new regular file without accepting an intervening writer.
  *
@@ -475,43 +441,6 @@ export function appendBytesDurableAt(
       if (written <= 0) throw new Error(`append write made no progress: ${filePath}`);
       offset += written;
     }
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  fsyncDirectory(path.dirname(filePath));
-}
-
-/**
- * Durably discards an unterminated trailing fragment.
- *
- * The expected size fences the repair decision against a concurrent append;
- * hard links are rejected so truncation cannot mutate another named file.
- */
-export function truncateDurable(
-  filePath: string,
-  length: number,
-  options: { expectedSize: number; trustedRoot?: string }
-): void {
-  if (options.trustedRoot !== undefined) {
-    assertNoSymlinkComponents(options.trustedRoot, filePath, "truncate path");
-  }
-  const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
-  try {
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile()) {
-      throw new ArtifactPathError("not-file", `truncate path must be a regular file: ${filePath}`);
-    }
-    if (stat.nlink !== 1) {
-      throw new ArtifactPathError("not-file", `truncate path must not be hard-linked: ${filePath}`);
-    }
-    if (stat.size !== options.expectedSize) {
-      throw new ArtifactPathError("not-file", `truncate path changed size before truncation: ${filePath}`);
-    }
-    if (length > stat.size) {
-      throw new ArtifactPathError("not-file", `truncate length exceeds the file size: ${filePath}`);
-    }
-    fs.ftruncateSync(fd, length);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
