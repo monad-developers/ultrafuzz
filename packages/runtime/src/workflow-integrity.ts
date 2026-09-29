@@ -59,10 +59,6 @@ const BUN_STARTUP_CONTROLS: Readonly<Record<string, Buffer>> = {
   "controls/bunfig.toml": Buffer.from("\n")
 };
 
-export function isBunStartupControlPath(snapshotPath: string): boolean {
-  return Object.hasOwn(BUN_STARTUP_CONTROLS, snapshotPath);
-}
-
 export function writeCurrentBunStartupControls(root: string): string {
   const resolvedRoot = path.resolve(root);
   const controlsRoot = ensureSafeDirectory(resolvedRoot, "controls");
@@ -349,10 +345,6 @@ export function sealWorkflowControlFiles(input: {
   return paths;
 }
 
-export function verifyWorkflowControlFiles(projectRoot: string, layout: RunLayout): WorkflowControlPaths {
-  return verifyWorkflowControlSnapshot(projectRoot, layout).paths;
-}
-
 /**
  * Read the task manifest through the workflow-control seal without needing the
  * external project checkout that owns the generated workflow source. This is
@@ -434,10 +426,6 @@ export function verifySealedTaskManifestSnapshot(layout: RunLayout): VerifiedSea
   const snapshot = { tasksPath, integrityPath, contents, integrityContents, document };
   if (verifiedControl !== undefined) sealedTaskManifestControlSnapshots.set(snapshot, verifiedControl);
   return snapshot;
-}
-
-export function workflowControlGeneration(projectRoot: string, layout: RunLayout): string {
-  return verifyWorkflowControlSnapshot(projectRoot, layout).generation;
 }
 
 /** Restore only the launch policy; native continuation does not reopen mutable control projections. */
@@ -1066,21 +1054,6 @@ function reconcileStaleSnapshotPublications(directory: OpenedSnapshotDirectory, 
   }
 }
 
-/**
- * Reconcile only the temporary publication belonging to an already authenticated generation.
- * Controller-refresh recovery calls this before the normal snapshot-root equality check so an
- * abrupt exit immediately before the atomic rename remains recoverable without admitting any
- * unrelated root entry.
- */
-export function reconcileStaleWorkflowExecutionSnapshotPublications(layout: RunLayout, generation: string): void {
-  const snapshots = openWorkflowExecutionSnapshotsDirectory(layout);
-  try {
-    reconcileStaleSnapshotPublications(snapshots, generation);
-  } finally {
-    if (snapshots.descriptor !== undefined) fs.closeSync(snapshots.descriptor);
-  }
-}
-
 function assertSnapshotPublicationBoundary(boundary: SnapshotPublicationBoundary, label: string): void {
   assertOpenedSnapshotDirectoryCurrent(boundary.snapshots, "workflow execution snapshots");
   assertExactDirectoryIdentity(boundary.lexicalRoot, boundary.device, boundary.inode, label);
@@ -1130,12 +1103,6 @@ export function materializeWorkflowExecutionSnapshot(input: {
   layout: RunLayout;
   snapshot: VerifiedWorkflowControlSnapshot;
   /**
-   * Every immutable generation already authorized for this run. Controller
-   * refresh uses this to retain the launch generation and its append-only
-   * successors without making arbitrary directories executable.
-   */
-  authorizedGenerations?: readonly string[];
-  /**
    * Read-only callers set this after reporting `sealedBunStartupControlDrift`, so a checkout that has
    * moved on since the run was sealed can still observe it. Execution callers leave it unset.
    */
@@ -1162,20 +1129,13 @@ export function materializeWorkflowExecutionSnapshot(input: {
   const snapshotRoot = path.join(snapshotsRoot, input.snapshot.generation);
   let snapshotDescriptor: number | undefined;
   try {
-    const authorizedGenerations = sortedUniqueGenerations(
-      input.authorizedGenerations ?? [input.snapshot.generation],
-      input.snapshot.generation
-    );
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     if (input.observeOnly !== true) {
       reconcileStaleSnapshotPublications(snapshots, input.snapshot.generation);
     }
     const snapshotAccessPath = path.join(snapshots.accessPath, input.snapshot.generation);
     const snapshotAlreadyExists = pathEntryExists(snapshotAccessPath);
-    const existingAuthorizedGenerations = authorizedGenerations.filter((generation) =>
-      pathEntryExists(path.join(snapshots.accessPath, generation))
-    );
-    assertSnapshotRootEntries(snapshots, existingAuthorizedGenerations);
+    assertSnapshotRootEntries(snapshots, snapshotAlreadyExists ? [input.snapshot.generation] : []);
     if (!snapshotAlreadyExists && input.observeOnly === true) {
       throw new Error("workflow execution snapshot is not published");
     }
@@ -1188,7 +1148,7 @@ export function materializeWorkflowExecutionSnapshot(input: {
         dependencyMap.executable_paths
       );
     }
-    assertSnapshotRootEntries(snapshots, authorizedGenerations);
+    assertSnapshotRootEntries(snapshots, [input.snapshot.generation]);
     assertOpenedSnapshotDirectoryCurrent(snapshots, "workflow execution snapshots");
     const lexicalStat = fs.lstatSync(snapshotRoot);
     if (lexicalStat.isSymbolicLink() || !lexicalStat.isDirectory()) {
@@ -1241,17 +1201,6 @@ export function materializeWorkflowExecutionSnapshot(input: {
     if (snapshotDescriptor !== undefined) fs.closeSync(snapshotDescriptor);
     if (snapshots.descriptor !== undefined) fs.closeSync(snapshots.descriptor);
   }
-}
-
-function sortedUniqueGenerations(values: readonly string[], required: string): string[] {
-  const generations = [...new Set(values)].sort(compareCanonicalStrings);
-  if (!generations.includes(required)) {
-    throw new Error("authorized workflow execution snapshots omit the selected generation");
-  }
-  if (generations.some((generation) => !SHA256_PATTERN.test(generation))) {
-    throw new Error("authorized workflow execution snapshot generation is invalid");
-  }
-  return generations;
 }
 
 function publishWorkflowExecutionSnapshot(
@@ -2170,57 +2119,6 @@ function withBunStartupControls(
     result.push({ sourcePath, snapshotPath });
   }
   return result;
-}
-
-/**
- * Replace controller-owned Bun startup controls while preparing an append-only
- * controller generation. The refreshed sources live under a content-addressed
- * directory so an older control seal's source files are never mutated.
- */
-export function replaceBunStartupControlsForControllerRefresh(
-  layout: RunLayout,
-  files: readonly (WorkflowExecutionControlFile & { contents: Buffer })[]
-): Array<WorkflowExecutionControlFile & { contents: Buffer }> {
-  const controlPaths = new Set(Object.keys(BUN_STARTUP_CONTROLS));
-  const digest = crypto
-    .createHash("sha256")
-    .update("ultrafuzz-bun-startup-controls-v1\0")
-    .update(
-      Object.entries(BUN_STARTUP_CONTROLS)
-        .map(([snapshotPath, contents]) => `${snapshotPath}\0${contents.byteLength}\0${contents.toString("hex")}\0`)
-        .join("")
-    )
-    .digest("hex");
-  const sourceRoot = ensureSafeDirectory(layout.root, path.join("smithers", "controller-bun-startup-controls", digest));
-  const controls = Object.entries(BUN_STARTUP_CONTROLS).map(([snapshotPath, contents]) => {
-    const sourcePath = safeResolveInside(
-      sourceRoot,
-      path.basename(snapshotPath),
-      "refreshed Bun startup control source"
-    );
-    if (pathEntryExists(sourcePath)) {
-      if (
-        !readBoundedRegularFile(layout.root, sourcePath, `refreshed Bun startup control ${snapshotPath}`).equals(
-          contents
-        )
-      ) {
-        throw new Error("refreshed workflow Bun startup control source changed before sealing");
-      }
-    } else {
-      writeFileDurable(sourcePath, contents);
-    }
-    return { sourcePath, snapshotPath, contents: Buffer.from(contents) };
-  });
-  return [
-    ...files
-      .filter((file) => !controlPaths.has(file.snapshotPath))
-      // Refresh helpers replace a file record before changing its contents;
-      // they never mutate a retained byte snapshot in place. Preserve the
-      // immutable backing for every unchanged file instead of eagerly copying
-      // the complete (and potentially very large) execution closure.
-      .map((file) => ({ ...file, contents: file.contents })),
-    ...controls
-  ];
 }
 
 function readBoundedRegularFile(root: string, filePath: string, label: string): Buffer {

@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -110,13 +109,11 @@ import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
 import { publishBestEffortTerminalReport } from "./unverified-report.js";
 import { hasCurrentReportPublicationStatus, writeReportPublicationStatus } from "./report-publication-status.js";
-import { recoverySubmissionAuthority } from "./workflow-recovery-authority.js";
 import {
   parseCurrentSmithersInspect,
   requestSmithersCancel,
   runSmithersInspectionCommand,
   smithersDiagnostic,
-  smithersSnapshotReportsMissingRun,
   type CurrentSmithersInspect,
   type SmithersCommandSnapshot
 } from "./smithers.js";
@@ -333,13 +330,6 @@ interface AttemptWorkflowEvidence {
   agentAttempt?: number;
 }
 
-interface ObservedTaskEvidence {
-  status: NodeStatus;
-  taskId: string;
-  attempt?: number;
-  workflowState?: SmithersNodeState;
-}
-
 interface NodeFinalization {
   status: NodeStatus;
   diagnostics: RuntimeDiagnostic[];
@@ -380,8 +370,6 @@ export interface WorkflowSynchronizationControl {
    * fail-closed by default and rethrows the parser error.
    */
   tolerateInvalidEventStreams?: boolean;
-  /** Retry preparation may defer an exact missing-run envelope to lifecycle recovery. */
-  allowMissingWorkflowRun?: boolean;
   /** Status synchronization authenticates published evidence without taking or repairing control state. */
   observeOnly?: boolean;
   /** Evidence an observer already authenticated for this run, so the pass does not verify it again. */
@@ -455,381 +443,6 @@ export function describeObservationSynchronizationDeadline(diagnostic: RuntimeDi
   };
 }
 
-export interface ControllerFailureRefinalizationInput {
-  projectRoot: string;
-  layout: RunLayout;
-  graph: PlannedGraph;
-  tasks: StoredWorkflowTask[];
-  workflowRunId: string;
-  workflowLinkId: string;
-  controlGeneration: string;
-  controllerGeneration: string;
-  env: Record<string, string | undefined>;
-  /** Permit a zero-op only when the caller will immediately retry genuine workflow failures. */
-  allowNoEligibleForRetry?: boolean;
-}
-
-export type ControllerFailureRefinalizationResult =
-  { ok: true; refinalized: number; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] };
-
-type ControllerRefinalizationIntentPayload = Extract<
-  AppendEventInput,
-  { eventType: "node-controller-refinalization-intent" }
->["payload"];
-
-/**
- * Re-run controller-only finalization without resetting or re-executing the Smithers task.
- *
- * This is deliberately separate from ordinary synchronization. Global terminal
- * immutability remains the default; the only admitted exception is an explicit
- * operation authenticated by a newly committed controller generation and the
- * exact verifier result that originally finished in the linked workflow run.
- */
-export async function refinalizeControllerFailures(
-  input: ControllerFailureRefinalizationInput
-): Promise<ControllerFailureRefinalizationResult> {
-  const reject = (error: unknown, code = "WORKFLOW_CONTROLLER_REFINALIZATION_REJECTED") => ({
-    ok: false as const,
-    diagnostics: [diagnosticFromError(error, "artifact-contracts", code)]
-  });
-  try {
-    const linked = await readLinkedWorkflowEvidence(input.projectRoot, input.layout.runId);
-    if (!linked.ok) {
-      throw new Error(linked.diagnostics.map((diagnostic) => diagnostic.message).join("; "));
-    }
-    if (
-      path.resolve(linked.layout.root) !== path.resolve(input.layout.root) ||
-      linked.smithersRunId !== input.workflowRunId ||
-      linked.workflowLinkId !== input.workflowLinkId ||
-      linked.controlGeneration !== input.controlGeneration ||
-      linked.controllerGeneration !== input.controllerGeneration
-    ) {
-      throw new Error("controller re-finalization authority does not match the current authenticated workflow link");
-    }
-    const authenticatedGraph = assertSealedPlannedGraph(parseStrictJsonBytes(linked.verifiedControl.contents.graph));
-    const authenticatedTaskDocument = parseSmithersTaskManifestBytes(linked.verifiedControl.contents.tasks);
-    const authenticatedTasks = authenticatedTaskDocument.tasks;
-    assertSmithersTaskManifestMatchesPlannedGraph(authenticatedTaskDocument, authenticatedGraph);
-    if (!isDeepStrictEqual(input.graph, authenticatedGraph) || !isDeepStrictEqual(input.tasks, authenticatedTasks)) {
-      throw new Error("controller re-finalization plan does not match the authenticated workflow control");
-    }
-    const inspectionEnvironment = linkedWorkflowExecutionEnvironment(linked, input.env);
-    if (input.controllerGeneration === input.controlGeneration) {
-      throw new Error("controller failure re-finalization requires a newly authenticated controller generation");
-    }
-    const replay = replayEvents(input.layout, Number.MAX_SAFE_INTEGER);
-    if (replay.malformedRecords > 0) {
-      throw new Error("controller re-finalization event history contains malformed records");
-    }
-    const records = replay.records;
-    const refreshEvents = records.filter((record) => {
-      if (record.event_type !== "workflow-controller-generation-recorded") return false;
-      return (
-        record.payload.workflow_run_id === input.workflowRunId &&
-        record.payload.workflow_link_id === input.workflowLinkId &&
-        record.payload.control_generation === input.controlGeneration &&
-        record.payload.controller_generation === input.controllerGeneration
-      );
-    });
-    if (refreshEvents.length !== 1) {
-      throw new Error("current controller generation does not have one exact authenticated refresh record");
-    }
-
-    const eventsSnapshot = await runSmithersInspectionCommand({
-      args: ["events", input.workflowRunId, "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
-      projectRoot: input.projectRoot,
-      env: inspectionEnvironment
-    });
-    if (!eventsSnapshot.ok) {
-      throw new Error(workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED").message);
-    }
-    const workflowEvents = parseWorkflowEvents(eventsSnapshot.stdout, input.workflowRunId);
-    const terminalAttempts = terminalWorkflowAttempts(workflowEvents);
-    const resultsByOperation = new Map<
-      string,
-      Extract<(typeof records)[number], { event_type: "node-controller-refinalization-result" }>
-    >();
-    const intentsByOperation = new Map<
-      string,
-      Extract<(typeof records)[number], { event_type: "node-controller-refinalization-intent" }>
-    >();
-    for (const record of records) {
-      if (record.event_type === "node-controller-refinalization-intent") {
-        if (intentsByOperation.has(record.payload.operation_id)) {
-          throw new Error("controller re-finalization history repeats an operation intent");
-        }
-        intentsByOperation.set(record.payload.operation_id, record);
-      } else if (record.event_type === "node-controller-refinalization-result") {
-        if (resultsByOperation.has(record.payload.operation_id)) {
-          throw new Error("controller re-finalization history repeats a terminal operation result");
-        }
-        resultsByOperation.set(record.payload.operation_id, record);
-      }
-    }
-    for (const operationId of resultsByOperation.keys()) {
-      if (!intentsByOperation.has(operationId)) {
-        throw new Error("controller re-finalization result has no durable operation intent");
-      }
-    }
-    let refinalized = 0;
-    let observedCompletedOperation = false;
-
-    const graphNodes = new Map(authenticatedGraph.nodes.map((node) => [node.id, node]));
-    const tasksByAttempt = new Map(authenticatedTasks.map((task) => [task.attemptId, task]));
-    for (const task of tasksInDependencyOrder(authenticatedTasks)) {
-      const node = graphNodes.get(task.concreteNodeId);
-      if (node === undefined) continue;
-      const previous = readRunState(input.layout).nodes[task.attemptId];
-      const priorAttempt = eligibleControllerFalseFailureAttempt(previous, task, input.workflowRunId);
-      const incompleteIntent = [...intentsByOperation.values()].find(
-        (record) =>
-          record.node_id === task.attemptId &&
-          record.payload.workflow_run_id === input.workflowRunId &&
-          record.payload.workflow_link_id === input.workflowLinkId &&
-          record.payload.control_generation === input.controlGeneration &&
-          record.payload.controller_generation === input.controllerGeneration &&
-          record.payload.verifier_task_id === task.verifierSmithersNodeId &&
-          !resultsByOperation.has(record.payload.operation_id)
-      );
-      const completed = [...resultsByOperation.values()].filter(
-        (record) =>
-          record.node_id === task.attemptId &&
-          record.status === "succeeded" &&
-          record.payload.workflow_run_id === input.workflowRunId &&
-          record.payload.workflow_link_id === input.workflowLinkId &&
-          record.payload.control_generation === input.controlGeneration &&
-          record.payload.controller_generation === input.controllerGeneration
-      );
-      if (completed.length > 1) {
-        throw new Error(`controller re-finalization has ambiguous terminal history for ${task.attemptId}`);
-      }
-      const completedResult = completed[0];
-      const verifierAttempt =
-        priorAttempt ?? incompleteIntent?.payload.verifier_attempt ?? completedResult?.payload.verifier_attempt;
-      if (verifierAttempt === undefined) {
-        continue;
-      }
-      if (priorAttempt === undefined && previous?.status !== "succeeded") {
-        throw new Error(`interrupted controller re-finalization state is invalid for ${task.attemptId}`);
-      }
-
-      const matchingAttempts = terminalAttempts.filter(
-        (attempt) =>
-          attempt.nodeId === task.verifierSmithersNodeId &&
-          attempt.retry === verifierAttempt &&
-          attempt.outcome === "succeeded" &&
-          !attempt.superseded
-      );
-      if (matchingAttempts.length !== 1) {
-        throw new Error(`linked workflow does not contain one exact finished verifier attempt for ${task.attemptId}`);
-      }
-      const verifierIteration = matchingAttempts[0]!.iteration;
-      const verifierSnapshot = await runSmithersInspectionCommand({
-        args: [
-          "node",
-          task.verifierSmithersNodeId,
-          "-r",
-          input.workflowRunId,
-          "-i",
-          String(verifierIteration),
-          "--format",
-          "json",
-          "--full-output"
-        ],
-        projectRoot: input.projectRoot,
-        env: inspectionEnvironment
-      });
-      const verifierOutput = parseFinishedVerifierOutput(verifierSnapshot, {
-        workflowRunId: input.workflowRunId,
-        verifierTaskId: task.verifierSmithersNodeId,
-        verifierIteration,
-        verifierAttempt
-      });
-      const publicationAuthority = captureVerifierPublicationAuthority(input.layout, node, task);
-      const markerSha256 = sha256Bytes(publicationAuthority.markerBytes);
-      if (
-        verifierOutput.verificationMarkerSha256 !== markerSha256 ||
-        verifierOutput.verificationMarkerSizeBytes !== publicationAuthority.markerBytes.byteLength
-      ) {
-        throw new Error(
-          `verifier-returned marker digest or size does not match durable marker bytes for ${task.attemptId}`
-        );
-      }
-      if (!isDeepStrictEqual(verifierOutput.artifacts, publicationAuthority.marker.artifacts)) {
-        throw new Error(`verifier-returned artifact bindings do not match the durable marker for ${task.attemptId}`);
-      }
-      const primary = publicationAuthority.marker.artifacts.find((artifact) => artifact.primary)?.path;
-      if (primary === undefined || verifierOutput.primaryArtifact !== primary) {
-        throw new Error(`verifier-returned primary artifact does not match the durable marker for ${task.attemptId}`);
-      }
-      const authorityWithoutOperation = {
-        workflow_run_id: input.workflowRunId,
-        workflow_link_id: input.workflowLinkId,
-        control_generation: input.controlGeneration,
-        controller_generation: input.controllerGeneration,
-        verifier_task_id: task.verifierSmithersNodeId,
-        verifier_iteration: verifierIteration,
-        verifier_attempt: verifierAttempt,
-        marker_sha256: markerSha256,
-        marker_size_bytes: publicationAuthority.markerBytes.byteLength,
-        prior_status: "failed" as const
-      };
-      const operationId = crypto
-        .createHash("sha256")
-        .update(
-          JSON.stringify([
-            "ultrafuzz.controller-refinalization.v1",
-            input.layout.runId,
-            task.attemptId,
-            authorityWithoutOperation.workflow_run_id,
-            authorityWithoutOperation.workflow_link_id,
-            authorityWithoutOperation.control_generation,
-            authorityWithoutOperation.controller_generation,
-            authorityWithoutOperation.verifier_task_id,
-            authorityWithoutOperation.verifier_iteration,
-            authorityWithoutOperation.verifier_attempt,
-            authorityWithoutOperation.marker_sha256,
-            authorityWithoutOperation.marker_size_bytes,
-            authorityWithoutOperation.prior_status
-          ]),
-          "utf8"
-        )
-        .digest("hex");
-      const authority: ControllerRefinalizationIntentPayload = {
-        operation_id: operationId,
-        ...authorityWithoutOperation
-      };
-      const existingIntent = intentsByOperation.get(operationId);
-      if (existingIntent !== undefined && !isDeepStrictEqual(existingIntent.payload, authority)) {
-        throw new Error(`controller re-finalization intent was replayed with changed authority for ${task.attemptId}`);
-      }
-      const existingResult = resultsByOperation.get(operationId);
-      if (existingResult !== undefined) {
-        const outputContracts = recordField(previous?.provenance, "output_contracts");
-        const workflow = recordField(previous?.provenance, "workflow");
-        if (
-          existingResult.status === "succeeded" &&
-          existingResult.payload.result === "succeeded" &&
-          existingResult.payload.failure_code === undefined &&
-          existingResult.payload.artifact_manifest_sha256 !== undefined &&
-          existingIntent?.node_id === task.attemptId &&
-          controllerRefinalizationResultMatchesIntent(existingResult.payload, existingIntent.payload) &&
-          previous?.status === "succeeded" &&
-          outputContracts?.artifact_manifest_sha256 === existingResult.payload.artifact_manifest_sha256 &&
-          workflow?.run_id === input.workflowRunId &&
-          workflow.task_id === task.verifierSmithersNodeId &&
-          workflow.agent_task_id === task.smithersNodeId &&
-          workflow.verifier_task_id === task.verifierSmithersNodeId &&
-          workflow.attempt === verifierAttempt &&
-          controllerRefinalizationResultMatchesIntent(existingResult.payload, authority)
-        ) {
-          loadFinalizedNodeOutputSnapshot({
-            runRoot: input.layout.root,
-            logicalNodeId: task.logicalNodeId,
-            attemptId: task.attemptId
-          });
-          observedCompletedOperation = true;
-          continue;
-        }
-        throw new Error(`controller re-finalization operation is already terminal for ${task.attemptId}`);
-      }
-      if (existingIntent === undefined) {
-        appendEvent(input.layout, {
-          eventType: "node-controller-refinalization-intent",
-          nodeId: task.attemptId,
-          status: "running",
-          payload: authority
-        });
-      }
-
-      const finalization = await finalizeTerminalTask({
-        layout: input.layout,
-        node,
-        task,
-        workflowRunId: input.workflowRunId,
-        evidence: {
-          status: "succeeded",
-          workflowState: "finished",
-          attempt: verifierAttempt,
-          finishedAt: previous?.finished_at
-        },
-        evidenceSource: "verifier",
-        tasksByAttempt,
-        control: {}
-      });
-      const manifestSha256 = finalization.provenance.output_contracts?.artifact_manifest_sha256;
-      if (finalization.status !== "succeeded" || manifestSha256 === undefined) {
-        appendEvent(input.layout, {
-          eventType: "node-controller-refinalization-result",
-          nodeId: task.attemptId,
-          status: "failed",
-          payload: {
-            ...authority,
-            result: "rejected",
-            failure_code: "CONTROLLER_REFINALIZATION_REJECTED"
-          }
-        });
-        return {
-          ok: false,
-          diagnostics: [
-            ...finalization.diagnostics,
-            {
-              code: "WORKFLOW_CONTROLLER_REFINALIZATION_REJECTED",
-              message: `current controller gates rejected the authenticated verifier output for ${task.attemptId}`,
-              severity: "error",
-              source: "artifact-contracts"
-            }
-          ]
-        };
-      }
-      assertVerifierPublicationAuthorityCurrent(input.layout, publicationAuthority);
-      const current = readRunState(input.layout).nodes[task.attemptId];
-      if (current === undefined) throw new Error(`durable node state disappeared for ${task.attemptId}`);
-      const patch = {
-        status: "succeeded" as const,
-        retry_count: current.retry_count,
-        timed_out: false,
-        ...(current.started_at === undefined ? {} : { started_at: current.started_at }),
-        ...(current.finished_at === undefined ? {} : { finished_at: current.finished_at }),
-        last_error: undefined,
-        provenance: {
-          ...withoutSupersededFailure(withoutTerminalDisposition(current.provenance), "succeeded", finalization),
-          workflow: {
-            run_id: input.workflowRunId,
-            task_id: task.verifierSmithersNodeId,
-            agent_task_id: task.smithersNodeId,
-            verifier_task_id: task.verifierSmithersNodeId,
-            state: "finished" as const,
-            attempt: verifierAttempt
-          },
-          ...finalization.provenance
-        }
-      };
-      if (nodePatchChanges(current, patch)) {
-        updateNodeState(input.layout, task.attemptId, patch);
-      }
-      assertVerifierPublicationAuthorityCurrent(input.layout, publicationAuthority);
-      appendEvent(input.layout, {
-        eventType: "node-controller-refinalization-result",
-        nodeId: task.attemptId,
-        status: "succeeded",
-        payload: {
-          ...authority,
-          result: "succeeded",
-          artifact_manifest_sha256: manifestSha256
-        }
-      });
-      refinalized += 1;
-    }
-    if (refinalized === 0 && !observedCompletedOperation && input.allowNoEligibleForRetry !== true) {
-      throw new Error("no eligible immutable controller false failures were found");
-    }
-    return { ok: true, refinalized, diagnostics: [] };
-  } catch (error) {
-    return reject(error);
-  }
-}
-
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "succeeded",
   "failed",
@@ -868,198 +481,6 @@ interface VerifierPublicationAuthoritySnapshot {
   artifactDir: string;
   publications: ReadonlyMap<string, VerifierPublicationSnapshot>;
   admittedDependencyAttemptIds: readonly string[];
-}
-
-function eligibleControllerFalseFailureAttempt(
-  previous: NodeState | undefined,
-  task: StoredWorkflowTask,
-  workflowRunId: string
-): number | undefined {
-  if (previous?.status !== "failed") return undefined;
-  const provenance = executionNodeProvenance(previous.provenance);
-  const disposition = recordField(provenance, "terminal_disposition");
-  if (
-    disposition === undefined ||
-    assertTerminalDispositionDocument(disposition).kind !== "task-output-validation-failure"
-  ) {
-    return undefined;
-  }
-  const contracts = recordField(provenance, "output_contracts");
-  const failure = recordField(provenance, "failure");
-  const workflow = recordField(provenance, "workflow");
-  const attempt = numberField(workflow, "attempt");
-  // An explicit non-finished verifier state is a genuine workflow failure,
-  // not a controller false failure. It carries no successful verifier output
-  // that controller-only finalization could authenticate or replay. Leave the
-  // immutable failure untouched so an atomic retry-failed resume can handle it.
-  if (workflow?.state !== undefined && workflow.state !== "finished") {
-    return undefined;
-  }
-  if (
-    contracts?.ok !== false ||
-    failure?.category !== "artifact-contract" ||
-    failure.causal_task_id !== task.verifierSmithersNodeId ||
-    failure.causal_failure_category !== "artifact-contract" ||
-    !Array.isArray(failure.dependent_task_ids) ||
-    failure.dependent_task_ids.length !== 0 ||
-    workflow?.run_id !== workflowRunId ||
-    workflow.task_id !== task.verifierSmithersNodeId ||
-    workflow.agent_task_id !== task.smithersNodeId ||
-    workflow.verifier_task_id !== task.verifierSmithersNodeId ||
-    attempt === undefined ||
-    !Number.isSafeInteger(attempt) ||
-    attempt < 1
-  ) {
-    throw new Error(`immutable controller failure authority is incomplete for ${task.attemptId}`);
-  }
-  return attempt;
-}
-
-function controllerRefinalizationResultMatchesIntent(
-  result: Extract<AppendEventInput, { eventType: "node-controller-refinalization-result" }>["payload"],
-  intent: ControllerRefinalizationIntentPayload
-): boolean {
-  return (
-    result.operation_id === intent.operation_id &&
-    result.workflow_run_id === intent.workflow_run_id &&
-    result.workflow_link_id === intent.workflow_link_id &&
-    result.control_generation === intent.control_generation &&
-    result.controller_generation === intent.controller_generation &&
-    result.verifier_task_id === intent.verifier_task_id &&
-    result.verifier_iteration === intent.verifier_iteration &&
-    result.verifier_attempt === intent.verifier_attempt &&
-    result.marker_sha256 === intent.marker_sha256 &&
-    result.marker_size_bytes === intent.marker_size_bytes &&
-    result.prior_status === intent.prior_status
-  );
-}
-
-function parseFinishedVerifierOutput(
-  snapshot: SmithersCommandSnapshot,
-  expected: {
-    workflowRunId: string;
-    verifierTaskId: string;
-    verifierIteration: number;
-    verifierAttempt: number;
-  }
-): {
-  artifacts: ArtifactVerificationEntry[];
-  primaryArtifact: string;
-  verificationMarkerSha256: string;
-  verificationMarkerSizeBytes: number;
-} {
-  if (!snapshot.ok || snapshot.json === undefined) {
-    throw new Error(workflowSnapshotDiagnostic(snapshot, "WORKFLOW_ATTEMPT_INSPECT_FAILED").message);
-  }
-  const envelope = exactStoredRecord(snapshot.json, "verifier node detail envelope", ["ok", "data", "meta"], []);
-  if (envelope.ok !== true) throw new Error("verifier node detail envelope did not report success");
-  const meta = exactStoredRecord(envelope.meta, "verifier node detail metadata", ["command", "duration"], ["cta"]);
-  if (meta.command !== "node") throw new Error("verifier node detail metadata does not identify the node command");
-  requiredStoredString(meta.duration, "verifier node detail metadata duration");
-  const detail = exactStoredRecord(
-    envelope.data,
-    "verifier node detail",
-    [
-      "node",
-      "status",
-      "durationMs",
-      "attemptsSummary",
-      "attempts",
-      "toolCalls",
-      "tokenUsage",
-      "scorers",
-      "output",
-      "approval",
-      "limits"
-    ],
-    []
-  );
-  const node = exactStoredRecord(
-    detail.node,
-    "verifier node detail node",
-    ["runId", "nodeId", "iteration", "state", "lastAttempt", "updatedAtMs", "outputTable", "label"],
-    []
-  );
-  if (
-    node.runId !== expected.workflowRunId ||
-    node.nodeId !== expected.verifierTaskId ||
-    requiredStoredCount(node.iteration, "verifier node iteration") !== expected.verifierIteration ||
-    node.state !== "finished" ||
-    detail.status !== "finished" ||
-    requiredStoredCount(node.lastAttempt, "verifier node last attempt") !== expected.verifierAttempt
-  ) {
-    throw new Error("verifier node detail does not match the exact linked finished attempt");
-  }
-  if (!Array.isArray(detail.attempts)) throw new Error("verifier node attempts must be an array");
-  const attempts = detail.attempts.map((value, index) =>
-    exactStoredRecord(
-      value,
-      `verifier node attempt ${index + 1}`,
-      [
-        "runId",
-        "nodeId",
-        "iteration",
-        "attempt",
-        "state",
-        "startedAtMs",
-        "finishedAtMs",
-        "durationMs",
-        "error",
-        "errorDetail",
-        "tokenUsage",
-        "toolCalls",
-        "meta",
-        "responseText",
-        "cached",
-        "jjPointer",
-        "jjCwd"
-      ],
-      []
-    )
-  );
-  const matching = attempts.filter(
-    (attempt) =>
-      attempt.runId === expected.workflowRunId &&
-      attempt.nodeId === expected.verifierTaskId &&
-      attempt.iteration === expected.verifierIteration &&
-      attempt.attempt === expected.verifierAttempt
-  );
-  if (
-    matching.length !== 1 ||
-    matching[0]!.state !== "finished" ||
-    matching[0]!.finishedAtMs === null ||
-    matching[0]!.error !== null
-  ) {
-    throw new Error("verifier node attempt is missing, unfinished, failed, or ambiguous");
-  }
-  const output = exactStoredRecord(
-    detail.output,
-    "verifier node output",
-    ["validated", "raw", "source", "cacheKey"],
-    []
-  );
-  if ((output.source !== "cache" && output.source !== "output-table") || !isRecord(output.validated)) {
-    throw new Error("finished verifier has no authenticated validated output");
-  }
-  const validated = exactStoredRecord(
-    output.validated,
-    "verifier validated output",
-    ["artifacts", "primary_artifact", "verification_marker_sha256", "verification_marker_size_bytes"],
-    []
-  );
-  if (!Array.isArray(validated.artifacts)) throw new Error("verifier validated artifacts must be an array");
-  const markerSha256 = requiredStoredString(validated.verification_marker_sha256, "verifier validation marker digest");
-  if (!/^[0-9a-f]{64}$/u.test(markerSha256)) throw new Error("verifier validation marker digest is invalid");
-  const markerSize = requiredStoredCount(validated.verification_marker_size_bytes, "verifier validation marker size");
-  if (markerSize < 1 || markerSize > MAX_VERIFIER_AUTHORITY_BYTES) {
-    throw new Error("verifier validation marker size is outside the authenticated bound");
-  }
-  return {
-    artifacts: validated.artifacts as ArtifactVerificationEntry[],
-    primaryArtifact: requiredStoredString(validated.primary_artifact, "verifier primary artifact"),
-    verificationMarkerSha256: markerSha256,
-    verificationMarkerSizeBytes: markerSize
-  };
 }
 
 /** Controls of passes that hold their run's synchronization lock. */
@@ -1225,19 +646,6 @@ export async function synchronizeLinkedWorkflowRun(
   if (postInspectBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
   }
-  if (control.allowMissingWorkflowRun === true && smithersSnapshotReportsMissingRun(inspectSnapshot)) {
-    return {
-      ok: true,
-      diagnostics: [],
-      value: {
-        run_id: layout.runId,
-        run_root: layout.root,
-        status: readRunState(layout).status,
-        workflow_run_id: evidence.smithersRunId,
-        synced_nodes: 0
-      }
-    };
-  }
   if (!inspectSnapshot.ok) {
     return {
       ok: false,
@@ -1363,36 +771,10 @@ export async function synchronizeLinkedWorkflowRun(
     throw error;
   }
   diagnostics.push(...syncResult.diagnostics);
-  reconcilePreparedRecoveryProvenance(layout);
-  const recoveryState = readRunState(layout);
-  const recovery = recoveryState.provenance?.recovery;
-  const recoveryRecords =
-    recovery?.submission_status === "submitted" ? replayEvents(layout, Number.MAX_SAFE_INTEGER).records : [];
-  const recoveryDispositionAuthorized =
-    recoverySubmissionAuthority({
-      records: recoveryRecords,
-      state: recoveryState,
-      workflowRunId: evidence.smithersRunId,
-      workflowLinkId: evidence.workflowLinkId,
-      controlGeneration: evidence.controlGeneration
-    }) !== undefined;
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const nonBlockingNodeIds = requiresCompleteRun(evidence)
     ? new Set<string>()
     : nonBlockingRuntimeNodeIds(loaded.graph);
-  const recoveredAggregateAuthorized = recoveryAuthorizesTerminalAggregate({
-    records: recoveryRecords,
-    state: recoveryState,
-    inspect,
-    nodeStatuses: syncResult.nodeStatuses,
-    observedTaskEvidence: syncResult.observedTaskEvidence,
-    evidenceComplete,
-    workflowRunId: evidence.smithersRunId,
-    workflowLinkId: evidence.workflowLinkId,
-    controlGeneration: evidence.controlGeneration,
-    nonBlockingNodeIds,
-    tasks: loaded.tasks
-  });
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
       code: "WORKFLOW_TASK_EVIDENCE_MISSING",
@@ -1410,11 +792,7 @@ export async function synchronizeLinkedWorkflowRun(
     Object.entries(readRunState(layout).nodes).map(([nodeId, node]) => [nodeId, node.status])
   );
   for (const [nodeId, status] of syncResult.nodeStatuses) attributionStatuses.set(nodeId, status);
-  const unattributedFailure = unattributedTerminalWorkflowFailure(
-    inspect,
-    attributionStatuses,
-    recoveredAggregateAuthorized
-  );
+  const unattributedFailure = unattributedTerminalWorkflowFailure(inspect, attributionStatuses);
   if (unattributedFailure !== undefined) {
     diagnostics.push(unattributedFailure);
   }
@@ -1452,12 +830,9 @@ export async function synchronizeLinkedWorkflowRun(
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete,
-    recoveredAggregateAuthorized,
-    recoveryRequiresAuthorization: recovery?.prior_status === "failed" && recovery.recovered === false,
     nonBlockingNodeIds
   });
-  const stateBeforeStatusUpdate = readRunState(layout);
-  const previousRunStatus = stateBeforeStatusUpdate.status;
+  const previousRunStatus = readRunState(layout).status;
   const runStatusChanged = previousRunStatus !== finalStatus;
   if (runStatusChanged) {
     const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
@@ -1465,44 +840,6 @@ export async function synchronizeLinkedWorkflowRun(
       return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
     }
     updateRunStatus(layout, finalStatus, undefined, { forbiddenSecretValues });
-  }
-  const recoveryBeforeStatusUpdate = stateBeforeStatusUpdate.provenance?.recovery;
-  if (
-    finalStatus === "succeeded" &&
-    recoveryDispositionAuthorized &&
-    recoveryBeforeStatusUpdate?.prior_status === "failed" &&
-    recoveryBeforeStatusUpdate.recovered === false
-  ) {
-    if (
-      !replayEvents(layout).records.some(
-        (event) =>
-          event.event_type === "run-recovered" && event.payload.recovery_id === recoveryBeforeStatusUpdate.recovery_id
-      )
-    ) {
-      appendEvent(layout, {
-        eventType: "run-recovered",
-        status: "succeeded",
-        payload: {
-          recovery_id: recoveryBeforeStatusUpdate.recovery_id,
-          prior_status: "failed",
-          failed_nodes: recoveryBeforeStatusUpdate.failed_nodes
-        },
-        forbiddenSecretValues
-      });
-    }
-    const state = readRunState(layout);
-    const recovered = {
-      ...recoveryBeforeStatusUpdate,
-      recovered: true,
-      recovered_at: new Date(synchronizationClock(control)).toISOString()
-    };
-    writeRunState(
-      layout,
-      { ...state, provenance: { ...state.provenance!, recovery: recovered } },
-      {
-        forbiddenSecretValues
-      }
-    );
   }
   const observedAtMs = synchronizationClock(control);
   const workflowControl = projectWorkflowControlState({
@@ -1695,171 +1032,6 @@ function requiresCompleteRun(evidence: LinkedWorkflowEvidence): boolean {
   );
   if (saved === undefined) throw new Error("sealed completion policy is unavailable");
   return parseResolvedConfigJsonBytes(saved.contents).run.completionPolicy === "require-complete";
-}
-
-function recoveryAuthorizesTerminalAggregate(input: {
-  records: readonly EventRecord[];
-  state: ReturnType<typeof readRunState>;
-  inspect: WorkflowInspect;
-  nodeStatuses: Map<string, NodeStatus>;
-  observedTaskEvidence: Map<string, ObservedTaskEvidence>;
-  evidenceComplete: boolean;
-  workflowRunId: string;
-  workflowLinkId: string;
-  controlGeneration: string;
-  nonBlockingNodeIds: ReadonlySet<string>;
-  tasks: readonly StoredWorkflowTask[];
-}): boolean {
-  const recovery = input.state.provenance?.recovery;
-  const submissionAuthority = recoverySubmissionAuthority({
-    records: input.records,
-    state: input.state,
-    workflowRunId: input.workflowRunId,
-    workflowLinkId: input.workflowLinkId,
-    controlGeneration: input.controlGeneration
-  });
-  const statuses = [...input.nodeStatuses]
-    .filter(([nodeId]) => !input.nonBlockingNodeIds.has(nodeId))
-    .map(([, status]) => status);
-  if (
-    (input.inspect.runState !== "failed" &&
-      input.inspect.runState !== "succeeded" &&
-      input.inspect.runState !== "succeeded-with-failures") ||
-    recovery === undefined ||
-    submissionAuthority === undefined ||
-    !input.evidenceComplete ||
-    statuses.length === 0 ||
-    !statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run") ||
-    input.observedTaskEvidence.size === 0
-  ) {
-    return false;
-  }
-
-  for (const [nodeId, observed] of input.observedTaskEvidence) {
-    if (input.nonBlockingNodeIds.has(nodeId)) continue;
-    const node = input.state.nodes[nodeId];
-    const workflow = recordField(node?.provenance, "workflow");
-    if (
-      node === undefined ||
-      observed.status !== "succeeded" ||
-      observed.workflowState !== "finished" ||
-      observed.attempt === undefined ||
-      (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
-      stringField(workflow, "run_id") !== recovery.workflow_run_id ||
-      stringField(workflow, "task_id") !== observed.taskId ||
-      numberField(workflow, "attempt") !== observed.attempt
-    ) {
-      return false;
-    }
-  }
-
-  for (const failedNode of recovery.failed_nodes) {
-    const node = input.state.nodes[failedNode.node_id];
-    const workflow = recordField(node?.provenance, "workflow");
-    const matchingTasks = input.tasks.filter((task) => task.attemptId === failedNode.node_id);
-    const sealedTask = matchingTasks.length === 1 ? matchingTasks[0] : undefined;
-    const failedTask = input.inspect.steps.find((step) => step.id === failedNode.workflow_task_id);
-    const attemptEpochRecreated = submissionAuthority.attemptEpoch === "recreated";
-    if (
-      node === undefined ||
-      sealedTask === undefined ||
-      failedNode.failed_attempt < 1 ||
-      ![sealedTask.preparationSmithersNodeId, sealedTask.smithersNodeId, sealedTask.verifierSmithersNodeId].includes(
-        failedNode.workflow_task_id
-      ) ||
-      failedTask === undefined ||
-      failedTask.state !== "finished" ||
-      (attemptEpochRecreated ? failedTask.attempt < 1 : failedTask.attempt <= failedNode.failed_attempt) ||
-      (node.status !== "succeeded" && node.status !== "reused-from-prior-run") ||
-      stringField(workflow, "run_id") !== recovery.workflow_run_id ||
-      stringField(workflow, "agent_task_id") !== sealedTask.smithersNodeId ||
-      stringField(workflow, "verifier_task_id") !== sealedTask.verifierSmithersNodeId ||
-      (attemptEpochRecreated
-        ? (numberField(workflow, "attempt") ?? -1) < 1
-        : (numberField(workflow, "attempt") ?? -1) <= failedNode.failed_attempt)
-    ) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function reconcilePreparedRecoveryProvenance(layout: RunLayout): void {
-  const state = readRunState(layout);
-  const recovery = state.provenance?.recovery;
-  if (recovery?.submission_status !== "prepared") return;
-
-  const records = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.map((record, index) => ({ record, index }));
-  const invocationMatches = records.filter(({ record }) => record.event_id === recovery.controller_invocation_id);
-  if (invocationMatches.length !== 1) return;
-  const invocation = invocationMatches[0]!;
-  const invocationPayload = invocation.record.payload as Record<string, unknown>;
-  if (
-    invocation.record.event_type !== "workflow-lifecycle-invoking" ||
-    invocation.record.timestamp !== recovery.controller_invoked_at ||
-    invocationPayload.action !== "resume" ||
-    invocationPayload.retry_failed !== true ||
-    invocationPayload.workflow_run_id !== recovery.source_workflow_run_id ||
-    invocationPayload.workflow_link_id !== recovery.source_workflow_link_id ||
-    invocationPayload.control_generation !== recovery.control_generation
-  ) {
-    return;
-  }
-
-  const results = records.filter(({ record, index }) => {
-    if (index <= invocation.index || record.event_type !== "workflow-lifecycle-result") return false;
-    const payload = record.payload as Record<string, unknown>;
-    return (
-      payload.action === "resume" &&
-      payload.retry_failed === true &&
-      payload.source_workflow_run_id === recovery.source_workflow_run_id &&
-      payload.source_workflow_link_id === recovery.source_workflow_link_id &&
-      payload.control_generation === recovery.control_generation &&
-      payload.controller_invocation_id === recovery.controller_invocation_id &&
-      payload.controller_invoked_at === recovery.controller_invoked_at
-    );
-  });
-  if (results.length !== 1) return;
-  const result = results[0]!;
-  const resultPayload = result.record.payload as Record<string, unknown>;
-  const workflowRunId = stringField(resultPayload, "workflow_run_id");
-  if (workflowRunId === undefined) return;
-
-  const submissions = records.filter(({ record, index }) => {
-    if (index <= result.index || record.event_type !== "workflow-lifecycle-submitted") return false;
-    const payload = record.payload as Record<string, unknown>;
-    return (
-      payload.action === "resume" &&
-      payload.retry_failed === true &&
-      payload.workflow_run_id === workflowRunId &&
-      payload.control_generation === recovery.control_generation &&
-      payload.controller_invocation_id === recovery.controller_invocation_id &&
-      payload.controller_invoked_at === recovery.controller_invoked_at
-    );
-  });
-  if (submissions.length !== 1) return;
-  const submission = submissions[0]!;
-  const submissionPayload = submission.record.payload as Record<string, unknown>;
-  const workflowLinkId = stringField(submissionPayload, "workflow_link_id");
-  if (workflowLinkId === undefined) return;
-
-  writeRunState(layout, {
-    ...state,
-    provenance: {
-      ...state.provenance!,
-      recovery: {
-        ...recovery,
-        submission_status: "submitted",
-        workflow_run_id: workflowRunId,
-        workflow_link_id: workflowLinkId,
-        lifecycle_result_event_id: result.record.event_id,
-        lifecycle_result_at: result.record.timestamp,
-        lifecycle_submission_event_id: submission.record.event_id,
-        lifecycle_submitted_at: submission.record.timestamp
-      }
-    }
-  });
 }
 
 function synchronizationBudgetDiagnostic(
@@ -3748,14 +2920,12 @@ async function synchronizeTasks(input: {
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
   nodeStatuses: Map<string, NodeStatus>;
-  observedTaskEvidence: Map<string, ObservedTaskEvidence>;
   workflowStates: Map<string, SmithersNodeState>;
   syncedNodes: number;
   changed: boolean;
 }> {
   const diagnostics: RuntimeDiagnostic[] = [];
   const nodeStatuses = new Map<string, NodeStatus>();
-  const observedTaskEvidence = new Map<string, ObservedTaskEvidence>();
   const workflowStates = new Map<string, SmithersNodeState>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
@@ -3813,12 +2983,6 @@ async function synchronizeTasks(input: {
       continue;
     }
     const evidence = attemptEvidence.evidence;
-    observedTaskEvidence.set(task.attemptId, {
-      status: evidence.status,
-      taskId: attemptEvidence.taskId,
-      ...(evidence.attempt === undefined ? {} : { attempt: evidence.attempt }),
-      ...(evidence.workflowState === undefined ? {} : { workflowState: evidence.workflowState })
-    });
 
     const previousIsImmutable = immutableTerminalFinalization(previous);
     const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
@@ -4042,7 +3206,7 @@ async function synchronizeTasks(input: {
     }
   }
 
-  return { diagnostics, nodeStatuses, observedTaskEvidence, workflowStates, syncedNodes, changed };
+  return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
 }
 
 async function finalizeTerminalTask(input: {
@@ -5409,8 +4573,6 @@ function finalRunStatus(
   currentStatus: RunStatus,
   options: {
     evidenceComplete: boolean;
-    recoveredAggregateAuthorized?: boolean;
-    recoveryRequiresAuthorization?: boolean;
     nonBlockingNodeIds?: ReadonlySet<string>;
   } = { evidenceComplete: true }
 ): RunStatus {
@@ -5440,7 +4602,7 @@ function finalRunStatus(
   }
   if (
     inspect.exhaustedLoops.length > 0 ||
-    (workflowStatus === "failed" && options.recoveredAggregateAuthorized !== true) ||
+    workflowStatus === "failed" ||
     statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))
   ) {
     return "failed";
@@ -5459,16 +4621,12 @@ function finalRunStatus(
   // instead would leave such a run reported `running` forever, and the Modal
   // resume and worker poll loops key their exit on that status.
   if (workflowStatus === "succeeded" || workflowStatus === "succeeded-with-failures") {
-    if (options.recoveryRequiresAuthorization === true && options.recoveredAggregateAuthorized !== true) {
-      return "failed";
-    }
     return options.evidenceComplete &&
       (statuses.length === 0 ||
         statuses.every((status) => status === "succeeded" || status === "reused-from-prior-run"))
       ? "succeeded"
       : "failed";
   }
-  if (workflowStatus === "failed" && options.recoveredAggregateAuthorized === true) return "succeeded";
   return currentStatus;
 }
 
@@ -5497,8 +4655,7 @@ function nonBlockingRuntimeNodeIds(graph: PlannedGraph): ReadonlySet<string> {
 // cause is removed (smithers-terminal-resume.integration.test.ts).
 function unattributedTerminalWorkflowFailure(
   inspect: WorkflowInspect,
-  nodeStatuses: Map<string, NodeStatus>,
-  recoveredAggregateAuthorized: boolean
+  nodeStatuses: Map<string, NodeStatus>
 ): UnattributedWorkflowFailureDiagnostic | undefined {
   const workflowState = inspect.runState;
   if (workflowState !== "failed") {
@@ -5506,9 +4663,6 @@ function unattributedTerminalWorkflowFailure(
   }
   const statuses = [...nodeStatuses.values()];
   if (statuses.some((status) => ["failed", "timed-out", "skipped", "invalidated"].includes(status))) {
-    return undefined;
-  }
-  if (recoveredAggregateAuthorized) {
     return undefined;
   }
   const failedWorkflowTasks = inspect.failedWorkflowTaskIds;

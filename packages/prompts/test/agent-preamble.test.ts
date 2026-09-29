@@ -45,18 +45,19 @@ describe("agent preamble MDX", () => {
     ).toBe(`${mandatoryPrefix}${operatorPrompt}\n\n${taskPrompt}`);
   });
 
-  it("preserves the retry-only prepend and treats inserted values as data", () => {
-    const previousFailure = "Error: deterministic verifier failure {{not_a_template_variable}}";
-    const rendered = renderAgentPreambleTemplate("retry-failure", {
-      previous_failure: previousFailure
+  it("treats inserted values as data", () => {
+    // The inserted value names another bound variable; a second expansion pass would turn it into 1500.
+    const rendered = renderAgentPreambleTemplate("topology-runtime-context", {
+      timeout_seconds: "{{working_budget_seconds}}",
+      finalization_reserve_seconds: "300",
+      working_budget_seconds: "1500"
     });
-    expect(sha256(rendered)).toBe("64b67a40f0bc6c412d08b9ad692ed4c985bfed3c2f00f1fc1ca14615ba95b5bd");
-    expect(rendered).toContain(previousFailure);
+    expect(rendered).toContain("- Timeout: {{working_budget_seconds}} seconds total.");
   });
 
   it("rejects missing and unknown composition variables", () => {
-    expect(() => renderAgentPreambleTemplate("retry-failure")).toThrow(
-      "missing agent preamble template variable: previous_failure"
+    expect(() => renderAgentPreambleTemplate("topology-runtime-context")).toThrow(
+      "missing agent preamble template variable: timeout_seconds"
     );
     expect(() =>
       renderAgentPreambleTemplate("untrusted-content-boundary", {

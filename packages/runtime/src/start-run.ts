@@ -92,7 +92,6 @@ import {
   type MaterializedWorkflowExecutionSnapshot,
   type VerifiedWorkflowControlSnapshot
 } from "./workflow-integrity.js";
-import { effectiveControllerGeneration } from "./workflow-controller-generation.js";
 import {
   finalizeWorkflowRunLink,
   prepareWorkflowRunLink,
@@ -119,10 +118,8 @@ export interface LinkedWorkflowEvidence {
   workflowPath: string;
   layout: RunLayout;
   controlGeneration: string;
-  controllerGeneration: string;
   workflowLinkId: string;
   verifiedControl: VerifiedWorkflowControlSnapshot;
-  controllerSnapshot: VerifiedWorkflowControlSnapshot;
   executionSnapshot: MaterializedWorkflowExecutionSnapshot;
 }
 
@@ -984,7 +981,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       ...linkedWorkflowExecutionEnvironment(evidence, trustedCli.env, providerCredentialNames)
     };
     assertProviderScopedSensitiveEnvironmentCapability(
-      evidence.controllerSnapshot.executionFiles,
+      evidence.verifiedControl.executionFiles,
       lifecycleEnvironment.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES
     );
     assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
@@ -1411,16 +1408,14 @@ export async function readLinkedWorkflowEvidence(
     ) {
       throw new Error("compiled workflow identity does not match the sealed task manifest");
     }
-    const controller = effectiveControllerGeneration(layout, verifiedControl);
     const startupControlDrift = tolerateDivergence
-      ? sealedBunStartupControlDrift(controller.snapshot.executionFiles)
+      ? sealedBunStartupControlDrift(verifiedControl.executionFiles)
       : undefined;
     if (startupControlDrift !== undefined) observerDivergences.push(startupControlDrift);
     const executionSnapshot = materializeWorkflowExecutionSnapshot({
       projectRoot: resolvedProjectRoot,
       layout,
-      snapshot: controller.snapshot,
-      authorizedGenerations: controller.authorizedGenerations,
+      snapshot: verifiedControl,
       ...(options.observeOnly === true ? { observeOnly: true } : {}),
       ...(startupControlDrift === undefined ? {} : { tolerateStartupControlDrift: true })
     });
@@ -1486,13 +1481,11 @@ export async function readLinkedWorkflowEvidence(
       smithersRunId,
       layout,
       controlGeneration: verifiedControl.generation,
-      controllerGeneration: controller.controllerGeneration,
       workflowLinkId: activeWorkflowLink.link_id,
       verifiedControl:
         observerDivergences.length === 0
           ? verifiedControl
           : { ...verifiedControl, divergences: [...verifiedControl.divergences, ...observerDivergences] },
-      controllerSnapshot: controller.snapshot,
       workflowPath: executionSnapshot.workflowPath,
       executionSnapshot
     };

@@ -1661,10 +1661,6 @@ const cloudExecutionGeneration = readCloudExecutionGeneration();
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
-// Current main intentionally starts automatic retries from the effective original prompt. Keep the
-// release template sealed into the generated workflow without reintroducing diagnostic injection.
-const retryFailureTemplate = __ULTRAFUZZ_RETRY_FAILURE_TEMPLATE__;
-void retryFailureTemplate;
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();

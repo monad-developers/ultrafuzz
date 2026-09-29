@@ -3,31 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  appendEvent,
-  assertNoSymlinkComponents,
-  assertPathInside,
   assertRegularFileInside,
+  isRecord,
   parseStrictJsonBytes,
-  publishFileDurableExclusive,
   readRegularFileSnapshot,
-  readRunMetadataDocument,
-  readRunState,
   replayEvents,
   safeResolveInside,
-  writeJsonDurable,
-  writeRunMetadataDocument,
-  writeRunState,
   type EventRecord,
   type RunLayout
 } from "@ultrafuzz/artifacts";
-
-import type { RefreshedSmithersControllerSnapshot } from "./smithers.js";
-import {
-  reconcileStaleWorkflowExecutionSnapshotPublications,
-  type VerifiedWorkflowControlSnapshot
-} from "./workflow-integrity.js";
-import { verifyWorkflowRunLinkHistory } from "./workflow-run-link.js";
-import { isRecord } from "@ultrafuzz/artifacts";
 
 const JOURNAL_VERSION = "ultrafuzz.workflow-controller-generation-journal.v1";
 const LEGACY_MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v1";
@@ -35,8 +19,6 @@ const MANIFEST_VERSION = "ultrafuzz.workflow-controller-generation.v2";
 const JOURNAL_FILE = "controller-generation-journal.json";
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/u;
-const DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH = "controls/runtime-base-graph.json";
-const DYNAMIC_BASE_TASKS_SNAPSHOT_PATH = "controls/runtime-base-tasks.json";
 type ControllerGenerationEvent = Extract<EventRecord, { event_type: "workflow-controller-generation-recorded" }>;
 
 interface ControllerGenerationFile {
@@ -81,19 +63,6 @@ interface ControllerGenerationJournal {
   entries: ControllerGenerationEntry[];
 }
 
-export interface PreparedControllerGeneration {
-  snapshot: VerifiedWorkflowControlSnapshot;
-  controllerGeneration: string;
-  authorizedGenerations: string[];
-  noChange: boolean;
-}
-
-export interface EffectiveControllerGeneration {
-  snapshot: VerifiedWorkflowControlSnapshot;
-  controllerGeneration: string;
-  authorizedGenerations: string[];
-}
-
 export interface CommittedControllerGenerationAuthority {
   controlGeneration: string;
   controllerGeneration: string;
@@ -111,296 +80,11 @@ export interface CommittedControllerGenerationAuthority {
   eventRecords: readonly ControllerGenerationEvent[];
 }
 
-/** Prepare the append-only transition before publishing its immutable tree. */
-export function prepareControllerGeneration(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot,
-  refreshed: RefreshedSmithersControllerSnapshot,
-  authority: { workflowRunId: string; workflowLinkId: string }
-): PreparedControllerGeneration {
-  assertOriginalGeneration(layout, original);
-  const journal = readJournal(layout, original.generation);
-  verifyControllerGenerationJournalEvents(layout, journal);
-  const current = committedHead(journal);
-  const pending = journal.entries.find((entry) => entry.phase === "prepared");
-  const manifest = controllerGenerationManifest(
-    layout,
-    original,
-    refreshed,
-    pending?.controller_generation ?? current?.controller_generation ?? original.generation
-  );
-  const manifestBytes = manifestBytesFor(manifest);
-  const manifestPath = manifestRelativePath(manifest.controller_generation);
-  if (pending === undefined && current !== undefined) {
-    const retained = readManifest(layout, current);
-    if (sameControllerGenerationContents(retained, manifest)) {
-      return {
-        snapshot: snapshotFromManifest(layout, original, retained),
-        controllerGeneration: retained.controller_generation,
-        authorizedGenerations: authorizedGenerations(journal, original.generation),
-        noChange: true
-      };
-    }
-  }
-
-  if (pending !== undefined) {
-    const retained = readManifest(layout, pending);
-    const publishedPending = publishedPreparedSnapshotRoot(layout, pending);
-    if (sameControllerGenerationContents(retained, manifest)) {
-      return {
-        snapshot:
-          publishedPending === undefined
-            ? { ...refreshed.snapshot, generation: retained.controller_generation }
-            : snapshotFromManifest(layout, original, retained),
-        controllerGeneration: retained.controller_generation,
-        authorizedGenerations: [
-          ...new Set([...authorizedGenerations(journal, original.generation), retained.controller_generation])
-        ].sort(compareStrings),
-        noChange: false
-      };
-    }
-    if (publishedPending !== undefined) {
-      return transitionPublishedPreparationToSuccessor(
-        layout,
-        original,
-        journal,
-        pending,
-        retained,
-        refreshed,
-        authority
-      );
-    }
-    if (
-      pending.controller_generation !== manifest.controller_generation ||
-      pending.manifest_path !== manifestPath ||
-      pending.manifest_sha256 !== sha256(manifestBytes)
-    ) {
-      throw new Error("a different controller generation requires reconciliation");
-    }
-  } else {
-    const manifestRoot = ensureControllerGenerationDirectory(layout);
-    // Publication is intentionally idempotent: if the process crashed after
-    // this durable write but before the journal append, the exclusive publisher
-    // accepts only the exact same bytes and thereby adopts that orphan safely.
-    publishFileDurableExclusive(manifestRoot, `${manifest.controller_generation}.json`, manifestBytes);
-    const now = new Date().toISOString();
-    journal.entries.push({
-      sequence: journal.entries.length + 1,
-      controller_generation: manifest.controller_generation,
-      previous_controller_generation: current?.controller_generation ?? original.generation,
-      manifest_path: manifestPath,
-      manifest_sha256: sha256(manifestBytes),
-      workflow_run_id: authority.workflowRunId,
-      workflow_link_id: authority.workflowLinkId,
-      phase: "prepared",
-      prepared_at: now,
-      updated_at: now
-    });
-    writeJournal(layout, journal);
-  }
-
-  return {
-    snapshot: { ...refreshed.snapshot, generation: manifest.controller_generation },
-    controllerGeneration: manifest.controller_generation,
-    authorizedGenerations: [
-      ...new Set([...authorizedGenerations(journal, original.generation), manifest.controller_generation])
-    ].sort(compareStrings),
-    noChange: false
-  };
-}
-
-/** Commit a prepared transition only after its complete tree is readable. */
-export function commitControllerGeneration(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot,
-  controllerGeneration: string
-): EffectiveControllerGeneration {
-  const journal = readJournal(layout, original.generation);
-  verifyControllerGenerationJournalEvents(layout, journal);
-  const entry = journal.entries.find((candidate) => candidate.controller_generation === controllerGeneration);
-  if (entry === undefined) throw new Error("prepared controller generation is missing from its journal");
-  const manifest = readManifest(layout, entry);
-  const snapshot = snapshotFromManifest(layout, original, manifest);
-  if (entry.phase === "prepared") {
-    const expectedPayload = controllerGenerationEventPayload(journal, entry, manifest);
-    const recordedEvent = controllerGenerationEvent(layout, entry);
-    if (recordedEvent !== undefined && JSON.stringify(recordedEvent.payload) !== JSON.stringify(expectedPayload)) {
-      throw new Error("controller generation event does not authenticate its prepared journal entry");
-    }
-    const event =
-      recordedEvent ??
-      appendEvent(layout, {
-        eventType: "workflow-controller-generation-recorded",
-        status: readRunState(layout).status,
-        payload: expectedPayload
-      });
-    const now = new Date().toISOString();
-    entry.phase = "committed";
-    entry.updated_at = now;
-    entry.committed_at = now;
-    entry.event_id = event.event_id;
-    entry.event_at = event.timestamp;
-    writeJournal(layout, journal);
-  }
-  verifyControllerGenerationEvent(layout, journal, entry, manifest);
-  reconcileControllerGenerationProjection(layout, journal, entry);
-  return {
-    snapshot,
-    controllerGeneration,
-    authorizedGenerations: authorizedGenerations(journal, original.generation)
-  };
-}
-
 /**
- * Finish the exact prepared transition when its immutable tree already crossed the publication
- * boundary. This must run before rebuilding a refresh: controller source may legitimately advance
- * after the crash, but it cannot redefine the identity of an existing prepared transaction.
- */
-export function commitPublishedPreparedControllerGeneration(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot
-): EffectiveControllerGeneration | undefined {
-  assertOriginalGeneration(layout, original);
-  const journal = readJournal(layout, original.generation);
-  verifyControllerGenerationJournalEvents(layout, journal);
-  const pending = journal.entries.find((entry) => entry.phase === "prepared");
-  if (pending === undefined) return undefined;
-  if (publishedPreparedSnapshotRoot(layout, pending) === undefined) return undefined;
-  return commitControllerGeneration(layout, original, pending.controller_generation);
-}
-
-/**
- * Preserve an already-published preparation as ancestry while durably requiring
- * the current controller generation before any ordinary lifecycle action can
- * select the recovered legacy head. The single journal replacement moves the
- * published entry to committed and appends its successor as prepared, so every
- * crash boundary has a pending refresh marker on at least one side.
- */
-function transitionPublishedPreparationToSuccessor(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot,
-  journal: ControllerGenerationJournal,
-  pending: ControllerGenerationEntry,
-  pendingManifest: ControllerGenerationManifest,
-  refreshed: RefreshedSmithersControllerSnapshot,
-  authority: { workflowRunId: string; workflowLinkId: string }
-): PreparedControllerGeneration {
-  snapshotFromManifest(layout, original, pendingManifest);
-  const successor = controllerGenerationManifest(layout, original, refreshed, pending.controller_generation);
-  const successorBytes = manifestBytesFor(successor);
-  const successorPath = manifestRelativePath(successor.controller_generation);
-  const manifestRoot = ensureControllerGenerationDirectory(layout);
-  publishFileDurableExclusive(manifestRoot, `${successor.controller_generation}.json`, successorBytes);
-
-  const expectedPayload = controllerGenerationEventPayload(journal, pending, pendingManifest);
-  const recordedEvent = controllerGenerationEvent(layout, pending);
-  if (recordedEvent !== undefined && JSON.stringify(recordedEvent.payload) !== JSON.stringify(expectedPayload)) {
-    throw new Error("controller generation event does not authenticate its prepared journal entry");
-  }
-  const event =
-    recordedEvent ??
-    appendEvent(layout, {
-      eventType: "workflow-controller-generation-recorded",
-      status: readRunState(layout).status,
-      payload: expectedPayload
-    });
-  const now = new Date().toISOString();
-  pending.phase = "committed";
-  pending.updated_at = now;
-  pending.committed_at = now;
-  pending.event_id = event.event_id;
-  pending.event_at = event.timestamp;
-  journal.entries.push({
-    sequence: journal.entries.length + 1,
-    controller_generation: successor.controller_generation,
-    previous_controller_generation: pending.controller_generation,
-    manifest_path: successorPath,
-    manifest_sha256: sha256(successorBytes),
-    workflow_run_id: authority.workflowRunId,
-    workflow_link_id: authority.workflowLinkId,
-    phase: "prepared",
-    prepared_at: now,
-    updated_at: now
-  });
-  writeJournal(layout, journal);
-  reconcileControllerGenerationProjection(layout, journal, pending);
-  return {
-    snapshot: { ...refreshed.snapshot, generation: successor.controller_generation },
-    controllerGeneration: successor.controller_generation,
-    authorizedGenerations: [
-      ...new Set([...authorizedGenerations(journal, original.generation), successor.controller_generation])
-    ].sort(compareStrings),
-    noChange: false
-  };
-}
-
-function publishedPreparedSnapshotRoot(layout: RunLayout, pending: ControllerGenerationEntry): string | undefined {
-  const snapshotRoot = safeResolveInside(
-    layout.root,
-    path.join("smithers", "execution-snapshots", pending.controller_generation),
-    "prepared controller generation snapshot"
-  );
-  let snapshotStat: fs.Stats;
-  try {
-    snapshotStat = fs.lstatSync(snapshotRoot);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-  if (snapshotStat.isSymbolicLink() || !snapshotStat.isDirectory()) {
-    throw new Error("prepared controller generation snapshot is not a physical directory");
-  }
-  assertNoSymlinkComponents(layout.root, snapshotRoot, "prepared controller generation snapshot");
-  return snapshotRoot;
-}
-
-/** Select only the committed journal head; a half-transition fails closed. */
-export function effectiveControllerGeneration(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot,
-  options: { allowPending?: boolean } = {}
-): EffectiveControllerGeneration {
-  const journal = readJournal(layout, original.generation);
-  verifyControllerGenerationJournalEvents(layout, journal);
-  if (journal.entries.some((entry) => entry.phase === "prepared") && options.allowPending !== true) {
-    throw new Error("controller generation requires reconciliation with resume --refresh-controller");
-  }
-  const readableGenerations = authorizedGenerations(journal, original.generation);
-  if (options.allowPending === true) {
-    for (const entry of journal.entries) {
-      if (entry.phase === "prepared") {
-        reconcileStaleWorkflowExecutionSnapshotPublications(layout, entry.controller_generation);
-        if (publishedPreparedSnapshotRoot(layout, entry) !== undefined) {
-          readableGenerations.push(entry.controller_generation);
-        }
-      }
-    }
-    readableGenerations.sort(compareStrings);
-  }
-  const head = committedHead(journal);
-  if (head === undefined) {
-    assertNoControllerGenerationProjection(layout);
-    return {
-      snapshot: original,
-      controllerGeneration: original.generation,
-      authorizedGenerations: readableGenerations
-    };
-  }
-  const manifest = readManifest(layout, head);
-  verifyControllerGenerationEvent(layout, journal, head, manifest);
-  reconcileControllerGenerationProjection(layout, journal, head);
-  return {
-    snapshot: snapshotFromManifest(layout, original, manifest),
-    controllerGeneration: head.controller_generation,
-    authorizedGenerations: readableGenerations
-  };
-}
-
-/**
- * Authenticate a selected refreshed execution snapshot without changing the
- * run's metadata/state projections. Cloud handoff verification uses this
- * read-only surface after the normal lifecycle path has selected and committed
- * a controller generation.
+ * Authenticate a refreshed execution snapshot recorded in a controller-generation
+ * journal. Nothing has written these journals since native continuation (#961),
+ * so only a run refreshed by an earlier build carries one. The Modal cloud
+ * handoff is the only remaining reader.
  */
 export function verifyCommittedControllerGenerationAuthority(
   layout: RunLayout,
@@ -422,20 +106,13 @@ export function verifyCommittedControllerGenerationAuthority(
   if (entry === undefined || entry.controller_generation !== controllerGeneration) {
     throw new Error("selected controller generation is not the committed journal head");
   }
+  // verifyControllerGenerationJournalEvents already authenticated every entry's manifest and event, the head's included.
   const manifest = readManifest(layout, entry);
-  if (manifest.control_generation !== controlGeneration) {
-    throw new Error("controller generation is not rooted in the workflow control seal");
-  }
-  const expectedGeneration = controllerGenerationDigestForManifest(manifest);
-  if (manifest.controller_generation !== expectedGeneration) {
-    throw new Error("controller generation manifest identity is invalid");
-  }
   for (const ancestor of journal.entries) {
     if (readManifest(layout, ancestor).semantic_fingerprint !== manifest.semantic_fingerprint) {
       throw new Error("controller generation journal changes sealed campaign semantics");
     }
   }
-  verifyControllerGenerationEvent(layout, journal, entry, manifest, eventRecords);
   return {
     controlGeneration,
     controllerGeneration,
@@ -454,152 +131,6 @@ export function verifyCommittedControllerGenerationAuthority(
     ),
     eventRecords: structuredClone(eventRecords)
   };
-}
-
-function controllerGenerationManifest(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot,
-  refreshed: RefreshedSmithersControllerSnapshot,
-  previousControllerGeneration: string
-): ControllerGenerationManifest {
-  const workflowPath = path.posix.join(".smithers/workflows", path.basename(original.paths.workflowPath));
-  const files: ControllerGenerationFile[] = [
-    fileManifest(workflowPath, "workflow", refreshed.snapshot.contents.workflow),
-    ...refreshed.snapshot.executionFiles.map((file) => fileManifest(file.snapshotPath, "execution", file.contents))
-  ].sort((left, right) => compareStrings(left.path, right.path));
-  if (new Set(files.map((file) => file.path)).size !== files.length) {
-    throw new Error("controller generation has colliding execution paths");
-  }
-  if (refreshed.semanticFingerprint !== semanticFingerprint(original)) {
-    throw new Error("controller refresh changed sealed campaign semantics");
-  }
-  const generation = controllerGenerationDigestV2({
-    runId: layout.runId,
-    controlGeneration: original.generation,
-    previousControllerGeneration,
-    controllerSourceDigest: refreshed.controllerSourceDigest,
-    semanticFingerprint: refreshed.semanticFingerprint,
-    workflowPath,
-    files
-  });
-  return {
-    schema_version: MANIFEST_VERSION,
-    run_id: layout.runId,
-    control_generation: original.generation,
-    controller_generation: generation,
-    previous_controller_generation: previousControllerGeneration,
-    controller_source_digest: refreshed.controllerSourceDigest,
-    semantic_fingerprint: refreshed.semanticFingerprint,
-    workflow_path: workflowPath,
-    files
-  };
-}
-
-function snapshotFromManifest(
-  layout: RunLayout,
-  original: VerifiedWorkflowControlSnapshot,
-  manifest: ControllerGenerationManifest
-): VerifiedWorkflowControlSnapshot {
-  if (
-    manifest.run_id !== layout.runId ||
-    manifest.control_generation !== original.generation ||
-    manifest.semantic_fingerprint !== semanticFingerprint(original)
-  ) {
-    throw new Error("controller generation is not rooted in the sealed campaign semantics");
-  }
-  const expectedGeneration = controllerGenerationDigestForManifest(manifest);
-  if (manifest.controller_generation !== expectedGeneration) {
-    throw new Error("controller generation manifest identity is invalid");
-  }
-  const root = safeResolveInside(
-    safeResolveInside(layout.root, "smithers/execution-snapshots", "workflow execution snapshots"),
-    manifest.controller_generation,
-    "controller generation snapshot"
-  );
-  const reusableContents = new Map<string, Buffer>([
-    [manifest.workflow_path, original.contents.workflow],
-    ...original.executionFiles.map((file) => [file.snapshotPath, file.contents] as const)
-  ]);
-  const digestScratch = Buffer.allocUnsafe(64 * 1024);
-  const loaded = new Map(
-    manifest.files.map((file) => {
-      const filePath = resolveControllerSnapshotFile(root, file.path, "controller generation file");
-      assertRegularFileInside(root, filePath, "controller generation file");
-      const observed = digestStableControllerFile(filePath, digestScratch);
-      if (observed.sizeBytes !== file.size_bytes || observed.sha256 !== file.sha256) {
-        throw new Error(`controller generation file changed: ${file.path}`);
-      }
-      const reusable = reusableContents.get(file.path);
-      let contents: Buffer;
-      if (reusable !== undefined && reusable.byteLength === file.size_bytes && sha256(reusable) === file.sha256) {
-        contents = reusable;
-      } else {
-        contents = readRegularFileSnapshot(filePath, MAX_DOCUMENT_BYTES);
-        if (contents.byteLength !== file.size_bytes || sha256(contents) !== file.sha256) {
-          throw new Error(`controller generation file changed: ${file.path}`);
-        }
-      }
-      return [file.path, contents] as const;
-    })
-  );
-  const workflow = loaded.get(manifest.workflow_path);
-  if (workflow === undefined) throw new Error("controller generation workflow is missing");
-  return {
-    ...original,
-    generation: manifest.controller_generation,
-    contents: { ...original.contents, workflow },
-    executionFiles: manifest.files
-      .filter((file) => file.kind === "execution")
-      .map((file) => ({
-        sourcePath: resolveControllerSnapshotFile(root, file.path, "controller generation execution file"),
-        snapshotPath: file.path,
-        contents: loaded.get(file.path)!
-      }))
-  };
-}
-
-/**
- * Authenticate a published controller file without retaining another copy of
- * its bytes. The descriptor checks mirror readRegularFileSnapshot: an atomic
- * replacement drops the opened inode's link count and is rejected even when a
- * replacement restores the original size and timestamps.
- */
-function digestStableControllerFile(filePath: string, scratch: Buffer): { sha256: string; sizeBytes: number } {
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
-  const descriptor = fs.openSync(filePath, flags);
-  try {
-    const before = fs.fstatSync(descriptor, { bigint: true });
-    if (!before.isFile()) throw new Error(`controller generation path is not a regular file: ${filePath}`);
-    if (before.size > BigInt(MAX_DOCUMENT_BYTES)) {
-      throw new Error(`controller generation file exceeds the ${MAX_DOCUMENT_BYTES}-byte limit: ${filePath}`);
-    }
-    const hash = crypto.createHash("sha256");
-    let offset = 0;
-    for (;;) {
-      const read = fs.readSync(descriptor, scratch, 0, scratch.byteLength, offset);
-      if (read === 0) break;
-      offset += read;
-      if (offset > MAX_DOCUMENT_BYTES) {
-        throw new Error(`controller generation file exceeds the ${MAX_DOCUMENT_BYTES}-byte limit: ${filePath}`);
-      }
-      hash.update(scratch.subarray(0, read));
-    }
-    const after = fs.fstatSync(descriptor, { bigint: true });
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeNs !== after.mtimeNs ||
-      before.ctimeNs !== after.ctimeNs ||
-      before.nlink !== after.nlink ||
-      after.size !== BigInt(offset)
-    ) {
-      throw new Error(`controller generation file changed while it was read: ${filePath}`);
-    }
-    return { sha256: hash.digest("hex"), sizeBytes: offset };
-  } finally {
-    fs.closeSync(descriptor);
-  }
 }
 
 function readJournal(layout: RunLayout, controlGeneration: string): ControllerGenerationJournal {
@@ -710,16 +241,6 @@ function controllerGenerationEventPayload(
   };
 }
 
-function controllerGenerationEvent(
-  layout: RunLayout,
-  entry: ControllerGenerationEntry,
-  events = controllerGenerationEvents(layout)
-) {
-  const matches = events.filter((event) => event.payload.controller_generation === entry.controller_generation);
-  if (matches.length > 1) throw new Error("controller generation has duplicate durable events");
-  return matches[0];
-}
-
 function controllerGenerationEvents(layout: RunLayout) {
   const events = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (events.malformedRecords > 0) throw new Error("workflow event journal contains malformed records");
@@ -776,150 +297,6 @@ function verifyControllerGenerationManifestIdentity(
     manifest.controller_generation !== expectedGeneration
   ) {
     throw new Error("controller generation manifest identity is invalid");
-  }
-}
-
-function verifyControllerGenerationEvent(
-  layout: RunLayout,
-  journal: ControllerGenerationJournal,
-  entry: ControllerGenerationEntry,
-  manifest: ControllerGenerationManifest,
-  events = controllerGenerationEvents(layout)
-): void {
-  const event = controllerGenerationEvent(layout, entry, events);
-  if (
-    event === undefined ||
-    event.event_id !== entry.event_id ||
-    event.timestamp !== entry.event_at ||
-    JSON.stringify(event.payload) !== JSON.stringify(controllerGenerationEventPayload(journal, entry, manifest))
-  ) {
-    throw new Error("controller generation event does not authenticate its journal entry");
-  }
-}
-
-function reconcileControllerGenerationProjection(
-  layout: RunLayout,
-  journal: ControllerGenerationJournal,
-  entry: ControllerGenerationEntry
-): void {
-  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
-  const state = readRunState(layout);
-  const metadataWorkflow = metadata.workflow;
-  const stateWorkflow = state.provenance?.workflow;
-  const linkHistory = verifyWorkflowRunLinkHistory(layout);
-  const refreshLink = [linkHistory.initial, ...linkHistoryEntries(layout)].find(
-    (candidate) => candidate?.link_id === entry.workflow_link_id
-  );
-  const activeLink = linkHistory.current;
-  if (
-    refreshLink === undefined ||
-    refreshLink.workflow_run_id !== entry.workflow_run_id ||
-    refreshLink.control_generation !== journal.control_generation ||
-    activeLink === undefined ||
-    metadataWorkflow === undefined ||
-    stateWorkflow === undefined ||
-    metadataWorkflow.run_id !== activeLink.workflow_run_id ||
-    metadataWorkflow.workflow_link_id !== activeLink.link_id ||
-    metadataWorkflow.control_generation !== journal.control_generation ||
-    stateWorkflow.runId !== activeLink.workflow_run_id ||
-    stateWorkflow.linkId !== activeLink.link_id ||
-    stateWorkflow.controlGeneration !== journal.control_generation
-  ) {
-    throw new Error("controller generation is not rooted in the active workflow link");
-  }
-  const snapshotPath = `smithers/execution-snapshots/${entry.controller_generation}`;
-  const previousSnapshotPath = `smithers/execution-snapshots/${entry.previous_controller_generation}`;
-  const journalPath = `smithers/${JOURNAL_FILE}`;
-  const projectionPhase = (
-    generation: string | undefined,
-    projectedJournalPath: string | undefined,
-    projectedSnapshotPath: string | undefined
-  ): "unprojected" | "previous" | "current" | "conflict" => {
-    if (generation === undefined && projectedJournalPath === undefined && projectedSnapshotPath === undefined) {
-      return "unprojected";
-    }
-    if (
-      generation === entry.controller_generation &&
-      projectedJournalPath === journalPath &&
-      projectedSnapshotPath === snapshotPath
-    ) {
-      return "current";
-    }
-    if (
-      generation === entry.previous_controller_generation &&
-      projectedJournalPath === journalPath &&
-      projectedSnapshotPath === previousSnapshotPath
-    ) {
-      return "previous";
-    }
-    return "conflict";
-  };
-  const metadataProjection = projectionPhase(
-    metadataWorkflow.controller_generation,
-    metadataWorkflow.controller_generation_journal_path,
-    metadataWorkflow.controller_execution_snapshot_path
-  );
-  const stateProjection = projectionPhase(
-    stateWorkflow.controllerGeneration,
-    stateWorkflow.controllerGenerationJournal,
-    stateWorkflow.controllerExecutionSnapshot
-  );
-  const initialProjection = entry.sequence === 1 && entry.previous_controller_generation === journal.control_generation;
-  const validProjection = initialProjection
-    ? (metadataProjection === "unprojected" && stateProjection === "unprojected") ||
-      (metadataProjection === "current" && (stateProjection === "unprojected" || stateProjection === "current"))
-    : (metadataProjection === "previous" && stateProjection === "previous") ||
-      (metadataProjection === "current" && (stateProjection === "previous" || stateProjection === "current"));
-  if (!validProjection) {
-    throw new Error("controller generation projection conflicts with its authenticated journal head");
-  }
-  writeRunMetadataDocument(layout.runMetadataPath, {
-    ...metadata,
-    workflow: {
-      ...metadataWorkflow,
-      controller_generation: entry.controller_generation,
-      controller_generation_journal_path: journalPath,
-      controller_execution_snapshot_path: snapshotPath
-    }
-  });
-  writeRunState(layout, {
-    ...state,
-    provenance: {
-      ...state.provenance!,
-      workflow: {
-        ...stateWorkflow,
-        controllerGeneration: entry.controller_generation,
-        controllerGenerationJournal: journalPath,
-        controllerExecutionSnapshot: snapshotPath
-      }
-    }
-  });
-}
-
-function linkHistoryEntries(layout: RunLayout) {
-  const events = replayEvents(layout, Number.MAX_SAFE_INTEGER);
-  if (events.malformedRecords > 0) throw new Error("workflow event journal contains malformed records");
-  return events.records
-    .filter((event) => event.event_type === "workflow-link-recorded")
-    .map((event) => ({
-      link_id: event.payload.workflow_link_id,
-      workflow_run_id: event.payload.workflow_run_id,
-      control_generation: event.payload.control_generation
-    }));
-}
-
-function assertNoControllerGenerationProjection(layout: RunLayout): void {
-  const metadataWorkflow = readRunMetadataDocument(layout.runMetadataPath, layout.runId).workflow;
-  const stateWorkflow = readRunState(layout).provenance?.workflow;
-  if (
-    metadataWorkflow?.controller_generation !== undefined ||
-    metadataWorkflow?.controller_generation_journal_path !== undefined ||
-    metadataWorkflow?.controller_execution_snapshot_path !== undefined ||
-    stateWorkflow?.controllerGeneration !== undefined ||
-    stateWorkflow?.controllerGenerationJournal !== undefined ||
-    stateWorkflow?.controllerExecutionSnapshot !== undefined
-  ) {
-    throw new Error("controller generation projection has no authenticated journal head");
   }
 }
 
@@ -1002,28 +379,9 @@ function readManifest(layout: RunLayout, entry: ControllerGenerationEntry): Cont
   return manifest;
 }
 
-function writeJournal(layout: RunLayout, journal: ControllerGenerationJournal): void {
-  validateJournal(journal);
-  const journalPath = path.join(layout.root, "smithers", JOURNAL_FILE);
-  assertPathInside(layout.root, journalPath, "controller generation journal");
-  writeJsonDurable(journalPath, journal);
-  assertRegularFileInside(layout.root, journalPath, "controller generation journal");
-}
-
-function ensureControllerGenerationDirectory(layout: RunLayout): string {
-  const directory = safeResolveInside(layout.root, "smithers/controller-generations", "controller generations");
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  assertNoSymlinkComponents(layout.root, directory, "controller generations");
-  return directory;
-}
-
 function manifestRelativePath(generation: string): string {
   if (!SHA256.test(generation)) throw new Error("controller generation is invalid");
   return `smithers/controller-generations/${generation}.json`;
-}
-
-function manifestBytesFor(manifest: ControllerGenerationManifest): Buffer {
-  return Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 }
 
 function controllerGenerationDigestV1(input: {
@@ -1093,56 +451,6 @@ function controllerGenerationDigestForManifest(manifest: ControllerGenerationMan
       });
 }
 
-function sameControllerGenerationContents(
-  left: ControllerGenerationManifest,
-  right: ControllerGenerationManifest
-): boolean {
-  return (
-    left.control_generation === right.control_generation &&
-    left.controller_source_digest === right.controller_source_digest &&
-    left.semantic_fingerprint === right.semantic_fingerprint &&
-    left.workflow_path === right.workflow_path &&
-    JSON.stringify(left.files) === JSON.stringify(right.files)
-  );
-}
-
-function semanticFingerprint(snapshot: VerifiedWorkflowControlSnapshot): string {
-  const dynamicBaseGraph = snapshot.executionFiles.find(
-    (file) => file.snapshotPath === DYNAMIC_BASE_GRAPH_SNAPSHOT_PATH
-  );
-  const dynamicBaseTasks = snapshot.executionFiles.find(
-    (file) => file.snapshotPath === DYNAMIC_BASE_TASKS_SNAPSHOT_PATH
-  );
-  if ((dynamicBaseGraph === undefined) !== (dynamicBaseTasks === undefined)) {
-    throw new Error("controller refresh has an incomplete dynamic control base");
-  }
-  const hash = crypto.createHash("sha256").update("ultrafuzz-controller-refresh-semantics-v1\0");
-  for (const key of ["graph", "expanded_graph", "graph_fingerprint", "config", "tasks", "input"] as const) {
-    const bytes =
-      key === "graph" && dynamicBaseGraph !== undefined
-        ? dynamicBaseGraph.contents
-        : key === "tasks" && dynamicBaseTasks !== undefined
-          ? dynamicBaseTasks.contents
-          : snapshot.contents[key];
-    hash.update(`${key}\0${bytes.byteLength}\0`).update(bytes);
-  }
-  for (const file of snapshot.executionFiles
-    .filter((candidate) => candidate.snapshotPath.startsWith("controls/"))
-    .sort((left, right) => compareStrings(left.snapshotPath, right.snapshotPath))) {
-    hash.update(`${file.snapshotPath}\0${file.contents.byteLength}\0`).update(file.contents);
-  }
-  return hash.digest("hex");
-}
-
-function fileManifest(
-  filePath: string,
-  kind: ControllerGenerationFile["kind"],
-  contents: Buffer
-): ControllerGenerationFile {
-  if (!safeSnapshotPath(filePath)) throw new Error(`controller generation path is unsafe: ${filePath}`);
-  return { path: filePath, kind, sha256: sha256(contents), size_bytes: contents.byteLength };
-}
-
 function authorizedGenerations(journal: ControllerGenerationJournal, original: string): string[] {
   return [
     ...new Set([
@@ -1156,12 +464,6 @@ function committedHead(journal: ControllerGenerationJournal): ControllerGenerati
   return journal.entries.filter((entry) => entry.phase === "committed").at(-1);
 }
 
-function assertOriginalGeneration(layout: RunLayout, original: VerifiedWorkflowControlSnapshot): void {
-  if (original.bindings.run_id !== layout.runId || !SHA256.test(original.generation)) {
-    throw new Error("controller refresh is not rooted in verified workflow control");
-  }
-}
-
 function safeSnapshotPath(value: string): boolean {
   return (
     value.length > 0 &&
@@ -1173,14 +475,6 @@ function safeSnapshotPath(value: string): boolean {
     value !== "." &&
     !value.startsWith("../")
   );
-}
-
-function resolveControllerSnapshotFile(root: string, relativePath: string, label: string): string {
-  if (!safeSnapshotPath(relativePath)) throw new Error(`${label} path is unsafe: ${relativePath}`);
-  const resolved = path.resolve(root, ...relativePath.split("/"));
-  assertPathInside(root, resolved, label);
-  assertNoSymlinkComponents(root, resolved, label);
-  return resolved;
 }
 
 function validTimestamp(value: unknown): value is string {

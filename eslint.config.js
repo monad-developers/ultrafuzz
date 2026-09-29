@@ -13,7 +13,7 @@ const sourceFiles = ["packages/**/*.{js,mjs,cjs,ts,tsx}", "scripts/**/*.{js,mjs,
 // with no suppressions, so no function can grow past the worst one today; lower
 // it as the most complex functions are simplified. Changed lines are held to the
 // stricter budgets below by `pnpm -w lint:strict:ci`.
-const complexityCeilingConfigs = [{ files: sourceFiles, rules: { complexity: ["error", 90] } }];
+const complexityCeilingConfigs = [{ files: sourceFiles, rules: { complexity: ["error", 83] } }];
 const strictConfigs = strictLint
   ? [
       ...tseslint.configs.strict.map((config) => ({
@@ -136,7 +136,6 @@ export default tseslint.config(
           "DYNAMIC_GROUPS",
           "MAX_DYNAMIC_NODES",
           "REPLACE_PROMPT_SCHEMAS",
-          "RETRY_FAILURE_TEMPLATE",
           "RUN_ID_LITERAL",
           "RUN_ROOT_RELATIVE",
           "SOURCE_PROJECT_ROOT",
