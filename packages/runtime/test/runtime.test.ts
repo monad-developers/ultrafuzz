@@ -13436,7 +13436,11 @@ test("status keeps reporting runner health when run-state synchronization fails"
 
   // A torn ledger append makes the synchronization itself throw.
   fs.appendFileSync(path.join(runRoot, "usage.jsonl"), '{"torn":');
-  await reportedHealth("torn usage ledger");
+  const thrown = await reportedHealth("torn usage ledger");
+  assert.ok(
+    thrown.some((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_FAILED" && diagnostic.severity === "warning"),
+    JSON.stringify(thrown)
+  );
 });
 
 testWhen(process.getuid?.() !== 0)(

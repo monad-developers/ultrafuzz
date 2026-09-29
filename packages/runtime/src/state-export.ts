@@ -360,27 +360,32 @@ export async function getRunHealth(input: {
  * Observe-only synchronization reads state.json and run.json strictly while the run's controller, or
  * another concurrent `status`, keeps replacing them by atomic rename, so it can hit the same transient
  * snapshot race the direct reads in `getRunHealth` retry. It is retried within the same bounded
- * budget.
+ * budget, and a retry reads the run's evidence again rather than reusing the caller's.
  *
- * Health below comes from the direct runner query, so a refresh that fails never hides it: a failed
- * or malformed runner query, an exceeded opt-in observation deadline, an exhausted race budget, and any
- * other synchronization error are warnings that local run state may be stale. One absolute deadline
- * spans every retry, so racing reads cannot extend the observer's wall-clock budget.
+ * Health below comes from the direct runner query, so a refresh never hides it. A thrown refresh
+ * error, an exhausted race budget, and the transient codes `stats` also tolerates (a failed or
+ * malformed runner query, an exceeded opt-in observation deadline, a lock the pass could not take)
+ * become warnings that local run state may be stale, so they neither fail `status` nor stop
+ * `--watch`. Any other error the refresh returns keeps its severity. One absolute deadline spans
+ * every retry, so racing reads cannot extend the observer's wall-clock budget.
  */
 async function synchronizeObservedWorkflowRun(
   input: SyncRunInput,
   evidence: LinkedWorkflowEvidence
 ): Promise<RuntimeDiagnostic[]> {
   const deadlineMs = observationSynchronizationDeadline(input.env);
+  let firstAttempt = true;
   try {
-    const sync = await retryTransientSnapshotObservation(() =>
-      synchronizeLinkedWorkflowRun(input, {
+    const sync = await retryTransientSnapshotObservation(() => {
+      const reuseEvidence = firstAttempt;
+      firstAttempt = false;
+      return synchronizeLinkedWorkflowRun(input, {
         observeOnly: true,
         tolerateInvalidEventStreams: true,
         deadlineMs,
-        evidence
-      })
-    );
+        ...(reuseEvidence ? { evidence } : {})
+      });
+    });
     return sync.diagnostics.map((diagnostic) =>
       TRANSIENT_SYNC_DIAGNOSTIC_CODES.has(diagnostic.code)
         ? describeObservationSynchronizationDeadline({ ...diagnostic, severity: "warning" as const })
