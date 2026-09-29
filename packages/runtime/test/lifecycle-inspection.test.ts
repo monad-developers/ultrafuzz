@@ -335,13 +335,14 @@ function projectWithFakeRunner(): { project: string; env: Record<string, string 
 }
 
 async function launchedProject(
-  fixtures: FakeInspectionFixtures
+  fixtures: FakeInspectionFixtures,
+  runId = "inspect-run"
 ): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
   const { project, env } = projectWithFakeRunner();
   writeInspectionFixtures(project, fixtures);
   const run = await startRun({
     projectRoot: project,
-    runId: "inspect-run",
+    runId,
     env,
     ultrafuzzCliEntrypoint: fakeUltrafuzzCliEntrypoint(project)
   });
@@ -575,6 +576,103 @@ test("diagnoseRun keeps a runner path intact in public text", async () => {
   assert.equal(diagnosis.ok, true, JSON.stringify(diagnosis.diagnostics));
   assert.equal(diagnosis.value?.summary, `workflow runner could not reload ${workflowPath}`);
   assert.deepEqual(diagnosis.value?.notes, ["spawn /opt/runner/bin/smithers ENOENT"]);
+});
+
+test("diagnoseRun names the ultrafuzz command for each recovery the runner suggests", async () => {
+  // A run ID naming the runner shows the rebuilt commands are not put through the runner-name scrub.
+  const runId = "smithers-probe";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const { project, env } = await launchedProject({}, runId);
+  // The pinned runner's own suggestions, which name its CLI, its workflow file and its run ID.
+  const workflow = `/work/target/.smithers/workflows/${workflowRunId}.tsx`;
+  const resume = `smithers up ${workflow} --run-id ${workflowRunId} --resume true`;
+  const retryTask = `smithers retry-task ${workflow} --run-id ${workflowRunId} --node-id node:project-discovery --iteration 0`;
+  const diagnose = async (
+    status: string,
+    summary: string,
+    blockers: Array<{ kind: string; unblocker: string; nodeId?: string; iteration?: null }>,
+    notes: { warnings?: string[]; information?: string[] } = {}
+  ) => {
+    const data = {
+      runId: workflowRunId,
+      status,
+      summary,
+      generatedAtMs: 1_700_000_000_000,
+      currentNodeId: null,
+      warnings: notes.warnings ?? [],
+      information: notes.information ?? [],
+      blockers: blockers.map((row) => ({
+        nodeId: "node:project-discovery",
+        iteration: 0,
+        reason: row.kind,
+        waitingSince: 1_699_999_000_000,
+        ...row
+      }))
+    };
+    const envelope = { ok: true, data, meta: { command: "why", duration: "1ms" } };
+    fs.writeFileSync(path.join(project, "fake-why.json"), `${JSON.stringify(envelope)}\n`, "utf8");
+    const diagnosis = await diagnoseRun({ projectRoot: project, runId, env });
+    assert.ok(diagnosis.value, JSON.stringify(diagnosis.diagnostics));
+    return diagnosis.value;
+  };
+
+  // A plain resume leaves a failed node failed, so on a failed run every retry goes through --retry-failed.
+  const failed = await diagnose(
+    "failed",
+    `Run ${workflowRunId} is failed`,
+    [
+      { kind: "retries-exhausted", nodeId: "verify:project-discovery", unblocker: resume },
+      { kind: "stalled", unblocker: retryTask }
+    ],
+    {
+      information: [
+        `Last good checkpoint: frame 29. Resume in place with \`${resume}\` or replay from the checkpoint with \`smithers replay ${workflow} --run-id ${workflowRunId} --frame 29\`.`
+      ]
+    }
+  );
+  assert.deepEqual(
+    failed.blockers.map((blocker) => blocker.unblocker),
+    ["ultrafuzz resume smithers-probe --retry-failed", "ultrafuzz resume smithers-probe --retry-failed"]
+  );
+  assert.deepEqual(failed.notes, [
+    "Last good checkpoint: frame 29. Resume in place with `ultrafuzz resume smithers-probe --retry-failed` or replay from the checkpoint with `ultrafuzz fork smithers-probe --frame 29`."
+  ]);
+
+  const running = await diagnose(
+    "running",
+    `Run ${workflowRunId} is running`,
+    [
+      {
+        kind: "side-effect-boundary-crossed",
+        nodeId: "(run-level)",
+        iteration: null,
+        unblocker: `smithers inspect ${workflowRunId}`
+      },
+      { kind: "stale-task-heartbeat", unblocker: `${retryTask} --force true` },
+      { kind: "engine-busy", nodeId: "(run-level)", iteration: null, unblocker: `smithers logs ${workflowRunId}` }
+    ],
+    {
+      warnings: [
+        "Concurrency ceiling saturated: requested demand 8, effective cap 4. Remediation: `smithers up --max-concurrency 8`."
+      ]
+    }
+  );
+  assert.deepEqual(
+    running.blockers.map((blocker) => blocker.unblocker),
+    [
+      "ultrafuzz inspect smithers-probe",
+      "ultrafuzz resume smithers-probe --reset-node node:project-discovery",
+      "ultrafuzz events smithers-probe --watch --history"
+    ]
+  );
+  // An `up` without `--resume` starts a run rather than resuming this one, so it is not rebuilt and
+  // keeps the limit it raises.
+  assert.deepEqual(running.notes, [
+    "Concurrency ceiling saturated: requested demand 8, effective cap 4. Remediation: `workflow runner up --max-concurrency 8`."
+  ]);
+
+  const paused = await diagnose("paused", "Run was gracefully paused; resume with `smithers up --resume <runId>`.", []);
+  assert.equal(paused.summary, "Run was gracefully paused; resume with `ultrafuzz resume smithers-probe`.");
 });
 
 test("diagnoseRun rejects an unexpected engine response", async () => {

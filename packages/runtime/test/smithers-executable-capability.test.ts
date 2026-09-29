@@ -75,6 +75,30 @@ test("Smithers commands invoke the bound interpreter instead of a substituted PA
   assert.equal(fs.existsSync(hostileMarker), false);
 });
 
+test("a failed runner query reports the runner's own reason, not the command line it ran", async () => {
+  const root = temporaryDirectory("ufz-runner-reported-error-");
+  // What the pinned runner prints for `node <unknown-id> --format json --full-output`, exiting 4.
+  const envelope = {
+    ok: false,
+    error: { code: "NODE_NOT_FOUND", message: "Node not found: final-report" },
+    meta: { command: "node", duration: "16ms" }
+  };
+  const runner = nodeRunner(
+    root,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(envelope))});\nprocess.exitCode = 4;\n`
+  );
+
+  const result = await runSmithersInspectionCommand({
+    args: ["node", "final-report", "--run-id", "ultrafuzz-run", "--format", "json", "--full-output"],
+    projectRoot: root,
+    env: bindSmithersExecutableCapability({}, runner)
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Node not found: final-report");
+  assert.deepEqual(result.json, envelope);
+});
+
 test(
   "Bun anchors ignore target startup and module resolution",
   { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
