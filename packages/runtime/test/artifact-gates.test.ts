@@ -4674,16 +4674,32 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   );
 });
 
-test("artifact validation rejects a persisted schema binding that differs from the current registry", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-schema-binding-mismatch" });
+test("artifact validation binds schema content and treats the validator build as provenance", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-schema-binding-provenance" });
   const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
   const node = plannedNode(["findings.json"]);
-  node.outputs[0]!.schema_sha256 = "0".repeat(64);
+  const [findings] = node.outputs;
+  assert.ok(findings);
+  // #921: an output planned by another validator build of the same schemas is still gated on its
+  // content. A validator rebuild after launch must neither pass an invalid artifact nor fail a valid one.
+  findings.validator_build = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
   fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]\n", "utf8");
+  const rebuilt = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(rebuilt.ok, true, JSON.stringify(rebuilt.diagnostics));
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "{}\n", "utf8");
+  const invalid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"));
 
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SCHEMA_BINDING_MISMATCH"));
+  // A planned schema digest that the planned bundle does not contain cannot be validated at all.
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]\n", "utf8");
+  findings.schema_sha256 = "0".repeat(64);
+  const unknownSchema = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unknownSchema.ok, false);
+  assert.ok(
+    unknownSchema.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH"),
+    JSON.stringify(unknownSchema.diagnostics)
+  );
 });
 
 test("project discovery gate accepts a repository-root scan probe", () => {

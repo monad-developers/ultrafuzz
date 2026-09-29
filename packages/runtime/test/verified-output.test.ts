@@ -699,6 +699,29 @@ test("verified final-report reader binds immutable current bytes to verifier and
   );
 });
 
+test("verified reads and the terminal report accept outputs planned by another validator build", () => {
+  // #921: `validator_build` and `contract_digest` record the build that planned the run. After a
+  // rebuild changes them, verified reads validate the same schema content and the terminal report is
+  // still published; both used to refuse with "current JSON Schema binding changed".
+  const rebuilt = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
+  const outputs = finalReportOutputs().map((output) => ({
+    ...output,
+    contract_digest: "d".repeat(64),
+    ...(output.validator_build === undefined ? {} : { validator_build: rebuilt })
+  }));
+  assert.ok(outputs.some((output) => output.validator_build === rebuilt));
+  const fixture = createVerifiedReportFixture("verified-report-rebuilt-validator", { outputs });
+
+  assert.deepEqual(loadVerifiedFinalReportSnapshot(fixture.layout.root).json_bytes, fixture.reportBytes);
+  recordStoppedReportFixture(fixture, "succeeded");
+  const published = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "succeeded"
+  });
+  assert.equal(published?.terminal, true);
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
+});
+
 test("final-report omissions remain visible as authenticated host diagnostics without rewriting the report", () => {
   const runId = "verified-report-own-warnings";
   const issue = currentIssue();

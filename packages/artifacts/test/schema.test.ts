@@ -178,7 +178,7 @@ test("current-controller schema materialization replaces only an older physical 
   }
 });
 
-test("loads only a complete physical sealed schema bundle", () => {
+test("loads a sealed schema bundle exactly as it was sealed, even when the installed build has moved on", () => {
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-sealed-schema-bundle-"));
   const destination = path.join(root, "schemas");
   try {
@@ -192,9 +192,32 @@ test("loads only a complete physical sealed schema bundle", () => {
     fs.symlinkSync(destination, linked, "dir");
     assert.throws(() => artifactSchemaRegistryFromDirectory(linked), /snapshot directory is unsafe/u);
 
+    // #921: a run sealed by another build may hold a schema this build dropped, lack one it added,
+    // and carry an older `$id` for a file this build re-versioned. The bundle still loads as sealed;
+    // the artifact gate tells bundles apart by digest, not by agreement with the installed registry.
     fs.chmodSync(destination, 0o700);
+    const retired = { $schema: "https://json-schema.org/draft/2020-12/schema", $id: "urn:ultrafuzz:schema:retired:1" };
+    fs.writeFileSync(path.join(destination, "retired.schema.json"), JSON.stringify(retired), "utf8");
+    fs.chmodSync(path.join(destination, "report.schema.json"), 0o600);
+    fs.rmSync(path.join(destination, "report.schema.json"));
+    const reversioned = path.join(destination, "usage-ledger.schema.json");
+    fs.chmodSync(reversioned, 0o600);
+    const usageLedger = JSON.parse(fs.readFileSync(reversioned, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(reversioned, JSON.stringify({ ...usageLedger, $id: `${String(usageLedger.$id)}-sealed` }), "utf8");
+    const sealed = artifactSchemaRegistryFromDirectory(destination);
+    assert.equal(sealed.find((entry) => entry.filename === "retired.schema.json")?.id, retired.$id);
+    assert.equal(
+      sealed.find((entry) => entry.filename === "usage-ledger.schema.json")?.id,
+      `${String(usageLedger.$id)}-sealed`
+    );
+    assert.equal(
+      sealed.some((entry) => entry.filename === "report.schema.json"),
+      false
+    );
+    assert.notEqual(schemaRegistryBundleDigest(sealed), artifactSchemaBundleDigest());
+
     fs.writeFileSync(path.join(destination, "foreign.schema.json"), "{}\n", "utf8");
-    assert.throws(() => artifactSchemaRegistryFromDirectory(destination), /registry mismatch/u);
+    assert.throws(() => artifactSchemaRegistryFromDirectory(destination), /must declare Draft 2020-12/u);
   } finally {
     fs.chmodSync(destination, 0o700);
     for (const file of readdirSync(destination)) fs.chmodSync(path.join(destination, file), 0o600);
@@ -2171,27 +2194,32 @@ test("planned graph v4 validates whole documents and executes every registered d
     ...artifactContractSchemaBinding("ultrafuzz/findings@2"),
     primary: true
   };
-  const preUpgradeValidatorBuild =
-    "ultrafuzz-json-validator.v1:028be3251e9ac213ad6e1c037d8da47c9d903e8be563c8f4fa2149839565bcab";
-  assert.equal(VALIDATOR_BUILD_IDENTITY, preUpgradeValidatorBuild);
-  const historicalBundle = structuredClone(graph);
-  historicalBundle.nodes = [
+  // #921: a graph planned by another build records that build's contract digest, schema content and
+  // validator build. None of it is re-derived against the reading build, so a rebuild or upgrade
+  // after launch cannot make the run's own graph unreadable.
+  const otherBuild = structuredClone(graph);
+  otherBuild.nodes = [
     {
       ...node,
       outputs: [
         {
           ...findingsOutput,
+          contract_digest: "d".repeat(64),
+          schema_sha256: "e".repeat(64),
           schema_bundle_sha256: "f".repeat(64),
-          validator_build: preUpgradeValidatorBuild
+          validator_build: `ultrafuzz-json-validator.v1:${"9".repeat(64)}`
         }
       ]
     }
   ];
-  assert.throws(() => assertPlannedGraph(historicalBundle), /schema binding changed/u);
-  assert.deepEqual(assertSealedPlannedGraph(historicalBundle), historicalBundle);
-  const historicalSchemaDrift = structuredClone(historicalBundle);
-  historicalSchemaDrift.nodes[0]!.outputs[0]!.schema_sha256 = "e".repeat(64);
-  assert.throws(() => assertSealedPlannedGraph(historicalSchemaDrift), /schema binding changed/u);
+  assert.notEqual(otherBuild.nodes[0]?.outputs[0]?.validator_build, VALIDATOR_BUILD_IDENTITY);
+  assert.deepEqual(assertPlannedGraph(otherBuild), otherBuild);
+  assert.deepEqual(assertSealedPlannedGraph(otherBuild), otherBuild);
+  // The shape still requires a schema binding exactly for schema-backed contracts.
+  const { schema_sha256: _schemaSha256, ...unboundFindings } = findingsOutput;
+  assert.equal(validatePlannedGraph({ ...graph, nodes: [{ ...node, outputs: [unboundFindings] }] }).ok, false);
+  const boundMarkdown = { ...node.outputs[0], ...artifactContractSchemaBinding("ultrafuzz/findings@2") };
+  assert.equal(validatePlannedGraph({ ...graph, nodes: [{ ...node, outputs: [boundMarkdown] }] }).ok, false);
 
   const documentGateFailures: Array<{ name: string; graph: PlannedGraphDocument; message: RegExp }> = [
     {
@@ -2275,14 +2303,6 @@ test("planned graph v4 validates whole documents and executes every registered d
       name: "planned-graph-loop-coupling",
       graph: { ...graph, nodes: [{ ...node, loop: { ...node.loop, index: 1, count: 1, attempt_index: 1 } }] },
       message: /inconsistent loop coordinates/u
-    },
-    {
-      name: "planned-graph-contract-identity",
-      graph: {
-        ...graph,
-        nodes: [{ ...node, outputs: [{ ...findingsOutput, contract_digest: "f".repeat(64) }] }]
-      },
-      message: /contract digest changed/u
     },
     {
       name: "planned-graph-model-loop-coupling",

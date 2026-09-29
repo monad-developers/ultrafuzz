@@ -118,7 +118,7 @@ import {
   sealedBunStartupControlDrift
 } from "../src/workflow-integrity.js";
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
-import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
+import { verifyRequiredArtifactSchemaBinding, verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { loadReportSnapshot } from "../src/unverified-report.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
@@ -13423,72 +13423,181 @@ test("a sealed manifest that stops re-deriving leaves status readable while nati
   );
 });
 
-test("a planned graph that stops matching this build's contracts leaves status readable", async () => {
+// Appends a comment to one of the five compiled modules VALIDATOR_BUILD_IDENTITY hashes, exactly as a
+// comment-only rebuild does, but only for the child process that loads it.
+const REBUILT_VALIDATOR_PRELOAD = String.raw`
+import fs from "node:fs";
+const rebuilt = process.env.ULTRAFUZZ_TEST_REBUILT_VALIDATOR_MODULE;
+const readFileSync = fs.readFileSync;
+fs.readFileSync = function (file, ...rest) {
+  const contents = readFileSync.call(this, file, ...rest);
+  return file === rebuilt && Buffer.isBuffer(contents) ? Buffer.concat([contents, Buffer.from("\n// rebuilt\n")]) : contents;
+};
+`;
+
+const REBUILT_VALIDATOR_OPERATOR = String.raw`
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+const input = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const artifacts = await import(input.artifactsModule);
+const runtime = await import(input.runtimeModule);
+const lifecycle = { projectRoot: input.project, runId: input.runId, env: input.env };
+const describe = (diagnostics) => diagnostics.map((diagnostic) => diagnostic.code + ": " + diagnostic.message);
+const messages = (outcome) => (outcome.ok ? [] : describe(outcome.diagnostics));
+const result = { validatorBuild: artifacts.VALIDATOR_BUILD_IDENTITY };
+// Each step records its own outcome, so one failure cannot hide what the others do.
+const step = async (name, run) => {
+  try {
+    result[name] = await run();
+  } catch (error) {
+    result[name] = { thrown: error instanceof Error ? error.message : String(error) };
+  }
+};
+const layout = artifacts.layoutForRunRoot(input.runRoot);
+const findingsPath = path.join(layout.artifactsDir, "project-discovery", "findings.json");
+const gate = () => {
+  const graph = artifacts.readPlannedGraphDocument(layout.graphPath);
+  const node = graph.nodes.find((entry) => entry.id === "project-discovery");
+  const tasks = JSON.parse(fs.readFileSync(path.join(layout.root, "smithers", "tasks.json"), "utf8")).tasks;
+  const task = tasks.find((entry) => entry.attemptId === node.id);
+  const outcome = runtime.verifyRequiredArtifactsForAttempt(layout, node, node.id, { task, tasks });
+  return { ok: outcome.ok, diagnostics: describe(outcome.diagnostics) };
+};
+await step("strict", async () => messages(await runtime.readLinkedWorkflowEvidence(input.project, input.runId)));
+await step("health", async () => {
+  const health = await runtime.getRunHealth(lifecycle);
+  return { ok: health.ok, diagnostics: describe(health.diagnostics) };
+});
+await step("validGate", gate);
+const validFindings = fs.readFileSync(findingsPath);
+fs.writeFileSync(findingsPath, "{}\n");
+await step("invalidGate", gate);
+fs.writeFileSync(findingsPath, validFindings);
+await step("preflight", () => {
+  const envelope = execFileSync(path.join(layout.root, "trusted-bin", "ultrafuzz"), ["json", "validate", "--json"], {
+    encoding: "utf8"
+  });
+  artifacts.parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(envelope, "utf8"));
+  return "ok";
+});
+await step("resume", async () =>
+  messages(await runtime.resumeRun({ ...lifecycle, ultrafuzzCliEntrypoint: input.cliEntrypoint }))
+);
+await step("pause", async () => {
+  const paused = await runtime.pauseRun(lifecycle);
+  return paused.ok ? paused.value.status : messages(paused);
+});
+await step("cancel", async () => {
+  const cancelled = await runtime.cancelRun({ ...lifecycle, env: input.cancelEnv });
+  return cancelled.ok ? cancelled.value.status : messages(cancelled);
+});
+process.stdout.write(JSON.stringify(result));
+`;
+
+test("a validator rebuild after launch leaves lifecycle commands, status and schema gates working", async () => {
+  // #921: VALIDATOR_BUILD_IDENTITY hashes five compiled validator modules and is recorded in every
+  // planned output. A comment-only rebuild of any of them used to make strict evidence, and so
+  // pause/cancel/replay/fork, fail with "planned graph output schema binding changed", and made every
+  // schema-backed gate and validator preflight of a resumed run fail. The operator's commands run in
+  // a child process whose rebuilt module yields a different identity; the run was sealed by this one.
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const env = fakeSmithersEnv(project);
-  const runId = "diverged-contract-binding-status";
+  const runId = "rebuilt-validator-lifecycle";
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value?.run_root;
+  assert.ok(runRoot);
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const plannedBuilds = readPlannedGraphDocument(path.join(runRoot, "graph.json")).nodes.flatMap((node) =>
+    node.outputs.flatMap((output) => (output.validator_build === undefined ? [] : [output.validator_build]))
+  );
+  assert.ok(plannedBuilds.length > 0);
+  assert.ok(plannedBuilds.every((build) => build === VALIDATOR_BUILD_IDENTITY));
 
-  // `assertSealedPlannedGraph` looks every output contract up in the *running process's* artifact
-  // registry and insists the schema identity recorded at compile time still matches. That is a
-  // property of the tree doing the observing, not of the run: an operator whose checkout has moved on
-  // since the run was submitted loses `status` for a run that is intact and possibly still executing
-  // (issue #866). Rewriting the recorded schema digest reproduces exactly that disagreement without
-  // needing two builds.
-  const graphPath = path.join(run.value!.run_root, "graph.json");
-  const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
-    nodes: { outputs: { path: string; schema_sha256?: string }[] }[];
+  const artifactsModule = import.meta.resolve("@ultrafuzz/artifacts");
+  const scripts = temporaryRoot("ufz-rebuilt-validator-");
+  fs.writeFileSync(path.join(scripts, "preload.mjs"), REBUILT_VALIDATOR_PRELOAD, "utf8");
+  fs.writeFileSync(path.join(scripts, "operator.mjs"), REBUILT_VALIDATOR_OPERATOR, "utf8");
+  fs.writeFileSync(
+    path.join(scripts, "input.json"),
+    JSON.stringify({
+      project,
+      runId,
+      runRoot,
+      env,
+      artifactsModule,
+      runtimeModule: new URL("../src/index.js", import.meta.url).href,
+      cliEntrypoint: fakeUltrafuzzCliEntrypoint(project),
+      cancelEnv: fakeLifecycleSmithersEnv(project, {
+        inspect: workflowInspect({
+          workflowRunId: `ultrafuzz-${runId}`,
+          status: "running",
+          state: "running",
+          steps: [{ id: "node:project-discovery", state: "in-progress" }]
+        })
+      })
+    }),
+    "utf8"
+  );
+  const operator = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        "--import",
+        pathToFileURL(path.join(scripts, "preload.mjs")).href,
+        path.join(scripts, "operator.mjs"),
+        path.join(scripts, "input.json")
+      ],
+      {
+        cwd: project,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ULTRAFUZZ_TEST_REBUILT_VALIDATOR_MODULE: path.join(
+            path.dirname(fileURLToPath(artifactsModule)),
+            "strict-json.js"
+          )
+        },
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 600_000
+      }
+    )
+  ) as {
+    validatorBuild: string;
+    strict: unknown;
+    health: { ok: boolean; diagnostics: string[] };
+    validGate: { ok: boolean; diagnostics: string[] };
+    invalidGate: { ok: boolean; diagnostics: string[] };
+    preflight: unknown;
+    resume: unknown;
+    pause: unknown;
+    cancel: unknown;
   };
-  const output = graph.nodes.flatMap((node) => node.outputs).find((candidate) => candidate.path === "findings.json");
-  assert.ok(output, "fixture has no schema-bound output to diverge");
-  output!.schema_sha256 = "a".repeat(64);
-  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
+  const report = JSON.stringify(operator, null, 2);
 
-  // Strict linked-evidence callers keep reporting the schema drift. Ordinary resume intentionally
-  // does not use current artifact bindings as authorization for same-ID Smithers continuation.
-  const strict = await readLinkedWorkflowEvidence(project, runId);
-  assert.equal(strict.ok, false);
-  const resumed = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const cancelled = await cancelRun({ projectRoot: project, runId, env });
-  assert.equal(cancelled.ok, false);
-  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
-
-  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
-  assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
-  if (observed.ok) {
-    assert.ok(
-      observed.verifiedControl.divergences.some((divergence) =>
-        /sealed planned graph no longer re-derives against this build's artifact contracts: planned graph output schema binding changed for "findings\.json"/u.test(
-          divergence
-        )
-      ),
-      JSON.stringify(observed.verifiedControl.divergences)
-    );
-  }
-
-  const health = await getRunHealth({ projectRoot: project, runId, env });
-  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
-  assert.equal(health.value?.run_id, runId);
-  const diverged = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED");
+  assert.match(operator.validatorBuild, /^ultrafuzz-json-validator\.v1:[0-9a-f]{64}$/u);
+  assert.notEqual(operator.validatorBuild, VALIDATOR_BUILD_IDENTITY, "the child must run a rebuilt validator");
+  assert.deepEqual(operator.strict, [], report);
+  assert.equal(operator.health.ok, true, report);
+  assert.deepEqual(
+    operator.health.diagnostics.filter((diagnostic) => /^WORKFLOW_CONTROL_EVIDENCE_/u.test(diagnostic)),
+    [],
+    report
+  );
+  assert.equal(operator.validGate.ok, true, report);
+  // Provenance is not a weaker gate: an artifact its planned schema rejects is still rejected.
+  assert.equal(operator.invalidGate.ok, false, report);
   assert.ok(
-    diverged.some((diagnostic) => /output schema binding changed/u.test(diagnostic.message)),
-    JSON.stringify(health.diagnostics)
+    operator.invalidGate.diagnostics.some((diagnostic) => diagnostic.startsWith("JSON_SCHEMA_VIOLATION")),
+    report
   );
-  assert.ok(diverged.every((diagnostic) => diagnostic.severity === "warning"));
-  assert.equal(
-    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_INVALID").length,
-    0,
-    JSON.stringify(health.diagnostics)
-  );
-  assert.equal(
-    health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED").length,
-    1,
-    JSON.stringify(health.diagnostics)
-  );
+  assert.equal(operator.preflight, "ok", report);
+  assert.deepEqual(operator.resume, [], report);
+  assert.equal(operator.pause, "pause-requested", report);
+  assert.equal(operator.cancel, "cancel-requested", report);
 });
 
 test("sealed Bun startup controls from another build are reported, not equated", () => {
@@ -24497,11 +24606,6 @@ test("controller refresh admits a new stock bootstrap module but rejects semanti
 });
 
 test("artifact gates validate a historical bundle through its active sealed schema snapshot", async () => {
-  assert.equal(
-    VALIDATOR_BUILD_IDENTITY,
-    "ultrafuzz-json-validator.v1:028be3251e9ac213ad6e1c037d8da47c9d903e8be563c8f4fa2149839565bcab",
-    "a compatibility-only bundle loader must retain the pre-upgrade validator identity"
-  );
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
@@ -24538,6 +24642,22 @@ test("artifact gates validate a historical bundle through its active sealed sche
 
   const artifactPath = path.join(layout.artifactsDir, "project-discovery", "findings.json");
   const schemaPath = path.join(historicalRoot, "modules", "@ultrafuzz", "artifacts", "schema", "findings.schema.json");
+  // #921: the planning build also differed from this one in the output's own schema, in a schema file
+  // this build no longer ships, and in its validator build. None of that may strand the run: the gate
+  // validates against the planned schema content that the run sealed.
+  const historicalSchemaRoot = path.dirname(schemaPath);
+  fs.chmodSync(historicalSchemaRoot, 0o700);
+  fs.chmodSync(schemaPath, 0o600);
+  const findingsSchema = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as Record<string, unknown>;
+  findingsSchema.$comment = "historical findings schema fixture";
+  fs.writeFileSync(schemaPath, `${JSON.stringify(findingsSchema, null, 2)}\n`, "utf8");
+  fs.chmodSync(schemaPath, 0o400);
+  fs.writeFileSync(
+    path.join(historicalSchemaRoot, "retired.schema.json"),
+    `${JSON.stringify({ $schema: "https://json-schema.org/draft/2020-12/schema", $id: "urn:ultrafuzz:schema:retired:1" })}\n`,
+    { encoding: "utf8", mode: 0o400 }
+  );
+  fs.chmodSync(historicalSchemaRoot, 0o500);
   const historicalValidation = validateRegisteredJsonBytesSync({
     schemaPath,
     instanceBytes: fs.readFileSync(artifactPath),
@@ -24554,10 +24674,21 @@ test("artifact gates validate a historical bundle through its active sealed sche
   for (const output of node.outputs) {
     if (output.schema_bundle_sha256 !== undefined) {
       output.schema_bundle_sha256 = historicalValidation.schema.bundle_sha256;
+      output.validator_build = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
     }
+    if (output.path === "findings.json") output.schema_sha256 = historicalValidation.schema.sha256;
   }
   const verified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(verified.ok, true, JSON.stringify(verified.diagnostics));
+  const findingsOutput = node.outputs.find((output) => output.path === "findings.json");
+  assert.ok(findingsOutput);
+  assert.notEqual(findingsOutput.schema_sha256, artifactContractSchemaBinding("ultrafuzz/findings@2")?.schema_sha256);
+  // Validating against the sealed schema is not a weaker gate: its violations still reject.
+  const invalid = verifyRequiredArtifactSchemaBinding(layout, artifactPath, findingsOutput, Buffer.from("{}\n"));
+  assert.ok(
+    invalid.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
+    JSON.stringify(invalid)
+  );
 
   state.provenance!.workflow.controllerExecutionSnapshot = `smithers/execution-snapshots/${"d".repeat(64)}`;
   writeRunState(layout, state);

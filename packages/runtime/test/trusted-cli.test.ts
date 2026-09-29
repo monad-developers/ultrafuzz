@@ -482,7 +482,11 @@ test("resume rejects missing, tampered, and stale trusted CLI identity", () => {
   const stale = prepareTrustedCliEnvironment({ layout: staleLayout, cliEntrypoint: entrypoint });
   const metadataPath = path.join(staleLayout.root, "trusted-cli.json");
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
-  metadata.validator_build = "ultrafuzz-json-validator.v1:stale";
+  // The recorded validator build is provenance (#921); the schema bundle it validates with still binds.
+  metadata.validator_build = "ultrafuzz-json-validator.v1:another-build";
+  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  runTrustedJsonValidatorPreflight({ layout: staleLayout, trusted: stale });
+  metadata.schema_bundle_sha256 = "0".repeat(64);
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
   assert.throws(
     () => runTrustedJsonValidatorPreflight({ layout: staleLayout, trusted: stale }),
@@ -660,7 +664,7 @@ test("legacy migration rejects stale evidence and recovers only the matching sta
   runTrustedJsonValidatorPreflight({ layout, trusted: recovered });
 });
 
-test("active trusted CLI stays on its sealed transitive build and rejects an incompatible refresh", () => {
+test("active trusted CLI stays on its sealed transitive build; refresh adopts a rebuilt validator of the same schemas", () => {
   const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "sealed-transitive-build" });
   const originalEnvelope = preflightEnvelope();
@@ -670,19 +674,20 @@ test("active trusted CLI stays on its sealed transitive build and rejects an inc
   const metadataBefore = fs.readFileSync(metadataPath);
   const closuresRoot = path.join(layout.root, "trusted-cli-closures");
   const closuresBefore = fs.readdirSync(closuresRoot).sort();
-
-  const rebuiltEnvelope = structuredClone(originalEnvelope) as {
-    data: { schema: { validator_build: string } };
+  const rebuild = (mutate: (schema: Record<string, unknown>) => void): void => {
+    const envelope = structuredClone(originalEnvelope) as { data: { schema: Record<string, unknown> } };
+    mutate(envelope.data.schema);
+    fs.chmodSync(source.dependencyEntrypoint, 0o600);
+    fs.writeFileSync(
+      source.dependencyEntrypoint,
+      `export const output = ${JSON.stringify(JSON.stringify(envelope))};\n`,
+      "utf8"
+    );
+    fs.chmodSync(source.dependencyEntrypoint, 0o400);
   };
-  rebuiltEnvelope.data.schema.validator_build = "ultrafuzz-json-validator.v1:rebuilt-transitive";
-  fs.chmodSync(source.dependencyEntrypoint, 0o600);
-  fs.writeFileSync(
-    source.dependencyEntrypoint,
-    `export const output = ${JSON.stringify(JSON.stringify(rebuiltEnvelope))};\n`,
-    "utf8"
-  );
-  fs.chmodSync(source.dependencyEntrypoint, 0o400);
 
+  // A rebuild that reports different schemas is refused and leaves the sealed CLI in place.
+  rebuild((schema) => void (schema.bundle_sha256 = "0".repeat(64)));
   runTrustedJsonValidatorPreflight({ layout, trusted });
   assert.deepEqual(fs.readFileSync(metadataPath), metadataBefore);
   assert.throws(
@@ -696,6 +701,17 @@ test("active trusted CLI stays on its sealed transitive build and rejects an inc
   );
   assert.deepEqual(fs.readFileSync(metadataPath), metadataBefore);
   assert.deepEqual(fs.readdirSync(closuresRoot).sort(), closuresBefore);
+
+  // #921: a rebuild that only changed the validator build validates the same schemas, so controller
+  // refresh adopts it instead of leaving the continued run without a trusted validator.
+  rebuild((schema) => void (schema.validator_build = "ultrafuzz-json-validator.v1:rebuilt-transitive"));
+  const refreshed = prepareTrustedCliEnvironment({
+    layout,
+    cliEntrypoint: source.entrypoint,
+    allowIdentityRotation: true
+  });
+  assert.notDeepEqual(fs.readdirSync(closuresRoot).sort(), closuresBefore);
+  runTrustedJsonValidatorPreflight({ layout, trusted: refreshed });
 });
 
 test("trusted CLI closure prefers the authenticated execution generation for workspace dependencies", () => {

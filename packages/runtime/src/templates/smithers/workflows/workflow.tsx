@@ -38,7 +38,6 @@ const runtimeModule =
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
   new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href;
 const {
-  artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
@@ -4067,6 +4066,9 @@ function prepareArtifactMirror(
 }
 
 function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void {
+  // The verifier validates with this process's schemas and records the planned binding in its marker,
+  // so the schema content must be the planned one. `validatorBuild` is provenance and is not compared:
+  // a rebuild of the validator modules must not stop an in-flight run (#921).
   for (const output of task.outputs) {
     const binding = artifactContractSchemaBinding(
       output.contract as Parameters<typeof artifactContractSchemaBinding>[0]
@@ -4075,8 +4077,7 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
       binding?.schema_file !== output.schemaFile ||
       binding?.schema_id !== output.schemaId ||
       binding?.schema_sha256 !== output.schemaSha256 ||
-      binding?.schema_bundle_sha256 !== output.schemaBundleSha256 ||
-      binding?.validator_build !== output.validatorBuild
+      binding?.schema_bundle_sha256 !== output.schemaBundleSha256
     ) {
       throw new Error(`artifact-contract failure: planned schema binding changed for ${output.path}`);
     }
@@ -5855,15 +5856,16 @@ function assertVerifiedDependency(
       }
       seenPaths.add(entry.path);
       const expected = expectedArtifacts.get(entry.path);
+      // The marker must name the declared output and its schema content. Its contract digest, bundle
+      // digest and validator build only record the build that planned the output, so none of them is
+      // compared, with the declaration or with this build (#921). The bytes stay pinned by the
+      // marker's sha256 and are revalidated below.
       if (
         expected === undefined ||
         expected.contract !== entry.contract ||
-        expected.contractDigest !== entry.contract_digest ||
         expected.schemaFile !== entry.schema_file ||
         expected.schemaId !== entry.schema_id ||
         expected.schemaSha256 !== entry.schema_sha256 ||
-        expected.schemaBundleSha256 !== entry.schema_bundle_sha256 ||
-        expected.validatorBuild !== entry.validator_build ||
         expected.primary !== entry.primary
       ) {
         throw new Error(`verification marker artifact is not a declared output ${entry.path}`);
@@ -5880,22 +5882,6 @@ function assertVerifiedDependency(
               `artifact-contract failure: verified dependency artifact is missing ${entry.path}`,
               MAX_VERIFIED_ARTIFACT_BYTES
             );
-      const definition = artifactContractDefinition(entry.contract as Parameters<typeof artifactContractDefinition>[0]);
-      if (definition.digest !== entry.contract_digest) {
-        throw new Error(`verified dependency contract changed ${entry.path}`);
-      }
-      const currentBinding = artifactContractSchemaBinding(
-        entry.contract as Parameters<typeof artifactContractSchemaBinding>[0]
-      );
-      if (
-        currentBinding?.schema_file !== entry.schema_file ||
-        currentBinding?.schema_id !== entry.schema_id ||
-        currentBinding?.schema_sha256 !== entry.schema_sha256 ||
-        currentBinding?.schema_bundle_sha256 !== entry.schema_bundle_sha256 ||
-        currentBinding?.validator_build !== entry.validator_build
-      ) {
-        throw new Error(`verified dependency schema binding changed ${entry.path}`);
-      }
       const artifactSha = createHash("sha256").update(artifactSnapshot.bytes).digest("hex");
       if (artifactSha !== entry.sha256) {
         throw new Error(`verified dependency artifact changed ${entry.path}`);

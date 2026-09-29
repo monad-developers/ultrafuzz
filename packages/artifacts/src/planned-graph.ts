@@ -5,7 +5,6 @@ import {
 } from "./artifact-contract-ids.js";
 import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primitives.js";
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
-import { artifactContractDefinition, artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -386,22 +385,11 @@ export function assertPlannedGraph(value: unknown): PlannedGraphDocument {
 
 /**
  * Parse a graph whose exact bytes are already authenticated by workflow-control
- * evidence. A controller-only upgrade may change the digest of the complete
- * schema bundle without changing this graph's contract schema. Keep every
- * contract-specific binding strict and admit only that historical bundle ID.
+ * evidence. Sealed and freshly planned graphs are checked identically: shape and
+ * internal consistency, never the reading build's contract registry.
  */
 export function assertSealedPlannedGraph(value: unknown): PlannedGraphDocument {
-  const shape = validatePlannedGraph(value);
-  if (!shape.ok) {
-    throw new Error(
-      `planned graph is schema-invalid: ${shape.issues
-        .map((issue) => `${issue.instancePath || "/"} ${issue.message}`)
-        .join("; ")}`
-    );
-  }
-  const graph = value as PlannedGraphDocument;
-  assertPlannedGraphSemantics(graph, { allowHistoricalSchemaBundle: true });
-  return graph;
+  return assertPlannedGraph(value);
 }
 
 export function readPlannedGraphDocument(filePath: string): PlannedGraphDocument {
@@ -415,90 +403,13 @@ export function readPlannedGraphDocument(filePath: string): PlannedGraphDocument
   );
 }
 
-export function assertPlannedGraphSemantics(
-  graph: PlannedGraphDocument,
-  options: { allowHistoricalSchemaBundle?: boolean } = {}
-): void {
+export function assertPlannedGraphSemantics(graph: PlannedGraphDocument): void {
   const nodes = new Map<string, PlannedGraphNodeDocument>();
   const workflowTaskIds = new Set<string>();
   for (const node of graph.nodes) {
     if (nodes.has(node.id)) throw new Error(`planned graph repeats node ID ${JSON.stringify(node.id)}`);
     nodes.set(node.id, node);
-    const artifactIdentity = node.dynamic_generated?.storage_id ?? node.id;
-    const expectedArtifactDirs = node.model_fanout.map((model) => `artifacts/${model.attempt_id ?? artifactIdentity}`);
-    const expectedPrimaryArtifactDir =
-      node.dynamic_generated === undefined
-        ? `artifacts/${node.id}`
-        : (expectedArtifactDirs[0] ?? `artifacts/${artifactIdentity}`);
-    if (node.artifact_dir !== expectedPrimaryArtifactDir) {
-      throw new Error(`planned graph artifact_dir does not match node ID ${JSON.stringify(node.id)}`);
-    }
-    if (
-      node.dynamic_generated !== undefined &&
-      JSON.stringify(node.artifact_dirs ?? []) !== JSON.stringify(expectedArtifactDirs)
-    ) {
-      throw new Error(`planned graph dynamic artifact directories do not match its generated attempts`);
-    }
-    if (node.loop.index >= node.loop.count || node.loop.attempt_index !== node.loop.index) {
-      throw new Error(`planned graph node ${JSON.stringify(node.id)} has inconsistent loop coordinates`);
-    }
-
-    const outputPaths = new Set<string>();
-    let primaryCount = 0;
-    for (const output of node.outputs) {
-      if (outputPaths.has(output.path)) {
-        throw new Error(
-          `planned graph node ${JSON.stringify(node.id)} repeats output path ${JSON.stringify(output.path)}`
-        );
-      }
-      outputPaths.add(output.path);
-      if (output.primary) primaryCount += 1;
-      const definition = artifactContractDefinition(output.contract);
-      if (output.contract_digest !== definition.digest) {
-        throw new Error(`planned graph output contract digest changed for ${JSON.stringify(output.path)}`);
-      }
-      const binding = artifactContractSchemaBinding(output.contract);
-      if (
-        (binding === undefined && output.schema_file !== undefined) ||
-        (binding !== undefined &&
-          (output.schema_file !== binding.schema_file ||
-            output.schema_id !== binding.schema_id ||
-            output.schema_sha256 !== binding.schema_sha256 ||
-            (options.allowHistoricalSchemaBundle !== true &&
-              output.schema_bundle_sha256 !== binding.schema_bundle_sha256) ||
-            output.validator_build !== binding.validator_build))
-      ) {
-        throw new Error(`planned graph output schema binding changed for ${JSON.stringify(output.path)}`);
-      }
-    }
-    if (primaryCount !== 1) {
-      throw new Error(`planned graph node ${JSON.stringify(node.id)} must identify exactly one primary output`);
-    }
-
-    const modelKeys = new Set<string>();
-    const modelAttemptIds = new Set<string>();
-    for (const model of node.model_fanout) {
-      const key = `${model.model_profile_id}\u0000${model.model_index}\u0000${model.loop_index}\u0000${model.attempt_index}`;
-      if (modelKeys.has(key)) {
-        throw new Error(`planned graph node ${JSON.stringify(node.id)} repeats a model-fanout identity`);
-      }
-      modelKeys.add(key);
-      if (model.loop_index !== node.loop.index) {
-        throw new Error(`planned graph node ${JSON.stringify(node.id)} has a model bound to another loop`);
-      }
-      const expectedAttemptId =
-        node.model_fanout.length <= 1
-          ? artifactIdentity
-          : `${artifactIdentity}__model_${model.model_index}__attempt_${model.attempt_index}`;
-      if (model.attempt_id !== undefined && model.attempt_id !== expectedAttemptId) {
-        throw new Error(`planned graph node ${JSON.stringify(node.id)} has an inconsistent model attempt ID`);
-      }
-      const attemptId = model.attempt_id ?? expectedAttemptId;
-      if (modelAttemptIds.has(attemptId)) {
-        throw new Error(`planned graph node ${JSON.stringify(node.id)} repeats a model attempt ID`);
-      }
-      modelAttemptIds.add(attemptId);
-    }
+    assertPlannedNodeSemantics(node);
     for (const taskId of node.workflow?.task_node_ids ?? []) {
       if (workflowTaskIds.has(taskId))
         throw new Error(`planned graph repeats workflow task ID ${JSON.stringify(taskId)}`);
@@ -531,4 +442,75 @@ export function assertPlannedGraphSemantics(
     visited.add(nodeId);
   };
   for (const nodeId of nodes.keys()) visit(nodeId);
+}
+
+function assertPlannedNodeSemantics(node: PlannedGraphNodeDocument): void {
+  const artifactIdentity = node.dynamic_generated?.storage_id ?? node.id;
+  const expectedArtifactDirs = node.model_fanout.map((model) => `artifacts/${model.attempt_id ?? artifactIdentity}`);
+  const expectedPrimaryArtifactDir =
+    node.dynamic_generated === undefined
+      ? `artifacts/${node.id}`
+      : (expectedArtifactDirs[0] ?? `artifacts/${artifactIdentity}`);
+  if (node.artifact_dir !== expectedPrimaryArtifactDir) {
+    throw new Error(`planned graph artifact_dir does not match node ID ${JSON.stringify(node.id)}`);
+  }
+  if (
+    node.dynamic_generated !== undefined &&
+    JSON.stringify(node.artifact_dirs ?? []) !== JSON.stringify(expectedArtifactDirs)
+  ) {
+    throw new Error(`planned graph dynamic artifact directories do not match its generated attempts`);
+  }
+  if (node.loop.index >= node.loop.count || node.loop.attempt_index !== node.loop.index) {
+    throw new Error(`planned graph node ${JSON.stringify(node.id)} has inconsistent loop coordinates`);
+  }
+  assertPlannedNodeOutputs(node);
+  assertPlannedNodeModelFanout(node, artifactIdentity);
+}
+
+function assertPlannedNodeOutputs(node: PlannedGraphNodeDocument): void {
+  const outputPaths = new Set<string>();
+  let primaryCount = 0;
+  for (const output of node.outputs) {
+    if (outputPaths.has(output.path)) {
+      throw new Error(
+        `planned graph node ${JSON.stringify(node.id)} repeats output path ${JSON.stringify(output.path)}`
+      );
+    }
+    outputPaths.add(output.path);
+    if (output.primary) primaryCount += 1;
+    // An output's contract digest and schema binding record the build that planned it, and the
+    // planned-graph schema already requires a binding exactly for schema-backed contracts. They
+    // are not re-derived against the reading build: that stranded in-flight runs whenever a
+    // rebuild changed any of them (#921). Artifact gates validate against the recorded schema.
+  }
+  if (primaryCount !== 1) {
+    throw new Error(`planned graph node ${JSON.stringify(node.id)} must identify exactly one primary output`);
+  }
+}
+
+function assertPlannedNodeModelFanout(node: PlannedGraphNodeDocument, artifactIdentity: string): void {
+  const modelKeys = new Set<string>();
+  const modelAttemptIds = new Set<string>();
+  for (const model of node.model_fanout) {
+    const key = [model.model_profile_id, model.model_index, model.loop_index, model.attempt_index].join("\u0000");
+    if (modelKeys.has(key)) {
+      throw new Error(`planned graph node ${JSON.stringify(node.id)} repeats a model-fanout identity`);
+    }
+    modelKeys.add(key);
+    if (model.loop_index !== node.loop.index) {
+      throw new Error(`planned graph node ${JSON.stringify(node.id)} has a model bound to another loop`);
+    }
+    const expectedAttemptId =
+      node.model_fanout.length <= 1
+        ? artifactIdentity
+        : `${artifactIdentity}__model_${String(model.model_index)}__attempt_${String(model.attempt_index)}`;
+    if (model.attempt_id !== undefined && model.attempt_id !== expectedAttemptId) {
+      throw new Error(`planned graph node ${JSON.stringify(node.id)} has an inconsistent model attempt ID`);
+    }
+    const attemptId = model.attempt_id ?? expectedAttemptId;
+    if (modelAttemptIds.has(attemptId)) {
+      throw new Error(`planned graph node ${JSON.stringify(node.id)} repeats a model attempt ID`);
+    }
+    modelAttemptIds.add(attemptId);
+  }
 }
