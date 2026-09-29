@@ -146,8 +146,9 @@ export interface VerifiedWorkflowControlSnapshot {
    */
   divergences: readonly string[];
   /**
-   * Runtime-rendered prompts kept as published although this build renders them differently. Not a
-   * divergence: synchronization reports it as `WORKFLOW_PUBLISHED_PROMPT_DRIFT` and still runs.
+   * Runtime-rendered prompts kept as published although this build renders them differently or
+   * cannot render them. Not a divergence: synchronization reports it as
+   * `WORKFLOW_PUBLISHED_PROMPT_DRIFT` and still runs.
    */
   promptDriftAttemptIds: readonly string[];
 }

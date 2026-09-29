@@ -14,7 +14,12 @@ import {
   validateSafeId,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
-import { renderPrompt, type PromptConcreteNode, type PromptGraphNode } from "@ultrafuzz/prompts";
+import {
+  renderPrompt,
+  type PromptConcreteNode,
+  type PromptGraphNode,
+  type PromptRenderInput
+} from "@ultrafuzz/prompts";
 
 import {
   loadOrCreateDynamicExpansion,
@@ -48,7 +53,7 @@ export interface DynamicRuntimeMaterialization {
   graph: PlannedGraph;
   expandedGroupIds: string[];
   unresolvedGroupIds: string[];
-  /** Attempts whose published prompt this build renders differently; each was kept as published. */
+  /** Attempts whose published prompt this build renders differently or cannot render; each was kept. */
   promptDriftAttemptIds: string[];
 }
 
@@ -65,7 +70,7 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
  * Re-derives an already-published dynamic graph/task extension from the sealed base controls and
  * digest-bound expansion manifests. This is the admission check used before lifecycle commands trust
  * mutable runtime state; it never creates a manifest, prompt, graph, or task document. A published
- * prompt it renders differently is returned in `promptDriftAttemptIds`, not refused.
+ * prompt it renders differently or cannot render is returned in `promptDriftAttemptIds`, not refused.
  */
 export function verifyDynamicRuntimeMaterialization(
   input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
@@ -471,7 +476,7 @@ function renderReadyRuntimePrompts(input: {
     assertRegularFileInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
     const artifactDir = remapProjectPath(task.artifactDir, groupContext.projectRoot, input.projectRoot);
     const workspacePath = remapProjectPath(task.workspacePath, groupContext.projectRoot, input.projectRoot);
-    const result = renderPrompt({
+    const renderInput: PromptRenderInput = {
       prompt: fs.readFileSync(templatePath, "utf8"),
       ...(task.dynamicVariables === undefined ? {} : { dynamicVariables: { ...task.dynamicVariables } }),
       graph: graphContext,
@@ -498,12 +503,16 @@ function renderReadyRuntimePrompts(input: {
         patchPath: path.join(artifactDir, "patch.diff")
       },
       resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
-    });
-    assertRenderedPromptValidatorCommands({
-      attemptId: task.attemptId,
-      outputContractMarkdown: result.outputContractMarkdown,
-      schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
-    });
+    };
+    const render = (): string => {
+      const result = renderPrompt(renderInput);
+      assertRenderedPromptValidatorCommands({
+        attemptId: task.attemptId,
+        outputContractMarkdown: result.outputContractMarkdown,
+        schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
+      });
+      return result.renderedMarkdown;
+    };
     const promptPath = path.join(artifactDir, "prompt.rendered.md");
     assertPathInside(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
@@ -511,19 +520,30 @@ function renderReadyRuntimePrompts(input: {
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     if (fs.existsSync(promptPath)) {
       assertRegularFileInside(input.runRoot, promptPath, `runtime rendered prompt for ${task.attemptId}`);
-      // A published prompt is what its task was, or will be, handed, so it is kept as published.
-      // Refusing one this build renders differently stranded a run across any renderer or
-      // projection change (#1176, #1195): every later render and lifecycle admission failed. The
-      // controller keeps it silently; synchronization reports the drift.
-      if (fs.readFileSync(promptPath, "utf8") !== result.renderedMarkdown) promptDriftAttemptIds.push(task.attemptId);
+      // A published prompt is what its task was, or will be, handed, so it is kept as published, also
+      // when this build renders it differently or cannot render it at all. Refusing it stranded a run
+      // across any renderer or projection change (#1176, #1195): every later render and lifecycle
+      // admission failed. The controller keeps it silently; synchronization reports the drift.
+      if (fs.readFileSync(promptPath, "utf8") !== renderedOrUndefined(render)) {
+        promptDriftAttemptIds.push(task.attemptId);
+      }
     } else if (input.publishMissing) {
-      writeFileDurable(promptPath, result.renderedMarkdown);
+      writeFileDurable(promptPath, render());
     } else {
       throw new Error(`runtime rendered prompt is missing for ${task.attemptId}`);
     }
     task.renderedPromptPath = promptPath;
   }
   return promptDriftAttemptIds;
+}
+
+/** The prompt `render` produces, or `undefined` when this build can no longer render it. */
+function renderedOrUndefined(render: () => string): string | undefined {
+  try {
+    return render();
+  } catch {
+    return undefined;
+  }
 }
 
 /**

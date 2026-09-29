@@ -3464,7 +3464,7 @@ function currentControllerPromptBindings(
     // A prompt deferred to the dynamic runtime is never rendered at plan time, so `plan.json` has
     // no row to rebind it to and no retained snapshot to authenticate against. That covers every
     // generated task and every planned task with a dynamic ancestor, whose prompt the runtime
-    // renders from the sealed template and publishes under the task's own artifact directory.
+    // renders from its template snapshot and publishes under the task's own artifact directory.
     // `verifyDynamicRuntimeMaterialization` re-renders it and reports, not refuses, drift. Requiring a
     // plan row here instead made `--refresh-controller` throw
     // `persisted prompt plan does not match continuation task ...` for every run that had expanded

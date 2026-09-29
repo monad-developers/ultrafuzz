@@ -119,17 +119,20 @@ and the run-wide limit. Recovery validates and reuses it; incompatible or
 tampered manifests fail rather than causing replanning or duplicate attempts.
 
 A prompt that waits on a dynamic group, a generated child's or a later node's
-such as the final report, is rendered from its sealed template when the group
+such as the final report, is rendered from its template snapshot when the group
 expands and published once as `artifacts/<attempt-id>/prompt.rendered.md`.
 Later renders and lifecycle admission re-derive the runtime graph, task plan,
 and prompts from the sealed base and the expansion manifests. A changed group
-template or manifest, a missing prompt, or a graph or task plan that no longer
-re-derives still fails closed. A published prompt whose bytes differ from what
-the current build renders, which an upgrade that changed a renderer or
-projection causes, is kept as published: synchronization (`sync`, `status`,
-`why`) reports one `WORKFLOW_PUBLISHED_PROMPT_DRIFT` warning naming the
-attempts. That warning is also the only signal that another process running as
-the same user rewrote a published prompt.
+template or manifest, or a graph or task plan that no longer re-derives, still
+fails closed, and a missing prompt fails lifecycle admission (a render
+republishes it). A published prompt that the current build renders differently
+or cannot render, which an upgrade that changed a renderer or projection
+causes, is kept as published. The commands that synchronize the run (`status`,
+`inspect`, `why`, and `stats`) then return one `WORKFLOW_PUBLISHED_PROMPT_DRIFT`
+warning in their `--json` diagnostics, naming up to three of those attempts;
+`stats` also prints it. That warning, repeated on every synchronization, is
+also the only signal that another process running as the same user wrote or
+rewrote a runtime prompt file.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 rendered prompt paths and digests, immutable prompt snapshot paths, and

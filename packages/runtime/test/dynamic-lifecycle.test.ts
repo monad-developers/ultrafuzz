@@ -750,7 +750,7 @@ test("runtime prompts an earlier build published keep the run synchronizable and
     const drift = result.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_PUBLISHED_PROMPT_DRIFT");
     assert.equal(drift.length, 1, JSON.stringify(result.diagnostics));
     assert.equal(drift[0]?.severity, "warning");
-    assert.match(drift[0]?.message ?? "", /^2 published runtime prompt\(s\) differ .*: strict-join, /u);
+    assert.match(drift[0]?.message ?? "", /^2 published runtime prompt\(s\) do not match .*: strict-join, /u);
     for (const diagnostic of result.diagnostics) {
       assert.doesNotMatch(
         diagnostic.code,

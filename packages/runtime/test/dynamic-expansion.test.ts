@@ -697,16 +697,17 @@ test("a re-run dynamic source keeps the published fan-out for renders and admiss
   );
 });
 
-test("a published prompt this build renders differently is kept for renders and admission", () => {
+test("a published prompt this build renders differently or cannot render is kept for renders and admission", () => {
   const { controls } = sealedDynamicRun(
     "prompt-drift",
     [item(0)],
     "Investigate {{item.goal_prompt}} in {{ancestor_artifact_path_authority:reports/a.json,reports/B.json}}.\n"
   );
-  const generated = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }).tasks.find(
-    (task) => task.metadata.node.dynamic !== undefined
-  );
+  const { tasks } = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  const generated = tasks.find((task) => task.metadata.node.dynamic !== undefined);
+  const join = tasks.find((task) => task.attemptId === "join");
   assert.ok(generated?.renderedPromptPath);
+  assert.ok(join?.renderedPromptPath && join.promptTemplatePath);
   // Builds before #1195 identified this selector by its host-collated path order, so the prompt such
   // a build published embeds a selector ID this build no longer renders.
   const rendered = fs.readFileSync(generated.renderedPromptPath, "utf8");
@@ -717,12 +718,23 @@ test("a published prompt this build renders differently is kept for renders and 
   );
   assert.notEqual(published, rendered);
   fs.writeFileSync(generated.renderedPromptPath, published, "utf8");
+  // A later build may also refuse a template an earlier one rendered, for example over a variable it
+  // no longer knows.
+  const joinPublished = fs.readFileSync(join.renderedPromptPath, "utf8");
+  fs.appendFileSync(join.promptTemplatePath, "{{variable_a_later_build_removed}}\n", "utf8");
 
-  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).promptDriftAttemptIds, [generated.attemptId]);
-  assert.deepEqual(materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }).promptDriftAttemptIds, [
-    generated.attemptId
-  ]);
+  const drift = ["join", generated.attemptId];
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).promptDriftAttemptIds, drift);
+  assert.deepEqual(materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }).promptDriftAttemptIds, drift);
   assert.equal(fs.readFileSync(generated.renderedPromptPath, "utf8"), published);
+  assert.equal(fs.readFileSync(join.renderedPromptPath, "utf8"), joinPublished);
+  // A prompt that is not published yet must still render.
+  fs.rmSync(join.renderedPromptPath);
+  assert.throws(
+    () => materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }),
+    /unknown prompt template variable: variable_a_later_build_removed/u
+  );
+  assert.equal(fs.existsSync(join.renderedPromptPath), false);
 
   // Only the prompt bytes are adopted: the manifest and template the prompt derives from still bind.
   const manifestPath = path.join(controls.runRoot, "dynamic-expansions", "fanout.json");
