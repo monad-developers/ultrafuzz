@@ -4,7 +4,7 @@ import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import {
   appendEvent,
@@ -16,10 +16,12 @@ import {
   type AppendEventInput,
   type StrictJsonlCodec
 } from "../src/index.js";
-import { JOURNAL_LOCK_WAIT_MS, withJournalLock } from "../src/journal-lock.js";
+import { JOURNAL_LOCK_STALE_MS, withJournalLock } from "../src/journal-lock.js";
 
 const INDEX_URL = new URL("../src/index.js", import.meta.url).href;
 const LOCK_URL = new URL("../src/journal-lock.js", import.meta.url).href;
+// Holders on this host are checked through /proc/<pid>/stat, as on the Linux hosts that run workflows.
+const NO_PROC_STAT = !fs.existsSync("/proc/self/stat");
 
 // Appends `count` events from one process once `startAt` passes, and reports
 // the IDs it appended and the messages of the appends that failed.
@@ -70,8 +72,20 @@ const testCodec: StrictJsonlCodec<TestRecord> = {
   identity: (record) => record.id
 };
 
-function tempProject(): string {
-  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-journal-lock-"));
+function tempProject(t: TestContext): string {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-journal-lock-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+/** The fields of /proc/<pid>/stat from the third, the process state, on. */
+function procStatFields(pid: number): string[] {
+  const stat = fs.readFileSync(`/proc/${String(pid)}/stat`, "utf8");
+  return stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+}
+
+function writeJournalLock(journal: string, holder: { host: string; pid: number; started?: string }): void {
+  fs.writeFileSync(`${journal}.lock`, `${JSON.stringify(holder)}\n`);
 }
 
 function dryRunEvent(auditPath: string): AppendEventInput {
@@ -97,8 +111,8 @@ function isJournalLocked(error: unknown): boolean {
   return error instanceof ArtifactPathError && error.code === "journal-locked";
 }
 
-test("appends from concurrent processes all land in the event journal, which still replays", async () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-concurrent-appends" });
+test("appends from concurrent processes all land in the event journal, which still replays", async (t) => {
+  const layout = createRunLayout({ projectRoot: tempProject(t), runId: "run-concurrent-appends" });
   const seed = appendEvent(layout, dryRunEvent("seed.jsonl"));
   const writers = 3;
   const appendsPerWriter = 50;
@@ -126,8 +140,8 @@ test("appends from concurrent processes all land in the event journal, which sti
   assert.equal(fs.existsSync(`${layout.eventsPath}.lock`), false);
 });
 
-test("an append waits while another process holds the journal's lock, then appends after its record", async () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-lock-wait" });
+test("an append waits while another process holds the journal's lock, then appends after its record", async (t) => {
+  const layout = createRunLayout({ projectRoot: tempProject(t), runId: "run-lock-wait" });
   const holder = spawn(
     process.execPath,
     ["--input-type=module", "-e", HOLDER, LOCK_URL, INDEX_URL, layout.root, layout.runId],
@@ -156,8 +170,8 @@ test("an append waits while another process holds the journal's lock, then appen
   );
 });
 
-test("a journal lock left by a process killed while holding it is taken over", () => {
-  const journal = path.join(tempProject(), "ledger.jsonl");
+test("a journal lock left by a process killed while holding it is taken over", (t) => {
+  const journal = path.join(tempProject(t), "ledger.jsonl");
   const killed = spawnSync(
     process.execPath,
     [
@@ -177,8 +191,58 @@ withJournalLock(${JSON.stringify(journal)}, () => process.kill(process.pid, "SIG
   assert.equal(fs.existsSync(`${journal}.lock`), false);
 });
 
-test("an append that cannot take the journal's lock within its wait fails without running", () => {
-  const journal = path.join(tempProject(), "ledger.jsonl");
+test(
+  "a journal lock whose holder was killed but is not reaped yet is taken over",
+  { skip: NO_PROC_STAT },
+  async (t) => {
+    const journal = path.join(tempProject(t), "ledger.jsonl");
+    const killed = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `const { withJournalLock } = await import(${JSON.stringify(LOCK_URL)});
+withJournalLock(${JSON.stringify(journal)}, () => process.kill(process.pid, "SIGKILL"));`
+      ],
+      { stdio: "ignore" }
+    );
+    const exited = once(killed, "exit");
+    const pid = killed.pid;
+    assert.ok(pid !== undefined);
+    // Node reaps a child between turns of its event loop, and waiting here, as a
+    // parent blocked in an append would, never takes one: the child stays a zombie.
+    const giveUpAt = Date.now() + 10_000;
+    while (!fs.existsSync(`${journal}.lock`) || procStatFields(pid)[0] !== "Z") {
+      assert.ok(Date.now() < giveUpAt, "the child did not die holding the lock");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+
+    assert.equal(
+      withJournalLock(journal, () => "appended", { waitMs: 50 }),
+      "appended"
+    );
+    const [, signal] = (await exited) as [number | null, NodeJS.Signals | null];
+    assert.equal(signal, "SIGKILL");
+  }
+);
+
+test("a journal lock whose process ID was reused, even by another user, is taken over", { skip: NO_PROC_STAT }, (t) => {
+  // Process 1 runs as another user unless the tests run as root.
+  for (const pid of [1, process.pid]) {
+    const journal = path.join(tempProject(t), "ledger.jsonl");
+    const started = Number(procStatFields(pid)[19]);
+    writeJournalLock(journal, { host: os.hostname(), pid, started: String(started - 1) });
+
+    assert.equal(
+      withJournalLock(journal, () => "appended", { waitMs: 50 }),
+      "appended"
+    );
+    assert.equal(fs.existsSync(`${journal}.lock`), false);
+  }
+});
+
+test("an append that cannot take the journal's lock within its wait fails without running", (t) => {
+  const journal = path.join(tempProject(t), "ledger.jsonl");
   let ran = false;
 
   withJournalLock(journal, () => {
@@ -199,19 +263,25 @@ test("an append that cannot take the journal's lock within its wait fails withou
   assert.equal(fs.existsSync(`${journal}.lock`), false);
 });
 
-test("an empty journal lock, as a power loss can leave, is taken over once it is older than the wait", () => {
-  const journal = path.join(tempProject(), "ledger.jsonl");
-  const lockPath = `${journal}.lock`;
-  fs.writeFileSync(lockPath, "");
-  // A new empty lock may belong to a holder that has not recorded itself yet.
-  assert.throws(() => withJournalLock(journal, () => undefined, { waitMs: 50 }), isJournalLocked);
+test("an empty journal lock, or one recorded on another host, is taken over once it is stale", (t) => {
+  // A power loss can leave an empty lock, and an earlier sandbox or container on the same volume another host's.
+  const lockedBy = [undefined, { host: `not-${os.hostname()}`, pid: process.pid }];
+  for (const holder of lockedBy) {
+    const journal = path.join(tempProject(t), "ledger.jsonl");
+    const lockPath = `${journal}.lock`;
+    if (holder === undefined) fs.writeFileSync(lockPath, "");
+    else writeJournalLock(journal, holder);
+    // A new one may belong to a live append: one that has not recorded itself yet, or one on the other host.
+    assert.throws(() => withJournalLock(journal, () => undefined, { waitMs: 50 }), isJournalLocked);
 
-  const beforeTheWait = new Date(Date.now() - JOURNAL_LOCK_WAIT_MS - 1_000);
-  fs.utimesSync(lockPath, beforeTheWait, beforeTheWait);
+    const stale = new Date(Date.now() - JOURNAL_LOCK_STALE_MS - 1_000);
+    fs.utimesSync(lockPath, stale, stale);
 
-  assert.equal(
-    withJournalLock(journal, () => "appended", { waitMs: 50 }),
-    "appended"
-  );
-  assert.equal(fs.existsSync(lockPath), false);
+    // An append that frees the lock takes it even when its wait has run out.
+    assert.equal(
+      withJournalLock(journal, () => "appended", { waitMs: 0 }),
+      "appended"
+    );
+    assert.equal(fs.existsSync(lockPath), false);
+  }
 });

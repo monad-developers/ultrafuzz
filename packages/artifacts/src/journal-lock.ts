@@ -6,7 +6,14 @@ import { isRecord } from "./lang-primitives.js";
 import { ArtifactPathError, assertNoSymlinkComponents } from "./safe-paths.js";
 
 /** How long one append waits for other processes' appends to the same journal. */
-export const JOURNAL_LOCK_WAIT_MS = 30_000;
+const JOURNAL_LOCK_WAIT_MS = 30_000;
+/**
+ * The age at which a lock whose holder cannot be checked by its process ID is
+ * abandoned: one without a record, or one recorded on another host. A live
+ * append holds its lock for milliseconds. This is well below the wait, so an
+ * append already waiting when such a holder died takes over within its wait.
+ */
+export const JOURNAL_LOCK_STALE_MS = 10_000;
 const JOURNAL_LOCK_POLL_MS = 5;
 const MAX_JOURNAL_LOCK_BYTES = 1024;
 const journalLockSleeper = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
@@ -29,10 +36,11 @@ interface HeldJournalLock {
  * one journal from different processes run one at a time: each reads the
  * journal, validates against it and writes before the next one reads. `append`
  * must not take another lock. A lock left by a process that died holding it is
- * taken over once the process it records has exited on this host, or, when it
- * is empty as a power loss can leave it, once it is older than the default
- * wait. Waiting longer than `waitMs` throws an ArtifactPathError coded
- * "journal-locked" without running `append`.
+ * taken over at once when the process it records on this host has exited, and
+ * otherwise, when it is empty as a power loss can leave it or records another
+ * host, once it is older than JOURNAL_LOCK_STALE_MS. Waiting longer than
+ * `waitMs` throws an ArtifactPathError coded "journal-locked" without running
+ * `append`.
  */
 export function withJournalLock<T>(
   journalPath: string,
@@ -58,15 +66,25 @@ function acquireJournalLock(lockPath: string, waitMs: number): HeldJournalLock {
   for (;;) {
     const lock = createJournalLock(lockPath);
     if (lock !== undefined) return lock;
-    const freed = freeAbandonedJournalLock(lockPath);
+    // A lock that is gone is tried again at once, even when the wait has run out.
+    if (freeAbandonedJournalLock(lockPath)) continue;
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw journalLockedError(lockPath, waitMs);
-    if (!freed) Atomics.wait(journalLockSleeper, 0, 0, Math.min(JOURNAL_LOCK_POLL_MS, remaining));
+    Atomics.wait(journalLockSleeper, 0, 0, Math.min(JOURNAL_LOCK_POLL_MS, remaining));
   }
 }
 
 /** Creates the lock with this process recorded as its holder; undefined when it exists. */
 function createJournalLock(lockPath: string): HeldJournalLock | undefined {
+  // Built first, so that a holder killed right after creating the lock has the
+  // least time to leave it without a record.
+  const started = processStat(process.pid)?.started;
+  const holder: JournalLockHolder = {
+    host: os.hostname(),
+    pid: process.pid,
+    ...(started === undefined ? {} : { started })
+  };
+  const record = `${JSON.stringify(holder)}\n`;
   let fd: number;
   try {
     fd = fs.openSync(
@@ -79,13 +97,7 @@ function createJournalLock(lockPath: string): HeldJournalLock | undefined {
     throw error;
   }
   try {
-    const started = processStartTicks(process.pid);
-    const holder: JournalLockHolder = {
-      host: os.hostname(),
-      pid: process.pid,
-      ...(started === undefined ? {} : { started })
-    };
-    fs.writeFileSync(fd, `${JSON.stringify(holder)}\n`);
+    fs.writeFileSync(fd, record);
     const stat = fs.fstatSync(fd, { bigint: true });
     return { path: lockPath, dev: stat.dev, ino: stat.ino };
   } catch (error) {
@@ -121,10 +133,11 @@ function freeAbandonedJournalLock(lockPath: string): boolean {
 function journalLockState(lockPath: string): "free" | "held" | "abandoned" {
   const lock = readJournalLock(lockPath);
   if (lock === undefined) return "free";
-  // A holder records itself right after creating the lock, so only a crash
-  // leaves it without a record for long. That age is measured by the wall clock.
-  if (lock.holder === undefined) return Date.now() - lock.mtimeMs > JOURNAL_LOCK_WAIT_MS ? "abandoned" : "held";
-  return holderIsGone(lock.holder) ? "abandoned" : "held";
+  const { holder, mtimeMs } = lock;
+  if (holder !== undefined && holder.host === os.hostname()) return holderIsGone(holder) ? "abandoned" : "held";
+  // Only a crash right after creating the lock leaves it without a record, and
+  // another host's process cannot be checked here. Age is by the wall clock.
+  return Date.now() - mtimeMs > JOURNAL_LOCK_STALE_MS ? "abandoned" : "held";
 }
 
 function readJournalLock(lockPath: string): { holder: JournalLockHolder | undefined; mtimeMs: number } | undefined {
@@ -159,30 +172,35 @@ function parseJournalLockHolder(text: string): JournalLockHolder | undefined {
   return { host, pid, ...(typeof started === "string" ? { started } : {}) };
 }
 
-/** Whether the holder provably no longer runs; only a process on this host can be checked. */
+/** Whether a holder on this host provably no longer runs. */
 function holderIsGone(holder: JournalLockHolder): boolean {
-  if (holder.host !== os.hostname()) return false;
   try {
     process.kill(holder.pid, 0);
   } catch (error) {
-    // EPERM means the process runs as another user.
-    return isErrnoException(error, "ESRCH");
+    if (isErrnoException(error, "ESRCH")) return true;
+    // EPERM: another user's process has the ID, and is checked like any other.
   }
-  // The ID is in use: by the holder, unless a process started later reuses it.
-  const started = processStartTicks(holder.pid);
-  return holder.started !== undefined && started !== undefined && started !== holder.started;
+  // The ID is in use: by the holder, unless the holder was killed and is not
+  // reaped yet, or a process started later reuses it.
+  const running = processStat(holder.pid);
+  if (running === undefined) return false;
+  if (running.state === "Z" || running.state === "X") return true;
+  return holder.started !== undefined && running.started !== holder.started;
 }
 
-function processStartTicks(pid: number): string | undefined {
+/** A Linux process's state and its start time in clock ticks since boot. */
+function processStat(pid: number): { state: string; started: string } | undefined {
   let stat: string;
   try {
     stat = fs.readFileSync(`/proc/${String(pid)}/stat`, "utf8");
   } catch {
     return undefined;
   }
-  // Field 22; the parenthesized command name before it may contain spaces.
-  const started = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
-  return started !== undefined && /^\d+$/u.test(started) ? started : undefined;
+  // Fields 3 and 22; the parenthesized command name before them may contain spaces.
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  const state = fields[0];
+  const started = fields[19];
+  return state !== undefined && started !== undefined && /^\d+$/u.test(started) ? { state, started } : undefined;
 }
 
 function journalLockedError(lockPath: string, waitMs: number): ArtifactPathError {
