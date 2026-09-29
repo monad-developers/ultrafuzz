@@ -142,9 +142,7 @@ publication. Use the commands in the rendered Output Contract and run
   accounting unavailable. Malformed present evidence fails the command.
 - `doctor` reports validation, toolchain, and pinned workflow engine install
   posture without changing project or run state or installing dependencies. It
-  is the operational superset of `validate`. A cloud check may create the
-  configured provider app so it can probe a transient sandbox in the workflow
-  image.
+  is the operational superset of `validate`.
 
 ## Reference Commands
 

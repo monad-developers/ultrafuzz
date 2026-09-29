@@ -615,11 +615,10 @@ non-launching configuration contract unchanged. Doctor reports:
 
 - config, topology, prompt, and reference validation posture;
 - required topology backends, toolchain, and configured agent executable
-  availability in the configured execution environment (the local `PATH` for
-  local runs or a transient probe of the provider image for cloud runs). Only
-  the executables of agents the selected topology can dispatch to, including
-  its `[retry] agents` fallbacks, are required; other configured profiles'
-  executables are listed as not required;
+  availability on the local `PATH`. Only the executables of agents the
+  selected topology can dispatch to, including its `[retry] agents`
+  fallbacks, are required; other configured profiles' executables are listed
+  as not required;
 - the bundled workflow engine version, the version the generated project
   requires, and the installed project-local version and bin target;
 - npm's latest published stable engine version when the registry check is
@@ -637,9 +636,7 @@ non-launching configuration contract unchanged. Doctor reports:
   controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
-dependencies. For cloud execution, checking required commands may create the
-configured provider app on first use and uses a transient sandbox so the probe
-runs inside the same image as workflow nodes.
+dependencies.
 
 Diagnostics are stable: `DOCTOR_AGENT_CREDENTIAL_MISSING`,
 `DOCTOR_TOOLCHAIN_MISSING`, `DOCTOR_TOOLCHAIN_PROBE_FAILED`,
