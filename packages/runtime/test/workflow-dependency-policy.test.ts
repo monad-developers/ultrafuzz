@@ -55,14 +55,14 @@ test("workflow dependency policy keeps inputs inside a continuing group required
         { id: "producer", group: "strategies", depends_on: ["__start__"] },
         { id: "dependent", group: "strategies", depends_on: ["producer"] },
         { id: "independent", group: "strategies", depends_on: ["__start__"] },
-        { id: "review", group: "catalog", depends_on: ["dependent", "independent"] }
+        { id: "join", group: "catalog", depends_on: ["dependent", "independent"] }
       ].map((node) => ({
         ...node,
         kind: "agentic" as const,
         prompt: "fixture.md",
         outputs: [{ path: "result.md", contract: "ultrafuzz/nonempty-markdown@1" as const, primary: true }]
       })),
-      { id: "__finish__", kind: "meta", role: "finish", depends_on: ["review"] }
+      { id: "__finish__", kind: "meta", role: "finish", depends_on: ["join"] }
     ]
   };
   const config = createDefaultResolvedConfig();
@@ -82,12 +82,12 @@ test("workflow dependency policy keeps inputs inside a continuing group required
   assert.deepEqual(compiled.nonBlockingAttemptIds, ["dependent", "independent", "producer"]);
   const dependent = compiled.tasks.find((task) => task.attemptId === "dependent");
   const independent = compiled.tasks.find((task) => task.attemptId === "independent");
-  const review = compiled.tasks.find((task) => task.attemptId === "review");
-  assert.ok(dependent && independent && review);
+  const join = compiled.tasks.find((task) => task.attemptId === "join");
+  assert.ok(dependent && independent && join);
   assert.deepEqual(dependent.dependencySmithersNodeIds, ["verify:producer"]);
   assert.deepEqual(dependent.optionalDependencyArtifactDirs, []);
   assert.deepEqual(independent.dependencySmithersNodeIds, []);
-  assert.deepEqual(review.optionalDependencyArtifactDirs?.map((directory) => path.basename(directory)).sort(), [
+  assert.deepEqual(join.optionalDependencyArtifactDirs?.map((directory) => path.basename(directory)).sort(), [
     "dependent",
     "independent",
     "producer"

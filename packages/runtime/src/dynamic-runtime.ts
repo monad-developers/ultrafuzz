@@ -334,10 +334,10 @@ function instantiateDynamicGraphNode(input: {
 /**
  * Whether `consumer` treats the output of a continuing producer in `producerGroup` as optional.
  * Consumers outside that group reconcile whichever results succeeded (the review group, and the
- * property fan-in reading its lenses). Inside the group a chain keeps its required inputs, so a
- * strategy or stateful stage never runs without its predecessor's output (#1120). The compiler and
- * dynamic lowering share this one rule; the task-manifest gate checks only that optional inputs
- * come from continuing producers.
+ * property fan-in reading its lenses). Inside the group the output stays required, so a chain within
+ * one group, such as a stateful stage after its setup, never runs without its predecessor (#1120).
+ * The compiler and dynamic lowering share this one rule; the task-manifest gate checks only that
+ * optional inputs come from continuing producers.
  */
 export function reconcilesPartialResults(
   consumer: Pick<CompiledSmithersTask, "metadata">,
