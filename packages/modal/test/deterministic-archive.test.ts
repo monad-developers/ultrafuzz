@@ -194,4 +194,53 @@ describe("deterministic archive descriptor traversal", () => {
     expect(fs.readFileSync(output, "utf8")).toBe("replacement\n");
     expect(fs.existsSync(path.join(displacedParent, "result.tar.gz"))).toBe(false);
   });
+
+  it("closes each descriptor once when the finished output is rejected", async () => {
+    const temporary = temporaryRoot("ultrafuzz-deterministic-archive-single-close-");
+    const source = path.join(temporary, "source");
+    const outputParent = path.join(temporary, "output");
+    fs.mkdirSync(source);
+    fs.mkdirSync(outputParent);
+    fs.writeFileSync(path.join(source, "input.txt"), "input\n");
+    const output = path.join(outputParent, "result.tar.gz");
+    const closes: number[] = [];
+    let outputDescriptor: number | undefined;
+    const originalOpenSync = fs.openSync.bind(fs);
+    vi.spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      const descriptor = originalOpenSync(...args);
+      if (String(args[0]).endsWith("result.tar.gz")) outputDescriptor = descriptor;
+      return descriptor;
+    }) as typeof fs.openSync);
+    const originalClose = fs.close.bind(fs);
+    const originalCloseSync = fs.closeSync.bind(fs);
+    vi.spyOn(fs, "close").mockImplementation(((descriptor: number, callback?: fs.NoParamCallback) => {
+      closes.push(descriptor);
+      originalClose(descriptor, callback);
+    }) as typeof fs.close);
+    vi.spyOn(fs, "closeSync").mockImplementation((descriptor) => {
+      closes.push(descriptor);
+      originalCloseSync(descriptor);
+    });
+    const originalFsync = fs.fsyncSync.bind(fs);
+    let replaced = false;
+    // Replace the output only after the gzip stream finished, so the rejection happens on a
+    // completed pipeline, the case where the stream's own close used to race the final close.
+    vi.spyOn(fs, "fsyncSync").mockImplementation((descriptor) => {
+      originalFsync(descriptor);
+      if (!replaced) {
+        replaced = true;
+        fs.unlinkSync(output);
+        fs.writeFileSync(output, "replacement\n");
+      }
+    });
+
+    await expect(writeDeterministicTarGzip(source, output)).rejects.toThrow(
+      "deterministic archive output changed while it was written"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(replaced).toBe(true);
+    expect(outputDescriptor).toBeTypeOf("number");
+    expect(closes.filter((descriptor) => descriptor === outputDescriptor)).toHaveLength(1);
+    expect(closes.filter((descriptor, index) => closes.indexOf(descriptor) !== index)).toEqual([]);
+  });
 });
