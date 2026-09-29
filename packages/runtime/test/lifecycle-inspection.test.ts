@@ -1526,6 +1526,38 @@ test("diagnoseProject warns when the temporary directory has little free space",
   );
 });
 
+test("diagnoseProject reports a lower bound once sizing many controller roots runs out of time", async (context) => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const temporary = temporaryRoot("ufz-doctor-many-roots-");
+  for (let index = 0; index < 100; index += 1) {
+    const root = path.join(temporary, `ultrafuzz-controller-${String(index)}`);
+    fs.mkdirSync(root);
+    // A sparse 1 MiB file, so the size is counted without writing the bytes.
+    fs.writeFileSync(path.join(root, "engine.js"), "");
+    fs.truncateSync(path.join(root, "engine.js"), 1024 * 1024);
+  }
+  // A slow filesystem: each clock reading is 100 ms after the previous one, so
+  // sizing all 100 roots would take far longer than doctor's budget.
+  let now = 0;
+  context.mock.method(performance, "now", () => (now += 100));
+
+  const doctor = await withTemporaryDirectory(temporary, () =>
+    diagnoseProject({
+      projectRoot: project,
+      env: { PATH: "/usr/bin" },
+      offline: true,
+      requiredCommandProbe: allAvailable
+    })
+  );
+
+  const summary = doctor.value?.checks.find((check) => check.name === "temporary-directory")?.summary ?? "";
+  const sized = /; 100 ultrafuzz-controller-\* directories hold at least (\d+) MiB$/u.exec(summary);
+  assert.ok(sized !== null, summary);
+  assert.ok(Number(sized[1]) < 100, summary);
+});
+
 async function allAvailable(names: readonly string[]) {
   return names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
 }
