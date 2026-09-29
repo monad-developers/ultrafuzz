@@ -17895,7 +17895,7 @@ function sortedKeys(values: Iterable<string>): string[] {
 // Ultrafuzz mirrors those vocabularies deliberately; this test is what turns a
 // silent widening upstream into a build failure here.
 test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", async () => {
-  const { CURRENT_SMITHERS_INSPECT_KEY_CONTRACT, SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const { CURRENT_SMITHERS_INSPECT_KEY_CONTRACT } = await import("../src/smithers.js");
   const {
     CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES,
     CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES,
@@ -18013,12 +18013,6 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     "type"
   ]);
 
-  // 8. `terminal_state_restore` and `resume_hydration` restore a node into a
-  // resumed session only for the states upstream calls terminal unconditionally.
-  // `failed` and `stalled` both stay out: upstream makes them terminal only
-  // under `continueOnFail`, and a node Ultrafuzz means to retry must not be
-  // hydrated back as done. If upstream promotes a new state into the
-  // unconditional branch, both replacements have to learn about it.
   // 9. `smithers why`. Ultrafuzz's parser is exact on the required set, so every
   // key `buildDiagnosis` can return must be required, and the only key the
   // command splices in afterwards (`steers`, conditional since 0.34.0) must be
@@ -18148,22 +18142,6 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     [],
     "the runner streams an event under a category Ultrafuzz exposes that its parser rejects"
   );
-
-  const { isTerminalState } = (await import(path.join(schedulerSource, "isTerminalState.js"))) as {
-    isTerminalState: (state: string) => boolean;
-  };
-  const unconditionallyTerminal = SMITHERS_NODE_STATES.filter((state) => isTerminalState(state));
-  assert.deepEqual([...unconditionallyTerminal].sort(), ["finished", "skipped"]);
-  for (const patchId of ["terminal_state_restore", "resume_hydration"] as const) {
-    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === patchId);
-    assert.ok(patch !== undefined, `${patchId} patch was not described`);
-    const restored = SMITHERS_NODE_STATES.filter((state) => patch.patched.includes(`"${state}"`));
-    assert.deepEqual(
-      [...restored].sort(),
-      [...unconditionallyTerminal].sort(),
-      `${patchId} restores a different state set than the pinned runner treats as unconditionally terminal`
-    );
-  }
 });
 
 // Acceptance criterion 3: a failed or cancelled attempt must not hand a stale

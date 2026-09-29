@@ -293,7 +293,7 @@ ultrafuzz node <run-id> <node-id> \
   [--project <path>] \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
-  [--reset-node <workflow-node-id>] [--refresh-controller] [--json]
+  [--reset-node <workflow-node-id>] [--retry-failed] [--refresh-controller] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
