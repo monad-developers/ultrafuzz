@@ -161,6 +161,12 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
 
+      # Every test that launches a run copies a sealed execution snapshot of
+      # thousands of files and fsyncs each one. eatmydata makes fsync a no-op
+      # for the lane; an ephemeral runner has nothing to protect across a crash.
+      - name: Install eatmydata
+        run: sudo apt-get install -y eatmydata
+
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -203,7 +209,7 @@ jobs:
 
       - name: Validate release lane
         run: >-
-          pnpm -w validate:release --
+          eatmydata pnpm -w validate:release --
           --gates "${{ matrix.gates }}"
           --report ".ultrafuzz/release-validation/${{ matrix.lane }}.json"
 
