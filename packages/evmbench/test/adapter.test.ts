@@ -118,6 +118,61 @@ describe("EVMBench adapter", () => {
     ).toBe('{"name":"synthetic-package"}\n');
   });
 
+  it("keeps waiting through failed status calls and an incomplete launch", async () => {
+    const fixture = adapterFixture();
+    const reportPath = path.join(fixture.auditRoot, "report.md");
+    fs.writeFileSync(reportPath, "# Synthetic report\n", "utf8");
+    const polls: Array<EvmbenchStatusVerdict | "fails"> = [
+      "fails",
+      "progressing",
+      "fails",
+      "fails",
+      "launch-incomplete"
+    ];
+    const waits: number[] = [];
+
+    await runEvmbenchAdapter({
+      ...fixture,
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+      execute: (args) => {
+        if (args[0] === "report") return success("report", reportData(reportPath));
+        if (args[0] !== "status") return defaultSuccess(args[0], fixture.auditRoot);
+        const poll = polls.shift() ?? "done";
+        if (poll === "fails") throw new Error("Ultrafuzz command status failed with exit code 1");
+        return success("status", poll === "launch-incomplete" ? launchIncompleteStatusData() : statusData(poll));
+      }
+    });
+
+    expect(fs.readFileSync(path.join(fixture.submissionRoot, "audit.md"), "utf8")).toBe("# Synthetic report\n");
+    expect(waits).toEqual([2_000, 1_000, 2_000, 4_000, 1_000]);
+  });
+
+  it("ends the attempt after five consecutive failed status calls", async () => {
+    const fixture = adapterFixture();
+    const waits: number[] = [];
+    let statusCalls = 0;
+
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        wait: async (milliseconds) => {
+          waits.push(milliseconds);
+        },
+        execute: (args) => {
+          if (args[0] !== "status") return defaultSuccess(args[0], fixture.auditRoot);
+          statusCalls += 1;
+          throw new Error("failed to invoke Ultrafuzz: spawnSync node ETIMEDOUT");
+        }
+      })
+    ).rejects.toThrow(
+      "Ultrafuzz status failed 5 consecutive times: failed to invoke Ultrafuzz: spawnSync node ETIMEDOUT"
+    );
+    expect(statusCalls).toBe(5);
+    expect(waits).toEqual([2_000, 4_000, 8_000, 16_000]);
+  });
+
   it("does not submit an unchecked partial report", async () => {
     const fixture = adapterFixture();
     await expect(
@@ -501,6 +556,11 @@ function statusData(
     quota: null,
     generated_at_ms: 1
   };
+}
+
+function launchIncompleteStatusData(): Record<string, unknown> {
+  const { workflow_run_id: _workflowRunId, ...status } = statusData("launch-incomplete", "launch preparation pending");
+  return { ...status, status: "pending", workflow_status: "unsubmitted", workflow_ids: [] };
 }
 
 function adapterFixture(): Omit<Parameters<typeof runEvmbenchAdapter>[0], "execute"> {
