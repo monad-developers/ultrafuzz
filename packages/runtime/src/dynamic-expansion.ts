@@ -244,11 +244,14 @@ export function loadOrCreateDynamicExpansion(input: {
   assertNoSymlinkComponents(runRoot, manifestDir, "dynamic expansion manifest directory");
   const manifestPath = path.join(manifestDir, `${validateSafeId(input.groupNodeId, "dynamic group node ID")}.json`);
   const sourceArtifactRelativePath = path.relative(runRoot, input.sourceArtifactPath).split(path.sep).join("/");
-  // No lock. Reading a published manifest needs none, and creation happens in the workflow render,
-  // which Smithers runs for one live driver per run. publishFileDurableExclusive never replaces a
-  // published file, and the re-read after publication refuses a set that a racing second publisher
-  // made inconsistent. The lock this replaced was never reclaimed, so a process killed while
-  // holding it failed every later render and lifecycle admission (#1142).
+  // No lock (#1142): the one this replaced was never reclaimed, so a process killed while holding it
+  // failed every later render and lifecycle admission. Published manifests are never rewritten, so
+  // reads need none; on a filesystem without hard links a concurrent reader can still catch one
+  // mid-publication and fail that read. Creation assumes one renderer per run (Smithers refuses to
+  // resume a run whose driver is live before it renders). Renderers that load the same outputs
+  // publish identical bytes, which publishFileDurableExclusive accepts. Two that create different
+  // groups at once can take the same `sequence`; the re-read after publication detects that but
+  // cannot undo it, and the run then needs manual repair.
   const priorManifests = readExpansionManifests(manifestDir);
   assertManifestSetMatchesInput(priorManifests, {
     runId: input.runId,

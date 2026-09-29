@@ -61,12 +61,12 @@ export interface DynamicExpansionRetryArchive {
  * generation, and validate everything that could refuse it.
  *
  * Smithers resets the producer and all of its dependents, but the expansion
- * manifests live outside Smithers state. Leaving them active makes the next
- * workflow render require the canonical source artifact during the gap between
- * producer completion and verifier publication. The decision is taken here,
- * before the first `timetravel`, so ambiguous or unrecognized manifest state
- * fails closed while Smithers state is still untouched. Returns `undefined`
- * when no published manifest belongs to a retried source.
+ * manifests live outside Smithers state. Left in place, they keep the group at
+ * its published items; withdrawing them lets the group expand again from the
+ * retried source's new output. The decision is taken here, before the first
+ * `timetravel`, so ambiguous or unrecognized manifest state fails closed while
+ * Smithers state is still untouched. Returns `undefined` when no published
+ * manifest belongs to a retried source.
  */
 export function planDynamicExpansionRetryArchive(input: {
   projectRoot: string;
