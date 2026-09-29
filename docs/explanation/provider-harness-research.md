@@ -13,6 +13,11 @@ and this page is published by
 bodies cite this page and its named headings directly. The recommendations below
 are proposals awaiting real-provider qualification, not shipped defaults.
 
+Per-node cloud execution (`[execution] mode = "cloud"`) was removed after this
+research, so the per-node `cloudPortable` requirement proposed below no longer
+applies. Portability to the pinned Modal image still matters for the
+`ultrafuzz-modal` eval runner, which runs a whole campaign inside one sandbox.
+
 Ultrafuzz currently names adapters such as `CodexAgent` and `DeepSeekAgent` in
 model profiles. That representation mixes three choices which need different
 validation and release cadences:

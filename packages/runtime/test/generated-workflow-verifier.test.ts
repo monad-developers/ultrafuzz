@@ -6907,43 +6907,41 @@ test("generated prompt relocation rebases task-local authority paths without exp
   ].join("\n");
   assert.doesNotMatch(rendered, /tasks\.json|execution-snapshots|\/controls\//u);
 
-  for (const [label, destinationRoot] of [["local", localRoot]] as const) {
-    const destinationArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
-    const mirroredTaskArtifactDir = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`;
-    const expectedAuthority = `${destinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/authorities/task-0.json`;
-    let relocated = relocatePromptPath(rendered, sourceRoot, destinationRoot);
-    relocated = relocatePromptPath(relocated, destinationArtifactDir, mirroredTaskArtifactDir);
-    const encodedDestinationRoot = destinationRoot.replaceAll("'", `'"'"'`);
-    const encodedExpectedArtifactDir = mirroredTaskArtifactDir.replaceAll("'", `'"'"'`);
+  const destinationArtifactDir = `${localRoot}/.ultrafuzz/runs/run-1/artifacts/task-0`;
+  const mirroredTaskArtifactDir = `${localRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/artifacts/task-0`;
+  const expectedAuthority = `${localRoot}/.ultrafuzz/runs/run-1/workspaces/task-0/.ultrafuzz/authorities/task-0.json`;
+  let relocated = relocatePromptPath(rendered, sourceRoot, localRoot);
+  relocated = relocatePromptPath(relocated, destinationArtifactDir, mirroredTaskArtifactDir);
+  const encodedDestinationRoot = localRoot.replaceAll("'", `'"'"'`);
+  const encodedExpectedArtifactDir = mirroredTaskArtifactDir.replaceAll("'", `'"'"'`);
 
-    assert.ok(relocated.includes(mirroredTaskArtifactDir), `${label}: ${relocated}`);
-    assert.ok(relocated.includes(expectedAuthority), `${label}: ${relocated}`);
-    assert.equal(relocated.includes(sourceRoot), false, label);
-    assert.doesNotMatch(relocated, /tasks\.json|execution-snapshots|\/controls\//u);
-    assert.ok(
-      relocated.includes(`--schema '${encodedDestinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`),
-      `${label}: ${relocated}`
-    );
-    assert.ok(relocated.includes(`--file '${encodedExpectedArtifactDir}/findings.json'`), `${label}: ${relocated}`);
-    assert.ok(
-      relocated.includes(
-        `ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedExpectedArtifactDir}/findings.json'`
-      ),
-      `${label}: ${relocated}`
-    );
-    assert.ok(
-      relocated.includes(
-        `ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${encodedExpectedArtifactDir}/generated-tests.json' --run-id 'run-1' --logical-node-id 'task-logical' --artifact-root '${encodedExpectedArtifactDir}'`
-      ),
-      `${label}: ${relocated}`
-    );
-    assert.equal(relocated.includes(encodedSourceRoot), false, `${label}: stale encoded controller root`);
-    assert.equal(
-      relocated.includes(`'${encodedDestinationRoot}/.ultrafuzz/runs/run-1/artifacts`),
-      false,
-      `${label}: stale canonical artifact root`
-    );
-  }
+  assert.ok(relocated.includes(mirroredTaskArtifactDir), relocated);
+  assert.ok(relocated.includes(expectedAuthority), relocated);
+  assert.equal(relocated.includes(sourceRoot), false, relocated);
+  assert.doesNotMatch(relocated, /tasks\.json|execution-snapshots|\/controls\//u);
+  assert.ok(
+    relocated.includes(`--schema '${encodedDestinationRoot}/.ultrafuzz/runs/run-1/workspaces/task-0`),
+    relocated
+  );
+  assert.ok(relocated.includes(`--file '${encodedExpectedArtifactDir}/findings.json'`), relocated);
+  assert.ok(
+    relocated.includes(
+      `ultrafuzz artifact validate 'ultrafuzz/findings@2' '${encodedExpectedArtifactDir}/findings.json'`
+    ),
+    relocated
+  );
+  assert.ok(
+    relocated.includes(
+      `ultrafuzz artifact validate 'ultrafuzz/generated-tests@3' '${encodedExpectedArtifactDir}/generated-tests.json' --run-id 'run-1' --logical-node-id 'task-logical' --artifact-root '${encodedExpectedArtifactDir}'`
+    ),
+    relocated
+  );
+  assert.equal(relocated.includes(encodedSourceRoot), false, "stale encoded controller root");
+  assert.equal(
+    relocated.includes(`'${encodedDestinationRoot}/.ultrafuzz/runs/run-1/artifacts`),
+    false,
+    "stale canonical artifact root"
+  );
 });
 
 test("generated immutable file identities preserve bigint device, inode, size, and nanosecond precision", () => {

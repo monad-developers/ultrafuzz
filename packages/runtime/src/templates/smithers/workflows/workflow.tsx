@@ -367,25 +367,17 @@ function dependencyVerificationProducersFromCompiledTask(task: (typeof compiledB
   });
 }
 
-function dynamicExecutionPath(task: (typeof compiledBaseTasks)[number], value: string, label: string): string {
-  const relative = path.relative(sourceProjectRoot, path.resolve(value));
-  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`${label} must be a project child path`);
-  }
-  return path.resolve(process.cwd(), relative);
-}
-
 function dynamicExecutionMetadata(task: (typeof compiledBaseTasks)[number]) {
   return {
     ...task.metadata,
     workspace: {
       ...task.metadata.workspace,
-      path: dynamicExecutionPath(task, task.metadata.workspace.path, "workspace metadata path")
+      path: currentProjectPath(task.metadata.workspace.path, "workspace metadata path")
     },
     artifacts: {
       ...task.metadata.artifacts,
-      dir: dynamicExecutionPath(task, task.metadata.artifacts.dir, "artifact metadata directory"),
-      manifestPath: dynamicExecutionPath(task, task.metadata.artifacts.manifestPath, "artifact manifest path")
+      dir: currentProjectPath(task.metadata.artifacts.dir, "artifact metadata directory"),
+      manifestPath: currentProjectPath(task.metadata.artifacts.manifestPath, "artifact manifest path")
     }
   };
 }
@@ -407,16 +399,15 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
     const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
-        : path.resolve(process.cwd(), dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"));
+        : currentProjectPath(task.renderedPromptPath, "rendered prompt");
     const compiledPromptPath =
       compiled?.promptPath === undefined ? undefined : path.resolve(process.cwd(), compiled.promptPath);
     const retainedPromptPath =
       compiledPromptPath !== undefined && compiledPromptPath !== runtimePromptPath ? compiledPromptPath : undefined;
     // A static compiled prompt exists in the initial execution seal. A deferred or generated prompt
-    // cannot exist there, so it stays in the run root and is bound by selected_task plus the handoff
-    // content digest instead. A continuation may rebind a static prompt to its authenticated retained
-    // snapshot after the cleanup-owned launch path is gone; that execution-only binding takes
-    // precedence without changing the sealed dynamic-runtime task manifest.
+    // cannot exist there, so it is read from the run root instead. A continuation may rebind a static
+    // prompt to its authenticated retained snapshot after the cleanup-owned launch path is gone; that
+    // execution-only binding takes precedence without changing the sealed dynamic-runtime task manifest.
     const promptPath =
       compiled?.promptPath === undefined
         ? runtimePromptPath
@@ -439,39 +430,29 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       reasoningEffort: task.reasoningEffort ?? null,
       prompt: "",
       promptPath,
-      workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
-      artifactDir: path.resolve(process.cwd(), dynamicExecutionPath(task, task.artifactDir, "task artifact directory")),
+      workspacePath: currentProjectPath(task.workspacePath, "task workspace"),
+      artifactDir: currentProjectPath(task.artifactDir, "task artifact directory"),
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
-        path.resolve(process.cwd(), dynamicExecutionPath(task, directory, "dependency artifact directory"))
+        currentProjectPath(directory, "dependency artifact directory")
       ),
       optionalDependencyArtifactDirs: (task.optionalDependencyArtifactDirs ?? []).map((directory) =>
-        path.resolve(process.cwd(), dynamicExecutionPath(task, directory, "optional dependency artifact directory"))
+        currentProjectPath(directory, "optional dependency artifact directory")
       ),
       referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
-        path.resolve(process.cwd(), dynamicExecutionPath(task, directory, "reference artifact directory"))
+        currentProjectPath(directory, "reference artifact directory")
       ),
       ...(task.vulnerabilityDatabaseCatalog === undefined
         ? {}
         : {
             vulnerabilityDatabase: {
-              catalogPath: path.resolve(
-                process.cwd(),
-                dynamicExecutionPath(task, task.vulnerabilityDatabaseCatalog.path, "vulnerability database catalog")
-              ),
+              catalogPath: currentProjectPath(task.vulnerabilityDatabaseCatalog.path, "vulnerability database catalog"),
               catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
             }
           }),
-      runRoot: dynamicExecutionPath(task, path.resolve(task.artifactDir, "..", ".."), "run root"),
+      runRoot: currentProjectPath(path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath:
         controlPaths.workflowPath ??
-        path.resolve(
-          process.cwd(),
-          dynamicExecutionPath(
-            task,
-            path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__),
-            "workflow path"
-          )
-        ),
+        currentProjectPath(path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__), "workflow path"),
       executionSnapshotRoot: controlPaths.executionSnapshotRoot,
       taskManifestPath:
         controlPaths.executionSnapshotRoot === undefined

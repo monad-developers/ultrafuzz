@@ -5445,8 +5445,7 @@ function errorText(value: unknown): string | undefined {
  * total and idle timers for agent CLIs. Message, stack, and cause text are not
  * classification input: a validator preflight that failed in 2ms mentions
  * "timeout" in its message, and node ids can contain the word (#1144). A
- * deadline reported only as text, such as the Modal provider's cloud-node
- * deadline, is therefore labelled failed.
+ * deadline reported only as text is therefore labelled failed.
  */
 const WORKFLOW_TIMEOUT_ERROR_CODES: ReadonlySet<string> = new Set([
   "TASK_TIMEOUT",
