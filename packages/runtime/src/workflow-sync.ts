@@ -2998,7 +2998,7 @@ async function synchronizeTasks(input: {
     }
     const evidence = attemptEvidence.evidence;
 
-    const previousIsImmutable = immutableTerminalFinalization(previous);
+    const previousIsImmutable = immutableTerminalFinalization(previous, evidence);
     const evidenceSupersedesPrevious = workflowEvidenceSupersedesPrevious(previous, attemptEvidence.taskId, evidence);
     const needsFinalization = !previousIsImmutable && terminalStatus(evidence.status) && evidenceSupersedesPrevious;
     const finalization = needsFinalization
@@ -3060,10 +3060,11 @@ async function synchronizeTasks(input: {
       });
     }
     if (previousIsImmutable) {
-      // A successful publication and a terminal invalid-output disposition are
-      // immutable. A later synchronization may finish recording source-ledger
-      // evidence, but it cannot re-finalize the node, clear its failure, create
-      // a manifest, or recover it from files that appeared after completion.
+      // A successful publication is immutable, and so is a terminal invalid-output
+      // disposition until the task runs again. A later synchronization may finish
+      // recording source-ledger evidence, but it cannot re-finalize the node,
+      // clear its failure, create a manifest, or recover it from files that
+      // appeared after completion.
       // Operational failures remain recoverable only when newer Smithers task
       // evidence reaches the finalization path above. The retry count is
       // attempt bookkeeping, not finalization: once the ledger holds the current
@@ -4769,9 +4770,12 @@ function terminalStatus(status: NodeStatus): boolean {
   return NODE_TERMINAL_STATUSES.has(status);
 }
 
-function immutableTerminalFinalization(previous: NodeState | undefined): boolean {
+function immutableTerminalFinalization(previous: NodeState | undefined, evidence: NodeWorkflowEvidence): boolean {
   if (previous === undefined || !terminalStatus(previous.status)) return false;
   if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
+  // An invalid-output verdict seals the occurrence it judged, not the task: a
+  // rerun by `resume --retry-failed` or `--reset-node` is judged on its output.
+  if (startedAfterRecordedFinish(previous, evidence)) return false;
   const disposition = recordField(previous.provenance, "terminal_disposition");
   if (disposition === undefined) return false;
   try {
@@ -4781,12 +4785,28 @@ function immutableTerminalFinalization(previous: NodeState | undefined): boolean
   }
 }
 
+/**
+ * Whether the evidence comes from a Smithers occurrence that started after the
+ * recorded one finished. A reset reruns a task from attempt 1, so the attempt
+ * number cannot tell the rerun from the recorded occurrence, but its start can.
+ * A later terminal event of the recorded occurrence, such as a trailing
+ * `NodeCancelled`, keeps that occurrence's start.
+ */
+function startedAfterRecordedFinish(previous: NodeState | undefined, evidence: NodeWorkflowEvidence): boolean {
+  return (
+    previous?.finished_at !== undefined &&
+    evidence.startedAt !== undefined &&
+    Date.parse(evidence.startedAt) > Date.parse(previous.finished_at)
+  );
+}
+
 function workflowEvidenceSupersedesPrevious(
   previous: NodeState | undefined,
   taskId: string,
   evidence: NodeWorkflowEvidence
 ): boolean {
   if (previous === undefined || previous.status !== evidence.status) return true;
+  if (startedAfterRecordedFinish(previous, evidence)) return true;
   const workflow = recordField(previous.provenance, "workflow");
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
 }

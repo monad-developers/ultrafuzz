@@ -27436,6 +27436,117 @@ test("resume --retry-failed after a pre-agent failure keeps synchronizing the re
   );
 });
 
+test("resume --retry-failed recovers a node whose verifier rejected its output", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "retry-rejected-output";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierId = "verify:project-discovery";
+  const history: Parameters<typeof workflowEvents>[1] = [];
+  // Every occurrence runs the producer, then its verifier. A reset restarts
+  // Smithers' attempt numbering, so every occurrence is attempt 1.
+  const produce = () =>
+    history.push(
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId: verifierId, attempt: 1 }
+    );
+  const verify = (rejection?: string) =>
+    history.push(
+      rejection === undefined
+        ? { type: "NodeFinished", nodeId: verifierId, attempt: 1 }
+        : { type: "NodeFailed", nodeId: verifierId, attempt: 1, error: { message: rejection } },
+      { type: rejection === undefined ? "RunFinished" : "RunFailed" }
+    );
+  const smithers = (verifier: "in-progress" | "failed" | "finished") =>
+    fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        ...(verifier === "in-progress" ? { status: "running" as const } : {}),
+        ...(verifier === "failed" ? { status: "failed" as const, state: "failed" as const } : {}),
+        steps: [
+          { id: nodeId, state: "finished", attempt: 1 },
+          { id: verifierId, state: verifier, attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, history)
+    });
+  produce();
+  verify("artifact-contract failure: findings.json is missing");
+  let env = smithers("failed");
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.ok(run.value, JSON.stringify(run.diagnostics));
+  const runRoot = run.value.run_root;
+  const layout = layoutForRunRoot(runRoot, runId);
+  const artifactDir = path.join(runRoot, "artifacts", "project-discovery");
+  const commandLog = fakeRunnerPath(env, "SMITHERS_FAKE_LOG");
+  const node = () => readRunState(layout).nodes["project-discovery"];
+  const disposition = () =>
+    (node()?.provenance as { terminal_disposition?: { kind: string } } | undefined)?.terminal_disposition?.kind;
+  const sync = async () => {
+    const synced = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+    assert.ok(
+      !synced.diagnostics.some((diagnostic) => /^(NODE|WORKFLOW)_ATTEMPT_/u.test(diagnostic.code)),
+      JSON.stringify(synced.diagnostics)
+    );
+    return synced.value?.status;
+  };
+  const retryFailed = async () => {
+    fs.writeFileSync(commandLog, "");
+    const resumed = await resumeRun({ projectRoot: project, runId, retryFailed: true, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.match(fs.readFileSync(commandLog, "utf8"), /^timetravel .* --node-id node:project-discovery /mu);
+  };
+
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+  assert.equal(await sync(), "failed");
+  const rejected = node();
+  assert.equal(disposition(), "task-output-validation-failure");
+
+  // Output written after the verdict, and a later terminal event for the same
+  // attempt, belong to the rejected occurrence, so its verdict stands.
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  history.push({ type: "NodeCancelled", nodeId: verifierId, attempt: 1 });
+  env = smithers("failed");
+  assert.equal(await sync(), "failed");
+  assert.deepEqual(node(), rejected);
+  assert.equal(fs.existsSync(path.join(artifactDir, "artifact-manifest.json")), false);
+
+  // A rerun is judged on its own output, even when the verifier rejects it too.
+  await retryFailed();
+  fs.rmSync(path.join(artifactDir, "findings.json"));
+  produce();
+  verify("artifact-contract failure: findings.json is still missing");
+  env = smithers("failed");
+  assert.equal(await sync(), "failed");
+  assert.equal(node()?.last_error, "artifact-contract failure: findings.json is still missing");
+  assert.equal(disposition(), "task-output-validation-failure");
+
+  await retryFailed();
+  produce();
+  env = smithers("in-progress");
+  assert.equal(await sync(), "running");
+  assert.equal(node()?.status, "running");
+  // The rerun's producer is recorded with the rerun's verdict, not the old one.
+  assert.equal(attemptLedgerRows(runRoot).length, 2);
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  verify();
+  env = smithers("finished");
+  assert.equal(await sync(), "succeeded");
+  assert.equal(node()?.status, "succeeded");
+  assert.equal(node()?.retry_count, 2);
+  assert.equal(disposition(), undefined);
+  assert.equal(fs.existsSync(path.join(artifactDir, "artifact-manifest.json")), true);
+  assert.deepEqual(
+    attemptLedgerRows(runRoot).map((entry) => entry.outcome),
+    ["failed", "failed", "succeeded"]
+  );
+});
+
 function fakeRunnerPath(env: Record<string, string | undefined>, name: string): string {
   const value = env[name];
   assert.ok(value, `${name} is not set`);
