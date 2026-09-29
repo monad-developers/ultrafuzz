@@ -478,9 +478,10 @@ function compiledTaskSourceIdentity(task: (typeof compiledBaseTasks)[number]) {
 }
 
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
+  const compiledById = new Map(serializedTaskSpecs.map((candidate) => [candidate.id, candidate]));
   return tasks.map((task) => {
     const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
-    const compiled = serializedTaskSpecs.find((candidate) => candidate.id === task.smithersNodeId);
+    const compiled = compiledById.get(task.smithersNodeId);
     const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
@@ -1678,13 +1679,13 @@ function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: str
     ["operator_prompt", values.operatorPrompt],
     ["task_prompt", values.taskPrompt]
   ]);
-  const rendered = agentPromptTemplate.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu, (match: string, key: string) =>
-    replacements.has(key) ? replacements.get(key)! : match
-  );
-  if (/\{\{\s*[A-Za-z0-9_]+\s*\}\}/u.test(rendered)) {
-    throw new Error("agent prompt template contains an unresolved variable");
-  }
-  return rendered;
+  // Check only the trusted template's own placeholders. The inserted prompts may legitimately
+  // contain literal `{{word}}` text, and rejecting it here would fail every render of the run.
+  return agentPromptTemplate.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu, (_match: string, key: string) => {
+    const value = replacements.get(key);
+    if (value === undefined) throw new Error(`agent prompt template contains an unresolved variable: ${key}`);
+    return value;
+  });
 }
 
 function sourceUsesPinnedBranch(): boolean {
@@ -4006,7 +4007,11 @@ function prepareArtifactMirror(
     materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
   );
   preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
-  preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  // `pinnedSubmodules: "verify"` is the post-agent verify pass. It checks outputs in-process and never
+  // runs the agent-facing CLI, so a CLI cold start there could only fail its zero-retry task.
+  if (options.pinnedSubmodules !== "verify") {
+    preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  }
   preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
   preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
     materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode)
@@ -4088,10 +4093,10 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
 }
 
 /**
- * How long the per-node validator preflight may spend inside the Ultrafuzz CLI.
+ * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
  * `"ultrafuzz"` resolves to the run-owned trusted launcher, which `composeSmithersCommandPath` puts
- * first on PATH, so every node preparation pays the CLI's own cold start: ~2.5 s on an idle box,
+ * first on PATH, so the preflight pays the CLI's own cold start: ~2.5 s on an idle box,
  * ~35 s once a dozen agents are building against the same cores. Below that the step reports a bare
  * `spawnSync ultrafuzz ETIMEDOUT`, which names neither the contention nor a schema, and which cost
  * the smoke lane two of its three targets in #1026. Roughly five times that measured worst case,
@@ -4099,8 +4104,14 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
  * inside the attempt.
  */
 const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
+// The preflight proves that this process can launch the agent-facing validator, which does not vary
+// by task: `materializePromptSchemas` has already digest-checked each workspace's schema copy. One
+// success per engine process is enough. Re-spawning it in every prepare and attempt reset only
+// added CLI cold starts that could fail an attempt.
+let jsonValidatorPreflightPassed = false;
 
 function preflightJsonValidator(schemaDirectory: string): void {
+  if (jsonValidatorPreflightPassed) return;
   const findings = artifactSchemaRegistry().find(
     (entry: { filename: string }) => entry.filename === "findings.schema.json"
   );
@@ -4134,6 +4145,7 @@ function preflightJsonValidator(schemaDirectory: string): void {
       cause: error
     });
   }
+  jsonValidatorPreflightPassed = true;
 }
 
 function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {

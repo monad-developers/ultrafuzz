@@ -697,6 +697,85 @@ test("100 generated attempts remain queued under the ordinary concurrency projec
   assert.equal(Object.values(projection.state.nodes).filter((node) => node.wait_reason === "capacity").length, 96);
 });
 
+test("re-rendering an unchanged dynamic runtime does not replace its published task plan or graph", () => {
+  const runId = "unchanged-publication";
+  const projectRoot = tempDirectory();
+  const runRoot = path.join(projectRoot, "runs", runId);
+  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
+  const templatePath = path.join(runRoot, "templates", "worker.md");
+  const graphPath = path.join(runRoot, "graph.json");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
+  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
+  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
+  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
+  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(0), item(1)] })}\n`, "utf8");
+  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
+  const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
+  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
+  const group: CompiledSmithersDynamicGroup = {
+    groupNodeId: "fanout",
+    logicalNodeId: "fanout",
+    source: {
+      concreteNodeId: "planner",
+      attemptId: "planner",
+      verifierSmithersNodeId: "verify:planner",
+      artifactPath: sourceArtifactPath
+    },
+    sourcePath: "$.goals",
+    keyPath: "id",
+    nodeIdTemplate: "dynamic:item:{{ item.id }}",
+    templatePath,
+    templateDigest: digest(fs.readFileSync(templatePath)),
+    templateFingerprint: digest("template-fingerprint"),
+    continueOnFail: true,
+    maxDynamicNodes: 100,
+    reservedNodeIds: ["planner", "fanout", "join"],
+    taskTemplates: [templateTask],
+    promptContext: promptContext(projectRoot, runRoot)
+  };
+  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
+  fs.writeFileSync(
+    tasksPath,
+    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
+    "utf8"
+  );
+  fs.copyFileSync(graphPath, baseGraphPath);
+  fs.copyFileSync(tasksPath, baseTasksPath);
+  const controls = {
+    runId,
+    projectRoot,
+    runRoot,
+    graphPath,
+    tasksPath,
+    baseGraphPath,
+    baseTasksPath,
+    baseTasks: [joinTask],
+    groups: [group],
+    readyGroupIds: ["fanout"]
+  };
+  // A durable write replaces the file through a rename, so an unchanged inode means no write.
+  const snapshot = (filePath: string) => ({
+    ino: fs.statSync(filePath, { bigint: true }).ino,
+    bytes: fs.readFileSync(filePath, "utf8")
+  });
+  const published = () => ({ tasks: snapshot(tasksPath), graph: snapshot(graphPath) });
+
+  const seeded = published();
+  materializeDynamicRuntime(controls);
+  const expanded = published();
+  assert.notEqual(expanded.tasks.bytes, seeded.tasks.bytes, "the first expansion must publish its generated tasks");
+  assert.notEqual(expanded.graph.bytes, seeded.graph.bytes, "the first expansion must publish its generated nodes");
+
+  // Smithers calls this on every render and resume. Compare after each call: a replaced file frees
+  // its old inode, which a later replacement could reuse.
+  materializeDynamicRuntime(controls);
+  assert.deepEqual(published(), expanded);
+  materializeDynamicRuntime({ ...controls, readyGroupIds: [] });
+  assert.deepEqual(published(), expanded);
+});
+
 function plannedGraph(_runId: string): PlannedGraph {
   const base = {
     display_name: "Node",

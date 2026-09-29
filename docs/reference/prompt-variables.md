@@ -174,6 +174,11 @@ bounded, item-scoped `replacements` map. Namespaced keys such as
 `{{liquidation:overdue}}` resolve only from that item. A value such as
 `{{item.goal_prompt}}` may retain those placeholders for the bounded nested
 replacement pass; unresolved, cyclic, non-scalar, or non-item references fail.
+That failure happens while the workflow renders, so it stops the whole run
+rather than one node. For `ultrafuzz/goal-plan@1`, `goal-plan`'s own
+verification therefore rejects `{{` anywhere in a replacement value, so a bad
+label fails that verification instead. `ultrafuzz json validate` and
+`ultrafuzz artifact validate` do not run this check.
 
 ## Output Contract
 
