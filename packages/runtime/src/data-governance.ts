@@ -554,6 +554,8 @@ export function controllerOwnedGovernancePaths(projectRoot: string, runRoot: str
     path.join(projectRoot, ".smithers", "workflows"),
     // `resume --refresh-controller` renders each refreshed controller here.
     path.join(projectRoot, ".smithers", "continuations"),
+    // The supervisor's relaunch of a dead engine logs its own output here.
+    path.join(projectRoot, ".smithers", "logs"),
     // The workflow engine opens its SQLite database in the target root, so a
     // launched run leaves engine state in the governed worktree.
     path.join(projectRoot, "smithers.db"),

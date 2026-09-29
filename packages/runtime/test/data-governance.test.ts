@@ -459,6 +459,18 @@ test("a refreshed controller rendered into the target leaves its governed identi
   assert.equal(initial.dirty, false);
   assert.deepEqual(targetIdentity(root, owned), initial);
 });
+test("a supervisor relaunch's log in the target leaves its governed identity unchanged", () => {
+  const root = repository(),
+    owned = controllerOwnedGovernancePaths(root, path.join(root, ".ultrafuzz", "runs", "relaunched-run")),
+    initial = targetIdentity(root, owned);
+  // Where Smithers' resumeRunDetached writes the output of the relaunch it starts in the run's root.
+  const log = path.join(root, ".smithers", "logs", "relaunched-run.log");
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.writeFileSync(log, "relaunch\n");
+
+  assert.equal(initial.dirty, false);
+  assert.deepEqual(targetIdentity(root, owned), initial);
+});
 test("governance precedes preflight and rejects a policy mutated during it", async () => {
   const project = temporaryRoot("ufz-governance-plan-");
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
