@@ -71,7 +71,7 @@ project's pinned revision.
 Use these Recon/Chimera rules while making decisions:
 
 - Read `AGENTS.md` and obey all repository-specific rules before editing.
-- Do not edit production `src/` or `contracts/` except for interfaces if they are genuinely required by the harness.
+- Do not edit production `src/` or `contracts/`, not even to add an interface: the workspace handoff rejects every change under the production source roots. Declare any interface the harness needs in the test tree instead.
 - [Chimera](https://github.com/Recon-Fuzz/create-chimera-app) is the write-once, run-everywhere scaffold for Foundry, Echidna, Medusa, Halmos, and Kontrol style runs.
 - The create-chimera-app layout under the repository's test root is:
   `<test-root>/recon/Setup.sol`, `BeforeAfter.sol`, `Properties.sol`,

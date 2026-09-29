@@ -272,7 +272,6 @@ export const threatModelJsonSchema = {
 
 export type ThreatModel = z.infer<typeof threatModelSchema>;
 export type ThreatModelEvidenceReference = z.infer<typeof evidenceReferenceSchema>;
-export type CapabilityStatus = (typeof CAPABILITY_STATUSES)[number];
 
 export function validateThreatModel(value: unknown, path = "$"): SchemaValidationResult<ThreatModel> {
   return validateWithZod(threatModelSchema, value, { path, code: "THREAT_MODEL_SCHEMA_INVALID" });

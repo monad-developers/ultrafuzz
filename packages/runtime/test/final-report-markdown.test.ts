@@ -27,6 +27,7 @@ test("final reports retain artifact warnings and their context without changing 
 
 import { validateSafeId, type ReportCompletion } from "@ultrafuzz/artifacts";
 import { redactSecretsInText } from "@ultrafuzz/security";
+import { fromMarkdown } from "mdast-util-from-markdown";
 
 import {
   isDirectiveConformingFinalReportMarkdown,
@@ -1081,7 +1082,7 @@ test("directive validation rejects injected or presentation-divergent Markdown",
   const projection = projectCanonicalFinalReport(renderableReport());
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      `${projection.markdown}\n## Executive summary\n\nInjected presentation.\n`,
+      `${projection.markdown}\n<img src="https://example.com/p.png">\n`,
       projection.report
     ),
     false
@@ -1093,17 +1094,13 @@ test("directive validation rejects injected or presentation-divergent Markdown",
     ),
     false
   );
-  for (const obsoleteLine of [
-    "- Strategy loops: `3`",
-    `- Prompt digest: \`${"a".repeat(64)}\``,
-    "### Strategy\n\n| Strategy | Detection rate |\n| --- | --- |\n| stateful-invariant | 2/3 |"
-  ]) {
-    assert.equal(
-      isDirectiveConformingFinalReportMarkdown(`${projection.markdown}\n${obsoleteLine}\n`, projection.report),
-      false,
-      obsoleteLine
-    );
-  }
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace("\n## Property provenance\n", "\n## Provenance\n"),
+      projection.report
+    ),
+    false
+  );
 });
 
 test("directive conformance requires both coverage headings without an opt-out", () => {
@@ -1132,34 +1129,26 @@ test("directive validation treats fenced proof code as code while retaining pros
   const input = renderableReport();
   const issue = (input.issues as Array<Record<string, unknown>>)[0]!;
   issue.proof_of_concept = {
-    scenario: ["Prepare the bounded state.", "Execute the transition and observe the mismatch."],
+    scenario: ["Prepare the state where balance <b> exceeds <a>.", "Execute the transition and observe the mismatch."],
     language: "solidity",
     code: [
-      "contract CriticalStateProbe {",
-      '    string internal constant label = "#### Sources";',
-      "    // **Source Node Id** and ### Strategy provenance are target identifiers here.",
+      "contract MarkupProbe {",
+      '    string internal constant label = "<b>bold</b>";',
+      "    // <script>probe()</script> is a target string here.",
       "}"
     ].join("\n")
   };
 
   const projection = projectCanonicalFinalReport(input);
-  assert.match(projection.markdown, /contract CriticalStateProbe/u);
-  assert.match(projection.markdown, /#### Sources/u);
+  assert.match(projection.markdown, /<script>probe\(\)<\/script>/u);
+  assert.match(projection.markdown, /balance &lt;b&gt; exceeds &lt;a&gt;\./u);
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      projection.markdown.replace("### Proof of Concept\n", "### Proof of Concept\n\nCritical\n"),
+      projection.markdown.replace("### Proof of Concept\n", "### Proof of Concept\n\n<b>bold</b>\n"),
       projection.report
     ),
     false
-  );
-  assert.equal(
-    isDirectiveConformingFinalReportMarkdown(
-      projection.markdown.replace("Prepare the bounded state.", "Prepare the critical invariant state."),
-      projection.report
-    ),
-    true,
-    "the unsupported severity label must not ban ordinary explanatory prose"
   );
 });
 
@@ -1173,11 +1162,10 @@ test("directive validation recognizes CommonMark tilde fences and matching close
   const tildeProof = insertProofBlock(
     [
       "   ~~~~solidity",
-      "contract CriticalStateProbe {",
-      '    string internal constant label = "#### Sources";',
-      "    // **Source Node Id**, ## Executive summary, and ### Strategy provenance are code.",
+      "contract MarkupProbe {",
+      '    string internal constant label = "<b>bold</b>";',
       "```",
-      "Critical",
+      "<i>still code after a backtick line</i>",
       "~~~",
       "<script>proofOnly()</script>",
       "~~~~   "
@@ -1189,7 +1177,7 @@ test("directive validation recognizes CommonMark tilde fences and matching close
     isDirectiveConformingFinalReportMarkdown(
       tildeProof.replace(
         "~~~~   \n\n## Property implementation coverage",
-        "~~~~   \n\nCritical\n\n## Property implementation coverage"
+        "~~~~   \n\n<b>bold</b>\n\n## Property implementation coverage"
       ),
       projection.report
     ),
@@ -1197,7 +1185,7 @@ test("directive validation recognizes CommonMark tilde fences and matching close
   );
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
-      insertProofBlock(["    ~~~solidity", "Critical", "    ~~~"].join("\n")),
+      insertProofBlock(["    ~~~solidity", "<script>proofOnly()</script>", "    ~~~"].join("\n")),
       projection.report
     ),
     false,
@@ -1405,4 +1393,153 @@ test("goal search coverage is rendered into the Markdown report instead of only 
     /\*\*No targeted goal search coverage: this run recorded no targeted goal search lanes\.\*\*/u
   );
   assert.match(roamingOnly.markdown, /^No issues were reported, but no targeted goal search lane ran, /mu);
+});
+
+interface MarkdownNode {
+  type: string;
+  url?: string;
+  value?: string;
+  children?: MarkdownNode[];
+}
+
+/** Flatten the CommonMark tree so assertions describe what a reader sees, not escape bytes. */
+function markdownNodes(markdown: string): Array<{ type: string; url?: string; text: string }> {
+  const text = (node: MarkdownNode): string => node.value ?? (node.children ?? []).map(text).join("");
+  const nodes: Array<{ type: string; url?: string; text: string }> = [];
+  const walk = (node: MarkdownNode): void => {
+    nodes.push({ type: node.type, ...(node.url === undefined ? {} : { url: node.url }), text: text(node) });
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(fromMarkdown(markdown) as unknown as MarkdownNode);
+  return nodes;
+}
+
+test("upstream prose with link or image syntax renders as literal text", () => {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  const description =
+    "See [the spec](https://example.com/spec), ![flow](https://example.com/flow.png), " +
+    "[THREAT_MODEL.md](../threat-model/THREAT_MODEL.md), and handlers[id](payload).";
+  issue.description = description;
+  (issue.proof_of_concept as Record<string, unknown>).scenario = ["Call handlers[id](payload).", "Observe it."];
+  const before = structuredClone(report);
+
+  const projection = projectCanonicalFinalReport(report);
+  assert.deepEqual(projection.report, before);
+  const nodes = markdownNodes(projection.markdown);
+  assert.deepEqual(
+    nodes.filter((node) => node.type === "image" || (node.type === "link" && !node.url?.startsWith("#"))),
+    []
+  );
+  assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === description));
+  assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === "Call handlers[id](payload)."));
+});
+
+test("artifact validation warning codes with link or image syntax render as literal text", () => {
+  const report = renderableReport();
+  const codes = ["[notice](https://example.com/x)", "![t](https://example.com/p.png)"];
+  const warnings = codes.map((code) => ({
+    code,
+    artifact_path: "artifacts/dedupe/strategy-detections.json",
+    field_path: "$[5].family_id",
+    message: "Optional metadata is missing",
+    gate: "strategy-detection-review-stage-reconciliation"
+  }));
+  (report.run_metadata as Record<string, unknown>).artifact_validation_warnings = warnings;
+
+  for (const markdown of [
+    projectCanonicalFinalReport(report).markdown,
+    projectPublicArtifactValidationWarnings(warnings).markdown
+  ]) {
+    const nodes = markdownNodes(markdown);
+    assert.deepEqual(
+      nodes.filter((node) => node.type === "image" || (node.type === "link" && !node.url?.startsWith("#"))),
+      []
+    );
+    for (const code of codes) {
+      assert.ok(
+        nodes.some((node) => node.type === "paragraph" && node.text.startsWith(`${code} — `)),
+        code
+      );
+    }
+  }
+});
+
+test("upstream prose that reads like a legacy report label still renders", () => {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.family_variants = [
+    { id: "variant-1", title: "Item 1", summary: "The first sibling path.", dedupe_key: "variant-1" },
+    { id: "variant-2", title: "Source Node Id", summary: "Mislabelled identifiers.", dedupe_key: "variant-2" }
+  ];
+  (report.property_implementation_coverage as Record<string, unknown>).blocker_summaries = [
+    "Critical",
+    "Strategy loops: 4"
+  ];
+
+  const items = markdownNodes(projectCanonicalFinalReport(report).markdown)
+    .filter((node) => node.type === "listItem")
+    .map((node) => node.text);
+  for (const text of [
+    "Item 1: The first sibling path.",
+    "Source Node Id: Mislabelled identifiers.",
+    "Critical",
+    "Strategy loops: 4"
+  ]) {
+    assert.ok(items.includes(text), text);
+  }
+});
+
+test("issue titles with non-ASCII letters render with index anchors that resolve to their headings", () => {
+  // GitHub heading slugs: lowercase, keep letters, marks, digits, spaces, "-" and "_", then spaces become "-".
+  const slug = (text: string): string =>
+    text
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
+      .replace(/\s/gu, "-");
+  for (const title of ["Δ-neutral rebalance drifts", "Naïve [share] math"]) {
+    const report = renderableReport();
+    const [issue] = report.issues as Array<Record<string, unknown>>;
+    if (issue === undefined) throw new Error("missing issue fixture");
+    issue.title = `[L-01] - ${title}`;
+    for (const entry of report.property_provenance as Array<Record<string, unknown>>) entry.title = issue.title;
+
+    const nodes = markdownNodes(projectCanonicalFinalReport(report).markdown);
+    const headings = new Set(nodes.filter((node) => node.type === "heading").map((node) => slug(node.text)));
+    const anchors = nodes.filter((node) => node.type === "link" && node.url?.startsWith("#"));
+    assert.ok(anchors.length > 0, title);
+    for (const anchor of anchors) assert.ok(headings.has(anchor.url?.slice(1) ?? ""), `${title}: ${anchor.url ?? ""}`);
+  }
+});
+
+test("public projection keeps a redacted path followed by a parenthesis as literal text", () => {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.description = "The reproducer at /srv/customer/private/Repro.t.sol(line 12) fails.";
+
+  const published = projectPublicCanonicalFinalReport(report);
+  assert.equal(
+    (published.report.issues as Array<Record<string, unknown>>)[0]?.description,
+    "The reproducer at [redacted-path](line 12) fails."
+  );
+  const nodes = markdownNodes(published.markdown);
+  assert.equal(
+    nodes.some((node) => node.type === "link" && !node.url?.startsWith("#")),
+    false
+  );
+  assert.ok(
+    nodes.some((node) => node.type === "paragraph" && node.text === "The reproducer at [redacted-path](line 12) fails.")
+  );
+  assertPublicProjectionFixedPoint(published);
+
+  // An escape inserted before `]` would read as a UNC path after a doubled backslash, and would
+  // extend a redacted assignment value so the fixed-point re-scan redacts it again.
+  for (const description of ["Match a literal \\](x) in the parser.", "Set token=synthetic-escape-secret](x)."]) {
+    issue.description = description;
+    assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+  }
 });

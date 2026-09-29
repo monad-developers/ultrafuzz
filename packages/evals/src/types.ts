@@ -7,7 +7,6 @@ export const EVAL_RUN_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.run-summary.v2" a
 export const EVAL_FINDING_SCORE_SCHEMA_VERSION = "ultrafuzz.eval.finding-score.v2" as const;
 export const EVAL_SCORE_SUMMARY_SCHEMA_VERSION = "ultrafuzz.eval.score-summary.v2" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_VERSION = "ultrafuzz.eval.review-queue-item.v2" as const;
-export const EVAL_PUBLICATION_STATE_SCHEMA_VERSION = "ultrafuzz.eval.publication.v1" as const;
 
 export type EvalClassification = "true-positive" | "false-positive" | "needs-human-review" | "missed";
 export type EvalClassificationReasonCode =
@@ -95,7 +94,10 @@ export interface EvalTarget {
   signal_profile?: string;
   /** Relative ground-truth file resolved strictly under the operator-supplied `[eval].ground_truth_root`. */
   ground_truth: string;
-  /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
+  /**
+   * `private` requires the ground truth to be bound to this repo and ref, and
+   * `ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true` before an LLM judge receives it.
+   */
   sensitivity?: "public" | "private";
   /**
    * Benchmark paths the run must never read, such as a reference solution the
@@ -166,17 +168,15 @@ export interface EvalRecoveryEquivalence {
 
 export type EvalArtifactMode = "manifest-only" | "upload";
 
+/**
+ * The suite's `reporting.artifacts` block: validated and recorded, but no eval
+ * behaviour depends on it. `mode` defaults to `manifest-only`.
+ */
 export interface EvalArtifactPolicy {
-  /**
-   * `manifest-only` publishes file names/sizes/hashes only; `upload` also streams payloads.
-   * `manifest-only` is the default and is always forced for `sensitivity: private`
-   * targets unless the suite explicitly sets `upload` (the opt-in).
-   */
   mode: EvalArtifactMode;
-  /** Allowlist of artifact file names eligible for streaming to the provider. */
   include: string[];
   max_file_bytes: number;
-  /** True when the suite YAML explicitly set `mode` (the privacy opt-in signal). */
+  /** True when the suite YAML explicitly set `mode`. */
   mode_explicit: boolean;
 }
 
@@ -687,20 +687,6 @@ export interface HumanReviewQueueItem {
   deterministic_match: FindingJudgeResult;
   judge_result: FindingJudgeResult;
   reviewer_status: ReviewerStatus;
-}
-
-export interface EvalPublicationDiagnostic {
-  code: "TERMINAL_REPORT_NOT_PUBLISHABLE" | "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE";
-  row_id: string;
-  contract: "ultrafuzz/report@3";
-  reason: string;
-  report_path?: string;
-}
-
-export interface EvalPublicationState {
-  schema_version: typeof EVAL_PUBLICATION_STATE_SCHEMA_VERSION;
-  status: "publishable" | "non-publishable";
-  diagnostics: EvalPublicationDiagnostic[];
 }
 
 export interface EvalRowScore {

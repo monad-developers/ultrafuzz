@@ -12,7 +12,6 @@ import {
   emptyWorkerCheckpoint,
   readWorkerCheckpoint,
   runWithTerminalPersistence,
-  WORKER_RESULT_ALLOWED_KEYS,
   WORKER_RESULT_SCHEMA_VERSION,
   WorkerResultWriter,
   type WorkerResultContract
@@ -232,12 +231,20 @@ describe("strict worker result contracts", () => {
     });
     expect(persistedStatus).toEqual(persistedResult);
     expect(persistedResult).toEqual(terminal);
-    expect(Object.keys(persistedResult).every((key) => new Set<string>(WORKER_RESULT_ALLOWED_KEYS).has(key))).toBe(
-      true
-    );
-    expect(Object.keys(persistedResult).sort()).toEqual(
-      WORKER_RESULT_ALLOWED_KEYS.filter((key) => key !== "pricing").sort()
-    );
+    expect(Object.keys(persistedResult).sort()).toEqual([
+      "attempt",
+      "checkpoint",
+      "counts",
+      "diagnostic_code",
+      "exit_category",
+      "generation",
+      "launch_generation",
+      "model_work_started",
+      "result_type",
+      "runtime_ms",
+      "schema_version",
+      "usage"
+    ]);
     expect(Object.keys(persistedResult.counts).sort()).toEqual(["failed", "remaining", "succeeded"]);
     expect(Object.keys(persistedResult.checkpoint).sort()).toEqual(["age_ms", "digest"]);
     expect(fs.statSync(path.join(root, "result.json")).mode & 0o777).toBe(0o600);

@@ -5,13 +5,13 @@ import { parseProjectConfigToml, resolveConfig } from "@ultrafuzz/config";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
-import { DEFAULT_BENCHMARK_MODELS } from "../src/defaults.js";
 import { PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS } from "../src/public-worker.js";
 import { modalTargetToml } from "../src/workspace-config.js";
+import { MODEL_SPEC_FIXTURES } from "./model-spec-fixtures.js";
 
 describe("Modal target model profiles", () => {
   it("overrides both explicit default and benchmark profiles with the selected model", () => {
-    const model = DEFAULT_BENCHMARK_MODELS[4]!;
+    const model = MODEL_SPEC_FIXTURES[4];
     const config = modalTargetToml(model, 7_200);
 
     expect(config).toMatch(/^schema_version = "ultrafuzz\.config\.v2"$/mu);
@@ -27,7 +27,7 @@ describe("Modal target model profiles", () => {
   });
 
   it("selects the packaged smoke audit profile for smoke target preparation", () => {
-    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 900, "smoke");
+    const config = modalTargetToml(MODEL_SPEC_FIXTURES[0], 900, "smoke");
 
     expect(config).toMatch(/^schema_version = "ultrafuzz\.config\.v2"$/mu);
     expect(config).toContain('audit_profile = "smoke"');
@@ -39,7 +39,7 @@ describe("Modal target model profiles", () => {
   });
 
   it("selects the packaged exhaustive audit profile for full-lane target preparation", () => {
-    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800, "exhaustive");
+    const config = modalTargetToml(MODEL_SPEC_FIXTURES[0], 1_800, "exhaustive");
 
     expect(config).toContain('audit_profile = "exhaustive"');
     expect(config).toContain("dynamic_strategies_enumerator = 3");

@@ -3,7 +3,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { createNodeAttemptLedgerEntry } from "@ultrafuzz/artifacts";
+import {
+  EVENT_SCHEMA_VERSION,
+  assertEventRecord,
+  createNodeAttemptLedgerEntry,
+  readRunState
+} from "@ultrafuzz/artifacts";
 import { initProject } from "@ultrafuzz/runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -12,7 +17,6 @@ import { appendEvalRunRecord, readEvalMatrix, readEvalRunRecords } from "../src/
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
 import { boundedEvalWorkflowRunId } from "../src/utils.js";
 import {
-  RecordingReporter,
   currentEvalRunRecord,
   currentPlannedGraph,
   currentRunState,
@@ -964,6 +968,42 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     expect(readEvalRunRecords(path.join(result.eval_run_root, "runs.jsonl"))).toHaveLength(2);
   });
 
+  it("publishes the run summary for a watched row whose skipped node synced without an attempt", async () => {
+    const { project, groundTruthRoot, suitePath } = initializationFixture("ufz-evals-run-attemptless-skip-");
+    const row = testRow(testSuite(groundTruthRoot));
+    const runId = expectedRowRunId("eval-attemptless-skip", row);
+    const runRoot = path.join(path.dirname(project), "target", ".ultrafuzz", "runs", runId);
+    terminalRunFixture(runRoot, "succeeded", runId);
+    // The event contract makes `payload.attempt` optional; sync omits it when the runner reported none.
+    const skipped = assertEventRecord({
+      schema_version: EVENT_SCHEMA_VERSION,
+      run_id: runId,
+      event_id: `evt-${"4".repeat(24)}`,
+      event_type: "node-synced",
+      timestamp: T1,
+      node_id: "final-report",
+      status: "skipped",
+      payload: { workflow_run_id: "workflow-1", workflow_task_id: "node:final-report" }
+    });
+    fs.appendFileSync(path.join(runRoot, "events.jsonl"), `${JSON.stringify(skipped)}\n`, "utf8");
+
+    const result = await runEvalSuite({
+      projectRoot: project,
+      suitePath,
+      evalRunId: "eval-attemptless-skip",
+      groundTruthRoot,
+      provider: "none",
+      launcher: async () => ({ ok: true, runId, runRoot, workflowIds: ["workflow-1"], diagnostics: [] })
+    });
+
+    expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 0 });
+    expect(result.records[0]).toMatchObject({ final_status: "succeeded", workflow: { terminal: true } });
+    const summary = JSON.parse(fs.readFileSync(path.join(result.eval_run_root, "run-summary.json"), "utf8")) as {
+      incomplete: number;
+    };
+    expect(summary.incomplete).toBe(0);
+  });
+
   it("counts a watched row as incomplete when it misses the watch deadline", async () => {
     const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-run-watch-timeout-"));
     const project = path.join(base, "project");
@@ -1104,13 +1144,12 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     });
   });
 
-  it("watches a row to terminal state, draining telemetry after each sync tick", async () => {
+  it("records a row that is already terminal without synchronizing it", async () => {
     const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
     terminalRunFixture(runRoot);
-    const reporter = new RecordingReporter();
     let syncCalls = 0;
     const evalRunRoot = path.join(base, "eval-run");
 
@@ -1118,7 +1157,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
       record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
-      reporters: [reporter],
       evalRunRoot,
       sync: async () => {
         syncCalls += 1;
@@ -1129,87 +1167,7 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     expect(watched.record.final_status).toBe("succeeded");
     expect(watched.record.workflow).toMatchObject({ status: "succeeded", terminal: true, finished_at: T1 });
     expect(readEvalRunRecords(path.join(base, "eval-run", "runs.jsonl")).at(-1)?.workflow?.finished_at).toBe(T1);
-    const methods = reporter.calls.map((call) => call.method);
-    expect(methods[0]).toBe("onRowStart");
-    expect(methods[methods.length - 1]).toBe("onRowFinish");
-    expect(reporter.envelopes().map((envelope) => envelope.event.type)).toEqual([
-      "node-started",
-      "node-artifacts",
-      "node-finished"
-    ]);
-    const rowStartGraph = reporter.calls[0]?.args[1] as { nodes: Array<{ group: string }> };
-    expect(rowStartGraph.nodes[0]?.group).toBe("setup");
-    const finish = reporter.calls[reporter.calls.length - 1]?.args[1] as { status: string; startedAt?: string };
-    expect(finish).toMatchObject({ status: "succeeded", startedAt: T0 });
-    // Terminal state on entry: no polling sleep loops required.
     expect(syncCalls).toBe(0);
-    // Cursor persisted under the eval run root for crash-safe resume.
-    expect(fs.existsSync(path.join(base, "eval-run", "telemetry", `${row.id}.cursor.json`))).toBe(true);
-  });
-
-  it("rejects a present graph that would require telemetry repair", async () => {
-    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-invalid-graph-"));
-    const suite = testSuite(path.join(base, "gt"));
-    const row = testRow(suite);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-    terminalRunFixture(runRoot);
-    const invalidGraph = currentPlannedGraph(["setup-1"], undefined);
-    Reflect.deleteProperty(invalidGraph.nodes[0]!, "logical_id");
-    fs.writeFileSync(path.join(runRoot, "graph.json"), JSON.stringify(invalidGraph), "utf8");
-    const reporter = new RecordingReporter();
-    const evalRunRoot = path.join(base, "eval-run");
-
-    await expect(
-      watchEvalRow({
-        plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
-        row,
-        record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
-        reporters: [reporter],
-        evalRunRoot,
-        sync: async () => undefined,
-        pollIntervalMs: 1
-      })
-    ).rejects.toThrow("planned graph is schema-invalid");
-    expect(reporter.calls).toEqual([]);
-  });
-
-  it("rejects a graph that disappears after the initial existence inspection", async () => {
-    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-graph-race-"));
-    const suite = testSuite(path.join(base, "gt"));
-    const row = testRow(suite);
-    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-    terminalRunFixture(runRoot);
-    const graphPath = path.join(runRoot, "graph.json");
-    const reporter = new RecordingReporter();
-    const evalRunRoot = path.join(base, "eval-run");
-    const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
-    const originalLstat = fs.lstatSync.bind(fs);
-    let removed = false;
-    const lstat = vi.spyOn(fs, "lstatSync").mockImplementation(((candidate: fs.PathLike) => {
-      const observed = originalLstat(candidate);
-      if (!removed && path.resolve(String(candidate)) === graphPath) {
-        removed = true;
-        fs.unlinkSync(graphPath);
-      }
-      return observed;
-    }) as typeof fs.lstatSync);
-    try {
-      await expect(
-        watchEvalRow({
-          plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
-          row,
-          record,
-          reporters: [reporter],
-          evalRunRoot,
-          sync: async () => undefined,
-          pollIntervalMs: 1
-        })
-      ).rejects.toThrow("cannot open regular file");
-    } finally {
-      lstat.mockRestore();
-    }
-    expect(removed).toBe(true);
-    expect(reporter.calls).toEqual([]);
   });
 
   it("rejects a present dangling run state instead of treating the row as merely launched", async () => {
@@ -1221,7 +1179,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     const statePath = path.join(runRoot, "state.json");
     fs.unlinkSync(statePath);
     fs.symlinkSync("missing-state.json", statePath);
-    const reporter = new RecordingReporter();
     const evalRunRoot = path.join(base, "eval-run");
     const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
 
@@ -1230,13 +1187,11 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
         plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
         row,
         record,
-        reporters: [reporter],
         evalRunRoot,
         sync: async () => undefined,
         pollIntervalMs: 1
       })
     ).rejects.toThrow();
-    expect(reporter.calls.map((call) => call.method)).toEqual(["onRowStart"]);
     expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
   });
 
@@ -1256,7 +1211,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       }),
       graph: currentPlannedGraph([], undefined)
     });
-    const reporter = new RecordingReporter();
     const evalRunRoot = path.join(base, "eval-run");
     const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
     let swapped = false;
@@ -1266,7 +1220,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
         plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
         row,
         record,
-        reporters: [reporter],
         evalRunRoot,
         sync: async () => {
           swapped = true;
@@ -1278,10 +1231,9 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
         },
         pollIntervalMs: 1
       })
-    ).rejects.toThrow('run state belongs to "foreign-run", expected "run-1"');
+    ).rejects.toThrow('run state identity does not match run "run-1"');
 
     expect(swapped).toBe(true);
-    expect(reporter.calls.map((call) => call.method)).toEqual(["onRowStart"]);
     expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
   });
 
@@ -1301,7 +1253,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       }),
       graph: currentPlannedGraph([], undefined)
     });
-    const reporter = new RecordingReporter();
     const evalRunRoot = path.join(base, "eval-run");
     const record = materializeLaunchedJournal(row, runRoot, evalRunRoot);
     const sync = vi.fn(async () => undefined);
@@ -1311,7 +1262,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
         plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
         row,
         record,
-        reporters: [reporter],
         evalRunRoot,
         sync,
         pollIntervalMs: 1
@@ -1319,16 +1269,14 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     ).rejects.toThrow('run state identity does not match run "run-1"');
 
     expect(sync).not.toHaveBeenCalled();
-    expect(reporter.calls.map((call) => call.method)).toEqual(["onRowStart"]);
     expect(readEvalRunRecords(path.join(evalRunRoot, "runs.jsonl"))).toEqual([record]);
   });
 
-  it("defers onRowStart until the detached subprocess writes graph.json", async () => {
-    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-race-"));
+  it("synchronizes a running row on every poll until its durable state is terminal", async () => {
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-poll-"));
     const suite = testSuite(path.join(base, "gt"));
     const row = testRow(suite);
     const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
-    // Freshly launched run: state.json exists but DAG planning has not written graph.json yet.
     writeRunFixture({
       runRoot,
       events: [],
@@ -1339,7 +1287,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
         overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
       })
     });
-    const reporter = new RecordingReporter();
     let syncCalls = 0;
     const evalRunRoot = path.join(base, "eval-run");
 
@@ -1347,33 +1294,20 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
       record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
-      reporters: [reporter],
       evalRunRoot,
       sync: async () => {
         syncCalls += 1;
-        if (syncCalls === 2) {
-          // Second tick: planning finishes (graph.json appears) and the run completes.
-          terminalRunFixture(runRoot);
-        }
+        // The second synchronization observes the completed run.
+        if (syncCalls === 2) terminalRunFixture(runRoot);
       },
       pollIntervalMs: 1
     });
 
-    expect(watched.record.final_status).toBe("succeeded");
     expect(syncCalls).toBe(2);
-    const methods = reporter.calls.map((call) => call.method);
-    expect(methods[0]).toBe("onRowStart");
-    expect(methods[methods.length - 1]).toBe("onRowFinish");
-    // onRowStart waited for graph.json: reporters get the real node list, not an empty graph.
-    const rowStartGraph = reporter.calls[0]?.args[1] as { nodes: Array<{ id: string; group: string }> };
-    expect(rowStartGraph.nodes).toHaveLength(2);
-    expect(rowStartGraph.nodes[0]).toMatchObject({ id: "setup-1", group: "setup" });
-    // No node events were delivered before onRowStart, and all journal events still arrive.
-    expect(reporter.envelopes().map((envelope) => envelope.event.type)).toEqual([
-      "node-started",
-      "node-artifacts",
-      "node-finished"
-    ]);
+    expect(watched.record).toMatchObject({
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true, finished_at: T1 }
+    });
   });
 
   it("records a typed incomplete outcome when the watch deadline expires", async () => {
@@ -1398,7 +1332,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
       record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
-      reporters: [],
       evalRunRoot,
       sync: async () => undefined,
       pollIntervalMs: 1,
@@ -1413,6 +1346,48 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
     expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
     expect(watched.record.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
   });
+
+  it("records the terminal status another writer reached while the watch slept past its deadline", async () => {
+    const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-final-sleep-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: currentRunState({
+        runId: "run-1",
+        status: "running",
+        nodes: {},
+        overrides: { created_at: T0, started_at: T0, last_transition_at: T0 }
+      })
+    });
+    // Compile the state validator first so the one poll starts well inside the 1 s deadline.
+    readRunState(path.join(runRoot, "state.json"));
+    const evalRunRoot = path.join(base, "eval-run");
+    let syncCalls = 0;
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
+      evalRunRoot,
+      sync: async () => {
+        syncCalls += 1;
+        // Another syncer (`ultrafuzz status`, the dashboard) finishes the run during the 1.5 s sleep.
+        setTimeout(() => terminalRunFixture(runRoot), 300);
+      },
+      pollIntervalMs: 1_500,
+      timeoutSeconds: 1
+    });
+
+    expect(syncCalls).toBe(1);
+    expect(watched.record).toMatchObject({
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true }
+    });
+    expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).not.toContain("EVAL_ROW_WATCH_TIMEOUT");
+  }, 20_000);
 
   it("coalesces and persists workflow synchronization failures", async () => {
     const base = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ufz-evals-watch-sync-failure-"));
@@ -1436,7 +1411,6 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
       row,
       record: materializeLaunchedJournal(row, runRoot, evalRunRoot),
-      reporters: [],
       evalRunRoot,
       sync: async () => {
         syncCalls += 1;

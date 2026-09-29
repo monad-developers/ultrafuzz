@@ -1,7 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import { isDeepStrictEqual } from "node:util";
 
 import { redactSecretsInValue, type SecretScanMode } from "@ultrafuzz/security";
 import { z } from "zod/v4";
@@ -14,19 +11,12 @@ import {
   canonicalUuidSchema
 } from "./portable-json-primitives.js";
 import { type RunLayout } from "./run-layout.js";
-import {
-  SAFE_ID_PATTERN,
-  createFileDurableExclusive,
-  prepareSafeFilePath,
-  readJsonFile,
-  safeResolveInside,
-  validateSafeId
-} from "./safe-paths.js";
+import { SAFE_ID_PATTERN, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import {
-  appendStrictJsonlRecords,
+  appendStrictJsonlRecordsAfterTail,
+  parseStrictJsonlBytes,
   readStrictJsonlSnapshot,
-  validateStrictJsonlHistory,
   type StrictJsonlCodec
 } from "./strict-jsonl.js";
 import {
@@ -47,7 +37,6 @@ export const DEFAULT_EVENT_REPLAY_LIMIT = 10_000;
 const MAX_EVENT_INDEX_FILENAME_LENGTH = 128;
 const EVENT_INDEX_EXTENSION = ".jsonl";
 const EVENT_INDEX_DIRECT_MAX_ID_LENGTH = MAX_EVENT_INDEX_FILENAME_LENGTH - EVENT_INDEX_EXTENSION.length;
-const EVENT_INDEX_LONG_DIRECTORY = "sha256";
 const EVENT_INDEX_KEY_SCHEMA_VERSION = "ultrafuzz.event-index-key.v1" as const;
 
 export const EVENT_RECORD_TYPES = [
@@ -57,6 +46,7 @@ export const EVENT_RECORD_TYPES = [
   "workflow-failure-unattributed",
   "run-recovered",
   "node-synced",
+  // No longer emitted (node-synced and node state carry the outcome); kept so existing journals replay.
   "node-artifacts-verified",
   "node-artifacts-missing",
   "node-controller-refinalization-intent",
@@ -94,36 +84,6 @@ export interface EventQuery {
   since?: string;
   until?: string;
   limit?: number;
-}
-
-export interface EventQueryFacade {
-  schema_version: typeof EVENT_QUERY_FACADE_SCHEMA_VERSION;
-  run_id: string;
-  append_log: string;
-  index_root: string;
-  indexes: ["run", "node", "type", "status", "timestamp"];
-  filters: {
-    run_id: "events.index/run/<run-id>.jsonl";
-    node_id: "events.index/node/<node-id>.jsonl";
-    event_type: "events.index/type/<event-type>.jsonl";
-    status: "events.index/status/<status>.jsonl";
-    timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl";
-  };
-  long_filters: {
-    run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl";
-    node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl";
-    event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl";
-    status: "events.index/status/sha256/<sha256-hex(status)>.jsonl";
-  };
-  index_key_encoding: {
-    version: typeof EVENT_INDEX_KEY_SCHEMA_VERSION;
-    direct_max_id_length: number;
-    direct_id_path: "<dimension>/<id>.jsonl";
-    long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl";
-    digest: "sha256";
-    hash_input_encoding: "utf8";
-    digest_encoding: "hex";
-  };
 }
 
 const eventIdSchema = z.string().regex(/^evt-[a-f0-9]{24}$/u);
@@ -1216,36 +1176,18 @@ export function assertEventRecord(value: unknown, recordPath = "$"): EventRecord
   return result.value;
 }
 
-export function validateEventQueryFacade(value: unknown, recordPath = "$"): SchemaValidationResult<EventQueryFacade> {
-  return validateWithZod(eventQueryFacadeSchema as z.ZodType<EventQueryFacade>, value, {
-    path: recordPath,
-    code: "EVENT_QUERY_FACADE_SCHEMA_INVALID"
-  });
-}
-
-export function assertEventQueryFacade(value: unknown, recordPath = "$"): EventQueryFacade {
-  const result = validateEventQueryFacade(value, recordPath);
-  if (!result.ok || result.value === undefined) {
-    throw new Error(schemaErrorMessage("event query facade", result.issues));
-  }
-  return result.value;
-}
-
 export function appendEvent(layout: RunLayout, input: AppendEventInput): EventRecord {
   const record = createEventRecord(layout, input);
-  const queryFacadePath = safeResolveInside(layout.eventsIndexDir, "query-inputs.json", "event query facade");
-  assertExistingQueryFacade(layout, queryFacadePath);
-  const targets = [layout.eventsPath, ...eventIndexPaths(layout, record)];
-  for (const target of targets) {
-    const codec = eventRecordCodec(layout.runId);
-    const existing = readStrictJsonlSnapshot(target, codec).records;
-    validateStrictJsonlHistory([...existing, record], codec);
-  }
-  appendEventRecord(layout.eventsPath, record, layout.root, layout.runId);
-  for (const target of targets.slice(1)) {
-    appendEventRecord(target, record, layout.root, layout.runId);
-  }
-  writeQueryFacadeInputs(layout, queryFacadePath);
+  // The event ID hashes the timestamp and timestamps never decrease, so only the
+  // trailing records that share this timestamp can repeat the ID. Checking that
+  // window keeps an append from costing a parse of the whole journal.
+  appendStrictJsonlRecordsAfterTail(
+    layout.eventsPath,
+    [record],
+    eventRecordCodec(layout.runId),
+    (existing) => existing.timestamp === record.timestamp,
+    layout.root
+  );
   return record;
 }
 
@@ -1279,16 +1221,6 @@ export function createEventRecord(layout: Pick<RunLayout, "runId">, input: Appen
   });
 }
 
-export function appendEventRecord(
-  eventsPath: string,
-  record: EventRecord,
-  trustedRoot?: string,
-  expectedRunId?: string
-): void {
-  const canonical = assertEventRecord(record);
-  appendStrictJsonlRecords(eventsPath, [canonical], eventRecordCodec(expectedRunId), trustedRoot);
-}
-
 export function replayEvents(layoutOrPath: RunLayout | string, limit = DEFAULT_EVENT_REPLAY_LIMIT): EventReplay {
   if (!Number.isSafeInteger(limit) || limit < 0)
     throw new Error("event replay limit must be a non-negative safe integer");
@@ -1300,6 +1232,11 @@ export function replayEvents(layoutOrPath: RunLayout | string, limit = DEFAULT_E
     malformedRecords: 0,
     truncatedRecords: Math.max(0, all.length - limit)
   };
+}
+
+/** Parse one captured event-journal byte snapshot with the rules replayEvents applies. */
+export function parseEventJournalBytes(bytes: Uint8Array, expectedRunId?: string): EventRecord[] {
+  return parseStrictJsonlBytes(bytes, eventRecordCodec(expectedRunId)).records;
 }
 
 export function queryEvents(layout: RunLayout, query: EventQuery = {}): EventRecord[] {
@@ -1326,42 +1263,6 @@ export function normalizeEventQuery(query: EventQuery = {}): EventQuery {
   return parsed.data;
 }
 
-export function readEventQueryFacade(layout: RunLayout): EventQueryFacade {
-  return assertEventQueryFacade(readJsonFile(path.join(layout.eventsIndexDir, "query-inputs.json")));
-}
-
-export function createEventQueryFacadeInputs(layout: RunLayout): EventQueryFacade {
-  return assertEventQueryFacade({
-    schema_version: EVENT_QUERY_FACADE_SCHEMA_VERSION,
-    run_id: layout.runId,
-    append_log: path.relative(layout.root, layout.eventsPath).split(path.sep).join("/"),
-    index_root: path.relative(layout.root, layout.eventsIndexDir).split(path.sep).join("/"),
-    indexes: ["run", "node", "type", "status", "timestamp"],
-    filters: {
-      run_id: "events.index/run/<run-id>.jsonl",
-      node_id: "events.index/node/<node-id>.jsonl",
-      event_type: "events.index/type/<event-type>.jsonl",
-      status: "events.index/status/<status>.jsonl",
-      timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
-    },
-    long_filters: {
-      run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
-      node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
-      event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
-      status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
-    },
-    index_key_encoding: {
-      version: EVENT_INDEX_KEY_SCHEMA_VERSION,
-      direct_max_id_length: EVENT_INDEX_DIRECT_MAX_ID_LENGTH,
-      direct_id_path: "<dimension>/<id>.jsonl",
-      long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
-      digest: "sha256",
-      hash_input_encoding: "utf8",
-      digest_encoding: "hex"
-    }
-  });
-}
-
 export function redactValue(
   value: unknown,
   forbiddenSecretValues: readonly string[] = [],
@@ -1370,27 +1271,8 @@ export function redactValue(
   return redactSecretsInValue(value, undefined, forbiddenSecretValues, mode);
 }
 
-function eventIndexPaths(layout: RunLayout, record: EventRecord): string[] {
-  const nodeId = eventRecordNodeId(record);
-  const targets = [
-    ["run", ...eventIndexPath(record.run_id)],
-    ["type", ...eventIndexPath(record.event_type)],
-    ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))]
-  ];
-  if (nodeId !== undefined) targets.push(["node", ...eventIndexPath(nodeId)]);
-  targets.push(["status", ...eventIndexPath(record.status)]);
-  return targets.map((segments) => prepareSafeFilePath(layout.eventsIndexDir, segments.join("/")));
-}
-
 function eventRecordNodeId(record: EventRecord): string | undefined {
   return "node_id" in record ? record.node_id : undefined;
-}
-
-function eventIndexPath(value: string): string[] {
-  const direct = `${value}${EVENT_INDEX_EXTENSION}`;
-  if (direct.length <= MAX_EVENT_INDEX_FILENAME_LENGTH) return [direct];
-  const digest = crypto.createHash("sha256").update(value, "utf8").digest("hex");
-  return [EVENT_INDEX_LONG_DIRECTORY, `${digest}${EVENT_INDEX_EXTENSION}`];
 }
 
 function eventRecordIdentity(record: EventRecord): string {
@@ -1400,6 +1282,9 @@ function eventRecordIdentity(record: EventRecord): string {
 function eventRecordCodec(expectedRunId?: string): StrictJsonlCodec<EventRecord> {
   return {
     label: "event journal",
+    // Only the byte limit bounds this journal: a record cap, once reached, would
+    // fail every later sync, lifecycle and cancel call for the rest of the run.
+    maxRecords: Number.MAX_SAFE_INTEGER,
     parseRecord: (value, recordPath) => {
       const record = assertEventRecord(value, recordPath);
       if (expectedRunId !== undefined && record.run_id !== expectedRunId) {
@@ -1424,17 +1309,4 @@ function eventRecordCodec(expectedRunId?: string): StrictJsonlCodec<EventRecord>
       }
     }
   };
-}
-
-function assertExistingQueryFacade(layout: RunLayout, facadePath: string): void {
-  if (!fs.existsSync(facadePath)) return;
-  const actual = assertEventQueryFacade(readJsonFile(facadePath));
-  const expected = createEventQueryFacadeInputs(layout);
-  if (!isDeepStrictEqual(actual, expected)) throw new Error("event query facade conflicts with the current run layout");
-}
-
-function writeQueryFacadeInputs(layout: RunLayout, facadePath: string): void {
-  if (fs.existsSync(facadePath)) return;
-  const bytes = Buffer.from(`${JSON.stringify(createEventQueryFacadeInputs(layout), null, 2)}\n`, "utf8");
-  createFileDurableExclusive(facadePath, bytes, layout.root);
 }

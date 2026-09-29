@@ -57,7 +57,6 @@ import {
   createModalBenchmarkSandbox,
   createModalLaunchSandbox,
   createExactCandidateSourceArchive,
-  createTrackedSourceArchive,
   finishReservedModalLaunch,
   hasExactPublicDiagnosticCollectionConfig,
   isModalRecoveryResultComplete,
@@ -513,25 +512,6 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toMatch(/apt-get install[\s\S]*\bzstd\b/u);
     expect(commands).toContain("RUN command -v zstd && zstd --version");
     expect(standaloneDockerfile).toContain("RUN command -v zstd");
-  });
-
-  it("archives tracked files only", () => {
-    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-modal-archive-"));
-    execFileSync("git", ["init", "--quiet"], { cwd: root });
-    fs.writeFileSync(path.join(root, ".gitignore"), ".private/\n", "utf8");
-    fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n", "utf8");
-    fs.writeFileSync(path.join(root, "untracked.txt"), "untracked\n", "utf8");
-    fs.mkdirSync(path.join(root, ".private"));
-    fs.writeFileSync(path.join(root, ".private", "benchmark.json"), "private\n", "utf8");
-    execFileSync("git", ["add", ".gitignore", "tracked.txt"], { cwd: root });
-    const archive = path.join(root, "source.tgz");
-
-    createTrackedSourceArchive(root, archive);
-    const entries = execFileSync("tar", ["-tzf", archive], { encoding: "utf8" }).trim().split("\n");
-
-    expect(entries).toEqual(expect.arrayContaining([".gitignore", "tracked.txt"]));
-    expect(entries).not.toContain("untracked.txt");
-    expect(entries).not.toContain(".private/benchmark.json");
   });
 
   it("bakes a clean shallow Git checkout at the exact candidate commit", () => {

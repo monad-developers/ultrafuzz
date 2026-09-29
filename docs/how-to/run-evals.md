@@ -3,7 +3,7 @@
 Eval suites benchmark the Ultrafuzz pipeline against targets with known
 ground-truth bugs and rank prompt or topology variants by precision, recall,
 and F1. The full loop is `plan → run → score → report → compare`. Evaluation
-records, telemetry, scores, and reports stay in local artifacts.
+records, scores, and reports stay in local artifacts.
 
 ## Configure The Suite
 
@@ -11,7 +11,7 @@ Two files split the configuration:
 
 - The eval YAML (default `.ultrafuzz/evals/bug-finding.yml`) is the
   committable experiment definition: model profiles, targets, variants, trial
-  counts, grading metrics, and the telemetry policy. It never names a
+  counts, grading metrics, and whether `run` watches rows. It never names a
   provider, an endpoint, or an env var.
 - The `ultrafuzz.toml` `[eval]` section is per-environment: the default suite
   path and the machine-specific `ground_truth_root`. `provider = "none"` is
@@ -67,9 +67,9 @@ ultrafuzz eval run --target-root /path/to/target-checkouts
 ultrafuzz eval run --row <row-id> --no-watch
 ```
 
-`run` launches an Ultrafuzz run per matrix row (or a `--row` selection),
-polls the runs to a terminal state, and records local telemetry when the suite
-enables it. `--no-watch` launches detached without polling. Artifacts accumulate under
+`run` launches an Ultrafuzz run per matrix row (or a `--row` selection) and,
+unless the suite sets `reporting.node_telemetry: false`, polls the runs to a
+terminal state. `--no-watch` launches detached without polling. Artifacts accumulate under
 `.ultrafuzz/evals/runs/<eval-run-id>/`.
 
 ## Score And Compare
@@ -157,8 +157,8 @@ variant and use the separate GPT-5.6 Sol `xhigh` judge. The benchmark adapter
 converts either lane into the normal `EvalSuiteSpec` and can project one runner
 for an isolated Modal pair while retaining the fixed judge.
 
-After a generation finishes and has been scored, append it and regenerate all
-nine SVG charts in one transaction:
+After a generation finishes and has been scored, append it and regenerate the
+three README SVG charts in one transaction:
 
 ```bash
 ultrafuzz eval history <eval-run-id> \

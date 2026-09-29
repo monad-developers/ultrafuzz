@@ -15,11 +15,7 @@ import {
   type SchemaRegistryEntry
 } from "@ultrafuzz/artifacts";
 
-import {
-  RESOLVED_CONFIG_JSON_SCHEMA_ID,
-  RESOLVED_CONFIG_SCHEMA_FILENAME,
-  resolvedConfigZodSchema
-} from "./resolved-config-schema.js";
+import { RESOLVED_CONFIG_JSON_SCHEMA_ID, RESOLVED_CONFIG_SCHEMA_FILENAME } from "./resolved-config-schema.js";
 import type { ResolvedConfig } from "./types.js";
 import { isRecord } from "@ultrafuzz/artifacts";
 
@@ -142,13 +138,6 @@ export function configSchemaBundleDigest(): string {
   return schemaRegistryBundleDigest(configSchemaRegistry());
 }
 
-export function resolvedConfigSchemaEntry(): SchemaRegistryEntry {
-  const entry = configSchemaRegistry().find((candidate) => candidate.id === RESOLVED_CONFIG_JSON_SCHEMA_ID);
-  if (entry === undefined)
-    throw new Error(`registered config schema is unavailable: ${RESOLVED_CONFIG_JSON_SCHEMA_ID}`);
-  return entry;
-}
-
 export function validateResolvedConfigJson(value: unknown): JsonSchemaValidationResult {
   const validator = configValidator().getSchema(RESOLVED_CONFIG_JSON_SCHEMA_ID);
   if (validator === undefined)
@@ -194,10 +183,6 @@ export function serializeResolvedConfigJsonBytes(config: ResolvedConfig): Buffer
   const bytes = Buffer.from(`${JSON.stringify(config, null, 2)}\n`, "utf8");
   parseResolvedConfigJsonBytes(bytes);
   return bytes;
-}
-
-export function resolvedConfigValidatorsAgree(value: unknown): boolean {
-  return validateResolvedConfigJson(value).ok === resolvedConfigZodSchema.safeParse(value).success;
 }
 
 function configValidator(): ReturnType<typeof createStrictAjv> {

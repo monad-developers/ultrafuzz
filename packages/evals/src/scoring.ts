@@ -33,7 +33,6 @@ import {
   validateEvalJsonSchema,
   type EVAL_LLM_JUDGE_RESULT_SCHEMA_VERSION
 } from "./eval-schema-registry.js";
-import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance } from "./lineage.js";
 import {
   assertGroundTruthSubject,
@@ -1076,7 +1075,7 @@ async function requestJudgeOnce(request: JudgeGatewayRequest, input: FindingJudg
       body: request.body,
       signal: controller.signal
     });
-    const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
+    const bodyText = await boundedJudgeResponseText(response);
     if (!response.ok) {
       throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
         status: response.status,
@@ -1087,6 +1086,40 @@ async function requestJudgeOnce(request: JudgeGatewayRequest, input: FindingJudg
   } finally {
     clearTimeout(timeout);
   }
+}
+
+const MAX_JUDGE_RESPONSE_BYTES = 1024 * 1024;
+
+async function boundedJudgeResponseText(response: Response): Promise<string> {
+  const tooLarge = (): EvalError =>
+    new EvalError(
+      "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE",
+      `LLM judge response exceeded ${String(MAX_JUDGE_RESPONSE_BYTES)} bytes`,
+      { label: "LLM judge", maxBytes: MAX_JUDGE_RESPONSE_BYTES }
+    );
+  const declaredBytes = Number(response.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_JUDGE_RESPONSE_BYTES) {
+    await response.body?.cancel();
+    throw tooLarge();
+  }
+  if (response.body === null) return await response.text();
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+  try {
+    for (let read = await reader.read(); !read.done; read = await reader.read()) {
+      totalBytes += read.value.byteLength;
+      if (totalBytes > MAX_JUDGE_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw tooLarge();
+      }
+      chunks.push(read.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, totalBytes).toString("utf8");
 }
 
 function parseJudgeCompletion(bodyText: string, input: FindingJudgeInput): FindingJudgeResult {

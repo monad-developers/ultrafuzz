@@ -9,7 +9,6 @@ import {
   readRunMetadataDocument,
   type GoalPlan,
   type NodeState,
-  type NodeStatus,
   type RunState,
   type UsageLedgerEntry
 } from "@ultrafuzz/artifacts";
@@ -36,24 +35,14 @@ import type {
 export const MAX_EVAL_EXPANSION_NODE_IDS = 256;
 
 /**
- * Key a run is expected to record on a generated node's provenance to name the
- * node that generated it. #183 asks for "source node IDs" per run record; this
- * is the name that request is read under.
- */
-export const EVAL_EXPANSION_SOURCE_NODE_KEY = "source_node_id";
-
-/**
  * Node-level view of one row, derived only from the run's own durable evidence.
  *
  * This exists because `EvalRunRecord` carried nothing below the run: it had a
  * single `workflow` lifecycle and no node counts, no identifiers and no
  * concurrency, so a fan-out was indistinguishable from one opaque agent node.
- * The alternative channel does not work either -- `node_telemetry` reaches only
- * `this.input.reporters`, while the public worker uses local reporting and has
- * no external reporters.
  *
  * Everything here comes from `state.json` and `graph.json`, which every run
- * writes, so it needs no reporter, no provider and no network.
+ * writes, so it needs no provider and no network.
  */
 export function evalRunExpansion(input: { runRoot: string; state: RunState }): EvalRunExpansion {
   const nodes = Object.values(input.state.nodes);
@@ -510,8 +499,4 @@ function completeness(reason: EvalExpansionReason | undefined): EvalExpansionCom
 
 function compareIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
-}
-
-export function isEvalNodeStatus(value: string): value is NodeStatus {
-  return (NODE_STATE_STATUSES as readonly string[]).includes(value);
 }

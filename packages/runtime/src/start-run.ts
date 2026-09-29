@@ -17,6 +17,7 @@ import {
   readRegularFileSnapshot,
   readRunMetadataDocument,
   readRunState,
+  replayEvents,
   safeResolveInside,
   sensitiveEnvironmentValues,
   updateRunStatus,
@@ -54,6 +55,7 @@ import {
   prepareTrustedCliEnvironment,
   runTrustedJsonValidatorPreflight,
   TRUSTED_CLI_ENVIRONMENT_VARIABLES,
+  ULTRAFUZZ_TRUSTED_BIN_ENV,
   type TrustedCliEnvironment
 } from "./trusted-cli.js";
 import { hasRuntimeErrors, runtimeFailure, runtimeResult } from "./utils.js";
@@ -189,12 +191,19 @@ function controllerRefreshInspectionEnvironment(
 }
 
 export async function startRun(input: StartRunInput) {
+  let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
     enforceDataGovernance: true,
     beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
+      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph),
+    afterLayoutCreated: (layout) => {
+      createdLayout = layout;
+    }
   });
   if (!planned.ok || !planned.value) {
+    if (createdLayout !== undefined) {
+      recordLaunchFailure(createdLayout, planned.diagnostics, sensitiveEnvironmentValues(input.env ?? process.env));
+    }
     return runtimeFailure<StartRunValue>(planned.diagnostics);
   }
 
@@ -209,7 +218,9 @@ export async function startRun(input: StartRunInput) {
   try {
     releaseControlLock = await acquireWorkflowControlLock(plan.layout);
   } catch (error) {
-    return runtimeFailure<StartRunValue>([smithersDiagnostic(error, "WORKFLOW_CONTROL_PREPARATION_FAILED")]);
+    const diagnostic = smithersDiagnostic(error, "WORKFLOW_CONTROL_PREPARATION_FAILED");
+    recordLaunchFailure(plan.layout, [diagnostic], forbiddenSecretValues);
+    return runtimeFailure<StartRunValue>([diagnostic]);
   }
   try {
     const compiled = compileSmithersWorkflow({
@@ -331,13 +342,7 @@ export async function startRun(input: StartRunInput) {
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
-    updateRunStatus(plan.layout, "failed", undefined, { forbiddenSecretValues });
-    appendEvent(plan.layout, {
-      eventType: "workflow-submit-failed",
-      status: "failed",
-      payload: workflowSubmissionFailureEventPayload(diagnostic),
-      forbiddenSecretValues
-    });
+    recordLaunchFailure(plan.layout, [diagnostic], forbiddenSecretValues);
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
     await releaseControlLock();
@@ -478,6 +483,7 @@ export async function resumeRun(input: WorkflowLifecycleInput) {
 
 async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
   let releaseLifecycleLock: (() => Promise<void>) | undefined;
+  const diagnostics: RuntimeDiagnostic[] = [];
   try {
     const projectRoot = path.resolve(input.projectRoot);
     const runsRoot = await runsRootForProject(projectRoot);
@@ -485,6 +491,11 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
     assertPathInside(runsRoot, layout.root, "run root");
     if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
+    // Checked before the lifecycle lock, whose directory a launch that failed before compiling never created.
+    const launchFailure = pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)
+      ? recordedLaunchFailure(layout)
+      : undefined;
+    if (launchFailure !== undefined) return runtimeFailure<WorkflowLifecycleValue>([launchFailure]);
     releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
 
     assertRegularFileInside(layout.root, layout.runMetadataPath, "run metadata");
@@ -526,6 +537,10 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     const smithersRoot = safeResolveInside(layout.root, "smithers", "Smithers evidence");
     const tasksPath = safeResolveInside(smithersRoot, "tasks.json", "workflow task manifest");
     const configPath = safeResolveInside(smithersRoot, "resolved-config.json", "workflow config");
+    // Agent adapters parse ULTRAFUZZ_CONFIG_PATH as TOML; given the JSON above
+    // they find no agent tables and fall back to default auth. Launch writes
+    // the same config as TOML beside it and hands adapters a copy of that file.
+    const agentConfigPath = safeResolveInside(smithersRoot, "execution-config.toml", "workflow agent config");
     let taskDocument: SmithersTaskManifestDocument | undefined;
     let config: ResolvedConfig | undefined;
     if (fs.existsSync(tasksPath)) {
@@ -571,7 +586,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: import.meta.resolve("@ultrafuzz/runtime"),
-      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: configPath }),
+      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: agentConfigPath }),
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
     };
     let trustedCli: TrustedCliEnvironment = {
@@ -593,9 +608,27 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         });
         if (prepared.active) runTrustedJsonValidatorPreflight({ layout, trusted: prepared });
         trustedCli = prepared;
-      } catch {
+      } catch (error) {
         // Historical validator identity is task setup provenance, not authority
-        // to prevent Smithers from continuing the workflow.
+        // to prevent Smithers from continuing the workflow. Keep the run-owned
+        // launcher first on PATH anyway: it re-verifies its closure on every
+        // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
+        const launcher = path.join(
+          layout.root,
+          "trusted-bin",
+          process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz"
+        );
+        const launcherKept = fs.existsSync(launcher);
+        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = path.dirname(launcher);
+        diagnostics.push(
+          resumeWarning(
+            "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
+            launcherKept
+              ? `resume could not re-verify the run's trusted Ultrafuzz CLI (tasks still call ${launcher}, and their preflight-json-validator step fails while that launcher cannot verify itself)`
+              : `resume could not re-verify the run's trusted Ultrafuzz CLI (${launcher} does not exist, so tasks call whatever \`ultrafuzz\` is on PATH)`,
+            error
+          )
+        );
       }
     }
     const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
@@ -611,7 +644,15 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       assertCurrentCloudAgentCredentialEnvironment(config, tasks, lifecycleEnvironment);
     }
     if (typeof metadata.source_revision === "string") {
-      repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
+      try {
+        repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
+      } catch (error) {
+        // Pruning is cleanup: a stale registration it leaves behind surfaces
+        // when Smithers recreates that task's worktree, so do not stop here.
+        diagnostics.push(
+          resumeWarning("WORKFLOW_WORKTREE_REPAIR_FAILED", "resume could not prune stale task worktrees", error)
+        );
+      }
     }
     const result = await runSmithersLifecycleCommand({
       action: "resume",
@@ -652,20 +693,27 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli.environmentVariableNames
       )
     });
-    recordNativeContinuationState({
-      layout,
-      config,
-      requestedConcurrency: input.maxConcurrency,
-      alreadyRunning: result.alreadyRunning ?? false
-    });
-    return runtimeResult(true, {
-      run_id: runId,
-      workflow_run_id: smithersRunId,
-      action: "resume" as const,
-      submitted: !result.alreadyRunning
-    });
+    // An attach to a run Smithers still reports active started no controller,
+    // so it must not re-record status, lease or deadline; the resume that
+    // starts the next controller does.
+    if (result.alreadyRunning !== true) {
+      recordNativeContinuationState({ layout, config, requestedConcurrency: input.maxConcurrency });
+    }
+    return runtimeResult(
+      true,
+      {
+        run_id: runId,
+        workflow_run_id: smithersRunId,
+        action: "resume" as const,
+        submitted: !result.alreadyRunning
+      },
+      diagnostics
+    );
   } catch (error) {
-    return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
+    return runtimeFailure<WorkflowLifecycleValue>([
+      smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED"),
+      ...diagnostics
+    ]);
   } finally {
     await releaseLifecycleLock?.();
   }
@@ -708,7 +756,6 @@ function recordNativeContinuationState(input: {
   layout: RunLayout;
   config: ResolvedConfig | undefined;
   requestedConcurrency: number | undefined;
-  alreadyRunning: boolean;
 }): void {
   try {
     const submittedAt = new Date().toISOString();
@@ -718,19 +765,17 @@ function recordNativeContinuationState(input: {
     state.status = "running";
     state.started_at ??= submittedAt;
     delete state.finished_at;
-    if (!input.alreadyRunning) {
-      const leaseDurationMs =
-        (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
-      state.controller_lease = {
-        ...state.controller_lease,
-        status: "active",
-        duration_ms: leaseDurationMs,
-        renewed_at: submittedAt,
-        expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
-      };
-      state.concurrency.requested_concurrency =
-        input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
-    }
+    const leaseDurationMs =
+      (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
+    state.controller_lease = {
+      ...state.controller_lease,
+      status: "active",
+      duration_ms: leaseDurationMs,
+      renewed_at: submittedAt,
+      expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
+    };
+    state.concurrency.requested_concurrency =
+      input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
     if (input.config !== undefined) {
       state.workflow_deadline_at = new Date(
         submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
@@ -748,6 +793,11 @@ function recordNativeContinuationState(input: {
   }
 }
 
+function resumeWarning(code: string, context: string, error: unknown): RuntimeDiagnostic {
+  const diagnostic = smithersDiagnostic(error, code);
+  return { ...diagnostic, message: `${context}: ${diagnostic.message}`, severity: "warning", source: "runtime" };
+}
+
 export async function replayRun(input: WorkflowLifecycleInput) {
   return submitLifecycleAction(input, "replay");
 }
@@ -758,7 +808,12 @@ export async function forkRun(input: WorkflowLifecycleInput) {
 
 export async function pauseRun(input: PauseRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  // Like `cancel`, pausing only asks the runner to park the linked run, so diverged control
+  // documents must not block it.
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    tolerateControlDivergence: true,
+    observeOnly: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<PauseRunValue>(evidence.diagnostics);
   }
@@ -802,13 +857,53 @@ export async function pauseRun(input: PauseRunInput) {
   }
 }
 
-function workflowSubmissionFailureEventPayload(
-  diagnostic: RuntimeDiagnostic
-): Extract<AppendEventInput, { eventType: "workflow-submit-failed" }>["payload"] {
-  if (!isWorkflowSubmissionFailureEventPayload(diagnostic)) {
-    throw new Error("workflow submission diagnostic does not match the current event contract");
+/**
+ * A launch that fails after its run directory exists must not look pending, running, or resumable:
+ * mark the run failed and keep the original error, which readers report in place of a missing seal.
+ * The event contract allows one code, so any other code is kept in the message.
+ */
+function recordLaunchFailure(
+  layout: RunLayout,
+  diagnostics: readonly RuntimeDiagnostic[],
+  forbiddenSecretValues: readonly string[]
+): void {
+  const errors = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  const [only] = errors;
+  const payload =
+    errors.length === 1 && only !== undefined && isWorkflowSubmissionFailureEventPayload(only)
+      ? only
+      : {
+          code: "WORKFLOW_SUBMISSION_FAILED" as const,
+          message: errors.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join("; "),
+          severity: "error" as const,
+          source: "workflow" as const,
+          details: {}
+        };
+  try {
+    updateRunStatus(layout, "failed", undefined, { forbiddenSecretValues });
+    appendEvent(layout, { eventType: "workflow-submit-failed", status: "failed", payload, forbiddenSecretValues });
+  } catch {
+    // Best effort: the caller returns the original diagnostics either way.
   }
-  return diagnostic;
+}
+
+/** A failed launch's recorded error; callers ask only about runs whose workflow controls were never sealed. */
+function recordedLaunchFailure(layout: RunLayout): RuntimeDiagnostic | undefined {
+  try {
+    const failure = replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter((record) => record.event_type === "workflow-submit-failed")
+      .at(-1);
+    if (failure?.event_type !== "workflow-submit-failed") return undefined;
+    return {
+      code: "RUN_LAUNCH_FAILED",
+      message: `run ${layout.runId} failed to launch: ${failure.payload.message}. A run whose launch failed cannot be resumed; fix the cause and start a new run`,
+      severity: "error",
+      source: "workflow",
+      path: layout.eventsPath
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function isWorkflowSubmissionFailureEventPayload(
@@ -1292,8 +1387,9 @@ export async function readLinkedWorkflowEvidence(
       throw new Error("run metadata workflow IDs do not exactly match the active workflow run");
     }
 
-    // Observers pass `tolerateControlDivergence` so a divergent control file downgrades to a reported
-    // warning instead of hiding a live run entirely (issue #674). Execution callers omit it and keep
+    // Observers, `pause` and `cancel` pass `tolerateControlDivergence` so a divergent control file is
+    // collected in `divergences` instead of failing the read: observers report it as a warning, and
+    // `pause` and `cancel` still reach the runner (issue #674). Execution callers omit it and keep
     // failing closed.
     const tolerateDivergence = options.tolerateControlDivergence === true;
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, { tolerateDivergence });
@@ -1440,7 +1536,7 @@ function invalidLinkedWorkflowEvidence(metadataPath: string, error: unknown): Li
 /**
  * A pending state records incomplete launch preparation, not launcher liveness.
  * It also survives an interrupted launch. Unreadable state retains the strict
- * missing-seal diagnostic.
+ * missing-seal or missing-journal diagnostic.
  */
 function runStatusIsPreSubmission(layout: RunLayout): boolean {
   try {
@@ -1465,6 +1561,8 @@ function missingLinkedWorkflowEvidenceDiagnostic(
         path: controlSealPath
       };
     }
+    const launchFailure = recordedLaunchFailure(layout);
+    if (launchFailure !== undefined) return launchFailure;
     return {
       code: "WORKFLOW_CONTROL_SEAL_MISSING",
       message: `run ${layout.runId} lacks the required workflow control seal; it may predate sealed runs or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,
@@ -1475,6 +1573,18 @@ function missingLinkedWorkflowEvidenceDiagnostic(
   }
   const linkJournalPath = workflowRunLinkJournalPath(layout);
   if (pathIsMissing(linkJournalPath)) {
+    // Launch writes this journal only after publishing the execution snapshot, its longest step, so a
+    // lock-free reader such as `status`, `pause` or `cancel` can meet a launch still in progress here.
+    // Report it with the seal's pending code, which `status` already renders as an incomplete launch.
+    if (runStatusIsPreSubmission(layout)) {
+      return {
+        code: "WORKFLOW_CONTROL_SEAL_PENDING",
+        message: `run ${layout.runId} has incomplete launch preparation: its workflow-link journal has not been written. Launcher liveness is unknown. If the original launch is still active, wait for it to finish; otherwise inspect its error before retrying`,
+        severity: "warning",
+        source: "workflow",
+        path: linkJournalPath
+      };
+    }
     return {
       code: "WORKFLOW_RUN_LINK_JOURNAL_MISSING",
       message: `run ${layout.runId} lacks the required authenticated workflow-link journal; it may predate authenticated lifecycle links or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,

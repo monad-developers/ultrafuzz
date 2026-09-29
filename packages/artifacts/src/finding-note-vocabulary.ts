@@ -26,14 +26,6 @@ export const FINDING_NOTE_KEYS = [
   "impact"
 ] as const;
 
-/** ASCII-only, case-insensitive forms used by both the runtime and portable
- * JSON-Schema grammar. Unicode compatibility folds are deliberately excluded:
- * JSON Schema has no portable equivalent, and identifiers in the authority are
- * ASCII exact apart from case. */
-export const FINDING_NOTE_KEYS_ASCII_CASE_INSENSITIVE_PATTERN = `(?:${FINDING_NOTE_KEYS.map((key) =>
-  key.replace(/[A-Za-z]/gu, (character) => `[${character.toLowerCase()}${character.toUpperCase()}]`)
-).join("|")})`;
-
 export const FINDING_REPORT_ASSIGNMENT_KEY_PATTERN = "[-_0-9A-Za-z]{1,128}";
 
 const findingReportAssignmentKey = new RegExp(`^${FINDING_REPORT_ASSIGNMENT_KEY_PATTERN}$`, "u");
@@ -129,14 +121,6 @@ export const FINDING_REPORT_MULTITERM_METADATA_KEY_PATTERNS = FINDING_REPORT_MET
   FINDING_REPORT_METADATA_TERM_PATTERNS.map((right) => `[-_0-9A-Za-z]*${left}[-_0-9A-Za-z]*${right}[-_0-9A-Za-z]*`)
 );
 
-/** A bounded ASCII identifier containing a report-metadata term. This defines
- * a family, rather than a blacklist of guessed aliases, so producer-local
- * renames such as `helper_summary` and `reachability_note` fail closed. */
-export const FINDING_REPORT_METADATA_KEY_PATTERNS = FINDING_REPORT_METADATA_TERM_GROUPS.map(
-  (_, index) =>
-    `(?=${FINDING_REPORT_ASSIGNMENT_KEY_PATTERN}\\s*={1,2})[-_0-9A-Za-z]*${FINDING_REPORT_METADATA_TERM_PATTERNS[index]}[-_0-9A-Za-z]*`
-);
-
 export function isFindingReportMetadataKey(key: string): boolean {
   if (!findingReportAssignmentKey.test(key)) return false;
   const normalized = key.replace(/[A-Z]/gu, (character) => character.toLowerCase());
@@ -152,12 +136,6 @@ export function isFindingReportMetadataAliasKey(key: string): boolean {
   const hasRenameMarker = normalized.includes("alias") || /v[0-9]+/u.test(normalized);
   const hasAliasBase = terms.length > 0 || normalized.includes("access") || normalized.includes("verification");
   return new Set(terms).size >= 2 || (hasAliasBase && hasRenameMarker);
-}
-
-export function isFindingReportEvidenceAssignmentKey(key: string): boolean {
-  return FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS.includes(
-    key as (typeof FINDING_REPORT_EVIDENCE_ASSIGNMENT_KEYS)[number]
-  );
 }
 
 export function findingReachabilityPromptVocabulary(): string {

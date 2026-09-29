@@ -396,16 +396,6 @@ async function readdirIfMissing(directoryPath: string): Promise<string[]> {
   });
 }
 
-/**
- * The strict form. Retained for tests and for any caller that has already established the run must be
- * resumable; `worker.ts` deliberately uses the tolerant lookup above instead.
- */
-export async function locateModalResumeWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {
-  const found = await findModalResumeWorkspace(workRoot);
-  if (found.kind === "not-started") throw new Error(found.reason);
-  return found.workspace;
-}
-
 export async function finalizeModalEvalRunRecord(
   workspace: ModalResumeWorkspace,
   state: ModalResumeRunState,

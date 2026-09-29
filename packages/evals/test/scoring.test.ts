@@ -1481,11 +1481,7 @@ describe("deterministic scorer math", () => {
         headers: init?.headers as Record<string, string>,
         ...(init?.redirect !== undefined ? { redirect: init.redirect } : {})
       });
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({ choices: [{ message: { content: responseContent } }] })
-      };
+      return new Response(JSON.stringify({ choices: [{ message: { content: responseContent } }] }), { status: 200 });
     }) as unknown as typeof fetch;
     const judge = gatewayLlmJudge(
       {
@@ -1702,6 +1698,18 @@ describe("deterministic scorer math", () => {
     });
     expect(gateway.bodies).toHaveLength(1);
     expect(gateway.sleeps).toEqual([]);
+  });
+
+  it("does not retry a judge response larger than 1 MiB", async () => {
+    const gateway = scriptedGatewayJudge([
+      async () => new Response("oversized", { headers: { "content-length": String(1024 * 1024 + 1) } })
+    ]);
+
+    await expect(scoreWithSingleJudge(gateway.judge)).rejects.toMatchObject({
+      code: "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE",
+      details: { attempts: 1 }
+    });
+    expect(gateway.bodies).toHaveLength(1);
   });
 
   it("retries a 429 gateway response once it succeeds", async () => {
