@@ -35,5 +35,13 @@ allowBuilds:
   msgpackr-extract: false
   node-pty: false
   protobufjs: true
+# The Smithers entries are generated from SMITHERS_COMPATIBILITY_PATCHES by
+# scripts/smithers-patches.mjs; CI fails when they drift from the registry.
 patchedDependencies:
+  "@smthrs/agents@0.35.0": patches/@smthrs__agents@0.35.0.patch
+  "@smthrs/cli@0.35.0": patches/@smthrs__cli@0.35.0.patch
+  "@smthrs/db@0.35.0": patches/@smthrs__db@0.35.0.patch
+  "@smthrs/engine@0.35.0": patches/@smthrs__engine@0.35.0.patch
+  "@smthrs/scheduler@0.35.0": patches/@smthrs__scheduler@0.35.0.patch
   npm@11.19.0: patches/npm@11.19.0.patch
+  smthrs@0.35.0: patches/smthrs@0.35.0.patch
