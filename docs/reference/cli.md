@@ -491,6 +491,24 @@ failing. Both outcomes append
 distinct product events. Failures use the stable `WORKFLOW_CANCEL_FAILED`
 diagnostic.
 
+`pause` and `cancel` read run evidence the way `status` does, without the
+workflow control lock. A run whose sealed control documents diverged, for
+example a hand-patched published workflow or a planned graph that no longer
+matches the current build's artifact contracts after a rebuild, can therefore
+still be paused or cancelled; `status` reports the divergence. They start the
+workflow runner from the run's published execution snapshot, so, like
+`status`, they still refuse a run whose sealed execution files changed: the
+files the control seal lists in that snapshot, such as the run plan, prompts,
+agent adapters, and the runtime packages and their dependencies.
+
+Because they take no lock, `pause` and `cancel` issued while a launch is still
+preparing fail without changing the run; retry once `ultrafuzz run` has
+returned. They also do not reconcile a `replay` or `fork` that was interrupted
+while linking its new workflow run, so they act on the workflow run it
+replaced, or refuse. Run `ultrafuzz why <run-id>` before pausing or cancelling
+such a run: it reconciles that link, even when it then reports a diverged
+control document.
+
 `why` returns a deterministic diagnosis: a summary, the current node, and typed
 blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,
 `waiting_since`, `attempt`, and `max_attempts`. Blocker kinds are
