@@ -146,7 +146,7 @@ export async function diagnoseProject(input: DoctorInput) {
       probeFailure !== undefined
         ? "required command probe failed in the configured execution environment"
         : missingTools.length === 0
-          ? `${toolchain.length} required commands available in the configured execution environment`
+          ? `${String(toolchain.filter((entry) => entry.required).length)} required commands available in the configured execution environment`
           : `missing required commands in the configured execution environment: ${missingTools.join(", ")}`
   });
   if (probeFailure !== undefined) {

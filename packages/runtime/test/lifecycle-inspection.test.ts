@@ -1353,7 +1353,9 @@ test("diagnoseProject requires only the CLIs of agents the selected topology can
     });
 
   const codexOnly = await diagnose();
-  assert.equal(codexOnly.value?.checks.find((check) => check.name === "toolchain")?.status, "ok");
+  const toolchainCheck = codexOnly.value?.checks.find((check) => check.name === "toolchain");
+  assert.equal(toolchainCheck?.status, "ok");
+  assert.match(toolchainCheck?.summary ?? "", /^4 required commands available /u);
   assert.deepEqual(
     codexOnly.value?.toolchain.map((entry) => [entry.name, entry.required]),
     [
@@ -1379,9 +1381,12 @@ test("diagnoseProject requires only the CLIs of agents the selected topology can
     )
   );
 
-  // Codex also runs OpenRouterAgent, so an unselected Codex profile cannot waive that requirement.
+  // Codex also runs OpenRouterAgent, so an unselected profile of either agent cannot waive
+  // the requirement the selected one makes.
   fs.writeFileSync(configPath, config, "utf8");
   addOpenRouterProfile(project);
+  const codexWithUnusedOpenRouter = await diagnose();
+  assert.equal(codexWithUnusedOpenRouter.value?.toolchain.find((entry) => entry.name === "codex")?.required, true);
   const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
   fs.writeFileSync(
     topologyPath,
