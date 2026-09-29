@@ -143,17 +143,16 @@ export function initProject(input: InitProjectInput) {
     // Planning admits only the byte-exact packaged adapter closure, so these
     // files are never project-owned. Refresh them on every init: otherwise an
     // upgrade needs `init --force`, which also resets ultrafuzz.toml, the
-    // topology, and the prompts.
+    // topology, and the prompts. A file that already matches is left alone,
+    // so a read-only up-to-date closure does not fail init.
     for (const [file, template] of Object.entries(STOCK_CONTROLLER_SOURCE_TEMPLATES)) {
-      writeProjectFile(
-        projectRoot,
-        `.smithers/agents/${file}`,
-        loadRuntimeTemplate(template),
-        true,
-        created,
-        preserved,
-        overwritten
-      );
+      const relativePath = `.smithers/agents/${file}`;
+      const contents = loadRuntimeTemplate(template);
+      if (holdsExactContents(projectRoot, relativePath, contents)) {
+        preserved.push(relativePath);
+        continue;
+      }
+      writeProjectFile(projectRoot, relativePath, contents, true, created, preserved, overwritten);
     }
   } catch {
     return runtimeFailure<InitProjectResult>([
@@ -225,6 +224,23 @@ function prepareStockSmithers032PackageMigration(projectRoot: string): string | 
     // The normal init path preserves it and launch validation reports any
     // incompatible dependency contract without reflecting inspection details.
     return undefined;
+  }
+}
+
+/** Whether the path is a physical single-link file holding exactly these bytes. */
+function holdsExactContents(projectRoot: string, relativePath: string, contents: string): boolean {
+  const expected = Buffer.from(contents, "utf8");
+  try {
+    return readStableInitReviewFile(
+      projectRoot,
+      path.join(projectRoot, relativePath),
+      expected.byteLength,
+      "generated agent adapter"
+    ).equals(expected);
+  } catch {
+    // Missing, linked, special, or larger files are handed to the writer,
+    // which creates the file or rejects the unsafe path.
+    return false;
   }
 }
 

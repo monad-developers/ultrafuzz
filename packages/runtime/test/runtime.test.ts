@@ -3654,6 +3654,22 @@ test("non-force init refreshes historical and customized adapters to the package
   assert.equal(fs.readFileSync(configPath, "utf8"), customConfig);
 });
 
+test("non-force init leaves an up-to-date read-only adapter untouched", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const adapterPath = path.join(project, ".smithers", "agents", "toml.ts");
+  const past = new Date("2020-01-01T00:00:00Z");
+  fs.utimesSync(adapterPath, past, past);
+  fs.chmodSync(adapterPath, 0o444);
+  const before = fs.lstatSync(adapterPath, { bigint: true });
+
+  const refreshed = initProject({ projectRoot: project });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const after = fs.lstatSync(adapterPath, { bigint: true });
+  assert.deepEqual([after.ino, after.mode, after.mtimeNs], [before.ino, before.mode, before.mtimeNs]);
+});
+
 test("non-force init migrates a superseded generated manifest so the project keeps its durable run", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -3800,7 +3816,9 @@ test("init does not modify a regular file swapped after the anchored open", { co
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
-  const originalContents = fs.readFileSync(environmentPath, "utf8");
+  // A stale adapter, so init has to open it for writing.
+  const originalContents = `${fs.readFileSync(environmentPath, "utf8")}// stale\n`;
+  fs.writeFileSync(environmentPath, originalContents, "utf8");
   const concurrentContents = "export const concurrentEnvironmentCustomization = true;\n";
   const originalOpenSync = fs.openSync;
   const descriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
@@ -3809,7 +3827,8 @@ test("init does not modify a regular file swapped after the anchored open", { co
     ...descriptor,
     value: (...args: unknown[]) => {
       const opened = Reflect.apply(originalOpenSync, fs, args) as number;
-      if (!swapped && path.basename(String(args[0])) === "environment.ts") {
+      const writing = (Number(args[1] ?? 0) & fs.constants.O_WRONLY) !== 0;
+      if (!swapped && writing && path.basename(String(args[0])) === "environment.ts") {
         swapped = true;
         fs.renameSync(environmentPath, `${environmentPath}.old`);
         fs.writeFileSync(environmentPath, concurrentContents, "utf8");
