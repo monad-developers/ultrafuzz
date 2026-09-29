@@ -59,19 +59,13 @@ export interface CleanAuditRecord {
 export const materializeAuditCodec: StrictJsonlCodec<MaterializeAuditRecord> = Object.freeze({
   label: "materialize audit journal",
   parseRecord: parseMaterializeAuditRecord,
-  identity: (record: MaterializeAuditRecord) => record.audit_id,
-  validateHistory: (records: readonly MaterializeAuditRecord[]) => {
-    assertNondecreasingTimestamps(records, "materialize audit journal");
-  }
+  identity: (record: MaterializeAuditRecord) => record.audit_id
 });
 
 export const cleanAuditCodec: StrictJsonlCodec<CleanAuditRecord> = Object.freeze({
   label: "clean audit journal",
   parseRecord: parseCleanAuditRecord,
-  identity: (record: CleanAuditRecord) => record.audit_id,
-  validateHistory: (records: readonly CleanAuditRecord[]) => {
-    assertNondecreasingTimestamps(records, "clean audit journal");
-  }
+  identity: (record: CleanAuditRecord) => record.audit_id
 });
 
 export function parseMaterializeAuditRecord(value: unknown, path = "$"): MaterializeAuditRecord {
@@ -120,14 +114,5 @@ function assertUnique<T>(values: readonly T[], project: (value: T) => string, la
     const key = project(value);
     if (seen.has(key)) throw new Error(`${label} values must be unique; duplicate ${JSON.stringify(key)}`);
     seen.add(key);
-  }
-}
-
-function assertNondecreasingTimestamps<T extends { timestamp: string }>(records: readonly T[], label: string): void {
-  let previous = Number.NEGATIVE_INFINITY;
-  for (const [index, record] of records.entries()) {
-    const current = Date.parse(record.timestamp);
-    if (current < previous) throw new Error(`${label} timestamps are out of order at record ${index + 1}`);
-    previous = current;
   }
 }

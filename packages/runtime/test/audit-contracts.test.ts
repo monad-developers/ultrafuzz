@@ -92,6 +92,23 @@ test("runtime audit journals validate immutable complete history before append",
   assert.deepEqual(fs.readFileSync(materializePath), malformedBytes);
 });
 
+test("runtime audit journals stay appendable after the host clock steps back", () => {
+  const root = temporaryRoot("ufz-runtime-audit-clock-");
+  const cleanPath = path.join(root, "clean-audit.jsonl");
+  const materializePath = path.join(root, "materialize-audit.jsonl");
+  const cleanRecords = [currentCleanRecord(), { ...currentCleanRecord(), timestamp: "2026-08-09T11:59:00.000Z" }];
+  const materializeRecords = [
+    currentMaterializeRecord(),
+    { ...currentMaterializeRecord(), timestamp: "2026-08-09T11:59:00.000Z" }
+  ];
+
+  for (const record of cleanRecords) appendCleanAuditRecord(cleanPath, record, root);
+  for (const record of materializeRecords) appendMaterializeAuditRecord(materializePath, record, root);
+
+  assert.deepEqual(readCleanAuditJournal(cleanPath).records, cleanRecords);
+  assert.deepEqual(readMaterializeAuditJournal(materializePath).records, materializeRecords);
+});
+
 function currentCleanRecord() {
   return {
     schema_version: CLEAN_AUDIT_SCHEMA_VERSION,
