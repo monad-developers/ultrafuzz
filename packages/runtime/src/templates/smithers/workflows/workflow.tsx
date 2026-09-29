@@ -4003,7 +4003,11 @@ function prepareArtifactMirror(
     materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
   );
   preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
-  preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  // `pinnedSubmodules: "verify"` is the post-agent verify pass. It checks outputs in-process and never
+  // runs the agent-facing CLI, so a CLI cold start there could only fail its zero-retry task.
+  if (options.pinnedSubmodules !== "verify") {
+    preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  }
   preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
   preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
     materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode)
@@ -4098,8 +4102,8 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
 const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
 // The preflight proves that this process can launch the agent-facing validator, which does not vary
 // by task: `materializePromptSchemas` has already digest-checked each workspace's schema copy. One
-// success per engine process is enough. Re-spawning it in every prepare, attempt reset and
-// zero-retry verify only added CLI cold starts that could fail a finished attempt.
+// success per engine process is enough. Re-spawning it in every prepare and attempt reset only
+// added CLI cold starts that could fail an attempt.
 let jsonValidatorPreflightPassed = false;
 
 function preflightJsonValidator(schemaDirectory: string): void {

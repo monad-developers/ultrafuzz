@@ -6766,8 +6766,8 @@ test("generated validator preflight budgets a contended CLI start and reports th
 });
 
 test("generated validator preflight spawns the CLI once per engine process and never remembers a failure", () => {
-  // One engine process runs every prepare, agent-attempt reset and zero-retry verify. The CLI answer
-  // does not depend on the task, so only the first success spawns it.
+  // One engine process runs every prepare and agent-attempt reset. The CLI answer does not depend on
+  // the task, so only the first success spawns it.
   const harness = loadJsonValidatorPreflight();
   harness.preflight();
   harness.preflight();

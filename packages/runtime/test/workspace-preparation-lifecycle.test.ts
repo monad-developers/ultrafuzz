@@ -80,7 +80,7 @@ function dependencySnapshot(dependency: string) {
  * dependency epoch checks, patch validation, replay, journals, snapshots, handoff,
  * and both invariant baseline copies use the production implementations.
  */
-function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean } = {}) {
+function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean; onPreflight?: () => void } = {}) {
   const source = ts.createSourceFile(
     templatePath(),
     fs.readFileSync(templatePath(), "utf8"),
@@ -91,7 +91,7 @@ function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean 
   const replacements: Record<string, unknown> = {
     assertWorkspaceSourceRevision: () => undefined,
     preservePinnedSourceProof: () => undefined,
-    preflightJsonValidator: () => undefined,
+    preflightJsonValidator: () => options.onPreflight?.(),
     assertTaskOutputSchemaBindings: () => undefined,
     materializePromptSchemas: (root: string) => {
       fs.mkdirSync(root, { recursive: true });
@@ -158,7 +158,11 @@ function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean 
   )(...Object.values(collaborators)) as {
     prepare(
       task: Task,
-      options?: { replayWorkspacePatches?: boolean; evidenceMode?: "create" | "require" }
+      options?: {
+        replayWorkspacePatches?: boolean;
+        evidenceMode?: "create" | "require";
+        pinnedSubmodules?: "restore" | "verify";
+      }
     ): { prepared: boolean };
     baseline(task: Task): string;
     preparation(task: Task): string;
@@ -526,4 +530,26 @@ test("#1115 an interrupted workspace replacement still binds property-only depen
     fs.writeFileSync(marker, "generation 1\n");
     preparationHarness(fixture.tasks).prepare(fixture.task);
     assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), fixture.second);
+  }));
+
+test("the post-agent verify pass does not preflight the agent-facing validator CLI", () =>
+  lifecycleFixture((fixture) => {
+    let preflights = 0;
+    const harness = preparationHarness(fixture.tasks, {
+      onPreflight: () => {
+        preflights += 1;
+      }
+    });
+    // prepare:* and the reset before each agent attempt run ahead of an agent that uses the CLI.
+    harness.prepare(fixture.task);
+    harness.prepare(fixture.task, { replayWorkspacePatches: false, evidenceMode: "require" });
+    assert.equal(preflights, 2);
+    // finalizeAndVerifyArtifacts' options: verify checks the finished agent's outputs in-process and
+    // has no retry, so a CLI cold start that timed out there would discard completed agent work.
+    harness.prepare(fixture.task, {
+      replayWorkspacePatches: false,
+      evidenceMode: "require",
+      pinnedSubmodules: "verify"
+    });
+    assert.equal(preflights, 2);
   }));
