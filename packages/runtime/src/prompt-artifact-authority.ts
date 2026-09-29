@@ -4,7 +4,6 @@ import {
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   isArtifactContractId,
-  isCanonicalSelectorOrder,
   MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
   MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
   parseSmithersTaskManifestBytes,
@@ -556,7 +555,9 @@ function validateSelector(value: unknown, label: string): PromptArtifactAuthorit
     throw new Error(`${label} paths must be a non-empty bounded array`);
   }
   const paths = value.paths.map((selectedPath, index) => canonicalRelativePath(selectedPath, `${label} path ${index}`));
-  assertCanonicalUniqueOrder(paths, `${label} paths`);
+  // Sealed selectors keep the path order they were planned with, which was host
+  // collation before code-unit ordering; the ID below binds that exact list.
+  if (new Set(paths).size !== paths.length) throw new Error(`${label} paths are duplicated`);
   if (value.id !== promptArtifactAuthorityPathSelectorId(paths)) {
     throw new Error(`${label} ID does not match its paths`);
   }
@@ -631,7 +632,13 @@ function assertExactArtifactDirectory(value: string, attemptId: string, label: s
 }
 
 function assertCanonicalUniqueOrder(values: readonly string[], label: string): void {
-  if (!isCanonicalSelectorOrder(values)) throw new Error(`${label} are duplicated or not canonically ordered`);
+  let previous: string | undefined;
+  for (const value of values) {
+    if (previous !== undefined && compareCodeUnits(previous, value) >= 0) {
+      throw new Error(`${label} are duplicated or not canonically ordered`);
+    }
+    previous = value;
+  }
 }
 
 // Code-unit order, not localeCompare: collation depends on the host locale, and

@@ -69,16 +69,7 @@ export interface DashboardAuditInput {
 export const dashboardAuditCodec: StrictJsonlCodec<DashboardAuditRecord> = Object.freeze({
   label: "dashboard audit journal",
   parseRecord: parseDashboardAuditRecord,
-  identity: (record: DashboardAuditRecord) => record.audit_id,
-  validateHistory: (records: readonly DashboardAuditRecord[]) => {
-    let previous = Number.NEGATIVE_INFINITY;
-    for (const [index, record] of records.entries()) {
-      const current = Date.parse(record.timestamp);
-      if (current < previous)
-        throw new Error(`dashboard audit journal timestamps are out of order at record ${index + 1}`);
-      previous = current;
-    }
-  }
+  identity: (record: DashboardAuditRecord) => record.audit_id
 });
 
 export function assertDashboardHttpDocument(value: unknown, definition: DashboardHttpDefinition, label: string): void {

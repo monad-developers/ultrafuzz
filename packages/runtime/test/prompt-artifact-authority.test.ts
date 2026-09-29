@@ -294,13 +294,24 @@ test("derivation orders producers whose attempt IDs share a prefix, such as loop
   );
 });
 
-test("derivation accepts selector paths sealed in code-unit order", () => {
+test("derivation accepts selector paths in the order they were sealed", () => {
   // "Report.md" sorts before "findings.json" by code unit ("R" is 0x52, "f" is
-  // 0x66) and after it under en-US localeCompare.
-  const authority = deriveFromProducers(["strategy"], ["Report.md", "findings.json"]);
-  assert.deepEqual(
-    authority.producers.flatMap((producer) => producer.outputs.map((output) => output.path)),
-    ["Report.md", "findings.json"]
+  // 0x66), which planning now produces, and after it under the en-US collation
+  // that runs sealed before code-unit ordering used.
+  for (const paths of [
+    ["Report.md", "findings.json"],
+    ["findings.json", "Report.md"]
+  ]) {
+    const authority = deriveFromProducers(["strategy"], paths);
+    assert.deepEqual(authority.selectors, [pathSelector(paths)]);
+    assert.deepEqual(
+      authority.producers.flatMap((producer) => producer.outputs.map((output) => output.path)),
+      ["Report.md", "findings.json"]
+    );
+  }
+  assert.throws(
+    () => derivePromptArtifactAuthority(deriveInput({ selectors: [pathSelector(["findings.json", "findings.json"])] })),
+    /input selector 0 paths are duplicated/u
   );
 });
 

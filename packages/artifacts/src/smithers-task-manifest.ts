@@ -9,7 +9,6 @@ import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
 import {
-  isCanonicalSelectorOrder,
   MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
   MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
   promptArtifactAuthorityPathSelectorId
@@ -1254,12 +1253,15 @@ function assertPromptArtifactAuthoritySelectors(task: SmithersTaskManifestTask):
         `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority has too many selected paths`
       );
     }
+    // Paths and selectors are checked for uniqueness, not order: manifests sealed
+    // before code-unit ordering hold them in host-collation order, and the
+    // selector ID already binds each path group to its exact list.
     if (
       selector.paths.some((selectedPath) => !CANONICAL_ARTIFACT_RELATIVE_PATH.test(selectedPath)) ||
-      !isCanonicalSelectorOrder(selector.paths)
+      new Set(selector.paths).size !== selector.paths.length
     ) {
       throw new Error(
-        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority paths are not unique and canonically ordered`
+        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority paths are not canonical and unique`
       );
     }
     if (selector.id !== promptArtifactAuthorityPathSelectorId(selector.paths)) {
@@ -1269,9 +1271,9 @@ function assertPromptArtifactAuthoritySelectors(task: SmithersTaskManifestTask):
     }
     return `path\u0000${selector.id}`;
   });
-  if (!isCanonicalSelectorOrder(keys)) {
+  if (new Set(keys).size !== keys.length) {
     throw new Error(
-      `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors are not unique and canonically ordered`
+      `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors are not unique`
     );
   }
 }

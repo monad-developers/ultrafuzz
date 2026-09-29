@@ -264,7 +264,7 @@ test("canonical runtime documents round-trip through their validated writers and
   assert.deepEqual(readRunMetadataDocument(metadataPath, runMetadata.run_id), runMetadata);
 });
 
-test("run plans round-trip compact selector groups and reject mismatched path IDs", (t) => {
+test("run plans round-trip compact selector groups in either path order and reject mismatched path IDs", (t) => {
   const root = temporaryDirectory();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -274,23 +274,28 @@ test("run plans round-trip compact selector groups and reject mismatched path ID
     logicalIds: [],
     contract: "ultrafuzz/findings@2"
   };
-  // Canonical order is code-unit order, whatever the host locale: "F" sorts before "c".
-  const paths = ["reports/Final.json", "reports/context.md"];
-  const pathReference = {
+  const pathAuthority = (paths: string[]) => ({
     kind: "ancestor_artifact_path_authority" as const,
     logicalIds: [],
     selectorId: promptArtifactAuthorityPathSelectorId(paths),
     relativePaths: paths
-  };
-  runPlan.rendered_prompts[0]!.artifact_references.push(emptyContractReference, pathReference);
+  });
+  // Code-unit order, which planning now produces ("F" sorts before "c"), and the
+  // host-collation order that plans sealed before it hold.
+  const pathReference = pathAuthority(["reports/Final.json", "reports/context.md"]);
+  const collatedReference = pathAuthority(["reports/context.md", "reports/Final.json"]);
+  const [prompt] = runPlan.rendered_prompts;
+  assert.ok(prompt);
+  prompt.artifact_references.push(emptyContractReference, pathReference, collatedReference);
   const planPath = path.join(root, "plan.json");
 
   writeRunPlanDocument(planPath, runPlan);
 
   const roundTripped = readRunPlanDocument(planPath, runPlan.run_id);
-  assert.deepEqual(roundTripped.rendered_prompts[0]!.artifact_references.slice(-2), [
+  assert.deepEqual(roundTripped.rendered_prompts[0]?.artifact_references.slice(-3), [
     emptyContractReference,
-    pathReference
+    pathReference,
+    collatedReference
   ]);
 
   pathReference.selectorId = "0".repeat(64);

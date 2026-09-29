@@ -560,8 +560,8 @@ default_timeout_seconds = 1200
 workflow_deadline_seconds = 7200
 controller_lease_seconds = 45
 
-[retry]
-agents = ["project-model"]
+[models]
+default = "project-model"
 
 [models.project-model]
 agent = "CodexAgent"
@@ -600,7 +600,7 @@ config_dir = "teams/codex"
     expect(resolved.value.run.forgeVmemLimitKb).toBe(16_777_216);
     expect(resolved.value.run.forgeRayonThreads).toBe(3);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 4 });
-    expect(resolved.value.retry.agents).toEqual(["project-model"]);
+    expect(resolved.value.models.default).toBe("project-model");
     expect(resolved.value.models.profiles["project-model"]?.agent).toBe("CodexAgent");
     expect(resolved.value.models.profiles["project-model"]?.reasoning).toBe("max");
     expect(resolved.value.agents.CodexAgent).toEqual({
@@ -608,32 +608,6 @@ config_dir = "teams/codex"
       apiKeyEnv: "OPENAI_API_KEY",
       configDir: "teams/codex"
     });
-  });
-
-  it("rejects a string [models] default and points at retry.agents instead", () => {
-    const resolve = (toml: string) => {
-      const project = parseProjectConfigToml(toml);
-      if (!project.ok) throw new Error(JSON.stringify(project.diagnostics));
-      return resolveConfig({ env: {}, projectConfig: project.value });
-    };
-    const profile = '[models.claude]\nagent = "ClaudeAgent"\n';
-
-    const rejected = resolve(`[models]\ndefault = "claude"\n\n${profile}`);
-    expect(rejected.ok ? [] : rejected.diagnostics).toContainEqual(
-      expect.objectContaining({
-        code: "CONFIG_MODEL_DEFAULT_UNSUPPORTED",
-        path: ["models", "default"],
-        message: expect.stringContaining('set [retry] agents = ["claude"]')
-      })
-    );
-
-    // The suggested spelling resolves and its TOML snapshot parses back.
-    const suggested = resolve(`[retry]\nagents = ["claude"]\n\n${profile}`);
-    expect(suggested.ok).toBe(true);
-    if (suggested.ok)
-      expect(parseProjectConfigToml(serializeRedactedResolvedConfigToml(suggested.value)).ok).toBe(true);
-    // Naming the built-in profile is a no-op and stays accepted.
-    expect(resolve('[models]\ndefault = "default"\n').ok).toBe(true);
   });
 
   it("returns typed diagnostics for invalid TOML fields and rejects legacy backend tables", () => {
@@ -845,7 +819,8 @@ describe("redaction", () => {
               agent: "CodexAgent",
               model: "sk-test-secret"
             }
-          }
+          },
+          default: "secret-model"
         }
       }
     });
@@ -1080,7 +1055,6 @@ describe("model profile and triage validation", () => {
 
     expect(resolved.ok).toBe(false);
     expect(resolved.diagnostics.map(({ code, path }) => ({ code, path }))).toEqual([
-      { code: "CONFIG_MODEL_DEFAULT_UNSUPPORTED", path: ["models", "default"] },
       { code: "CONFIG_MODEL_PROFILE_ID_INVALID", path: ["models", "../bad"] },
       { code: "CONFIG_MODEL_DEFAULT_UNKNOWN", path: ["models", "default"] },
       { code: "CONFIG_MODEL_AGENT_INVALID", path: ["models", "../bad", "agent"] },

@@ -18,7 +18,6 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   isArtifactContractId,
-  isCanonicalSelectorOrder,
   MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
@@ -8128,11 +8127,7 @@ function promptArtifactAuthoritySelectorsFor(
     }
     if (reference.kind !== "ancestor_artifact_path_authority") continue;
     const paths = [...reference.relativePaths];
-    if (
-      paths.length === 0 ||
-      reference.selectorId !== promptArtifactAuthorityPathSelectorId(paths) ||
-      !isCanonicalSelectorOrder(paths)
-    ) {
+    if (paths.length === 0 || reference.selectorId !== promptArtifactAuthorityPathSelectorId(paths)) {
       throw new Error(
         `rendered prompt ${JSON.stringify(renderedPrompt.attempt_id)} uses an invalid prompt artifact authority path selector group`
       );

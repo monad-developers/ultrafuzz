@@ -243,29 +243,37 @@ test("strictly validates retained dynamic group templates and prompt context", (
   assert.throws(() => parseSmithersTaskManifestBytes(bytes(missingTemplateDigest)), /registered schema/u);
 });
 
-test("accepts canonical prompt artifact authority selectors and rejects duplicate or unordered selectors", () => {
-  // Canonical order is code-unit order, whatever the host locale: "Z" sorts before "a".
-  const paths = ["reports/Zeta.json", "reports/alpha.json"];
-  const pathSelector = { kind: "path" as const, id: promptArtifactAuthorityPathSelectorId(paths), paths };
-  const selected = task({
-    promptArtifactAuthoritySelectors: [
-      { kind: "contract", contract: "ultrafuzz/findings@2" },
-      { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
-      pathSelector
-    ]
+test("accepts prompt artifact authority selectors in any order and rejects duplicates", () => {
+  const pathSelector = (paths: string[]) => ({
+    kind: "path" as const,
+    id: promptArtifactAuthorityPathSelectorId(paths),
+    paths
   });
-  const parsed = parseSmithersTaskManifestBytes(bytes(manifest([selected])));
-  assert.deepEqual(parsed.tasks[0]!.promptArtifactAuthoritySelectors, selected.promptArtifactAuthoritySelectors);
+  const contracts = [
+    { kind: "contract" as const, contract: "ultrafuzz/findings@2" as const },
+    { kind: "contract" as const, contract: "ultrafuzz/generated-tests@3" as const }
+  ];
+  const selectors = [
+    ...contracts,
+    // Code-unit order, which planning now produces: "Z" sorts before "a".
+    pathSelector(["reports/Zeta.json", "reports/alpha.json"]),
+    // Host-collation order, as sealed before code-unit ordering: ICU puts "_" before ".".
+    pathSelector(["findings_raw.json", "findings.json"])
+  ];
+  const parsedSelectors = (promptArtifactAuthoritySelectors: typeof selectors) =>
+    parseSmithersTaskManifestBytes(bytes(manifest([task({ promptArtifactAuthoritySelectors })]))).tasks[0]
+      ?.promptArtifactAuthoritySelectors;
 
-  const duplicate = structuredClone(selected);
-  duplicate.promptArtifactAuthoritySelectors!.push(structuredClone(pathSelector));
-  assert.throws(() => parseSmithersTaskManifestBytes(bytes(manifest([duplicate]))), /registered schema/u);
-
-  const unordered = structuredClone(selected);
-  unordered.promptArtifactAuthoritySelectors!.reverse();
+  assert.deepEqual(parsedSelectors(selectors), selectors);
+  const reversed = [...selectors].reverse();
+  assert.deepEqual(parsedSelectors(reversed), reversed);
   assert.throws(
-    () => parseSmithersTaskManifestBytes(bytes(manifest([unordered]))),
-    /prompt artifact authority selectors are not unique and canonically ordered/u
+    () => parsedSelectors([...selectors, pathSelector(["findings_raw.json", "findings.json"])]),
+    /registered schema/u
+  );
+  assert.throws(
+    () => parsedSelectors([...contracts, pathSelector(["findings.json", "findings.json"])]),
+    /registered schema/u
   );
 });
 

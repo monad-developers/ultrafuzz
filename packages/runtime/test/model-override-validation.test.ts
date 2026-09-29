@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { initProject, validateProject } from "../src/index.js";
+import { initProject, runsRootForProject, validateProject } from "../src/index.js";
 
 const ACCEPTED_OPENROUTER_MODEL = "~vendor/model.latest:free+preview@2026";
 const BELL = String.fromCodePoint(7);
@@ -96,4 +96,46 @@ test("validate still requires the pre-override configured agent factories", asyn
       .map((diagnostic) => diagnostic.message.match(/agent reference (\w+)/u)?.[1]),
     ["CodexAgent"]
   );
+});
+
+test("validate rejects a string [models] default while the config still locates existing runs", async () => {
+  const project = tempProject();
+  const writeConfig = (primaryProfile: string) =>
+    fs.writeFileSync(
+      path.join(project, "ultrafuzz.toml"),
+      `schema_version = "ultrafuzz.config.v2"
+
+[project]
+repo = "."
+
+[run]
+output_dir = "custom-runs"
+
+${primaryProfile}
+
+[models.fast]
+agent = "CodexAgent"
+model = "gpt-test-fast"
+`,
+      "utf8"
+    );
+
+  writeConfig('[models]\ndefault = "fast"');
+  const rejected = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(
+    rejected.diagnostics
+      .filter((diagnostic) => diagnostic.severity === "error")
+      .map(({ code, path: diagnosticPath, message }) => ({
+        code,
+        path: diagnosticPath,
+        suggestsRetryAgents: message.includes('set [retry] agents = ["fast"]')
+      })),
+    [{ code: "CONFIG_MODEL_DEFAULT_UNSUPPORTED", path: "models.default", suggestsRetryAgents: true }]
+  );
+  // Status, resume and sync resolve the same file only to find the runs directory.
+  assert.equal(await runsRootForProject(project), path.join(project, "custom-runs"));
+
+  writeConfig('[retry]\nagents = ["fast"]');
+  const accepted = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
 });

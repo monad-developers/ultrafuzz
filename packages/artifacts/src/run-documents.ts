@@ -3,10 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { isArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
-import {
-  isCanonicalSelectorOrder,
-  promptArtifactAuthorityPathSelectorId
-} from "./prompt-artifact-authority-selectors.js";
+import { promptArtifactAuthorityPathSelectorId } from "./prompt-artifact-authority-selectors.js";
 import { writeJsonDurable } from "./safe-paths.js";
 import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -374,10 +371,9 @@ export function assertRunPlanDocument(value: unknown, expectedRunId?: string): R
         );
       }
       if (reference.kind !== "ancestor_artifact_path_authority") continue;
-      if (
-        !isCanonicalSelectorOrder(reference.relativePaths) ||
-        reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)
-      ) {
+      // The schema already makes the paths unique. Their order is not checked:
+      // plans sealed before code-unit ordering hold them in host-collation order.
+      if (reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)) {
         throw new Error(
           `run plan rendered prompt ${JSON.stringify(prompt.attempt_id)} has an invalid compact path authority group`
         );
