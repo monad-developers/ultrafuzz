@@ -3969,14 +3969,6 @@ async function synchronizeTasks(input: {
     );
     const aggregateStatus = aggregateAttemptStatuses(aggregateStatuses);
     const previous = currentState.nodes[aggregateStateId];
-    if (
-      previous !== undefined &&
-      terminalStatus(previous.status) &&
-      !(previous.status === "failed" && aggregateStatus === "succeeded")
-    ) {
-      nodeStatuses.set(aggregateStateId, previous.status);
-      continue;
-    }
     nodeStatuses.set(aggregateStateId, aggregateStatus);
     const patch = {
       status: aggregateStatus,

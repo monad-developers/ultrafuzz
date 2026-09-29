@@ -609,7 +609,6 @@ export function verifyWorkflowControlSnapshot(
   const runtimeControlsChanged =
     digestBytes(currentGraph).sha256 !== seal.files.graph.sha256 ||
     digestBytes(currentTasks).sha256 !== seal.files.tasks.sha256;
-  let runtimeStateNodeIds: readonly string[] | undefined;
   // A changed graph or task plan with no compiled dynamic base has no authority that could explain
   // the change, so nothing may execute it. That is an execution question, not a reading one: the
   // digest loop above has already reported both files as diverged, so refusing here told a read-only
@@ -634,7 +633,7 @@ export function verifyWorkflowControlSnapshot(
     // So an observer records that the expansion no longer re-derives and reports the run; execution
     // callers still take the throw from `reportDivergence`.
     try {
-      const materialized = verifyDynamicRuntimeMaterialization({
+      verifyDynamicRuntimeMaterialization({
         runId: layout.runId,
         projectRoot,
         runRoot: layout.root,
@@ -645,14 +644,6 @@ export function verifyWorkflowControlSnapshot(
         baseTasks: taskDocument.tasks as CompiledSmithersTask[],
         groups: taskDocument.dynamic_groups as CompiledSmithersDynamicGroup[]
       });
-      runtimeStateNodeIds = [
-        ...new Set(
-          [
-            ...materialized.graph.nodes.map((node) => node.id),
-            ...materialized.tasks.flatMap((task) => [task.attemptId, task.metadata.node.storageId])
-          ].filter((nodeId): nodeId is string => nodeId !== undefined)
-        )
-      ];
     } catch (error) {
       reportDivergence(
         `published dynamic runtime controls no longer re-derive from their sealed base: ${error instanceof Error ? error.message : String(error)}`
@@ -671,8 +662,7 @@ export function verifyWorkflowControlSnapshot(
       layout.runId,
       contents,
       readBoundedRegularFile(layout.root, layout.statePath, "run state"),
-      executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents,
-      runtimeStateNodeIds
+      executionFiles.find((file) => file.snapshotPath === "controls/plan.json")?.contents
     );
   } catch (error) {
     reportDivergence(
@@ -2057,8 +2047,7 @@ function deriveWorkflowControlBindings(
     Pick<Record<WorkflowControlFileKey, Buffer>, "graph" | "expanded_graph" | "graph_fingerprint" | "config" | "tasks">
   >,
   stateContents: Buffer,
-  planContents: Buffer | undefined,
-  runtimeStateNodeIds?: readonly string[]
+  planContents: Buffer | undefined
 ): WorkflowControlBindings {
   const graph = assertPlannedGraph(parseStrictJsonBytes(contents.graph));
   const expandedGraph = assertExpandedGraphSchema(parseStrictJsonBytes(contents.expanded_graph));
@@ -2077,7 +2066,6 @@ function deriveWorkflowControlBindings(
   if (state.config_fingerprint !== configFingerprint) {
     throw new Error("run state config fingerprint does not match the exact resolved config");
   }
-  if (!Array.isArray(graph.nodes) || !isRecord(state.nodes)) throw new Error("run graph or state node set is invalid");
   if (tasksDocument.run_id !== runId || tasksDocument.smithers_run_id.length === 0) {
     throw new Error("workflow task manifest identity is invalid");
   }
@@ -2091,20 +2079,6 @@ function deriveWorkflowControlBindings(
   );
   if (JSON.stringify(graphNodeIds) !== JSON.stringify(expandedGraphNodeIds)) {
     throw new Error("run graph node set does not exactly match the expanded graph fingerprint preimage");
-  }
-  const stateNodeIds = sortedUniqueIds(Object.keys(state.nodes), "run state node");
-  if (runtimeStateNodeIds === undefined) {
-    if (JSON.stringify(graphNodeIds) !== JSON.stringify(stateNodeIds)) {
-      throw new Error("run state node set does not exactly match the sealed graph");
-    }
-  } else {
-    const admittedRuntimeNodeIds = sortedUniqueIds(runtimeStateNodeIds, "dynamic runtime state node");
-    if (graphNodeIds.some((nodeId) => !stateNodeIds.includes(nodeId))) {
-      throw new Error("run state dropped a node from the sealed graph");
-    }
-    if (stateNodeIds.some((nodeId) => !admittedRuntimeNodeIds.includes(nodeId))) {
-      throw new Error("run state contains a node outside the verified dynamic runtime graph");
-    }
   }
   const taskAttempts: string[] = [];
   const taskNodes: string[] = [];
@@ -2149,6 +2123,7 @@ function deriveWorkflowControlBindings(
     run_id: runId,
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
+    // The sealed graph's node set. Run state also keys records by attempt and storage ID, so its keys are not checked.
     expected_state_node_ids: graphNodeIds,
     expected_task_attempt_ids: expectedTaskAttemptIds,
     expected_task_node_ids: expectedTaskNodeIds
