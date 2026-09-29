@@ -7,7 +7,7 @@
  * merged with all checks green, then failed on main.
  */
 
-/** @typedef {{ lane: string, description: string, gates: string, timeout_minutes: number, build_modal_dependencies?: boolean, build_release_reporter?: boolean, build_cli?: boolean }} ReleaseValidationLane */
+/** @typedef {{ lane: string, description: string, gates: string, timeout_minutes: number, build_modal_dependencies?: boolean, build_cli?: boolean }} ReleaseValidationLane */
 
 /** @type {readonly ReleaseValidationLane[]} */
 export const RELEASE_VALIDATION_LANES = Object.freeze([
@@ -59,22 +59,19 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     description: "CLI package tests",
     gates: "cli",
     // The complete local CLI suite took 76 minutes before job setup overhead.
-    timeout_minutes: 120,
-    build_release_reporter: true
+    timeout_minutes: 120
   },
   {
     lane: "cli-e2e",
     description: "End-to-end campaign with controller kill and resume on the pinned engine",
     gates: "cli-e2e",
-    timeout_minutes: 60,
-    build_release_reporter: true
+    timeout_minutes: 60
   },
   {
     lane: "benchmark-history-typecheck",
     description: "Benchmark history charts and workspace typecheck",
     gates: "benchmark-history,workspace-typecheck",
     timeout_minutes: 45,
-    build_release_reporter: true,
     build_cli: true
   }
 ]);

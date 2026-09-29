@@ -197,8 +197,9 @@ jobs:
         if: matrix.build_modal_dependencies == true
         run: pnpm --filter @ultrafuzz/modal... build
 
+      # scripts/validate-release.mjs imports packages/artifacts/dist when it
+      # loads, so every lane builds it; a lane without it fails before any gate.
       - name: Build release reporter dependencies
-        if: matrix.build_release_reporter == true
         run: pnpm --filter @ultrafuzz/artifacts... build
 
       # The benchmark-history gate runs `benchmark:check:prebuilt`, which executes
