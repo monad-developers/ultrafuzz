@@ -9,38 +9,11 @@ const browserFiles = ["packages/dashboard/frontend/{public,src}/**/*.{js,ts,tsx}
 const typescriptFiles = ["packages/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}"];
 const typeCheckedFiles = ["packages/*/src/**/*.ts", "packages/dashboard/frontend/src/**/*.{ts,tsx}"];
 const sourceFiles = ["packages/**/*.{js,mjs,cjs,ts,tsx}", "scripts/**/*.{js,mjs,cjs,ts,tsx}"];
-// Complexity and size budgets apply to all code. Violations that predate them are
-// counted per file and rule in eslint-suppressions.json: lint fails when a file
-// has more violations of a rule than its count, and only `pnpm -w lint:prune`
-// lowers a count (docs/contributing.md).
-const sizeConfigs = [
-  {
-    files: sourceFiles,
-    rules: {
-      complexity: ["error", 20],
-      "max-depth": ["error", 4],
-      "max-lines": ["error", { max: 500, skipBlankLines: true, skipComments: true }],
-      "max-lines-per-function": ["error", { max: 80, skipBlankLines: true, skipComments: true }],
-      "max-nested-callbacks": ["error", 4],
-      "max-params": ["error", 5],
-      "max-statements": ["error", 40]
-    }
-  },
-  {
-    files: [
-      "**/{test,tests}/**/*.{js,mjs,cjs,ts,tsx}",
-      "**/*.test.{js,mjs,cjs,ts,tsx}",
-      "packages/runtime/src/templates/**/*.tsx"
-    ],
-    rules: {
-      complexity: ["error", 25],
-      "max-lines": ["error", { max: 1000, skipBlankLines: true, skipComments: true }],
-      "max-lines-per-function": ["error", { max: 150, skipBlankLines: true, skipComments: true }],
-      "max-params": ["error", 6],
-      "max-statements": ["error", 80]
-    }
-  }
-];
+// Global cyclomatic complexity ceiling (#960). It is set at the current maximum,
+// with no suppressions, so no function can grow past the worst one today; lower
+// it as the most complex functions are simplified. Changed lines are held to the
+// stricter budgets below by `pnpm -w lint:strict:ci`.
+const complexityCeilingConfigs = [{ files: sourceFiles, rules: { complexity: ["error", 90] } }];
 const strictConfigs = strictLint
   ? [
       ...tseslint.configs.strict.map((config) => ({
@@ -63,8 +36,29 @@ const strictConfigs = strictLint
       {
         files: sourceFiles,
         rules: {
+          complexity: ["error", 20],
+          "max-depth": ["error", 4],
+          "max-lines": ["error", { max: 500, skipBlankLines: true, skipComments: true }],
+          "max-lines-per-function": ["error", { max: 80, skipBlankLines: true, skipComments: true }],
+          "max-nested-callbacks": ["error", 4],
+          "max-params": ["error", 5],
+          "max-statements": ["error", 40],
           "no-console": "error",
           "no-warning-comments": ["error", { terms: ["todo", "fixme"], location: "anywhere" }]
+        }
+      },
+      {
+        files: [
+          "**/{test,tests}/**/*.{js,mjs,cjs,ts,tsx}",
+          "**/*.test.{js,mjs,cjs,ts,tsx}",
+          "packages/runtime/src/templates/**/*.tsx"
+        ],
+        rules: {
+          complexity: ["error", 25],
+          "max-lines": ["error", { max: 1000, skipBlankLines: true, skipComments: true }],
+          "max-lines-per-function": ["error", { max: 150, skipBlankLines: true, skipComments: true }],
+          "max-params": ["error", 6],
+          "max-statements": ["error", 80]
         }
       }
     ]
@@ -88,7 +82,7 @@ export default tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
-  ...sizeConfigs,
+  ...complexityCeilingConfigs,
   ...strictConfigs,
   {
     files: ["**/*.{js,mjs,cjs,ts,tsx}"],

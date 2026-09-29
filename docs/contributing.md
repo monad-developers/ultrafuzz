@@ -79,29 +79,11 @@ pnpm -r test
 Prefer narrow package checks while iterating, then run broader gates before PR
 handoff when a change touches shared behavior or release workflows.
 
-## Complexity and Size Budgets
+## Complexity Ceiling
 
-`pnpm -w lint` applies complexity and size budgets to all code under
-`packages/` and `scripts/`: cyclomatic complexity 20, nesting depth 4, 500 lines
-per file, 80 lines and 40 statements per function, 5 parameters, and 4 nested
-callbacks. Tests and workflow templates allow complexity 25, 1000 lines per
-file, 150 lines and 80 statements per function, and 6 parameters.
-
-Violations that predate the budgets are counted per file and rule in
-`eslint-suppressions.json`, ESLint's bulk-suppressions file. Lint compares each
-file's violations of a rule with that recorded count:
-
-- More violations than the recorded count fail lint, and ESLint then reports
-  every violation of that rule in the file. Fix the new one.
-- Fewer violations pass, and the recorded count stays until someone runs
-  `pnpm -w lint:prune` and commits the smaller `eslint-suppressions.json`.
-  Until then, new violations of that rule in that file pass up to the old count.
-  Prune in the change that removes the violations, or in a follow-up when
-  parallel changes would edit the same entries.
-- Moving code that already exceeds a budget, including renaming its file,
-  needs its count moved to the new path in `eslint-suppressions.json`.
-
-Counts are per file and rule, so a function that already exceeds a budget can
-grow without failing lint, and a change can fix one violation and add another
-of the same rule in the same file. `pnpm -w lint:strict:ci` adds the type-aware
-strict rules, `no-console`, and the TODO/FIXME check for changed lines only.
+`pnpm -w lint` fails any function under `packages/` or `scripts/` whose
+cyclomatic complexity is above 90, the highest value in the codebase when the
+ceiling was added. There are no suppressions: lower the ceiling in
+`eslint.config.js` when the most complex functions are simplified.
+`pnpm -w lint:strict:ci` holds changed lines to the stricter complexity, size,
+and type-aware budgets.
