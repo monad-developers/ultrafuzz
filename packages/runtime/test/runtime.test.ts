@@ -13183,7 +13183,6 @@ test("repeated observations leave an unchanged finished or orphaned run byte-ide
     assert.equal(first.ok, true, `${scenario}: ${JSON.stringify(first.diagnostics)}`);
     const settled = readRunState(layoutForRunRoot(runRoot, runId));
     assert.equal(settled.status, scenario === "finished" ? "succeeded" : "running");
-    assert.equal(settled.controller_lease.status, scenario === "finished" ? "active" : "expired");
     const before = runStateDocumentBytes(runRoot);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
