@@ -88,6 +88,18 @@ export function loadPromptCatalog(options: LoadPromptCatalogOptions = {}): Promp
   };
 }
 
+export function getPrompt(catalog: PromptCatalog, id: string): PromptCatalogEntry {
+  const entry = catalog.entries.get(id);
+  if (!entry) {
+    throw new PromptError("missing-template-variable", `prompt id \`${id}\` was not found`);
+  }
+  return entry;
+}
+
+export function builtInPromptRelativePaths(): string[] {
+  return discoverBuiltInPromptRelativePaths(builtInPromptRoot());
+}
+
 /**
  * Relative paths of project prompts whose bytes differ from the built-in prompt at the same path. Runs
  * use the project copy and `ultrafuzz init` keeps it unless run with `--force`, so after an upgrade such
@@ -100,18 +112,6 @@ export function projectPromptsDifferingFromBuiltIns(catalog: PromptCatalog): str
     .filter((entry) => builtInMarkdown.get(entry.relativePath) !== entry.markdown)
     .map((entry) => entry.relativePath)
     .sort();
-}
-
-export function getPrompt(catalog: PromptCatalog, id: string): PromptCatalogEntry {
-  const entry = catalog.entries.get(id);
-  if (!entry) {
-    throw new PromptError("missing-template-variable", `prompt id \`${id}\` was not found`);
-  }
-  return entry;
-}
-
-export function builtInPromptRelativePaths(): string[] {
-  return discoverBuiltInPromptRelativePaths(builtInPromptRoot());
 }
 
 function discoverBuiltInPromptRelativePaths(root: string): string[] {

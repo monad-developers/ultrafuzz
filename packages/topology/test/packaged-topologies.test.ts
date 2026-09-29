@@ -493,8 +493,9 @@ describe("packaged topology collection", () => {
   // #1150. The triage and severity-classification prompts tell the agent that "the topology gives
   // this review node an extended timeout". No shipped topology did: the review group lost its pin in
   // v0.0.2, so the widest fan-in and the per-finding panel stages ran on the run default while every
-  // strategy lane had the reviewed window. Each promise is checked against the expanded graph, so a
-  // prompt and its topology cannot drift apart again.
+  // strategy lane had the reviewed window. Every built-in prompt that makes this promise is checked
+  // against each packaged topology's expanded graph; nodes whose prompt promises nothing, such as
+  // dedupe-findings, are not covered here.
   it("gives every node whose prompt promises an extended timeout more than the default", { timeout: 30_000 }, () => {
     const shadowed = largestShadowedDefault();
     const promisingPrompts = new Set(
