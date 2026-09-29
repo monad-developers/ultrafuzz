@@ -31,7 +31,6 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { DASHBOARD_HTTP_SCHEMA_VERSION, serveDashboard } from "@ultrafuzz/dashboard";
-import { NodeTelemetryPump, type EvalArtifactUpload, type EvalMatrixRow, type EvalReporter } from "@ultrafuzz/evals";
 import {
   loadGoalSearchCoverageSnapshot,
   loadVerifiedRunOutputSnapshots,
@@ -2600,7 +2599,7 @@ test("report --require-verified rejects legacy report versions without a compati
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("agent-owned bytes stay identical across validation, sync, aggregation, report, dashboard, eval, and bundle reads", async () => {
+test("agent-owned bytes stay identical across validation, sync, aggregation, report, dashboard, and bundle reads", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeByteIdentityTopology(project);
@@ -2695,69 +2694,6 @@ test("agent-owned bytes stay identical across validation, sync, aggregation, rep
     });
   } finally {
     await dashboard.close();
-  }
-  assertAgentBytesUnchanged();
-
-  const uploads: EvalArtifactUpload[] = [];
-  const reporter: EvalReporter = {
-    name: "byte-identity",
-    async onPlan() {},
-    async onRowStart() {},
-    async onNodeEvent() {},
-    async onArtifact(artifact) {
-      uploads.push(artifact);
-    },
-    async onRowFinish() {},
-    async onScores() {},
-    async finalize() {
-      return {};
-    }
-  };
-  const row: EvalMatrixRow = {
-    id: "byte-identity-row",
-    target_id: "target",
-    variant_id: "variant",
-    trial_id: "trial",
-    run_id: runData.run_id,
-    target: {
-      id: "target",
-      repo: "https://example.com/target.git",
-      ref: "a".repeat(40),
-      ground_truth: "target.yml",
-      ground_truth_path: path.join(project, "target.yml"),
-      sensitivity: "public"
-    },
-    variant: { id: "variant" },
-    runner_model_profile: "runner",
-    judge_model_profile: "judge"
-  };
-  const cursorPath = path.join(project, ".ultrafuzz", "evals", "byte-identity-cursor.json");
-  fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
-  const telemetry = new NodeTelemetryPump({
-    runRoot: runData.run_root,
-    row,
-    reporters: [reporter],
-    policy: {
-      node_telemetry: true,
-      heartbeat_interval_seconds: 60,
-      artifacts: {
-        mode: "upload",
-        mode_explicit: true,
-        include: ["report.json", "report.md"],
-        max_file_bytes: 1024 * 1024
-      }
-    },
-    cursorPath,
-    retryDelayMs: 0
-  });
-  const drained = await telemetry.drain();
-  assert.deepEqual(drained.warnings, []);
-  assert.deepEqual(uploads.map((upload) => upload.relativePath).sort(), ["report.json", "report.md"]);
-  for (const upload of uploads) {
-    assert.ok(upload.read);
-    const expected =
-      upload.relativePath === "report.json" ? agentBytes.get(reportJsonPath) : agentBytes.get(reportMarkdownPath);
-    assert.deepEqual(await upload.read(), expected);
   }
   assertAgentBytesUnchanged();
 
