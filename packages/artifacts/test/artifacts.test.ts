@@ -345,6 +345,12 @@ test("safe path helpers reject traversal, absolutes, unsafe IDs, and symlink esc
   assert.throws(() => safeResolveInside(root, "link/file.txt"), /symlink/);
 });
 
+test("safe path helpers admit segments that only begin with two dots", () => {
+  const root = tempProject();
+  assert.equal(safeResolveInside(root, "..data/report.json"), path.join(root, "..data", "report.json"));
+  assert.throws(() => safeResolveInside(root, "../report.json"), /traverse/);
+});
+
 test("validated artifact publication is atomic, exclusive, durable, and idempotent", () => {
   const root = tempProject();
   const expected = "verified artifact\n";

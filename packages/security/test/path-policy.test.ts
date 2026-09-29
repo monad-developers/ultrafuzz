@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { test } from "node:test";
-import { validateSafeId, validateSafeRelativePath } from "../src/index.js";
+import { isPathInside, validateSafeId, validateSafeRelativePath } from "../src/index.js";
 
 test("safe relative path policy rejects traversal and absolute injection", () => {
   assert.equal(validateSafeRelativePath("src/Test.sol").ok, true);
@@ -23,4 +24,12 @@ test("safe IDs reject traversal, slashes, and dot edges", () => {
   assert.equal(validateSafeId("node id", "../setup").ok, false);
   assert.equal(validateSafeId("node id", "bad/node").ok, false);
   assert.equal(validateSafeId("node id", ".hidden").ok, false);
+});
+
+test("isPathInside admits children whose names only begin with two dots", () => {
+  const root = path.resolve("/project");
+  assert.equal(isPathInside(root, root), true);
+  assert.equal(isPathInside(root, path.join(root, "..data", "report.json")), true);
+  assert.equal(isPathInside(root, path.dirname(root)), false);
+  assert.equal(isPathInside(root, path.resolve(root, "..", "sibling")), false);
 });

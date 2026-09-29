@@ -88,7 +88,7 @@ export function assertPathInside(root: string, candidate: string, label = "path"
   const rootAbsolute = path.resolve(root);
   const candidateAbsolute = path.resolve(candidate);
   const relative = path.relative(rootAbsolute, candidateAbsolute);
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+  if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
     return;
   }
   throw new ArtifactPathError("path-escape", `${label} escapes ${rootAbsolute}`);
