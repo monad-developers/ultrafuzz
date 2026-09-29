@@ -16,11 +16,14 @@ import {
   cancelRun,
   diagnoseProject,
   diagnoseRun,
+  type forkRun,
   getRunTimeline,
   getWorkflowNode,
   initProject,
   listRunSnapshots,
   queryWorkflowEvents,
+  type replayRun,
+  type resumeRun,
   startRun as runtimeStartRun,
   validateProject,
   watchWorkflowEvents,
@@ -390,6 +393,17 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
     assert.equal(unlinked.ok, false);
     assert.equal(unlinked.diagnostics[0]?.code, "WORKFLOW_RUN_ID_MISSING");
   }
+});
+
+test("resume, replay and fork declare workflow_run_id on every lifecycle value", () => {
+  // Compile-time check: each reader stops type-checking if its function's
+  // result type lets workflow_run_id be undefined. The inferred return types
+  // were unions, and which member a caller saw depended on type-check order.
+  const resume = (value: NonNullable<Awaited<ReturnType<typeof resumeRun>>["value"]>): string => value.workflow_run_id;
+  const replay = (value: NonNullable<Awaited<ReturnType<typeof replayRun>>["value"]>): string => value.workflow_run_id;
+  const fork = (value: NonNullable<Awaited<ReturnType<typeof forkRun>>["value"]>): string => value.workflow_run_id;
+  const value = { run_id: "run", workflow_run_id: "ultrafuzz-run", action: "resume", submitted: true } as const;
+  assert.deepEqual([resume(value), replay(value), fork(value)], ["ultrafuzz-run", "ultrafuzz-run", "ultrafuzz-run"]);
 });
 
 test("diagnoseRun adapts the engine diagnosis without engine-branded public text", async () => {

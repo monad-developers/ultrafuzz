@@ -523,7 +523,7 @@ export interface WorkflowLifecycleInput {
 
 export interface WorkflowLifecycleValue {
   run_id: string;
-  workflow_run_id?: string;
+  workflow_run_id: string;
   workflow_path?: string;
   action: "resume" | "replay" | "fork";
   submitted: boolean;
