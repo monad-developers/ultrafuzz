@@ -10,8 +10,9 @@ const typescriptFiles = ["packages/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}"];
 const typeCheckedFiles = ["packages/*/src/**/*.ts", "packages/dashboard/frontend/src/**/*.{ts,tsx}"];
 const sourceFiles = ["packages/**/*.{js,mjs,cjs,ts,tsx}", "scripts/**/*.{js,mjs,cjs,ts,tsx}"];
 // Complexity and size budgets apply to all code. Violations that predate them are
-// counted per file and rule in eslint-suppressions.json: a file that gains one
-// fails lint, and `pnpm -w lint:prune` removes the counts a change pays down.
+// counted per file and rule in eslint-suppressions.json: lint fails when a file
+// has more violations of a rule than its count, and only `pnpm -w lint:prune`
+// lowers a count (docs/contributing.md).
 const sizeConfigs = [
   {
     files: sourceFiles,
