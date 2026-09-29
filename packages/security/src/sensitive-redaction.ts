@@ -49,9 +49,13 @@ const SUPPLEMENTAL_SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:ak|as)-[A-Za-z0-9_]{16,}\b/gu,
   // No Google OAuth access-token rule in the recommended preset.
   /\bya29\.[A-Za-z0-9._-]{20,}\b/gu,
-  // No JWT rule in the recommended preset; a three-part base64url token is a
-  // positive format identification.
-  /\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu,
+  // No JWT rule in the recommended preset. A JWT header is a base64url JSON
+  // object, which encodes to "eyJ" when it opens with '{"' and a letter; that
+  // prefix is the identification. Three long dotted segments alone also
+  // describe qualified names such as
+  // ReentrancyGuardUpgradeable.nonReentrantModifier.lockedStateCheck. Later
+  // segments stay unconstrained: a JWE's second one is its encrypted key.
+  /\b(?=eyJ)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu,
   // Provider-keyed RPC URLs embed the credential in the path; no secretlint
   // rule covers Alchemy/Infura project keys.
   /\b(?:https?|wss?):\/\/[^\s"'`]*(?:alchemy\.com\/v2\/|infura\.io\/v3\/)[A-Za-z0-9_-]{16,}\b/giu
@@ -133,30 +137,6 @@ export function containsSensitiveSecrets(
   return redactSecretsInText(value, SENSITIVE_REDACTION_PLACEHOLDER, forbiddenSecretValues, mode) !== value;
 }
 
-/** Match exact concealed spans without allowing surrounding context to drift. */
-export function matchesRedactedText(
-  redacted: string,
-  observed: string,
-  redactedSpanCodePoints: readonly number[],
-  options: { allowObservedSuffix?: boolean } = {}
-): boolean {
-  const fragments = redacted.split(SENSITIVE_REDACTION_PLACEHOLDER);
-  if (fragments.length === 1) return redactedSpanCodePoints.length === 0 && redacted === observed;
-  if (redactedSpanCodePoints.length !== fragments.length - 1) return false;
-  const first = fragments[0] ?? "";
-  if (!observed.startsWith(first)) return false;
-  let cursor = first.length;
-  for (let index = 0; index < redactedSpanCodePoints.length; index += 1) {
-    const next = advanceCodePoints(observed, cursor, redactedSpanCodePoints[index]!);
-    if (next === undefined) return false;
-    cursor = next;
-    const fragment = fragments[index + 1] ?? "";
-    if (!observed.startsWith(fragment, cursor)) return false;
-    cursor += fragment.length;
-  }
-  return options.allowObservedSuffix === true || cursor === observed.length;
-}
-
 /** Infer one unambiguous normalized source span for each inserted placeholder. */
 export function redactedTextSpanCodePointLengths(redacted: string, observed: string): number[] | undefined {
   if (redacted.length > 16_384 || observed.length > 16_384) return undefined;
@@ -194,16 +174,6 @@ export function redactedTextSpanCodePointLengths(redacted: string, observed: str
   };
   visit(1, (fragments[0] ?? "").length, []);
   return !exhausted && solutions.length === 1 ? solutions[0] : undefined;
-}
-
-function advanceCodePoints(value: string, start: number, count: number): number | undefined {
-  if (!Number.isSafeInteger(count) || count <= 0) return undefined;
-  let cursor = start;
-  for (let index = 0; index < count; index += 1) {
-    if (cursor >= value.length) return undefined;
-    cursor += value.codePointAt(cursor)! > 0xffff ? 2 : 1;
-  }
-  return cursor;
 }
 
 export function hasRedactionPlaceholder(value: string): boolean {
@@ -336,6 +306,26 @@ function redactExactSecretValues(value: string, placeholder: string, forbiddenSe
   return redacted;
 }
 
+/**
+ * Anvil's and Hardhat's default mnemonic, and the keys of the 10 dev accounts
+ * Anvil derives from it and prints on startup (m/44'/60'/0'/0/0-9). They are
+ * published, not secret, and Foundry tests and scripts sign with them:
+ * forge-std's own test_DeriveRememberKey quotes the mnemonic and key (0).
+ */
+const PUBLIC_DEVELOPMENT_MNEMONIC = "test test test test test test test test test test test junk";
+const PUBLIC_DEVELOPMENT_PRIVATE_KEYS: ReadonlySet<string> = new Set([
+  "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+  "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+  "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+  "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
+  "47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a",
+  "8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba",
+  "92db14e403b83dfe3df233f83dfa3a0d7096f21ca9b0d6d6b8d88b2b4ec1564e",
+  "4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356",
+  "dbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97",
+  "2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6"
+]);
+
 function redactBip39Mnemonics(value: string, placeholder: string): string {
   type WordToken = { word: string; start: number; end: number };
   let run: WordToken[] = [];
@@ -357,7 +347,14 @@ function redactBip39Mnemonics(value: string, placeholder: string): string {
     for (const wordCount of BIP39_WORD_COUNTS) {
       if (run.length < wordCount) continue;
       const window = run.slice(-wordCount);
-      if (!validateMnemonic(window.map((token) => token.word).join(" "), englishWordlist)) continue;
+      const phrase = window.map((token) => token.word).join(" ");
+      if (!validateMnemonic(phrase, englishWordlist)) continue;
+      // The public phrase is left in place but still ends the run, so the
+      // words after it are checked exactly as if it had been redacted.
+      if (phrase === PUBLIC_DEVELOPMENT_MNEMONIC) {
+        run = [];
+        break;
+      }
       ranges.push({ start: window[0]!.start, end: window.at(-1)!.end });
       run = [];
       break;
@@ -380,6 +377,7 @@ function redactUnlabeledFortyHexSecrets(value: string, placeholder: string): str
 function redactContextLabeledPrivateKeys(value: string, placeholder: string): string {
   THIRTY_TWO_BYTE_HEX_PATTERN.lastIndex = 0;
   return value.replace(THIRTY_TWO_BYTE_HEX_PATTERN, (candidate, offset: number) =>
+    !PUBLIC_DEVELOPMENT_PRIVATE_KEYS.has(candidate.replace(/^0x/iu, "").toLowerCase()) &&
     /(?:private|secret|signing|wallet|ethereum|evm)[-_\s]*(?:key|scalar)\s*(?:(?:[:=]|\bis\b)\s*)?["'`]?$/iu.test(
       value.slice(Math.max(0, offset - 96), offset)
     )

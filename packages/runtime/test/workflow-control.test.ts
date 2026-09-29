@@ -227,6 +227,52 @@ test("workflow deadline decisions are deterministic at the fake-clock boundary",
   assert.equal(deadlineProjection.deadlineExceeded, true);
 });
 
+test("a paused run is not cancelled by an observation past its workflow deadline", () => {
+  const graph = syntheticGraph([node("pending")]);
+  const paused = initialState(graph, 1, 10);
+  paused.status = "paused";
+
+  const projection = projectWorkflowControlState({
+    previousState: structuredClone(paused),
+    state: paused,
+    graph,
+    tasks: tasksFor(graph),
+    workflowStates: new Map(),
+    workflowState: "paused",
+    nowMs: BASE_MS + 10_000
+  });
+
+  assert.equal(projection.deadlineExceeded, false);
+});
+
+test("re-projecting an unchanged run only advances its observation clock", () => {
+  const graph = syntheticGraph([node("active")]);
+  const state = initialState(graph, 1);
+  const active = state.nodes.active;
+  assert.ok(active);
+  active.status = "running";
+  const project = (previous: RunState, workflowState: "running" | "orphaned", nowMs: number) =>
+    projectWorkflowControlState({
+      previousState: structuredClone(previous),
+      state: previous,
+      graph,
+      tasks: tasksFor(graph),
+      workflowStates: new Map([["active", "in-progress"]]),
+      workflowState,
+      nowMs
+    });
+  const first = project(state, "running", BASE_MS + 1_000);
+
+  const renewed = project(first.state, "running", BASE_MS + 20_000);
+  assert.equal(renewed.changed, true);
+  assert.equal(renewed.observationOnly, true);
+  assert.equal(renewed.state.controller_lease.renewed_at, new Date(BASE_MS + 20_000).toISOString());
+
+  const orphaned = project(first.state, "orphaned", BASE_MS + 40_000);
+  assert.equal(orphaned.observationOnly, false);
+  assert.equal(orphaned.state.controller_lease.status, "expired");
+});
+
 test("controller recovery rejects malformed present timestamps instead of substituting the clock", () => {
   const graph = syntheticGraph([node("pending")]);
   const state = initialState(graph, 1, 60, 45);

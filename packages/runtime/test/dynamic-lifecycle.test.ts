@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
+import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -734,20 +735,21 @@ test("a half-published dynamic expansion stays readable while execution stays cl
   assert.equal(fs.existsSync(generated.renderedPromptPath!), false);
 });
 
-test("event observers stay readable while a retried dynamic source is rematerialized", async () => {
+test("a re-running dynamic source keeps published controls admissible and observable", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-source-retry-events" });
   const [firstTask] = fixture.generatedTasks;
   assert.ok(firstTask);
   const eventNodeId = firstTask.smithersNodeId;
   setLifecycle(fixture, [], [{ type: "NodeStarted", nodeId: eventNodeId, attempt: 2 }]);
+  // A reset re-runs the planner, whose agent attempt first wipes its canonical artifact directory.
   const sourcePath = path.join(fixture.runRoot, "artifacts", "planner", "plan.json");
+  const publishedPlan = fs.readFileSync(sourcePath, "utf8");
   fs.rmSync(sourcePath);
 
+  // The published expansion manifest decides the fan-out, so the strict admission that cancel,
+  // pause, fork, and replay require keeps re-deriving the same controls without the source.
   const strict = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-  assert.equal(strict.ok, false);
-  if (!strict.ok) {
-    assert.match(strict.diagnostics[0]?.message ?? "", /dynamic source artifact does not exist/u);
-  }
+  assert.equal(strict.ok, true, "diagnostics" in strict ? JSON.stringify(strict.diagnostics) : "");
 
   const queried = await queryWorkflowEvents({
     projectRoot: fixture.project,
@@ -757,12 +759,9 @@ test("event observers stay readable while a retried dynamic source is rematerial
   assert.equal(queried.ok, true, JSON.stringify(queried.diagnostics));
   assert.equal(queried.value?.events[0]?.category, "NodeStarted");
   assert.equal(queried.value?.events[0]?.node_id, eventNodeId);
-  assert.ok(
-    queried.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED" &&
-        /dynamic source artifact does not exist/u.test(diagnostic.message)
-    ),
+  assert.equal(
+    queried.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED"),
+    false,
     JSON.stringify(queried.diagnostics)
   );
 
@@ -775,13 +774,21 @@ test("event observers stay readable while a retried dynamic source is rematerial
   });
   assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
   assert.equal(streamed[0]?.category, "NodeStarted");
-  assert.ok(
+  assert.equal(
     watched.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED"),
+    false,
     JSON.stringify(watched.diagnostics)
   );
-
   // Observation must not recreate or otherwise repair the dynamic source on the controller's behalf.
   assert.equal(fs.existsSync(sourcePath), false);
+
+  // The re-run then writes a plan whose goal has a different key; admission still follows the
+  // published manifest.
+  const plan = JSON.parse(publishedPlan) as { threat_goals: Array<Record<string, unknown>> };
+  plan.threat_goals = plan.threat_goals.map((goal) => ({ ...goal, id: "liquidation:early" }));
+  fs.writeFileSync(sourcePath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  const rewritten = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(rewritten.ok, true, "diagnostics" in rewritten ? JSON.stringify(rewritten.diagnostics) : "");
 });
 
 test("controller refresh preserves the sealed dynamic base after runtime materialization", async () => {
@@ -1306,7 +1313,7 @@ test("dynamic child failure, skip, and timeout keep strict joins blocked with du
     const ledgerOutcome = readLedger(fixture).find(
       (entry) => entry.strategy_attempt_id === generated.attemptId
     )?.outcome;
-    // The current strict attempt ledger records only NodeFinished/NodeFailed terminal authorities.
+    // The attempt ledger records only NodeFinished/NodeFailed/NodeCancelled terminal events.
     // A skip or heartbeat timeout remains durable in state without inventing a ledger terminal
     // event that the workflow runner did not emit.
     assert.equal(ledgerOutcome, outcome === "failed" ? "failed" : undefined, outcome);
@@ -1962,4 +1969,86 @@ test("a refresh repairs control evidence a rebound task manifest permanently inv
     path.join(fixture.runRoot, planned.rendered_prompt_snapshot_path),
     "the repaired controller must still bind the authenticated retained snapshot"
   );
+});
+
+const REBUILT_VALIDATOR_REFRESH = String.raw`
+import fs from "node:fs";
+const input = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const artifacts = await import(input.artifactsModule);
+const { renderCurrentSmithersController } = await import(input.smithersModule);
+const workflowPath = renderCurrentSmithersController({
+  projectRoot: input.project,
+  layout: artifacts.layoutForRunRoot(input.runRoot),
+  smithersRunId: input.smithersRunId,
+  tasks: artifacts.parseSmithersTaskManifestBytes(fs.readFileSync(input.tasksPath)),
+  config: input.config
+});
+process.stdout.write(JSON.stringify({ validatorBuild: artifacts.VALIDATOR_BUILD_IDENTITY, workflowPath }));
+`;
+
+/**
+ * #921: `resume --refresh-controller` re-renders the workflow with the operator's current build, and a
+ * rebuild that changed only the validator build must not change what that workflow records for the
+ * run's outputs. Its first tick republishes the runtime task plan that every gated command re-derives
+ * from the sealed base, and its verifier copies each declared output into the marker that
+ * synchronization compares with `graph.json`. The refresh runs in a child whose rebuilt validator
+ * module yields a different identity; the run was launched by this process.
+ */
+test("a controller refresh by a rebuilt validator keeps the run's recorded output bindings", async () => {
+  const fixture = await createDynamicFixture({ runId: "refresh-rebuilt-validator" });
+  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
+  if (!evidence.ok) return;
+  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
+    (file) => file.snapshotPath === "controls/resolved-config.json"
+  );
+  assert.ok(resolvedConfig);
+  const tasksPath = path.join(fixture.runRoot, "smithers", "tasks.json");
+  const refreshed = runWithRebuiltValidator(
+    REBUILT_VALIDATOR_REFRESH,
+    {
+      artifactsModule: ARTIFACTS_MODULE_URL,
+      smithersModule: new URL("../src/smithers.js", import.meta.url).href,
+      project: fixture.project,
+      runRoot: fixture.runRoot,
+      smithersRunId: evidence.smithersRunId,
+      tasksPath,
+      config: JSON.parse(resolvedConfig.contents.toString("utf8")) as unknown
+    },
+    fixture.project
+  ) as { validatorBuild: string; workflowPath: string };
+  assert.notEqual(refreshed.validatorBuild, VALIDATOR_BUILD_IDENTITY, "the refresh must run a rebuilt validator");
+  const compiled = compiledControllerConstants(fs.readFileSync(refreshed.workflowPath, "utf8"));
+
+  // Replay the refreshed workflow's first-tick materialization with its own literals.
+  const rematerialized = materializeDynamicRuntime({
+    runId: fixture.runId,
+    projectRoot: fixture.project,
+    runRoot: fixture.runRoot,
+    graphPath: path.join(fixture.runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: compiled.baseTasks,
+    groups: compiled.groups,
+    readyGroupIds: ["fanout"]
+  });
+  const readmitted = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(readmitted.ok, true, "diagnostics" in readmitted ? JSON.stringify(readmitted.diagnostics) : "");
+
+  // A generated attempt the refreshed workflow verifies: its marker records the refreshed declaration.
+  const generated = rematerialized.tasks.find((task) => task.attemptId === fixture.generatedTasks[0]?.attemptId);
+  assert.ok(generated);
+  writeFinding(generated);
+  const planner = plannerSuccessEvidence(fixture);
+  setLifecycle(
+    fixture,
+    [...planner.steps, { id: generated.smithersNodeId, state: "finished", attempt: 1 }],
+    [
+      ...planner.events,
+      { type: "NodeStarted", nodeId: generated.smithersNodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId: generated.smithersNodeId, attempt: 1 }
+    ]
+  );
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  assert.equal(readState(fixture).nodes[generated.attemptId]?.status, "succeeded");
 });

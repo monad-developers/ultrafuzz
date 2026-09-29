@@ -11,8 +11,7 @@ import {
   MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
   MODAL_SANDBOX_MAX_LIFETIME_SECONDS,
   REDACTION_PLACEHOLDER,
-  assertNoRedactionPlaceholders,
-  applyDefaultProfileOverrides,
+  applyModelProfileOverrides,
   invariantPropertyPrioritySelection,
   loadProjectConfig,
   parseProjectConfigToml,
@@ -20,7 +19,6 @@ import {
   redactResolvedConfig,
   resolveExecutionResources,
   resolveConfig,
-  restoreRedactedConfig,
   serializeRedactedResolvedConfigToml,
   type ConfigDiagnostic,
   type ProjectConfigInput,
@@ -547,7 +545,7 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     }
   });
 
-  it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
+  it("applies defaults, project TOML, env, then runtime overrides", () => {
     const project = parseProjectConfigToml(`
 schema_version = "ultrafuzz.config.v2"
 dynamic_strategies_enumerator = 5
@@ -578,15 +576,6 @@ config_dir = "teams/codex"
     if (!project.ok) return;
 
     const resolved = resolveConfig({
-      promptMetadata: {
-        run: { defaultTimeoutSeconds: 900 },
-        models: {
-          "prompt-model": {
-            agent: "CodexAgent",
-            model: "gpt-5.5"
-          }
-        }
-      },
       projectConfig: project.value,
       env: {
         ULTRAFUZZ_MAX_PARALLEL_AGENTS: "7",
@@ -820,7 +809,7 @@ output_dir = ".ultrafuzz/custom-runs"
 });
 
 describe("redaction", () => {
-  it("redacts sensitive model values while preserving restore requirements", () => {
+  it("redacts sensitive model values from the persisted config and records them in the manifest", () => {
     const resolved = resolveConfig({
       env: {},
       projectConfig: {
@@ -845,50 +834,7 @@ describe("redaction", () => {
     expect(toml).not.toContain("sk-test-secret");
     expect(redacted.manifest.entries.map((entry) => entry.key)).toContain("models.profiles.secret-model.model");
     expect(redacted.manifest.entries[0]?.requiredForWorkflowLaunch).toBe(true);
-
-    const restored = restoreRedactedConfig(redacted.config, resolved.value, redacted.manifest);
-    expect(restored.ok).toBe(true);
-    if (!restored.ok) return;
-    expect(restored.value.models.profiles["secret-model"]?.model).toBe("sk-test-secret");
-    expect(assertNoRedactionPlaceholders(restored.value).ok).toBe(true);
-  });
-
-  it("rejects literal redaction placeholders before workflow launch", () => {
-    const resolved = resolveConfig({ env: {} });
-    expect(resolved.ok).toBe(true);
-    if (!resolved.ok) return;
-    resolved.value.models.profiles.default!.model = "[redacted]";
-    const checked = assertNoRedactionPlaceholders(resolved.value);
-    expect(checked.ok).toBe(false);
-    expect(checked.diagnostics[0]?.code).toBe("CONFIG_REDACTION_PLACEHOLDER_PRESENT");
-  });
-
-  it("fails restoration when a required redacted value is unavailable", () => {
-    const resolved = resolveConfig({
-      env: {},
-      projectConfig: {
-        models: {
-          profiles: {
-            "secret-model": {
-              agent: "CodexAgent",
-              model: "sk-test-secret"
-            }
-          },
-          default: "secret-model"
-        }
-      }
-    });
-    expect(resolved.ok).toBe(true);
-    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
-
-    const redacted = redactResolvedConfig(resolved.value);
-    const current = structuredClone(resolved.value);
-    delete current.models.profiles["secret-model"]!.model;
-
-    const restored = restoreRedactedConfig(redacted.config, current, redacted.manifest);
-    expect(restored.ok).toBe(false);
-    expect(restored.diagnostics.map((entry) => entry.code)).toContain("CONFIG_REDACTION_RESTORE_MISSING");
-    expect(restored.diagnostics[0]?.message).toContain("before workflow launch");
+    expect(resolved.value.models.profiles["secret-model"]?.model).toBe("sk-test-secret");
   });
 });
 
@@ -1054,7 +1000,7 @@ describe("model profile and triage validation", () => {
     const agentOnly = resolveConfig({ env: {} });
     expect(agentOnly.ok).toBe(true);
     if (!agentOnly.ok) return;
-    applyDefaultProfileOverrides(agentOnly.value, { agent: "ClaudeAgent" });
+    applyModelProfileOverrides(agentOnly.value, agentOnly.value.models.default, { agent: "ClaudeAgent" });
     expect(agentOnly.value.models.profiles.default).toMatchObject({
       agent: "ClaudeAgent"
     });
@@ -1064,7 +1010,10 @@ describe("model profile and triage validation", () => {
     const pinned = resolveConfig({ env: {} });
     expect(pinned.ok).toBe(true);
     if (!pinned.ok) return;
-    applyDefaultProfileOverrides(pinned.value, { agent: "ClaudeAgent", model: "claude-sonnet-5" });
+    applyModelProfileOverrides(pinned.value, pinned.value.models.default, {
+      agent: "ClaudeAgent",
+      model: "claude-sonnet-5"
+    });
     expect(pinned.value.models.profiles.default).toMatchObject({
       agent: "ClaudeAgent",
       model: "claude-sonnet-5"
@@ -1074,7 +1023,7 @@ describe("model profile and triage validation", () => {
     const benchmark = resolveConfig({ env: {} });
     expect(benchmark.ok).toBe(true);
     if (!benchmark.ok) return;
-    applyDefaultProfileOverrides(benchmark.value, {
+    applyModelProfileOverrides(benchmark.value, benchmark.value.models.default, {
       agent: "CodexAgent",
       model: "gpt-5.6-luna",
       reasoning: "high"

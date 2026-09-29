@@ -63,7 +63,6 @@ function identityGate(document: unknown) {
         schemaId: binding.schema_id,
         schemaSha256: binding.schema_sha256,
         schemaBundleSha256: binding.schema_bundle_sha256,
-        validatorBuild: binding.validator_build,
         artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
       }
     }
@@ -86,6 +85,19 @@ test("validator preflight parser accepts only the exact non-transforming success
   );
 });
 
+test("validator preflight parser accepts the same schemas reported by another validator build", () => {
+  // #921: a rebuild that only changes the validator modules must not fail an in-flight run's
+  // preflight, whose trusted CLI was sealed by the earlier build. The schema identity still binds.
+  const value = successEnvelope();
+  objectField(objectField(value, "data"), "schema").validator_build = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
+
+  assert.deepEqual(parseJsonValidatorPreflightSuccessEnvelope(encode(value)), value);
+  assert.equal(identityGate(value)?.status, "passed");
+  objectField(objectField(value, "data"), "schema").sha256 = "0".repeat(64);
+  assert.throws(() => parseJsonValidatorPreflightSuccessEnvelope(encode(value)), /mismatched identity/u);
+  assert.equal(identityGate(value)?.status, "failed");
+});
+
 test("validator preflight parser can authenticate a sealed historical identity explicitly", () => {
   const value = successEnvelope();
   const schema = objectField(objectField(value, "data"), "schema");
@@ -97,7 +109,6 @@ test("validator preflight parser can authenticate a sealed historical identity e
     schemaId: binding.schema_id,
     schemaSha256: binding.schema_sha256,
     schemaBundleSha256: schema.bundle_sha256 as string,
-    validatorBuild: schema.validator_build as string,
     artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
   };
 
@@ -171,11 +182,6 @@ const contractMutations: ReadonlyArray<{
   {
     name: "missing validator build",
     mutate: (value) => void delete objectField(objectField(value, "data"), "schema").validator_build
-  },
-  {
-    name: "wrong validator build",
-    structurallyValid: true,
-    mutate: (value) => void (objectField(objectField(value, "data"), "schema").validator_build = "legacy")
   },
   {
     name: "missing registration status",

@@ -14,7 +14,6 @@ import {
   REMOTE_LAUNCH_READY_PATH,
   REMOTE_LINEAGE_PATH,
   modalVolumeName,
-  persistentWorkspaceRoot,
   remoteAuthPath,
   resolvePersistentRemoteRoot
 } from "../src/layout.js";
@@ -22,7 +21,6 @@ import { modalEvalRunCommand } from "../src/resume.js";
 
 describe("Modal storage layout", () => {
   it("persists workspaces while keeping config and auth ephemeral", () => {
-    expect(persistentWorkspaceRoot("run-1", "model-1")).toBe("/data/run-1/model-1/workspace");
     expect(REMOTE_CONFIG_PATH).toBe("/run/ultrafuzz-config/benchmark.json");
     expect(REMOTE_LINEAGE_PATH).toBe("/run/ultrafuzz-config/lineage.json");
     expect(REMOTE_LAUNCH_READY_PATH).toBe("/run/ultrafuzz-config/launch-ready");

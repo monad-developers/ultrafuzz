@@ -34,7 +34,6 @@ import {
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
 import { SAFE_ID_PATTERN } from "./safe-paths.js";
-import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { canonicalJsonValueKey } from "./lang-primitives.js";
 
 const nonEmptyString = z.string().min(1);
@@ -75,10 +74,6 @@ function withDocumentMetadata<T extends z.ZodType>(schema: T, slug: string, vers
   }) as T;
 }
 
-export const HARNESS_REPAIRS_SCHEMA_VERSION = "ultrafuzz.harness-repairs.v1" as const;
-export const STRATEGY_DETECTIONS_SCHEMA_VERSION = "ultrafuzz.strategy-detections.v1" as const;
-export const TRIAGED_FINDINGS_SCHEMA_VERSION = "ultrafuzz.triaged-findings.v1" as const;
-export const SEVERITY_CLASSIFIED_FINDINGS_SCHEMA_VERSION = "ultrafuzz.severity-classified-findings.v1" as const;
 export const REFERENCE_MANIFEST_SCHEMA_VERSION = "ultrafuzz.reference-manifest.v1" as const;
 export const BOUNDARY_RECIPES_SCHEMA_VERSION = "ultrafuzz.boundary-recipes.v1" as const;
 export const ADMIN_CONFIG_BOUNDARY_MATRIX_SCHEMA_VERSION = "ultrafuzz.admin-config-boundary-matrix.v1" as const;
@@ -1814,44 +1809,8 @@ export const findingLifecycleLedgerJsonSchema = workflowContractJsonSchemas["ult
 export const aggregationManifestJsonSchema = workflowContractJsonSchemas["ultrafuzz/aggregation-manifest@1"];
 export const reportJsonSchema = workflowContractJsonSchemas["ultrafuzz/report@3"];
 
-export function validateWorkflowContract(
-  contract: WorkflowContractId,
-  value: unknown,
-  path = "$"
-): SchemaValidationResult<unknown> {
-  return validateWithZod(workflowContractSchemas[contract] as z.ZodType, value, {
-    path,
-    code: "WORKFLOW_ARTIFACT_SCHEMA_INVALID"
-  });
-}
-
-export type HarnessRepairs = z.infer<typeof harnessRepairsSchema>;
-export type StrategyDetections = z.infer<typeof strategyDetectionsSchema>;
 export type TriagedFindings = z.infer<typeof triagedFindingsSchema>;
 export type SeverityClassifiedFindings = z.infer<typeof severityClassifiedFindingsSchema>;
-export type ReferenceManifest = z.infer<typeof referenceManifestSchema>;
-export type BoundaryRecipes = z.infer<typeof boundaryRecipesSchema>;
-export type AdminConfigBoundaryMatrix = z.infer<typeof adminConfigBoundaryMatrixSchema>;
-export type DependencyScopeMatrix = z.infer<typeof dependencyScopeMatrixSchema>;
-export type ExternalizedStateAccounting = z.infer<typeof externalizedStateAccountingSchema>;
-export type CoverageGoal = z.infer<typeof coverageGoalSchema>;
-export type InvariantCampaignPlan = z.infer<typeof invariantCampaignPlanSchema>;
-export type CampaignSummary = z.infer<typeof campaignSummarySchema>;
-export type DifferentialPlan = z.infer<typeof differentialPlanSchema>;
-export type ReferenceHarness = z.infer<typeof referenceHarnessSchema>;
-export type AuditedDifferentialLanes = z.infer<typeof auditedDifferentialLanesSchema>;
-export type DifferentialLaneResult = z.infer<typeof differentialLaneResultSchema>;
-export type SemanticRedRegistry = z.infer<typeof semanticRedRegistrySchema>;
-export type DifferentialRedTriage = z.infer<typeof differentialRedTriageSchema>;
-export type DifferentialRepairSummary = z.infer<typeof differentialRepairSummarySchema>;
-export type DifferentialGapReview = z.infer<typeof differentialGapReviewSchema>;
-export type DifferentialReportReview = z.infer<typeof differentialReportReviewSchema>;
-export type DynamicStrategyPlan = z.infer<typeof dynamicStrategyPlanSchema>;
-export type DynamicEnumeratorOutputs = z.infer<typeof dynamicEnumeratorOutputsSchema>;
-export type SelectedStrategies = z.infer<typeof selectedStrategiesSchema>;
-export type DynamicStrategyProvenance = z.infer<typeof dynamicStrategyProvenanceSchema>;
-export type FindingLifecycleLedger = z.infer<typeof findingLifecycleLedgerSchema>;
-export type AggregationManifest = z.infer<typeof aggregationManifestSchema>;
 export type TerminalReport = z.infer<typeof reportSchema>;
 
 export const WORKFLOW_SCHEMA_FILES = {

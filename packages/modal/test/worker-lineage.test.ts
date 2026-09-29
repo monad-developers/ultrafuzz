@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { fingerprintModalModel } from "../src/config.js";
-import { DEFAULT_BENCHMARK_MODELS, MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
+import { MODAL_WORKER_LINEAGE_SCHEMA_VERSION } from "../src/defaults.js";
 import type { ModalWorkerLineage } from "../src/launch-state.js";
 import {
   CheckpointIncompatibleError,
@@ -15,6 +15,7 @@ import {
   readModalWorkerLineage
 } from "../src/worker-lineage.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "../src/worker-result.js";
+import { MODEL_SPEC_FIXTURES } from "./model-spec-fixtures.js";
 
 const roots: string[] = [];
 
@@ -24,7 +25,7 @@ afterEach(() => {
 
 describe("persistent Modal worker lineage", () => {
   it("derives the worker model only from the exact configured lineage fingerprint", () => {
-    const model = DEFAULT_BENCHMARK_MODELS[0]!;
+    const model = MODEL_SPEC_FIXTURES[0];
     const current = { ...lineage(), model_fingerprint: fingerprintModalModel(model) };
 
     expect(modelForModalWorkerLineage({ models: [model] }, current)).toBe(model);

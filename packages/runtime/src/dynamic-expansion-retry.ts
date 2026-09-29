@@ -61,12 +61,12 @@ export interface DynamicExpansionRetryArchive {
  * generation, and validate everything that could refuse it.
  *
  * Smithers resets the producer and all of its dependents, but the expansion
- * manifests live outside Smithers state. Leaving them active makes the next
- * workflow render require the canonical source artifact during the gap between
- * producer completion and verifier publication. The decision is taken here,
- * before the first `timetravel`, so ambiguous or unrecognized manifest state
- * fails closed while Smithers state is still untouched. Returns `undefined`
- * when no published manifest belongs to a retried source.
+ * manifests live outside Smithers state. Left in place, they keep the group at
+ * its published items; withdrawing them lets the group expand again from the
+ * retried source's new output. The decision is taken here, before the first
+ * `timetravel`, so ambiguous or unrecognized manifest state fails closed while
+ * Smithers state is still untouched. Returns `undefined` when no published
+ * manifest belongs to a retried source.
  */
 export function planDynamicExpansionRetryArchive(input: {
   projectRoot: string;
@@ -113,7 +113,11 @@ export function planDynamicExpansionRetryArchive(input: {
     );
   }
   const expectedEntries = new Set(manifests.map((manifest) => `${manifest.group_node_id}.json`));
-  const unexpectedEntries = fs.readdirSync(manifestDir).filter((entry) => !expectedEntries.has(entry));
+  // A dot entry is never a manifest (readExpansionManifests skips it): an interrupted publication's
+  // temporary file, or the `.expansion.lock` older builds left behind. It moves with the directory.
+  const unexpectedEntries = fs
+    .readdirSync(manifestDir)
+    .filter((entry) => !entry.startsWith(".") && !expectedEntries.has(entry));
   if (unexpectedEntries.length > 0) {
     throw dynamicError(
       "DYNAMIC_RETRY_EXPANSION_INVALID",

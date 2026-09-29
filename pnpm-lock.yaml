@@ -201,19 +201,12 @@ importers:
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
-      proper-lockfile:
-        specifier: 4.1.2
-        version: 4.1.2
       yaml:
         specifier: ^2.8.0
         version: 2.9.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3
-    devDependencies:
-      '@types/proper-lockfile':
-        specifier: ^4.1.4
-        version: 4.1.4
 
   packages/evmbench:
     dependencies:
@@ -329,6 +322,9 @@ importers:
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
+      smol-toml:
+        specifier: 1.7.1
+        version: 1.7.1
       typescript:
         specifier: 6.0.3
         version: 6.0.3

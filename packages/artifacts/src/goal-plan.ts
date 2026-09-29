@@ -123,6 +123,12 @@ const replacementValue = nonEmptyString
     message:
       "Replacement values must be a human-readable title, not a serialized JSON record: keep the record in the " +
       "artifact directory and reference it by path so the goal sentence stays one sentence"
+  })
+  // The dynamic-node renderer resolves `{{...}}` inside replacement values, and a reference it cannot
+  // bind throws inside the workflow render, which fails the whole run on every resume. A label has no
+  // reason to carry template syntax, so reject it here, where the failure is goal-plan's own verify.
+  .refine((value) => !value.includes("{{"), {
+    message: "Replacement values must be plain-text labels and must not contain template braces '{{'"
   });
 
 const replacementsSchema = z
@@ -332,7 +338,6 @@ const applicabilityDecisionSchema = z
   });
 
 export const GOAL_LANE_KINDS = ["threat", "class", "roaming"] as const;
-export type GoalLaneKind = (typeof GOAL_LANE_KINDS)[number];
 
 /**
  * One goal lane: a named unit of hunting work and the concrete node IDs it owns.
@@ -598,9 +603,6 @@ export const goalPlanJsonSchema = {
 } as Record<string, unknown>;
 
 export type GoalPlan = z.infer<typeof goalPlanSchema>;
-export type ThreatGoalPlanItem = z.infer<typeof threatGoalSchema>;
-export type ClassGoalPlanItem = z.infer<typeof classGoalSchema>;
-export type ApplicabilityDecision = z.infer<typeof applicabilityDecisionSchema>;
 
 export function validateGoalPlan(value: unknown, path = "$"): SchemaValidationResult<GoalPlan> {
   return validateWithZod(goalPlanSchema, value, { path, code: "GOAL_PLAN_SCHEMA_INVALID" });

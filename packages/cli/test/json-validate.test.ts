@@ -38,7 +38,7 @@ import {
   evmbenchSchemaBundleDigest,
   evmbenchSchemaDirectory
 } from "@ultrafuzz/evmbench";
-import { EVAL_PUBLICATION_STATE_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
+import { EVAL_GROUND_TRUTH_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   MODAL_NODE_INPUT_SCHEMA_ID,
@@ -665,19 +665,15 @@ test("json validate recognizes the pinned resolved-config schema and reports the
 test("json validate recognizes the pinned eval schema and reports the owning eval bundle", async () => {
   const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-eval-"));
   try {
-    const schema = path.join(evalSchemaDirectory(), "eval-publication-state.schema.json");
-    const publicationState = path.join(temporary, "publication-state.json");
+    const schema = path.join(evalSchemaDirectory(), "eval-ground-truth.schema.json");
+    const groundTruth = path.join(temporary, "ground-truth.json");
     fs.writeFileSync(
-      publicationState,
-      `${JSON.stringify({
-        schema_version: "ultrafuzz.eval.publication.v1",
-        status: "publishable",
-        diagnostics: []
-      })}\n`,
+      groundTruth,
+      `${JSON.stringify({ schema_version: "ultrafuzz.eval-ground-truth.v1", bugs: [] })}\n`,
       "utf8"
     );
 
-    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", publicationState, "--json"]);
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", groundTruth, "--json"]);
     assert.equal(validCapture.code, 0);
     const envelope = JSON.parse(validCapture.stdout) as {
       ok: boolean;
@@ -689,10 +685,10 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
     assert.equal(envelope.ok, true);
     assert.equal(envelope.data.status, "valid");
     assert.equal(envelope.data.schema.registered, true);
-    assert.equal(envelope.data.schema.id, EVAL_PUBLICATION_STATE_SCHEMA_ID);
+    assert.equal(envelope.data.schema.id, EVAL_GROUND_TRUTH_SCHEMA_ID);
     assert.equal(envelope.data.schema.bundle_sha256, evalSchemaBundleDigest());
 
-    const renamedSchema = path.join(temporary, "renamed-publication-state.schema.json");
+    const renamedSchema = path.join(temporary, "renamed-ground-truth.schema.json");
     fs.copyFileSync(schema, renamedSchema);
     const renamedCapture = await capture([
       "json",
@@ -700,7 +696,7 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
       "--schema",
       renamedSchema,
       "--file",
-      publicationState,
+      groundTruth,
       "--json"
     ]);
     assert.equal(renamedCapture.code, 0);
@@ -708,12 +704,12 @@ test("json validate recognizes the pinned eval schema and reports the owning eva
       data: { schema: { id: string; bundle_sha256: string; registered: boolean } };
     };
     assert.equal(renamedEnvelope.data.schema.registered, true);
-    assert.equal(renamedEnvelope.data.schema.id, EVAL_PUBLICATION_STATE_SCHEMA_ID);
+    assert.equal(renamedEnvelope.data.schema.id, EVAL_GROUND_TRUTH_SCHEMA_ID);
     assert.equal(renamedEnvelope.data.schema.bundle_sha256, evalSchemaBundleDigest());
 
-    const tamperedSchema = path.join(temporary, "eval-publication-state.schema.json");
+    const tamperedSchema = path.join(temporary, "eval-ground-truth.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
-    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", publicationState]);
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", groundTruth]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {

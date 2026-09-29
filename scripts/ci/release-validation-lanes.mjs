@@ -69,6 +69,13 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     build_release_reporter: true
   },
   {
+    lane: "cli-e2e",
+    description: "End-to-end campaign with controller kill and resume on the pinned engine",
+    gates: "cli-e2e",
+    timeout_minutes: 60,
+    build_release_reporter: true
+  },
+  {
     lane: "benchmark-history-typecheck",
     description: "Benchmark history charts and workspace typecheck",
     gates: "benchmark-history,workspace-typecheck",

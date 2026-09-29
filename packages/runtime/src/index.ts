@@ -29,7 +29,6 @@ export * from "./runtime-semantic-gates.js";
 export * from "./schema-registry.js";
 export * from "./semantic-artifact-context.js";
 export * from "./semantic-gates.js";
-export * from "./severity-matrix.js";
 export * from "./smithers.js";
 export * from "./smithers-package.js";
 export * from "./smithers-attempt-authority.js";

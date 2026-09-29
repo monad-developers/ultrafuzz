@@ -43,11 +43,9 @@ import {
   MAX_PUBLIC_OPTIONAL_ROW_ARTIFACT_FILES,
   PUBLIC_OPTIONAL_ROW_ARTIFACTS,
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
-  PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
-  PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
   PublicEvalDiagnosticsBuildError,
   PublicWorkerCommandInterruptedError,
   publicBenchmarkMaxParallelEvalRows,
@@ -60,8 +58,8 @@ import {
   publicEvalRunId,
   preparePublicEvalSuite,
   publicCommandExitFailureCause,
-  publicEvalFailureDiagnosticLogPayload,
   publicEvalFailureDiagnosticLogPayloadFromRecords,
+  publicEvalFailureEnvelopeDiagnostics,
   publicEvalModelWorkEvidence,
   publicEvalCommandLeftFinalJournal,
   publicEvalRunErrorCanBePublished,
@@ -1222,6 +1220,14 @@ it("continues after the eval command reports one publishable failed datapoint", 
   ).toBe(false);
 });
 
+function publicEvalFailureDiagnosticLogPayload(
+  stdout: string,
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  const diagnostics = publicEvalFailureEnvelopeDiagnostics(stdout);
+  return diagnostics === undefined ? undefined : workerDiagnosticLogPayload(diagnostics, forbiddenSecretValues);
+}
+
 it("publishes only bounded redacted workflow-submission messages from eval JSON", () => {
   const secret = "sk-fixture-secret-value";
   const payload = publicEvalFailureDiagnosticLogPayload(
@@ -1857,7 +1863,7 @@ it("bounds public provider fan-out by mode", () => {
     ...smokeBaseSuite,
     run: {
       ...smokeBaseSuite.run,
-      max_parallel_runs: PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
+      max_parallel_runs: 3,
       max_parallel_targets: 4
     }
   });
@@ -1877,7 +1883,7 @@ it("bounds public provider fan-out by mode", () => {
   expect(fullSuite.targets).toHaveLength(40);
   expect(fullSuite.run).toEqual({
     ...fullBaseSuite.run,
-    max_parallel_runs: PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
+    max_parallel_runs: 20,
     max_parallel_targets: 8
   });
   expect(publicBenchmarkMaxParallelEvalRows("smoke")).toBe(3);
@@ -2687,9 +2693,8 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
 
 it("retains threat-model, goal-plan and vulnerability-database artifacts per row when the run produced them", () => {
   // #183 requires the real generated documents to be retrievable. They cannot
-  // reach the bundle any other way: `reporting.artifacts.include` is consumed
-  // only by `uploadsForManifest`, which delivers to `this.input.reporters`, and
-  // the public worker runs `eval run --provider none` with an empty reporter list.
+  // reach the bundle any other way: nothing in the eval runner reads
+  // `reporting.artifacts.include`.
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-threat-"));
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-threat-model";

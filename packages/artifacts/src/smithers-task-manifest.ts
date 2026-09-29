@@ -1410,7 +1410,11 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
     }
   }
 
-  const optionalAttemptIds = new Set(
+  // Safety only: a producer that halts on failure can never have its output treated as optional.
+  // Which consumers opt in to a continuing producer's output is compiler policy and is not
+  // re-derived here: once a second copy of that policy drifted from the compiler, it rejected the
+  // default, low-cost, exhaustive and invariant-only launches (#1140).
+  const continuingAttemptIds = new Set(
     manifest.tasks
       .filter((task) => {
         const node = graphNodes.get(task.concreteNodeId)!;
@@ -1419,21 +1423,14 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
       .map((task) => task.attemptId)
   );
   for (const task of manifest.tasks) {
-    // Mirrors the runtime compiler: continuation lets independent tasks settle,
-    // but only the review group reconciles partial results, so only review tasks
-    // treat inputs from continuing groups as optional.
-    const reconcilesPartialResults = graphNodes.get(task.concreteNodeId)?.group === "review";
-    const expectedOptionalDirectories = reconcilesPartialResults
-      ? task.dependencyArtifactDirs.filter((directory) => {
-          const attemptId = directory.split(/[\\/]/u).at(-1);
-          return attemptId !== undefined && optionalAttemptIds.has(attemptId);
-        })
-      : [];
-    assertSameStringSet(
-      task.optionalDependencyArtifactDirs ?? [],
-      expectedOptionalDirectories,
-      `Smithers task ${JSON.stringify(task.attemptId)} optional dependency artifact directories`
-    );
+    for (const directory of task.optionalDependencyArtifactDirs ?? []) {
+      const producer = portablePathBasename(directory) ?? "";
+      if (!continuingAttemptIds.has(producer)) {
+        throw new Error(
+          `Smithers task ${JSON.stringify(task.attemptId)} marks dependency ${JSON.stringify(producer)} optional, but that producer does not continue on failure`
+        );
+      }
+    }
   }
 }
 

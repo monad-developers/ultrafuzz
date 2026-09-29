@@ -97,6 +97,5 @@ automatically counted as false positives.
 
 Ultrafuzz ships this methodology as a product surface: eval suites run a
 target × variant × trial matrix against ground-truth bugs, score precision,
-recall, and F1 locally, and optionally mirror node telemetry to an eval cloud
-provider. See [Eval Suites](../reference/evals.md) and
+recall, and F1 locally. See [Eval Suites](../reference/evals.md) and
 [Run Eval Suites](../how-to/run-evals.md).

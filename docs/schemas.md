@@ -22,8 +22,6 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:evals:benchmark-lanes:2`
 - `urn:ultrafuzz:schema:evals:ground-truth:1`
 - `urn:ultrafuzz:schema:evals:history:2`
-- `urn:ultrafuzz:schema:evals:history-automatic-publication-plan:1`
-- `urn:ultrafuzz:schema:evals:history-publication-generation:1`
 - `urn:ultrafuzz:schema:evals:run-record:3`
 - `urn:ultrafuzz:schema:evals:recovery-equivalence:1`
 - `urn:ultrafuzz:schema:evals:status:1`
@@ -66,25 +64,37 @@ ultrafuzz json validate \
 Use repeatable `--ref` flags only for explicitly supplied local dependencies.
 Bundled sibling schemas resolve offline without flags. The CLI and host use the
 same non-mutating parser, schema registry, Ajv configuration, resource limits,
-schema digest, bundle digest, and validator-build identity.
+schema digest, and bundle digest, and each reports its validator-build identity.
 
 Every planned JSON output persists the registered schema filename, `$id`,
 schema SHA-256, owning package's schema-bundle SHA-256, and validator build.
 The expanded graph, run state, `ultrafuzz.artifact-verification.v2` marker, and
-`ultrafuzz.artifact-manifest.v3` repeat that binding. A missing, partial, stale,
-or mismatched identity is a host setup/verification failure even when the JSON
-would match a different schema with the same general shape.
+`ultrafuzz.artifact-manifest.v3` repeat that binding. The host validates each
+artifact against the schema content that binding names: the installed schemas
+when their bundle digest is the planned one, otherwise the bundle sealed in the
+run's execution snapshot. A missing or partial binding, or schema content that
+neither holds, is a host verification failure even when the JSON would match a
+different schema with the same general shape. The validator build is
+provenance: graph reads, host artifact gates, and the validator preflight do not
+compare it with the build doing the checking.
 
 Schema-backed producers receive a run-owned trusted launcher ahead of
 target-controlled `PATH` entries. Local and Modal environments use that launcher
-to validate a real known-valid fixture and compare the returned schema, bundle,
-and validator-build identity before model work. Local launchers resolve only a
-verified content-addressed snapshot of the CLI and every transitive package, so
+to validate a real known-valid fixture and compare the returned schema and
+bundle identity before model work; the returned validator build is provenance.
+Local launchers resolve only a verified content-addressed snapshot of the CLI
+and every transitive package, so
 a working-tree rebuild cannot change an active run. Ambient Node loader/search
 variables are removed and both ESM and CommonJS module resolution must stay
 inside that snapshot; document reads are unaffected. A path lookup alone is not
 a preflight. Ordinary resume now delegates continuation to Smithers instead of
-using the historical launcher or closure as an authorization gate. A current
+using the historical launcher or closure as an authorization gate. When resume
+cannot re-verify the launcher, it reports a `WORKFLOW_TRUSTED_CLI_UNVERIFIED`
+warning and, if `<run>/trusted-bin/ultrafuzz` exists, keeps it first on `PATH`
+rather than letting tasks reach another `ultrafuzz`. That launcher still
+verifies its closure before every dispatch, so if its metadata or closure is
+damaged, or the Node binary it names is gone, each task's validator preflight
+fails; `resume --refresh-controller` does not repair such a launcher. A current
 controller refresh publishes a new controller path without rewriting the
 historical closure.
 

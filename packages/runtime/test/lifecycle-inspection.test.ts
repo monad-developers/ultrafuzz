@@ -1332,6 +1332,179 @@ test("diagnoseProject reports commands required by the active topology", async (
   );
 });
 
+test("diagnoseProject requires only the CLIs of agents the selected topology can dispatch to", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  // The scaffold also configures Claude, DeepSeek, Kimi, and Pi profiles; only Codex is installed.
+  const installed = new Set(["git", "node", "forge", "codex"]);
+  const diagnose = () =>
+    diagnoseProject({
+      projectRoot: project,
+      env: { PATH: "/usr/bin" },
+      offline: true,
+      requiredCommandProbe: async (names) =>
+        names.map((name) => ({
+          name,
+          available: installed.has(name),
+          path: installed.has(name) ? `/usr/bin/${name}` : null,
+          version: null
+        }))
+    });
+
+  const codexOnly = await diagnose();
+  const toolchainCheck = codexOnly.value?.checks.find((check) => check.name === "toolchain");
+  assert.equal(toolchainCheck?.status, "ok");
+  assert.match(toolchainCheck?.summary ?? "", /^4 required commands available /u);
+  assert.deepEqual(
+    codexOnly.value?.toolchain.map((entry) => [entry.name, entry.required]),
+    [
+      ["git", true],
+      ["node", true],
+      ["forge", true],
+      ["claude", false],
+      ["codex", true],
+      ["kimi", false],
+      ["pi", false]
+    ]
+  );
+
+  // A retry fallback is dispatched to as well.
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  fs.writeFileSync(configPath, `${config}\n[retry]\nagents = ["default", "kimi"]\n`, "utf8");
+  const withFallback = await diagnose();
+  assert.equal(withFallback.value?.toolchain.find((entry) => entry.name === "kimi")?.required, true);
+  assert.ok(
+    withFallback.diagnostics.some(
+      (entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING" && entry.message.endsWith(": kimi")
+    )
+  );
+
+  // Codex also runs OpenRouterAgent, so an unselected profile of either agent cannot waive
+  // the requirement the selected one makes.
+  fs.writeFileSync(configPath, config, "utf8");
+  addOpenRouterProfile(project);
+  const codexWithUnusedOpenRouter = await diagnose();
+  assert.equal(codexWithUnusedOpenRouter.value?.toolchain.find((entry) => entry.name === "codex")?.required, true);
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace(
+        "    prompt: setup/project-discovery.md\n",
+        "    prompt: setup/project-discovery.md\n    model_profiles:\n      - openrouter\n"
+      ),
+    "utf8"
+  );
+  const openRouterOnly = await diagnose();
+  assert.equal(openRouterOnly.value?.toolchain.find((entry) => entry.name === "codex")?.required, true);
+});
+
+test("diagnoseProject reports controller roots in the temporary directory and leaves them in place", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const temporary = temporaryRoot("ufz-doctor-tmpdir-");
+  for (const [name, mebibytes] of [
+    ["ultrafuzz-controller-first", 1],
+    ["ultrafuzz-controller-second", 2],
+    ["unrelated", 4]
+  ] as const) {
+    fs.mkdirSync(path.join(temporary, name, ".smithers"), { recursive: true });
+    fs.writeFileSync(path.join(temporary, name, ".smithers", "engine.js"), Buffer.alloc(mebibytes * 1024 * 1024));
+  }
+
+  const doctor = await withTemporaryDirectory(temporary, () =>
+    diagnoseProject({
+      projectRoot: project,
+      env: { PATH: "/usr/bin" },
+      offline: true,
+      requiredCommandProbe: allAvailable
+    })
+  );
+
+  assert.match(
+    doctor.value?.checks.find((check) => check.name === "temporary-directory")?.summary ?? "",
+    /; 2 ultrafuzz-controller-\* directories hold 3 MiB/u
+  );
+  assert.ok(fs.existsSync(path.join(temporary, "ultrafuzz-controller-first", ".smithers", "engine.js")));
+  assert.ok(fs.existsSync(path.join(temporary, "ultrafuzz-controller-second", ".smithers", "engine.js")));
+});
+
+const devShmIsTmpfs = (() => {
+  try {
+    return fs.statfsSync("/dev/shm").type === 0x01021994;
+  } catch {
+    return false;
+  }
+})();
+
+test(
+  "diagnoseProject warns, without failing, when the temporary directory is RAM-backed",
+  { skip: devShmIsTmpfs ? false : "/dev/shm is not a tmpfs mount on this host" },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const temporary = registerTemporaryPath(fs.mkdtempSync("/dev/shm/ufz-doctor-"));
+
+    const doctor = await withTemporaryDirectory(temporary, () =>
+      diagnoseProject({
+        projectRoot: project,
+        env: { PATH: "/usr/bin" },
+        offline: true,
+        requiredCommandProbe: allAvailable
+      })
+    );
+
+    assert.equal(doctor.value?.checks.find((check) => check.name === "temporary-directory")?.status, "warning");
+    const warning = doctor.diagnostics.find((entry) => entry.code === "DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED");
+    assert.equal(warning?.severity, "warning");
+    assert.match(warning?.message ?? "", /is a RAM-backed tmpfs/u);
+  }
+);
+
+test("diagnoseProject warns when the temporary directory has little free space", async (context) => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const temporary = temporaryRoot("ufz-doctor-full-");
+  const statfsSync = fs.statfsSync;
+  context.mock.method(fs, "statfsSync", (target: fs.PathLike) => ({ ...statfsSync(target), bavail: 1 }));
+
+  const doctor = await withTemporaryDirectory(temporary, () =>
+    diagnoseProject({
+      projectRoot: project,
+      env: { PATH: "/usr/bin" },
+      offline: true,
+      requiredCommandProbe: allAvailable
+    })
+  );
+
+  assert.equal(doctor.value?.checks.find((check) => check.name === "temporary-directory")?.status, "warning");
+  assert.match(
+    doctor.diagnostics.find((entry) => entry.code === "DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED")?.message ?? "",
+    /has less than 2 GiB free/u
+  );
+});
+
+async function allAvailable(names: readonly string[]) {
+  return names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: null }));
+}
+
+async function withTemporaryDirectory<T>(directory: string, operation: () => Promise<T>): Promise<T> {
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = directory;
+  try {
+    return await operation();
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+}
+
 test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in task worktrees", async () => {
   for (const searchPath of ["bin", ""]) {
     const project = tempProject();
@@ -1600,7 +1773,6 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
   assert.ok(Object.hasOwn(reported, "resume_hydration"));
   // Target-owned dependencies never become controller authority.
   assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "unknown");
-  assert.ok(!doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE"));
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {
@@ -1608,17 +1780,18 @@ test("diagnoseProject reports a missing install and a version mismatch", async (
 
   const missing = await diagnoseProject({ projectRoot: project, env, offline: true });
   assert.equal(missing.value?.workflow_engine.installed_version, null);
-  assert.ok(!missing.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_MISSING"));
+  assert.equal(missing.value?.workflow_engine.layout_status, "error");
 
   writeFakeInstalledEngine(project, { version: "0.29.0" });
   const mismatched = await diagnoseProject({ projectRoot: project, env, offline: true });
   assert.equal(mismatched.value?.workflow_engine.installed_version, "0.29.0");
-  assert.ok(!mismatched.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH"));
+  assert.equal(mismatched.value?.workflow_engine.layout_status, "error");
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION, binTarget: "dist/other.js" });
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
   assert.equal(doctor.value?.workflow_engine.installed_bin_target, "dist/other.js");
   assert.equal(doctor.value?.workflow_engine.layout_status, "error");
-  assert.ok(!doctor.diagnostics.some((entry) => entry.code === "DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID"));
+  // The project-local engine is informational: launch installs its own controller.
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "unknown");
 });
 
 test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {

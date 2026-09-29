@@ -268,7 +268,6 @@ export function runTrustedJsonValidatorPreflight(input: { layout: RunLayout; tru
     schemaId: paths.schemaId,
     schemaSha256: paths.schemaSha256,
     schemaBundleSha256: metadata.schema_bundle_sha256,
-    validatorBuild: metadata.validator_build,
     artifactSha256: paths.fixtureSha256
   });
   assertTrustedCliLauncher({ layout: input.layout, launcherPath: input.trusted.launcherPath });
@@ -310,11 +309,8 @@ export function assertTrustedCliLauncher(input: { layout: RunLayout; launcherPat
 // closure on every dispatch.
 const authenticatedClosurePreflights = new Set<string>();
 
-function preflightTrustedCliClosure(
-  closure: TrustedCliClosure,
-  expected: { validator_build: string; schema_bundle_sha256: string }
-): void {
-  const authenticated = [closure.digest, expected.validator_build, expected.schema_bundle_sha256].join("\0");
+function preflightTrustedCliClosure(closure: TrustedCliClosure, expected: { schema_bundle_sha256: string }): void {
+  const authenticated = [closure.digest, expected.schema_bundle_sha256].join("\0");
   if (authenticatedClosurePreflights.has(authenticated)) return;
   const paths = closurePreflightPaths(closure);
   const stdout = execFileSync(
@@ -344,7 +340,6 @@ function preflightTrustedCliClosure(
     schemaId: paths.schemaId,
     schemaSha256: paths.schemaSha256,
     schemaBundleSha256: expected.schema_bundle_sha256,
-    validatorBuild: expected.validator_build,
     artifactSha256: paths.fixtureSha256
   });
   authenticatedClosurePreflights.add(authenticated);

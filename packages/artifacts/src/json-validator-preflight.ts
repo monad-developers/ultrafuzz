@@ -108,7 +108,6 @@ export interface JsonValidatorPreflightExpectedIdentity {
   schemaId: string;
   schemaSha256: string;
   schemaBundleSha256: string;
-  validatorBuild: string;
   artifactSha256: string;
 }
 
@@ -134,7 +133,6 @@ export function parseJsonValidatorPreflightSuccessEnvelope(
     schemaId: binding!.schema_id,
     schemaSha256: binding!.schema_sha256,
     schemaBundleSha256: binding!.schema_bundle_sha256,
-    validatorBuild: binding!.validator_build,
     artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
   };
   const gates = executeSchemaSemanticGates(JSON_VALIDATOR_PREFLIGHT_SUCCESS_SCHEMA_FILENAME, {
@@ -144,7 +142,6 @@ export function parseJsonValidatorPreflightSuccessEnvelope(
         schemaId: expected.schemaId,
         schemaSha256: expected.schemaSha256,
         schemaBundleSha256: expected.schemaBundleSha256,
-        validatorBuild: expected.validatorBuild,
         artifactSha256: expected.artifactSha256
       }
     }

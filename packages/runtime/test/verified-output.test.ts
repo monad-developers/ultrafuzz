@@ -245,7 +245,14 @@ test("terminal presentation discloses tolerated failures and preserves verified 
   assert.equal(published.completion?.counts.failed, 1);
   assert.equal(published.completion?.outcome, "partial");
   const expected = JSON.parse(fixture.reportBytes.toString("utf8")) as Record<string, unknown>;
-  assert.deepEqual(published.json, { ...expected, completion: published.completion });
+  // The run summary restates elapsed time from run.json and state.json; all review content is the agent's.
+  const elapsed = (published.json as { run_metadata: { elapsed_time: string } }).run_metadata.elapsed_time;
+  assert.match(elapsed, /^\d+\.\ds$/u);
+  assert.deepEqual(published.json, {
+    ...expected,
+    run_metadata: { ...(expected.run_metadata as Record<string, unknown>), elapsed_time: elapsed },
+    completion: published.completion
+  });
   assert.match(published.markdown, /producer/u);
 });
 
@@ -697,6 +704,31 @@ test("verified final-report reader binds immutable current bytes to verifier and
     runSnapshots[0]!.publications.map((publication) => publication.bytes),
     [fixture.markdownBytes, fixture.reportBytes]
   );
+});
+
+test("verified reads and the terminal report accept outputs planned by another validator build", () => {
+  // #921: `validator_build` and `contract_digest` record the build that planned the run. After a
+  // rebuild changes them, verified reads validate the same schema content and the terminal report is
+  // still published. They used to refuse at the graph read ("planned graph output contract digest
+  // changed"), and past it at "current contract digest changed" and "terminal report found
+  // schema/control drift".
+  const rebuilt = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
+  const outputs = finalReportOutputs().map((output) => ({
+    ...output,
+    contract_digest: "d".repeat(64),
+    ...(output.validator_build === undefined ? {} : { validator_build: rebuilt })
+  }));
+  assert.ok(outputs.some((output) => output.validator_build === rebuilt));
+  const fixture = createVerifiedReportFixture("verified-report-rebuilt-validator", { outputs });
+
+  assert.deepEqual(loadVerifiedFinalReportSnapshot(fixture.layout.root).json_bytes, fixture.reportBytes);
+  recordStoppedReportFixture(fixture, "succeeded");
+  const published = publishTerminalReport(fixture.layout.root, {
+    workflowRunId: WORKFLOW_RUN_ID,
+    workflowState: "succeeded"
+  });
+  assert.equal(published?.terminal, true);
+  assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
 });
 
 test("final-report omissions remain visible as authenticated host diagnostics without rewriting the report", () => {

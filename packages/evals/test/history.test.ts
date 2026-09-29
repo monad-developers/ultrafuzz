@@ -500,9 +500,6 @@ describe("longitudinal eval history", () => {
     expect(pendingCharts.get("performance-cost.svg")).toContain(
       'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
     );
-    expect(pendingCharts.get("cost.svg")).toContain(
-      'data-status="partial" data-available-count="1" data-expected-count="1"'
-    );
 
     const replacement = supersessionRun({
       sourceRunId: replacementSourceRun,
@@ -515,9 +512,6 @@ describe("longitudinal eval history", () => {
     expect(renderEvalHistoryCharts(partiallyMerged).get("performance-cost.svg")).toContain(
       'data-model="deepseek-v4-flash" data-status="partial" data-run-count="1" data-expected-run-count="1" data-available-target-count="3" data-expected-target-count="3"'
     );
-    expect(renderEvalHistoryCharts(partiallyMerged).get("cost.svg")).toContain(
-      'data-status="partial" data-available-count="1" data-expected-count="1"'
-    );
 
     const merged = mergeEvalHistory(partiallyMerged, replacement);
     expect(merged.supersessions).toEqual([supersession]);
@@ -529,10 +523,8 @@ describe("longitudinal eval history", () => {
     );
     expect(performance).not.toContain('data-available-target-count="5" data-expected-target-count="6"');
     expect(performance).not.toContain("targets 5/6");
-    expect(replacedCharts.get("cost.svg")).not.toContain("7777777");
-    expect(replacedCharts.get("cost.svg")).toContain("8888888");
-    expect(replacedCharts.get("precision.svg")).not.toContain(`/commit/${"7".repeat(40)}`);
-    expect(replacedCharts.get("precision.svg")).toContain(`/commit/${"8".repeat(40)}`);
+    expect(replacedCharts.get("quality.svg")).not.toContain(`/commit/${"7".repeat(40)}`);
+    expect(replacedCharts.get("quality.svg")).toContain(`/commit/${"8".repeat(40)}`);
   });
 
   it("activates an explicit cohort transition only when both immutable fingerprints match", () => {
@@ -567,15 +559,13 @@ describe("longitudinal eval history", () => {
     });
 
     const partiallyMerged = mergeEvalHistory(pending, replacement.slice(0, 2));
-    const partialCost = renderEvalHistoryCharts(partiallyMerged).get("cost.svg")!;
-    expect(partialCost).toContain('data-completeness-marker="partial"');
-    expect(partialCost).toContain("0.2 partial (pricing-incomplete)");
-    expect(partialCost).not.toContain("partial n/a 7777777");
+    expect(renderEvalHistoryCharts(partiallyMerged).get("quality.svg")).toContain(`/commit/${"7".repeat(40)}`);
 
     const merged = mergeEvalHistory(partiallyMerged, replacement);
     expect(merged.supersessions).toEqual([supersession]);
-    expect(renderEvalHistoryCharts(merged).get("cost.svg")).not.toContain("7777777");
-    expect(renderEvalHistoryCharts(merged).get("precision.svg")).toContain(`/commit/${"8".repeat(40)}`);
+    const mergedCharts = renderEvalHistoryCharts(merged);
+    expect(mergedCharts.get("quality.svg")).not.toContain(`/commit/${"7".repeat(40)}`);
+    expect(mergedCharts.get("quality.svg")).toContain(`/commit/${"8".repeat(40)}`);
   });
 
   it("rejects invalid source-run supersession ledgers", () => {
@@ -959,11 +949,6 @@ describe("longitudinal eval history", () => {
     expect(charts.get("performance-cost.svg")).toContain(
       'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 23.7% · $0.41 · n=1 · targets 2/3 · partial'
     );
-    expect(charts.get("cost.svg")).toContain(
-      'data-status="unavailable" data-available-count="0" data-expected-count="1"'
-    );
-    expect(charts.get("cost.svg")).not.toContain('data-completeness-marker="partial-null"');
-    expect(charts.get("cost.svg")).toContain("n/a 70646d2");
     expect(charts.get("latest-summary.svg")).toContain(
       'data-metric="cost_usd" data-status="partial" data-available-target-count="2" data-expected-target-count="3"'
     );
@@ -1586,14 +1571,12 @@ describe("longitudinal eval history", () => {
     const first = renderEvalHistoryCharts(history);
     const second = renderEvalHistoryCharts(history);
     expect(first).toEqual(second);
-    expect(first.get("precision.svg")).toContain(`https://github.com/monad-developers/ultrafuzz/commit/${CANDIDATE}`);
-    expect(first.get("precision.svg")).toContain(CANDIDATE.slice(0, 7));
-    expect(first.get("precision.svg")).toContain("gpt-5.6-luna · high");
-    expect(first.get("precision.svg")).toContain("cohort-aaaaaaaa");
-    expect(first.get("precision.svg")).toContain("policy-dddddddd");
-    expect(first.get("precision.svg")).toContain(">target-a</text>");
-    expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
-    expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
+    expect([...first.keys()]).toEqual(["latest-summary.svg", "quality.svg", "performance-cost.svg"]);
+    expect(first.get("latest-summary.svg")).toContain(
+      `https://github.com/monad-developers/ultrafuzz/commit/${CANDIDATE}`
+    );
+    expect(first.get("latest-summary.svg")).toContain("gpt-5.6-luna · high");
+    expect(first.get("quality.svg")).toContain("cohort-aaaaaaaa");
     expect(first.get("latest-summary.svg")).toContain("Score (macro-F1)");
     expect(first.get("latest-summary.svg")).toContain("n/a · unavailable 0/1");
     expect(first.get("quality.svg")).toContain('data-metric="f1"');
@@ -1818,11 +1801,6 @@ describe("longitudinal eval history", () => {
     expect(svg).toContain(
       'deepseek-v4-flash</tspan><tspan fill="#6b7280"> · median 25.0% · $0.40 · n=1 · targets 2/2 · partial'
     );
-    const costSvg = renderEvalHistoryCharts(
-      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: partialFlash })
-    ).get("cost.svg")!;
-    expect(costSvg).toContain('data-status="partial" data-available-count="1" data-expected-count="1"');
-    expect(costSvg).toContain("partial (pricing-incomplete)");
     const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
     expect(deepseek).toBeDefined();
     expect(deepseek).not.toContain('data-iqr="');
@@ -1994,79 +1972,6 @@ describe("longitudinal eval history", () => {
 
     expect(formatted).toContain('"reasons": ["accounting-unavailable"]');
     expect(parseEvalHistory(JSON.parse(formatted))).toEqual(history);
-  });
-
-  it("renders changed cohorts and execution policies as lineage markers instead of chart series", () => {
-    const svg = renderEvalHistoryCharts(
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        supersessions: [],
-        observations: [
-          observation({ id: "first-series" }),
-          observation({
-            id: "second-series",
-            candidate_commit: "3333333333333333333333333333333333333333",
-            cohort_fingerprint: `sha256:${"c".repeat(64)}`,
-            execution_policy_fingerprint: `sha256:${"e".repeat(64)}`
-          })
-        ]
-      })
-    ).get("precision.svg")!;
-
-    expect(svg.match(/<polyline /gu)).toHaveLength(1);
-    expect(svg).toContain('data-lineage-marker="cohort-aaaaaaaa"');
-    expect(svg).toContain('data-lineage-marker="cohort-cccccccc"');
-    expect(svg).not.toContain(">cohort-aaaaaaaa policy-dddddddd target-a</text>");
-    expect(svg).not.toContain(">cohort-cccccccc policy-eeeeeeee target-a</text>");
-  });
-
-  it("labels the globally earliest and latest dates across series", () => {
-    const charts = renderEvalHistoryCharts(
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        supersessions: [],
-        observations: [
-          observation({ id: "later", benchmark: "evmbench", run_timestamp: "2026-07-19T12:00:00.000Z" }),
-          observation({
-            id: "earlier",
-            benchmark: "ultrafuzz-bench",
-            run_timestamp: "2026-07-17T12:00:00.000Z",
-            candidate_commit: "3333333333333333333333333333333333333333"
-          })
-        ]
-      })
-    );
-    const svg = charts.get("precision.svg")!;
-    expect(svg.indexOf(">2026-07-17</text>")).toBeLessThan(svg.indexOf(">2026-07-19</text>"));
-  });
-
-  it("uses evenly spaced run columns and rotates date labels below the x axis", () => {
-    const observations = [0, 1, 2].map((index) =>
-      observation({
-        id: `run-${index}`,
-        candidate_commit: `${index + 1}`.repeat(40),
-        run_timestamp: ["2026-07-17T00:00:00.000Z", "2026-07-29T00:00:00.000Z", "2026-07-30T00:00:00.000Z"][index]!,
-        precision: 0.25 + index * 0.1
-      })
-    );
-    const svg = renderEvalHistoryCharts(
-      parseEvalHistory({
-        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
-        supersessions: [],
-        observations
-      })
-    ).get("precision.svg")!;
-
-    const match = /<polyline[^>]+points="([^"]+)"/u.exec(svg);
-    expect(match).not.toBeNull();
-    const polylinePoints = match?.[1];
-    expect(polylinePoints).toBeDefined();
-    if (polylinePoints === undefined) throw new Error("missing polyline points");
-    const xCoordinates = polylinePoints.split(" ").map((point) => Number(point.split(",")[0]!));
-    expect(xCoordinates).toHaveLength(3);
-    expect(xCoordinates[1]! - xCoordinates[0]!).toBeCloseTo(xCoordinates[2]! - xCoordinates[1]!, 5);
-    expect(svg).toContain("rotate(-90)");
-    expect(svg).toContain(">2026-07-29</text>");
   });
 });
 

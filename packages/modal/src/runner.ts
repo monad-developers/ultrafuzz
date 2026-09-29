@@ -2959,18 +2959,6 @@ export function modalSecurityToolchainCommands(): string[] {
   ];
 }
 
-export function createTrackedSourceArchive(
-  repoRoot: string,
-  archive = path.join(realpathSync(os.tmpdir()), `ultrafuzz-modal-source-${String(process.pid)}.tgz`)
-): string {
-  const trackedFiles = execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot });
-  if (trackedFiles.length === 0) throw new Error(`no Git-tracked source files found under ${repoRoot}`);
-  execFileSync("tar", ["--null", "-czf", archive, "-C", repoRoot, "--files-from=-"], {
-    input: trackedFiles
-  });
-  return archive;
-}
-
 /**
  * Create a self-contained, shallow Git checkout for the exact candidate HEAD.
  * The worker extracts this immutable archive instead of cloning the candidate

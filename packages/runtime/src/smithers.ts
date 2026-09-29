@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import { isBuiltin } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -9,7 +9,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
-  artifactContractDefinition,
   artifactContractSchemaBinding,
   assertRunPlanDocument,
   assertValidSmithersTaskManifest,
@@ -60,7 +59,7 @@ import {
   type ExpandedNode,
   type ModelFanoutProvenance
 } from "@ultrafuzz/topology";
-import * as ts from "typescript";
+import type * as TypeScript from "typescript";
 
 import {
   DATA_GOVERNANCE_PROVENANCE_PATH,
@@ -69,6 +68,7 @@ import {
   routeOwnsCredentialLikeEnvironmentVariable
 } from "./data-governance.js";
 import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
+import { reconcilesPartialResults } from "./dynamic-runtime.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -904,11 +904,16 @@ export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath =
       workflowPath,
       identityWorkflowPath || workflowPath,
     );`;
-// Restores exactly the two states upstream's `isTerminalState` calls terminal
-// unconditionally: `finished` and `skipped`. `failed`, `cancelled` and Smithers
-// 0.35.0's new `stalled` are deliberately NOT restored, and the omission of
-// `stalled` is the deliberate half of that rule, not an oversight from the
-// 0.35.0 bump. Upstream classes `stalled` with `failed` ("it behaves exactly
+// Restores only `finished`, the one state backed by a durable output row.
+// `skipped` is re-derived instead: it is a verdict on prerequisites that a reset
+// (`resume --retry-failed`, `--reset-node`) can overturn, and restoring it kept a
+// recovered producer's verifier and every descendant skipped (#1141). The flag
+// set here makes the session re-render before it schedules anything (see
+// `skip_predicate_rerender`), so the workflow's skip predicates see the
+// restored states.
+// `failed`, `cancelled` and Smithers 0.35.0's new `stalled` are deliberately NOT
+// restored, and the omission of `stalled` is not an oversight from the 0.35.0
+// bump. Upstream classes `stalled` with `failed` ("it behaves exactly
 // like `failed`, including the continueOnFail escape hatch"), and a resume's
 // whole purpose is to re-attempt what did not finish -- restoring `stalled` but
 // not `failed` would make a stalled node strictly less retryable than an
@@ -924,11 +929,42 @@ const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
       Effect.sync(() => {
         for (const task of tasks) {
-          if (task.state !== "finished" && task.state !== "skipped") continue;
+          if (task.state !== "finished") continue;
           state.states.set(stateKeyFor(task), task.state);
         }
+        state.skipPredicatesStale = true;
       }),
     getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),`;
+// Ultrafuzz's skip predicates read other nodes' states, so a predicate is only
+// as current as the render that computed it. Upstream re-renders when a node
+// finishes or exhausts its retries, but keeps scheduling from an older graph
+// after two other state changes:
+// - resume hydration: a resumed session's first graph was rendered before it,
+//   so a still-failed agent's verifier ran;
+// - a skip: the dependents it made runnable kept predicates that never saw it,
+//   so each descendant of a failed agent ran its preparation into a failure.
+//   That happens on the recursive pass after a skip, and, when the skip shared
+//   its pass with dispatched work, on the next decision made without a render,
+//   such as after a retryable failure or at a retry deadline.
+// Both set the flag, and the next decision re-renders before scheduling. That
+// costs at most one redundant render per skipping pass, when a completion's own
+// re-render already saw the skip. A pass that only skipped now ends in a
+// re-render instead of recursing on the same graph, so upstream's decide()
+// depth guard no longer counts it; those re-renders stay bounded because a
+// session only returns a skipped node to pending through `hotReloaded`, which
+// the pinned engine never calls.
+const SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE = `    if (!state.graph) {
+      return { _tag: "Wait", reason: { _tag: "ExternalTrigger" } };
+    }`;
+const SMITHERS_SCHEDULER_SKIP_RERENDER_PATCH = `${SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE}
+    if (state.skipPredicatesStale) {
+      state.skipPredicatesStale = false;
+      return { _tag: "ReRender", context: renderContext(state, undefined, { reason: "skip-check" }) };
+    }`;
+const SMITHERS_SCHEDULER_SKIP_MARK_SOURCE = `      if (task.skipIf) {
+        state.states.set(key, "skipped");`;
+const SMITHERS_SCHEDULER_SKIP_MARK_PATCH = `${SMITHERS_SCHEDULER_SKIP_MARK_SOURCE}
+        state.skipPredicatesStale = true;`;
 // Anchored immediately after the resume path's `startRunRuntime()`, which is
 // where Smithers cancels stale in-progress attempts and rewrites their nodes back
 // to `pending`. Hydrating before that reset would restore a node as finished and
@@ -946,9 +982,6 @@ const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `          resumeWorkflowNameVali
           const durableOutputs = await loadOutputs(db, schema, runId);
           const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
           const terminalTaskStates = durableNodes.flatMap((node) => {
-            if (node.state === "skipped") {
-              return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
-            }
             if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
             const rows = durableOutputs[node.outputTable];
             const hasOutput =
@@ -1010,6 +1043,63 @@ const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChe
       });
     pendingOwnershipChecks.add(check);
   };`;
+
+// After each successful fenced attempt-row heartbeat write, the engine appends a
+// TaskHeartbeat event (an `_smithers_events` row plus a stream.ndjson line) that
+// carries no heartbeat data, because Ultrafuzz never passes any. A quiet agent
+// task writes one per throttled liveness pulse, up to two a second; an agent that
+// streams output writes one per ownership check its stdout, stderr and tool
+// callbacks force past the throttle. In a baseline campaign they were 83% of the
+// event rows (#1147), and Ultrafuzz never acts on them (it handles only
+// TaskHeartbeatTimeout). Liveness is the attempt-row write: the heartbeat-timeout
+// watchdog advances only when it succeeds, and `smithers why` reads the row. Keep
+// the write and drop the event.
+const SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE = `        "heartbeat:record",
+      );
+      await eventBus.emitEventQueued({
+        type: "TaskHeartbeat",
+        runId,
+        nodeId: desc.nodeId,
+        iteration: desc.iteration,
+        attempt: attemptNo,
+        hasData: heartbeatDataJson !== null,
+        dataSizeBytes,
+        intervalMs: intervalMs ?? undefined,
+        timestampMs: heartbeatAtMs,
+      });
+    } catch (error) {`;
+const SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH = `        "heartbeat:record",
+      );
+      // ultrafuzz: the fenced attempt row above is the liveness record (#1147).
+    } catch (error) {`;
+
+// Smithers treats <Worktree baseBranch> as a branch to track. Creating a
+// worktree runs `git fetch origin` first, and each re-entry retries
+// `git rebase origin/<base>` until one succeeds, after another fetch unless one
+// succeeded for that repository in the last 60 s. Ultrafuzz passes the recorded
+// launch commit (or a pinned source branch), and `origin/<sha>` never resolves,
+// so every re-entry logs a failed rebase; each fetch is an untimed call to the
+// user's remote (#1148). Task worktrees must stay on the launch commit
+// (assertWorkspaceSourceRevision), so never synchronize them.
+const SMITHERS_ENGINE_WORKTREE_SYNC_SOURCE = `function getWorktreeSyncCache() {
+  if (!worktreeSyncCacheSingleton) {
+    worktreeSyncCacheSingleton = createWorktreeSyncCache({ ttlMs: resolveWorktreeFetchTtlMs() });
+  }
+  return worktreeSyncCacheSingleton;
+}`;
+const SMITHERS_ENGINE_WORKTREE_SYNC_PATCH = `function getWorktreeSyncCache() {
+  // ultrafuzz: task worktrees stay on their recorded launch commit (#1148).
+  return { shouldFetch: () => false, recordFetch() {}, shouldRebase: () => false, recordRebase() {} };
+}`;
+const SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_SOURCE = `  // Best effort: refresh remote refs for git so origin/main can be used as a
+  // base when local main is absent.
+  if (vcs.type === "git") {
+    await runGitCommand(vcs.root, ["fetch", "origin"]);
+  }
+`;
+const SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_PATCH = `  // ultrafuzz: task worktrees start from a local recorded commit, so creating
+  // one never fetches origin (#1148).
+`;
 
 // Every event the engine persists first runs an idempotency probe that
 // filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
@@ -2436,8 +2526,13 @@ export type SmithersCompatibilityPatchId =
   | "supervisor_descriptor"
   | "resume_snapshot_transfer"
   | "terminal_state_restore"
+  | "skip_predicate_rerender"
+  | "skip_marks_predicates_stale"
   | "resume_hydration"
   | "engine_agent_event_ownership"
+  | "engine_task_heartbeat_event"
+  | "engine_worktree_sync"
+  | "engine_worktree_create_fetch"
   | "engine_agent_usage_progress"
   | "engine_main_usage_invocation"
   | "engine_json_correction_usage_invocation"
@@ -2568,6 +2663,25 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     upstreamAbsent: ["restoreTerminalTaskStates"]
   },
   {
+    id: "skip_predicate_rerender",
+    packageName: "@smthrs/scheduler",
+    sourceRelativePath: "src/makeWorkflowSession.js",
+    patchable: SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE,
+    patched: SMITHERS_SCHEDULER_SKIP_RERENDER_PATCH,
+    // Consumes the flag that `terminal_state_restore` and
+    // `skip_marks_predicates_stale` set, so it retires only with both.
+    upstreamAbsent: []
+  },
+  {
+    id: "skip_marks_predicates_stale",
+    packageName: "@smthrs/scheduler",
+    sourceRelativePath: "src/makeWorkflowSession.js",
+    patchable: SMITHERS_SCHEDULER_SKIP_MARK_SOURCE,
+    patched: SMITHERS_SCHEDULER_SKIP_MARK_PATCH,
+    // Retires once upstream re-renders after a skip; no upstream text names that yet.
+    upstreamAbsent: []
+  },
+  {
     id: "resume_hydration",
     packageName: "@smthrs/engine",
     sourceRelativePath: "src/engine.js",
@@ -2584,6 +2698,30 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
     // Upstream coalescing its own in-flight proof retires this patch.
     upstreamAbsent: ["heartbeatOwnershipCheckInFlight"]
+  },
+  {
+    id: "engine_task_heartbeat_event",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE,
+    patched: SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_worktree_sync",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKTREE_SYNC_SOURCE,
+    patched: SMITHERS_ENGINE_WORKTREE_SYNC_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_worktree_create_fetch",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_SOURCE,
+    patched: SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_PATCH,
+    upstreamAbsent: []
   },
   {
     id: "engine_agent_usage_progress",
@@ -3149,6 +3287,8 @@ export interface CurrentSmithersInspect {
   nodes: CurrentSmithersInspectNode[];
   failedChildKeys: string[];
   exhaustedLoops: CurrentSmithersExhaustedLoop[];
+  /** The runner's run-level error (for example WORKFLOW_RENDER_FAILED), redacted and capped. Advisory text only. */
+  runError?: { code?: string; message: string };
 }
 
 /**
@@ -3746,6 +3886,8 @@ function assertRefreshedModuleAuthority(
   }
   const dependencies = new Set(Object.keys(issuers[0]!.dependencies));
   const executablePaths = new Set(dependencyMap.executable_paths);
+  // Required here rather than imported: every ultrafuzz CLI process imports this module.
+  const ts = createRequire(import.meta.url)("typescript") as typeof TypeScript;
   for (const file of files) {
     if (file.executable !== executablePaths.has(file.snapshotPath)) {
       throw new Error(`controller module ${moduleName} changed executable authority for ${file.snapshotPath}`);
@@ -4077,12 +4219,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const nonBlockingAttemptIdSet = new Set(nonBlockingAttemptIds);
   const tasks = compiledTasks.map((task) => ({
     ...task,
-    // Continuation lets independent tasks settle. It does not make a strategy's
-    // required inputs optional; only the review group reconciles partial results.
-    optionalDependencyArtifactDirs:
-      task.metadata.node.group === "review"
-        ? task.dependencyArtifactDirs.filter((directory) => nonBlockingAttemptIdSet.has(path.basename(directory)))
-        : []
+    optionalDependencyArtifactDirs: reconcilesPartialResults(task)
+      ? task.dependencyArtifactDirs.filter((directory) => nonBlockingAttemptIdSet.has(path.basename(directory)))
+      : []
   }));
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
@@ -4337,12 +4476,6 @@ export async function smithersExecutionControlFiles(
   const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
   assertControllerSourceDigest(compiled.projectRoot, compiled.controllerSourceDigest);
   for (const sourcePath of walkExecutionFiles(agentsRoot)) {
-    const source = fs.readFileSync(sourcePath, "utf8");
-    if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
-      throw new Error(
-        `workflow agent reads mutable project ultrafuzz.toml instead of process.env.ULTRAFUZZ_CONFIG_PATH: ${sourcePath}; rerun ultrafuzz init --force to replace generated files, or update this adapter manually and remove controller-only variables before spawning a model process`
-      );
-    }
     add(sourcePath, path.posix.join(".smithers/agents", relativeExecutionPath(agentsRoot, sourcePath)));
   }
 
@@ -5209,8 +5342,6 @@ export async function runSmithersLifecycleCommand(input: {
   priorInspection?: SmithersResumeInspection;
   /** Prepare launch authority only after ruling out an idempotent active attach. */
   prepareContinuationEnvironment?: () => Record<string, string | undefined>;
-  /** Preserve stopped-run failure evidence before its mutable attempt rows are reset. */
-  beforeStoppedReset?: (inspection: SmithersCommandSnapshot) => Promise<void>;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -5256,18 +5387,6 @@ export async function runSmithersLifecycleCommand(input: {
   let preResumeStderr = "";
   let currentInspection: CurrentSmithersInspect | undefined;
   let inspection: SmithersCommandSnapshot | undefined;
-  let stoppedResetPreserved = false;
-  const preserveStoppedReset = async (): Promise<void> => {
-    if (
-      stoppedResetPreserved ||
-      currentInspection === undefined ||
-      inspection === undefined ||
-      smithersRunStateIsActive(currentInspection)
-    )
-      return;
-    await input.beforeStoppedReset?.(inspection);
-    stoppedResetPreserved = true;
-  };
   // Detached admission renders the workflow before Smithers checks whether
   // this run already has an active owner. Inspect every resume first so an
   // idempotent attach cannot fail preflight or compete with that owner (#968).
@@ -5336,7 +5455,6 @@ export async function runSmithersLifecycleCommand(input: {
           })
         : undefined;
     if (failedTasks.length > 0) {
-      await preserveStoppedReset();
       const resetStderr: string[] = [];
       for (const failedTask of failedTasks) {
         const producerTask = retryProducerForFailedVerifier(currentInspection, failedTask);
@@ -5390,7 +5508,6 @@ export async function runSmithersLifecycleCommand(input: {
         : path.join(input.relaunchPaths.runRoot, "smithers", "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
-      await preserveStoppedReset();
       // A failure can be durable in the canonical node snapshot even when the
       // runner cannot resolve its implicit "latest attempt" lookup. Pinning the
       // iteration from that snapshot keeps --reset-node recoverable by node ID.
@@ -5635,6 +5752,20 @@ export async function assertSmithersControllerRefreshable(input: {
   return { status: "present", snapshot: inspection, inspect };
 }
 
+const DEFAULT_RUNNER_QUERY_TIMEOUT_MS = 120_000;
+const MAX_RUNNER_QUERY_TIMEOUT_MS = 600_000;
+
+/**
+ * Bounds one read-only runner query, so a wedged runner becomes a failed snapshot instead of blocking
+ * `status`, `inspect`, `stats`, or a synchronization pump forever. `ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS`
+ * overrides the default with a positive number of milliseconds, capped at ten minutes.
+ */
+function runnerQueryTimeoutMs(env: Record<string, string | undefined> | undefined): number {
+  const configured = (env ?? process.env).ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS;
+  const parsed = configured !== undefined && /^[1-9]\d*$/u.test(configured) ? Number(configured) : Number.NaN;
+  return Number.isSafeInteger(parsed) ? Math.min(parsed, MAX_RUNNER_QUERY_TIMEOUT_MS) : DEFAULT_RUNNER_QUERY_TIMEOUT_MS;
+}
+
 export async function runSmithersInspectionCommand(input: {
   args: readonly string[];
   projectRoot: string;
@@ -5644,6 +5775,7 @@ export async function runSmithersInspectionCommand(input: {
   timeoutMs?: number;
 }): Promise<SmithersCommandSnapshot> {
   const command = [...input.args];
+  const commandTimeoutMs = runnerQueryTimeoutMs(input.env);
   try {
     const result = await execSmithersCli({
       args: command,
@@ -5651,7 +5783,8 @@ export async function runSmithersInspectionCommand(input: {
       env: input.env,
       environmentVariableNames: input.environmentVariableNames,
       signal: input.signal,
-      timeoutMs: input.timeoutMs
+      timeoutMs: input.timeoutMs,
+      commandTimeoutMs
     });
     return {
       command: result.command,
@@ -5662,16 +5795,24 @@ export async function runSmithersInspectionCommand(input: {
     };
   } catch (error) {
     const record =
-      error && typeof error === "object" ? (error as { stdout?: unknown; stderr?: unknown; message?: unknown }) : {};
+      error && typeof error === "object"
+        ? (error as { stdout?: unknown; stderr?: unknown; message?: unknown; killed?: unknown; signal?: unknown })
+        : {};
     const stdout = typeof record.stdout === "string" ? record.stdout : "";
     const stderr = typeof record.stderr === "string" ? record.stderr : "";
+    // Node reports the kill of its own execution timeout as `killed` with SIGTERM.
+    const timedOut = record.killed === true && record.signal === "SIGTERM";
     return {
       command: smithersDisplayCommand(command),
       ok: false,
       stdout,
       stderr,
       ...jsonField(stdout),
-      error: error instanceof Error ? error.message : String(error)
+      error: timedOut
+        ? `workflow runner query exceeded its time limit and was stopped (ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS=${String(commandTimeoutMs)})`
+        : error instanceof Error
+          ? error.message
+          : String(error)
     };
   }
 }
@@ -5965,7 +6106,41 @@ export function parseCurrentSmithersInspect(
   if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded" && parsedRunState !== "succeeded-with-failures") {
     throw new Error("Smithers inspect data.exhaustedLoops is only valid for a succeeded workflow state");
   }
-  return { runStatus, runState: parsedRunState, nodes, failedChildKeys, exhaustedLoops };
+  const runError = currentSmithersRunError(run.error);
+  return {
+    runStatus,
+    runState: parsedRunState,
+    nodes,
+    failedChildKeys,
+    exhaustedLoops,
+    ...(runError === undefined ? {} : { runError })
+  };
+}
+
+// A run-level failure (for example a render exception) names no task, so the
+// run row's error is the only record of why the run stopped. Read it loosely:
+// an unexpected shape yields nothing and never fails the parse.
+function currentSmithersRunError(value: unknown): CurrentSmithersInspect["runError"] {
+  if (!isObjectRecord(value)) return undefined;
+  const nonBlank = (field: unknown): field is string => typeof field === "string" && field.trim() !== "";
+  // The runner records what was thrown as `cause`. Its `summary` is its own
+  // message before it appends a docs link and raw runner resume commands.
+  const cause = isObjectRecord(value.cause) ? value.cause.message : undefined;
+  const message = [cause, value.summary, value.message].find(nonBlank);
+  if (message === undefined) return undefined;
+  return {
+    ...(nonBlank(value.code) ? { code: runErrorText(value.code, 100) } : {}),
+    message: runErrorText(message, 1_000)
+  };
+}
+
+// Redacted and scrubbed like other runner text, since it is printed. The runner
+// stores error text untruncated and redaction cost grows with the square of one
+// long token, so only a prefix is redacted. For the message, eight times the
+// kept length still holds a whole PEM private key (3,300 characters at RSA-4096)
+// that starts in the kept text, so it is redacted as one block.
+function runErrorText(value: string, limit: number): string {
+  return scrubWorkflowRunnerText(redactSecretsInText(value.slice(0, limit * 8))).slice(0, limit);
 }
 
 function parseCurrentSmithersExhaustedLoops(value: unknown): CurrentSmithersExhaustedLoop[] {
@@ -6164,32 +6339,6 @@ function requiredCurrentInspectEnum<const Values extends readonly string[]>(
   return value as Values[number];
 }
 
-/**
- * Dependency attempt ids whose verified artifacts no longer match their verification marker.
- * The message is emitted by the generated workflow's own `assertVerifiedDependency`, so the shape
- * is stable, and it is the only signal that reaches the resume side: the failure lands on the
- * dependent's `prepare:` task and leaves no failed node behind, so the run row's `error_json` is
- * where it surfaces. Recovery on top of this is tracked separately in #288.
- */
-export function smithersSnapshotUnverifiedDependencies(snapshot: SmithersCommandSnapshot): string[] {
-  const evidence = [
-    snapshot.stdout,
-    snapshot.stderr,
-    snapshot.error ?? "",
-    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
-  ].join("\n");
-  const dependencies = new Set<string>();
-  for (const match of evidence.matchAll(
-    /artifact dependency has not passed verification ([A-Za-z0-9._-]+) for [A-Za-z0-9._-]+/gu
-  )) {
-    const dependency = match[1];
-    if (dependency !== undefined && dependency.trim() !== "" && !dependency.includes("..")) {
-      dependencies.add(dependency);
-    }
-  }
-  return [...dependencies].sort();
-}
-
 function isCompatibleSmithersRunId(value: string): boolean {
   return /^[a-z0-9_-]{1,64}$/u.test(value);
 }
@@ -6236,6 +6385,8 @@ async function execSmithersCli(input: {
   acceptedExitCodes?: readonly number[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Bounds only the runner process, never executable preparation. */
+  commandTimeoutMs?: number;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
@@ -6243,8 +6394,10 @@ async function execSmithersCli(input: {
     signal: input.signal,
     timeoutMs: input.timeoutMs
   });
-  const commandTimeoutMs =
+  const remainingMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
+  const commandTimeoutMs =
+    remainingMs === undefined ? input.commandTimeoutMs : Math.min(remainingMs, input.commandTimeoutMs ?? remainingMs);
   const { anchored, snapshotAnchor, executableAnchor } = acquireAnchoredSmithersController(command, commandEnvironment);
   try {
     const { stdout, stderr } = await execFileAsync(
@@ -6990,16 +7143,19 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   }
   assertRegularFileInside(nodeModules, engineWorkflowHashSource, "installed Smithers workflow hash implementation");
 
-  const schedulerContents = fs.readFileSync(schedulerSource, "utf8");
-  writeFileDurable(
-    schedulerSource,
-    applyRequiredSmithersPatch(
-      schedulerContents,
+  let schedulerContents = fs.readFileSync(schedulerSource, "utf8");
+  for (const [source, patched, label] of [
+    [
       SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
       SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
       "terminal-state restoration"
-    )
-  );
+    ],
+    [SMITHERS_SCHEDULER_SKIP_RERENDER_SOURCE, SMITHERS_SCHEDULER_SKIP_RERENDER_PATCH, "skip predicate re-render"],
+    [SMITHERS_SCHEDULER_SKIP_MARK_SOURCE, SMITHERS_SCHEDULER_SKIP_MARK_PATCH, "skip marks predicates stale"]
+  ] as const) {
+    schedulerContents = applyRequiredSmithersPatch(schedulerContents, source, patched, label);
+  }
+  writeFileDurable(schedulerSource, schedulerContents);
 
   let workflowHashContents = fs.readFileSync(engineWorkflowHashSource, "utf8");
   for (const [source, patched, label] of [
@@ -7066,6 +7222,13 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
       SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
       "agent event ownership coalescing"
+    ],
+    [SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE, SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH, "task heartbeat event"],
+    [SMITHERS_ENGINE_WORKTREE_SYNC_SOURCE, SMITHERS_ENGINE_WORKTREE_SYNC_PATCH, "task worktree sync"],
+    [
+      SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_SOURCE,
+      SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_PATCH,
+      "task worktree creation fetch"
     ],
     [
       SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_SOURCE,
@@ -7914,7 +8077,10 @@ function compileTask(input: {
     timeoutMs,
     heartbeatTimeoutMs,
     retries,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
+    // Retries wait 60s, 120s, 240s, then Smithers' 5-minute cap. A 1s base
+    // spent a three-attempt budget in about 25s, inside the minute a
+    // contended Claude Code OAuth refresh can take to clear (#1084).
+    retryPolicy: { backoff: "exponential", initialDelayMs: 60_000 },
     ...(input.sourceRevision === undefined
       ? {}
       : { sourceRevision: input.sourceRevision, sourceRef: input.sourceRef! }),
@@ -8505,6 +8671,12 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
   });
 }
 
+/**
+ * Rebind each declared output's schema to the bundle this build installs into task workspaces (#982).
+ * The contract digest and validator build keep their recorded values: they only record the build
+ * that planned the output, and the refreshed workflow copies them into its markers (and, for a
+ * dynamic run, its runtime task plan), which are compared with the run's sealed plan (#921).
+ */
 function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmithersTask {
   return {
     ...task,
@@ -8517,7 +8689,7 @@ function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmi
           return {
             path: output.path,
             contract: output.contract,
-            contractDigest: artifactContractDefinition(output.contract).digest,
+            contractDigest: output.contractDigest,
             primary: output.primary,
             ...(binding === undefined
               ? {}
@@ -8526,7 +8698,7 @@ function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmi
                   schemaId: binding.schema_id,
                   schemaSha256: binding.schema_sha256,
                   schemaBundleSha256: binding.schema_bundle_sha256,
-                  validatorBuild: binding.validator_build
+                  validatorBuild: output.validatorBuild ?? binding.validator_build
                 })
           };
         })
