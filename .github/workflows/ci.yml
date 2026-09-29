@@ -67,6 +67,12 @@ jobs:
       - name: Find dead code and dependencies
         run: pnpm -w knip
 
+      # Informational until the pending dead-code removals land; then these
+      # categories move into the blocking `pnpm -w knip` step above.
+      - name: Report unused exports
+        continue-on-error: true
+        run: pnpm -w knip --include exports,types,duplicates
+
       - name: Build
         run: pnpm -w build
 
