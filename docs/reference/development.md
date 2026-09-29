@@ -49,10 +49,12 @@ validated only by the pull-request event, avoiding a duplicate push run.
 
 Pull requests also require all five runtime validation lanes: one supporting
 lane, including the Bun adapter contracts, and four deterministic integration
-shards. Together these run the full runtime suite before merge. Pushes to `main`
-and manual workflow dispatches run all eight release lanes, adding package,
-CLI, and benchmark-history/typecheck checks, with at most eight jobs in parallel.
-Their results are recorded in stable gate order in the JSON report.
+shards. Together these run the full runtime suite before merge. They also
+require the `cli-e2e` lane, which runs one campaign end to end (see below).
+Pushes to `main` and manual workflow dispatches run all nine release lanes,
+adding package, CLI, and benchmark-history/typecheck checks, with at most eight
+jobs in parallel. Their results are recorded in stable gate order in the JSON
+report.
 
 ## Package Checks
 
@@ -68,6 +70,15 @@ pnpm --filter @ultrafuzz/runtime test
 pnpm --filter @ultrafuzz/cli test
 pnpm --filter @ultrafuzz/modal test
 ```
+
+`pnpm --filter @ultrafuzz/cli test:e2e` runs the end-to-end campaign test in
+`packages/cli/test/e2e/`. It drives `init`, `run`, `resume`, `status`, `stats`,
+`report`, and `events` as separate CLI processes against the pinned Smithers
+engine under Bun, with a stub `codex` executable in place of the model. It
+SIGKILLs the detached controller while one node is running, resumes the run, and
+checks that it succeeds with a verified report and that no finished task started
+again. It needs Linux, Bun, Git, and access to the npm registry, because `run`
+and `resume` install the pinned engine from npm as they do for any campaign.
 
 Package-local `typecheck` and `test` scripts may build direct workspace
 dependencies first because package exports point at `dist/**`.

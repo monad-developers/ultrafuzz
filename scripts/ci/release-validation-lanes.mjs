@@ -83,6 +83,14 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     build_release_reporter: true
   },
   {
+    lane: "cli-e2e",
+    description: "End-to-end campaign with controller kill and resume on the pinned engine",
+    gates: "cli-e2e",
+    timeout_minutes: 60,
+    pull_request: true,
+    build_release_reporter: true
+  },
+  {
     lane: "benchmark-history-typecheck",
     description: "Benchmark history charts and workspace typecheck",
     gates: "benchmark-history,workspace-typecheck",
@@ -95,8 +103,10 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
 
 /**
  * Release validation gates that must run before a pull request can merge.
- * Together these execute every `@ultrafuzz/runtime` test, which is where run
- * resume, controller refresh, replay, and fork are covered.
+ * The runtime gates execute every `@ultrafuzz/runtime` test, which is where run
+ * resume, controller refresh, replay, and fork are covered. `cli-e2e` runs one
+ * campaign through the CLI on the pinned workflow engine, killing and resuming
+ * its controller.
  *
  * @type {readonly string[]}
  */
@@ -105,7 +115,8 @@ export const PULL_REQUEST_REQUIRED_GATES = Object.freeze([
   "runtime-1",
   "runtime-2",
   "runtime-3",
-  "runtime-4"
+  "runtime-4",
+  "cli-e2e"
 ]);
 
 /**

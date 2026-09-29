@@ -48,7 +48,7 @@ describe("release validation lane policy", () => {
   });
 
   it("gives complete runtime and CLI suites a bounded budget beyond observed 75-minute runs", () => {
-    for (const name of [...PULL_REQUEST_REQUIRED_GATES, "cli"]) {
+    for (const name of [...PULL_REQUEST_REQUIRED_GATES.filter((gate) => gate.startsWith("runtime-")), "cli"]) {
       const lane = RELEASE_VALIDATION_LANES.find((candidate) => candidate.lane === name);
       expect(lane?.timeout_minutes).toBe(120);
     }
@@ -111,7 +111,8 @@ describe("release validation lane policy", () => {
       "runtime-1",
       "runtime-2",
       "runtime-3",
-      "runtime-4"
+      "runtime-4",
+      "cli-e2e"
     ]);
     for (const lane of lanes) {
       expect(lane).not.toHaveProperty("pull_request");
