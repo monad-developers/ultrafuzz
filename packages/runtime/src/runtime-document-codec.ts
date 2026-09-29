@@ -25,7 +25,11 @@ export function parseRuntimeDocumentBytes<SchemaId extends RuntimeDocumentSchema
   const value = parseStrictJsonBytes(bytes, {
     maxBytes: MAX_RUNTIME_DOCUMENT_BYTES,
     maxDepth: 64,
-    maxItems: 100_000,
+    // Items are counted across the whole document, and launch writes the control seal
+    // after schema validation alone. At its schema's array bounds a seal holds 400_000
+    // items (100_000 execution files and three identity arrays of 100_000 entries) and
+    // 400_035 properties.
+    maxItems: 400_000,
     maxProperties: 500_000
   });
   return assertRuntimeDocument(schemaId, value, label);

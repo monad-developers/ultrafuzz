@@ -331,10 +331,9 @@ else. `config_dir` is the XDG parent, not OpenCode's own directory:
 `XDG_DATA_HOME` becomes `<config_dir>/data`, so pointing it at
 `~/.config/opencode` or `~/.local/share/opencode` picks nothing up.
 
-`ultrafuzz doctor` requires the `opencode` executable whenever any configured
-profile uses `OpenCodeAgent` — every profile in `[models.*]` is checked, not
-only the one a run selects, so keeping the shipped `[models.opencode]` profile
-means every contributor needs the CLI installed.
+`ultrafuzz doctor` requires the `opencode` executable only when a node of the
+selected topology, or its `[retry] agents` fallback chain, uses an
+`OpenCodeAgent` profile; otherwise the executable is listed as not required.
 
 Default triage requires quorum `3` from a panel size of `4`:
 
