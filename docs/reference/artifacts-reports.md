@@ -45,6 +45,21 @@ clock catches up. The journal has no record-count limit; its 64 MiB byte limit
 still applies. Runs created before this change may also have an `events.index/`
 directory. Nothing reads it, and report bundles still copy it.
 
+Each append to `events.jsonl`, `usage.jsonl`, `attempts.jsonl`, or the
+`.ultrafuzz/` materialize, clean, and dashboard audit journals holds
+`<journal>.lock`, created next to the journal, from reading the journal to
+writing the new records. Commands that append to the same journal at the same
+time, such as `ultrafuzz status --watch` syncing while `ultrafuzz cancel` runs,
+therefore append one at a time instead of overwriting each other's records.
+Readers do not take the lock, and report bundles do not include it. A live
+append holds the lock for milliseconds. The next append takes over at once a
+lock whose process on the same host has exited, and any other lock left behind
+once it is 10 seconds old: an empty one, as a power loss can leave, or one
+recorded on another host, such as an earlier sandbox or container on the same
+volume. An append that cannot take the lock within 30 seconds fails without
+writing and names the lock and the process holding it; remove the lock by hand
+only after that process is gone.
+
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
 Each entry's immutable identity is the exact Smithers pair
 `(workflow_run_id, source_event_sequence)`; `control_generation`, node,

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
+import { withJournalLock } from "./journal-lock.js";
 import { appendBytesDurableAt, createFileDurableExclusive } from "./safe-paths.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -137,7 +138,9 @@ export function validateStrictJsonlHistory<RecordType>(
 
 /**
  * Append records only after validating the complete existing and candidate
- * history. Existing files are fenced by the immutable snapshot byte length.
+ * history. The journal's lock (withJournalLock) is held from the read through
+ * the write, so an append from another process waits instead of writing at the
+ * same offset. Existing files are still fenced by the snapshot byte length.
  */
 export function appendStrictJsonlRecords<RecordType>(
   filePath: string,
@@ -145,9 +148,19 @@ export function appendStrictJsonlRecords<RecordType>(
   codec: StrictJsonlCodec<RecordType>,
   trustedRoot?: string
 ): StrictJsonlSnapshot<RecordType> {
-  const existing = readStrictJsonlSnapshot(filePath, codec);
-  if (records.length === 0) return existing;
+  if (records.length === 0) return readStrictJsonlSnapshot(filePath, codec);
+  return withJournalLock(filePath, () => appendStrictJsonlRecordsLocked(filePath, records, codec, trustedRoot), {
+    trustedRoot
+  });
+}
 
+function appendStrictJsonlRecordsLocked<RecordType>(
+  filePath: string,
+  records: readonly RecordType[],
+  codec: StrictJsonlCodec<RecordType>,
+  trustedRoot: string | undefined
+): StrictJsonlSnapshot<RecordType> {
+  const existing = readStrictJsonlSnapshot(filePath, codec);
   const canonicalRecords = canonicalStrictJsonlRecords(
     records,
     codec,
@@ -169,8 +182,9 @@ export function appendStrictJsonlRecords<RecordType>(
  * them. `build` makes the record from the final record, and this returns it.
  * This suits journals whose history rules relate a record only to the
  * records inside that window. It does not count records, so it is for
- * journals bounded by bytes alone. Readers still validate the whole journal,
- * and the byte length read here still fences the write.
+ * journals bounded by bytes alone. Readers still validate the whole journal.
+ * As in appendStrictJsonlRecords, the journal's lock is held from the read
+ * through the write, and the byte length read here still fences the write.
  */
 export function appendStrictJsonlRecordAfterTail<RecordType>(
   filePath: string,
@@ -178,6 +192,20 @@ export function appendStrictJsonlRecordAfterTail<RecordType>(
   codec: StrictJsonlCodec<RecordType>,
   inWindow: (existing: RecordType) => boolean,
   trustedRoot?: string
+): RecordType {
+  return withJournalLock(
+    filePath,
+    () => appendStrictJsonlRecordAfterTailLocked(filePath, build, codec, inWindow, trustedRoot),
+    { trustedRoot }
+  );
+}
+
+function appendStrictJsonlRecordAfterTailLocked<RecordType>(
+  filePath: string,
+  build: (final: RecordType | undefined) => RecordType,
+  codec: StrictJsonlCodec<RecordType>,
+  inWindow: (existing: RecordType) => boolean,
+  trustedRoot: string | undefined
 ): RecordType {
   const bytes = readStrictJsonlBytes(filePath, codec);
   const tail = bytes === undefined ? [] : parseStrictJsonlTail(bytes, codec, inWindow);
