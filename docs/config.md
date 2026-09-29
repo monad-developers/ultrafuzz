@@ -50,11 +50,17 @@ project primary count. The shipped `default` profile uses three attempts;
 five, and `invariant-only` inherits three. An explicit project `[retry]` value overrides
 the profile. The complete primary-plus-fallback chain may contain at most 100
 attempts. Omitting `agents`, or leaving it empty, keeps model fallback disabled.
-Retries use bounded exponential backoff, a fresh session, and the same effective
-task prompt, including Smithers' safety contracts; Ultrafuzz does not inspect
-provider error text. The
-planned chain and actual producer are recorded in the task manifest, attempt
-ledger, and final report.
+A retry waits one minute, then two, then four, and at most five minutes (the
+Smithers cap), and uses a fresh session and the same effective task prompt,
+including Smithers' safety contracts; Ultrafuzz does not inspect provider error
+text. Repeated identical failures do not end the planned chain early; Smithers
+still stops it at a failure it classifies as non-retryable, such as a CLI
+configuration or authentication error, and pauses the run on a provider quota
+limit. Dependency admission is not retried: it re-reads the same producer files,
+so an admission failure, including a file-system or validator error while
+reading them, fails the task without a retry or fallback. The planned chain and
+actual producer are recorded in the task manifest, attempt ledger, and final
+report.
 
 Retry chains currently require local execution. Cloud planning accepts one
 effective attempt, and local fallback across different agent implementations

@@ -14,16 +14,55 @@ interface Inspection {
 }
 
 test("failed and stalled required inputs skip dependent attempts while independent work and review finish", async () => {
-  const root = temporaryRoot("ufz-skip-required-");
+  const { root, state } = await runSyntheticWorkflow("required-inputs", syntheticWorkflowSource);
+  assert.equal(state("verify:producer"), "failed");
+  assert.equal(state("prepare:dependent"), "skipped");
+  assert.equal(state("node:dependent"), "skipped");
+  assert.equal(state("verify:dependent"), "skipped");
+  assert.equal(state("prepare:own-failure"), "stalled");
+  assert.equal(state("node:own-failure"), "skipped");
+  assert.equal(state("verify:own-failure"), "skipped");
+  assert.equal(state("independent"), "finished");
+  assert.equal(state("review"), "finished");
+  assert.deepEqual(fs.readFileSync(path.join(root, "executed.log"), "utf8").trim().split("\n"), [
+    "independent",
+    "review"
+  ]);
+});
+
+test("a dependency admission failure fails its preparation once while a transient failure is retried", async () => {
+  const { root, state } = await runSyntheticWorkflow("non-retryable", nonRetryableWorkflowSource);
+  // #1144: the default three-attempt budget used to re-read the same producer
+  // bytes three times and then stall; the attempt now fails once.
+  assert.equal(state("prepare:consumer"), "failed");
+  assert.equal(state("node:consumer"), "skipped");
+  // #672: an engine-boundary TypeError still spends the preparation retry.
+  assert.equal(state("prepare:transient"), "finished");
+  assert.deepEqual(fs.readFileSync(path.join(root, "executed.log"), "utf8").trim().split("\n").sort(), [
+    "consumer",
+    "transient",
+    "transient"
+  ]);
+});
+
+async function runSyntheticWorkflow(
+  name: string,
+  workflowSource: (root: string, template: string) => string
+): Promise<{ root: string; state: (nodeId: string) => string | undefined }> {
+  const root = temporaryRoot(`ufz-${name}-`);
   const packageRoot = runtimePackageRoot();
   const smithers = path.join(packageRoot, "node_modules", ".bin", "smithers");
-  const runId = `skip-required-${process.pid}-${Date.now()}`;
-  const workflow = path.join(root, ".smithers", "workflows", "required-inputs.tsx");
+  const runId = `${name}-${process.pid}-${Date.now()}`;
+  const workflow = path.join(root, ".smithers", "workflows", `${name}.tsx`);
   fs.mkdirSync(path.dirname(workflow), { recursive: true });
   const dependencyRoot = path.dirname(fs.realpathSync(path.join(packageRoot, "node_modules", "smthrs")));
   fs.symlinkSync(dependencyRoot, path.join(root, ".smithers", "node_modules"), "dir");
   execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
-  fs.writeFileSync(workflow, syntheticWorkflowSource(root, packageRoot));
+  const template = fs.readFileSync(
+    path.join(packageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx"),
+    "utf8"
+  );
+  fs.writeFileSync(workflow, workflowSource(root, template));
   execFileSync(
     smithers,
     ["up", workflow, "--detach", "--run-id", runId, "--root", root, "--input", "{}", "--format", "json"],
@@ -41,35 +80,68 @@ test("failed and stalled required inputs skip dependent attempts while independe
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.equal(inspected.status ?? inspected.run?.status, "finished", JSON.stringify(inspected));
-  const state = (nodeId: string) => inspected.steps?.find((step) => (step.id ?? step.nodeId) === nodeId)?.state;
-  assert.equal(state("verify:producer"), "failed");
-  assert.equal(state("prepare:dependent"), "skipped");
-  assert.equal(state("node:dependent"), "skipped");
-  assert.equal(state("verify:dependent"), "skipped");
-  assert.equal(state("prepare:own-failure"), "stalled");
-  assert.equal(state("node:own-failure"), "skipped");
-  assert.equal(state("verify:own-failure"), "skipped");
-  assert.equal(state("independent"), "finished");
-  assert.equal(state("review"), "finished");
-  assert.deepEqual(fs.readFileSync(path.join(root, "executed.log"), "utf8").trim().split("\n"), [
-    "independent",
-    "review"
-  ]);
-});
+  return {
+    root,
+    state: (nodeId) => inspected.steps?.find((step) => (step.id ?? step.nodeId) === nodeId)?.state
+  };
+}
 
-function syntheticWorkflowSource(root: string, packageRoot: string): string {
-  const source = fs.readFileSync(
-    path.join(packageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx"),
-    "utf8"
-  );
-  const start = source.indexOf("type WorkflowTaskStateContext =");
-  const end = source.indexOf("type DependencyVerificationProducer =", start);
-  assert.ok(start >= 0 && end > start);
+function templateSlice(template: string, startMarker: string, endMarker: string): string {
+  const start = template.indexOf(startMarker);
+  const end = template.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, `${startMarker} is missing from the workflow template`);
+  return template.slice(start, end);
+}
+
+function nonRetryableWorkflowSource(root: string, template: string): string {
   return `/** @jsxImportSource smthrs */
 import fs from "node:fs";
 import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
-${source.slice(start, end)}
+${templateSlice(template, "type WorkflowTaskStateContext =", "type DependencyVerificationProducer =")}
+${templateSlice(template, "function preparationStep", "\n\nfunction prepareArtifactMirror")}
+${templateSlice(template, "function nonRetryableFailure", "\n\nfunction assertVerifiedDependency")}
+const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
+const { Workflow, Parallel, Task, smithers, outputs } = createSmithers({
+  input: z.object({}),
+  result: z.object({ value: z.string() })
+});
+const executions = (value: string) =>
+  fs.existsSync(evidence) ? fs.readFileSync(evidence, "utf8").split("\\n").filter((line) => line === value).length : 0;
+const record = (value: string) => { fs.appendFileSync(evidence, value + "\\n"); return { value }; };
+export default smithers((ctx) => {
+  const preparation = failedWorkflowPrerequisites(ctx, ["prepare:consumer"]);
+  return <Workflow name="non-retryable"><Parallel>
+    <Task id="prepare:consumer" output={outputs.result} continueOnFail retries={2}>
+      {() => preparationStep("consumer", "assert-task-inputs", () => {
+        record("consumer");
+        throw nonRetryableFailure(new Error("artifact-contract failure: artifact dependency has not passed verification producer"));
+      })}
+    </Task>
+    <Task id="node:consumer" output={outputs.result} dependsOn={["prepare:consumer"]}
+      skipIf={shouldSkipWorkflowTask(ctx, "node:consumer", preparation)} continueOnFail retries={0}>
+      {() => record("forbidden-consumer")}
+    </Task>
+    <Task id="prepare:transient" output={outputs.result} continueOnFail retries={2}>
+      {() => preparationStep("transient", "resolve-workspace-root", () => {
+        if (executions("transient") === 0) {
+          record("transient");
+          throw new TypeError("undefined is not an object (evaluating 'get')");
+        }
+        return record("transient");
+      })}
+    </Task>
+  </Parallel></Workflow>;
+});
+`;
+}
+
+function syntheticWorkflowSource(root: string, template: string): string {
+  return `/** @jsxImportSource smthrs */
+import fs from "node:fs";
+import { createSmithers } from "smthrs";
+import { z } from "zod/v4";
+${templateSlice(template, "type WorkflowTaskStateContext =", "type DependencyVerificationProducer =")}
 const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
 const { Workflow, Parallel, Task, smithers, outputs } = createSmithers({
   input: z.object({}),
