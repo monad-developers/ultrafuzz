@@ -6,19 +6,26 @@ import { parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
   "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
 
-type ProviderRouteDestination = (
-  agent: string,
-  env: Record<string, string | undefined>,
-  routeConfig?: Uint8Array
-) => string;
-// Plan-time disclosure acknowledgement computes route IDs with
-// @ultrafuzz/runtime's providerRouteDestination. Re-verify with that same
-// function, loaded from the module the rendered workflow imports, rather than
-// with a second copy that has to be kept in step with it.
-const { providerRouteDestination } = (await import(
+// The controller computes acknowledged route IDs and credential ownership
+// with these @ultrafuzz/runtime functions. Use the same functions, loaded from
+// the module the rendered workflow imports, rather than copies that have to be
+// kept in step with them.
+const {
+  isCredentialLikeEnvironmentVariableName,
+  providerRouteDestination,
+  routeOwnsCredentialLikeEnvironmentVariable
+} = (await import(
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
     new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href
-)) as { providerRouteDestination: ProviderRouteDestination };
+)) as {
+  isCredentialLikeEnvironmentVariableName: (name: string) => boolean;
+  providerRouteDestination: (
+    agent: string,
+    env: Record<string, string | undefined>,
+    routeConfig?: Uint8Array
+  ) => string;
+  routeOwnsCredentialLikeEnvironmentVariable: (agent: string, name: string) => boolean;
+};
 
 const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "SMITHERS_BIN",
@@ -68,15 +75,6 @@ const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 type WorkflowRouteAgent = "ClaudeAgent" | "CodexAgent" | "DeepSeekAgent" | "KimiAgent" | "OpenRouterAgent";
 type WorkflowDataRoute = { agent: WorkflowRouteAgent; configDir?: string };
-const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
-  ClaudeAgent: ["ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_", "AZURE_", "CLOUD_ML_", "FOUNDRY_", "GOOGLE_"],
-  CodexAgent: ["AZURE_OPENAI_", "OPENAI_"],
-  KimiAgent: ["KIMI_", "MOONSHOT_"]
-};
-// Keep this generated, dependency-free boundary in parity with
-// @ultrafuzz/security's isSensitiveEnvironmentName contract.
-const SENSITIVE_ENVIRONMENT_NAME_PATTERN =
-  /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CLIENT_?SECRET|CREDENTIALS?|AUTH(?:ORIZATION)?)(?:_|$)/iu;
 
 /**
  * Smithers agents inherit the controller environment by default. Remove every
@@ -157,10 +155,6 @@ function allowlistedEnvironmentVariables(
   return [...variables.values()];
 }
 
-function isCredentialLikeEnvironmentVariableName(name: string): boolean {
-  return SENSITIVE_ENVIRONMENT_NAME_PATTERN.test(name);
-}
-
 function sensitiveAgentEnvironmentVariableNames(source: Record<string, string | undefined>): string[] {
   const names = new Set<string>();
   for (const name of (source.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES ?? "").split(",")) {
@@ -189,23 +183,6 @@ function addLogicalEnvironmentVariableNames(
   for (const sourceName of Object.keys(source)) {
     if (sourceName.toUpperCase() === upper) names.add(sourceName);
   }
-}
-
-function routeOwnsCredentialLikeEnvironmentVariable(agent: WorkflowRouteAgent, name: string): boolean {
-  const upper = name.toUpperCase();
-  let longestPrefix = -1;
-  const owners = new Set<string>();
-  for (const [candidate, prefixes] of Object.entries(ROUTE_ENV_PREFIXES)) {
-    for (const prefix of prefixes) {
-      if (!upper.startsWith(prefix) || prefix.length < longestPrefix) continue;
-      if (prefix.length > longestPrefix) {
-        longestPrefix = prefix.length;
-        owners.clear();
-      }
-      owners.add(candidate);
-    }
-  }
-  return owners.has(agent);
 }
 
 function restoreRouteScopedAllowlistedCredentials(

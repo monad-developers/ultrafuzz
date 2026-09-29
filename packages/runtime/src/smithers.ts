@@ -4337,12 +4337,6 @@ export async function smithersExecutionControlFiles(
   const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
   assertControllerSourceDigest(compiled.projectRoot, compiled.controllerSourceDigest);
   for (const sourcePath of walkExecutionFiles(agentsRoot)) {
-    const source = fs.readFileSync(sourcePath, "utf8");
-    if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
-      throw new Error(
-        `workflow agent reads mutable project ultrafuzz.toml instead of process.env.ULTRAFUZZ_CONFIG_PATH: ${sourcePath}; rerun ultrafuzz init --force to replace generated files, or update this adapter manually and remove controller-only variables before spawning a model process`
-      );
-    }
     add(sourcePath, path.posix.join(".smithers/agents", relativeExecutionPath(agentsRoot, sourcePath)));
   }
 
