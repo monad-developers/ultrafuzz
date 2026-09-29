@@ -6446,84 +6446,23 @@ test("campaign evidence-file closure names duplicated, missing, and unreferenced
   );
 });
 
-test("campaign timeout evidence reports the expected final artifact deadline next to a forged execution deadline", () => {
-  const command =
-    "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
-    "--timeout 60 --test-limit 18446744073709551615 --seq-len 100";
-  const plan = {
-    configured_fuzzer_timeout_seconds: 60,
-    recon_internal_timeout_seconds: 60,
-    host_soft_timeout_seconds: 60,
-    host_force_kill_grace_seconds: 300,
-    artifact_finalization_reserve_seconds: 100,
-    finalization_reserve_seconds: 100,
-    configured_budget_seconds: 460,
-    recon_test_limit: "18446744073709551615",
-    recon_sequence_length: 100,
-    backend_started_at: "2026-01-01T00:00:00.000Z",
-    fuzzing_deadline_utc: "2026-01-01T00:01:00.000Z",
-    force_kill_deadline_utc: "2026-01-01T00:06:00.000Z",
-    final_artifact_deadline_utc: "2026-01-01T00:07:40.000Z",
-    deadline: "2026-01-01T00:07:40.000Z",
-    backend: { exact_shell_escaped_command: command },
-    command_plan: [{ phase: "campaign", command }]
-  };
-  const result = executeSemanticGate("property-campaign-timeout-evidence", {
-    document: {
-      configured_timeout_seconds: 60,
-      exact_command: command,
-      start_timestamp: "2026-01-01T00:00:00.000Z",
-      end_timestamp: "2026-01-01T00:01:00.000Z",
-      termination_reason: "configured-timeout",
-      campaign_outcome: "complete",
-      usable_results: true,
-      execution: {
-        command,
-        usable_results: true,
-        started_at: "2026-01-01T00:00:00.000Z",
-        finished_at: "2026-01-01T00:01:00.000Z",
-        // The incident's wrong-field bug: copied from the plan's
-        // fuzzing_deadline_utc instead of final_artifact_deadline_utc.
-        deadline: "2026-01-01T00:01:00.000Z"
-      }
-    },
-    context: {
-      artifactSet: { campaignPlan: plan, campaignSummary: { outcome: "complete", sequence_length: 100 } },
-      propertyCampaignTimeout: {
-        configuredFuzzerTimeoutSeconds: 60,
-        plannedTimeoutSeconds: 600,
-        finalizationReserveSeconds: 100
-      }
-    }
-  });
+const CAMPAIGN_TIMEOUT_EVIDENCE_COMMAND =
+  "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
+  "--timeout 60 --test-limit 18446744073709551615 --seq-len 100";
 
-  assert.equal(result.status, "failed");
-  const issues = result.status === "failed" ? result.issues : [];
-  assert.deepEqual(
-    issues.map((entry) => ({ path: entry.path, message: entry.message })),
-    [
-      {
-        path: "$.execution.deadline",
-        message:
-          "Execution deadline must equal plan final artifact deadline " +
-          '(expected "2026-01-01T00:07:40.000Z", actual "2026-01-01T00:01:00.000Z")'
-      }
-    ]
-  );
-});
+interface CampaignTimeoutEvidenceFields {
+  plan: Record<string, unknown>;
+  document: Record<string, unknown>;
+  summary: Record<string, unknown>;
+}
 
-test("campaign timeout evidence requires the stateful Recon sequence length wherever it is recorded", () => {
-  const command =
-    "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
-    "--timeout 60 --test-limit 18446744073709551615 --seq-len 100";
-  const gate = (
-    mutate: (fields: {
-      plan: Record<string, unknown>;
-      document: Record<string, unknown>;
-      summary: Record<string, unknown>;
-    }) => void = () => undefined
-  ) => {
-    const plan: Record<string, unknown> = {
+/** property-campaign-timeout-evidence issues for a consistent 60-second Recon campaign after `mutate`. */
+function campaignTimeoutEvidenceIssues(
+  mutate: (fields: CampaignTimeoutEvidenceFields) => void = () => undefined
+): { path: string; message: string }[] {
+  const command = CAMPAIGN_TIMEOUT_EVIDENCE_COMMAND;
+  const fields: CampaignTimeoutEvidenceFields = {
+    plan: {
       configured_fuzzer_timeout_seconds: 60,
       recon_internal_timeout_seconds: 60,
       host_soft_timeout_seconds: 60,
@@ -6540,8 +6479,8 @@ test("campaign timeout evidence requires the stateful Recon sequence length wher
       deadline: "2026-01-01T00:07:40.000Z",
       backend: { exact_shell_escaped_command: command },
       command_plan: [{ phase: "campaign", command }]
-    };
-    const document: Record<string, unknown> = {
+    },
+    document: {
       configured_timeout_seconds: 60,
       sequence_length: 100,
       exact_command: command,
@@ -6557,62 +6496,87 @@ test("campaign timeout evidence requires the stateful Recon sequence length wher
         finished_at: "2026-01-01T00:01:00.000Z",
         deadline: "2026-01-01T00:07:40.000Z"
       }
-    };
-    const summary: Record<string, unknown> = { outcome: "complete", sequence_length: 100 };
-    mutate({ plan, document, summary });
-    const result = executeSemanticGate("property-campaign-timeout-evidence", {
-      document,
-      context: {
-        artifactSet: { campaignPlan: plan, campaignSummary: summary },
-        propertyCampaignTimeout: {
-          configuredFuzzerTimeoutSeconds: 60,
-          plannedTimeoutSeconds: 600,
-          finalizationReserveSeconds: 100
-        }
-      }
-    });
-    return result.status === "failed" ? result.issues.map((entry) => entry.path) : [];
+    },
+    summary: { outcome: "complete", sequence_length: 100 }
   };
-  const withCommand = (fields: { plan: Record<string, unknown>; document: Record<string, unknown> }, next: string) => {
-    fields.plan.backend = { exact_shell_escaped_command: next };
-    fields.plan.command_plan = [{ phase: "campaign", command: next }];
-    fields.document.exact_command = next;
-    (fields.document.execution as Record<string, unknown>).command = next;
+  mutate(fields);
+  const result = executeSemanticGate("property-campaign-timeout-evidence", {
+    document: fields.document,
+    context: {
+      artifactSet: { campaignPlan: fields.plan, campaignSummary: fields.summary },
+      propertyCampaignTimeout: {
+        configuredFuzzerTimeoutSeconds: 60,
+        plannedTimeoutSeconds: 600,
+        finalizationReserveSeconds: 100
+      }
+    }
+  });
+  assert.notEqual(result.status, "requires-context");
+  return result.status === "failed" ? result.issues.map((entry) => ({ path: entry.path, message: entry.message })) : [];
+}
+
+test("campaign timeout evidence reports the expected final artifact deadline next to a forged execution deadline", () => {
+  assert.deepEqual(
+    campaignTimeoutEvidenceIssues(({ document }) => {
+      // The incident's wrong-field bug: copied from the plan's
+      // fuzzing_deadline_utc instead of final_artifact_deadline_utc.
+      (document.execution as Record<string, unknown>).deadline = "2026-01-01T00:01:00.000Z";
+    }),
+    [
+      {
+        path: "$.execution.deadline",
+        message:
+          "Execution deadline must equal plan final artifact deadline " +
+          '(expected "2026-01-01T00:07:40.000Z", actual "2026-01-01T00:01:00.000Z")'
+      }
+    ]
+  );
+});
+
+test("campaign timeout evidence requires the stateful Recon sequence length wherever it is recorded", () => {
+  const issuePaths = (mutate?: (fields: CampaignTimeoutEvidenceFields) => void) =>
+    campaignTimeoutEvidenceIssues(mutate).map((entry) => entry.path);
+  const withCommand = ({ plan, document }: CampaignTimeoutEvidenceFields, next: string) => {
+    plan.backend = { exact_shell_escaped_command: next };
+    plan.command_plan = [{ phase: "campaign", command: next }];
+    document.exact_command = next;
+    (document.execution as Record<string, unknown>).command = next;
   };
 
-  assert.deepEqual(gate(), []);
+  assert.deepEqual(issuePaths(), []);
   // The result record's sequence_length is optional in its schema.
   assert.deepEqual(
-    gate(({ document }) => {
+    issuePaths(({ document }) => {
       delete document.sequence_length;
     }),
     []
   );
   assert.deepEqual(
-    gate(({ plan }) => {
+    issuePaths(({ plan }) => {
       plan.recon_sequence_length = 1;
     }),
     ["$.campaign_plan_ref#recon_sequence_length"]
   );
   assert.deepEqual(
-    gate(({ summary }) => {
+    issuePaths(({ summary }) => {
       summary.sequence_length = 1;
     }),
     ["$.campaign_summary_ref#sequence_length"]
   );
   assert.deepEqual(
-    gate(({ document }) => {
+    issuePaths(({ document }) => {
       document.sequence_length = 1;
     }),
     ["$.sequence_length"]
   );
+  const command = CAMPAIGN_TIMEOUT_EVIDENCE_COMMAND;
   for (const next of [
     command.replace("--seq-len 100", "--seq-len 1"),
     command.replace(" --seq-len 100", ""),
     `${command} --seq-len 100`
   ]) {
     assert.deepEqual(
-      gate((fields) => withCommand(fields, next)),
+      issuePaths((fields) => withCommand(fields, next)),
       ["$.exact_command"],
       next
     );
