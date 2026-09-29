@@ -6,6 +6,7 @@ import path from "node:path";
 import { parseStrictJsonBytes, readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
 import { isSensitiveEnvironmentName } from "@ultrafuzz/security";
+import { parse as parseToml } from "smol-toml";
 import { retryFallbackProfileIds } from "./retry-chain.js";
 import {
   DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
@@ -43,6 +44,29 @@ const ROUTE_PROXY_ENV = [
   "https_proxy",
   "no_proxy"
 ] as const;
+// Claude Code reads cloud-provider settings only for the platform a
+// CLAUDE_CODE_USE_* flag selects (the flags Claude Code 2.1.284 checks; it
+// reads each as set only for 1, true, yes, or on, in any case). Without one an
+// ambient AWS_PROFILE or GOOGLE_CLOUD_PROJECT routes nothing, yet pinning it
+// made the acknowledged route depend on which shell resumed.
+const CLAUDE_PLATFORM_FLAG_SET = /^(?:1|true|yes|on)$/iu;
+const CLAUDE_CLOUD_ROUTE_PREFIXES: Readonly<Record<string, readonly string[]>> = {
+  CLAUDE_CODE_USE_ANTHROPIC_AWS: ["AWS_"],
+  CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: ["CLOUD_ML_", "GOOGLE_"],
+  CLAUDE_CODE_USE_BEDROCK: ["AWS_"],
+  CLAUDE_CODE_USE_FOUNDRY: ["AZURE_", "FOUNDRY_"],
+  CLAUDE_CODE_USE_MANTLE: ["AWS_"],
+  CLAUDE_CODE_USE_VERTEX: ["CLOUD_ML_", "GOOGLE_"]
+};
+const PROVIDER_DESTINATIONS: Readonly<Record<string, string>> = {
+  ClaudeAgent: "anthropic",
+  CodexAgent: "openai",
+  DeepSeekAgent: "deepseek",
+  KimiAgent: "moonshot",
+  OpenCodeAgent: "openrouter",
+  OpenRouterAgent: "openrouter",
+  PiAgent: "openrouter"
+};
 export interface DataGovernanceDestinationPolicy {
   destination: string;
   processor: string;
@@ -301,102 +325,165 @@ function requiredDestinations(config: ResolvedConfig, graph: PlannedGraph, env: 
   };
 }
 export function modelDestination(agent: string, config: ResolvedConfig, env: NodeJS.ProcessEnv): string {
-  const builtins: Record<string, string> = {
-      CodexAgent: "openai",
-      ClaudeAgent: "anthropic",
-      KimiAgent: "moonshot",
-      DeepSeekAgent: "deepseek",
-      OpenCodeAgent: "openrouter",
-      OpenRouterAgent: "openrouter",
-      PiAgent: "openrouter"
-    },
-    route = effectiveRoute(agent, config, env);
-  if (route !== undefined) return `model:${agent.toLowerCase().replace("agent", "")}-route-${route}`;
-  if (builtins[agent] === undefined) throw new Error(`cannot derive a data destination for ${agent}`);
-  return `model:${builtins[agent]}`;
+  const routeConfig = providerHomeRouteConfig(agent, config, env);
+  if (
+    routeConfig !== undefined &&
+    config.execution.mode === "cloud" &&
+    routeBearingConfig(agent, routeConfig, env) !== undefined
+  )
+    throw new Error(
+      "cloud execution cannot use host provider-home routing; select and acknowledge the route through environment variables"
+    );
+  return providerRouteDestination(agent, env, routeConfig);
 }
-function effectiveRoute(agent: string, config: ResolvedConfig, env: NodeJS.ProcessEnv): string | undefined {
-  const routeEnvironment = effectiveRouteEnvironment(agent, env),
-    provider = { CodexAgent: "codex", KimiAgent: "kimi", ClaudeAgent: "claude" }[agent];
+/**
+ * The data destination an agent's model traffic reaches. Plan-time disclosure
+ * acknowledgement calls this, and the generated Claude, Codex, DeepSeek, Kimi,
+ * and OpenRouter adapters re-verify each invocation with this same function
+ * (loaded through the runtime module), so there is no second implementation to
+ * keep in step. Proxies, cloud-provider variables for an unselected platform,
+ * and a provider CLI's rewrites of unrelated config sections do not count.
+ */
+export function providerRouteDestination(
+  agent: string,
+  env: Record<string, string | undefined>,
+  routeConfig?: Uint8Array
+): string {
+  // A CLAUDE_CODE_USE_* flag in Claude's settings env selects the platform for
+  // the process environment's cloud variables too, and vice versa.
+  const settingsEnv =
+      agent === "ClaudeAgent" && routeConfig !== undefined ? claudeSettings(routeConfig)?.env : undefined,
+    route = routeBearingEnvironment(agent, env, [env, settingsEnv ?? {}]),
+    config = routeConfig === undefined ? undefined : routeBearingConfig(agent, routeConfig, env);
+  if (route.length === 0 && config === undefined) {
+    const destination = PROVIDER_DESTINATIONS[agent];
+    if (destination === undefined) throw new Error(`cannot derive a data destination for ${agent}`);
+    return `model:${destination}`;
+  }
+  return `model:${agent.toLowerCase().replace("agent", "")}-route-${sha256Stable({ agent, config: config ?? null, route })}`;
+}
+/** The provider CLI's own config file, when that file can select this agent's route. */
+function providerHomeRouteConfig(agent: string, config: ResolvedConfig, env: NodeJS.ProcessEnv): Buffer | undefined {
+  const provider = { CodexAgent: "codex", KimiAgent: "kimi", ClaudeAgent: "claude" }[agent];
   if (provider === undefined || (agent === "KimiAgent" && config.agents?.KimiAgent?.auth === "api-key"))
-    return routeEnvironment.length > 0 ? sha256Stable({ agent, config: null, route: routeEnvironment }) : undefined;
+    return undefined;
   const configured = config.agents?.[agent]?.configDir,
-    selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(),
-    userHome = env.HOME?.trim() || os.homedir(),
-    defaultRoot = path.join(
+    home = providerHome(agent, provider, configured, env),
+    routeConfig = path.join(home, agent === "ClaudeAgent" ? "settings.json" : "config.toml");
+  if (!fs.existsSync(routeConfig)) return undefined;
+  return readSinglyLinkedRegularFileSnapshotInside(home, routeConfig, 1024 * 1024, "provider route config");
+}
+/** The home directory the stock adapter gives this provider's CLI. */
+function providerHome(agent: string, provider: string, configured: string | undefined, env: NodeJS.ProcessEnv): string {
+  const selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(),
+    userHome = env.HOME?.trim() || os.homedir();
+  if (configured) {
+    const defaultRoot = path.join(
       env.XDG_STATE_HOME?.trim() || path.join(userHome, ".local", "state"),
       "ultrafuzz",
       "provider-homes"
-    ),
-    home = configured
-      ? path.join(selectedRoot || defaultRoot, provider, configured)
-      : selectedRoot
-        ? path.join(selectedRoot, provider)
-        : agent === "CodexAgent"
-          ? env.CODEX_HOME?.trim() || path.join(userHome, ".codex")
-          : agent === "KimiAgent"
-            ? env.KIMI_CODE_HOME?.trim() || env.KIMI_SHARE_DIR?.trim() || path.join(userHome, ".kimi-code")
-            : env.CLAUDE_CONFIG_DIR?.trim() || path.join(userHome, ".claude"),
-    routeConfig = path.join(home, agent === "ClaudeAgent" ? "settings.json" : "config.toml");
-  let configDigest: string | undefined;
-  if (fs.existsSync(routeConfig)) {
-    const bytes = readSinglyLinkedRegularFileSnapshotInside(home, routeConfig, 1024 * 1024, "provider route config");
-    const affectsRoute =
-      agent === "ClaudeAgent"
-        ? claudeSettingsAffectRoute(bytes)
-        : agent !== "CodexAgent" || codexConfigAffectsRoute(bytes.toString("utf8"));
-    if (affectsRoute) configDigest = hash(bytes);
-    if (configDigest !== undefined && config.execution.mode === "cloud")
-      throw new Error(
-        "cloud execution cannot use host provider-home routing; select and acknowledge the route through environment variables"
-      );
+    );
+    return path.join(selectedRoot || defaultRoot, provider, configured);
   }
-  return routeEnvironment.length > 0
-    ? sha256Stable({ agent, config: configDigest ?? null, route: routeEnvironment })
-    : configDigest;
+  if (selectedRoot) return path.join(selectedRoot, provider);
+  if (agent === "CodexAgent") return env.CODEX_HOME?.trim() || path.join(userHome, ".codex");
+  if (agent === "KimiAgent")
+    return env.KIMI_CODE_HOME?.trim() || env.KIMI_SHARE_DIR?.trim() || path.join(userHome, ".kimi-code");
+  return env.CLAUDE_CONFIG_DIR?.trim() || path.join(userHome, ".claude");
 }
 /**
- * The Codex CLI rewrites its own config.toml on invocation — marketplace
- * `last_updated` timestamps, plugin toggles, and project trust levels — so
- * digesting the whole file makes the acknowledged route change the moment the
- * CLI first runs in a fresh HOME, which failed every sandbox agent task after
- * disclosure (#908). Mirror claudeSettingsAffectRoute: only content that can
- * actually redirect traffic — a `model_provider` selection, a
- * `[model_providers…]` table, or a `base_url` assignment, the same fields
- * codexProviderRouting reads — participates in the route digest. A config
- * that gains any of these after acknowledgement still fails closed.
+ * Environment entries that select where an agent's model traffic goes. A
+ * Claude cloud prefix counts while any of `selectors` sets its platform flag.
  */
-function codexConfigAffectsRoute(text: string): boolean {
-  return (
-    /(?:^|\n)\s*(?:model_provider|"model_provider"|'model_provider')\s*=/u.test(text) ||
-    /(?:^|\n)\s*\[[^\]\n]*model_providers[^\]\n]*\]/u.test(text) ||
-    /(?:^|\n)\s*(?:base_url|"base_url"|'base_url')\s*=/u.test(text)
+function routeBearingEnvironment(
+  agent: string,
+  env: Record<string, string | undefined>,
+  selectors: ReadonlyArray<Record<string, string | undefined>>
+): Array<[string, string]> {
+  const selected = new Set(
+      Object.entries(CLAUDE_CLOUD_ROUTE_PREFIXES).flatMap(([flag, prefixes]) =>
+        selectors.some((source) => CLAUDE_PLATFORM_FLAG_SET.test(source[flag]?.trim() ?? "")) ? prefixes : []
+      )
+    ),
+    inactivePrefixes =
+      agent === "ClaudeAgent"
+        ? Object.values(CLAUDE_CLOUD_ROUTE_PREFIXES)
+            .flat()
+            .filter((prefix) => !selected.has(prefix))
+        : [];
+  return effectiveRouteEnvironment(agent, env).filter(
+    ([name]) => !ROUTE_PROXY_ENV.includes(name as never) && !inactivePrefixes.some((prefix) => name.startsWith(prefix))
   );
 }
-function claudeSettingsAffectRoute(bytes: Buffer): boolean {
-  const parsed = parseStrictJsonBytes(bytes, {
-    maxBytes: 1024 * 1024,
-    maxDepth: 32,
-    maxItems: 4096,
-    maxProperties: 4096
-  });
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-    throw new Error("Claude settings must be a JSON object");
-  if (Object.keys(parsed).some((name) => /(?:helper|refresh|credentialexport|processwrapper|proxyauth)$/iu.test(name)))
-    return true;
-  const configuredEnv = (parsed as Record<string, unknown>).env;
-  if (configuredEnv === undefined) return false;
-  if (configuredEnv === null || typeof configuredEnv !== "object" || Array.isArray(configuredEnv))
-    throw new Error("Claude settings env must be a JSON object");
-  return Object.keys(configuredEnv).some((name) => {
-    const upper = name.toUpperCase();
-    return (
-      ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].includes(upper) ||
-      (!NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES.has(upper) &&
-        !isCredentialLikeEnvironmentVariableName(upper) &&
-        ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
-    );
-  });
+/**
+ * The part of a provider CLI's own config file that can redirect traffic, or
+ * undefined when it selects no route. The CLIs rewrite unrelated sections of
+ * these files themselves (Codex refreshes marketplace timestamps and project
+ * trust levels, #908), so only these fields participate:
+ * - Codex `config.toml`: the selected `model_provider` (a `profile` may select
+ *   it), that provider's `base_url`, `wire_api`, and `env_key`, and the
+ *   top-level `openai_base_url`;
+ * - Claude `settings.json`: credential/process helper keys and routing `env`;
+ * - Kimi `config.toml`: the whole file.
+ * A file these readers cannot parse routes by its exact bytes, as before.
+ */
+function routeBearingConfig(agent: string, bytes: Uint8Array, env: Record<string, string | undefined>): unknown {
+  if (agent === "CodexAgent") return codexRouteConfig(bytes);
+  if (agent === "ClaudeAgent") return claudeRouteConfig(bytes, env);
+  return hash(bytes);
+}
+function codexRouteConfig(bytes: Uint8Array): unknown {
+  let config: Record<string, unknown>;
+  try {
+    config = parseToml(Buffer.from(bytes).toString("utf8"));
+  } catch {
+    return { unparsed: hash(bytes) };
+  }
+  const profile = typeof config.profile === "string" ? record(record(config.profiles)?.[config.profile]) : undefined,
+    selected = profile?.model_provider ?? config.model_provider;
+  if (typeof selected !== "string") return undefined;
+  const provider = record(record(config.model_providers)?.[selected]) ?? {};
+  return {
+    model_provider: selected,
+    base_url: provider.base_url ?? null,
+    wire_api: provider.wire_api ?? null,
+    env_key: provider.env_key ?? null,
+    // Redirects the built-in openai provider when that is the one selected.
+    openai_base_url: config.openai_base_url ?? null
+  };
+}
+function claudeRouteConfig(bytes: Uint8Array, env: Record<string, string | undefined>): unknown {
+  const parsed = claudeSettings(bytes);
+  if (parsed === undefined) return { unparsed: hash(bytes) };
+  const helpers = Object.entries(parsed.settings)
+      .filter(([name]) => /(?:helper|refresh|credentialexport|processwrapper|proxyauth)$/iu.test(name))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+    routeEnv = routeBearingEnvironment("ClaudeAgent", parsed.env, [env, parsed.env]);
+  return helpers.length === 0 && routeEnv.length === 0 ? undefined : { helpers, env: routeEnv };
+}
+/** Claude settings.json, or undefined when it is not an object with an object `env`. */
+function claudeSettings(
+  bytes: Uint8Array
+): { settings: Record<string, unknown>; env: Record<string, string> } | undefined {
+  let settings: Record<string, unknown> | undefined;
+  try {
+    settings = record(JSON.parse(Buffer.from(bytes).toString("utf8")));
+  } catch {
+    return undefined;
+  }
+  const env = settings === undefined ? undefined : record(settings.env ?? {});
+  if (settings === undefined || env === undefined) return undefined;
+  return {
+    settings,
+    env: Object.fromEntries(
+      Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    )
+  };
+}
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 export function effectiveRouteEnvironment(agent: string, env: NodeJS.ProcessEnv): Array<[string, string]> {
   const names = new Set(

@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -16,73 +15,13 @@ import {
 } from "@ultrafuzz/config";
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
-import { AGENT_REGISTRY_RELATIVE_PATH, agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
+import { STOCK_CONTROLLER_SOURCE_TEMPLATES } from "./controller-source.js";
 import { loadRuntimeTemplate } from "./runtime-template.js";
 import { migrateStockSmithers032PackageManifest, renderSmithersPackageJson } from "./smithers-package.js";
-import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
+import type { InitProjectInput, InitProjectResult } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
 const DEFAULT_TOPOLOGY = fs.readFileSync(packagedTopology("default").path, "utf8");
-
-const MAX_AGENT_ADAPTER_REVIEW_BYTES = 256 * 1024;
-const AGENT_TEMPLATES = [
-  {
-    file: "claude.ts",
-    template: "smithers/agents/claude.tsx",
-    ref: "ClaudeAgent",
-    stock032Sha256: ["f2b97c9b57aa45bdc3b42be20d7a3baddc0086a2bae95c161b841599f3262232"]
-  },
-  {
-    file: "codex.ts",
-    template: "smithers/agents/codex.tsx",
-    ref: "CodexAgent",
-    stock032Sha256: [
-      "b932fb7da3c05fdc662f60359e8a751aaabd236ca4072dfeaade1a7bb25a01b5",
-      "e7e845b2bccf5b7d41a3f0cedfaec7a1457580126513ff96f282a36307c7da98",
-      "7865f1be1715d36d016c7b2814081b70e70a9aca7e30d5b41f5d91bf2337f681"
-    ]
-  },
-  {
-    file: "deepseek.ts",
-    template: "smithers/agents/deepseek.tsx",
-    ref: "DeepSeekAgent",
-    stockSha256: new Set([
-      "c23a03c84e2f62d2e6b23ee7b27b1464a633fe20bb5b91c34d2c93d37dcf7e35",
-      "65bf43f333cbced8ff0157e942d3c78267d8245d6c0041e053c8577a463e7407"
-    ])
-  },
-  {
-    file: "kimi.ts",
-    template: "smithers/agents/kimi.tsx",
-    ref: "KimiAgent",
-    stockSha256: new Set([
-      "fdbeaad6ea55122da50e9c9d86ac58a8b6377f419f8e78df23fb1fb401924e0b",
-      "6de5f4b00b54b533f8fc1aa0628f5a402dbb6521a4584852d83786ee59dcb2fd",
-      "25c499f8631db6e2529b046b5d2243119b456696c7a4a729345baa6f21f4c4f5",
-      "f790a3f121da84049032cfc5bf5d300f7bd56e9e3b15d0a51df5ea1b275de75f"
-    ])
-  },
-  {
-    file: "opencode.ts",
-    template: "smithers/agents/opencode.tsx",
-    ref: "OpenCodeAgent",
-    stockSha256: new Set<string>()
-  },
-  {
-    file: "openrouter.ts",
-    template: "smithers/agents/openrouter.tsx",
-    ref: "OpenRouterAgent",
-    stock032Sha256: []
-  },
-  {
-    file: "pi.ts",
-    template: "smithers/agents/pi.tsx",
-    ref: "PiAgent",
-    // No stock digest yet: this adapter has never shipped in a released
-    // scaffold, so any pi.ts already on disk is the operator's and is preserved.
-    stockSha256: new Set<string>()
-  }
-] as const;
 
 /**
  * Canonical artifact JSON Schemas scaffolded into the project.
@@ -154,10 +93,6 @@ export function initProject(input: InitProjectInput) {
   try {
     const stockSmithersPackageMigration =
       input.force === true ? undefined : prepareStockSmithers032PackageMigration(projectRoot);
-    const upgradedStockAdapters =
-      stockSmithersPackageMigration === undefined
-        ? new Set<string>()
-        : upgradeStockSmithers032Adapters(projectRoot, created, preserved, overwritten);
     writeProjectFile(
       projectRoot,
       "ultrafuzz.toml",
@@ -205,63 +140,19 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/index.ts",
-      loadRuntimeTemplate("smithers/agents/index.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/toml.ts",
-      loadRuntimeTemplate("smithers/agents/toml.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/environment.ts",
-      loadRuntimeTemplate("smithers/agents/environment.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/provider-home.ts",
-      loadRuntimeTemplate("smithers/agents/provider-home.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/strict-json.ts",
-      loadRuntimeTemplate("smithers/agents/strict-json.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
-    for (const agent of AGENT_TEMPLATES) {
-      const relativePath = `.smithers/agents/${agent.file}`;
-      if (upgradedStockAdapters.has(relativePath)) continue;
-      writeProjectFile(
-        projectRoot,
-        relativePath,
-        loadRuntimeTemplate(agent.template),
-        input.force === true,
-        created,
-        preserved,
-        overwritten
-      );
+    // Planning admits only the byte-exact packaged adapter closure, so these
+    // files are never project-owned. Refresh them on every init: otherwise an
+    // upgrade needs `init --force`, which also resets ultrafuzz.toml, the
+    // topology, and the prompts. A file that already matches is left alone,
+    // so a read-only up-to-date closure does not fail init.
+    for (const [file, template] of Object.entries(STOCK_CONTROLLER_SOURCE_TEMPLATES)) {
+      const relativePath = `.smithers/agents/${file}`;
+      const contents = loadRuntimeTemplate(template);
+      if (holdsExactContents(projectRoot, relativePath, contents)) {
+        preserved.push(relativePath);
+        continue;
+      }
+      writeProjectFile(projectRoot, relativePath, contents, true, created, preserved, overwritten);
     }
   } catch {
     return runtimeFailure<InitProjectResult>([
@@ -304,16 +195,12 @@ export function initProject(input: InitProjectInput) {
     preserved.push(toProjectRelative(projectRoot, absolutePath));
   }
 
-  return runtimeResult(
-    true,
-    {
-      project_root: projectRoot,
-      created: publicInitPaths(created),
-      preserved: publicInitPaths(preserved),
-      overwritten: publicInitPaths(overwritten)
-    },
-    [...staleAgentRegistryDiagnostics(projectRoot), ...staleAgentAdapterDiagnostics(projectRoot)]
-  );
+  return runtimeResult(true, {
+    project_root: projectRoot,
+    created: publicInitPaths(created),
+    preserved: publicInitPaths(preserved),
+    overwritten: publicInitPaths(overwritten)
+  });
 }
 
 function prepareStockSmithers032PackageMigration(projectRoot: string): string | undefined {
@@ -340,141 +227,21 @@ function prepareStockSmithers032PackageMigration(projectRoot: string): string | 
   }
 }
 
-function upgradeStockSmithers032Adapters(
-  projectRoot: string,
-  created: string[],
-  preserved: string[],
-  overwritten: string[]
-): ReadonlySet<string> {
-  const upgraded = new Set<string>();
-  for (const agent of AGENT_TEMPLATES) {
-    const relativePath = `.smithers/agents/${agent.file}`;
-    const filePath = path.join(projectRoot, relativePath);
-    let bytes: Buffer;
-    try {
-      bytes = readStableInitReviewFile(
-        projectRoot,
-        filePath,
-        MAX_AGENT_ADAPTER_REVIEW_BYTES,
-        "generated 0.32 agent adapter"
-      );
-    } catch {
-      continue;
-    }
-    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
-    if (!("stock032Sha256" in agent)) continue;
-    const stock032Sha256 = agent.stock032Sha256 as readonly string[];
-    if (!stock032Sha256.includes(digest)) continue;
-    writeProjectFile(
+/** Whether the path is a physical single-link file holding exactly these bytes. */
+function holdsExactContents(projectRoot: string, relativePath: string, contents: string): boolean {
+  const expected = Buffer.from(contents, "utf8");
+  try {
+    return readStableInitReviewFile(
       projectRoot,
-      relativePath,
-      loadRuntimeTemplate(agent.template),
-      true,
-      created,
-      preserved,
-      overwritten
-    );
-    upgraded.add(relativePath);
+      path.join(projectRoot, relativePath),
+      expected.byteLength,
+      "generated agent adapter"
+    ).equals(expected);
+  } catch {
+    // Missing, linked, special, or larger files are handed to the writer,
+    // which creates the file or rejects the unsafe path.
+    return false;
   }
-  return upgraded;
-}
-
-function staleAgentAdapterDiagnostics(projectRoot: string): RuntimeDiagnostic[] {
-  const diagnostics: RuntimeDiagnostic[] = [];
-  for (const agent of AGENT_TEMPLATES) {
-    const relativePath = `.smithers/agents/${agent.file}`;
-    const filePath = path.join(projectRoot, relativePath);
-    try {
-      const lexical = fs.lstatSync(filePath, { bigint: true });
-      if (lexical.isSymbolicLink() || !lexical.isFile() || lexical.nlink !== 1n) {
-        diagnostics.push(
-          manualAgentAdapterReviewDiagnostic(
-            relativePath,
-            "is not a physical single-link file, so init preserved it without inspection; replace it with an ordinary file"
-          )
-        );
-        continue;
-      }
-      if (lexical.size > BigInt(MAX_AGENT_ADAPTER_REVIEW_BYTES)) {
-        diagnostics.push(
-          manualAgentAdapterReviewDiagnostic(
-            relativePath,
-            "is too large to inspect as a generated adapter and was preserved"
-          )
-        );
-        continue;
-      }
-      const source = readStableInitReviewFile(
-        projectRoot,
-        filePath,
-        MAX_AGENT_ADAPTER_REVIEW_BYTES,
-        "generated agent adapter"
-      ).toString("utf8");
-      if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
-        diagnostics.push({
-          code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
-          message: `${relativePath} was preserved and still reads mutable project ultrafuzz.toml; update it to read process.env.ULTRAFUZZ_CONFIG_PATH and use workflowControlChildEnvironment before spawning a model process`,
-          severity: "warning",
-          source: "runtime",
-          path: relativePath
-        });
-      }
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") continue;
-      diagnostics.push(
-        manualAgentAdapterReviewDiagnostic(relativePath, "could not be safely inspected during post-init review")
-      );
-    }
-  }
-  return diagnostics;
-}
-
-function manualAgentAdapterReviewDiagnostic(relativePath: string, reason: string): RuntimeDiagnostic {
-  return {
-    code: "INIT_AGENT_ADAPTER_UPDATE_REQUIRED",
-    message: `${relativePath} ${reason}; verify manually that it reads process.env.ULTRAFUZZ_CONFIG_PATH and removes controller-only variables before spawning a model process`,
-    severity: "warning",
-    source: "runtime",
-    path: relativePath
-  };
-}
-
-// init preserves project-owned files, so a project scaffolded before an agent
-// was added keeps its old registry: the new adapter lands on disk but nothing
-// exports it, and the agent is only rejected later, at launch. Report it here
-// instead of leaving the mismatch silent.
-function staleAgentRegistryDiagnostics(projectRoot: string): RuntimeDiagnostic[] {
-  const registry = inspectAgentRegistry(projectRoot);
-  if (!registry.exists) return [];
-  if (registry.error !== undefined) {
-    // This runs after init may already have written other project files. Keep
-    // the warning actionable without reflecting an OS/parser error that can
-    // contain sensitive path or injected error details.
-    return [
-      manualAgentRegistryReviewDiagnostic("was preserved without inspection because it could not be safely inspected")
-    ];
-  }
-  return AGENT_TEMPLATES.filter(
-    (agent) =>
-      lstatIfPresent(path.join(projectRoot, ".smithers", "agents", agent.file)) !== undefined &&
-      !agentRegistryRegisters(registry, agent.ref)
-  ).map((agent) => ({
-    code: "INIT_AGENT_REGISTRY_STALE",
-    message: `${AGENT_REGISTRY_RELATIVE_PATH} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
-    severity: "warning" as const,
-    source: "runtime",
-    path: AGENT_REGISTRY_RELATIVE_PATH
-  }));
-}
-
-function manualAgentRegistryReviewDiagnostic(reason: string): RuntimeDiagnostic {
-  return {
-    code: "INIT_AGENT_REGISTRY_REVIEW_REQUIRED",
-    message: `${AGENT_REGISTRY_RELATIVE_PATH} ${reason}; verify manually that agentFactories registers every generated agent before starting a run`,
-    severity: "warning",
-    source: "runtime",
-    path: AGENT_REGISTRY_RELATIVE_PATH
-  };
 }
 
 function writeProjectFile(
@@ -547,7 +314,9 @@ function writeProjectFileNoFollow(
       expected === undefined
         ? fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0)
         : fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0);
-    fileDescriptor = fs.openSync(accessPath, flags, 0o666);
+    // O_NONBLOCK makes a FIFO planted at a generated path fail the open (or the
+    // regular-file check below) instead of blocking init on a missing reader.
+    fileDescriptor = fs.openSync(accessPath, flags | fs.constants.O_NONBLOCK, 0o666);
     const opened = fs.fstatSync(fileDescriptor, { bigint: true });
     // Modal's virtual filesystem can report one device for an opened
     // directory and another for stable children created through that dirfd.
@@ -712,10 +481,6 @@ function writeDescriptorContents(descriptor: number, contents: Buffer): void {
     if (written === 0) throw new Error("generated agent adapter stopped accepting replacement bytes");
     offset += written;
   }
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
 }
 
 function uniqueSorted(values: string[]): string[] {

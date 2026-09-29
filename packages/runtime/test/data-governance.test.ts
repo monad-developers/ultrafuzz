@@ -355,7 +355,7 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
     { apiKeyHelper: "/operator/helper" },
     { processWrapper: "/operator/wrapper" },
     { proxyAuth: "operator" },
-    { env: { HTTPS_PROXY: "https://proxy.example" } }
+    { env: { ANTHROPIC_BASE_URL: "https://home-route" } }
   ]) {
     fs.writeFileSync(claudeSettings, JSON.stringify(value));
     assert.throws(
@@ -363,6 +363,13 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
       /cloud execution cannot use host provider-home routing/u
     );
   }
+  // A proxy does not select a destination, in settings or in the environment.
+  fs.writeFileSync(claudeSettings, JSON.stringify({ env: { HTTPS_PROXY: "https://proxy.example" } }));
+  assert.equal(modelDestination("ClaudeAgent", cloud, { HOME: homes }), "model:anthropic");
+  assert.equal(
+    modelDestination("ClaudeAgent", routed, { HOME: homes, HTTPS_PROXY: "https://proxy.example" }),
+    "model:anthropic"
+  );
   const mixedGraph = {
       nodes: [{ model_fanout: [{ agent_ref: "OpenRouterAgent", model_name: "vendor/review-model" }] }]
     } as unknown as PlannedGraph,
@@ -523,6 +530,24 @@ test("target identity rejects Git content filters before execution", () => {
   assert.equal(fs.existsSync(marker), false);
 });
 
+test("a Claude platform flag in settings pins that platform's process variables", () => {
+  const homes = temporaryRoot("ufz-claude-settings-platform-"),
+    settingsPath = path.join(homes, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(settingsPath));
+  fs.writeFileSync(settingsPath, JSON.stringify({ env: { CLAUDE_CODE_USE_BEDROCK: "1" } }));
+  const east = modelDestination("ClaudeAgent", config, { HOME: homes, AWS_REGION: "us-east-1" });
+  assert.match(east, /^model:claude-route-/u);
+  assert.notEqual(modelDestination("ClaudeAgent", config, { HOME: homes, AWS_REGION: "eu-west-1" }), east);
+  // Without a platform flag anywhere, the same variable routes nothing.
+  fs.writeFileSync(settingsPath, "{}");
+  assert.equal(modelDestination("ClaudeAgent", config, { HOME: homes, AWS_REGION: "us-east-1" }), "model:anthropic");
+  // Claude Code treats a flag as set only for 1, true, yes, or on.
+  const region = (flag: string, AWS_REGION: string) =>
+    modelDestination("ClaudeAgent", config, { HOME: homes, CLAUDE_CODE_USE_BEDROCK: flag, AWS_REGION });
+  assert.equal(region("0", "us-east-1"), region("0", "eu-west-1"));
+  assert.notEqual(region(" Yes ", "us-east-1"), region(" Yes ", "eu-west-1"));
+});
+
 test("Codex CLI bookkeeping in config.toml does not change the acknowledged route", () => {
   const homes = temporaryRoot("ufz-codex-route-");
   fs.mkdirSync(path.join(homes, ".codex"));
@@ -551,14 +576,42 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
   );
   assert.equal(modelDestination("CodexAgent", config, { HOME: homes }), "model:openai");
 
-  // Routing declarations still pin (and, after acknowledgement, still fail
-  // closed): a provider selection or endpoint makes the digest reappear.
-  for (const routing of [
-    'model_provider = "private"\n',
-    '[model_providers.private]\nbase_url = "https://gateway.example/v1"\n',
-    'base_url = "https://gateway.example/v1"\n'
-  ]) {
-    fs.writeFileSync(configPath, routing);
-    assert.match(modelDestination("CodexAgent", config, { HOME: homes }), /^model:codex-route-/u);
-  }
+  // A provider table routes nothing until model_provider selects it.
+  fs.writeFileSync(configPath, '[model_providers.private]\nbase_url = "https://gateway.example/v1"\n');
+  assert.equal(modelDestination("CodexAgent", config, { HOME: homes }), "model:openai");
+
+  // A selected provider pins its id, endpoint, wire API, and credential name,
+  // and nothing else in the file.
+  const selected = (lines: string[]) =>
+    ['model_provider = "private"', "", "[model_providers.private]", ...lines, ""].join("\n");
+  const route = (text: string) => {
+    fs.writeFileSync(configPath, text);
+    return modelDestination("CodexAgent", config, { HOME: homes });
+  };
+  const pinned = route(selected(['base_url = "https://gateway.example/v1"', 'env_key = "PRIVATE_KEY_ENV"']));
+  assert.match(pinned, /^model:codex-route-/u);
+  assert.equal(
+    route(
+      `model = "gpt-5.5"\n${selected([
+        'name = "Private gateway"',
+        'base_url = "https://gateway.example/v1"',
+        'env_key = "PRIVATE_KEY_ENV"',
+        "request_max_retries = 4"
+      ])}\n[marketplaces.openai-bundled]\nlast_updated = "2026-08-25T13:35:06Z"\n\n[model_providers.unused]\nbase_url = "https://unused.example/v1"\n`
+    ),
+    pinned
+  );
+  for (const drift of [
+    selected(['base_url = "https://other.example/v1"', 'env_key = "PRIVATE_KEY_ENV"']),
+    selected(['base_url = "https://gateway.example/v1"', 'env_key = "OTHER_KEY_ENV"']),
+    selected(['base_url = "https://gateway.example/v1"', 'env_key = "PRIVATE_KEY_ENV"', 'wire_api = "chat"']),
+    `profile = "work"\n\n[profiles.work]\nmodel_provider = "other"\n\n${selected([
+      'base_url = "https://gateway.example/v1"',
+      'env_key = "PRIVATE_KEY_ENV"'
+    ])}`
+  ])
+    assert.notEqual(route(drift), pinned, drift);
+  // Codex's endpoint override for its built-in provider pins as well.
+  const builtIn = (url: string) => route(`model_provider = "openai"\nopenai_base_url = "${url}"\n`);
+  assert.notEqual(builtIn("https://gateway.example/v1"), builtIn("https://other.example/v1"));
 });

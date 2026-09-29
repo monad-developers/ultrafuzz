@@ -128,6 +128,8 @@ import { verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { loadReportSnapshot } from "../src/unverified-report.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
+import { inspectControllerSource } from "../src/controller-source.js";
+import { loadRuntimeTemplate } from "../src/runtime-template.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
@@ -140,6 +142,9 @@ import {
 const runningUnderBun = typeof process.versions.bun === "string";
 const BUN_ADAPTER_TEST_PREFIX = "Bun adapter contract: ";
 const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_000 }), BUN_ADAPTER_TEST_PREFIX);
+// Generated adapters load their route helper from the runtime module the
+// rendered workflow names; point them at this build.
+if (runningUnderBun) process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/index.js", import.meta.url).href;
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
   "SMITHERS_FAKE_CLOUD_ENV_LOG",
@@ -3422,9 +3427,9 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
 
       const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
       fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-      const preserved = initProject({ projectRoot: project });
-      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-      assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
+      const refreshed = initProject({ projectRoot: project });
+      assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+      assert.equal(fs.readFileSync(codexPath, "utf8"), loadRuntimeTemplate("smithers/agents/codex.tsx"));
 
       const attackedProject = tempProject();
       mismatchedPath = path.join(attackedProject, "ultrafuzz.toml");
@@ -3554,9 +3559,6 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(deepSeekAgentText, /settingSources:\s*""/);
   assert.match(deepSeekAgentText, /effort:\s*reasoningEffort/);
   assert.doesNotMatch(deepSeekAgentText, /extraArgs:\s*\["--effort"/);
-  assert.match(deepSeekAgentText, /cacheReadTokens/);
-  assert.match(deepSeekAgentText, /reasoningTokens: undefined/);
-  assert.match(deepSeekAgentText, /import \{ parseStrictJson \} from "\.\/strict-json";/u);
   assert.doesNotMatch(deepSeekAgentText, /=\s*createDeepSeekAgent\(\)/);
   const kimiAgentText = fs.readFileSync(path.join(project, ".smithers/agents/kimi.ts"), "utf8");
   assert.match(kimiAgentText, /KimiAgent/);
@@ -3648,26 +3650,46 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
-test("non-force init preserves historical stock agent adapters and force replaces them", () => {
-  assert.equal(
-    crypto.createHash("sha256").update(V0_0_2_STOCK_CODEX_ADAPTER).digest("hex"),
-    "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236"
-  );
+test("non-force init refreshes historical and customized adapters to the packaged closure", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const currentAdapter = fs.readFileSync(codexPath, "utf8");
-  fs.writeFileSync(codexPath, V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
-  const historicalStats = fs.statSync(codexPath, { bigint: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const customConfig = `${fs.readFileSync(configPath, "utf8")}\n# operator customization\n`;
+  fs.writeFileSync(configPath, customConfig, "utf8");
+  const agents = path.join(project, ".smithers", "agents");
+  fs.writeFileSync(path.join(agents, "codex.ts"), V0_0_2_STOCK_CODEX_ADAPTER, "utf8");
+  fs.writeFileSync(path.join(agents, "environment.ts"), "export const customized = true;\n", "utf8");
+  fs.writeFileSync(
+    path.join(agents, "index.ts"),
+    'import { createCodexAgent } from "./codex";\nexport const agentFactories = { CodexAgent: createCodexAgent };\n',
+    "utf8"
+  );
+  fs.rmSync(path.join(agents, "pi.ts"));
 
-  const preserved = initProject({ projectRoot: project });
+  const refreshed = initProject({ projectRoot: project });
 
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-  assert.equal(fs.statSync(codexPath, { bigint: true }).ino, historicalStats.ino);
-  const forced = initProject({ projectRoot: project, force: true });
-  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
-  assert.equal(fs.readFileSync(codexPath, "utf8"), currentAdapter);
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.deepEqual(refreshed.diagnostics, []);
+  // Plan admits only the packaged closure, so plain init restores all of it
+  // while every project-owned file keeps its customization.
+  assert.doesNotThrow(() => inspectControllerSource(project));
+  assert.equal(fs.readFileSync(configPath, "utf8"), customConfig);
+});
+
+test("non-force init leaves an up-to-date read-only adapter untouched", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const adapterPath = path.join(project, ".smithers", "agents", "toml.ts");
+  const past = new Date("2020-01-01T00:00:00Z");
+  fs.utimesSync(adapterPath, past, past);
+  fs.chmodSync(adapterPath, 0o444);
+  const before = fs.lstatSync(adapterPath, { bigint: true });
+
+  const refreshed = initProject({ projectRoot: project });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const after = fs.lstatSync(adapterPath, { bigint: true });
+  assert.deepEqual([after.ino, after.mode, after.mtimeNs], [before.ino, before.mode, before.mtimeNs]);
 });
 
 test("non-force init migrates a superseded generated manifest so the project keeps its durable run", () => {
@@ -3754,81 +3776,6 @@ test("non-force init migrates the exact generated 0.32 package and immediately p
   assert.doesNotMatch(source, /smithers-orchestrator/u);
 });
 
-test(
-  "init converts an adapter inspection failure into a preserved manual-review warning",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-    const customized = 'export const customConfig = "ultrafuzz.toml"; // project-owned adapter\n';
-    fs.writeFileSync(codexPath, customized, "utf8");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
-    const originalOpenSync = fs.openSync;
-    let codexOpenCount = 0;
-
-    Object.defineProperty(fs, "openSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (String(args[0]) === codexPath) {
-          codexOpenCount += 1;
-          if (codexOpenCount === 1) {
-            throw Object.assign(new Error("induced sensitive adapter inspection failure"), { code: "EACCES" });
-          }
-        }
-        return Reflect.apply(originalOpenSync, fs, args) as number;
-      }
-    });
-    try {
-      const preserved = initProject({ projectRoot: project });
-      assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-      assert.equal(codexOpenCount, 1);
-      assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
-      const warning = preserved.diagnostics.find(
-        (diagnostic) =>
-          diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
-      );
-      assert.equal(warning?.severity, "warning");
-      assert.match(warning?.message ?? "", /could not be safely inspected/u);
-      assert.match(warning?.message ?? "", /verify manually/u);
-      assert.doesNotMatch(JSON.stringify(preserved.diagnostics), /induced sensitive|EACCES/u);
-    } finally {
-      Object.defineProperty(fs, "openSync", originalDescriptor);
-    }
-  }
-);
-
-test("non-force init preserves a customized stale adapter and force remains explicit", () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
-  const customized = [
-    'import { readFileSync } from "node:fs";',
-    'import path from "node:path";',
-    'export const customConfig = readFileSync(path.join(process.cwd(), "ultrafuzz.toml"), "utf8");',
-    "// project-owned customization",
-    ""
-  ].join("\n");
-  fs.writeFileSync(codexPath, customized, "utf8");
-
-  const preserved = initProject({ projectRoot: project });
-
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(fs.readFileSync(codexPath, "utf8"), customized);
-  const warning = preserved.diagnostics.find(
-    (diagnostic) =>
-      diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
-  );
-  assert.equal(warning?.severity, "warning");
-  assert.match(warning?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-  assert.match(warning?.message ?? "", /workflowControlChildEnvironment/u);
-
-  const forced = initProject({ projectRoot: project, force: true });
-  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
-  assert.notEqual(fs.readFileSync(codexPath, "utf8"), customized);
-  assert.match(fs.readFileSync(codexPath, "utf8"), /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
-});
-
 test("non-force init never follows or overwrites linked adapter paths", () => {
   for (const linkKind of ["symbolic", "hard"] as const) {
     const project = tempProject();
@@ -3844,18 +3791,13 @@ test("non-force init never follows or overwrites linked adapter paths", () => {
       fs.linkSync(outsidePath, codexPath);
     }
 
-    const preserved = initProject({ projectRoot: project });
+    const rejected = initProject({ projectRoot: project });
 
-    assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
     assert.equal(fs.readFileSync(outsidePath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
-    assert.equal(fs.readFileSync(codexPath, "utf8"), V0_0_2_STOCK_CODEX_ADAPTER);
     assert.equal(fs.lstatSync(codexPath).isSymbolicLink(), linkKind === "symbolic");
     if (linkKind === "hard") assert.equal(fs.statSync(codexPath).nlink, 2);
-    const warning = preserved.diagnostics.find(
-      (diagnostic) =>
-        diagnostic.code === "INIT_AGENT_ADAPTER_UPDATE_REQUIRED" && diagnostic.path === ".smithers/agents/codex.ts"
-    );
-    assert.match(warning?.message ?? "", /preserved it without inspection/u);
   }
 });
 
@@ -3871,11 +3813,11 @@ test("startRun rejects a customized controller adapter before submission", async
   assert.equal(run.ok, false);
   assert.equal(run.diagnostics[0]?.code, "CONTROLLER_SOURCE_UNTRUSTED");
   assert.match(run.diagnostics[0]?.message ?? "", /must exactly match the packaged stock closure/u);
-  assert.match(run.diagnostics[0]?.message ?? "", /ultrafuzz init --force/u);
+  assert.match(run.diagnostics[0]?.message ?? "", /rerun ultrafuzz init$/u);
   assert.equal(fs.existsSync(path.join(project, "smithers-commands.log")), false);
 });
 
-test("init preserves a dangling adapter symlink without writing through it", () => {
+test("init never writes through a dangling adapter symlink", () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const codexPath = path.join(project, ".smithers", "agents", "codex.ts");
@@ -3886,7 +3828,8 @@ test("init preserves a dangling adapter symlink without writing through it", () 
 
   const result = initProject({ projectRoot: project });
 
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.diagnostics[0]?.code, "INIT_PATH_UNSAFE");
   assert.equal(fs.existsSync(outsidePath), false);
   assert.equal(fs.readlinkSync(codexPath), outsidePath);
 });
@@ -3895,7 +3838,9 @@ test("init does not modify a regular file swapped after the anchored open", { co
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const environmentPath = path.join(project, ".smithers", "agents", "environment.ts");
-  const originalContents = fs.readFileSync(environmentPath, "utf8");
+  // A stale adapter, so init has to open it for writing.
+  const originalContents = `${fs.readFileSync(environmentPath, "utf8")}// stale\n`;
+  fs.writeFileSync(environmentPath, originalContents, "utf8");
   const concurrentContents = "export const concurrentEnvironmentCustomization = true;\n";
   const originalOpenSync = fs.openSync;
   const descriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
@@ -3904,7 +3849,8 @@ test("init does not modify a regular file swapped after the anchored open", { co
     ...descriptor,
     value: (...args: unknown[]) => {
       const opened = Reflect.apply(originalOpenSync, fs, args) as number;
-      if (!swapped && path.basename(String(args[0])) === "environment.ts") {
+      const writing = (Number(args[1] ?? 0) & fs.constants.O_WRONLY) !== 0;
+      if (!swapped && writing && path.basename(String(args[0])) === "environment.ts") {
         swapped = true;
         fs.renameSync(environmentPath, `${environmentPath}.old`);
         fs.writeFileSync(environmentPath, concurrentContents, "utf8");
@@ -3924,7 +3870,7 @@ test("init does not modify a regular file swapped after the anchored open", { co
 });
 
 bunAdapterTest(
-  "generated Codex commands accept a sealed ambient proxy and reject drift",
+  "generated Codex commands ignore ambient proxies and reject endpoint drift",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -3942,6 +3888,7 @@ bunAdapterTest(
         "http_proxy",
         "https_proxy",
         "no_proxy",
+        "OPENAI_BASE_URL",
         "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
         "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
       ],
@@ -3950,23 +3897,33 @@ bunAdapterTest(
     process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
     process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
     try {
+      const config = { execution: { mode: "local" }, agents: {} } as never;
       process.env.HTTPS_PROXY = "https://proxy.a.invalid";
-      const hash = crypto
-        .createHash("sha256")
-        .update(
-          JSON.stringify({ agent: "CodexAgent", config: null, route: [["HTTPS_PROXY", process.env.HTTPS_PROXY]] })
-        )
-        .digest("hex");
-      fs.writeFileSync(authority, `{"required_source_destinations":["model:codex-route-${hash}"]}`, "utf8");
-      const build = () =>
-        new CompatibleCodexAgent().buildCommand({ prompt: "Contract only", cwd: project, options: {} });
-      const accepted = await build();
-      await accepted.cleanup?.();
+      process.env.OPENAI_BASE_URL = "https://gateway.a.invalid/v1";
+      fs.writeFileSync(
+        authority,
+        JSON.stringify({ required_source_destinations: [modelDestination("CodexAgent", config, process.env)] })
+      );
+      const build = async () => {
+        const command = await new CompatibleCodexAgent().buildCommand({
+          prompt: "Contract only",
+          cwd: project,
+          options: {}
+        });
+        await command.cleanup?.();
+      };
+      await build();
+      // A proxy does not change which provider receives the traffic, so a run
+      // resumed from a shell with another proxy, or none, keeps its route.
+      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
+      await build();
+      delete process.env.HTTPS_PROXY;
+      await build();
       assert.throws(
         () =>
           workflowControlChildEnvironment(
             {
-              HTTPS_PROXY: "https://proxy.b.invalid",
+              OPENAI_BASE_URL: "https://gateway.b.invalid/v1",
               ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(project, "forged.json")
             },
             process.env,
@@ -3974,7 +3931,7 @@ bunAdapterTest(
           ),
         /provider route changed/u
       );
-      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
+      process.env.OPENAI_BASE_URL = "https://gateway.b.invalid/v1";
       await assert.rejects(build(), /provider route changed/u);
     } finally {
       for (const name of names) {
@@ -4056,9 +4013,21 @@ bunAdapterTest("planned routes equal final generated-adapter validation", { time
         workflowControlChildEnvironment({}, { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" }, { agent: "ClaudeAgent" }),
       /provider route changed/u
     );
+    // Once Bedrock is selected, its AWS settings are part of the route.
+    const bedrockEnv = { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" },
+      bedrockDestination = modelDestination("ClaudeAgent", config, bedrockEnv);
+    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [bedrockDestination] }));
+    assert.doesNotThrow(() => workflowControlChildEnvironment({}, bedrockEnv, { agent: "ClaudeAgent" }));
+    assert.throws(
+      () => workflowControlChildEnvironment({}, { ...bedrockEnv, AWS_REGION: "eu-west-1" }, { agent: "ClaudeAgent" }),
+      /provider route changed/u
+    );
     assert.equal(codexDestination.startsWith("model:codex-route-"), true);
     assert.equal(openRouterDestination, "model:openrouter");
-    assert.equal(claudeDestination.startsWith("model:claude-route-"), true);
+    // AWS_REGION alone routes nothing: Claude Code reads it only for an
+    // AWS-hosted platform such as Bedrock.
+    assert.equal(claudeDestination, "model:anthropic");
+    assert.equal(bedrockDestination.startsWith("model:claude-route-"), true);
   } finally {
     for (const name of names) {
       const value = saved[name];
@@ -4097,6 +4066,135 @@ bunAdapterTest(
       { agent: "ClaudeAgent", configDir: claudeHome }
     );
     assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
+  }
+);
+
+bunAdapterTest(
+  "generated Codex adapter keeps its acknowledged route when the CLI rewrites unrelated config",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const homes = temporaryRoot("ufz-codex-rewrite-"),
+      codexHome = path.join(homes, "codex", "configured"),
+      configPath = path.join(codexHome, "config.toml"),
+      snapshot = path.join(project, "route-snapshot"),
+      authority = path.join(snapshot, "controls/data-governance.json"),
+      names = [
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "all_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "OPENAI_BASE_URL",
+        "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
+        "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
+        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
+      ],
+      saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    const providerConfig = [
+      'model = "gpt-5.5"',
+      'model_provider = "gateway"',
+      "",
+      "[model_providers.gateway]",
+      'name = "Gateway"',
+      'base_url = "https://gateway.invalid/v1"',
+      'env_key = "GATEWAY_API_KEY"',
+      'wire_api = "responses"',
+      ""
+    ].join("\n");
+    fs.writeFileSync(
+      configPath,
+      `${providerConfig}\n[marketplaces.openai-bundled]\nlast_updated = "2026-08-25T13:35:06Z"\n`
+    );
+    for (const name of names) Reflect.deleteProperty(process.env, name);
+    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
+    try {
+      const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
+        destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
+      assert.match(destination, /^model:codex-route-/u);
+      fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] }));
+      const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+      const build = async () => {
+        const command = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({
+          prompt: "route",
+          cwd: project,
+          options: {}
+        });
+        await command.cleanup?.();
+      };
+      await build();
+      // What the Codex CLI itself writes while running: marketplace refresh
+      // timestamps and project trust levels (#908).
+      fs.writeFileSync(
+        configPath,
+        `${providerConfig}\n[marketplaces.openai-bundled]\nlast_updated = "2026-09-28T00:00:00Z"\n\n` +
+          `[projects."/workspace/target"]\ntrust_level = "trusted"\n`
+      );
+      await build();
+      fs.writeFileSync(configPath, providerConfig.replace("gateway.invalid", "other-gateway.invalid"));
+      await assert.rejects(build(), /provider route changed/u);
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated Claude route ignores ambient cloud settings until a cloud platform is selected",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
+    const snapshot = path.join(project, "route-snapshot"),
+      authority = path.join(snapshot, "controls", "data-governance.json");
+    fs.mkdirSync(path.dirname(authority), { recursive: true });
+    const config = { execution: { mode: "local" }, agents: {} } as never,
+      env = {
+        ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-claude-ambient-"),
+        AWS_PROFILE: "operator-a",
+        GOOGLE_CLOUD_PROJECT: "project-a",
+        // Foundry's forge profile, not Microsoft Foundry.
+        FOUNDRY_PROFILE: "ci",
+        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
+      };
+    fs.writeFileSync(
+      authority,
+      JSON.stringify({ required_source_destinations: [modelDestination("ClaudeAgent", config, env)] })
+    );
+    // A run resumed from another shell sees different, unused cloud settings.
+    assert.doesNotThrow(() =>
+      workflowControlChildEnvironment(
+        {},
+        { ...env, AWS_PROFILE: "operator-b", GOOGLE_CLOUD_PROJECT: "project-b", FOUNDRY_PROFILE: "default" },
+        { agent: "ClaudeAgent" }
+      )
+    );
+    const vertex = { ...env, CLAUDE_CODE_USE_VERTEX: "1" };
+    fs.writeFileSync(
+      authority,
+      JSON.stringify({ required_source_destinations: [modelDestination("ClaudeAgent", config, vertex)] })
+    );
+    assert.doesNotThrow(() =>
+      workflowControlChildEnvironment({}, { ...vertex, AWS_PROFILE: "operator-b" }, { agent: "ClaudeAgent" })
+    );
+    assert.throws(
+      () =>
+        workflowControlChildEnvironment({}, { ...vertex, GOOGLE_CLOUD_PROJECT: "project-b" }, { agent: "ClaudeAgent" }),
+      /provider route changed/u
+    );
   }
 );
 
@@ -6986,19 +7084,19 @@ bunAdapterTest(
 
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
-      workflow: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
+      snapshot: process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT,
       alias: process.env.MY_ALIAS
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = persistedWorkflow;
+    process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT = snapshotRoot;
     process.env.MY_ALIAS = aliasedControlPath;
     try {
       assert.throws(() => createCodexAgent(), /credential MY_ALIAS resolves inside controller-only execution state/u);
     } finally {
       if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
       else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
-      if (previous.workflow === undefined) delete process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
-      else process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = previous.workflow;
+      if (previous.snapshot === undefined) delete process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT;
+      else process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT = previous.snapshot;
       if (previous.alias === undefined) delete process.env.MY_ALIAS;
       else process.env.MY_ALIAS = previous.alias;
     }
@@ -7006,7 +7104,7 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
+  "generated DeepSeek adapter uses the official endpoint and isolates Claude routing",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -7088,33 +7186,6 @@ bunAdapterTest(
       ]) {
         assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
       }
-
-      const resultLine = JSON.stringify({
-        type: "result",
-        subtype: "success",
-        is_error: false,
-        result: "done",
-        usage: {
-          prompt_cache_miss_tokens: 120,
-          output_tokens: 30,
-          prompt_cache_hit_tokens: 400,
-          cache_creation_input_tokens: 999,
-          reasoning_tokens: 20
-        }
-      });
-      const events = agent.createOutputInterpreter().onStdoutLine?.(resultLine) as Array<{
-        type?: string;
-        usage?: Record<string, number>;
-      }>;
-      const completed = events.find((event) => event.type === "completed");
-      assert.deepEqual(completed?.usage, {
-        input_tokens: 520,
-        fresh_input_tokens: 120,
-        output_tokens: 30,
-        cache_read_input_tokens: 400,
-        cache_creation_input_tokens: 0,
-        total_tokens: 550
-      });
     } finally {
       await command.cleanup?.();
     }
@@ -7169,173 +7240,56 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
+  "generated DeepSeek adapter completes on a Claude Code result line and reports its usage",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-    const providerUsage = {
-      prompt_cache_miss_tokens: 101,
-      prompt_cache_hit_tokens: 400,
-      output_tokens: 23,
-      reasoning_tokens: 17
-    };
-    const normalizedUsage = {
-      inputTokens: 501,
-      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
-      outputTokens: 23,
-      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
-      totalTokens: 524
-    };
-
-    const successful = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
-    successful.buildCommand = async () => ({
-      command: process.execPath,
-      args: [
-        "-e",
-        `console.log(${JSON.stringify(
-          JSON.stringify({
-            type: "result",
-            subtype: "success",
-            is_error: false,
-            result: "done",
-            session_id: "deepseek-session",
-            usage: providerUsage
-          })
-        )})`
-      ],
-      outputFormat: "stream-json"
-    });
-    const result = await successful.generate({ prompt: "Telemetry", rootDir: project });
-    assert.deepEqual(result.usage, normalizedUsage);
-
-    const streamed = await successful.stream({ prompt: "Stream telemetry", rootDir: project });
-    assert.deepEqual(await streamed.usage, normalizedUsage);
-    assert.deepEqual(await streamed.totalUsage, normalizedUsage);
-
-    const failed = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
-    failed.buildCommand = async () => ({
-      command: process.execPath,
-      args: [
-        "-e",
-        `console.log(${JSON.stringify(
-          JSON.stringify({
-            type: "result",
-            subtype: "error",
-            is_error: true,
-            error: "provider failed",
-            usage: providerUsage
-          })
-        )}); process.exit(17)`
-      ],
-      outputFormat: "stream-json"
-    });
-    let failure: unknown;
-    try {
-      await failed.generate({ prompt: "Failed telemetry", rootDir: project });
-    } catch (error) {
-      failure = error;
-    }
-    assert.ok(failure instanceof Error);
-    assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
-  }
-);
-
-bunAdapterTest(
-  "generated DeepSeek adapter rejects ambiguous or noncanonical result telemetry",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    const init = initProject({ projectRoot: project, force: true });
-    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-    const agent = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
-    const interpreter = agent.createOutputInterpreter();
-
-    assert.doesNotThrow(() =>
-      interpreter.onStdoutLine?.(JSON.stringify({ type: "assistant", message: { content: "working" } }))
-    );
-    assert.doesNotThrow(() => interpreter.onStdoutLine?.("provider banner: still starting"));
-
-    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
-    const invalid = [
-      {
-        label: "duplicate key",
-        line: '{"type":"result","type":"result","usage":{"prompt_cache_miss_tokens":1,"prompt_cache_hit_tokens":2,"output_tokens":3}}',
-        expected: /duplicate/iu
-      },
-      {
-        label: "malformed candidate",
-        line: '{"type":"result","usage":',
-        expected: /invalid strict JSON/iu
-      },
-      {
-        label: "malformed object without result marker",
-        line: '{"provider_status":',
-        expected: /invalid strict JSON/iu
-      },
-      {
-        label: "legacy aliases",
-        line: JSON.stringify({
-          type: "result",
-          usage: { input_tokens: 1, cache_read_input_tokens: 2, completion_tokens: 3 }
-        }),
-        expected: /legacy alias/iu
-      },
-      {
-        label: "legacy alias alongside canonical fields",
-        line: JSON.stringify({
-          type: "result",
-          usage: {
-            prompt_cache_miss_tokens: 1,
-            prompt_cache_hit_tokens: 2,
-            output_tokens: 3,
-            input_tokens: 1
-          }
-        }),
-        expected: /legacy alias input_tokens/iu
-      },
-      {
-        label: "missing exact field",
-        line: JSON.stringify({
-          type: "result",
-          usage: { prompt_cache_miss_tokens: 1, output_tokens: 3 }
-        }),
-        expected: /prompt_cache_hit_tokens/iu
-      },
-      {
-        label: "oversize raw line whitespace",
-        line:
-          " ".repeat(1024 * 1024) +
-          JSON.stringify({
-            type: "result",
-            usage: { prompt_cache_miss_tokens: 1, prompt_cache_hit_tokens: 2, output_tokens: 3 }
-          }),
-        expected: /1048576-byte limit/iu
-      },
-      {
-        label: "excessive depth",
-        line: `{"type":"result","future":${tooDeep},"usage":{"prompt_cache_miss_tokens":1,"prompt_cache_hit_tokens":2,"output_tokens":3}}`,
-        expected: /nesting-depth limit of 32/iu
-      },
-      {
-        label: "unsafe aggregate",
-        line: JSON.stringify({
-          type: "result",
-          usage: {
-            prompt_cache_miss_tokens: Number.MAX_SAFE_INTEGER,
-            prompt_cache_hit_tokens: 1,
-            output_tokens: 0
-          }
-        }),
-        expected: /safe integer range/iu
+    // The shape Claude Code prints for a DeepSeek-routed session: Anthropic
+    // usage field names. (The Claude Code 2.1.284 binary contains no
+    // prompt_cache_hit_tokens or prompt_cache_miss_tokens string at all.)
+    const resultLine = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 1200,
+      num_turns: 1,
+      result: "done",
+      session_id: "deepseek-session",
+      total_cost_usd: 0.01,
+      usage: {
+        input_tokens: 120,
+        cache_creation_input_tokens: 7,
+        cache_read_input_tokens: 400,
+        output_tokens: 30,
+        server_tool_use: { web_search_requests: 0 },
+        service_tier: "standard"
       }
-    ];
-    for (const fixture of invalid) {
-      assert.throws(() => interpreter.onStdoutLine?.(fixture.line), fixture.expected, fixture.label);
-    }
+    });
+    // A short idle timeout turns a stalled invocation into a prompt failure
+    // instead of waiting for the node timeout.
+    const agent = new DeepSeekClaudeCodeAgent({
+      model: "deepseek-v4-pro",
+      ultrafuzzApiKey: "test-key",
+      idleTimeoutMs: 5_000
+    });
+    agent.buildCommand = async () => ({
+      command: process.execPath,
+      args: ["-e", `console.log(${JSON.stringify(resultLine)})`],
+      outputFormat: "stream-json"
+    });
+
+    const result = (await agent.generate({ prompt: "Telemetry", rootDir: project })) as {
+      text?: string;
+      usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number } };
+    };
+
+    assert.equal(result.text, "done");
+    assert.equal(result.usage?.inputTokens, 120);
+    assert.equal(result.usage?.outputTokens, 30);
+    assert.equal(result.usage?.inputTokenDetails?.cacheReadTokens, 400);
   }
 );
 
@@ -7347,47 +7301,95 @@ bunAdapterTest(
     initProject({ projectRoot: project, force: true });
     const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
     const externalBin = temporaryRoot("ultrafuzz-continuation-external-bin-");
-    const trustedBin = path.join(project, ".ultrafuzz", "runs", "continued", "trusted-bin");
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "continued");
+    const trustedBin = path.join(runRoot, "trusted-bin");
     const admittedPath = [trustedBin, externalBin].join(path.delimiter);
-    const piHome = path.join(project, ".ultrafuzz", "pi-coding-agent");
+    // Homes adapters place under the target: Pi's configured home, OpenCode's
+    // run-scoped XDG roots, and Kimi's API-key home.
+    const adapterOwned = {
+      PI_CODING_AGENT_DIR: path.join(project, ".ultrafuzz", "pi-coding-agent"),
+      XDG_CONFIG_HOME: path.join(runRoot, "opencode", "config"),
+      OPENCODE_DB: path.join(runRoot, "opencode", "data", "opencode", "opencode.db"),
+      KIMI_CODE_HOME: path.join(project, ".ultrafuzz", "kimi-code")
+    };
     const source = {
       PATH: admittedPath,
-      PI_CODING_AGENT_DIR: piHome,
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(project, ".smithers", "workflows", "continued.tsx"),
-      ULTRAFUZZ_CONFIG_PATH: path.join(project, ".ultrafuzz", "runs", "continued", "smithers", "resolved-config.json"),
-      CONTROL_ALIAS: path.join(project, ".smithers", "workflows", "continued.tsx"),
+      ULTRAFUZZ_CONFIG_PATH: path.join(runRoot, "smithers", "resolved-config.json"),
       OPENAI_API_KEY: "unrelated-provider-key"
     };
-    for (const additions of [{}, { PATH: admittedPath, PI_CODING_AGENT_DIR: piHome }]) {
-      const child = { ...source, ...workflowControlChildEnvironment(additions, source) };
+    // A native continuation runs the target's own workflow and advertises no
+    // sealed snapshot, so nothing under the target is controller-only state:
+    // neither inherited values nor the homes an adapter supplies are blanked.
+    // (An inherited KIMI_CODE_HOME is still dropped as a provider home.)
+    const { KIMI_CODE_HOME: _kimiHome, ...inherited } = adapterOwned;
+    const continuation = { ...source, ...inherited };
+    for (const [additions, expected] of [
+      [{}, inherited],
+      [{ PATH: admittedPath, ...adapterOwned }, adapterOwned]
+    ] as const) {
+      const child: Record<string, string> = {
+        ...continuation,
+        ...workflowControlChildEnvironment(additions, continuation)
+      };
       assert.equal(child.PATH, admittedPath);
-      assert.equal(child.PI_CODING_AGENT_DIR, piHome);
-      assert.equal(child.CONTROL_ALIAS, "");
+      for (const [name, value] of Object.entries(expected)) assert.equal(child[name], value, name);
       assert.equal(child.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, "");
+      assert.equal(child.ULTRAFUZZ_CONFIG_PATH, "");
       assert.equal(child.OPENAI_API_KEY, "");
     }
-    const snapshotRoot = path.join(
-      project,
-      ".ultrafuzz",
-      "runs",
-      "continued",
-      "smithers",
-      "execution-snapshots",
-      "a".repeat(64)
-    );
+    const snapshotRoot = path.join(runRoot, "smithers", "execution-snapshots", "a".repeat(64));
     const snapshotHome = path.join(snapshotRoot, "controls");
     const snapshotSource = {
       ...source,
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, ".smithers", "workflows", "continued.tsx"),
       ULTRAFUZZ_CONFIG_PATH: path.join(snapshotRoot, "controls", "ultrafuzz.toml"),
       ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT: snapshotRoot,
-      PI_CODING_AGENT_DIR: snapshotHome
+      PI_CODING_AGENT_DIR: snapshotHome,
+      XDG_CONFIG_HOME: snapshotHome
     };
-    assert.equal(workflowControlChildEnvironment({}, snapshotSource).PI_CODING_AGENT_DIR, "");
-    assert.equal(
-      workflowControlChildEnvironment({ PI_CODING_AGENT_DIR: snapshotHome }, snapshotSource).PI_CODING_AGENT_DIR,
-      ""
-    );
+    for (const additions of [{}, { PI_CODING_AGENT_DIR: snapshotHome, XDG_CONFIG_HOME: snapshotHome }]) {
+      const child = workflowControlChildEnvironment(additions, snapshotSource);
+      assert.equal(child.PI_CODING_AGENT_DIR, "");
+      assert.equal(child.XDG_CONFIG_HOME, "");
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated OpenCode adapter keeps its run-scoped state roots in a native continuation",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { createOpenCodeAgent } = await loadGeneratedOpenCodeAgent(project);
+    const runRoot = path.join(project, ".ultrafuzz", "runs", "opencode-continued");
+    const names = ["ULTRAFUZZ_CONFIG_PATH", "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH", "OPENROUTER_API_KEY"] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    // What `ultrafuzz resume` hands a native continuation: the target's own
+    // persisted workflow and no advertised execution snapshot.
+    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(project, ".smithers", "workflows", "continued.tsx");
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-not-a-real-opencode-credential";
+    try {
+      const agent = createOpenCodeAgent({
+        model: "openrouter/test-model",
+        addDir: [path.join(runRoot, "artifacts", "attempt")]
+      });
+      const command = await agent.buildCommand({ prompt: "inspect", cwd: project, options: {} });
+      const childEnv = { ...process.env, ...agent.opts.env, ...command.env };
+      const stateRoot = path.join(runRoot, "opencode");
+      assert.equal(childEnv.XDG_CONFIG_HOME, path.join(stateRoot, "config"));
+      assert.equal(childEnv.XDG_DATA_HOME, path.join(stateRoot, "data"));
+      assert.equal(childEnv.OPENCODE_DB, path.join(stateRoot, "data", "opencode", "opencode.db"));
+      assert.equal(childEnv.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH, "");
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
   }
 );
 
@@ -8015,6 +8017,111 @@ bunAdapterTest(
       else process.env.OPENROUTER_API_KEY = previous.openRouter;
       if (previous.named === undefined) delete process.env.PI_OPENROUTER_KEY;
       else process.env.PI_OPENROUTER_KEY = previous.named;
+    }
+  }
+);
+
+bunAdapterTest(
+  "generated Pi adapter leaves inconsistent usage uncounted instead of aborting the invocation",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { createPiAgent } = await loadGeneratedPiAgent(project);
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      openRouter: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.OPENROUTER_API_KEY = "sk-or-v1-not-a-real-openrouter-credential";
+    try {
+      const cost = { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 };
+      const assistant = (responseId: string, text: string, usage: Record<string, unknown>) => ({
+        type: "message_end",
+        message: { role: "assistant", responseId, content: [{ type: "text", text }], usage }
+      });
+      const generateUsage = async (responses: unknown[]) => {
+        const lines = [
+          { type: "session", id: "inconsistent-usage-session" },
+          ...responses,
+          { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "final answer" }] }] }
+        ];
+        const agent = createPiAgent({ model: "openai/gpt-mini-latest" });
+        agent.buildCommand = async () => ({
+          command: process.execPath,
+          args: ["-e", lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")],
+          outputFormat: "stream-json"
+        });
+        // A short idle timeout turns a stalled invocation into a prompt failure
+        // instead of waiting for the node timeout.
+        const result = await agent.generate({ prompt: "inconsistent usage", timeout: { idleMs: 5_000 } });
+        assert.equal(result.text, "final answer");
+        return result.usage as Record<string, unknown>;
+      };
+      // A provider that folds reasoning into totalTokens, one that omits the
+      // cost breakdown, and one whose cost total disagrees with its parts.
+      const inconsistent = [
+        assistant("reasoning-in-total", "first", {
+          input: 1,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 9,
+          cost
+        }),
+        assistant("no-cost", "second", { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3 }),
+        assistant("cost-mismatch", "third", {
+          input: 1,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 3,
+          cost: { ...cost, total: 1 }
+        })
+      ];
+      const consistent = assistant("consistent", "final answer", {
+        input: 4,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 9,
+        cost
+      });
+      const consistentUsage = {
+        inputTokens: 4,
+        inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        outputTokens: 5,
+        outputTokenDetails: { textTokens: undefined, reasoningTokens: 0 },
+        totalTokens: 9,
+        reportedCostUsd: 0.003
+      };
+
+      // Each inconsistent response is left out whole, so the invocation's
+      // usage is a lower bound: only the consistent response is counted.
+      assert.deepEqual(await generateUsage([...inconsistent, consistent]), consistentUsage);
+      // A response that would push a running total past the safe-integer range
+      // is left out whole too, not counted up to the field that overflowed.
+      const overflow = assistant("overflow", "fourth", {
+        input: 1,
+        output: Number.MAX_SAFE_INTEGER - 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: Number.MAX_SAFE_INTEGER,
+        cost
+      });
+      assert.deepEqual(await generateUsage([consistent, overflow]), consistentUsage);
+      // With nothing countable the invocation reports no token counts, rather
+      // than Smithers' reading of Pi's raw last-response usage object.
+      const uncounted = await generateUsage(inconsistent);
+      assert.deepEqual(
+        [uncounted.inputTokens, uncounted.outputTokens, uncounted.totalTokens],
+        [undefined, undefined, undefined]
+      );
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.openRouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouter;
     }
   }
 );
@@ -8894,7 +9001,7 @@ function kimiCompletedEvent(events: unknown): KimiInterpreterEvent {
 }
 
 bunAdapterTest(
-  "generated Kimi adapter strictly parses credentials and resume hints without normalization",
+  "generated Kimi adapter strictly parses credentials and ignores ambiguous resume hints",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -9006,26 +9113,23 @@ bunAdapterTest(
     const hintAgent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
     const hintInterpreter = hintAgent.createOutputInterpreter();
     const session = "00000000-0000-0000-0000-000000000301";
-    assert.throws(
-      () =>
-        hintInterpreter.onStdoutLine?.(
-          `{"type":"session.resume_hint","type":"session.resume_hint","session_id":${JSON.stringify(session)}}`
-        ),
-      /duplicate/iu
-    );
-    assert.throws(
-      () => hintInterpreter.onStdoutLine?.(JSON.stringify({ type: "session.resume_hint", session_id: ` ${session}` })),
-      /session_id is invalid/iu
-    );
-    assert.throws(
-      () =>
-        hintInterpreter.onStdoutLine?.(
-          " ".repeat(1024 * 1024) + JSON.stringify({ type: "session.resume_hint", session_id: session })
-        ),
-      /1048576-byte limit/iu
-    );
-    assert.throws(() => hintInterpreter.onStdoutLine?.('{"provider_status":'), /Kimi output JSON is invalid/iu);
-    assert.doesNotThrow(() => hintInterpreter.onStdoutLine?.("Kimi Code provider banner"));
+    // These hooks run inside the child's stdout/stderr listeners, where a throw
+    // escapes the invocation, so an ambiguous line carries no session instead.
+    for (const line of [
+      `{"type":"session.resume_hint","type":"session.resume_hint","session_id":${JSON.stringify(session)}}`,
+      JSON.stringify({ type: "session.resume_hint", session_id: ` ${session}` }),
+      JSON.stringify({ type: "session.resume_hint", session_id: 301 }),
+      " ".repeat(1024 * 1024) + JSON.stringify({ type: "session.resume_hint", session_id: session }),
+      '{"provider_status":',
+      "{ code: 'ECONNRESET', errno: -104 }",
+      "Kimi Code provider banner"
+    ]) {
+      assert.doesNotThrow(() => hintInterpreter.onStdoutLine?.(line), line.slice(0, 60));
+      assert.doesNotThrow(() => hintInterpreter.onStderrLine?.(line), line.slice(0, 60));
+    }
+    assert.equal(hintAgent.issuedSessionId, undefined);
+    hintInterpreter.onStdoutLine?.(JSON.stringify({ type: "session.resume_hint", session_id: session }));
+    assert.equal(hintAgent.issuedSessionId, session);
   }
 );
 
@@ -9391,112 +9495,193 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
-  "generated Kimi adapter rejects malformed wire records instead of fabricating tokens",
-  { timeout: 30_000 },
+  "generated Kimi adapter reports no usage for an unreadable wire instead of failing the invocation",
+  { timeout: 60_000 },
   async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-malformed");
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-unreadable");
     const options = kimiSubscriptionOptions(sourceConfig);
+    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
+    const wire = (home: string, name: string) =>
+      path.join(home, "sessions", `wd_${name}`, "session-303", "agents", "main", "wire.jsonl");
+    const anomalies: Array<{ label: string; write: (home: string) => void }> = [
+      {
+        label: "malformed records beside a valid one",
+        write: (home) =>
+          writeKimiWire(home, "wd_malformed/session-203", "main", [
+            "not json at all",
+            "{",
+            JSON.stringify({
+              type: "usage.record",
+              usage: { inputOther: "12", output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
+            }),
+            JSON.stringify({ type: "usage.record", usage: { inputOther: 4, output: 2, inputCacheRead: 1 } }),
+            kimiUsageRecordLine(33, 7, 2, 1)
+          ])
+      },
+      ...[
+        [
+          "duplicate key",
+          '{"type":"usage.record","type":"usage.record","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}\n'
+        ],
+        ["invalid UTF-8", Buffer.from([0x7b, 0xff, 0x7d, 0x0a])],
+        ["oversize line", `${JSON.stringify({ type: "message.appended", padding: "x".repeat(1024 * 1024) })}\n`],
+        ["excessive depth", `{"type":"message.appended","future":${tooDeep}}\n`],
+        ["torn final record", '{"type":"message.appended"'],
+        [
+          "unsafe aggregate",
+          `${kimiUsageRecordLine(Number.MAX_SAFE_INTEGER, 0, 0, 0)}\n${kimiUsageRecordLine(0, 1, 0, 0)}\n`
+        ]
+      ].map(([label, bytes]) => ({
+        label: label as string,
+        write: (home: string) => {
+          const target = wire(home, (label as string).replaceAll(" ", "_"));
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, bytes as string | Buffer);
+        }
+      })),
+      {
+        label: "wire file budget",
+        write: (home) => {
+          for (let index = 0; index < 513; index += 1) {
+            writeKimiWire(home, "wd_budget/session-211", `agent-${index.toString().padStart(3, "0")}`, [
+              kimiUsageRecordLine(1, 1, 0, 0)
+            ]);
+          }
+        }
+      }
+    ];
+    for (const anomaly of anomalies) {
+      const agent = new KimiCode029Agent(options);
+      const command = await agent.buildCommand({ prompt: anomaly.label, cwd: project, options: {} });
+      const home = command.env?.KIMI_CODE_HOME;
+      assert.ok(home);
+      anomaly.write(home);
+      let events: unknown;
+      assert.doesNotThrow(() => {
+        events = agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args));
+      }, anomaly.label);
+      const completed = kimiCompletedEvent(events);
+      assert.equal(completed.ok, true, anomaly.label);
+      // Unknown usage stays absent; it is never partially counted or fabricated.
+      assert.equal(Object.prototype.hasOwnProperty.call(completed, "usage"), false, anomaly.label);
+      await command.cleanup?.();
+    }
 
-    const malformed = new KimiCode029Agent(options);
-    const malformedCommand = await malformed.buildCommand({
-      prompt: "Malformed usage",
+    // A resumed session whose stored wire was torn by an earlier, killed
+    // attempt still launches; its usage is unknown rather than miscounted.
+    const session = "00000000-0000-0000-0000-000000000210";
+    const bucket = "wd_target_000000000210";
+    const storedSessionDir = path.join(sourceConfig, "sessions", bucket, session);
+    const storedWire = writeKimiWire(sourceConfig, `${bucket}/${session}`, "main", [
+      kimiUsageRecordLine(1_000, 200, 3_000, 40)
+    ]);
+    fs.appendFileSync(storedWire, '{"type":"usage.record","usage":{"inputOther":5', "utf8");
+    fs.writeFileSync(
+      path.join(storedSessionDir, "state.json"),
+      `${JSON.stringify({
+        workDir: "/workspace/target",
+        agents: {
+          main: { homedir: path.join(storedSessionDir, "agents", "main"), type: "agent", parentAgentId: null }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(sourceConfig, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: session, sessionDir: storedSessionDir, workDir: "/workspace/target" })}\n`,
+      "utf8"
+    );
+    const torn = new KimiCode029Agent(options);
+    const tornCommand = await torn.buildCommand({
+      prompt: "Resume a torn wire",
       cwd: "/workspace/target",
-      options: {}
+      options: { resumeSession: session }
     });
-    const malformedHome = malformedCommand.env?.KIMI_CODE_HOME;
-    assert.ok(malformedHome);
-    writeKimiWire(malformedHome, "wd_target_000000000203/session-203", "main", [
-      "not json at all",
-      "{",
-      JSON.stringify({
-        type: "usage.record",
-        usage: { inputOther: "12", output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
-      }),
-      JSON.stringify({
-        type: "usage.record",
-        usage: { inputOther: -5, output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
-      }),
-      JSON.stringify({ type: "usage.record", usage: { inputOther: 4, output: 2, inputCacheRead: 1 } }),
-      JSON.stringify({ type: "usage.record", model: "kimi-k3" }),
-      JSON.stringify({ type: "message.appended", usage: { inputOther: 999, output: 999 } }),
-      kimiUsageRecordLine(33, 7, 2, 1)
-    ]);
-    assert.throws(
-      () => malformed.createOutputInterpreter().onExit?.(kimiExitResult(malformedCommand.args)),
-      /invalid strict JSON/iu
+    const tornHome = tornCommand.env?.KIMI_CODE_HOME;
+    assert.ok(tornHome);
+    fs.appendFileSync(
+      path.join(tornHome, "sessions", bucket, session, "agents", "main", "wire.jsonl"),
+      `\n${kimiUsageRecordLine(99, 88, 77, 66)}\n`,
+      "utf8"
     );
-    await malformedCommand.cleanup?.();
+    const tornCompleted = kimiCompletedEvent(torn.createOutputInterpreter().onExit?.(kimiExitResult(tornCommand.args)));
+    assert.equal(Object.prototype.hasOwnProperty.call(tornCompleted, "usage"), false);
+    assert.equal(tornCompleted.resume, session);
+    await tornCommand.cleanup?.();
 
-    const absent = new KimiCode029Agent(options);
-    const absentCommand = await absent.buildCommand({ prompt: "No usage", cwd: "/workspace/target", options: {} });
-    const absentHome = absentCommand.env?.KIMI_CODE_HOME;
-    assert.ok(absentHome);
-    writeKimiWire(absentHome, "wd_target_000000000204/session-204", "main", [
-      kimiWireHeaderLine("session-204"),
-      "still not json",
-      JSON.stringify({ type: "usage.record", usage: { inputOther: Number.NaN } })
-    ]);
-    assert.throws(
-      () => absent.createOutputInterpreter().onExit?.(kimiExitResult(absentCommand.args)),
-      /invalid strict JSON/iu
+    // A resumed wire replaced during the invocation is no longer comparable
+    // with its baseline, so its usage is unknown too.
+    fs.writeFileSync(storedWire, `${kimiUsageRecordLine(1_000, 200, 3_000, 40)}\n`, "utf8");
+    const replaced = new KimiCode029Agent(options);
+    const replacedCommand = await replaced.buildCommand({
+      prompt: "Replaced resumed wire",
+      cwd: "/workspace/target",
+      options: { resumeSession: session }
+    });
+    const replacedHome = replacedCommand.env?.KIMI_CODE_HOME;
+    assert.ok(replacedHome);
+    const runtimeWire = path.join(replacedHome, "sessions", bucket, session, "agents", "main", "wire.jsonl");
+    fs.rmSync(runtimeWire);
+    fs.writeFileSync(runtimeWire, `${kimiUsageRecordLine(99, 88, 77, 66)}\n`, "utf8");
+    const replacedCompleted = kimiCompletedEvent(
+      replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args))
     );
-    await absentCommand.cleanup?.();
+    assert.equal(Object.prototype.hasOwnProperty.call(replacedCompleted, "usage"), false);
+    await replacedCommand.cleanup?.();
   }
 );
 
 bunAdapterTest(
-  "generated Kimi adapter rejects ambiguous, invalidly encoded, oversized, or deep wire JSON",
+  "generated Kimi adapter completes when its output and telemetry are malformed",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
     assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
     const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const sourceConfig = writeKimiSourceConfig(project, "kimi-wire-strict-json");
-    const tooDeep = `${"[".repeat(34)}null${"]".repeat(34)}`;
-    const invalidWires: Array<{ label: string; bytes: Buffer; expected: RegExp }> = [
-      {
-        label: "duplicate key",
-        bytes: Buffer.from(
-          '{"type":"usage.record","type":"usage.record","usage":{"inputOther":1,"output":2,"inputCacheRead":3,"inputCacheCreation":4}}\n'
-        ),
-        expected: /duplicate/iu
-      },
-      { label: "invalid UTF-8", bytes: Buffer.from([0x7b, 0xff, 0x7d, 0x0a]), expected: /UTF-8/iu },
-      {
-        label: "oversize line",
-        bytes: Buffer.from(`${JSON.stringify({ type: "message.appended", padding: "x".repeat(1024 * 1024) })}\n`),
-        expected: /line exceeded its byte budget/iu
-      },
-      {
-        label: "excessive depth",
-        bytes: Buffer.from(`{"type":"message.appended","future":${tooDeep}}\n`),
-        expected: /nesting-depth limit of 32/iu
-      },
-      {
-        label: "torn final record",
-        bytes: Buffer.from('{"type":"message.appended"'),
-        expected: /torn or unterminated/iu
-      }
-    ];
-    for (const [index, fixture] of invalidWires.entries()) {
-      const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
-      const command = await agent.buildCommand({ prompt: fixture.label, cwd: project, options: {} });
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-malformed-output");
+    const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const originalBuildCommand = agent.buildCommand.bind(agent);
+    agent.buildCommand = async (params) => {
+      const command = await originalBuildCommand(params);
       const home = command.env?.KIMI_CODE_HOME;
       assert.ok(home);
-      const wire = path.join(home, "sessions", `bucket-${index}`, "session-303", "agents", "main", "wire.jsonl");
-      fs.mkdirSync(path.dirname(wire), { recursive: true });
-      fs.writeFileSync(wire, fixture.bytes);
-      assert.throws(
-        () => agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)),
-        fixture.expected,
-        fixture.label
-      );
-      await command.cleanup?.();
-    }
+      const wire = path.join(home, "sessions", "wd_target_000000000401", "session-401", "agents", "main", "wire.jsonl");
+      const script = [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        `fs.mkdirSync(path.dirname(${JSON.stringify(wire)}), { recursive: true });`,
+        // A usage record torn mid-write, as a killed CLI leaves it.
+        `fs.writeFileSync(${JSON.stringify(wire)}, ${JSON.stringify('{"type":"usage.record"')});`,
+        // A Node util.inspect dump on stderr and a truncated JSON line on stdout.
+        `console.error(${JSON.stringify("{ code: 'ECONNRESET', errno: -104 }")});`,
+        `console.log(${JSON.stringify('{"provider_status":')});`,
+        `console.log(${JSON.stringify(JSON.stringify({ role: "assistant", content: "Done." }))});`
+      ].join("\n");
+      return {
+        ...command,
+        command: process.execPath,
+        args: ["-e", script],
+        stdin: undefined,
+        outputFormat: "stream-json"
+      };
+    };
+
+    // A short idle timeout turns a stalled invocation into a prompt failure
+    // instead of waiting for the node timeout.
+    const result = (await agent.generate({
+      prompt: "Malformed output",
+      rootDir: project,
+      timeout: { idleMs: 5_000 }
+    })) as { text?: string; usage?: { inputTokens?: number; totalTokens?: number } };
+
+    assert.equal(result.text, "Done.");
+    // The torn wire record leaves this invocation's usage unknown.
+    assert.equal(result.usage?.inputTokens, undefined);
+    assert.equal(result.usage?.totalTokens, undefined);
   }
 );
 
@@ -9541,111 +9726,6 @@ bunAdapterTest(
       total_tokens: 110
     });
     await command.cleanup?.();
-  }
-);
-
-bunAdapterTest(
-  "generated Kimi adapter fails telemetry closed on unsafe wire bounds and replacement",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    const init = initProject({ projectRoot: project, force: true });
-    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
-    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-bounds");
-    const options = kimiSubscriptionOptions(sourceConfig);
-
-    const oversized = new KimiCode029Agent(options);
-    const oversizedCommand = await oversized.buildCommand({
-      prompt: "Oversized usage wire",
-      cwd: "/workspace/target",
-      options: {}
-    });
-    const oversizedHome = oversizedCommand.env?.KIMI_CODE_HOME;
-    assert.ok(oversizedHome);
-    const oversizedWire = writeKimiWire(oversizedHome, "wd_target_000000000208/session-208", "main", [
-      kimiUsageRecordLine(9, 8, 7, 6)
-    ]);
-    fs.appendFileSync(oversizedWire, "x".repeat(1024 * 1024 + 1), "utf8");
-    assert.throws(
-      () => oversized.createOutputInterpreter().onExit?.(kimiExitResult(oversizedCommand.args)),
-      /torn or unterminated|line exceeded/iu
-    );
-    await oversizedCommand.cleanup?.();
-
-    const overflowing = new KimiCode029Agent(options);
-    const overflowingCommand = await overflowing.buildCommand({
-      prompt: "Overflowing usage values",
-      cwd: "/workspace/target",
-      options: {}
-    });
-    const overflowingHome = overflowingCommand.env?.KIMI_CODE_HOME;
-    assert.ok(overflowingHome);
-    writeKimiWire(overflowingHome, "wd_target_000000000209/session-209", "main", [
-      kimiUsageRecordLine(Number.MAX_SAFE_INTEGER, 0, 0, 0),
-      // Each component total is independently safe, but the combined total is not.
-      kimiUsageRecordLine(0, 1, 0, 0)
-    ]);
-    assert.throws(
-      () => overflowing.createOutputInterpreter().onExit?.(kimiExitResult(overflowingCommand.args)),
-      /safe integer range/iu
-    );
-    await overflowingCommand.cleanup?.();
-
-    const tooMany = new KimiCode029Agent(options);
-    const tooManyCommand = await tooMany.buildCommand({
-      prompt: "Too many usage wires",
-      cwd: "/workspace/target",
-      options: {}
-    });
-    const tooManyHome = tooManyCommand.env?.KIMI_CODE_HOME;
-    assert.ok(tooManyHome);
-    for (let index = 0; index < 513; index += 1) {
-      writeKimiWire(tooManyHome, "wd_target_000000000211/session-211", `agent-${index.toString().padStart(3, "0")}`, [
-        kimiUsageRecordLine(1, 1, 0, 0)
-      ]);
-    }
-    assert.throws(
-      () => tooMany.createOutputInterpreter().onExit?.(kimiExitResult(tooManyCommand.args)),
-      /file budget/iu
-    );
-    await tooManyCommand.cleanup?.();
-
-    const session = "00000000-0000-0000-0000-000000000210";
-    const bucket = "wd_target_000000000210";
-    const storedSessionDir = path.join(sourceConfig, "sessions", bucket, session);
-    writeKimiWire(sourceConfig, `${bucket}/${session}`, "main", [kimiUsageRecordLine(1_000, 200, 3_000, 40)]);
-    fs.writeFileSync(
-      path.join(storedSessionDir, "state.json"),
-      `${JSON.stringify({
-        workDir: "/workspace/target",
-        agents: {
-          main: { homedir: path.join(storedSessionDir, "agents", "main"), type: "agent", parentAgentId: null }
-        }
-      })}\n`,
-      "utf8"
-    );
-    fs.writeFileSync(
-      path.join(sourceConfig, "session_index.jsonl"),
-      `${JSON.stringify({ sessionId: session, sessionDir: storedSessionDir, workDir: "/workspace/target" })}\n`,
-      "utf8"
-    );
-    const replaced = new KimiCode029Agent(options);
-    const replacedCommand = await replaced.buildCommand({
-      prompt: "Replaced resumed wire",
-      cwd: "/workspace/target",
-      options: { resumeSession: session }
-    });
-    const replacedHome = replacedCommand.env?.KIMI_CODE_HOME;
-    assert.ok(replacedHome);
-    const runtimeWire = path.join(replacedHome, "sessions", bucket, session, "agents", "main", "wire.jsonl");
-    fs.rmSync(runtimeWire);
-    fs.writeFileSync(runtimeWire, `${kimiUsageRecordLine(99, 88, 77, 66)}\n`, "utf8");
-    assert.throws(
-      () => replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args)),
-      /replaced or truncated/iu
-    );
-    await replacedCommand.cleanup?.();
   }
 );
 
@@ -9811,11 +9891,8 @@ test("legacy projects do not require newly added opt-in agent factories", async 
   fs.writeFileSync(registryPath, legacyRegistry, "utf8");
   fs.unlinkSync(path.join(project, ".smithers", "agents", "openrouter.ts"));
 
-  const preserved = initProject({ projectRoot: project });
   const validate = await validateProject({ projectRoot: project, env: {} });
 
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(fs.readFileSync(registryPath, "utf8"), legacyRegistry);
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
@@ -9847,14 +9924,8 @@ test("validate accepts a typed aliased registry composed from static spreads", a
   );
 
   const validate = await validateProject({ projectRoot: project, env: {} });
-  const preserved = initProject({ projectRoot: project });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(
-    preserved.diagnostics.some((diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_STALE"),
-    false
-  );
 });
 
 test("validate applies registry overwrite order and rejects nullish or shadowed factories", async () => {
@@ -12223,127 +12294,41 @@ test("startRun --agent does not carry the previous agent's model onto the new ag
   assert.equal(pinnedTasks.tasks[0]?.reasoningEffort ?? null, null);
 });
 
-test("init reports an agent registry that does not export a generated agent", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-
-  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, KimiAgent,
-  // OpenCodeAgent, OpenRouterAgent, and PiAgent existed: the registry predates the adapters, and init preserves
-  // project-owned files.
-  const registryPath = path.join(project, ".smithers/agents/index.ts");
-  fs.writeFileSync(
-    registryPath,
-    'import { createCodexAgent } from "./codex";\n' +
-      'export { createCodexAgent } from "./codex";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
-    "utf8"
-  );
-
-  const upgraded = initProject({ projectRoot: project });
-  assert.equal(upgraded.ok, true);
-  const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 6, JSON.stringify(upgraded.diagnostics));
-  assert.equal(stale[0]?.severity, "warning");
-  assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
-  assert.match(stale.map((entry) => entry.message).join("\n"), /PiAgent/);
-
-  // A registry that names Claude, DeepSeek, Kimi, OpenCode, OpenRouter, and Pi without registering
-  // their factories is still stale: nothing resolves it, since generated
-  // adapters export only factories.
-  fs.writeFileSync(
-    registryPath,
-    'import { createCodexAgent } from "./codex";\n' +
-      'export { CodexAgent, createCodexAgent } from "./codex";\n' +
-      'export { ClaudeAgent } from "./claude";\n' +
-      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
-    "utf8"
-  );
-  const named = initProject({ projectRoot: project });
-  const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 6, JSON.stringify(named.diagnostics));
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenCodeAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /OpenRouterAgent/);
-  assert.match(namedStale.map((entry) => entry.message).join("\n"), /PiAgent/);
-
-  // A registry that exports every generated agent stays quiet.
-  const regenerated = initProject({ projectRoot: project, force: true });
-  assert.equal(
-    regenerated.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE").length,
-    0,
-    JSON.stringify(regenerated.diagnostics)
-  );
-});
-
-test(
-  "post-init registry inspection sanitizes access failures instead of failing after mutation",
-  { concurrency: false },
-  () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const registryPath = path.join(project, ".smithers", "agents", "index.ts");
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "openSync")!;
-    const originalOpenSync = fs.openSync;
-
-    Object.defineProperty(fs, "openSync", {
-      ...originalDescriptor,
-      value: (...args: unknown[]) => {
-        if (String(args[0]) === registryPath) {
-          throw Object.assign(new Error("sensitive registry access detail"), { code: "EACCES" });
-        }
-        return Reflect.apply(originalOpenSync, fs, args) as number;
-      }
-    });
-    try {
-      const inspected = initProject({ projectRoot: project });
-      assert.equal(inspected.ok, true, JSON.stringify(inspected.diagnostics));
-      const warning = inspected.diagnostics.find(
-        (diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_REVIEW_REQUIRED"
-      );
-      assert.equal(warning?.severity, "warning");
-      assert.match(warning?.message ?? "", /could not be safely inspected/u);
-      assert.match(warning?.message ?? "", /verify manually/u);
-      assert.doesNotMatch(JSON.stringify(inspected.diagnostics), /sensitive registry|EACCES/u);
-    } finally {
-      Object.defineProperty(fs, "openSync", originalDescriptor);
-    }
-  }
-);
-
 testWhen(process.platform !== "win32")(
-  "post-init registry inspection rejects symlinks, FIFOs, and oversized files without reading them",
+  "init replaces a stale registry but never writes through a linked or special registry path",
   () => {
-    const cases = ["symlink", "fifo", "oversized"] as const;
-    for (const kind of cases) {
+    const stock = loadRuntimeTemplate("smithers/agents/index.tsx");
+    const staleProject = tempProject();
+    assert.equal(initProject({ projectRoot: staleProject, force: true }).ok, true);
+    const staleRegistry = path.join(staleProject, ".smithers", "agents", "index.ts");
+    // A registry scaffolded before the other adapters existed.
+    fs.writeFileSync(
+      staleRegistry,
+      'import { createCodexAgent } from "./codex";\nexport const agentFactories = { CodexAgent: createCodexAgent };\n',
+      "utf8"
+    );
+    assert.equal(initProject({ projectRoot: staleProject }).ok, true);
+    assert.equal(fs.readFileSync(staleRegistry, "utf8"), stock);
+
+    for (const kind of ["symlink", "fifo"] as const) {
       const project = tempProject();
       assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
       const registryPath = path.join(project, ".smithers", "agents", "index.ts");
       fs.unlinkSync(registryPath);
+      const outside = path.join(tempProject(), "outside-index.ts");
       if (kind === "symlink") {
-        const outside = path.join(tempProject(), "outside-index.ts");
-        fs.writeFileSync(outside, "outside registry must not be read\n", "utf8");
+        fs.writeFileSync(outside, "outside registry must not be written\n", "utf8");
         fs.symlinkSync(outside, registryPath);
-      } else if (kind === "fifo") {
-        execFileSync("mkfifo", [registryPath]);
       } else {
-        fs.writeFileSync(registryPath, Buffer.alloc(256 * 1024 + 1, 0x61));
+        execFileSync("mkfifo", [registryPath]);
       }
 
-      const inspected = initProject({ projectRoot: project });
+      const rejected = initProject({ projectRoot: project });
 
-      assert.equal(inspected.ok, true, `${kind}: ${JSON.stringify(inspected.diagnostics)}`);
-      const warning = inspected.diagnostics.find(
-        (diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_REVIEW_REQUIRED"
-      );
-      assert.equal(warning?.severity, "warning", kind);
-      assert.match(warning?.message ?? "", /preserved (?:it )?without inspection|too large to inspect/u, kind);
-      assert.match(warning?.message ?? "", /verify manually/u, kind);
+      assert.equal(rejected.ok, false, kind);
+      assert.equal(rejected.diagnostics[0]?.code, "INIT_PATH_UNSAFE", kind);
+      if (kind === "symlink") assert.equal(fs.readFileSync(outside, "utf8"), "outside registry must not be written\n");
+      else assert.equal(fs.lstatSync(registryPath).isFIFO(), true);
     }
   }
 );
