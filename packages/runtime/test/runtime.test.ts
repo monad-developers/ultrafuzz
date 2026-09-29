@@ -99,6 +99,7 @@ import {
   pauseRun,
   prepareControllerGeneration,
   readLinkedWorkflowEvidence,
+  readReportPublicationStatus,
   replayRun as runtimeReplayRun,
   resumeRun as runtimeResumeRun,
   startRun as runtimeStartRun,
@@ -24311,6 +24312,88 @@ test("syncRun records each attempt that a killed controller abandoned as cancele
     tasks.map((task) => nodes[task]?.retry_count),
     [1, 1]
   );
+});
+
+test("syncRun records an abandoned attempt of an already reported run and publishes the report again", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSingleFinalReportTopology(project);
+  const runId = "sync-reported-abandoned-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:final-report";
+  const meta = { agentChainIndex: 0, agentId: "ultrafuzz-agent:final-report:0:default", agentModel: "gpt-5.5" };
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const events = [
+    { type: "RunStarted" },
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    { type: "RunStarted" },
+    { type: "NodeStarted", nodeId, attempt: 2 },
+    { type: "NodeFinished", nodeId, attempt: 2 },
+    { type: "NodeFinished", nodeId: "verify:final-report", attempt: 1 },
+    { type: "RunFinished" }
+  ].map((event, sequence) => ({ ...event, sequence, timestampMs: base + sequence * 100 }));
+  const lifecycle = (observed: typeof events) =>
+    fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [
+          { id: nodeId, state: "finished", attempt: 2 },
+          { id: "verify:final-report", state: "finished", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, observed),
+      nodeDetails: {
+        [nodeId]: {
+          node: { nodeId, lastAttempt: 2 },
+          attempts: [
+            { nodeId, attempt: 1, state: "cancelled", meta },
+            { nodeId, attempt: 2, state: "finished", meta }
+          ]
+        }
+      }
+    });
+  // An earlier version finalized and reported the run without recording the abandoned attempt.
+  const earlier = lifecycle(events.filter((event) => event.sequence !== 1));
+  const run = await startRun({ projectRoot: project, runId, env: earlier });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeEmptyFinalReportArtifactSet(runRoot, runId);
+  const observe = async (env: Record<string, string | undefined>) => {
+    const sync = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+    const state = readRunState(layoutForRunRoot(runRoot, runId));
+    const report = readReportPublicationStatus(runRoot, state);
+    return {
+      ledger: attemptLedgerRows(runRoot).map((entry) => [
+        entry.attempt,
+        entry.started_event_sequence,
+        entry.source_event_sequence,
+        entry.outcome
+      ]),
+      retryCount: state.nodes["final-report"]?.retry_count,
+      // What `status` reports, and the verified report itself.
+      report: [report.status, report.verification, loadCurrentFinalReportSnapshot(runRoot).artifacts.source]
+    };
+  };
+
+  assert.deepEqual(await observe(earlier), {
+    ledger: [[2, 3, 4, "succeeded"]],
+    retryCount: 0,
+    report: ["available", "verified", "verified-runtime-report"]
+  });
+  // The abandoned attempt is appended after its replacement and raises the
+  // immutable node's retry count, which changes the state the published report
+  // describes; the same synchronization publishes the report again.
+  assert.deepEqual(await observe(lifecycle(events)), {
+    ledger: [
+      [2, 3, 4, "succeeded"],
+      [1, 1, 3, "canceled"]
+    ],
+    retryCount: 1,
+    report: ["available", "verified", "verified-runtime-report"]
+  });
 });
 
 test("syncRun records external wait reasons from workflow events", async () => {

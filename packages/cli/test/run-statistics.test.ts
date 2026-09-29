@@ -12,6 +12,7 @@ import {
   manifestDigest,
   type NodeAttemptLedgerEntry,
   type NodeState,
+  type NodeWorkflowProvenance,
   type PlannedGraphDocument,
   type RunAccountingSummary,
   type RunMetadataDocument,
@@ -201,25 +202,30 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
 });
 
 test("stats counts a failed node whose task Smithers cancelled as canceled", () => {
-  const status = (workflowState: "cancelled" | "failed") => {
-    const node: NodeState = {
-      ...terminalNodeState("node", "node"),
-      status: "failed",
-      outputs: [],
-      provenance: {
-        workflow: {
-          run_id: WORKFLOW_RUN_ID,
-          task_id: "node:node",
-          agent_task_id: "node:node",
-          verifier_task_id: "verify:node",
-          state: workflowState,
-          attempt: 1
-        }
-      }
-    };
-    // Smithers cancelled the task before it selected an agent, so no attempt was recorded.
+  type WorkflowState = "cancelled" | "failed";
+  const failed = (nodeId: string, logicalNodeId: string, workflow: NodeWorkflowProvenance): NodeState => ({
+    ...terminalNodeState(nodeId, logicalNodeId),
+    status: "failed",
+    outputs: [],
+    provenance: { workflow }
+  });
+  const task = (nodeId: string, logicalNodeId: string, state: WorkflowState): NodeState =>
+    failed(nodeId, logicalNodeId, {
+      run_id: WORKFLOW_RUN_ID,
+      task_id: `node:${nodeId}`,
+      agent_task_id: `node:${nodeId}`,
+      verifier_task_id: `verify:${nodeId}`,
+      state,
+      attempt: 1
+    });
+  const status = (states: NodeState[], graph?: PlannedGraphDocument) => {
+    // Smithers cancelled the tasks before it selected an agent, so no attempt was recorded.
     const { value } = deriveRunStatistics(
-      evidence({ state: runState([node], "canceled"), attempts: [] }),
+      evidence({
+        ...(graph === undefined ? {} : { graph, usage: [] }),
+        state: runState(states, "canceled"),
+        attempts: []
+      }),
       Date.parse(FINISHED_AT)
     );
     // The JSON envelope is validated against the closed CLI result schema.
@@ -228,8 +234,23 @@ test("stats counts a failed node whose task Smithers cancelled as canceled", () 
   };
 
   // Run state records a cancelled task as failed; `status` counts it apart from failures (#1087).
-  assert.deepEqual(status("cancelled"), ["canceled", 0, 1]);
-  assert.deepEqual(status("failed"), ["failed", 1, 0]);
+  assert.deepEqual(status([task("node", "node", "cancelled")]), ["canceled", 0, 1]);
+  assert.deepEqual(status([task("node", "node", "failed")]), ["failed", 1, 0]);
+  // A fan-out node's canonical state aggregates its strategy tasks and has no Smithers state of its own.
+  const fanOut = (...states: WorkflowState[]) =>
+    status(
+      [
+        failed("fan", "fan", { run_id: WORKFLOW_RUN_ID, aggregate_attempt_statuses: ["failed", "failed"] }),
+        ...states.map((state, index) => task(`fan__model_${index}__attempt_0`, "fan", state))
+      ],
+      graphDocument(
+        "fan",
+        states.map((_, index) => `node:fan__model_${index}__attempt_0`),
+        ["gpt-test", "gpt-other"]
+      )
+    );
+  assert.deepEqual(fanOut("cancelled", "cancelled"), ["canceled", 0, 1]);
+  assert.deepEqual(fanOut("cancelled", "failed"), ["failed", 1, 0]);
 });
 
 test("stats reports a node's latest attempt outcome in event order, not ledger row order", () => {
