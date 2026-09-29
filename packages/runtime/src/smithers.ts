@@ -184,6 +184,13 @@ const operatorControllerProjects = new Map<string, Promise<OperatorControllerPro
 let operatorControllerCleanupRegistered = false;
 const SMITHERS_BIN_LOCAL_DELEGATION_SOURCE = "if (!delegateToLocalCliIfPresent()) {",
   SMITHERS_BIN_LOCAL_DELEGATION_PATCH = "if (true) { // Ultrafuzz operator controller: never delegate to target code.";
+// Bun reads `bunfig.toml` (and runs its `preload` list) and `.env` from the
+// working directory, which for every controller process is the target
+// repository. A patched spawn that carries no execution-snapshot startup
+// controls passes these flags instead, so target configuration never reaches
+// the engine, the supervisor or a relaunch.
+const SMITHERS_BUN_GUARD_ARGS =
+  '(process.versions.bun ? ["--config=/dev/null", "--no-env-file", "--no-install", "--no-addons"] : [])';
 // 0.35.0 routes the detached spawn through `smithersRuntimeSpawn`, which only
 // selects the interpreter: under Bun it returns exactly `{command: "bun", args}`,
 // the literal 0.34.0 shape. Upstream still has no equivalent of the fd-3
@@ -204,7 +211,7 @@ const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapsh
           cliPath,
           ...childArgs,
         ]);
-        child = spawn(process.execPath, [...(childSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgsFor(childSnapshotTransfer.root)), ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
+        child = spawn(process.execPath, [...(childSnapshotTransfer === undefined ? ${SMITHERS_BUN_GUARD_ARGS} : ultrafuzzBunStartupArgsFor(childSnapshotTransfer.root)), ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
           detached: true,
           stdio:
             childSnapshotTransfer === undefined
@@ -221,7 +228,8 @@ const SMITHERS_CLI_DETACHED_SNAPSHOT_TRANSFER_PATCH = `        const childSnapsh
 // use-after-close this patch exists for survives verbatim in 0.35.0: `fd` is
 // closed in the enclosing `finally` before the supervisor spawn reaches it, so
 // the private `supervisorFd` below is still the only thing keeping the
-// supervisor off a closed descriptor.
+// supervisor off a closed descriptor. The supervisor also inherits this run's
+// `--log-dir`, which upstream's relaunch drops (see `resume_log_dir`).
 const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisorSpawn = smithersRuntimeSpawn(supervisorArgs);
         const supervisor = spawn(supervisorSpawn.command, supervisorSpawn.args, {
           detached: true,
@@ -234,7 +242,7 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
         const supervisorFd = openSync(logFile, "a");
         let supervisor;
         try {
-          supervisor = spawn(process.execPath, [...(supervisorSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgsFor(supervisorSnapshotTransfer.root)), ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
+          supervisor = spawn(process.execPath, [...(supervisorSnapshotTransfer === undefined ? ${SMITHERS_BUN_GUARD_ARGS} : ultrafuzzBunStartupArgsFor(supervisorSnapshotTransfer.root)), ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
             detached: true,
             stdio:
               supervisorSnapshotTransfer === undefined
@@ -242,6 +250,7 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorSnapshotTra
                 : ["ignore", supervisorFd, supervisorFd, supervisorSnapshotTransfer.descriptor],
             env: {
               ...process.env,
+              ...(options.logDir ? { ULTRAFUZZ_SMITHERS_LOG_DIR: options.logDir } : {}),
               ...(supervisorSnapshotTransfer?.env ?? {}),
             },
           });
@@ -382,16 +391,48 @@ const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_LOCAL_ROOT_HELPERS = `    // resume-
       process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/" + process.pid + "/fd/" + descriptor;
     const ultrafuzzChildRootPath = (descriptor) =>
       process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/3";`;
+// The startup controls exist only under an inherited descriptor. A supervisor
+// that holds none (every native continuation) passes the Bun guard instead:
+// the `/proc/self/fd/3` paths would not exist in its relaunched engine.
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH = `${SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_LOCAL_ROOT_HELPERS}
 ${SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH.replace(
   RESUME_SNAPSHOT_INLINE_BUN_STARTUP_ARGS,
-  '[...(process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]'
+  `[...(snapshotDescriptor === undefined ? ${SMITHERS_BUN_GUARD_ARGS} : process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)]`
 )}`;
 const SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS = [
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSOR_PATCH,
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PRESERVE_SYMLINKS_PREDECESSOR_PATCH,
   SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_UNSCOPED_HELPER_PREDECESSOR_PATCH
 ] as const;
+// A supervisor relaunch runs exactly this argv, so without the patch the
+// relaunched engine writes its events to `<root>/.smithers/executions/<id>/logs`
+// instead of the run's `--log-dir`, which the supervisor spawn patch hands down.
+const SMITHERS_CLI_RESUME_LOG_DIR_SOURCE =
+  '  return ["up", target.workflowPath, "--resume", "--run-id", runId, "-d", "--force"];';
+const SMITHERS_CLI_RESUME_LOG_DIR_PATCH =
+  '  return ["up", target.workflowPath, "--resume", "--run-id", runId, "-d", "--force", ...(process.env.ULTRAFUZZ_SMITHERS_LOG_DIR ? ["--log-dir", process.env.ULTRAFUZZ_SMITHERS_LOG_DIR] : [])];';
+// Upstream relaunches a workflow file from `dirname(workflowPath)`, but
+// `createSmithers` opens the database relative to the working directory, and
+// the generated workflow resolves its task paths from it too. The relaunch
+// therefore starts in the rootDir the engine persisted, read the way
+// `parsePersistedRootDir` reads it for `up --resume`.
+const SMITHERS_CLI_SUPERVISOR_RESUME_ROOT_SOURCE = `    const direct = resolveResumeTarget(run, { workflowExists: options.deps.workflowExists });
+    if (direct) return direct;`;
+const SMITHERS_CLI_SUPERVISOR_RESUME_ROOT_PATCH = `    const direct = resolveResumeTarget(run, { workflowExists: options.deps.workflowExists });
+    if (direct?.kind === "workflow-file") {
+      const persisted =
+        run.configJson !== undefined
+          ? run
+          : yield* Effect.promise(() => Promise.resolve(options.adapter.getRun(run.runId))).pipe(
+              Effect.catchDefect(() => Effect.succeed(null)),
+            );
+      let rootDir;
+      try {
+        rootDir = JSON.parse(persisted?.configJson ?? "null")?.rootDir;
+      } catch {}
+      return typeof rootDir === "string" && rootDir.length > 0 ? { ...direct, cwd: rootDir } : direct;
+    }
+    if (direct) return direct;`;
 // 0.35.0 reflowed this import across multiple lines and added `watch`;
 // `realpathSync` is still absent, so the CLI still cannot compare a workflow
 // path against its persisted generation without this patch.
@@ -2525,6 +2566,8 @@ export type SmithersCompatibilityPatchId =
   | "detached_snapshot_transfer"
   | "supervisor_descriptor"
   | "resume_snapshot_transfer"
+  | "resume_log_dir"
+  | "supervisor_resume_root"
   | "terminal_state_restore"
   | "skip_predicate_rerender"
   | "skip_marks_predicates_stale"
@@ -2652,6 +2695,24 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     predecessors: SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
     patchedFamilyMarkers: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"],
     upstreamAbsent: ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
+  },
+  {
+    id: "resume_log_dir",
+    packageName: "@smthrs/cli",
+    sourceRelativePath: "src/resume-detached.js",
+    patchable: SMITHERS_CLI_RESUME_LOG_DIR_SOURCE,
+    patched: SMITHERS_CLI_RESUME_LOG_DIR_PATCH,
+    // Upstream forwarding a log directory to the relaunch retires this patch.
+    upstreamAbsent: ["--log-dir"]
+  },
+  {
+    id: "supervisor_resume_root",
+    packageName: "@smthrs/cli",
+    sourceRelativePath: "src/supervisor.js",
+    patchable: SMITHERS_CLI_SUPERVISOR_RESUME_ROOT_SOURCE,
+    patched: SMITHERS_CLI_SUPERVISOR_RESUME_ROOT_PATCH,
+    // Upstream reading the persisted root for a relaunch retires this patch.
+    upstreamAbsent: ["rootDir", "parsePersistedRootDir"]
   },
   {
     id: "terminal_state_restore",
@@ -7016,11 +7077,13 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const cliSource = path.join(packageRoot, "src", "index.js");
   const observabilitySource = path.join(packageRoot, "src", "observability-helpers.js");
   const resumeDetachedSource = path.join(packageRoot, "src", "resume-detached.js");
+  const supervisorSource = path.join(packageRoot, "src", "supervisor.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
   assertRegularFileInside(nodeModules, runnerSource, "installed Smithers public entrypoint");
   assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
   assertRegularFileInside(nodeModules, observabilitySource, "installed Smithers observability implementation");
   assertRegularFileInside(nodeModules, resumeDetachedSource, "installed Smithers detached resume implementation");
+  assertRegularFileInside(nodeModules, supervisorSource, "installed Smithers supervisor implementation");
   const metadata = readPackageManagerOwnedManifestEnvelope(packageJson, "installed Smithers CLI package manifest");
   if (optionalPackageManifestString(metadata, "version", packageJson) !== SMITHERS_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_VERSION}`);
@@ -7075,16 +7138,30 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "lifecycle trace summary visibility"
     )
   );
-  const resumeDetachedContents = fs.readFileSync(resumeDetachedSource, "utf8");
+  const resumeDetachedContents = applyRequiredSmithersPatch(
+    fs.readFileSync(resumeDetachedSource, "utf8"),
+    SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
+    SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
+    "detached resume execution snapshot transfer",
+    SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
+    ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
+  );
   writeFileDurable(
     resumeDetachedSource,
     applyRequiredSmithersPatch(
       resumeDetachedContents,
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_SOURCE,
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PATCH,
-      "detached resume execution snapshot transfer",
-      SMITHERS_CLI_RESUME_SNAPSHOT_TRANSFER_PREDECESSORS,
-      ["ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR"]
+      SMITHERS_CLI_RESUME_LOG_DIR_SOURCE,
+      SMITHERS_CLI_RESUME_LOG_DIR_PATCH,
+      "detached resume log directory"
+    )
+  );
+  writeFileDurable(
+    supervisorSource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(supervisorSource, "utf8"),
+      SMITHERS_CLI_SUPERVISOR_RESUME_ROOT_SOURCE,
+      SMITHERS_CLI_SUPERVISOR_RESUME_ROOT_PATCH,
+      "supervisor relaunch root"
     )
   );
 
