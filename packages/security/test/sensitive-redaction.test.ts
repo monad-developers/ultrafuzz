@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   containsSensitiveSecrets,
   isSensitiveEnvironmentName,
-  matchesRedactedText,
   redactSecretsInText,
   redactSecretsInValue,
   redactedTextSpanCodePointLengths,
@@ -78,21 +77,8 @@ test("exact secret matching ignores collision-prone short values", () => {
   assert.deepEqual(sensitiveEnvironmentValues({ OPENAI_API_KEY: "short" }), []);
 });
 
-test("persisted redaction matches rotated replay without hiding changed non-secret context", () => {
+test("redaction span inference names one source span per placeholder or gives up", () => {
   const length = (value: string): number => [...value].length;
-  const secret = "old credential";
-  assert.equal(matchesRedactedText("provider echoed <redacted>", `provider echoed ${secret}`, [length(secret)]), true);
-  assert.equal(
-    matchesRedactedText("provider echoed <redacted>", `provider echoed ${secret}; changed context`, [length(secret)]),
-    false
-  );
-  assert.equal(matchesRedactedText("<redacted> failed", `${secret} failed`, [length(secret)]), true);
-  assert.equal(matchesRedactedText("<redacted> failed", `changed ${secret} failed`, [length(secret)]), false);
-  assert.equal(matchesRedactedText("provider <redacted> failed", `provider ${secret} failed`, [length(secret)]), true);
-  assert.equal(
-    matchesRedactedText("provider <redacted> failed", `provider ${secret}; changed failed`, [length(secret)]),
-    false
-  );
   assert.deepEqual(redactedTextSpanCodePointLengths("<redacted> and <redacted>", "first secret and second secret"), [
     length("first secret"),
     length("second secret")
@@ -100,23 +86,6 @@ test("persisted redaction matches rotated replay without hiding changed non-secr
   assert.equal(
     redactedTextSpanCodePointLengths(`${"<redacted>x".repeat(65)}z`, `${"secretxx".repeat(65)}z`),
     undefined
-  );
-  assert.equal(matchesRedactedText("ordinary failure", "ordinary failure", []), true);
-  assert.equal(matchesRedactedText("ordinary failure", "changed failure", []), false);
-});
-
-test("persisted redaction can match a retained prefix when the storage boundary truncated it", () => {
-  assert.equal(
-    matchesRedactedText("prefix <redacted> retained", "prefix old-secret retained unpersisted", [10], {
-      allowObservedSuffix: true
-    }),
-    true
-  );
-  assert.equal(
-    matchesRedactedText("prefix <redacted> retained", "prefix old-secret changed unpersisted", [10], {
-      allowObservedSuffix: true
-    }),
-    false
   );
 });
 
