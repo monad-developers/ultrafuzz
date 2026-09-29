@@ -12,10 +12,11 @@ import {
 } from "@ultrafuzz/artifacts";
 import { loadBuiltInPromptAssets } from "@ultrafuzz/prompts";
 
-import { expandTopology, loadTopology } from "../src/index.js";
+import { expandTopology, loadTopology, type ExpandedGraph, type ProjectTopology } from "../src/index.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const TOPOLOGY_ROOT = path.join(REPOSITORY_ROOT, "packages", "config", "topologies");
+const CANONICAL_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
 const PACKAGED_TOPOLOGY_IDS = ["default", "exhaustive", "smoke", "invariant-only"] as const;
 const DIRECT_BUG_FIRST_STRATEGIES = [
   "boundary-tests",
@@ -117,30 +118,44 @@ const EXPECTED_ROLES_BY_TOPOLOGY: Record<string, Record<string, OutputRole>> = {
   }
 };
 
+// Loading validates every prompt file and expansion validates the topology again, so each topology is
+// loaded and expanded once per file rather than once per test.
+const loadedTopologies = new Map<string, ProjectTopology>();
+const expandedTopologies = new Map<string, ExpandedGraph>();
+
+function loadedTopology(topologyPath: string): ProjectTopology {
+  let topology = loadedTopologies.get(topologyPath);
+  if (topology === undefined) {
+    topology = loadTopology(REPOSITORY_ROOT, { topologyPath, requirePromptFiles: true });
+    loadedTopologies.set(topologyPath, topology);
+  }
+  return topology;
+}
+
+function expandedTopology(topologyPath: string): ExpandedGraph {
+  let graph = expandedTopologies.get(topologyPath);
+  if (graph === undefined) {
+    graph = expandTopology(loadedTopology(topologyPath), { projectRoot: REPOSITORY_ROOT });
+    expandedTopologies.set(topologyPath, graph);
+  }
+  return graph;
+}
+
 describe("packaged topology collection", () => {
   it.each(PACKAGED_TOPOLOGY_IDS)("continues independent strategies in %s without changing setup failures", (id) => {
-    const topology = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(TOPOLOGY_ROOT, `${id}.yml`),
-      requirePromptFiles: true
-    });
+    const topology = loadedTopology(path.join(TOPOLOGY_ROOT, `${id}.yml`));
     expect(topology.groups.strategies?.defaults?.failure_policy).toBe("continue");
     expect(topology.groups.setup?.defaults?.failure_policy).toBeUndefined();
     expect(topology.groups.properties?.defaults?.failure_policy).toBeUndefined();
-    const expanded = expandTopology(topology, { projectRoot: REPOSITORY_ROOT, runId: `policy-${id}` });
+    const expanded = expandedTopology(path.join(TOPOLOGY_ROOT, `${id}.yml`));
     expect(expanded.groups.strategies?.defaults?.failure_policy).toBe("continue");
     expect(expanded.nodes.some((node) => node.group === "strategies")).toBe(true);
   });
 
   it("keeps the goal topology in the initialized default and packaged exhaustive graphs", () => {
-    const packagedDefaultPath = path.join(TOPOLOGY_ROOT, "default.yml");
-    const packagedPath = path.join(TOPOLOGY_ROOT, "exhaustive.yml");
-    const projectPath = path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml");
-    expect(readFileSync(packagedDefaultPath)).toEqual(readFileSync(projectPath));
+    expect(readFileSync(path.join(TOPOLOGY_ROOT, "default.yml"))).toEqual(readFileSync(CANONICAL_TOPOLOGY_PATH));
 
-    const topology = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: packagedPath,
-      requirePromptFiles: true
-    });
+    const topology = loadedTopology(path.join(TOPOLOGY_ROOT, "exhaustive.yml"));
     const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
     for (const id of [
       "reference-vulnerability-database",
@@ -156,24 +171,11 @@ describe("packaged topology collection", () => {
     expect(nodes.get("class-goals")?.dynamic?.from).toEqual({ node: "goal-plan", path: "$.class_goals" });
   });
 
-  it("validates every shipped topology directly with the built-in prompt catalog", () => {
-    for (const name of ["exhaustive", "smoke", "invariant-only"]) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
-        requirePromptFiles: true
-      });
-      expect(topology.nodes.length).toBeGreaterThan(2);
-    }
-  });
-
   it("binds every packaged output to one current central contract and every JSON output to a registered schema", () => {
     const currentContracts = new Set<string>(ARTIFACT_CONTRACT_IDS);
     const nonJsonContracts = new Set<string>(NON_JSON_ARTIFACT_CONTRACT_IDS);
     for (const name of PACKAGED_TOPOLOGY_IDS) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
-        requirePromptFiles: true
-      });
+      const topology = loadedTopology(path.join(TOPOLOGY_ROOT, `${name}.yml`));
       for (const node of topology.nodes) {
         for (const output of node.outputs ?? []) {
           expect(currentContracts.has(output.contract), `${name}:${node.id}/${output.path}`).toBe(true);
@@ -186,13 +188,8 @@ describe("packaged topology collection", () => {
   });
 
   it("keeps the packaged default byte-aligned and shared profile handoffs aligned with canonical producers", () => {
-    expect(readFileSync(path.join(TOPOLOGY_ROOT, "default.yml"))).toEqual(
-      readFileSync(path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"))
-    );
-    const canonical = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
-      requirePromptFiles: true
-    });
+    expect(readFileSync(path.join(TOPOLOGY_ROOT, "default.yml"))).toEqual(readFileSync(CANONICAL_TOPOLOGY_PATH));
+    const canonical = loadedTopology(CANONICAL_TOPOLOGY_PATH);
     const canonicalOutputs = new Map(
       canonical.nodes.map((node) => [
         node.id,
@@ -202,10 +199,7 @@ describe("packaged topology collection", () => {
       ])
     );
     for (const name of ["exhaustive", "invariant-only"]) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
-        requirePromptFiles: true
-      });
+      const topology = loadedTopology(path.join(TOPOLOGY_ROOT, `${name}.yml`));
       for (const node of topology.nodes) {
         const expected = canonicalOutputs.get(node.id);
         if (expected === undefined) continue;
@@ -226,15 +220,12 @@ describe("packaged topology collection", () => {
     );
 
     const targets: Array<readonly [string, string, Record<string, OutputRole>]> = [
-      ["canonical", path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"), DEFAULT_PROFILE_ROLES],
+      ["canonical", CANONICAL_TOPOLOGY_PATH, DEFAULT_PROFILE_ROLES],
       ...packagedFiles.map((file) => [file, path.join(TOPOLOGY_ROOT, file), EXPECTED_ROLES_BY_TOPOLOGY[file]!] as const)
     ];
 
     for (const [name, topologyPath, expectedRoles] of targets) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath,
-        requirePromptFiles: true
-      });
+      const topology = loadedTopology(topologyPath);
       const nodeById = new Map(topology.nodes.map((node) => [node.id, node]));
       const contractsFor = (id: string): string[] => (nodeById.get(id)?.outputs ?? []).map((output) => output.contract);
 
@@ -285,14 +276,8 @@ describe("packaged topology collection", () => {
   });
 
   it("includes stateful invariants in ordinary discovery while exhaustive retains every specialist lane", () => {
-    const canonical = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml"),
-      requirePromptFiles: true
-    });
-    const exhaustive = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(TOPOLOGY_ROOT, "exhaustive.yml"),
-      requirePromptFiles: true
-    });
+    const canonical = loadedTopology(CANONICAL_TOPOLOGY_PATH);
+    const exhaustive = loadedTopology(path.join(TOPOLOGY_ROOT, "exhaustive.yml"));
     const canonicalIds = new Set(canonical.nodes.map((node) => node.id));
     const exhaustiveIds = new Set(exhaustive.nodes.map((node) => node.id));
 
@@ -343,10 +328,7 @@ describe("packaged topology collection", () => {
   });
 
   it("keeps the invariant discovery and campaign chain while omitting unrelated strategies", () => {
-    const topology = loadTopology(REPOSITORY_ROOT, {
-      topologyPath: path.join(TOPOLOGY_ROOT, "invariant-only.yml"),
-      requirePromptFiles: true
-    });
+    const topology = loadedTopology(path.join(TOPOLOGY_ROOT, "invariant-only.yml"));
     const nodeIds = new Set(topology.nodes.map((node) => node.id));
     for (const retained of [
       "project-discovery",
@@ -383,10 +365,7 @@ describe("packaged topology collection", () => {
 
   it("declares the invariant backend commands in every topology that runs them", () => {
     for (const name of ["default", "exhaustive", "invariant-only"]) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
-        requirePromptFiles: true
-      });
+      const topology = loadedTopology(path.join(TOPOLOGY_ROOT, `${name}.yml`));
       expect(topology.nodes.find((node) => node.id === "stateful-invariant-coverage")?.required_commands).toEqual([
         "covg-eval",
         "recon",
@@ -447,10 +426,7 @@ describe("packaged topology collection", () => {
     const shadowed = largestShadowedDefault();
     let pinsChecked = 0;
     for (const name of PACKAGED_TOPOLOGY_IDS) {
-      const topology = loadTopology(REPOSITORY_ROOT, {
-        topologyPath: path.join(TOPOLOGY_ROOT, `${name}.yml`),
-        requirePromptFiles: true
-      });
+      const topology = loadedTopology(path.join(TOPOLOGY_ROOT, `${name}.yml`));
       for (const [groupId, group] of Object.entries(topology.groups)) {
         const pinned = group.defaults?.timeout_seconds;
         if (pinned === undefined) {
@@ -505,10 +481,7 @@ describe("packaged topology collection", () => {
     );
     let promisesChecked = 0;
     for (const name of PACKAGED_TOPOLOGY_IDS) {
-      const topologyPath = path.join(TOPOLOGY_ROOT, `${name}.yml`);
-      const graph = expandTopology(loadTopology(REPOSITORY_ROOT, { topologyPath, requirePromptFiles: true }), {
-        projectRoot: REPOSITORY_ROOT
-      });
+      const graph = expandedTopology(path.join(TOPOLOGY_ROOT, `${name}.yml`));
       for (const node of graph.nodes) {
         if (node.promptPath === undefined || !promisingPrompts.has(node.promptPath)) {
           continue;
@@ -554,7 +527,7 @@ describe("packaged topology collection", () => {
       // editable project topology, which is the `default` profile's whole point.
       const topologyPath =
         profile?.topology_path === undefined
-          ? path.join(REPOSITORY_ROOT, ".ultrafuzz", "topology.yml")
+          ? CANONICAL_TOPOLOGY_PATH
           : path.resolve(path.dirname(catalogPath), profile.topology_path);
       const declaredDeadline = profile?.settings?.workflow_deadline_seconds;
       const deadlineSeconds = typeof declaredDeadline === "number" ? declaredDeadline : Number(configuredDeadline![1]);
@@ -562,9 +535,7 @@ describe("packaged topology collection", () => {
       const sameAgentAttempts =
         typeof declaredAttempts === "number" ? declaredAttempts : Number(configuredAttempts![1]);
 
-      const graph = expandTopology(loadTopology(REPOSITORY_ROOT, { topologyPath, requirePromptFiles: true }), {
-        projectRoot: REPOSITORY_ROOT
-      });
+      const graph = expandedTopology(topologyPath);
       for (const node of graph.nodes) {
         if (node.kind !== "agentic" || node.timeoutSeconds === undefined) {
           continue;
