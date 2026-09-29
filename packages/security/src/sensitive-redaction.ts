@@ -380,7 +380,13 @@ function redactBip39Mnemonics(value: string, placeholder: string): string {
       if (run.length < wordCount) continue;
       const window = run.slice(-wordCount);
       const phrase = window.map((token) => token.word).join(" ");
-      if (phrase === PUBLIC_DEVELOPMENT_MNEMONIC || !validateMnemonic(phrase, englishWordlist)) continue;
+      if (!validateMnemonic(phrase, englishWordlist)) continue;
+      // The public phrase is left in place but still ends the run, so the
+      // words after it are checked exactly as if it had been redacted.
+      if (phrase === PUBLIC_DEVELOPMENT_MNEMONIC) {
+        run = [];
+        break;
+      }
       ranges.push({ start: window[0]!.start, end: window.at(-1)!.end });
       run = [];
       break;

@@ -232,6 +232,11 @@ test("positive-only scans publish Anvil's dev mnemonic and keys while other mnem
     redactSecretsInText(`mnemonic: ${anvilMnemonic.replace(/junk$/u, "absent")}`, undefined, [], "positive-only"),
     "mnemonic: <redacted>"
   );
+  // The phrase ends its word run: BIP39 words that follow it ("one") start a
+  // new run, so prose after it publishes and a real mnemonic on the next line
+  // is still redacted in full.
+  assert.equal(containsSensitiveSecrets(`${anvilMnemonic} one account per index`, [], "positive-only"), false);
+  assert.equal(redactSecretsInText(`${anvilMnemonic}\n${mnemonic}`), `${anvilMnemonic}\n<redacted>`);
 
   const anvilKeys = [
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
