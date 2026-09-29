@@ -1011,6 +1011,63 @@ const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChe
     pendingOwnershipChecks.add(check);
   };`;
 
+// After each successful fenced attempt-row heartbeat write, the engine appends a
+// TaskHeartbeat event (an `_smithers_events` row plus a stream.ndjson line) that
+// carries no heartbeat data, because Ultrafuzz never passes any. A quiet agent
+// task writes one per throttled liveness pulse, up to two a second; an agent that
+// streams output writes one per ownership check its stdout, stderr and tool
+// callbacks force past the throttle. In a baseline campaign they were 83% of the
+// event rows (#1147), and Ultrafuzz never acts on them (it handles only
+// TaskHeartbeatTimeout). Liveness is the attempt-row write: the heartbeat-timeout
+// watchdog advances only when it succeeds, and `smithers why` reads the row. Keep
+// the write and drop the event.
+const SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE = `        "heartbeat:record",
+      );
+      await eventBus.emitEventQueued({
+        type: "TaskHeartbeat",
+        runId,
+        nodeId: desc.nodeId,
+        iteration: desc.iteration,
+        attempt: attemptNo,
+        hasData: heartbeatDataJson !== null,
+        dataSizeBytes,
+        intervalMs: intervalMs ?? undefined,
+        timestampMs: heartbeatAtMs,
+      });
+    } catch (error) {`;
+const SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH = `        "heartbeat:record",
+      );
+      // ultrafuzz: the fenced attempt row above is the liveness record (#1147).
+    } catch (error) {`;
+
+// Smithers treats <Worktree baseBranch> as a branch to track. Creating a
+// worktree runs `git fetch origin` first, and each re-entry retries
+// `git rebase origin/<base>` until one succeeds, after another fetch unless one
+// succeeded for that repository in the last 60 s. Ultrafuzz passes the recorded
+// launch commit (or a pinned source branch), and `origin/<sha>` never resolves,
+// so every re-entry logs a failed rebase; each fetch is an untimed call to the
+// user's remote (#1148). Task worktrees must stay on the launch commit
+// (assertWorkspaceSourceRevision), so never synchronize them.
+const SMITHERS_ENGINE_WORKTREE_SYNC_SOURCE = `function getWorktreeSyncCache() {
+  if (!worktreeSyncCacheSingleton) {
+    worktreeSyncCacheSingleton = createWorktreeSyncCache({ ttlMs: resolveWorktreeFetchTtlMs() });
+  }
+  return worktreeSyncCacheSingleton;
+}`;
+const SMITHERS_ENGINE_WORKTREE_SYNC_PATCH = `function getWorktreeSyncCache() {
+  // ultrafuzz: task worktrees stay on their recorded launch commit (#1148).
+  return { shouldFetch: () => false, recordFetch() {}, shouldRebase: () => false, recordRebase() {} };
+}`;
+const SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_SOURCE = `  // Best effort: refresh remote refs for git so origin/main can be used as a
+  // base when local main is absent.
+  if (vcs.type === "git") {
+    await runGitCommand(vcs.root, ["fetch", "origin"]);
+  }
+`;
+const SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_PATCH = `  // ultrafuzz: task worktrees start from a local recorded commit, so creating
+  // one never fetches origin (#1148).
+`;
+
 // Every event the engine persists first runs an idempotency probe that
 // filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
 // The table's only index is its (run_id, seq) primary key, and the probe's
@@ -2438,6 +2495,9 @@ export type SmithersCompatibilityPatchId =
   | "terminal_state_restore"
   | "resume_hydration"
   | "engine_agent_event_ownership"
+  | "engine_task_heartbeat_event"
+  | "engine_worktree_sync"
+  | "engine_worktree_create_fetch"
   | "engine_agent_usage_progress"
   | "engine_main_usage_invocation"
   | "engine_json_correction_usage_invocation"
@@ -2584,6 +2644,30 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
     // Upstream coalescing its own in-flight proof retires this patch.
     upstreamAbsent: ["heartbeatOwnershipCheckInFlight"]
+  },
+  {
+    id: "engine_task_heartbeat_event",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE,
+    patched: SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_worktree_sync",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKTREE_SYNC_SOURCE,
+    patched: SMITHERS_ENGINE_WORKTREE_SYNC_PATCH,
+    upstreamAbsent: []
+  },
+  {
+    id: "engine_worktree_create_fetch",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_SOURCE,
+    patched: SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_PATCH,
+    upstreamAbsent: []
   },
   {
     id: "engine_agent_usage_progress",
@@ -7066,6 +7150,13 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_SOURCE,
       SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
       "agent event ownership coalescing"
+    ],
+    [SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE, SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH, "task heartbeat event"],
+    [SMITHERS_ENGINE_WORKTREE_SYNC_SOURCE, SMITHERS_ENGINE_WORKTREE_SYNC_PATCH, "task worktree sync"],
+    [
+      SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_SOURCE,
+      SMITHERS_ENGINE_WORKTREE_CREATE_FETCH_PATCH,
+      "task worktree creation fetch"
     ],
     [
       SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_SOURCE,
