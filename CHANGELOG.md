@@ -1,5 +1,7 @@
 # Changelog
 
+<!-- markdownlint-disable MD013 -->
+
 ## Unreleased
 
 ### Breaking changes
