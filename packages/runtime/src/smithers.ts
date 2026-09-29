@@ -5406,12 +5406,19 @@ export async function runSmithersInspectionCommand(input: {
 
 /**
  * The runner's own reason for a failed command, from its JSON envelope. The process error only says
- * the command exited, and names the whole runner invocation instead.
+ * the command exited, and names the whole runner invocation instead. A sentence quoting a runner
+ * command is the runner's advice, such as "Run 'smithers up <workflow>' to start a run first.", which
+ * is not an ultrafuzz step, so it is left out.
  */
 function runnerReportedError(json: unknown): string | undefined {
   const message =
     isObjectRecord(json) && json.ok === false && isObjectRecord(json.error) ? json.error.message : undefined;
-  return typeof message === "string" && message.trim().length > 0 ? message : undefined;
+  if (typeof message !== "string") return undefined;
+  const reason = message
+    .split(/(?<=\.)\s+/u)
+    .filter((sentence) => !/['`]smithers\s/u.test(sentence))
+    .join(" ");
+  return reason.trim().length > 0 ? reason : undefined;
 }
 
 function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {

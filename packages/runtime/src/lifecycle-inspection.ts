@@ -1943,11 +1943,10 @@ function publicWorkflowText(value: string): string {
   return scrubWorkflowRunnerText(
     redactSecretsInText(value).replace(
       // Not after a path separator or dot: `.../bin/smithers ENOENT` names a file, not a runner command.
-      /(`?)\b(?<![\\/.])smithers\s+([a-z][a-z-]*)(`?)/giu,
+      // Lowercase only: the runner's commands are, and "No Smithers run history" names the runner.
+      /(`?)\b(?<![\\/.])smithers\s+([a-z][a-z-]*)(`?)/gu,
       (_match, open: string, command: string, close: string) =>
-        PUBLIC_WORKFLOW_COMMANDS.has(command.toLowerCase())
-          ? `\`ultrafuzz ${command.toLowerCase()}\``
-          : `${open}workflow runner ${command}${close}`
+        PUBLIC_WORKFLOW_COMMANDS.has(command) ? `\`ultrafuzz ${command}\`` : `${open}workflow runner ${command}${close}`
     )
   );
 }
