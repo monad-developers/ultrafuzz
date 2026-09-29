@@ -69,6 +69,32 @@ it("keeps the flag for model-node work and for genuinely ambiguous durable evide
   expect(() => privateEvalModelWorkEvidence(incomplete)).toThrow(/schema-invalid/u);
 });
 
+it("reads model work from records the runtime keys by model attempt ID", () => {
+  // Synchronization adds a record per attempt of a model fan-out node beside the node's own record, keyed by
+  // attempt ID, which the planned graph does not name.
+  const fanoutRun = (attempt: Partial<NodeState>): string =>
+    privateRunFixture({
+      status: "failed",
+      graphNodes: [
+        { id: "reference", kind: "reference", model_fanout: [] },
+        { id: "model", kind: "agentic", model_fanout: [{ model_profile_id: "fast" }, { model_profile_id: "deep" }] }
+      ],
+      stateNodes: { reference: { status: "succeeded", started_at: "2026-01-01T00:00:00.000Z" } },
+      mutateState: (state) => {
+        const { model } = state.nodes;
+        if (model === undefined) throw new Error("the fixture plans a model node");
+        state.nodes.model__model_0__attempt_0 = { ...model, node_id: "model__model_0__attempt_0" };
+        state.nodes.model__model_1__attempt_0 = { ...model, ...attempt, node_id: "model__model_1__attempt_0" };
+      }
+    });
+
+  expect(privateEvalModelWorkEvidence(fanoutRun({}))).toBe("none");
+  // An attempt's own record is evidence, whatever the node's record reads.
+  expect(privateEvalModelWorkEvidence(fanoutRun({ status: "running", started_at: "2026-01-01T00:00:01.000Z" }))).toBe(
+    "started"
+  );
+});
+
 it("rejects malformed present graph evidence while treating a missing graph as unavailable", () => {
   const corrupt = privateRunFixture({
     status: "failed",

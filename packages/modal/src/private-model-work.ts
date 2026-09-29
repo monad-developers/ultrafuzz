@@ -46,17 +46,15 @@ export function privateEvalModelWorkEvidence(projectRoot: string): PrivateEvalMo
   }
 
   const graphNodeIds = new Set(graph.nodes.map((node) => node.id));
-  const stateNodeIds = Object.keys(state.nodes);
-  if (graphNodeIds.size !== stateNodeIds.length || stateNodeIds.some((id) => !graphNodeIds.has(id))) {
-    throw new Error("private eval run state must exactly match its planned graph nodes");
-  }
   const modelNodeIds = new Set(
     graph.nodes.filter((node) => node.kind === "agentic" || node.model_fanout.length > 0).map((node) => node.id)
   );
 
   if (state.status === "succeeded" && modelNodeIds.size > 0) return "started";
-  for (const id of modelNodeIds) {
-    const node = state.nodes[id]!;
+  // Run state also records each model attempt under its attempt ID and each generated dynamic node under its
+  // storage ID, neither of which the graph names. Only agentic nodes get such records, so they are model work.
+  for (const [id, node] of Object.entries(state.nodes)) {
+    if (graphNodeIds.has(id) && !modelNodeIds.has(id)) continue;
     if (node.started_at !== undefined || !UNTOUCHED_MODEL_NODE_STATUSES.has(node.status)) return "started";
   }
 

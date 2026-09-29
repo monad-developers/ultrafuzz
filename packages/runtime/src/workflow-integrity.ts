@@ -2123,6 +2123,7 @@ function deriveWorkflowControlBindings(
     run_id: runId,
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
+    // The sealed graph's node set. Run state also keys records by attempt and storage ID, so its keys are not checked.
     expected_state_node_ids: graphNodeIds,
     expected_task_attempt_ids: expectedTaskAttemptIds,
     expected_task_node_ids: expectedTaskNodeIds
