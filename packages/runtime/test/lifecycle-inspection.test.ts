@@ -1541,6 +1541,7 @@ test("diagnoseProject reports a lower bound once sizing many controller roots ru
   // sizing all 100 roots would take far longer than doctor's budget.
   let now = 0;
   context.mock.method(performance, "now", () => (now += 100));
+  const readdirSync = context.mock.method(fs, "readdirSync");
 
   const doctor = await withTemporaryDirectory(temporary, () =>
     diagnoseProject({
@@ -1555,6 +1556,10 @@ test("diagnoseProject reports a lower bound once sizing many controller roots ru
   const sized = /; 100 ultrafuzz-controller-\* directories hold at least (\d+) MiB/u.exec(summary);
   assert.ok(sized !== null, summary);
   assert.ok(Number(sized[1]) < 100, summary);
+  // Each root holds 1 MiB, so every root doctor opens is counted except the
+  // one being read when the budget runs out. No root is opened after that.
+  const opened = readdirSync.mock.calls.filter((call) => path.dirname(String(call.arguments[0])) === temporary);
+  assert.ok(opened.length <= Number(sized[1]) + 1, `${String(opened.length)} roots opened; ${summary}`);
 });
 
 async function allAvailable(names: readonly string[]) {

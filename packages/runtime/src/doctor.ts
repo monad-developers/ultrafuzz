@@ -269,9 +269,11 @@ function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagn
 
 /**
  * Total size of the regular files under a directory that the walk reaches
- * before the deadline, skipping entries that vanish or cannot be read.
+ * before the deadline, skipping entries that vanish or cannot be read. The
+ * clock is checked before each directory read and each entry.
  */
 function regularFileBytes(directory: string, deadline: number): number {
+  if (performance.now() >= deadline) return 0;
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true });
