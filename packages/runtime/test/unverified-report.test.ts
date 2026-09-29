@@ -284,6 +284,50 @@ test("a report its verifier rejected stays unavailable when it holds a credentia
   }
 });
 
+// JSON escapes a quote, a backslash and a control character, so the report's
+// JSON text never holds such a credential verbatim.
+test("a report its verifier rejected stays unavailable when it holds a credential that JSON escapes", () => {
+  const credentials = ['quoted "opaque" password', "back\\slashed opaque password", "tabbed\topaque password"];
+  for (const [index, credential] of credentials.entries()) {
+    for (const configured of [false, true]) {
+      const root = reportRun(`verifier-rejected-escaped-credential-${String(index)}-${String(configured)}`);
+      writeAgentReport(root);
+      const file = failReportAttempt(root, "verify:final-report");
+      const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+      report.run_metadata.repository = `example/repository ${credential}`;
+      fs.writeFileSync(file, JSON.stringify(report));
+      if (configured) process.env.ULTRAFUZZ_TEST_REPORT_PASSWORD = credential;
+      try {
+        if (!configured) {
+          // Nothing else marks the value as a secret, so only the configured value can hide the report.
+          assert.equal(loadReportSnapshot(root).verification, "not-checked");
+        } else {
+          assert.throws(
+            () => loadReportSnapshot(root),
+            /Report unavailable: .* did not pass the artifact secret gate/u
+          );
+          assert.equal(fs.existsSync(path.join(root, "review")), false);
+        }
+      } finally {
+        delete process.env.ULTRAFUZZ_TEST_REPORT_PASSWORD;
+      }
+    }
+  }
+});
+
+// JSON writes each line break of this recovery phrase as `\n`, which is not
+// whitespace, so only the decoded report holds the phrase.
+test("a report its verifier rejected stays unavailable when it holds a line-broken recovery phrase", () => {
+  const root = reportRun("verifier-rejected-line-broken-phrase");
+  writeAgentReport(root);
+  const file = failReportAttempt(root, "verify:final-report");
+  const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+  report.run_metadata.repository = `example/repository\n${[...Array<string>(11).fill("abandon"), "about"].join("\n")}`;
+  fs.writeFileSync(file, JSON.stringify(report));
+  assert.throws(() => loadReportSnapshot(root), /Report unavailable: .* did not pass the artifact secret gate/u);
+  assert.equal(fs.existsSync(path.join(root, "review")), false);
+});
+
 test("unchecked agent reports disclose saved failures without inventing planned counts", () => {
   const root = reportRun("failed-records");
   writeAgentReport(root);

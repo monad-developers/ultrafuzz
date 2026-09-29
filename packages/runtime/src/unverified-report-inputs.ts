@@ -274,16 +274,25 @@ function readAgentReport(
  * rejected may never have passed that gate. Scan the parsed report, which holds
  * all agent-written presentation content, for the values the verifier refuses,
  * including those its task names as credentials, and keep it unavailable on a
- * hit rather than rewrite agent content.
+ * hit rather than rewrite agent content. JSON escapes a quote, a backslash and
+ * a control character, so the decoded strings are scanned beside the JSON text.
  */
 function assertRejectedReportHasNoSecrets(
   outputPath: string,
   report: unknown,
   execution: SmithersTaskManifestExecution | undefined
 ): void {
+  const strings: string[] = [];
+  const json = JSON.stringify(report, (_key, value: unknown) => {
+    if (typeof value === "string") strings.push(value);
+    return value;
+  });
   try {
     assertArtifactPublicationsContainNoSecrets(
-      new Map([[outputPath, Buffer.from(JSON.stringify(report), "utf8")]]),
+      new Map([
+        [outputPath, Buffer.from(json, "utf8")],
+        [`${outputPath} strings`, Buffer.from(strings.join("\n"), "utf8")]
+      ]),
       sensitiveEnvironmentValues(process.env, [
         ...(execution?.agentCredentialEnv ?? []),
         ...(execution?.modal?.credentialEnv ?? [])
