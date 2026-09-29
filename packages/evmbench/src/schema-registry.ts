@@ -142,12 +142,6 @@ export function evmbenchSchemaBundleDigest(): string {
   return schemaRegistryBundleDigest(evmbenchSchemaRegistry());
 }
 
-export function evmbenchSchemaPath(schemaId: string): string {
-  const entry = evmbenchSchemaRegistry().find((candidate) => candidate.id === schemaId);
-  if (entry === undefined) throw new Error(`unregistered EVMBench schema: ${schemaId}`);
-  return path.join(evmbenchSchemaDirectory(), entry.filename);
-}
-
 export function validateEvmbenchJsonSchema(schemaId: string, value: unknown): JsonSchemaValidationResult {
   const registry = evmbenchSchemaRegistry();
   const entry = registry.find((candidate) => candidate.id === schemaId);

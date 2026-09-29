@@ -104,16 +104,19 @@ ultrafuzz.toml
 .ultrafuzz/cache/
 ```
 
-Without `--force`, existing config, topology, prompts, reference catalogs, and
-agent adapters are preserved except for recognized stock migrations. `init`
+Without `--force`, existing config, topology, prompts, and reference catalogs
+are preserved. The `.smithers/agents` adapter closure is not project-owned:
+planning accepts only the byte-exact packaged copy, so every `init` rewrites
+each adapter that differs from the current templates and leaves matching ones
+untouched. Refreshing the adapters after an upgrade therefore needs no
+`--force`. A symbolic link, hard link, or special file at an adapter path makes
+`init` fail with `INIT_PATH_UNSAFE` instead of being followed or written
+through. `init` also
 migrates a recognized generated `smithers-orchestrator@0.32.0` manifest or a
 `smthrs@0.34.0` manifest to the current `smthrs@0.35.0` pin. The 0.34.0 migration
-requires the rest of the manifest to match the current generated document.
-During a recognized manifest migration, known byte-identical prior stock
-adapters are also upgraded; customized or unrecognized adapters remain
-preserved. Use `--force` to replace existing generated files with the current
-templates. `init` emits an actionable diagnostic when a preserved adapter
-requires manual review.
+requires the rest of the manifest to match the current generated document. Use
+`--force` to replace the other existing generated files with the current
+templates.
 
 ## Validate
 
@@ -124,7 +127,10 @@ ultrafuzz validate [--project <path>] [--audit-profile <name>] \
 
 Validation covers typed TOML config, `.ultrafuzz/topology.yml`, project prompt
 copies, safe paths, reference nodes, agent references, and trusted local
-execution posture. It does not launch agents.
+execution posture. It does not launch agents. A project prompt that differs
+from the built-in prompt at the same path sets the prompts posture to `warn`
+with one `PROMPT_DIFFERS_FROM_BUILT_IN` warning per file; warnings do not fail
+validation.
 
 ## JSON Validate
 
@@ -294,7 +300,7 @@ ultrafuzz node <run-id> <node-id> \
   [--project <path>] \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
-  [--reset-node <workflow-node-id>] [--refresh-controller] [--json]
+  [--reset-node <workflow-node-id>] [--retry-failed] [--refresh-controller] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -317,6 +323,18 @@ the linked workflow status when it is available; its JSON output retains both
 `workflow_status` and `ultrafuzz_status` so lifecycle divergence remains
 explicit.
 
+A launch that fails after planning has created its run directory, but before
+its workflow controls are sealed (while planning, compiling the workflow, or
+checking its task manifest), records the run as `failed` with its original
+error. `status`, `resume`, and the other commands that read the linked
+workflow then report that error as `RUN_LAUNCH_FAILED`. Such a run never
+reached Smithers and cannot be resumed; fix the cause and start a new run. A
+launch that fails after sealing is also recorded as `failed`, with its error in
+`events.jsonl`, but those commands do not report it as `RUN_LAUNCH_FAILED`. A
+goal-planning topology without its vulnerability-database reference, and a
+missing or invalid reference cache (run `ultrafuzz references sync`), are
+rejected before the run directory is created.
+
 `resume` delegates continuation to Smithers with the same Ultrafuzz and
 Smithers run IDs and automatically accepts changed workflow source. Control
 seals, link journals, controller generations, graph fingerprints, current
@@ -324,7 +342,23 @@ schema bindings, and metadata projections remain provenance for inspection;
 they are not resume authorization. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
-fork completed work.
+fork completed work. When the run's `smithers/resolved-config.json` parses as
+the current resolved-config schema, agent adapters in the continued workflow
+read the run's `smithers/execution-config.toml` (launch gave them a copy of the
+same file); for a run whose resolved config does not parse, resume sets no
+`ULTRAFUZZ_CONFIG_PATH`. If resume cannot prune stale task-worktree
+registrations, it reports a `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and
+continues.
+
+A run that ends `failed` with no failed durable node was stopped by something
+no durable node owns: a run-level workflow runner error, such as an exception
+thrown while rendering the workflow, or a failed workflow task outside the
+durable graph. `status` reports it as `WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE`,
+names any failed workflow tasks, and appends the runner's run-level error to
+the message. For a run-level error, fix that cause, then `resume` the same run;
+it continues from the tasks that already finished. While the cause persists,
+the resume either fails with `WORKFLOW_LIFECYCLE_FAILED` or the run fails
+again.
 
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
@@ -462,13 +496,18 @@ an available agent-written report.
 
 `pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
 finish, and the run settles in the resumable `paused` state. `resume` reports
-`submitted: false` instead of launching a duplicate continuation when the linked
-workflow is still in an active state (running, in-progress, started, queued,
-retrying, or waiting). `resume --reset-node` retries one failed workflow node and
-its dependents in the same linked run; the applied reset is recorded so retrying
-the command after a failed continuation resumes the already-reset run instead of
-repeating the reset. `fork` may start from a checkpoint frame and may reset one
-workflow node before starting the fork.
+`submitted: false` (text output `Run already active`) instead of launching a
+duplicate continuation when the linked workflow is still active (its Smithers
+run state is `running`, `recovering`, or one of the `waiting-*` states), and
+leaves the run's recorded state and workflow deadline unchanged. A run still
+finishing its in-flight tasks after `pause` is still active; resume it again
+once `status` reports `paused`. Smithers also reports a run as `running` for up
+to 30 seconds after its controller process exits (its heartbeat window), so
+resume such a run again after that. `resume --reset-node` retries one failed
+workflow node and its dependents in the same linked run; the applied reset is
+recorded so retrying the command after a failed continuation resumes the
+already-reset run instead of repeating the reset. `fork` may start from a
+checkpoint frame and may reset one workflow node before starting the fork.
 
 Every command in this section takes an Ultrafuzz run ID and resolves the linked
 workflow run from existing product evidence; none of them require the
@@ -483,6 +522,24 @@ after the run has already stopped converges on the confirmed result instead of
 failing. Both outcomes append
 distinct product events. Failures use the stable `WORKFLOW_CANCEL_FAILED`
 diagnostic.
+
+`pause` and `cancel` read run evidence the way `status` does, without the
+workflow control lock. A run whose sealed control documents diverged, for
+example a hand-patched published workflow or a planned graph that no longer
+matches the current build's artifact contracts after a rebuild, can therefore
+still be paused or cancelled; `status` reports the divergence. They start the
+workflow runner from the run's published execution snapshot, so, like
+`status`, they still refuse a run whose sealed execution files changed: the
+files the control seal lists in that snapshot, such as the run plan, prompts,
+agent adapters, and the runtime packages and their dependencies.
+
+Because they take no lock, `pause` and `cancel` issued while a launch is still
+preparing fail without changing the run; retry once `ultrafuzz run` has
+returned. They also do not reconcile a `replay` or `fork` that was interrupted
+while linking its new workflow run, so they act on the workflow run it
+replaced, or refuse. Run `ultrafuzz why <run-id>` before pausing or cancelling
+such a run: it reconciles that link, even when it then reports a diverged
+control document.
 
 `why` returns a deterministic diagnosis: a summary, the current node, and typed
 blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,
@@ -537,31 +594,33 @@ non-launching configuration contract unchanged. Doctor reports:
 - config, topology, prompt, and reference validation posture;
 - required topology backends, toolchain, and configured agent executable
   availability in the configured execution environment (the local `PATH` for
-  local runs or a transient probe of the provider image for cloud runs);
+  local runs or a transient probe of the provider image for cloud runs). Only
+  the executables of agents the selected topology can dispatch to, including
+  its `[retry] agents` fallbacks, are required; other configured profiles'
+  executables are listed as not required;
 - the bundled workflow engine version, the version the generated project
   requires, and the installed project-local version and bin target;
 - npm's latest published stable engine version when the registry check is
   available;
-- whether the installed dependency layout passes Ultrafuzz's exact
-  manifest and path validation;
-- whether required compatibility patches, or their upstream replacements, are
-  present. A source carrying neither the patch nor the shape Ultrafuzz patches
-  is reported as modified or incompatible, because the next run fails in that
-  state.
+- whether the project-local dependency layout passes Ultrafuzz's exact
+  manifest and path validation, and the posture of each compatibility patch in
+  it. Both are informational: a launch installs, patches, and seals its own
+  operator-owned controller;
+- the OS temporary directory, where launch and resume install that controller:
+  its free space and how many `ultrafuzz-controller-*` directories it holds,
+  with their total size. Doctor warns when the directory is a RAM-backed tmpfs
+  or has less than 2 GiB free, and never removes those directories, because a
+  native resume keeps its controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies. For cloud execution, checking required commands may create the
 configured provider app on first use and uses a transient sandbox so the probe
 runs inside the same image as workflow nodes.
 
-Diagnostics are stable: `DOCTOR_TOOLCHAIN_MISSING`,
-`DOCTOR_TOOLCHAIN_PROBE_FAILED`,
-`DOCTOR_WORKFLOW_ENGINE_MISSING`,
-`DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH`,
-`DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID`,
-`DOCTOR_WORKFLOW_ENGINE_PATCHES_PENDING`,
-`DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE`,
-`DOCTOR_WORKFLOW_ENGINE_OUTDATED`, and `DOCTOR_REGISTRY_UNAVAILABLE`. A registry or network failure produces a
+Diagnostics are stable: `DOCTOR_AGENT_CREDENTIAL_MISSING`,
+`DOCTOR_TOOLCHAIN_MISSING`, `DOCTOR_TOOLCHAIN_PROBE_FAILED`,
+`DOCTOR_WORKFLOW_ENGINE_OUTDATED`, `DOCTOR_REGISTRY_UNAVAILABLE`, and
+`DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED`. A registry or network failure produces a
 warning and an `unknown` latest version instead of failing an otherwise valid
 offline project. Doctor never installs, mutates, or upgrades dependencies.
 
@@ -748,8 +807,8 @@ directory per target id under `--target-root`) against the pinned git refs;
 `--skip-target-validation` skips that check.
 
 `run` launches Ultrafuzz runs for matrix rows (all rows, or a `--row`
-selection) and polls them to a terminal state. Reports and telemetry remain
-in local run artifacts. `--no-watch` launches detached without polling.
+selection) and polls them to a terminal state. Reports remain in local run
+artifacts. `--no-watch` launches detached without polling.
 
 `status` reads the eval matrix, its latest `runs.jsonl` records, and each
 linked durable `state.json` without synchronizing or changing workflow state.
@@ -801,5 +860,4 @@ candidate repository, immutable source artifact, and publication URL flags.
 performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
-[Eval Suites](evals.md) for configuration, architecture, and telemetry policy
-details.
+[Eval Suites](evals.md) for configuration and architecture details.

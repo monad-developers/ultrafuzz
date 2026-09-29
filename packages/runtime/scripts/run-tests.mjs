@@ -12,13 +12,7 @@ const selectorFiles = new Map([
       .filter((entry) => entry.endsWith(".test.js") && entry !== "runtime.test.js")
       .sort()
       .map((entry) => path.join("dist-test/test", entry))
-  ],
-  [
-    "materialize",
-    ["dist-test/test/materialize.test.js", "dist-test/test/clean.test.js", "dist-test/test/runtime.test.js"]
-  ],
-  ["clean", ["dist-test/test/clean.test.js", "dist-test/test/runtime.test.js"]],
-  ["smithers", ["dist-test/test/runtime.test.js"]]
+  ]
 ]);
 
 const testFiles =

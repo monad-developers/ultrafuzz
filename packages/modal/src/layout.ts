@@ -14,10 +14,6 @@ export function persistentDataRoot(runId: string, slug: string): string {
   return path.posix.join("/data", runId, slug);
 }
 
-export function persistentWorkspaceRoot(runId: string, slug: string): string {
-  return path.posix.join(persistentDataRoot(runId, slug), "workspace");
-}
-
 export function modalVolumeName(runId: string, slug: string): string {
   const identity = `${runId}\0${slug}`;
   const suffix = createHash("sha256").update(identity).digest("hex").slice(0, 12);

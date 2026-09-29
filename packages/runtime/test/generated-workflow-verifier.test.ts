@@ -10,6 +10,7 @@ import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import * as ts from "typescript";
 import { z } from "zod/v4";
+import { loadAgentPreambleTemplate } from "@ultrafuzz/prompts";
 
 import {
   artifactContractDefinition,
@@ -470,6 +471,7 @@ function loadFinalReportAgentExecutionAuthority(
 function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: string } = {}): {
   preflight(): void;
   observedTimeoutMs(): number | undefined;
+  spawnCount(): number;
   budgetMs: number;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -480,6 +482,7 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   let observedTimeout: number | undefined;
+  let spawns = 0;
   const loaded = new Function(
     "artifactSchemaRegistry",
     "artifactValidatorSmokeFixturePath",
@@ -494,6 +497,7 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
     () => [{ filename: "findings.schema.json" }],
     () => path.join(path.sep, "fixture", "findings.json"),
     (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
+      spawns += 1;
       observedTimeout = spawnOptions.timeout;
       if (options.failure !== undefined) throw options.failure;
       return options.stdout ?? "{}";
@@ -504,8 +508,27 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
   return {
     preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas")),
     observedTimeoutMs: () => observedTimeout,
+    spawnCount: () => spawns,
     budgetMs: loaded.budgetMs
   };
+}
+
+type AgentPromptRenderer = (values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }) => string;
+
+function loadAgentPromptRenderer(template: string): AgentPromptRenderer {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function renderAgentPrompt");
+  const helperEnd = source.indexOf("\nfunction sourceUsesPinnedBranch", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "agentPromptTemplate",
+    "authorizedDefensiveSecurityContext",
+    "untrustedContentBoundary",
+    `${helper}; return renderAgentPrompt;`
+  )(template, "SECURITY CONTEXT", "UNTRUSTED BOUNDARY") as AgentPromptRenderer;
 }
 
 function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
@@ -3102,6 +3125,22 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
       mutate: (_plan, result) => {
         result.campaign_outcome = "partial";
       }
+    },
+    {
+      // The shared registry gate owns the stateful sequence length, so a
+      // one-step campaign fails here, inside the attempt, not at the host.
+      label: "stateful sequence length",
+      mutate: (plan, result, summary) => {
+        const command = GENERATED_CAMPAIGN_COMMAND.replace("--seq-len 100", "--seq-len 1");
+        record(plan.backend).exact_shell_escaped_command = command;
+        record((plan.command_plan as unknown[])[0]).command = command;
+        result.exact_command = command;
+        record(result.execution).command = command;
+        plan.recon_sequence_length = 1;
+        result.sequence_length = 1;
+        summary.sequence_length = 1;
+      },
+      alsoMatches: /--seq-len 100/u
     },
     {
       // #693 surface 3: the wrong-field bug — execution.deadline copied from
@@ -6175,7 +6214,12 @@ test("generated optional admission rejects a present malformed marker before pub
 
     assert.throws(
       () => harness.prepareAndBuild(consumer, runRoot, { agentRef: "codex" }),
-      /verification marker is schema-invalid optional-producer/u
+      (error: Error & { details?: unknown }) => {
+        assert.match(error.message, /verification marker is schema-invalid optional-producer/u);
+        // A retry would re-read the same producer bytes, so Smithers must not spend the budget (#1144).
+        assert.deepEqual(error.details, { failureRetryable: false });
+        return true;
+      }
     );
     assert.equal(dependencyAuthenticationCount, 1, "a present optional marker must be authenticated");
     assert.equal(harness.hasAdmission(consumer.attemptId), false, "failed authentication must not publish admission");
@@ -6619,7 +6663,11 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   };
   assert.throws(
     () => harness.current(consumer),
-    /dependency authority changed after admission patch-producer/u,
+    (error: Error & { details?: unknown }) => {
+      assert.match(error.message, /dependency authority changed after admission patch-producer/u);
+      assert.deepEqual(error.details, { failureRetryable: false }, "the agent's admission recheck is deterministic");
+      return true;
+    },
     "an identical-byte marker replacement must not inherit the admitted identity"
   );
 
@@ -6780,6 +6828,42 @@ test("generated validator preflight budgets a contended CLI start and reports th
       assert.equal(normalizeNodeAttemptFailureMessage(reported), reported);
       return true;
     }
+  );
+});
+
+test("generated validator preflight spawns the CLI once per engine process and never remembers a failure", () => {
+  // One engine process runs every prepare and agent-attempt reset. The CLI answer does not depend on
+  // the task, so only the first success spawns it.
+  const harness = loadJsonValidatorPreflight();
+  harness.preflight();
+  harness.preflight();
+  harness.preflight();
+  assert.equal(harness.spawnCount(), 1);
+
+  const failing = loadJsonValidatorPreflight({
+    failure: Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" })
+  });
+  assert.throws(() => failing.preflight(), /JSON validator preflight failed/u);
+  assert.throws(() => failing.preflight(), /JSON validator preflight failed/u);
+  assert.equal(failing.spawnCount(), 2, "a failed preflight must be retried by the next caller");
+});
+
+test("generated agent prompt inserts literal braces from task and operator prompts verbatim", () => {
+  const render = loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"));
+  // Model-authored goal text, an escaped prompt example and an operator note are all inserted text,
+  // not placeholders of the trusted template. Any one of them used to throw inside every render.
+  const taskPrompt = "Find where a late tick lets {{amount}} round down.\nThe plan escaped \\{{window}} on purpose.\n";
+  const operatorPrompt = "Prefer {{ reentrancy }} leads.\n\n";
+  assert.equal(
+    render({ runtimeContext: "## Topology Runtime Context", operatorPrompt, taskPrompt }),
+    `SECURITY CONTEXT\n\nUNTRUSTED BOUNDARY\n\n## Topology Runtime Context\n\n${operatorPrompt}${taskPrompt}`
+  );
+
+  // A placeholder the template itself cannot bind is still a controller defect, reported by name.
+  const unbound = loadAgentPromptRenderer("{{runtime_context}}\n{{retry_failure}}\n{{task_prompt}}");
+  assert.throws(
+    () => unbound({ runtimeContext: "context", operatorPrompt: "", taskPrompt: "task" }),
+    /agent prompt template contains an unresolved variable: retry_failure$/u
   );
 });
 
@@ -8153,6 +8237,11 @@ test("agent failure normalization preserves only validated Smithers recovery con
     const normalized = await captureAgentFailure(failure);
     assert.equal(normalized.code, code);
     assert.deepEqual(normalized.details, details);
+  }
+  // Agent CLI deadlines keep their code: run synchronization labels timeouts by code alone (#1144).
+  for (const code of ["PROCESS_TIMEOUT", "PROCESS_IDLE_TIMEOUT"]) {
+    const deadline = await captureAgentFailure(Object.assign(new Error("CLI timed out after 1800000ms"), { code }));
+    assert.equal(deadline.code, code);
   }
 
   const abort = new Error("operation aborted") as Error & { code: string };

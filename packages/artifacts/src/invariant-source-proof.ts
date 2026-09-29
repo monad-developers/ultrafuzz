@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 
-import { validateWithZod, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
+import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { executeSemanticGate } from "./semantic-gates.js";
 
 export const INVARIANT_SOURCE_PROOF_SCHEMA_VERSION = "ultrafuzz.invariant-source-proof.v1" as const;
@@ -41,7 +41,6 @@ export const invariantSourceProofSchema = z.strictObject({
 });
 
 export type InvariantSourceProof = z.infer<typeof invariantSourceProofSchema>;
-export type InvariantSourceProofFile = z.infer<typeof invariantSourceProofFileSchema>;
 
 export function validateInvariantSourceProofSchema(
   value: unknown,
@@ -66,10 +65,6 @@ export function validateInvariantSourceProofSchema(
 
 function prefixedSemanticPath(rootPath: string, semanticPath: string): string {
   return semanticPath === "$" ? rootPath : `${rootPath}${semanticPath.slice(1)}`;
-}
-
-export function invariantSourceProofSchemaIssues(value: unknown, path = "$"): SchemaValidationIssue[] {
-  return validateInvariantSourceProofSchema(value, path).issues;
 }
 
 export const invariantSourceProofJsonSchema = {

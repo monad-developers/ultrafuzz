@@ -22,8 +22,6 @@ Schema IDs are stable, fragment-free URNs such as:
 - `urn:ultrafuzz:schema:evals:benchmark-lanes:2`
 - `urn:ultrafuzz:schema:evals:ground-truth:1`
 - `urn:ultrafuzz:schema:evals:history:2`
-- `urn:ultrafuzz:schema:evals:history-automatic-publication-plan:1`
-- `urn:ultrafuzz:schema:evals:history-publication-generation:1`
 - `urn:ultrafuzz:schema:evals:run-record:3`
 - `urn:ultrafuzz:schema:evals:recovery-equivalence:1`
 - `urn:ultrafuzz:schema:evals:status:1`
@@ -90,7 +88,13 @@ a working-tree rebuild cannot change an active run. Ambient Node loader/search
 variables are removed and both ESM and CommonJS module resolution must stay
 inside that snapshot; document reads are unaffected. A path lookup alone is not
 a preflight. Ordinary resume now delegates continuation to Smithers instead of
-using the historical launcher or closure as an authorization gate. A current
+using the historical launcher or closure as an authorization gate. When resume
+cannot re-verify the launcher, it reports a `WORKFLOW_TRUSTED_CLI_UNVERIFIED`
+warning and, if `<run>/trusted-bin/ultrafuzz` exists, keeps it first on `PATH`
+rather than letting tasks reach another `ultrafuzz`. That launcher still
+verifies its closure before every dispatch, so if its metadata or closure is
+damaged, or the Node binary it names is gone, each task's validator preflight
+fails; `resume --refresh-controller` does not repair such a launcher. A current
 controller refresh publishes a new controller path without rewriting the
 historical closure.
 

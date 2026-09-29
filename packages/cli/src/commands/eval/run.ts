@@ -13,7 +13,7 @@ import {
 import { toCliEvalRunData } from "../../cli-contracts.js";
 
 export default class EvalRun extends Command {
-  static override summary = "Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry";
+  static override summary = "Launch Ultrafuzz runs for an eval suite matrix and watch them to a terminal state";
   static override flags = {
     ...globalFlags,
     suite: Flags.string({ summary: "Eval suite YAML path (defaults to [eval].eval_config)" }),
@@ -26,7 +26,7 @@ export default class EvalRun extends Command {
       summary: "Maximum time to watch each launched row before returning",
       min: 1
     }),
-    "no-watch": Flags.boolean({ summary: "Launch detached without polling runs or streaming node telemetry" })
+    "no-watch": Flags.boolean({ summary: "Launch detached without polling runs" })
   };
 
   async run(): Promise<void> {

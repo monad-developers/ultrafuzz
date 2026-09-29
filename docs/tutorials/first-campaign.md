@@ -12,9 +12,10 @@ You need:
 - Node.js `22.19.0` or newer and the repository-pinned `pnpm` `11.1.1` for the
   TypeScript workspace.
 - Bun `1.3` or newer for the Smithers workflow executable, plus Git.
-- The CLI executables for the configured agent profiles and their credentials.
-  `doctor` checks executables for every configured model profile, including
-  profiles that are not selected for a run.
+- The CLI executables for the agent profiles your topology selects, and their
+  credentials. `doctor` requires the executables of the agents the selected
+  topology and its retry fallbacks use, and lists the other configured
+  profiles' executables as not required.
 - Foundry (`forge`) and the target project's test dependencies and layout.
 
 See [Development Commands](../reference/development.md) for host runtime and

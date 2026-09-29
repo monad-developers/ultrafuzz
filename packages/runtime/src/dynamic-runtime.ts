@@ -12,8 +12,7 @@ import {
   sha256Bytes,
   validateNodeReference,
   validateSafeId,
-  writeFileDurable,
-  writeJsonDurable
+  writeFileDurable
 } from "@ultrafuzz/artifacts";
 import { renderPrompt, type PromptConcreteNode, type PromptGraphNode } from "@ultrafuzz/prompts";
 
@@ -183,9 +182,11 @@ function deriveDynamicRuntime(
   if (mode === "publish") {
     // Publish tasks first. A concurrent synchronizer may temporarily skip an
     // unknown graph node, while the reverse ordering could finalize a graph node
-    // against stale task identity. Both files are themselves atomically replaced.
-    writeJsonDurable(tasksPath, runtimeTaskDocument);
-    writeJsonDurable(graphPath, runtimeGraph);
+    // against stale task identity. Both files are themselves atomically replaced,
+    // and only when their bytes change: this runs on every render, and most
+    // renders re-derive exactly the documents already on disk.
+    writeJsonDurableIfChanged(tasksPath, runtimeTaskDocument);
+    writeJsonDurableIfChanged(graphPath, runtimeGraph);
   } else {
     const observedTasks = readRecord(tasksPath);
     const observedGraph = readPlannedGraph(graphPath);
@@ -330,6 +331,16 @@ function instantiateDynamicGraphNode(input: {
   };
 }
 
+/**
+ * Continuation lets independent tasks settle; it does not make a strategy's required inputs
+ * optional. Only the review group reconciles partial results, so only its tasks treat a continuing
+ * producer's output as optional (#1120). The compiler and dynamic lowering share this one rule; the
+ * task-manifest gate checks only that optional inputs come from continuing producers.
+ */
+export function reconcilesPartialResults(task: Pick<CompiledSmithersTask, "metadata">): boolean {
+  return task.metadata.node.group === "review";
+}
+
 function lowerTaskDynamicDependencies(
   task: CompiledSmithersTask,
   groups: readonly CompiledSmithersDynamicGroup[],
@@ -370,7 +381,7 @@ function lowerTaskDynamicDependencies(
     dependencies.push(...generated.map((candidate) => candidate.attemptId));
     dependencySmithersNodeIds.push(...generated.map((candidate) => candidate.verifierSmithersNodeId));
     dependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
-    if (group.continueOnFail && task.metadata.node.group === "review") {
+    if (group.continueOnFail && reconcilesPartialResults(task)) {
       optionalDependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
     }
     concreteNodeIds.push(...manifest.items.map((item) => item.node_id));
@@ -636,6 +647,12 @@ function readPlannedGraph(graphPath: string): PlannedGraph {
     throw new Error("persisted runtime graph is invalid");
   }
   return value as PlannedGraph;
+}
+
+/** Same bytes as `writeJsonDurable`, skipping the replace and fsyncs when the file already holds them. */
+function writeJsonDurableIfChanged(filePath: string, value: unknown): void {
+  const bytes = `${JSON.stringify(value, null, 2)}\n`;
+  if (fs.readFileSync(filePath, "utf8") !== bytes) writeFileDurable(filePath, bytes);
 }
 
 function readRecord(filePath: string): Record<string, unknown> {

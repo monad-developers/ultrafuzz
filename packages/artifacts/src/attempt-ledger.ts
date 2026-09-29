@@ -1,7 +1,4 @@
-import { isDeepStrictEqual } from "node:util";
-
 import {
-  matchesRedactedText,
   redactSecretsInText,
   redactedTextSpanCodePointLengths,
   SENSITIVE_REDACTION_PLACEHOLDER
@@ -629,46 +626,6 @@ export function appendNodeAttempt(
   return appendNodeAttempts(layout, [input])[0]!;
 }
 
-/** Preserve an inserted redaction only when its exact spans and all surrounding evidence replay unchanged. */
-export function reconcileNodeAttemptLedgerEntry(
-  prior: NodeAttemptLedgerEntry,
-  candidate: NodeAttemptLedgerEntry,
-  replayEvidence: { failureMessage?: string } = {}
-): NodeAttemptLedgerEntry | undefined {
-  if (isDeepStrictEqual(prior, candidate)) return prior;
-
-  const {
-    failure_message: priorFailureMessage,
-    failure_message_redaction_span_code_points: priorRedactionSpanCodePoints,
-    failure_message_truncated: priorFailureMessageTruncated,
-    ...priorWithoutFailureMessage
-  } = prior;
-  const {
-    failure_message: candidateFailureMessage,
-    failure_message_redaction_span_code_points: _candidateRedactionSpanCodePoints,
-    failure_message_truncated: _candidateFailureMessageTruncated,
-    ...candidateWithoutFailureMessage
-  } = candidate;
-  const replayFailure =
-    replayEvidence.failureMessage === undefined ||
-    replayEvidence.failureMessage.includes(SENSITIVE_REDACTION_PLACEHOLDER)
-      ? undefined
-      : normalizeNodeAttemptFailureText(replayEvidence.failureMessage);
-  if (
-    typeof priorFailureMessage === "string" &&
-    typeof candidateFailureMessage === "string" &&
-    priorRedactionSpanCodePoints !== undefined &&
-    replayFailure !== undefined &&
-    isDeepStrictEqual(priorWithoutFailureMessage, candidateWithoutFailureMessage) &&
-    matchesRedactedText(priorFailureMessage, replayFailure, priorRedactionSpanCodePoints, {
-      allowObservedSuffix: priorFailureMessageTruncated === true
-    })
-  ) {
-    return prior;
-  }
-  return undefined;
-}
-
 export function appendNodeAttempts(
   layout: Pick<RunLayout, "runId" | "root" | "attemptLedgerPath">,
   inputs: readonly AppendNodeAttemptInput[]
@@ -679,18 +636,17 @@ export function appendNodeAttempts(
   const byIdentity = new Map(existing.map((entry) => [nodeAttemptLedgerIdentity(entry), entry]));
   const pending: NodeAttemptLedgerEntry[] = [];
   const results = inputs.map((input): AppendNodeAttemptResult => {
+    // A Smithers occurrence is recorded once: replaying its identity returns the
+    // stored entry without re-deriving or comparing it.
+    const prior = byIdentity.get(
+      nodeAttemptLedgerIdentity({
+        workflow_run_id: input.workflowRunId,
+        source_event_sequence: input.sourceEventSequence
+      })
+    );
+    if (prior !== undefined) return { entry: prior, appended: false };
     const candidate = createNodeAttemptLedgerEntry(layout, input);
     const identity = nodeAttemptLedgerIdentity(candidate);
-    const prior = byIdentity.get(identity);
-    if (prior !== undefined) {
-      const reconciled = reconcileNodeAttemptLedgerEntry(prior, candidate, {
-        failureMessage: input.failureMessage
-      });
-      if (reconciled === undefined) {
-        throw new Error(`node attempt ${identity} was already recorded with different immutable data`);
-      }
-      return { entry: reconciled, appended: false };
-    }
     byIdentity.set(identity, candidate);
     pending.push(candidate);
     return { entry: candidate, appended: true };

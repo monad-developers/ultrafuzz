@@ -116,6 +116,33 @@ export default tseslint.config(
       ]
     }
   },
+  {
+    // Runtime templates are copied into projects and executed by Bun without a
+    // type check, so an undefined name would first fail when a run renders it.
+    // The declared globals are the placeholders the compiler substitutes.
+    files: ["packages/runtime/src/templates/**/*.tsx"],
+    languageOptions: {
+      globals: Object.fromEntries(
+        [
+          "AGENT_PROMPT_TEMPLATE",
+          "AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT",
+          "COMPILED_TASKS",
+          "DYNAMIC_GROUPS",
+          "MAX_DYNAMIC_NODES",
+          "REPLACE_PROMPT_SCHEMAS",
+          "RETRY_FAILURE_TEMPLATE",
+          "RUN_ID_LITERAL",
+          "RUN_ROOT_RELATIVE",
+          "SOURCE_PROJECT_ROOT",
+          "TASK_SPECS",
+          "UNTRUSTED_CONTENT_BOUNDARY",
+          "WORKFLOW_NAME",
+          "WORKFLOW_PATH_RELATIVE"
+        ].map((name) => [`__ULTRAFUZZ_${name}__`, "readonly"])
+      )
+    },
+    rules: { "no-undef": "error" }
+  },
   eslintConfigPrettier,
   ...(strictLint ? diff.configs[process.env.CI ? "flat/ci" : "flat/diff"] : [])
 );

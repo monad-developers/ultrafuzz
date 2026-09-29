@@ -10,16 +10,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   appendEvalRunRecord,
   parseEvalFindingScore,
-  parseEvalPublicationState,
   parseEvalReviewQueueItem,
   parseEvalRunManifest,
   parseEvalRunRecord,
   parseEvalRunSummary,
   parseEvalScoreSummary,
-  parseTelemetryCursor,
   readEvalFindingScores,
   readEvalMatrix,
-  readEvalPublicationState,
   readEvalReviewQueue,
   readEvalRunManifest,
   readEvalRunRecords,
@@ -29,7 +26,6 @@ import {
   serializeEvalFindingScores,
   serializeEvalReviewQueue,
   writeEvalMatrix,
-  writeEvalPublicationState,
   writeEvalRunManifest,
   writeEvalRunSummary,
   writeEvalScoreSummary
@@ -237,24 +233,6 @@ describe("eval durable schema registry", () => {
     for (const [schemaId, value] of fixtures) {
       expect(validateEvalJsonSchema(schemaId, value), schemaId).toMatchObject({ ok: true, issues: [] });
     }
-    expect(
-      parseEvalPublicationState({
-        schema_version: "ultrafuzz.eval.publication.v1",
-        status: "publishable",
-        diagnostics: []
-      })
-    ).toBeDefined();
-    expect(
-      parseTelemetryCursor({
-        schemaVersion: "ultrafuzz.eval.telemetry-cursor.v1",
-        byteOffset: 0,
-        deliveredEventIds: [],
-        uploadedArtifacts: {},
-        lastHeartbeatAt: {},
-        providerIds: {},
-        findingsCountByNode: {}
-      })
-    ).toBeDefined();
   });
 
   it("keeps durable run-manifest concurrency limits aligned with suite planning", () => {
@@ -294,24 +272,17 @@ describe("eval durable readers and writers", () => {
     const recordsPath = path.join(root, "runs.jsonl");
     const runSummaryPath = path.join(root, "run-summary.json");
     const scoreSummaryPath = path.join(root, "summary.json");
-    const publicationPath = path.join(root, "publication-state.json");
     writeEvalRunManifest(manifestPath, manifest);
     writeEvalMatrix(matrixPath, [row]);
     fs.writeFileSync(recordsPath, "");
     appendEvalRunRecord(recordsPath, record);
     writeEvalRunSummary(runSummaryPath, runSummary);
     writeEvalScoreSummary(scoreSummaryPath, scoreSummary);
-    writeEvalPublicationState(publicationPath, {
-      schema_version: "ultrafuzz.eval.publication.v1",
-      status: "publishable",
-      diagnostics: []
-    });
     expect(readEvalRunManifest(manifestPath)).toEqual(manifest);
     expect(readEvalMatrix(matrixPath)).toEqual([row]);
     expect(readEvalRunRecords(recordsPath)).toEqual([record]);
     expect(readEvalRunSummary(runSummaryPath)).toEqual(runSummary);
     expect(readEvalScoreSummary(scoreSummaryPath)).toEqual(scoreSummary);
-    expect(readEvalPublicationState(publicationPath).status).toBe("publishable");
   });
 
   it("rejects duplicate keys, invalid UTF-8, and wrong versions", () => {

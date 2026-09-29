@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createRunLayout, getNodeArtifactDir } from "@ultrafuzz/artifacts";
-import { verifyRequiredArtifactsForAttempt, type PlannedGraphNode } from "@ultrafuzz/runtime";
+import {
+  verifyRequiredArtifactsForAttempt,
+  type ArtifactGateAttemptAuthority,
+  type PlannedGraphNode
+} from "@ultrafuzz/runtime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -39,7 +43,7 @@ describe("terminal artifact-gate recovery", () => {
       const notesBefore = fs.readFileSync(notesPath);
       const findingsBefore = artifactState === "schema-invalid" ? fs.readFileSync(findingsPath) : undefined;
 
-      const gate = verifyRequiredArtifactsForAttempt(layout, findingsNode(), "task-one");
+      const gate = verifyRequiredArtifactsForAttempt(layout, findingsNode(), "task-one", OUTPUT_ONLY_AUTHORITY);
       expect(gate.ok).toBe(false);
       expect(gate.missing).toEqual(artifactState === "missing" ? ["findings.json"] : []);
       if (artifactState === "schema-invalid") {
@@ -219,6 +223,12 @@ function taskWorkflow(attemptId: string, runId = WORKFLOW_RUN_ID) {
     state: "finished"
   };
 }
+
+/**
+ * A missing or schema-invalid findings output is rejected from its own bytes,
+ * before any gate reads the sealed attempt declarations, so none are modeled.
+ */
+const OUTPUT_ONLY_AUTHORITY = { task: {}, tasks: [] } as unknown as ArtifactGateAttemptAuthority;
 
 /** The strategy node whose only declared output carries the findings contract. */
 function findingsNode(): PlannedGraphNode {

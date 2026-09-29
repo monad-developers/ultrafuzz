@@ -1303,14 +1303,17 @@ function publishWorkflowExecutionSnapshot(
       inode: temporaryStat.ino
     };
     assertSnapshotPublicationBoundary(boundary, "workflow execution snapshot creation");
-    for (const [relative, contents] of expectedFiles) writeSnapshotFile(accessRoot, relative, contents, boundary);
+    const executables = new Set(executablePaths);
+    for (const [relative, contents] of expectedFiles) {
+      writeSnapshotFile(accessRoot, relative, contents, executables.has(relative) ? 0o500 : 0o400, boundary);
+    }
     for (const [relative, target] of expectedLinks) writeSnapshotLink(accessRoot, relative, target, boundary);
-    sealSnapshotPermissions(accessRoot, new Set(executablePaths), boundary);
+    sealSnapshotPermissions(accessRoot, boundary);
     verifyPublishedWorkflowExecutionSnapshot(
       accessRoot,
       expectedFiles,
       expectedLinks,
-      new Set(executablePaths),
+      executables,
       temporaryLexicalPath
     );
     assertSnapshotPublicationBoundary(boundary, "workflow execution snapshot publication");
@@ -1448,6 +1451,7 @@ function writeSnapshotFile(
   root: string,
   relativePath: string,
   contents: Buffer,
+  mode: number,
   boundary: SnapshotPublicationBoundary
 ): void {
   snapshotPath(root, relativePath, "workflow execution snapshot file");
@@ -1458,7 +1462,7 @@ function writeSnapshotFile(
     const descriptor = fs.openSync(
       destination,
       fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0),
-      0o400
+      mode
     );
     try {
       let offset = 0;
@@ -1467,6 +1471,9 @@ function writeSnapshotFile(
         if (written <= 0) throw new Error(`workflow execution snapshot write made no progress: ${relativePath}`);
         offset += written;
       }
+      // The umask can clear bits of the creation mode. Setting the final mode through the
+      // creating descriptor lets this file's single flush make its bytes and mode durable.
+      fs.fchmodSync(descriptor, mode);
       fs.fsyncSync(descriptor);
       const observed = Buffer.alloc(contents.byteLength);
       let readOffset = 0;
@@ -1889,11 +1896,7 @@ function workflowSnapshotEnvironment(
   });
 }
 
-function sealSnapshotPermissions(
-  root: string,
-  executablePaths: ReadonlySet<string>,
-  boundary: SnapshotPublicationBoundary
-): void {
+function sealSnapshotPermissions(root: string, boundary: SnapshotPublicationBoundary): void {
   if (root !== boundary.accessRoot || boundary.descriptor === undefined) {
     throw new Error("workflow execution snapshot permission sealing requires its root descriptor");
   }
@@ -1906,17 +1909,22 @@ function sealSnapshotPermissions(
       device: boundary.device,
       inode: boundary.inode
     },
-    "",
-    executablePaths
+    ""
   );
   assertSnapshotPublicationBoundary(boundary, "workflow execution snapshot durability flush");
 }
 
+/**
+ * Make every snapshot directory read-only, deepest first. Files already carry
+ * their final mode from `writeSnapshotFile` and links have none, so neither is
+ * reopened here. Publication verification then checks each file's mode, link
+ * count, and bytes, each link's target, that every directory is read-only, and
+ * that no entry is missing or unexpected.
+ */
 function sealSnapshotDirectoryPermissions(
   boundary: SnapshotPublicationBoundary,
   directory: OpenedSnapshotPublicationDirectory,
-  relativeDirectory: string,
-  executablePaths: ReadonlySet<string>
+  relativeDirectory: string
 ): void {
   assertSnapshotPublicationBoundary(boundary, "workflow execution snapshot permission seal");
   assertOpenedPublicationDirectoryCurrent(directory, "workflow execution snapshot permission seal");
@@ -1937,70 +1945,36 @@ function sealSnapshotDirectoryPermissions(
     ) {
       throw new Error(`workflow execution snapshot entry changed during permission sealing: ${relative}`);
     }
-    if (accessed.isSymbolicLink()) continue;
-    if (accessed.isDirectory()) {
-      const descriptor = openSnapshotDirectory(candidate);
-      if (descriptor === undefined) {
-        throw new Error("workflow execution snapshot directory has no descriptor-rooted permission support");
-      }
-      try {
-        const opened = fs.fstatSync(descriptor);
-        if (!opened.isDirectory() || opened.dev !== accessed.dev || opened.ino !== accessed.ino) {
-          throw new Error(`workflow execution snapshot directory changed while sealing: ${relative}`);
-        }
-        const descriptorPath = verifiedSnapshotDescriptorPath(
-          descriptor,
-          opened.dev,
-          opened.ino,
-          "workflow execution snapshot directory"
-        );
-        if (descriptorPath === undefined) {
-          throw new Error("workflow execution snapshot directory lost descriptor-rooted permission support");
-        }
-        sealSnapshotDirectoryPermissions(
-          boundary,
-          {
-            accessPath: descriptorPath,
-            lexicalPath: lexicalCandidate,
-            descriptor,
-            device: opened.dev,
-            inode: opened.ino
-          },
-          relative,
-          executablePaths
-        );
-      } finally {
-        fs.closeSync(descriptor);
-      }
-      continue;
+    if (!accessed.isDirectory()) continue;
+    const descriptor = openSnapshotDirectory(candidate);
+    if (descriptor === undefined) {
+      throw new Error("workflow execution snapshot directory has no descriptor-rooted permission support");
     }
-    if (!accessed.isFile()) {
-      throw new Error(`workflow execution snapshot contains a non-regular entry while sealing: ${relative}`);
-    }
-    const descriptor = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     try {
       const opened = fs.fstatSync(descriptor);
-      if (!opened.isFile() || opened.dev !== accessed.dev || opened.ino !== accessed.ino || opened.nlink !== 1) {
-        throw new Error(`workflow execution snapshot file changed while sealing: ${relative}`);
+      if (!opened.isDirectory() || opened.dev !== accessed.dev || opened.ino !== accessed.ino) {
+        throw new Error(`workflow execution snapshot directory changed while sealing: ${relative}`);
       }
-      fs.fchmodSync(descriptor, executablePaths.has(relative) ? 0o500 : 0o400);
-      fs.fsyncSync(descriptor);
-      const completed = fs.fstatSync(descriptor);
-      const completedAccess = fs.lstatSync(candidate);
-      const completedLexical = fs.lstatSync(lexicalCandidate);
-      for (const observed of [completedAccess, completedLexical]) {
-        if (
-          !observed.isFile() ||
-          observed.isSymbolicLink() ||
-          observed.dev !== completed.dev ||
-          observed.ino !== completed.ino ||
-          observed.mode !== completed.mode ||
-          observed.nlink !== completed.nlink ||
-          observed.size !== completed.size
-        ) {
-          throw new Error(`workflow execution snapshot file changed after sealing: ${relative}`);
-        }
+      const descriptorPath = verifiedSnapshotDescriptorPath(
+        descriptor,
+        opened.dev,
+        opened.ino,
+        "workflow execution snapshot directory"
+      );
+      if (descriptorPath === undefined) {
+        throw new Error("workflow execution snapshot directory lost descriptor-rooted permission support");
       }
+      sealSnapshotDirectoryPermissions(
+        boundary,
+        {
+          accessPath: descriptorPath,
+          lexicalPath: lexicalCandidate,
+          descriptor,
+          device: opened.dev,
+          inode: opened.ino
+        },
+        relative
+      );
     } finally {
       fs.closeSync(descriptor);
     }

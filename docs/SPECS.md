@@ -478,7 +478,6 @@ Before or at launch, each run MUST persist:
 - immutable rendered prompt snapshots under `prompt-snapshots/`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
-- event query indexes under `events.index/`
 - workspace metadata under `workspaces/`
 
 Reporting is agentic and lives in final-report artifacts.

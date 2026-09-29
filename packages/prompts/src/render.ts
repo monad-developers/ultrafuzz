@@ -1,6 +1,5 @@
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   findingNoteKeyPromptVocabulary,
@@ -199,7 +198,6 @@ type ArtifactProducer =
 
 export interface TemplateOccurrence {
   name: string;
-  rawName: string;
   start: number;
   end: number;
 }
@@ -625,34 +623,9 @@ function loadOutputContractTemplate(relativePath: string): string {
   if (cached !== undefined) {
     return cached;
   }
-  const template = readFileSync(path.join(outputContractTemplateRoot(), relativePath), "utf8");
+  const template = readFileSync(path.join(builtInPromptRoot(), "_templates", "output-contract", relativePath), "utf8");
   outputContractTemplateCache.set(relativePath, template);
   return template;
-}
-
-function outputContractTemplateRoot(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    // This build now copies the prompt tree to dist/assets/prompts, so the
-    // packaged templates live here. Without this candidate the only path that
-    // still resolved was the repository fallback below, which exists in a source
-    // checkout but not in a sealed execution snapshot -- where the package sits
-    // at modules/@ultrafuzz/prompts/dist and "../../../" reaches modules/. That
-    // rendered fine at submission and threw the first time a workflow
-    // re-rendered mid-run, taking the whole run down at WORKFLOW_RENDER_FAILED.
-    path.join(here, "assets", "prompts", "_templates", "output-contract"),
-    path.join(here, "prompts", "_templates", "output-contract"),
-    path.resolve(here, "../../../.ultrafuzz/prompts/_templates/output-contract")
-  ];
-  const found = candidates.find((candidate) => {
-    try {
-      return statSync(candidate).isDirectory();
-    } catch {
-      return false;
-    }
-  });
-  if (found === undefined) throw new Error(`unable to locate the packaged output contract templates from ${here}`);
-  return found;
 }
 
 const agentPreambleTemplateCache = new Map<AgentPreambleTemplateName, string>();
@@ -700,38 +673,6 @@ export function writeRenderedPrompt(result: PromptRenderResult): string {
   return result.renderedPromptPath;
 }
 
-export function renamePromptArtifactReferences(template: string, oldLogicalId: string, newLogicalId: string): string {
-  validateArtifactReferenceId(oldLogicalId);
-  validateArtifactReferenceId(newLogicalId);
-  validatePromptVariables(template);
-
-  let rewritten = "";
-  let consumed = 0;
-  for (const occurrence of findTemplateOccurrences(template)) {
-    rewritten += template.slice(consumed, occurrence.start);
-    const replacement = renameTemplateVariableName(occurrence.name, oldLogicalId, newLogicalId);
-    const leadingWhitespace = occurrence.rawName.length - occurrence.rawName.trimStart().length;
-    const trailingWhitespace = occurrence.rawName.length - occurrence.rawName.trimEnd().length;
-    rewritten += "{{";
-    rewritten += occurrence.rawName.slice(0, leadingWhitespace);
-    rewritten += replacement;
-    rewritten += occurrence.rawName.slice(occurrence.rawName.length - trailingWhitespace);
-    rewritten += "}}";
-
-    consumed = occurrence.end;
-    const producer = parseArtifactProducer(occurrence.name);
-    if (producer?.kind === "current" || (producer?.kind === "logical" && producer.logicalId === oldLogicalId)) {
-      const suffix = rewriteArtifactPathSuffix(template.slice(consumed), oldLogicalId, newLogicalId);
-      if (suffix.consumed > 0) {
-        rewritten += suffix.value;
-        consumed += suffix.consumed;
-      }
-    }
-  }
-  rewritten += template.slice(consumed);
-  return rewritten;
-}
-
 export function validateArtifactRelativePath(relativePath: string): void {
   const parts = relativePath.split("/");
   if (
@@ -771,14 +712,12 @@ function findTemplateOccurrences(template: string): TemplateOccurrence[] {
     if (end === -1) {
       throw new PromptError("unclosed-template-variable", "template variable is missing a closing delimiter");
     }
-    const rawName = template.slice(start + 2, end);
-    const name = rawName.trim();
+    const name = template.slice(start + 2, end).trim();
     if (name === "") {
       throw new PromptError("empty-template-variable", "template variable name cannot be empty");
     }
     occurrences.push({
       name,
-      rawName,
       start,
       end: end + 2
     });
@@ -1389,45 +1328,4 @@ function ensureInsidePath(root: string, candidate: string, label: string): void 
     return;
   }
   throw new PromptError("invalid-render-input", `${label} must stay inside ${root}: ${candidate}`);
-}
-
-function renameTemplateVariableName(name: string, oldLogicalId: string, newLogicalId: string): string {
-  if (name === `artifact_path:${oldLogicalId}`) {
-    return `artifact_path:${newLogicalId}`;
-  }
-  if (name === `artifact_handoff:${oldLogicalId}`) {
-    return `artifact_handoff:${newLogicalId}`;
-  }
-  return name;
-}
-
-function rewriteArtifactPathSuffix(
-  suffix: string,
-  oldLogicalId: string,
-  newLogicalId: string
-): { value: string; consumed: number } {
-  if (!suffix.startsWith("/")) {
-    return { value: "", consumed: 0 };
-  }
-  const end = findSuffixEnd(suffix);
-  const value = suffix
-    .slice(0, end)
-    .split("/")
-    .map((segment) => rewriteArtifactPathSegment(segment, oldLogicalId, newLogicalId))
-    .join("/");
-  return { value, consumed: end };
-}
-
-function rewriteArtifactPathSegment(segment: string, oldLogicalId: string, newLogicalId: string): string {
-  if (segment === oldLogicalId) {
-    return newLogicalId;
-  }
-  if (segment.startsWith(`${oldLogicalId}-`)) {
-    return `${newLogicalId}${segment.slice(oldLogicalId.length)}`;
-  }
-  const extensionIndex = segment.lastIndexOf(".");
-  if (extensionIndex > 0 && segment.slice(0, extensionIndex) === oldLogicalId) {
-    return `${newLogicalId}${segment.slice(extensionIndex)}`;
-  }
-  return segment;
 }

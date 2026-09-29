@@ -13,11 +13,9 @@ import {
   MODAL_GIT_URL_PATTERN_SOURCE,
   MODAL_HTTPS_URL_PATTERN_SOURCE,
   modalBenchmarkConfigZodSchema,
-  modalBenchmarkConfigValidatorsAgree,
   parseModalBenchmarkConfig
 } from "../src/config.js";
 import {
-  DEFAULT_BENCHMARK_MODELS,
   MODAL_BENCHMARK_SCHEMA_VERSION,
   MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS,
   MODAL_PUBLIC_SANDBOX_TIMEOUT_MS,
@@ -27,10 +25,18 @@ import { MODAL_BENCHMARK_CONFIG_SCHEMA_ID } from "../src/modal-contracts.js";
 import { ModalDocumentValidationError } from "../src/modal-documents.js";
 import { modalBenchmarkConfigJsonSchema, validateModalJsonSchema } from "../src/modal-schema-registry.js";
 import { ModalSemanticValidationError } from "../src/modal-semantic-gates.js";
+import { MODEL_SPEC_FIXTURES } from "./model-spec-fixtures.js";
+
+function modalBenchmarkConfigValidatorsAgree(value: unknown): boolean {
+  return (
+    validateModalJsonSchema(MODAL_BENCHMARK_CONFIG_SCHEMA_ID, value).ok ===
+    modalBenchmarkConfigZodSchema.safeParse(value).success
+  );
+}
 
 function minimalConfig(): Record<string, unknown> {
   return {
-    ...commonConfig("example-run", [...DEFAULT_BENCHMARK_MODELS]),
+    ...commonConfig("example-run", [...MODEL_SPEC_FIXTURES]),
     target: { repo: "https://example.invalid/target.git", ref: "0123456789abcdef" },
     ground_truth: {
       repo: "https://example.invalid/ground-truth.git",
@@ -60,7 +66,7 @@ function commonConfig(runId: string, models: unknown[]): Record<string, unknown>
 }
 
 function minimalPublicConfig() {
-  const model = DEFAULT_BENCHMARK_MODELS[0]!;
+  const model = MODEL_SPEC_FIXTURES[0];
   return {
     ...commonConfig("public-run", [model]),
     public_benchmark: {
@@ -232,7 +238,7 @@ describe("Modal benchmark config", () => {
 
   it("bounds new public sandboxes without cutting off the accepted full-lane envelope", () => {
     const privateConfig = parseModalBenchmarkConfig(minimalConfig());
-    const model = DEFAULT_BENCHMARK_MODELS[0]!;
+    const model = MODEL_SPEC_FIXTURES[0];
     const publicConfig = parseModalBenchmarkConfig({
       ...commonConfig("public-run", [model]),
       public_benchmark: {
@@ -307,7 +313,7 @@ describe("Modal benchmark config", () => {
       label: "duplicate projected model slugs",
       value: {
         ...minimalConfig(),
-        models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
+        models: [MODEL_SPEC_FIXTURES[0], MODEL_SPEC_FIXTURES[0]]
       }
     },
     {
@@ -349,7 +355,7 @@ describe("Modal benchmark config", () => {
     expect(() =>
       parseModalBenchmarkConfig({
         ...minimalConfig(),
-        models: [{ ...DEFAULT_BENCHMARK_MODELS[0], agent: "ClaudeAgent" }]
+        models: [{ ...MODEL_SPEC_FIXTURES[0], agent: "ClaudeAgent" }]
       })
     ).toThrow();
   });
@@ -634,8 +640,8 @@ describe("Modal benchmark config", () => {
     const first = fingerprintModalConfigFile(file);
     fs.writeFileSync(file, `${JSON.stringify(minimalConfig(), null, 2)}\n`);
     expect(fingerprintModalConfigFile(file)).not.toBe(first);
-    expect(fingerprintModalModel(DEFAULT_BENCHMARK_MODELS[0]!)).not.toBe(
-      fingerprintModalModel({ ...DEFAULT_BENCHMARK_MODELS[0]!, reasoning: "different" })
+    expect(fingerprintModalModel(MODEL_SPEC_FIXTURES[0])).not.toBe(
+      fingerprintModalModel({ ...MODEL_SPEC_FIXTURES[0], reasoning: "different" })
     );
   });
 
@@ -660,7 +666,7 @@ describe("Modal benchmark config", () => {
       file,
       `${JSON.stringify({
         ...config,
-        models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
+        models: [MODEL_SPEC_FIXTURES[0], MODEL_SPEC_FIXTURES[0]]
       })}\n`
     );
     expect(() => loadModalBenchmarkConfig(file)).toThrow(/trusted semantic gates/u);
@@ -672,7 +678,7 @@ describe("Modal benchmark config", () => {
       valid,
       { ...valid, unexpected: true },
       { ...valid, loops: "3" },
-      { ...valid, models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]] },
+      { ...valid, models: [MODEL_SPEC_FIXTURES[0], MODEL_SPEC_FIXTURES[0]] },
       {
         ...valid,
         benchmark_execution: { excluded_node_ids: ["boundary-tests", "boundary-tests"] }

@@ -93,6 +93,28 @@ remain fail-closed pending the separate R-26 disclosure authorization. Public
 Modal runs record `cloud:modal`. These controls are not a sandbox or egress
 filter: YOLO agents remain unrestricted.
 
+A model destination is `model:<provider>`, or `model:<agent>-route-<digest>`
+when route input is present. The digest covers:
+
+- every non-credential environment variable with the agent's provider prefix
+  (`ANTHROPIC_` and `CLAUDE_CODE_USE_` for Claude, `OPENAI_` and
+  `AZURE_OPENAI_` for Codex, `KIMI_` and `MOONSHOT_` for Kimi), including ones
+  that do not route traffic, such as `ANTHROPIC_LOG`;
+- Claude's `AWS_`, `GOOGLE_`/`CLOUD_ML_`, and `AZURE_`/`FOUNDRY_` variables, only
+  while a `CLAUDE_CODE_USE_*` flag for that platform is set to `1`, `true`,
+  `yes`, or `on` (any case) in the environment or in `settings.json` `env`;
+- the provider a Codex `config.toml` selects through `model_provider` (its id,
+  `base_url`, `wire_api`, and `env_key`) plus the top-level `openai_base_url`;
+- Claude `settings.json` credential helpers, and its `env` entries under the
+  same rules as the environment;
+- for Kimi subscription auth, the whole Kimi `config.toml`.
+
+Proxy variables and a CLI's own rewrites of other config sections do not change
+the route. Each time the Claude, Codex, DeepSeek, Kimi, or OpenRouter adapter
+starts its CLI in a run, it recomputes the destination with the same runtime
+function and fails if it no longer matches an acknowledged one. Pi and OpenCode
+destinations are checked only when the run is planned.
+
 ## Production dependency advisories
 
 CI and release validation run `pnpm security:dependency-advisories`. The gate

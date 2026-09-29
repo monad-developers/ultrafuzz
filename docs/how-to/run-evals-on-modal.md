@@ -1,8 +1,8 @@
 # Run evals on Modal
 
 Ultrafuzz can run long evaluation rows in Modal sandboxes while retaining
-telemetry, scores, and reports in the run workspace. The runner uses the Modal
-TypeScript SDK; Python is not required.
+scores and reports in the run workspace. The runner uses the Modal TypeScript
+SDK; Python is not required.
 
 ## Security and storage boundaries
 

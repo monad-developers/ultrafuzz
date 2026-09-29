@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,11 +6,33 @@ import { parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
   "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
 
+// The controller computes acknowledged route IDs and credential ownership
+// with these @ultrafuzz/runtime functions. Use the same functions, loaded from
+// the module the rendered workflow imports, rather than copies that have to be
+// kept in step with them.
+const {
+  isCredentialLikeEnvironmentVariableName,
+  providerRouteDestination,
+  routeOwnsCredentialLikeEnvironmentVariable
+} = (await import(
+  process.env.ULTRAFUZZ_RUNTIME_MODULE ??
+    new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href
+)) as {
+  isCredentialLikeEnvironmentVariableName: (name: string) => boolean;
+  providerRouteDestination: (
+    agent: string,
+    env: Record<string, string | undefined>,
+    routeConfig?: Uint8Array
+  ) => string;
+  routeOwnsCredentialLikeEnvironmentVariable: (agent: string, name: string) => boolean;
+};
+
 const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "SMITHERS_BIN",
   "SMITHERS_CLI_SRC_DIR",
   "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
+  "ULTRAFUZZ_BUN_MODULE_CONFINEMENT",
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
   "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
@@ -54,26 +75,6 @@ const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 type WorkflowRouteAgent = "ClaudeAgent" | "CodexAgent" | "DeepSeekAgent" | "KimiAgent" | "OpenRouterAgent";
 type WorkflowDataRoute = { agent: WorkflowRouteAgent; configDir?: string };
-const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
-  ClaudeAgent: ["ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_", "AZURE_", "CLOUD_ML_", "FOUNDRY_", "GOOGLE_"],
-  CodexAgent: ["AZURE_OPENAI_", "OPENAI_"],
-  KimiAgent: ["KIMI_", "MOONSHOT_"]
-};
-const NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES = new Set(["AZURE_EXTENSION_DIR"]);
-// Keep this generated, dependency-free boundary in parity with
-// @ultrafuzz/security's isSensitiveEnvironmentName contract.
-const SENSITIVE_ENVIRONMENT_NAME_PATTERN =
-  /(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_?KEY|ACCESS_?KEY|CLIENT_?SECRET|CREDENTIALS?|AUTH(?:ORIZATION)?)(?:_|$)/iu;
-const ROUTE_PROXY_ENV = [
-  "ALL_PROXY",
-  "HTTP_PROXY",
-  "HTTPS_PROXY",
-  "NO_PROXY",
-  "all_proxy",
-  "http_proxy",
-  "https_proxy",
-  "no_proxy"
-] as const;
 
 /**
  * Smithers agents inherit the controller environment by default. Remove every
@@ -93,22 +94,12 @@ export function workflowControlChildEnvironment(
     ].map((name) => [name, ""])
   );
   const roots = workflowExecutionSnapshotRoots(source);
-  // Native continuations name the target's workflow, not a sealed execution
-  // tree. Pi's configured home may live under that target. Continue rejecting
-  // homes that alias a real advertised snapshot or another controller root.
-  const piHomeRoots =
-    source.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT ||
-    source.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT ||
-    source.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT
-      ? roots
-      : workflowExecutionSnapshotRoots({ ...source, ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: undefined });
   const aliasesControl = (name: string, value: string): boolean => {
     // PATH has already passed the controller's command-path admission. Its
     // trusted-bin/forge guard intentionally lives under the target; blanking
     // the whole list also removes external CLIs admitted by the controller.
     if (name === "PATH") return false;
-    const selectedRoots = name === "PI_CODING_AGENT_DIR" ? piHomeRoots : roots;
-    return selectedRoots.some((root) => environmentPath(value).includes(root));
+    return roots.some((root) => environmentPath(value).includes(root));
   };
   for (const [name, value] of Object.entries(source)) {
     if (value !== undefined && aliasesControl(name, value)) child[name] = "";
@@ -164,10 +155,6 @@ function allowlistedEnvironmentVariables(
   return [...variables.values()];
 }
 
-function isCredentialLikeEnvironmentVariableName(name: string): boolean {
-  return SENSITIVE_ENVIRONMENT_NAME_PATTERN.test(name);
-}
-
 function sensitiveAgentEnvironmentVariableNames(source: Record<string, string | undefined>): string[] {
   const names = new Set<string>();
   for (const name of (source.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES ?? "").split(",")) {
@@ -196,23 +183,6 @@ function addLogicalEnvironmentVariableNames(
   for (const sourceName of Object.keys(source)) {
     if (sourceName.toUpperCase() === upper) names.add(sourceName);
   }
-}
-
-function routeOwnsCredentialLikeEnvironmentVariable(agent: WorkflowRouteAgent, name: string): boolean {
-  const upper = name.toUpperCase();
-  let longestPrefix = -1;
-  const owners = new Set<string>();
-  for (const [candidate, prefixes] of Object.entries(ROUTE_ENV_PREFIXES)) {
-    for (const prefix of prefixes) {
-      if (!upper.startsWith(prefix) || prefix.length < longestPrefix) continue;
-      if (prefix.length > longestPrefix) {
-        longestPrefix = prefix.length;
-        owners.clear();
-      }
-      owners.add(candidate);
-    }
-  }
-  return owners.has(agent);
 }
 
 function restoreRouteScopedAllowlistedCredentials(
@@ -258,126 +228,26 @@ function assertWorkflowDataRoute(
     required = (record as { required_source_destinations?: unknown }).required_source_destinations;
   if (!Array.isArray(required) || required.some((entry) => typeof entry !== "string"))
     throw new Error("sealed data-governance authority is invalid");
-  const effective = effectiveWorkflowDataRoute(route, effectiveEnvironment, authorityEnvironment);
+  const configPath =
+    route.configDir === undefined || route.agent === "OpenRouterAgent"
+      ? undefined
+      : path.join(route.configDir, route.agent === "ClaudeAgent" ? "settings.json" : "config.toml");
+  const effective = providerRouteDestination(
+    route.agent,
+    {
+      ...effectiveEnvironment,
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: authorityEnvironment.ULTRAFUZZ_AGENT_ENV_ALLOWLIST,
+      // The Codex adapter derives OPENAI_BASE_URL from the provider config,
+      // which the config part of the route already covers.
+      ...(route.agent === "CodexAgent" && !authorityEnvironment.OPENAI_BASE_URL?.trim()
+        ? { OPENAI_BASE_URL: undefined }
+        : {})
+    },
+    configPath !== undefined && existsSync(configPath) ? readRegularFileSnapshot(configPath, 1024 * 1024) : undefined
+  );
   if (!required.includes(effective))
     throw new Error(`effective ${route.agent} provider route changed after disclosure acknowledgement`);
 }
-
-function effectiveWorkflowDataRoute(
-  route: WorkflowDataRoute,
-  source: Record<string, string | undefined>,
-  authority: Record<string, string | undefined>
-): string {
-  const routeSource = { ...source, ULTRAFUZZ_AGENT_ENV_ALLOWLIST: authority.ULTRAFUZZ_AGENT_ENV_ALLOWLIST },
-    routeEnvironment = effectiveRouteEnvironment(
-      route.agent,
-      route.agent === "CodexAgent" && !authority.OPENAI_BASE_URL?.trim()
-        ? { ...routeSource, OPENAI_BASE_URL: undefined }
-        : routeSource
-    );
-  let configDigest: string | undefined;
-  if (route.configDir !== undefined && route.agent !== "OpenRouterAgent") {
-    const configPath = path.join(route.configDir, route.agent === "ClaudeAgent" ? "settings.json" : "config.toml");
-    if (existsSync(configPath)) {
-      const bytes = readRegularFileSnapshot(configPath, 1024 * 1024);
-      const affectsRoute =
-        route.agent === "ClaudeAgent"
-          ? claudeSettingsAffectRoute(bytes)
-          : route.agent !== "CodexAgent" || codexConfigAffectsRoute(bytes.toString("utf8"));
-      if (affectsRoute) configDigest = sha256(bytes);
-    }
-  }
-  const digest =
-      routeEnvironment.length > 0
-        ? sha256(JSON.stringify({ agent: route.agent, config: configDigest ?? null, route: routeEnvironment }))
-        : configDigest,
-    provider = {
-      ClaudeAgent: "anthropic",
-      CodexAgent: "openai",
-      DeepSeekAgent: "deepseek",
-      KimiAgent: "moonshot",
-      OpenRouterAgent: "openrouter"
-    }[route.agent];
-  return digest === undefined
-    ? `model:${provider}`
-    : `model:${route.agent.toLowerCase().replace("agent", "")}-route-${digest}`;
-}
-
-/**
- * The Codex CLI rewrites its own config.toml on invocation — marketplace
- * `last_updated` timestamps, plugin toggles, and project trust levels — so
- * digesting the whole file makes the acknowledged route change the moment the
- * CLI first runs in a fresh HOME, which failed every sandbox agent task after
- * disclosure (#908). Keep this generated copy in exact parity with
- * @ultrafuzz/runtime data-governance.ts: only content that can actually
- * redirect traffic — a `model_provider` selection, a `[model_providers…]`
- * table, or a `base_url` assignment — participates in the route digest.
- */
-function codexConfigAffectsRoute(text: string): boolean {
-  return (
-    /(?:^|\n)\s*(?:model_provider|"model_provider"|'model_provider')\s*=/u.test(text) ||
-    /(?:^|\n)\s*\[[^\]\n]*model_providers[^\]\n]*\]/u.test(text) ||
-    /(?:^|\n)\s*(?:base_url|"base_url"|'base_url')\s*=/u.test(text)
-  );
-}
-
-function claudeSettingsAffectRoute(bytes: Buffer): boolean {
-  const parsed = parseStrictJsonBytes(bytes, {
-    maxBytes: 1024 * 1024,
-    maxDepth: 32,
-    maxItems: 4096,
-    maxProperties: 4096
-  });
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-    throw new Error("Claude settings must be a JSON object");
-  if (Object.keys(parsed).some((name) => /(?:helper|refresh|credentialexport|processwrapper|proxyauth)$/iu.test(name)))
-    return true;
-  const configuredEnv = (parsed as Record<string, unknown>).env;
-  if (configuredEnv === undefined) return false;
-  if (configuredEnv === null || typeof configuredEnv !== "object" || Array.isArray(configuredEnv))
-    throw new Error("Claude settings env must be a JSON object");
-  return Object.keys(configuredEnv).some((name) => {
-    const upper = name.toUpperCase();
-    return (
-      ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"].includes(upper) ||
-      (!NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES.has(upper) &&
-        !isCredentialLikeEnvironmentVariableName(upper) &&
-        ROUTE_ENV_PREFIXES.ClaudeAgent!.some((prefix) => upper.startsWith(prefix)))
-    );
-  });
-}
-
-function effectiveRouteEnvironment(
-  agent: WorkflowRouteAgent,
-  env: Record<string, string | undefined>
-): Array<[string, string]> {
-  const names = new Set(
-    (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",").map((entry) => entry.trim().toUpperCase())
-  );
-  for (const name of ROUTE_PROXY_ENV) names.add(name);
-  for (const name of Object.keys(env))
-    if (
-      !isCredentialLikeEnvironmentVariableName(name) &&
-      ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix))
-    )
-      names.add(name);
-  if (agent === "CodexAgent") names.add("OPENAI_BASE_URL");
-  if (agent === "KimiAgent") names.add("KIMI_BASE_URL");
-  for (const name of NON_ROUTING_PROVIDER_ENVIRONMENT_NAMES) names.delete(name);
-  names.delete("KIMI_CODE_HOME");
-  names.delete("KIMI_SHARE_DIR");
-  return [...names].sort().flatMap((name): Array<[string, string]> => {
-    const value = env[name];
-    return value !== undefined &&
-      value.trim() !== "" &&
-      !isCredentialLikeEnvironmentVariableName(name) &&
-      (ROUTE_PROXY_ENV.includes(name as never) || ROUTE_ENV_PREFIXES[agent]?.some((prefix) => name.startsWith(prefix)))
-      ? [[name, value]]
-      : [];
-  });
-}
-
-const sha256 = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 
 export function workflowControlCredentialValue(
   value: string,
@@ -391,26 +261,24 @@ export function workflowControlCredentialValue(
   return value;
 }
 
+/**
+ * The sealed execution snapshot this process runs from, under every name the
+ * process anchor advertises for it. A native continuation runs the target's
+ * own workflow and advertises none: treating that project as controller-only
+ * state would blank every adapter-owned path under it, such as OpenCode's
+ * run-scoped XDG roots and Kimi's API-key home.
+ */
 function workflowExecutionSnapshotRoots(source: Record<string, string | undefined>): string[] {
   const roots = new Set<string>();
-  const persistedWorkflow = source.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
-  if (persistedWorkflow !== undefined && path.isAbsolute(persistedWorkflow)) {
-    const workflowsDirectory = path.dirname(persistedWorkflow);
-    const smithersDirectory = path.dirname(workflowsDirectory);
-    if (path.basename(workflowsDirectory) === "workflows" && path.basename(smithersDirectory) === ".smithers") {
-      roots.add(path.dirname(smithersDirectory));
-    }
+  for (const name of [
+    "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT",
+    "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT",
+    "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT"
+  ]) {
+    const root = source[name]?.trim();
+    if (root && path.isAbsolute(root) && root !== path.parse(root).root) roots.add(root);
   }
-  for (const name of CONTROLLER_ONLY_ENVIRONMENT_VARIABLES) {
-    const value = source[name];
-    if (value === undefined) continue;
-    const candidate = environmentPath(value);
-    for (const marker of ["/dependencies/", "/modules/", "/controls/", "/.smithers/workflows/"]) {
-      const index = candidate.indexOf(marker);
-      if (index > 0) roots.add(candidate.slice(0, index));
-    }
-  }
-  return [...roots].filter((root) => root !== path.parse(root).root);
+  return [...roots];
 }
 
 function environmentPath(value: string): string {

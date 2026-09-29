@@ -477,9 +477,10 @@ function compiledTaskSourceIdentity(task: (typeof compiledBaseTasks)[number]) {
 }
 
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
+  const compiledById = new Map(serializedTaskSpecs.map((candidate) => [candidate.id, candidate]));
   return tasks.map((task) => {
     const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
-    const compiled = serializedTaskSpecs.find((candidate) => candidate.id === task.smithersNodeId);
+    const compiled = compiledById.get(task.smithersNodeId);
     const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
@@ -1677,13 +1678,13 @@ function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: str
     ["operator_prompt", values.operatorPrompt],
     ["task_prompt", values.taskPrompt]
   ]);
-  const rendered = agentPromptTemplate.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu, (match: string, key: string) =>
-    replacements.has(key) ? replacements.get(key)! : match
-  );
-  if (/\{\{\s*[A-Za-z0-9_]+\s*\}\}/u.test(rendered)) {
-    throw new Error("agent prompt template contains an unresolved variable");
-  }
-  return rendered;
+  // Check only the trusted template's own placeholders. The inserted prompts may legitimately
+  // contain literal `{{word}}` text, and rejecting it here would fail every render of the run.
+  return agentPromptTemplate.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu, (_match: string, key: string) => {
+    const value = replacements.get(key);
+    if (value === undefined) throw new Error(`agent prompt template contains an unresolved variable: ${key}`);
+    return value;
+  });
 }
 
 function sourceUsesPinnedBranch(): boolean {
@@ -3345,7 +3346,10 @@ function artifactAwareAgent(
       "AGENT_CONFIG_INVALID",
       "AGENT_SESSION_LOST",
       "AGENT_CHECKPOINT_INVALID",
-      "TASK_ABORTED"
+      "TASK_ABORTED",
+      // Agent CLI deadlines. Run synchronization labels timeouts by code only.
+      "PROCESS_TIMEOUT",
+      "PROCESS_IDLE_TIMEOUT"
     ]);
     // #677: a routed-gateway HTTP 402 (provider credit exhausted) reaches this
     // normalizer as an anonymous CLI failure because the subprocess boundary
@@ -3950,10 +3954,11 @@ function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
   try {
     return run();
   } catch (error) {
-    throw new Error(
+    const wrapped = new Error(
       `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
+    throw isNonRetryableFailure(error) ? nonRetryableFailure(wrapped) : wrapped;
   }
 }
 
@@ -4001,7 +4006,11 @@ function prepareArtifactMirror(
     materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
   );
   preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
-  preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  // `pinnedSubmodules: "verify"` is the post-agent verify pass. It checks outputs in-process and never
+  // runs the agent-facing CLI, so a CLI cold start there could only fail its zero-retry task.
+  if (options.pinnedSubmodules !== "verify") {
+    preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  }
   preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
   preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
     materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode)
@@ -4085,10 +4094,10 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
 }
 
 /**
- * How long the per-node validator preflight may spend inside the Ultrafuzz CLI.
+ * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
  * `"ultrafuzz"` resolves to the run-owned trusted launcher, which `composeSmithersCommandPath` puts
- * first on PATH, so every node preparation pays the CLI's own cold start: ~2.5 s on an idle box,
+ * first on PATH, so the preflight pays the CLI's own cold start: ~2.5 s on an idle box,
  * ~35 s once a dozen agents are building against the same cores. Below that the step reports a bare
  * `spawnSync ultrafuzz ETIMEDOUT`, which names neither the contention nor a schema, and which cost
  * the smoke lane two of its three targets in #1026. Roughly five times that measured worst case,
@@ -4096,8 +4105,14 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
  * inside the attempt.
  */
 const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
+// The preflight proves that this process can launch the agent-facing validator, which does not vary
+// by task: `materializePromptSchemas` has already digest-checked each workspace's schema copy. One
+// success per engine process is enough. Re-spawning it in every prepare and attempt reset only
+// added CLI cold starts that could fail an attempt.
+let jsonValidatorPreflightPassed = false;
 
 function preflightJsonValidator(schemaDirectory: string): void {
+  if (jsonValidatorPreflightPassed) return;
   const findings = artifactSchemaRegistry().find(
     (entry: { filename: string }) => entry.filename === "findings.schema.json"
   );
@@ -4131,6 +4146,7 @@ function preflightJsonValidator(schemaDirectory: string): void {
       cause: error
     });
   }
+  jsonValidatorPreflightPassed = true;
 }
 
 function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {
@@ -5579,6 +5595,14 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
 }
 
 function assertTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {
+  try {
+    admitTaskDependencyInputs(task);
+  } catch (error) {
+    throw nonRetryableFailure(error);
+  }
+}
+
+function admitTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {
   const existingAdmission = dependencyArtifactAdmissionsByTask.get(task.attemptId);
   if (existingAdmission !== undefined) {
     assertDependencyArtifactAdmissionCurrent(task, existingAdmission);
@@ -5706,6 +5730,17 @@ function assertDependencyArtifactAdmissionCurrent(
   task: (typeof taskSpecs)[number],
   expected: DependencyArtifactAdmission = dependencyArtifactAdmission(task)
 ): DependencyArtifactAdmission {
+  try {
+    return checkDependencyArtifactAdmissionCurrent(task, expected);
+  } catch (error) {
+    throw nonRetryableFailure(error);
+  }
+}
+
+function checkDependencyArtifactAdmissionCurrent(
+  task: (typeof taskSpecs)[number],
+  expected: DependencyArtifactAdmission
+): DependencyArtifactAdmission {
   if (expected.task !== task || dependencyArtifactAdmissionsByTask.get(task.attemptId) !== expected) {
     throw new Error(`artifact-contract failure: dependency admission identity changed ${task.attemptId}`);
   }
@@ -5748,6 +5783,22 @@ function assertDependencyArtifactAdmissionCurrent(
     }
   }
   return expected;
+}
+
+/**
+ * A dependency admission failure is deterministic for its consumer: the
+ * producer's verified artifacts are missing, changed, or unsafe, and a retry
+ * re-reads the same bytes. Smithers fails an attempt whose error carries
+ * `details.failureRetryable: false` once, instead of spending the consumer's
+ * retry budget and agent fallback chain on it (#1144).
+ */
+function nonRetryableFailure(error: unknown): Error {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  return Object.assign(failure, { details: { failureRetryable: false } });
+}
+
+function isNonRetryableFailure(error: unknown): boolean {
+  return (error as { details?: { failureRetryable?: unknown } } | undefined)?.details?.failureRetryable === false;
 }
 
 function assertVerifiedDependency(
@@ -10096,7 +10147,11 @@ export default smithers((ctx) => {
                 timeoutMs={task.timeoutMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={task.retries}
-                retryPolicy={task.retryPolicy}
+                // The planned chain is the whole retry budget. Smithers'
+                // default stall verdict would end it after three identical
+                // failures, before later same-agent attempts or fallback
+                // profiles run (#1084).
+                retryPolicy={{ ...task.retryPolicy, maxIdenticalFailures: 0 }}
                 metadata={task.metadata}
               >
                 {fullTaskPrompt}

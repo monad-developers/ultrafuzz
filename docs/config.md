@@ -50,11 +50,17 @@ project primary count. The shipped `default` profile uses three attempts;
 five, and `invariant-only` inherits three. An explicit project `[retry]` value overrides
 the profile. The complete primary-plus-fallback chain may contain at most 100
 attempts. Omitting `agents`, or leaving it empty, keeps model fallback disabled.
-Retries use bounded exponential backoff, a fresh session, and the same effective
-task prompt, including Smithers' safety contracts; Ultrafuzz does not inspect
-provider error text. The
-planned chain and actual producer are recorded in the task manifest, attempt
-ledger, and final report.
+A retry waits one minute, then two, then four, and at most five minutes (the
+Smithers cap), and uses a fresh session and the same effective task prompt,
+including Smithers' safety contracts; Ultrafuzz does not inspect provider error
+text. Repeated identical failures do not end the planned chain early; Smithers
+still stops it at a failure it classifies as non-retryable, such as a CLI
+configuration or authentication error, and pauses the run on a provider quota
+limit. Dependency admission is not retried: it re-reads the same producer files,
+so an admission failure, including a file-system or validator error while
+reading them, fails the task without a retry or fallback. The planned chain and
+actual producer are recorded in the task manifest, attempt ledger, and final
+report.
 
 Retry chains currently require local execution. Cloud planning accepts one
 effective attempt, and local fallback across different agent implementations
@@ -65,7 +71,7 @@ Agent configuration and model profiles may name only `ClaudeAgent`, `CodexAgent`
 `DeepSeekAgent`, `KimiAgent`, `OpenCodeAgent`, `OpenRouterAgent`, or `PiAgent`.
 The complete `.smithers/agents`
 tree must byte-match the packaged stock closure; custom adapters and registries
-are unsupported, and `ultrafuzz init --force` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
+are unsupported, and `ultrafuzz init` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
 
 Each stock agent's `api_key_env` must use its canonical provider credential
 name. Custom environment variable names fail config validation.
@@ -198,7 +204,9 @@ Kimi's four components — uncached input, output, cache reads, and cache
 creation — are reported independently; Kimi already folds thinking tokens into
 output, so no separate reasoning total is published. Malformed or absent usage
 stays absent rather than becoming zeros, which keeps accounting honest about
-what it does not know. Kimi model pricing resolves against the Moonshot
+what it does not know. An unreadable wire, including inherited history torn by
+a killed attempt, leaves that invocation's usage absent instead of failing the
+invocation. Kimi model pricing resolves against the Moonshot
 provider entry in the pricing catalog, so the configured alias must match a
 Moonshot catalog model id such as `kimi-k3`; anything else is reported as an
 unresolved model instead of being priced from a same-named third-party entry.
@@ -247,9 +255,10 @@ value is rejected before execution. See DeepSeek's
 and [Anthropic API guide](https://api-docs.deepseek.com/guides/anthropic_api).
 
 DeepSeek's automatic disk cache reports cache misses and hits independently.
-Ultrafuzz records those as uncached input and cache-read tokens, records no
-cache-write charge, and treats the provider's output count as already including
-thinking tokens rather than publishing a second reasoning component. Pricing
+Claude Code reports them under Anthropic field names (`input_tokens`,
+`cache_read_input_tokens`), which the pinned Smithers Claude Code adapter
+already reads, so the DeepSeek adapter does no usage parsing of its own. The
+output count already includes thinking tokens. Pricing
 is pinned to the first-party `deepseek` catalog entry so a same-named hosted or
 subscription plan cannot supply a zero or unrelated rate. The current
 [DeepSeek price table](https://api-docs.deepseek.com/quick_start/pricing) lists
@@ -260,7 +269,8 @@ million cache-hit input tokens, and $0.87 per million output tokens.
 
 `ultrafuzz init` also generates a dedicated `OpenCodeAgent`. It is opt-in and
 non-default: nothing selects it until a topology group or `--agent` names it.
-The default root config includes an opt-in OpenCode profile:
+The default root config has the `[agents.OpenCodeAgent]` block below but no
+OpenCode model profile, so add one such as `[models.opencode]` to use it:
 
 ```toml
 [models.opencode]
@@ -321,10 +331,9 @@ else. `config_dir` is the XDG parent, not OpenCode's own directory:
 `XDG_DATA_HOME` becomes `<config_dir>/data`, so pointing it at
 `~/.config/opencode` or `~/.local/share/opencode` picks nothing up.
 
-`ultrafuzz doctor` requires the `opencode` executable whenever any configured
-profile uses `OpenCodeAgent` — every profile in `[models.*]` is checked, not
-only the one a run selects, so keeping the shipped `[models.opencode]` profile
-means every contributor needs the CLI installed.
+`ultrafuzz doctor` requires the `opencode` executable only when a node of the
+selected topology, or its `[retry] agents` fallback chain, uses an
+`OpenCodeAgent` profile; otherwise the executable is listed as not required.
 
 Default triage requires quorum `3` from a panel size of `4`:
 
@@ -375,6 +384,50 @@ When a Pi profile sets `reasoning`, the adapter passes it to pi as
 execution. The Smithers type surface pinned by this release stops at `xhigh`,
 but pi's command surface also accepts `max`, so the adapter validates and
 forwards that final level without degrading it.
+
+The adapter counts usage from each assistant `message_end` event. A response
+whose usage Pi reports inconsistently (token counts that do not add up to
+`totalTokens`, or a cost breakdown that is missing or does not add up), or
+whose counts are invalid or would overflow the running totals, is left out
+whole instead of failing the invocation, so that invocation's usage is then a
+lower bound.
+
+## OpenRouter guardrails
+
+`OpenRouterAgent`, `PiAgent`, and `OpenCodeAgent` with an `openrouter/` model
+send their requests through OpenRouter with the key in `OPENROUTER_API_KEY`. If
+any guardrail covering that key sets
+[prompt-injection detection](https://openrouter.ai/docs/guides/features/guardrails/prompt-injection)
+to **Block**, OpenRouter rejects each request its detector matches with HTTP
+403 `Request blocked: prompt injection patterns detected` before it reaches a
+model.
+
+The match need not be in Ultrafuzz's task prompt. These harnesses also send
+their own system prompts and the target source and test output the agent reads,
+and by default OpenRouter scans every message in a request, including base64-
+and hex-decoded text. For example, the default system prompt of OpenCode
+1.18.18, used for models without a model-specific prompt such as DeepSeek,
+Qwen, or GLM, has an `assistant: [...]` line followed by a `user:` line, which
+matches OpenRouter's documented `role_delimiter_injection` pattern.
+
+In the **Security** section of every guardrail that covers the key (the
+workspace default and any member or API-key guardrail), set prompt-injection
+detection to **Flag**, which records matches without enforcing them, or turn it
+off. OpenRouter applies the most restrictive action when several guardrails
+apply. Do not use **Redact** either: it replaces each match with
+`[PROMPT_INJECTION]` and forwards the request, so the model can work from
+altered source or tool output with no error for Ultrafuzz to report.
+
+The workspace default covers every key in its workspace and a member guardrail
+every key of that member, so relaxing either can affect more than Ultrafuzz.
+Creating the Ultrafuzz key in a workspace of its own confines the
+workspace-default change to that key. In an organization account, only an
+organization admin can change guardrails.
+
+Ultrafuzz has no special handling for this rejection: the attempt fails like any
+other agent error and follows the `[retry]` policy above. A retry on the same
+profile sends the same task prompt with the same key, so it is rejected again
+when the match is in that prompt or in the harness's system prompt.
 
 ## Forge process guard
 
@@ -458,10 +511,8 @@ trusted local execution model remains unchanged.
 ## Redaction
 
 Run artifacts store redacted resolved config and a redaction manifest.
-Sensitive model values are redacted before persistence. Launch guards for
-literal redaction placeholders may fail before workflow launch when enabled,
-and manifest entries mark values that must be restored from current config
-before launch.
+Sensitive model values are redacted before persistence. The manifest records
+which values were redacted; no command restores values from it.
 
 ## Eval suites
 
