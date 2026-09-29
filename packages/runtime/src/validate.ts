@@ -11,7 +11,7 @@ import {
   validateModelProfiles,
   type ResolvedConfig
 } from "@ultrafuzz/config";
-import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
+import { loadPromptCatalog, projectPromptDir, projectPromptsDifferingFromBuiltIns } from "@ultrafuzz/prompts";
 import { expandTopology, loadTopology, resolveTopologyPath, type ModelProfileSelection } from "@ultrafuzz/topology";
 
 import type {
@@ -202,8 +202,21 @@ function validatePrompts(projectRoot: string): {
   }
   try {
     const catalog = loadPromptCatalog({ projectRoot });
+    const differing = projectPromptsDifferingFromBuiltIns(catalog);
     return {
-      posture: postureFromDiagnostics("prompts", "project prompt catalog loads and variables are strict", []),
+      posture: postureFromDiagnostics(
+        "prompts",
+        differing.length === 0
+          ? "project prompt catalog loads and variables are strict"
+          : `project prompt catalog loads, but ${String(differing.length)} project prompt(s) differ from the built-in prompt at the same path; ultrafuzz validate --json lists them`,
+        differing.map((relativePath) => ({
+          code: "PROMPT_DIFFERS_FROM_BUILT_IN",
+          message: `.ultrafuzz/prompts/${relativePath} differs from the built-in prompt at the same path; runs use the project copy, and ultrafuzz init without --force keeps it, so to take the built-in version, delete the file and rerun ultrafuzz init`,
+          severity: "warning" as const,
+          source: "prompts",
+          path: `.ultrafuzz/prompts/${relativePath}`
+        }))
+      ),
       summary: {
         prompt_dir: promptDir,
         prompt_count: catalog.orderedIds.length

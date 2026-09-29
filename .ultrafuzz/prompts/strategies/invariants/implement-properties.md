@@ -124,8 +124,10 @@ an unselected expected check is not implemented or fulfilled.
      guard, or other precondition that prevents the backend from observing the
      violating post-state. Preconditions may admit valid actions; they may not
      assume the property under test.
-   - Do not edit production contracts except interfaces that are genuinely
-     required by the test harness.
+   - Do not edit production contracts, not even to add an interface: the
+     workspace handoff rejects every change under the production source roots
+     (by default `src/` and `contracts/`). Declare any interface the harness
+     needs in the test tree instead.
    - Keep generated or changed invariant files in the test tree and include
      every changed `*.t.sol` test/reproducer in `generated-tests.json`.
    - Preserve Recon constructor deployment if property work changes `Setup`,

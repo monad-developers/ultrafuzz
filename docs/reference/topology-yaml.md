@@ -225,6 +225,9 @@ Reference nodes must:
 - Mark exactly one non-manifest output as primary.
 - Avoid `prompt`, `role`, and `model_profiles`.
 
+Reference nodes are materialized when the run is planned and never run as
+agent tasks, so `timeout_seconds` has no effect on their execution.
+
 Downstream prompts can consume the normalized Markdown primary artifact with:
 
 ```md
