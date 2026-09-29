@@ -39,8 +39,10 @@ If the setup handoffs identify Vyper-only or mixed Solidity/Vyper production
 contracts, make the reusable Foundry fixture Vyper-aware while keeping the tests
 Solidity-based. Define Solidity interfaces for the Vyper contracts' ABI-visible
 public/external functions and events, or reuse ABI-derived interfaces generated
-by the target repository. Do not require Foundry to compile `.vy` files as
-Solidity sources.
+by the target repository. Declare any new interface in the test tree: the
+workspace handoff rejects every change under the production source roots (by
+default `src/` and `contracts/`). Do not require Foundry to compile `.vy` files
+as Solidity sources.
 
 For Vyper deployment helpers, prefer one reusable path that compiles creation
 bytecode with the target project's pinned compiler/tooling from the project

@@ -58,9 +58,12 @@ export async function diagnoseProject(input: DoctorInput) {
   checks.push({
     name: "validate",
     status: validationStatus,
-    summary: validation.ok
-      ? "config, topology, prompts, paths, agents, and trust posture pass"
-      : "configuration validation reported errors; run ultrafuzz validate for detail"
+    summary:
+      validationStatus === "ok"
+        ? "config, topology, prompts, paths, agents, and trust posture pass"
+        : validationStatus === "warning"
+          ? "configuration validation passed with warnings; run ultrafuzz validate --json for detail"
+          : "configuration validation reported errors; run ultrafuzz validate for detail"
   });
   diagnostics.push(...validation.diagnostics);
 
