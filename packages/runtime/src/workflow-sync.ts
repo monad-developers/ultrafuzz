@@ -4927,7 +4927,10 @@ function nodeAttemptAgentProvenance(selection: SmithersAttemptAgentSelection): N
  * (Smithers cancels in-progress rows at the next RunStarted without an event),
  * and a terminal without a live start in the same activation, such as a
  * NodeCancelled for an attempt that already ended or never started, is not an
- * occurrence (#1139).
+ * occurrence (#1139). Nor is a terminal stamped before its start, which no
+ * ledger row can hold: Smithers stamps a run cancellation's NodeCancelled with
+ * an instant it takes before its transaction, so a start that commits meanwhile
+ * can carry a later timestamp.
  */
 function terminalWorkflowAttempts(events: readonly WorkflowEvent[]): TerminalWorkflowAttempt[] {
   const active = new Map<
@@ -4961,7 +4964,7 @@ function terminalWorkflowAttempts(events: readonly WorkflowEvent[]): TerminalWor
     }
     const started = active.get(identity);
     const terminal = terminalOutcomeForEvent(event);
-    if (started === undefined || terminal === undefined) continue;
+    if (started === undefined || terminal === undefined || event.timestampMs < Date.parse(started.startedAt)) continue;
     active.delete(identity);
     const occurrence: TerminalWorkflowAttempt = {
       ...started,

@@ -27109,6 +27109,57 @@ test("syncRun ignores a cancellation that names no live attempt", async () => {
   );
 });
 
+test("syncRun skips a cancellation stamped before its attempt started and records the task's later attempts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-cancellation-before-start";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: nodeId, state: "finished", attempt: 2 },
+        { id: verifierNodeId, state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted", timestampMs: base },
+      // Smithers stamps a run cancellation's NodeCancelled with an instant taken
+      // before its transaction, so an attempt that started meanwhile has the
+      // earlier sequence but the later timestamp.
+      { type: "NodeStarted", nodeId, attempt: 1, timestampMs: base + 200 },
+      { type: "NodeCancelled", nodeId, attempt: 1, timestampMs: base + 100, extra: { reason: "run-cancelled" } },
+      { type: "RunCancelled", timestampMs: base + 300 },
+      { type: "RunStarted", timestampMs: base + 400 },
+      { type: "NodeStarted", nodeId, attempt: 2, timestampMs: base + 500 },
+      { type: "NodeFinished", nodeId, attempt: 2, timestampMs: base + 600 },
+      { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, timestampMs: base + 700 },
+      { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, timestampMs: base + 800 },
+      { type: "RunFinished", timestampMs: base + 900 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(
+    !sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"),
+    JSON.stringify(sync.diagnostics)
+  );
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [entry.attempt, entry.source_event_sequence, entry.outcome]),
+    [[2, 6, "succeeded"]]
+  );
+});
+
 test("syncRun keeps a cancelled occurrence that a reset superseded before any sync", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
