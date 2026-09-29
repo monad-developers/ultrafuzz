@@ -13439,6 +13439,53 @@ test("status keeps reporting runner health when run-state synchronization fails"
   await reportedHealth("torn usage ledger");
 });
 
+testWhen(process.getuid?.() !== 0)(
+  "a synchronization that cannot take its lock is reported instead of thrown",
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "read-only-run-root";
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "RunStarted" },
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+      ]),
+      status: currentStatusEnvelope(workflowRunId)
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    const lockFailure = (diagnostics: readonly { code: string; severity: string }[]) =>
+      diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_LOCK_FAILED");
+    const mode = fs.statSync(runRoot).mode & 0o777;
+    // Root ignores directory permissions, so this test only registers for other users.
+    fs.chmodSync(runRoot, 0o555);
+    try {
+      // The Modal worker polls `inspect` and stops at the first command that fails.
+      const inspected = await getRunStatus({ projectRoot: project, runId, env });
+      assert.equal(inspected.ok, true, JSON.stringify(inspected.diagnostics));
+      assert.equal(lockFailure(inspected.diagnostics)?.severity, "warning", JSON.stringify(inspected.diagnostics));
+      const health = await getRunHealth({ projectRoot: project, runId, env });
+      assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+      assert.equal(lockFailure(health.diagnostics)?.severity, "warning", JSON.stringify(health.diagnostics));
+      const synced = await syncRun({ projectRoot: project, runId, env });
+      assert.equal(synced.ok, false);
+      assert.ok(lockFailure(synced.diagnostics), JSON.stringify(synced.diagnostics));
+    } finally {
+      fs.chmodSync(runRoot, mode);
+    }
+  }
+);
+
 test("a failed deadline cancel is a warning and the next status requests it again", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

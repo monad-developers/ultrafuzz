@@ -392,8 +392,9 @@ export interface WorkflowSynchronizationControl {
 
 /**
  * Synchronization failures an observer reports as warnings: a runner query failed or returned
- * unusable output, or the observation budget ran out. Local state stays the last coherent snapshot
- * and the next poll retries.
+ * unusable output, the observation budget ran out, or the pass could not take its lock. None says
+ * the run's evidence is invalid; local state stays the last coherent snapshot and the next poll
+ * retries.
  */
 export const TRANSIENT_SYNC_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set([
   "WORKFLOW_INSPECT_FAILED",
@@ -403,7 +404,8 @@ export const TRANSIENT_SYNC_DIAGNOSTIC_CODES: ReadonlySet<string> = new Set([
   "WORKFLOW_TOKEN_EVENTS_FAILED",
   "WORKFLOW_TOKEN_EVENTS_INVALID",
   "WORKFLOW_SYNC_CANCELLED",
-  "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
+  "WORKFLOW_SYNC_DEADLINE_EXCEEDED",
+  "WORKFLOW_SYNC_LOCK_FAILED"
 ]);
 
 const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
@@ -1324,7 +1326,25 @@ async function synchronizeExclusively(
     return synchronizeLinkedWorkflowRun(input, exclusive);
   }
   const layout = layoutResult.layout;
-  const release = await tryAcquireSynchronizationLock(layout);
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await tryAcquireSynchronizationLock(layout);
+  } catch (error) {
+    // A run root the pass cannot write to (read-only, full, or removed) fails the pass like any other
+    // write would, so observers report it instead of dying on it.
+    return {
+      ok: false,
+      diagnostics: [
+        {
+          code: "WORKFLOW_SYNC_LOCK_FAILED",
+          message: `run state synchronization could not take its lock: ${error instanceof Error ? error.message : String(error)}`,
+          severity: "error",
+          source: "runtime",
+          path: layout.root
+        }
+      ]
+    };
+  }
   if (release === undefined) {
     return {
       ok: true,
