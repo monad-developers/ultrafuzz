@@ -2,7 +2,7 @@ import { z } from "zod/v4";
 
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import { STOCK_AGENT_IDS } from "./agents.js";
-import { MAX_TIMEOUT_SECONDS } from "./constants.js";
+import { MAX_TIMEOUT_SECONDS, MAX_WORKFLOW_DEADLINE_SECONDS } from "./constants.js";
 import { RESOLVED_CONFIG_SCHEMA_VERSION, type ResolvedConfig } from "./types.js";
 
 export const RESOLVED_CONFIG_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:config:resolved-config:4" as const;
@@ -25,6 +25,7 @@ const nonWhitespaceStringSchema = z.string().min(1).regex(NON_WHITESPACE_PATTERN
 const environmentVariableNameSchema = z.string().regex(ENVIRONMENT_VARIABLE_PATTERN);
 const projectLocalPathSchema = z.string().regex(PROJECT_LOCAL_PATH_PATTERN);
 const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
+const workflowDeadlineSecondsSchema = z.number().int().min(1).max(MAX_WORKFLOW_DEADLINE_SECONDS);
 const positiveIntegerSchema = z.number().int().positive();
 const nonNegativeIntegerSchema = z.number().int().nonnegative();
 const dynamicStrategiesEnumeratorSchema = z.union([nonNegativeIntegerSchema, z.literal("unlimited")]);
@@ -66,7 +67,7 @@ const auditProfileSettingsSchema = z
     same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
     default_timeout_seconds: timeoutSecondsSchema.optional(),
-    workflow_deadline_seconds: timeoutSecondsSchema.optional(),
+    workflow_deadline_seconds: workflowDeadlineSecondsSchema.optional(),
     invariant_testing_smoke_timeout_seconds: timeoutSecondsSchema.optional(),
     invariant_testing_fuzzer_timeout_seconds: timeoutSecondsSchema.optional(),
     triage_quorum: positiveIntegerSchema.optional(),
@@ -300,7 +301,7 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
         forgeRayonThreads: positiveIntegerSchema,
         workspaceMode: z.literal("git-worktree"),
         defaultTimeoutSeconds: timeoutSecondsSchema,
-        workflowDeadlineSeconds: timeoutSecondsSchema,
+        workflowDeadlineSeconds: workflowDeadlineSecondsSchema,
         controllerLeaseSeconds: timeoutSecondsSchema
       })
       .strict(),

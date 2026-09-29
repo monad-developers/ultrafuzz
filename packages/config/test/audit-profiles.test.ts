@@ -121,6 +121,34 @@ ${profile}
     }
   });
 
+  it("accepts a profile workflow deadline above the one-day task timeout cap", () => {
+    const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-audit-profiles-"));
+    const catalogPath = path.join(directory, "audit-profiles.yml");
+    try {
+      fs.writeFileSync(
+        catalogPath,
+        `schema_version: 2
+profiles:
+  default:
+    description: Default profile.
+    intended_use: General audits.
+    settings: {}
+  long:
+    description: Long profile.
+    intended_use: Multi-day campaigns.
+    settings:
+      workflow_deadline_seconds: 172800
+`,
+        "utf8"
+      );
+      expect(auditProfile("long", loadAuditProfileCatalog(catalogPath)).settings.workflow_deadline_seconds).toBe(
+        172_800
+      );
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects the legacy top-level default pointer", () => {
     const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-audit-profiles-"));
     const catalogPath = path.join(directory, "audit-profiles.yml");

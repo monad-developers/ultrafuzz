@@ -23,8 +23,8 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "f7d513f45b696b4539259f40506aac57066aace218b3d1a8d8f382d1af04dd32";
-const EXPECTED_BUNDLE_SHA256 = "f0715eb17527e9974a4fa837fb064ee514446cdea887ccc4a8d821c08646fe31";
+const EXPECTED_SCHEMA_SHA256 = "8030b7b7ab1592d4a10d1c08554f418f69786cbe55dbf837ad2b935a91d3028b";
+const EXPECTED_BUNDLE_SHA256 = "b799a29b0fbe83656ff19d14c5f5925189d98e4b4d5dcfa6169ad06d65509be5";
 
 describe("resolved config JSON contract", () => {
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
@@ -66,6 +66,31 @@ describe("resolved config JSON contract", () => {
     const zod = resolvedConfigZodSchema.safeParse(parsed);
     expect(zod.success).toBe(true);
     if (zod.success) expect(zod.data).toEqual(parsed);
+  });
+
+  it("accepts a multi-day workflow deadline while task timeouts stay capped at one day", () => {
+    const project = parseProjectConfigToml("[run]\nworkflow_deadline_seconds = 172800\n");
+    expect(project.ok).toBe(true);
+    if (!project.ok) return;
+    const twoDays = resolveConfig({ env: {}, projectConfig: project.value });
+    expect(twoDays.ok).toBe(true);
+    if (!twoDays.ok) return;
+    // Every resume re-reads the sealed JSON copy against the checked-in schema.
+    const sealed = parseResolvedConfigJsonBytes(serializeResolvedConfigJsonBytes(twoDays.value));
+    expect(sealed.run.workflowDeadlineSeconds).toBe(172_800);
+
+    const rejected = (run: { workflowDeadlineSeconds?: number; defaultTimeoutSeconds?: number }) => {
+      const result = resolveConfig({ env: {}, projectConfig: { run } });
+      return result.ok ? [] : result.diagnostics.map(({ code, message }) => ({ code, message }));
+    };
+    expect(rejected({ workflowDeadlineSeconds: 604_801 })).toContainEqual({
+      code: "CONFIG_TIMEOUT_INVALID",
+      message: "run.workflow_deadline_seconds must be between 1 and 604800"
+    });
+    expect(rejected({ defaultTimeoutSeconds: 172_800 })).toContainEqual({
+      code: "CONFIG_TIMEOUT_INVALID",
+      message: "run.default_timeout_seconds must be between 1 and 86400"
+    });
   });
 
   it("rejects the previous v3 snapshot rather than adding a completion policy", () => {

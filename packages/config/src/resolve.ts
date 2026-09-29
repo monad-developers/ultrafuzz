@@ -13,6 +13,7 @@ import {
   type AuditProfileSettings
 } from "./audit-profiles.js";
 import { validateAgentConfigs } from "./agents.js";
+import { MAX_WORKFLOW_DEADLINE_SECONDS } from "./constants.js";
 import {
   MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
   MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
@@ -881,8 +882,10 @@ function resolvedConfigDiagnosticMessage(code: string, issue: ZodIssue, config: 
       return `${label} must be a relative project-local path`;
     case "CONFIG_PATH_TRAVERSAL":
       return `${label} must not contain empty, dot, or traversal path components`;
-    case "CONFIG_TIMEOUT_INVALID":
-      return `${label} must be between 1 and ${MAX_TIMEOUT_SECONDS}`;
+    case "CONFIG_TIMEOUT_INVALID": {
+      const maximum = label === "run.workflow_deadline_seconds" ? MAX_WORKFLOW_DEADLINE_SECONDS : MAX_TIMEOUT_SECONDS;
+      return `${label} must be between 1 and ${String(maximum)}`;
+    }
     case "CONFIG_WORKSPACE_MODE_INVALID":
       return `run.workspace_mode \`${String(valueAtPath(config, issue.path))}\` is not supported`;
     case "CONFIG_INVARIANT_PRIORITY_INVALID":
