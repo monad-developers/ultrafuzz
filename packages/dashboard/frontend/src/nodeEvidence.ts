@@ -1,6 +1,6 @@
 export type NodeEvidenceSectionId = "artifacts" | "logs" | "findings";
 
-export type NodeEvidenceAvailability = {
+type NodeEvidenceAvailability = {
   logs: boolean;
   findings: boolean;
   patch: boolean;
@@ -8,7 +8,7 @@ export type NodeEvidenceAvailability = {
   metadata: boolean;
 };
 
-export type NodeEvidenceDetail = {
+type NodeEvidenceDetail = {
   stdout?: string;
   stderr?: string;
   findings: unknown[];

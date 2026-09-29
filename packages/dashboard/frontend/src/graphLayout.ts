@@ -28,15 +28,15 @@ export type PhaseDimensions = {
   width: number;
 };
 
-export const dashboardNodeWidth = 268;
-export const dashboardNodeHeight = 132;
+const dashboardNodeWidth = 268;
+const dashboardNodeHeight = 132;
 export const metaNodeWidth = 138;
 export const metaNodeHeight = 56;
 export const metaNodeGap = 76;
-export const phaseNodeGap = 52;
-export const phaseGroupGap = 108;
-export const phaseBranchGap = 72;
-export const phasePadding = {
+const phaseNodeGap = 52;
+const phaseGroupGap = 108;
+const phaseBranchGap = 72;
+const phasePadding = {
   left: 36,
   right: 36,
   top: 62,

@@ -7,7 +7,7 @@ import * as ts from "typescript";
 
 import type { CompiledSmithersWorkflow } from "../src/smithers.js";
 
-export interface RenderedElement {
+interface RenderedElement {
   type: unknown;
   props: Record<string, unknown>;
 }

@@ -7,7 +7,7 @@ const WORKFLOW_EXECUTION_SNAPSHOT_CAPABILITY: unique symbol = Symbol(
   "ultrafuzz.workflow-execution-snapshot-capability"
 );
 
-export interface WorkflowExecutionSnapshotProtectedDirectory {
+interface WorkflowExecutionSnapshotProtectedDirectory {
   kind: "directory";
   relativePath: string;
   device: number;
@@ -16,7 +16,7 @@ export interface WorkflowExecutionSnapshotProtectedDirectory {
   links: number;
 }
 
-export interface WorkflowExecutionSnapshotProtectedFile {
+interface WorkflowExecutionSnapshotProtectedFile {
   kind: "file";
   relativePath: string;
   device: number;
@@ -27,7 +27,7 @@ export interface WorkflowExecutionSnapshotProtectedFile {
   sha256: string;
 }
 
-export interface WorkflowExecutionSnapshotProtectedLink {
+interface WorkflowExecutionSnapshotProtectedLink {
   kind: "link";
   relativePath: string;
   device: number;

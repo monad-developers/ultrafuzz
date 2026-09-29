@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { validatePromptTemplateVariables } from "./templateValidation";
 import { dashboardRequest, parseDashboardHttpResponse, throwDashboardHttpError } from "./wireContracts";
 
-export const promptAutosaveDelayMs = 1500;
+const promptAutosaveDelayMs = 1500;
 
 type PromptSummary = {
   strategyId?: string;

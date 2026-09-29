@@ -151,10 +151,7 @@ async function ensurePersistentWorkerLineageLocked(input: {
   await writeLineageAtomic(input.lineagePath, input.lineage);
 }
 
-export async function assertCurrentPersistentWorkerLineage(
-  lineagePath: string,
-  expected: ModalWorkerLineage
-): Promise<void> {
+function assertCurrentPersistentWorkerLineage(lineagePath: string, expected: ModalWorkerLineage): void {
   let persisted: ModalWorkerLineage;
   try {
     persisted = readModalWorkerLineage(lineagePath);
@@ -173,7 +170,7 @@ export function guardCurrentPersistentWorkerLineage(
   return async <T>(write: () => Promise<T>): Promise<T> => {
     const release = await acquireLineageLock(lineagePath);
     try {
-      await assertCurrentPersistentWorkerLineage(lineagePath, expected);
+      assertCurrentPersistentWorkerLineage(lineagePath, expected);
       return await write();
     } finally {
       await release();

@@ -7,7 +7,7 @@ export function isSafeId(value: string): boolean {
   return value.length > 0 && /^[a-z0-9_-]+$/.test(value) && value !== "." && value !== "..";
 }
 
-export function isSafeRelativePath(value: string): boolean {
+function isSafeRelativePath(value: string): boolean {
   if (value.length === 0 || value.includes("\\")) {
     return false;
   }

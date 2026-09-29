@@ -22,9 +22,9 @@ import {
 } from "@ultrafuzz/runtime";
 import { sameStrings } from "@ultrafuzz/artifacts";
 
-export const RUN_STATISTICS_SCHEMA_VERSION = "ultrafuzz.stats.v1" as const;
+const RUN_STATISTICS_SCHEMA_VERSION = "ultrafuzz.stats.v1" as const;
 
-export interface StatisticsSource {
+interface StatisticsSource {
   kind: "local-run" | "report-bundle";
   path: string;
 }
@@ -58,9 +58,9 @@ export interface TokenStatistics {
   models: string[];
 }
 
-export type NodeStatisticsStatus = NodeStatus | "canceled" | "unknown";
+type NodeStatisticsStatus = NodeStatus | "canceled" | "unknown";
 
-export interface NodeStatistics {
+interface NodeStatistics {
   node_id: string;
   logical_node_id: string | null;
   kind: PlannedGraphNodeDocument["kind"] | null;
@@ -78,7 +78,7 @@ export interface NodeStatistics {
   usage: TokenStatistics | null;
 }
 
-export interface AccountingCumulativeStatistics {
+interface AccountingCumulativeStatistics {
   input_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;

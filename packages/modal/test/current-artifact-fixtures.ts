@@ -20,7 +20,7 @@ import { projectCanonicalFinalReport, WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION 
 
 const FIXTURE_TIMESTAMP = "2026-01-01T00:00:00.000Z";
 
-export function currentFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function currentFinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schema_version: "ultrafuzz.finding.v2",
     id: "fixture-finding-1",

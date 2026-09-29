@@ -53,7 +53,7 @@ import type { ReportArtifacts } from "./report-artifacts.js";
 import type { RunStatisticsValue } from "./run-statistics.js";
 
 export const CLI_SCHEMA_VERSION = "ultrafuzz.cli.result.v2" as const;
-export const CLI_PUBLIC_RUN_STATE_SCHEMA_VERSION = "ultrafuzz.cli.public-run-state.v1" as const;
+const CLI_PUBLIC_RUN_STATE_SCHEMA_VERSION = "ultrafuzz.cli.public-run-state.v1" as const;
 
 export const CLI_KNOWN_COMMANDS = [
   "init",
@@ -137,11 +137,11 @@ export interface CliValidateProjectData {
   prompts?: NonNullable<ValidateProjectResult["prompts"]>;
 }
 
-export type CliPublicNodeState = Omit<NodeState, "artifact_dir" | "outputs" | "provenance">;
+type CliPublicNodeState = Omit<NodeState, "artifact_dir" | "outputs" | "provenance">;
 
-export type CliPublicWorkflowProvenance = PublicRunWorkflowProvenance;
+type CliPublicWorkflowProvenance = PublicRunWorkflowProvenance;
 
-export interface CliPublicRunState {
+interface CliPublicRunState {
   schema_version: typeof CLI_PUBLIC_RUN_STATE_SCHEMA_VERSION;
   run_id: string;
   status: RunState["status"];
@@ -159,7 +159,7 @@ export interface CliPublicRunState {
   provenance?: { workflow: CliPublicWorkflowProvenance };
 }
 
-export interface CliPublicRunMetadata {
+interface CliPublicRunMetadata {
   schema_version: "ultrafuzz.run-metadata.v2";
   run_id: string;
   created_at: string;
@@ -185,14 +185,14 @@ export interface CliInspectData extends Omit<RunStatusValue, "state" | "graph" |
   metadata: CliPublicRunMetadata;
 }
 
-export interface CliWorkflowNodeToolCall extends Omit<WorkflowNodeToolCall, "input" | "output"> {
+interface CliWorkflowNodeToolCall extends Omit<WorkflowNodeToolCall, "input" | "output"> {
   /** Redacted third-party tool payload; the tool defines its inner shape. */
   input?: CliJsonValue;
   /** Redacted third-party tool payload; the tool defines its inner shape. */
   output?: CliJsonValue;
 }
 
-export interface CliWorkflowNodeAttempt extends Omit<WorkflowNodeAttempt, "tool_calls"> {
+interface CliWorkflowNodeAttempt extends Omit<WorkflowNodeAttempt, "tool_calls"> {
   tool_calls: CliWorkflowNodeToolCall[];
 }
 
@@ -202,14 +202,14 @@ export interface CliWorkflowNodeData extends Omit<WorkflowNodeValue, "attempts">
 
 type DoctorPostureKey = keyof ValidateProjectResult["policy_posture"];
 
-export interface CliDoctorData extends Omit<DoctorValue, "validation"> {
+interface CliDoctorData extends Omit<DoctorValue, "validation"> {
   validation: {
     status: DoctorCheckStatus;
     policy_posture: Partial<Record<DoctorPostureKey, { status: string; summary: string }>>;
   };
 }
 
-export interface CliReportBundleData {
+interface CliReportBundleData {
   scope?: "report-only";
   verification?: "verified" | "not-checked";
   zip_path: string;
@@ -233,7 +233,7 @@ type CliResolvedEvalVariant = Omit<EvalMatrixRow["variant"], "workflow_input"> &
   workflow_input?: CliJsonValue;
 };
 
-export type CliEvalMatrixRow = Omit<EvalMatrixRow, "variant" | "workflow_input"> & {
+type CliEvalMatrixRow = Omit<EvalMatrixRow, "variant" | "workflow_input"> & {
   variant: CliResolvedEvalVariant;
   /** Explicit operator-controlled workflow input; Ultrafuzz does not infer its domain shape. */
   workflow_input?: CliJsonValue;
@@ -249,14 +249,14 @@ export interface CliEvalRunData {
   incomplete: number;
 }
 
-export interface CliEvalHistoryAppendData {
+interface CliEvalHistoryAppendData {
   history_path: string;
   observations: number;
   appended: number;
   charts: string[];
 }
 
-export interface CliEvalHistoryViewData {
+interface CliEvalHistoryViewData {
   history_path: string;
   observations: number;
   charts_directory: string;
@@ -264,7 +264,7 @@ export interface CliEvalHistoryViewData {
 }
 
 /** Payloads for the packaged audit-profile and topology commands. */
-export interface CliAuditProfileData {
+interface CliAuditProfileData {
   id: string;
   description: string;
   intended_use: string;
@@ -281,7 +281,7 @@ export interface CliAuditProfileData {
   overridden_settings: string[];
 }
 
-export interface CliAuditProfileSummary {
+interface CliAuditProfileSummary {
   id: string;
   description: string;
   intended_use: string;
@@ -290,14 +290,14 @@ export interface CliAuditProfileSummary {
   topology_digest?: string;
 }
 
-export interface CliAuditProfilesData {
+interface CliAuditProfilesData {
   schema_version: number;
   catalog_digest: string;
   default_profile: string;
   profiles: CliAuditProfileSummary[];
 }
 
-export interface CliTopologySummary {
+interface CliTopologySummary {
   id: string;
   description: string;
   topology_path: string;
@@ -305,15 +305,15 @@ export interface CliTopologySummary {
   digest: string;
 }
 
-export interface CliTopologyListData {
+interface CliTopologyListData {
   topologies: CliTopologySummary[];
 }
 
-export interface CliTopologyShowData extends CliTopologySummary {
+interface CliTopologyShowData extends CliTopologySummary {
   source: string;
 }
 
-export interface CliTopologyCopyData {
+interface CliTopologyCopyData {
   id: string;
   source_path: string;
   destination_path: string;
@@ -321,7 +321,7 @@ export interface CliTopologyCopyData {
   overwritten: boolean;
 }
 
-export interface CliArtifactValidateData {
+interface CliArtifactValidateData {
   contract: string;
   path: string;
 }
@@ -385,7 +385,7 @@ export interface CliCommandDataMap {
 
 export type CliCommandData = CliCommandDataMap[CliKnownCommand];
 
-export type CliKnownResultEnvelope = {
+type CliKnownResultEnvelope = {
   [Command in CliKnownCommand]: {
     schema_version: typeof CLI_SCHEMA_VERSION;
     command: Command;
@@ -395,7 +395,7 @@ export type CliKnownResultEnvelope = {
   };
 }[CliKnownCommand];
 
-export interface CliInvocationFailureEnvelope {
+interface CliInvocationFailureEnvelope {
   schema_version: typeof CLI_SCHEMA_VERSION;
   command: string;
   ok: false;

@@ -8,7 +8,7 @@ export function mean(values: number[]): number | null {
   return values.length ? sum(values) / values.length : null;
 }
 
-export function median(values: number[]): number | null {
+function median(values: number[]): number | null {
   if (!values.length) return null;
   const ordered = [...values].sort((a, b) => a - b);
   const middle = Math.floor(ordered.length / 2);

@@ -1,6 +1,6 @@
 import type { GroundTruthSubject } from "@ultrafuzz/evals";
 
-export interface ModalGroundTruthBug {
+interface ModalGroundTruthBug {
   id: string;
   title: string;
   severity?: string;

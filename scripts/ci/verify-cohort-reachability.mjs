@@ -41,7 +41,7 @@ const COHORT_DIRECTORIES = Object.freeze({ "ultrafuzz-bench": "ultrafuzzbench", 
  * Selectors: a benchmark lane name probes exactly the targets that lane runs, a
  * cohort name probes every target that cohort pins.
  */
-export const COHORT_REACHABILITY_LANES = Object.freeze([...BENCHMARK_LANE_NAMES, ...Object.keys(COHORT_DIRECTORIES)]);
+const COHORT_REACHABILITY_LANES = Object.freeze([...BENCHMARK_LANE_NAMES, ...Object.keys(COHORT_DIRECTORIES)]);
 const GITHUB_REPOSITORY = /^https:\/\/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)$/u;
 const SCP_LIKE_URL = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[A-Za-z0-9._~\-/]+$/u;
 const REMOTE_HELPER_URL = /^[A-Za-z0-9+.-]+::/u;

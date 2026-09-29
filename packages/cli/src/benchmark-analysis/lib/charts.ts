@@ -455,7 +455,7 @@ function pairwisePanelParts(
   return parts;
 }
 
-export async function buildPairwiseChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
+async function buildPairwiseChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
   const pairs = result.pairComparison;
   if (pairs.length === 0) throw new Error("No Ultrafuzz/no-fuzz row pairs are available for pairwise analysis");
 

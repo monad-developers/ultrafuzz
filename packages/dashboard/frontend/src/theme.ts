@@ -1,14 +1,14 @@
 export type ThemePreference = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
-export const THEME_STORAGE_KEY = "mds-theme";
-export const DEFAULT_THEME_PREFERENCE: ThemePreference = "system";
+const THEME_STORAGE_KEY = "mds-theme";
+const DEFAULT_THEME_PREFERENCE: ThemePreference = "system";
 
-export function isThemePreference(value: string | null): value is ThemePreference {
+function isThemePreference(value: string | null): value is ThemePreference {
   return value === "system" || value === "light" || value === "dark";
 }
 
-export function getSystemTheme(): ResolvedTheme {
+function getSystemTheme(): ResolvedTheme {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return "light";
   }

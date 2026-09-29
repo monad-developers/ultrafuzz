@@ -1,4 +1,4 @@
-export function csvEscape(value: unknown): string {
+function csvEscape(value: unknown): string {
   if (value === null || value === undefined || (typeof value === "number" && !Number.isFinite(value))) return "";
   const raw = Array.isArray(value)
     ? value.join("; ")

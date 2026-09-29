@@ -16,13 +16,13 @@ import {
  * declares it. Tests bind their local cache representation to this entry rather than appending a
  * fixture entry, so a catalog edit can never make the "clean scaffold" assertions vacuous.
  */
-export const SHIPPED_VULNERABILITY_DATABASE = shippedReference("vulnerability-database.owasp-scs");
+const SHIPPED_VULNERABILITY_DATABASE = shippedReference("vulnerability-database.owasp-scs");
 
 export function shippedReferenceCatalog(): ReferenceCatalog {
   return parseReferenceCatalog(defaultReferenceCatalogYaml());
 }
 
-export function shippedReference(id: string): { repo: string; commit: string; paths: readonly string[] } {
+function shippedReference(id: string): { repo: string; commit: string; paths: readonly string[] } {
   const entry = shippedReferenceCatalog().references[id];
   assert.ok(entry, `shipped references.yml must define ${id}`);
   return { repo: entry.repo, commit: entry.commit, paths: entry.paths };
@@ -142,6 +142,6 @@ export function fixtureFileDigest(
   return { path: filePath, size_bytes: contents.byteLength, sha256: digestFixtureBytes(contents) };
 }
 
-export function digestFixtureBytes(contents: Buffer): string {
+function digestFixtureBytes(contents: Buffer): string {
   return crypto.createHash("sha256").update(contents).digest("hex");
 }

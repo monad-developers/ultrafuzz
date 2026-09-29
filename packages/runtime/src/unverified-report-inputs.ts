@@ -358,6 +358,6 @@ function safeReportPath(relative: string): boolean {
   );
 }
 
-export function asRecord(value: unknown): JsonRecord | undefined {
+function asRecord(value: unknown): JsonRecord | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonRecord) : undefined;
 }
