@@ -1661,18 +1661,49 @@ const cloudExecutionGeneration = readCloudExecutionGeneration();
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
-// Empty unless run.friction_log_enabled is set. Appended to the fixed boundary so
-// a disabled run renders byte-identical prompts and an enabled run keeps the
-// friction instructions inside the prefix every task shares.
-const frictionLogContext = __ULTRAFUZZ_FRICTION_LOG_CONTEXT__;
-const frictionLogDirectory =
-  frictionLogContext === "" ? undefined : process.env.ULTRAFUZZ_FRICTION_LOG_DIR?.trim() || undefined;
+// Null unless run.friction_log_enabled is set. Agents write Frog-format entries
+// directly; no Frog code runs inside the campaign.
+const frictionLog: { instructions: string; entriesPath: string } | null = __ULTRAFUZZ_FRICTION_LOG__;
+
+/**
+ * The run friction log's entry directory for a local task, derived from the task's own run root
+ * rather than inherited environment so every continuation resolves the same directory. Cloud tasks
+ * get no friction log: their run root is relocated into the worker and is not reviewed locally.
+ */
+function frictionLogDirectory(task: (typeof taskSpecs)[number]): string | undefined {
+  if (frictionLog === null || task.execution.mode !== "local") return undefined;
+  return path.resolve(process.cwd(), task.runRoot, ...frictionLog.entriesPath.split("/"));
+}
+
+/** Best effort: a friction log that cannot be created must never fail the task it serves. */
+function ensureFrictionLogDirectory(task: (typeof taskSpecs)[number]): void {
+  const directory = frictionLogDirectory(task);
+  if (directory === undefined) return;
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    process.stderr.write(
+      `ultrafuzz: friction log unavailable for ${task.attemptId}: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+  }
+}
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
 const governedSource = readGovernedSource();
 
-function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }): string {
+function renderAgentPrompt(values: {
+  runtimeContext: string;
+  operatorPrompt: string;
+  taskPrompt: string;
+  frictionLogDirectory: string | undefined;
+}): string {
+  // The friction instructions follow the fixed boundary. Every task in a run shares one run root,
+  // so they stay inside the prefix all of the run's prompts share.
+  const frictionLogContext =
+    frictionLog === null || values.frictionLogDirectory === undefined
+      ? ""
+      : `\n\n${frictionLog.instructions.replaceAll("{{friction_log_directory}}", values.frictionLogDirectory)}`;
   const replacements = new Map([
     ["authorized_defensive_security_context", authorizedDefensiveSecurityContext],
     ["untrusted_content_boundary", untrustedContentBoundary + frictionLogContext],
@@ -3278,11 +3309,7 @@ function baseAgentForProfile(
     // their verifier markers. The metadata-only instance created while the
     // workflow is rendered receives no dependency access. The run friction log,
     // when enabled, is the only run-level root and holds no task inputs.
-    addDir: [
-      task.artifactDir,
-      ...dependencyArtifactDirs,
-      ...(frictionLogDirectory === undefined ? [] : [frictionLogDirectory])
-    ]
+    addDir: [task.artifactDir, ...dependencyArtifactDirs, ...(frictionLogDirectory(task) ?? [])]
   });
   if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
     throw new Error(`agent factory returned no agents: ${profile.agentRef}`);
@@ -4052,6 +4079,7 @@ function prepareArtifactMirror(
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
   preparationStep(task.attemptId, "create-artifact-mirror", () => mkdirSync(candidate, { recursive: true }));
+  ensureFrictionLogDirectory(task);
   const mirrorRoot = preparationStep(task.attemptId, "resolve-artifact-mirror", () => realpathSync(candidate));
   if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
@@ -10033,7 +10061,8 @@ export default smithers((ctx) => {
           const fullTaskPrompt = renderAgentPrompt({
             runtimeContext: task.runtimeContext,
             operatorPrompt,
-            taskPrompt: promptForTask(task, inputTask)
+            taskPrompt: promptForTask(task, inputTask),
+            frictionLogDirectory: frictionLogDirectory(task)
           });
           if (task.execution.mode === "cloud" && !cloudWorker) {
             const dependencyVerificationAuthorities = dependencyVerificationAuthoritiesForTask(task, (producer) =>

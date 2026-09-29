@@ -181,21 +181,27 @@ exits through the normal task command path, so its diagnostics remain task
 evidence without applying the limit to the workflow controller.
 
 The friction log is disabled by default. With `friction_log_enabled = true`,
-Ultrafuzz initializes a [Frog](https://github.com/wevm/frog) friction log at
-`<run>/friction` using the Frog release pinned by `@ultrafuzz/runtime`. It then
-gives every agent `ULTRAFUZZ_FRICTION_LOG` (the absolute path of a run-owned
-wrapper) and `ULTRAFUZZ_FRICTION_LOG_DIR` (the absolute log directory), plus
-write access to that directory. Agents record Ultrafuzz, tooling, or
-instruction roadblocks with `"$ULTRAFUZZ_FRICTION_LOG" log` and check existing
-entries with `"$ULTRAFUZZ_FRICTION_LOG" list`. The wrapper allows only those
-two commands and removes GitHub credentials, so entries stay local and
-`pending`. Review `<run>/friction/.agents/friction-log/` before publishing
-anything: entries can describe private targets.
+every local task may record Ultrafuzz, tooling, or instruction roadblocks as
+[Frog](https://github.com/wevm/frog) entries under
+`<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md`. Each
+task resolves that directory from its own run root, receives write access to
+it, and creates it during preparation. Ultrafuzz ships no Frog code and runs no
+Frog command, so a disabled run installs, seals, and renders nothing extra.
+Cloud tasks do not receive the friction log.
 
-The agent instructions are one fixed paragraph appended after the shared trust
-boundary and contain no paths or run identifiers. Enabled runs therefore add
-the same bytes to every task's shared prompt prefix, and disabled runs render
-byte-identical prompts.
+Entries stay local. Review them before publishing anything, because they can
+describe private targets. Run directories sit inside the target repository and
+Frog anchors itself at the enclosing Git root, so stop Git discovery at the run
+directory when you inspect them with Frog:
+
+```bash
+GIT_CEILING_DIRECTORIES=<run> npx frog list --cwd <run>/friction
+```
+
+The agent instructions are one paragraph appended after the shared trust
+boundary. Its only variable is the entry directory, which is the same for every
+task in a run, so enabled runs keep it inside the prompt prefix all of the
+run's tasks share, and disabled runs render byte-identical prompts.
 
 Every submitted workflow starts a run-scoped recovery supervisor. The
 supervisor renews controller ownership through runner heartbeats and uses an

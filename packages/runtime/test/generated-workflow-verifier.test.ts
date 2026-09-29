@@ -562,9 +562,17 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
   };
 }
 
-type AgentPromptRenderer = (values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }) => string;
+type AgentPromptRenderer = (values: {
+  runtimeContext: string;
+  operatorPrompt: string;
+  taskPrompt: string;
+  frictionLogDirectory?: string;
+}) => string;
 
-function loadAgentPromptRenderer(template: string): AgentPromptRenderer {
+function loadAgentPromptRenderer(
+  template: string,
+  frictionLog: { instructions: string; entriesPath: string } | null = null
+): AgentPromptRenderer {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function renderAgentPrompt");
   const helperEnd = source.indexOf("\nfunction sourceUsesPinnedBranch", helperStart);
@@ -576,8 +584,9 @@ function loadAgentPromptRenderer(template: string): AgentPromptRenderer {
     "agentPromptTemplate",
     "authorizedDefensiveSecurityContext",
     "untrustedContentBoundary",
+    "frictionLog",
     `${helper}; return renderAgentPrompt;`
-  )(template, "SECURITY CONTEXT", "UNTRUSTED BOUNDARY") as AgentPromptRenderer;
+  )(template, "SECURITY CONTEXT", "UNTRUSTED BOUNDARY", frictionLog) as AgentPromptRenderer;
 }
 
 function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
@@ -6369,13 +6378,15 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   );
   assert.match(
     baseAgent,
-    /addDir: \[\s*task\.artifactDir,\s*\.\.\.dependencyArtifactDirs,\s*\.\.\.\(frictionLogDirectory === undefined \? \[\] : \[frictionLogDirectory\]\)\s*\]/u
+    /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs, \.\.\.\(frictionLogDirectory\(task\) \?\? \[\]\)\]/u
   );
-  // The friction log root reaches agents only when the sealed prompt fragment is present.
+  // The friction log directory comes from the task's own run root, never from inherited
+  // environment that a continuation can blank, and only local tasks receive it.
   assert.match(
     source,
-    /const frictionLogDirectory =\s*frictionLogContext === "" \? undefined : process\.env\.ULTRAFUZZ_FRICTION_LOG_DIR/u
+    /function frictionLogDirectory\(task: \(typeof taskSpecs\)\[number\]\): string \| undefined \{\s*if \(frictionLog === null \|\| task\.execution\.mode !== "local"\) return undefined;\s*return path\.resolve\(process\.cwd\(\), task\.runRoot,/u
   );
+  assert.doesNotMatch(source, /process\.env\.ULTRAFUZZ_FRICTION/u);
   assert.match(source, /\["untrusted_content_boundary", untrustedContentBoundary \+ frictionLogContext\]/u);
   assert.doesNotMatch(baseAgent, /taskManifestPath|executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
@@ -6591,6 +6602,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "assertGovernedWorkspaceSource",
         "artifactAwareAgent",
         "frictionLogDirectory",
+        "ensureFrictionLogDirectory",
         `${emitted}; return {
           prepare(task) {
             prepareArtifactMirror(task);
@@ -6674,7 +6686,8 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
           preflight: async (args: unknown) => admittedAgent().preflight?.(args),
           generate: async () => ({ summary: "ok" })
         }),
-        undefined
+        () => undefined,
+        () => undefined
       ) as {
         prepare(task: ReturnType<typeof makeTaskSpecs>["consumer"]): void;
         agent(task: ReturnType<typeof makeTaskSpecs>["consumer"]): {
@@ -7135,6 +7148,28 @@ test("generated agent prompt inserts literal braces from task and operator promp
   assert.throws(
     () => unbound({ runtimeContext: "context", operatorPrompt: "", taskPrompt: "task" }),
     /agent prompt template contains an unresolved variable: retry_failure$/u
+  );
+});
+
+test("generated agent prompt places the run friction log after the trust boundary only when a task has one", () => {
+  const instructions = loadAgentPreambleTemplate("friction-log");
+  const render = loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"), {
+    instructions,
+    entriesPath: "friction/.agents/friction-log"
+  });
+  const directory = "/project/.ultrafuzz/runs/run-1/friction/.agents/friction-log";
+  const values = { runtimeContext: "## Topology Runtime Context", operatorPrompt: "", taskPrompt: "# Task\n" };
+  const withLog = render({ ...values, frictionLogDirectory: directory });
+  const expectedFragment = instructions.replaceAll("{{friction_log_directory}}", directory);
+  assert.ok(
+    withLog.startsWith(`SECURITY CONTEXT\n\nUNTRUSTED BOUNDARY\n\n${expectedFragment}\n\n## Topology Runtime Context`),
+    withLog
+  );
+  assert.doesNotMatch(withLog, /\{\{friction_log_directory\}\}/u);
+  // Cloud tasks resolve no directory and render exactly what a disabled run renders.
+  assert.equal(
+    render({ ...values, frictionLogDirectory: undefined }),
+    loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"))(values)
   );
 });
 

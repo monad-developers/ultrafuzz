@@ -45,29 +45,31 @@ describe("agent preamble MDX", () => {
     ).toBe(`${mandatoryPrefix}${operatorPrompt}\n\n${taskPrompt}`);
   });
 
-  it("keeps the friction log fragment static so it can sit inside the shared cache prefix", () => {
-    const fragment = renderAgentPreambleTemplate("friction-log");
-    // No template variables, run IDs, or paths: the fragment must be identical
-    // for every task and run, so it never moves a prompt-cache boundary.
-    expect(loadAgentPreambleTemplate("friction-log")).not.toMatch(/\{\{/u);
-    expect(fragment).not.toMatch(/\/(?:Users|home|tmp|private)\//u);
-    expect(fragment).toContain('"$ULTRAFUZZ_FRICTION_LOG" log');
+  it("tells agents to write Frog-format friction entries into the run's friction directory", () => {
+    const template = loadAgentPreambleTemplate("friction-log");
+    // The directory is the only variable: nothing reaches the agent through the environment.
+    expect(new Set([...template.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu)].map((match) => match[1]))).toEqual(
+      new Set(["friction_log_directory"])
+    );
+    expect(template).not.toMatch(/ULTRAFUZZ_FRICTION_LOG|\$[A-Z_]{3,}/u);
+    const directory = "/runs/example/friction/.agents/friction-log";
+    const fragment = renderAgentPreambleTemplate("friction-log", { friction_log_directory: directory });
+    expect(fragment).toContain(`${directory}/<UTC time as YYYYMMDDHHMMSS>-`);
+    expect(fragment).toContain("/friction.md");
+    // Frog's front matter and its five entry sections, in Frog's order.
+    expect(fragment).toMatch(/---\ntitle: '[^\n]+'\nseverity: '[^\n]+'\n---/u);
+    const sections = [
+      "Expected Behavior",
+      "Current Behavior",
+      "Possible Solution",
+      "Minimal Reproducible Example",
+      "Context"
+    ];
+    const positions = sections.map((section) => fragment.indexOf(`## ${section}`));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((left, right) => left - right)).toEqual(positions);
     expect(fragment).toMatch(/Never include target source, findings/u);
-    expect(Buffer.byteLength(fragment, "utf8")).toBeLessThanOrEqual(1_024);
-
-    const authorization = renderAgentPreambleTemplate("authorized-defensive-security-context");
-    const boundary = renderAgentPreambleTemplate("untrusted-content-boundary");
-    const render = (runtime: string): string =>
-      renderAgentPreambleTemplate("agent-prompt", {
-        authorized_defensive_security_context: authorization,
-        untrusted_content_boundary: `${boundary}\n\n${fragment}`,
-        runtime_context: runtime,
-        operator_prompt: "",
-        task_prompt: "# Task"
-      });
-    const sharedPrefix = `${authorization}\n\n${boundary}\n\n${fragment}\n\n`;
-    expect(render("short timeout").startsWith(sharedPrefix)).toBe(true);
-    expect(render("long timeout").startsWith(sharedPrefix)).toBe(true);
+    expect(Buffer.byteLength(fragment, "utf8")).toBeLessThanOrEqual(1_536);
   });
 
   it("treats inserted values as data", () => {

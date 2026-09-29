@@ -132,6 +132,9 @@ const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const MAX_WORKFLOW_EXECUTION_FILE_BYTES = 64 * 1024 * 1024;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
+// Frog's on-disk layout (`<root>/.agents/friction-log/<id>/friction.md`) rooted at
+// `<run>/friction`, so an operator can review the entries with `frog` after the run.
+const FRICTION_LOG_ENTRIES_PATH = "friction/.agents/friction-log";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
@@ -8276,10 +8279,13 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       renderAgentPreambleTemplate("authorized-defensive-security-context")
     ),
     __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
-    // Static text only: agents resolve paths from the environment, so enabling the
-    // friction log adds identical bytes to every prompt's shared cache prefix.
-    __ULTRAFUZZ_FRICTION_LOG_CONTEXT__: JSON.stringify(
-      config.run.frictionLogEnabled === true ? `\n\n${renderAgentPreambleTemplate("friction-log")}` : ""
+    // Null unless run.friction_log_enabled is set. The workflow resolves the entry
+    // directory from each task's own run root, so continuation never depends on
+    // inherited environment and a disabled run renders byte-identical prompts.
+    __ULTRAFUZZ_FRICTION_LOG__: JSON.stringify(
+      config.run.frictionLogEnabled === true
+        ? { instructions: loadAgentPreambleTemplate("friction-log"), entriesPath: FRICTION_LOG_ENTRIES_PATH }
+        : null
     ),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
