@@ -293,7 +293,7 @@ ultrafuzz node <run-id> <node-id> \
   [--project <path>] \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
-  [--reset-node <workflow-node-id>] [--refresh-controller] [--json]
+  [--reset-node <workflow-node-id>] [--retry-failed] [--refresh-controller] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -323,7 +323,13 @@ schema bindings, and metadata projections remain provenance for inspection;
 they are not resume authorization. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
-fork completed work.
+fork completed work. When the run's `smithers/resolved-config.json` parses as
+the current resolved-config schema, agent adapters in the continued workflow
+read the run's `smithers/execution-config.toml` (launch gave them a copy of the
+same file); for a run whose resolved config does not parse, resume sets no
+`ULTRAFUZZ_CONFIG_PATH`. If resume cannot prune stale task-worktree
+registrations, it reports a `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and
+continues.
 
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
@@ -458,13 +464,18 @@ an available agent-written report.
 
 `pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
 finish, and the run settles in the resumable `paused` state. `resume` reports
-`submitted: false` instead of launching a duplicate continuation when the linked
-workflow is still in an active state (running, in-progress, started, queued,
-retrying, or waiting). `resume --reset-node` retries one failed workflow node and
-its dependents in the same linked run; the applied reset is recorded so retrying
-the command after a failed continuation resumes the already-reset run instead of
-repeating the reset. `fork` may start from a checkpoint frame and may reset one
-workflow node before starting the fork.
+`submitted: false` (text output `Run already active`) instead of launching a
+duplicate continuation when the linked workflow is still active (its Smithers
+run state is `running`, `recovering`, or one of the `waiting-*` states), and
+leaves the run's recorded state and workflow deadline unchanged. A run still
+finishing its in-flight tasks after `pause` is still active; resume it again
+once `status` reports `paused`. Smithers also reports a run as `running` for up
+to 30 seconds after its controller process exits (its heartbeat window), so
+resume such a run again after that. `resume --reset-node` retries one failed
+workflow node and its dependents in the same linked run; the applied reset is
+recorded so retrying the command after a failed continuation resumes the
+already-reset run instead of repeating the reset. `fork` may start from a
+checkpoint frame and may reset one workflow node before starting the fork.
 
 Every command in this section takes an Ultrafuzz run ID and resolves the linked
 workflow run from existing product evidence; none of them require the
@@ -479,6 +490,24 @@ after the run has already stopped converges on the confirmed result instead of
 failing. Both outcomes append
 distinct product events. Failures use the stable `WORKFLOW_CANCEL_FAILED`
 diagnostic.
+
+`pause` and `cancel` read run evidence the way `status` does, without the
+workflow control lock. A run whose sealed control documents diverged, for
+example a hand-patched published workflow or a planned graph that no longer
+matches the current build's artifact contracts after a rebuild, can therefore
+still be paused or cancelled; `status` reports the divergence. They start the
+workflow runner from the run's published execution snapshot, so, like
+`status`, they still refuse a run whose sealed execution files changed: the
+files the control seal lists in that snapshot, such as the run plan, prompts,
+agent adapters, and the runtime packages and their dependencies.
+
+Because they take no lock, `pause` and `cancel` issued while a launch is still
+preparing fail without changing the run; retry once `ultrafuzz run` has
+returned. They also do not reconcile a `replay` or `fork` that was interrupted
+while linking its new workflow run, so they act on the workflow run it
+replaced, or refuse. Run `ultrafuzz why <run-id>` before pausing or cancelling
+such a run: it reconciles that link, even when it then reports a diverged
+control document.
 
 `why` returns a deterministic diagnosis: a summary, the current node, and typed
 blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,

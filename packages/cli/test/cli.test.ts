@@ -1918,6 +1918,26 @@ test("status surfaces a terminal product and live workflow lifecycle divergence"
   );
 });
 
+test("resume of an already-active run says no controller was started instead of claiming a submission", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
+  writeSmallTopology(project);
+  const runId = "resume-already-active";
+  const run = await cli(project, ["run", "--run-id", runId, "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+
+  // The fake runner still reports the run as running, so resume only attaches.
+  const resumed = await cli(project, ["resume", runId], env);
+
+  assert.equal(resumed.code, 0, `${resumed.stderr}\n${resumed.stdout}`);
+  assert.match(
+    resumed.stdout,
+    /^Run already active: ultrafuzz-resume-already-active; no new controller was started\./mu
+  );
+  assert.doesNotMatch(resumed.stdout, /Submitted/u);
+});
+
 test("status --watch stops immediately on a degraded verdict even while product state is nonterminal", async () => {
   const project = tempProject();
   const env = fakeSmithersEnv(project);

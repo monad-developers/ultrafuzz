@@ -5,6 +5,7 @@ import {
   cliEntrypoint,
   cliIo,
   commandFromRuntime,
+  diagnosticsText,
   emitCommandResult,
   globalFlags,
   projectRoot
@@ -37,11 +38,14 @@ export default class Resume extends Command {
       resetNode: flags["reset-node"],
       env: cliIo().env
     });
-    emitCommandResult(
-      this,
-      "resume",
-      commandFromRuntime("resume", result, (value) => `Submitted ${value.action}: ${value.workflow_run_id}\n`),
-      flags.json === true
+    const commandResult = commandFromRuntime("resume", result, (value) =>
+      value.submitted
+        ? `Submitted ${value.action}: ${value.workflow_run_id}\n`
+        : `Run already active: ${value.workflow_run_id}; no new controller was started. If a pause is still draining, resume again once status reports paused; if its controller process just exited, resume again after 30 seconds.\n`
     );
+    if (result.ok && result.diagnostics.length > 0) {
+      commandResult.text = `${commandResult.text ?? ""}${diagnosticsText(result.diagnostics)}`;
+    }
+    emitCommandResult(this, "resume", commandResult, flags.json);
   }
 }

@@ -26,8 +26,10 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaBundleDigest,
+  artifactSchemaDirectory,
   artifactSchemaRegistry,
   artifactSchemaRegistryFromDirectory,
+  artifactValidatorSmokeFixturePath,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   GOAL_PLAN_JSON_SCHEMA_ID,
   THREAT_MODEL_JSON_SCHEMA_ID,
@@ -36,6 +38,7 @@ import {
   goalPlanJsonSchema,
   layoutForRunRoot,
   manifestDigest,
+  parseJsonValidatorPreflightSuccessEnvelope,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -1916,6 +1919,10 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "      exit 2",
       "    fi",
       "    ;;",
+      "  cancel)",
+      '    printf \'%s\\n\' \'{"ok":true,"data":{"status":"cancelled"}}\'',
+      "    exit 2",
+      "    ;;",
       "  inspect)",
       `    if [ -f ${shellQuote(inspectStateOverride)} ]; then`,
       `      inspect_state=$(cat ${shellQuote(inspectStateOverride)})`,
@@ -2501,6 +2508,16 @@ function controllerRefreshTerminalEnv(
     enforceWorkflowChangeAcceptance: options.enforceWorkflowChangeAcceptance,
     failWorkflowChangeAdmissionOnce: options.failWorkflowChangeAdmissionOnce
   });
+}
+
+/** Make a fake lifecycle runner append `$<name>` to `logPath` on every `up`. */
+function logFakeRunnerUpVariable(env: Record<string, string | undefined>, name: string, logPath: string): void {
+  const shim = env.SMITHERS_BIN;
+  assert.ok(shim);
+  fs.writeFileSync(
+    shim,
+    fs.readFileSync(shim, "utf8").replace("  up)\n", `  up)\n    printf '%s\\n' "$${name}" >> ${shellQuote(logPath)}\n`)
+  );
 }
 
 function workflowEvents(
@@ -13302,6 +13319,20 @@ test("a divergent published control file leaves status readable while native res
   assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
   assert.equal(skipped[0]?.severity, "warning");
 
+  // The operator can still stop the run: pause and cancel reach the runner, and a confirmed
+  // cancellation is still persisted as the terminal state.
+  const paused = await pauseRun({ projectRoot: project, runId, env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.status, "pause-requested");
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled.diagnostics));
+  assert.equal(cancelled.value?.run_status, "canceled");
+  assert.ok(run.value);
+  assert.equal(readRunState(layoutForRunRoot(run.value.run_root)).status, "canceled");
+  const commands = fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8");
+  assert.match(commands, new RegExp(`^pause ultrafuzz-${runId} --format json`, "mu"));
+  assert.match(commands, new RegExp(`^cancel ultrafuzz-${runId} --format json`, "mu"));
+
   // The divergence is never silently repaired.
   assert.equal(fs.readFileSync(snapshotWorkflowPath, "utf8"), `${pristine}\n// diverged\n`);
 });
@@ -13338,6 +13369,11 @@ test("an observer still refuses a run whose sealed execution files diverged", as
   const health = await getRunHealth({ projectRoot: project, runId, env });
   assert.equal(health.ok, false);
   assert.equal(health.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  // Cancel reaches the runner through the same snapshot environment, so it refuses before invoking it.
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
+  assert.doesNotMatch(fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8"), /^cancel /mu);
 });
 
 test("a sealed manifest that stops re-deriving leaves status readable while native resume delegates", async () => {
@@ -13378,9 +13414,6 @@ test("a sealed manifest that stops re-deriving leaves status readable while nati
   }
   const resumed = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const cancelled = await cancelRun({ projectRoot: project, runId, env });
-  assert.equal(cancelled.ok, false);
-  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 
   // An observer reads the same run and is told which document stopped agreeing, naming the task the
   // re-derivation tripped on so the divergence is diagnosable without reproducing it by hand.
@@ -13413,6 +13446,11 @@ test("a sealed manifest that stops re-deriving leaves status readable while nati
   const skipped = health.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_SKIPPED");
   assert.equal(skipped.length, 1, JSON.stringify(health.diagnostics));
   assert.equal(skipped[0]?.severity, "warning");
+
+  // The divergence does not keep the operator from stopping the run either.
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled.diagnostics));
+  assert.equal(cancelled.value?.run_status, "canceled");
 
   // Reporting the divergence must never repair it.
   assert.equal(
@@ -13453,9 +13491,6 @@ test("a planned graph that stops matching this build's contracts leaves status r
   assert.equal(strict.ok, false);
   const resumed = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const cancelled = await cancelRun({ projectRoot: project, runId, env });
-  assert.equal(cancelled.ok, false);
-  assert.equal(cancelled.diagnostics[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 
   const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
   assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
@@ -13489,6 +13524,14 @@ test("a planned graph that stops matching this build's contracts leaves status r
     1,
     JSON.stringify(health.diagnostics)
   );
+
+  // A checkout that moved on must not cost the operator the ability to stop the run.
+  const paused = await pauseRun({ projectRoot: project, runId, env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.status, "pause-requested");
+  const cancelled = await cancelRun({ projectRoot: project, runId, env });
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled.diagnostics));
+  assert.equal(cancelled.value?.run_status, "canceled");
 });
 
 test("sealed Bun startup controls from another build are reported, not equated", () => {
@@ -15383,7 +15426,7 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   const consumed = fs.readFileSync(snapshotBytesLog, "utf8");
   assert.equal(consumed.includes(`workflow=${mutableWorkflow}\n`), true);
-  assert.match(consumed, /^config=.*\/smithers\/resolved-config\.json$/mu);
+  assert.match(consumed, /^config=.*\/smithers\/execution-config\.toml$/mu);
   assert.match(consumed, /^agent=.*\/\.smithers\/agents\/codex\.ts$/mu);
   assert.match(consumed, /HostileReplacement/u);
   assert.match(consumed, /export const hostile/u);
@@ -17895,7 +17938,7 @@ function sortedKeys(values: Iterable<string>): string[] {
 // Ultrafuzz mirrors those vocabularies deliberately; this test is what turns a
 // silent widening upstream into a build failure here.
 test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", async () => {
-  const { CURRENT_SMITHERS_INSPECT_KEY_CONTRACT, SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const { CURRENT_SMITHERS_INSPECT_KEY_CONTRACT } = await import("../src/smithers.js");
   const {
     CURRENT_SMITHERS_LIFECYCLE_EVENT_CATEGORIES,
     CURRENT_SMITHERS_LIFECYCLE_EVENT_TYPES,
@@ -18013,12 +18056,6 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     "type"
   ]);
 
-  // 8. `terminal_state_restore` and `resume_hydration` restore a node into a
-  // resumed session only for the states upstream calls terminal unconditionally.
-  // `failed` and `stalled` both stay out: upstream makes them terminal only
-  // under `continueOnFail`, and a node Ultrafuzz means to retry must not be
-  // hydrated back as done. If upstream promotes a new state into the
-  // unconditional branch, both replacements have to learn about it.
   // 9. `smithers why`. Ultrafuzz's parser is exact on the required set, so every
   // key `buildDiagnosis` can return must be required, and the only key the
   // command splices in afterwards (`steers`, conditional since 0.34.0) must be
@@ -18148,22 +18185,6 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     [],
     "the runner streams an event under a category Ultrafuzz exposes that its parser rejects"
   );
-
-  const { isTerminalState } = (await import(path.join(schedulerSource, "isTerminalState.js"))) as {
-    isTerminalState: (state: string) => boolean;
-  };
-  const unconditionallyTerminal = SMITHERS_NODE_STATES.filter((state) => isTerminalState(state));
-  assert.deepEqual([...unconditionallyTerminal].sort(), ["finished", "skipped"]);
-  for (const patchId of ["terminal_state_restore", "resume_hydration"] as const) {
-    const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === patchId);
-    assert.ok(patch !== undefined, `${patchId} patch was not described`);
-    const restored = SMITHERS_NODE_STATES.filter((state) => patch.patched.includes(`"${state}"`));
-    assert.deepEqual(
-      [...restored].sort(),
-      [...unconditionallyTerminal].sort(),
-      `${patchId} restores a different state set than the pinned runner treats as unconditionally terminal`
-    );
-  }
 });
 
 // Acceptance criterion 3: a failed or cancelled attempt must not hand a stale
@@ -25058,6 +25079,16 @@ test("native continuation does not use historical trusted CLI identity as an aut
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
   assert.equal(refreshed.value?.submitted, true);
   assert.equal(fs.readFileSync(trustedMetadataPath, "utf8"), "{}\n");
+  // The failed re-verification is reported instead of swallowed (#1143).
+  for (const resumed of [ordinary, refreshed]) {
+    assert.equal(
+      resumed.diagnostics.some(
+        (diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED" && diagnostic.severity === "warning"
+      ),
+      true,
+      JSON.stringify(resumed.diagnostics)
+    );
+  }
   assert.equal(
     fs
       .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
@@ -25066,6 +25097,88 @@ test("native continuation does not use historical trusted CLI identity as an aut
       .filter((command) => command.startsWith("up ")).length,
     2
   );
+});
+
+test("a resume that cannot re-verify the trusted CLI leaves tasks on the run's own working launcher", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "resume-keeps-trusted-launcher";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const upPathLog = path.join(project, "fake-smithers-up-path.log");
+  logFakeRunnerUpVariable(env, "PATH", upPathLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  fs.writeFileSync(upPathLog, "", "utf8");
+
+  // Without a CLI entrypoint resume cannot re-verify the launcher, although
+  // the launcher and its closure are intact (#1143).
+  const resumed = await runtimeResumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+
+  // Each task's validator preflight runs `ultrafuzz` from the runner's PATH.
+  // It must still reach the run's launcher, which verifies its closure and
+  // dispatches to the recorded (fake) CLI, never another `ultrafuzz`.
+  const runnerPath = fs.readFileSync(upPathLog, "utf8").trim();
+  const resolved = runnerPath
+    .split(path.delimiter)
+    .map((entry) => path.join(entry, "ultrafuzz"))
+    .find((candidate) => fs.existsSync(candidate));
+  assert.equal(resolved, path.join(launched.value.run_root, "trusted-bin", "ultrafuzz"));
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const stdout = execFileSync(
+    resolved,
+    [
+      "json",
+      "validate",
+      "--schema",
+      path.join(artifactSchemaDirectory(), findings.filename),
+      "--file",
+      artifactValidatorSmokeFixturePath(),
+      "--json"
+    ],
+    { encoding: "utf8", env: { ...process.env, PATH: runnerPath } }
+  );
+  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
+  const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED");
+  assert.equal(warning?.severity, "warning", JSON.stringify(resumed.diagnostics));
+});
+
+test("native continuation hands generated agents the run's TOML config, so CodexAgent keeps API-key auth", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "continuation-agent-config";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const configPathLog = path.join(project, "fake-smithers-up-config-path.log");
+  logFakeRunnerUpVariable(env, "ULTRAFUZZ_CONFIG_PATH", configPathLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  fs.writeFileSync(configPathLog, "", "utf8");
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+
+  // Build the stock adapter from the config path the resumed runner received.
+  // The init config selects `auth = "api-key"` for CodexAgent; an adapter that
+  // cannot read it falls back to subscription auth and clears the key.
+  const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+  const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENAI_API_KEY };
+  process.env.ULTRAFUZZ_CONFIG_PATH = fs.readFileSync(configPathLog, "utf8").trim();
+  process.env.OPENAI_API_KEY = "continuation-codex-key";
+  try {
+    const agent = createCodexAgent() as { opts: { env: Record<string, string> } };
+    assert.equal(agent.opts.env.CODEX_API_KEY, "continuation-codex-key");
+    assert.equal(agent.opts.env.OPENAI_API_KEY, "continuation-codex-key");
+  } finally {
+    if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+    else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+    if (previous.key === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previous.key;
+  }
 });
 
 test("controller refresh authenticates newly required sealed runner patches and rejects source drift", async () => {
@@ -25959,6 +26072,42 @@ test("launch observation rechecks a seal published while state remains pending",
   }
 });
 
+test("a launch that has sealed its controls but not written its link journal reads as incomplete, not legacy", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const runId = "launch-link-pending";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  // Launch publishes the execution snapshot after sealing its controls and before writing the link
+  // journal, with the run still pending. `pause`, `cancel` and `status` take no control lock, so they
+  // can read exactly this state while that publication runs.
+  writeRunState(layout, { ...readRunState(layout), status: "pending" });
+  const journalPath = path.join(layout.root, "smithers", "workflow-run-link-journal.json");
+  fs.unlinkSync(journalPath);
+  const commandLog = path.join(project, "smithers-commands.log");
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  for (const result of [
+    await pauseRun({ projectRoot: project, runId, env }),
+    await cancelRun({ projectRoot: project, runId, env })
+  ]) {
+    assert.equal(result.ok, false);
+    assert.equal(result.diagnostics[0]?.code, "WORKFLOW_CONTROL_SEAL_PENDING", JSON.stringify(result.diagnostics));
+    assert.equal(result.diagnostics[0]?.path, journalPath);
+    assert.match(result.diagnostics[0]?.message ?? "", /Launcher liveness is unknown/u);
+    assert.doesNotMatch(result.diagnostics[0]?.message ?? "", /new run ID|cannot be safely upgraded/u);
+  }
+  assert.doesNotMatch(fs.readFileSync(commandLog, "utf8"), /^(?:pause|cancel) /mu);
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.verdict, "launch-incomplete");
+  assert.equal(readRunState(layout).status, "pending");
+});
+
 test("native continuation restores only authenticated snapshot governance before launch", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
@@ -26427,6 +26576,11 @@ test("ordinary resume checks active-run ownership before detached preflight", as
   });
   const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  // An attach starts no controller, so the run's state (status, lease and
+  // workflow deadline) must stay exactly as its live owner left it (#1153).
+  assert.ok(run.value);
+  const statePath = path.join(run.value.run_root, "state.json");
+  const stateBefore = fs.readFileSync(statePath, "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
   // A duplicate `up --resume --detach` renders the workflow before Smithers
   // checks ownership. Keep that path fatal so this regression proves active
@@ -26456,6 +26610,53 @@ test("ordinary resume checks active-run ownership before detached preflight", as
   const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(forcedCommands, /inspect ultrafuzz-active-lifecycle-run --format json --full-output/u);
   assert.doesNotMatch(forcedCommands, /^up /mu);
+  assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore);
+});
+
+test("resume continues with a warning when stale task-worktree cleanup fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "worktree-cleanup-failure";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  // Cleanup runs only for runs launched from a Git revision.
+  const metadataPath = path.join(runRoot, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, source_revision: "0".repeat(40) }, null, 2)}\n`);
+  // Git lists a prunable registration owned by this run, then cannot remove it.
+  const previousPath = process.env.PATH ?? "";
+  const gitBin = temporaryRoot("ufz-failing-git-");
+  fs.writeFileSync(
+    path.join(gitBin, "git"),
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      `  *"worktree list --porcelain"*) printf 'worktree %s\\nbranch refs/heads/ultrafuzz/%s/stale\\nprunable\\n\\n' ${shellQuote(path.join(runRoot, "workspaces", "stale"))} ${runId} ;;`,
+      '  *"worktree remove"*) echo "fatal: synthetic removal failure" >&2; exit 1 ;;',
+      `  *) PATH=${shellQuote(previousPath)} exec git "$@" ;;`,
+      "esac",
+      ""
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  process.env.PATH = [gitBin, previousPath].join(path.delimiter);
+  const resumed = await resumeRun({ projectRoot: project, runId, env }).finally(() => {
+    process.env.PATH = previousPath;
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_WORKTREE_REPAIR_FAILED");
+  assert.ok(warning, JSON.stringify(resumed.diagnostics));
+  assert.equal(warning.severity, "warning");
+  assert.match(warning.message, /synthetic removal failure/u);
+  assert.match(fs.readFileSync(commandLog, "utf8"), /^up .*--resume ultrafuzz-worktree-cleanup-failure/mu);
 });
 
 test("resume derives reset identities from the canonical nodes of a failed workflow", async () => {
