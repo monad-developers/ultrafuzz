@@ -553,7 +553,10 @@ function verifyRequiredArtifactsForAttempt(
   );
 }
 
-/** The sealed attempt authority production passes, taken from the fixture's written task manifest. */
+/**
+ * The sealed task set production passes, taken from the fixture's written task
+ * manifest. Verifier-admitted dependency attempt IDs are not modeled.
+ */
 function fixtureAttemptAuthority(
   tasks: readonly SmithersTaskManifestTask[],
   attemptId: string
