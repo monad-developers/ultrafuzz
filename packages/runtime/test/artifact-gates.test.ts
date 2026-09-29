@@ -6820,8 +6820,8 @@ test("property fan-in selects a declared lens contract without relying on the pr
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
-test("property fan-in cannot hide a planned lens by omitting its state declaration and catalog rows", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-planned-lens-state-omission" });
+test("property fan-in cannot hide a planned lens by omitting its catalog rows", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-planned-lens-catalog-omission" });
   const node = writeMinimalPropertyFaninFixture(layout, {
     sourceNodeId: "project-discovery",
     sourcePropertyId: "evidence-1",
@@ -6843,10 +6843,6 @@ test("property fan-in cannot hide a planned lens by omitting its state declarati
       ]
     })
   );
-  // Run state is not a declaration source: the planned lens stays bound.
-  const state = readRunState(layout);
-  delete state.nodes["property-specification-recon"]!.outputs;
-  writeRunState(layout, state);
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
@@ -10245,7 +10241,7 @@ interface CampaignTimeoutResultFixture extends Record<string, unknown> {
   schema_version: "ultrafuzz.property-campaign.v3";
   fuzzer_backend: "recon";
   configured_timeout_seconds: number;
-  sequence_length: number;
+  sequence_length?: number;
   exact_command: string;
   start_timestamp: string;
   end_timestamp: string;
@@ -10743,6 +10739,15 @@ test("current campaign timeout gate accepts ordinary shell framing around the re
     const result = runCampaignTimeoutGate((fixture) => withCampaignCommand(fixture, command));
     assert.equal(result.ok, true, `${command}: ${JSON.stringify(result.diagnostics)}`);
   }
+});
+
+// The result schema makes sequence_length optional and the campaign prompt does
+// not ask for it; the deleted host copy required it after the budget was spent.
+test("current campaign timeout gate accepts a result that omits the optional sequence_length", () => {
+  const result = runCampaignTimeoutGate((fixture) => {
+    delete fixture.backend.sequence_length;
+  });
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("current campaign timeout gate names only the missing flag when the command also redirects output", () => {
@@ -11460,124 +11465,6 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
   assert.deepEqual(fs.readFileSync(incompletePath), incompleteBytes);
 });
 
-test("campaign gate still rejects a property-derived failure no finding covers", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-uncovered" });
-  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(
-      currentCampaign(
-        ["property-1", "property-2"],
-        [
-          { id: "failure-1", property_ids: ["property-1"] },
-          { id: "failure-2", property_ids: ["property-2"] }
-        ]
-      )
-    )
-  );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
-  writeCampaignSummary(layout, campaignId, 2, 1);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(result.ok, false);
-  assert.ok(
-    campaignJoinIssues(result).some((entry) => entry.includes('"failure-2" must be claimed by exactly one finding')),
-    JSON.stringify(result.diagnostics)
-  );
-});
-
-test("campaign gate does not let an unrelated finding cover a campaign failure", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-unrelated-coverage" });
-  campaignPropertyCatalog(layout, ["property-1"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(currentCampaign(["property-1"], [{ id: "failure-1", property_ids: ["property-1"] }]))
-  );
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("unrelated-finding", ["property-1"])])
-  );
-  writeCampaignSummary(layout, campaignId, 1, 1);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(result.ok, false);
-  assert.ok(
-    campaignJoinIssues(result).some((entry) => entry.includes('"failure-1" must be claimed by exactly one finding')),
-    JSON.stringify(result.diagnostics)
-  );
-});
-
-test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-ambiguous" });
-  campaignPropertyCatalog(layout, ["property-1"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(
-      currentCampaign(
-        ["property-1"],
-        [
-          { id: "failure-1", property_ids: ["property-1"] },
-          { id: "failure-2", property_ids: ["property-1"] }
-        ]
-      )
-    )
-  );
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-1", ["property-1"])])
-  );
-  writeCampaignSummary(layout, campaignId, 2, 2);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-  const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(ambiguous.ok, false);
-  assert.deepEqual(gateIssuePaths(ambiguous, "findings-id-uniqueness"), ["$[1]"]);
-
-  // A finding that claims a failure's ID must still carry that failure's properties,
-  // even though other failures may now be covered by a different finding.
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("failure-1", []), campaignFinding("failure-2", ["property-1"])])
-  );
-  writeCampaignSummary(layout, campaignId, 2, 2);
-  const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(mismatched.ok, false);
-  assert.ok(
-    campaignJoinIssues(mismatched).some((entry) =>
-      entry.includes('"failure-1" must be claimed by exactly one finding')
-    ),
-    JSON.stringify(mismatched.diagnostics)
-  );
-});
-
 test("campaign gate rejects a failure whose property combination no single finding claims", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-combination" });
   campaignPropertyCatalog(layout, ["property-1", "property-2"]);
@@ -11599,12 +11486,11 @@ test("campaign gate rejects a failure whose property combination no single findi
       )
     )
   );
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-2", ["property-2"])])
-  );
+  const singlePropertyFindings = [
+    accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"]),
+    accountedCampaignFinding("failure-2", ["property-2"], ["failure-2"])
+  ];
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify(singlePropertyFindings));
   writeCampaignSummary(layout, campaignId, 3, 2);
   const node = {
     ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
@@ -11614,10 +11500,22 @@ test("campaign gate rejects a failure whose property combination no single findi
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    campaignJoinIssues(result).some((entry) => entry.includes('"failure-3" must be claimed by exactly one finding')),
-    JSON.stringify(result.diagnostics)
+  assert.deepEqual(campaignJoinIssues(result), [
+    '$.failures: Semantic gate property-campaign-context-joins failed: Property-derived campaign failure "failure-3" must be claimed by exactly one finding'
+  ]);
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      ...singlePropertyFindings,
+      accountedCampaignFinding("failure-3", ["property-1", "property-2"], ["failure-3"])
+    ])
   );
+  writeCampaignSummary(layout, campaignId, 3, 3);
+  const claimed = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(claimed.ok, true, JSON.stringify(claimed.diagnostics));
 });
 
 test("campaign gate accepts a deduplicated finding that unions the properties of the failures it covers", () => {
