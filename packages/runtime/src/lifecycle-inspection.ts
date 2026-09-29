@@ -237,7 +237,13 @@ function readRunStatusIfPresent(layout: RunLayout): RunStatus | undefined {
 
 export async function cancelRun(input: CancelRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  // Cancelling runs none of the run's workflow code: it only asks the workflow runner to stop the
+  // linked run. So it reads evidence the way `status` does, and a run whose sealed control documents
+  // diverged can still be stopped instead of refusing with WORKFLOW_CONTROL_EVIDENCE_INVALID.
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    tolerateControlDivergence: true,
+    observeOnly: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<CancelRunValue>(evidence.diagnostics);
   }

@@ -30,14 +30,18 @@ trusted-cli.json
 trusted-bin/
 artifacts/
 review/
-events.index/
 workspaces/
 workspaces.json
 ```
 
-`source-run.json` is present when the run derives from another run. Event query
-indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
-of the artifact contract.
+`source-run.json` is present when the run derives from another run.
+`events.jsonl` is the only event journal: event queries filter it, and SQLite
+events are not part of the artifact contract. An append checks the new event
+against the final event and any trailing events with the same timestamp;
+`replayEvents` and `queryEvents` validate the whole journal. The journal has no
+record-count limit; its 64 MiB byte limit still applies. Runs created before
+this change may also have an `events.index/` directory. Nothing reads it, and
+report bundles still copy it.
 
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
 Each entry's immutable identity is the exact Smithers pair
@@ -173,6 +177,12 @@ Node statuses are:
 - `reused-from-prior-run`
 - `invalidated`
 
+Synchronization records a node as `timed-out` from Smithers' typed deadline
+codes (`TASK_TIMEOUT`, `TASK_HEARTBEAT_TIMEOUT`, `PROCESS_TIMEOUT`,
+`PROCESS_IDLE_TIMEOUT`) and heartbeat-timeout events, not from error text: a
+failure whose message mentions a timeout, or a deadline reported only as text
+such as a Modal cloud-node deadline, is `failed`.
+
 Every nonterminal node records `wait_since`, a typed `wait_reason`, and a typed
 `next_eligible_action`. Wait reasons distinguish ready work, capacity and
 dependency waits, retry backoff, external gates, controller loss, and active
@@ -204,17 +214,44 @@ manifests.
 
 Each new attempt also records its selected Smithers chain index, model-profile
 ID, agent reference, optional model/reasoning values, and
-primary-or-fallback role. Selection is reconciled against Smithers' durable
-attempt metadata and the sealed task chain; it is never inferred from the retry
-number or token model. Failed primaries therefore remain visible even when a
-later fallback produces the accepted output.
+primary-or-fallback role when Smithers' durable attempt metadata identifies a
+rung of the sealed task chain; selection is never inferred from the retry number
+or token model. Failed primaries therefore remain visible even when a later
+fallback produces the accepted output. An attempt that fails before Smithers
+selects a rung ran no model and is not recorded, unless a reset supersedes it
+first (see below).
+
+Each attempt is identified by its terminal Smithers event and is recorded once:
+later synchronization never re-derives or rewrites it, even when the node's
+status changes afterwards. Finished, failed, timed-out, and cancelled attempts
+are recorded; a cancellation has outcome and category `canceled` and the
+Smithers cancellation reason as its message. A terminal event with no started
+attempt in the same Smithers activation, or stamped before that attempt
+started, is skipped. A finished attempt whose node then fails, for example
+because the verifier or artifact gates reject its output, is recorded as failed
+with category `invalid-output` for findings validation and
+`artifact-validation` otherwise.
+`resume --retry-failed` and `--reset-node` restart Smithers' attempt numbering,
+after which Smithers' attempt row describes only the replacement. A failed,
+timed-out, or cancelled attempt that such a reset superseded before any
+synchronization recorded it is therefore recorded from its events without the
+agent block. That includes a pre-agent failure, which then counts toward the
+node's `retry_count` although no model ran. A superseded finished attempt that
+was not recorded before the reset is not recorded, because the node's output
+manifest now belongs to the replacement.
 
 Attempt summaries and retry counts are derived from this ledger. Replaying a
 known transition does not append it again, so resume, replay, checkpoint
 continuation, and controller takeover preserve prior lifecycle history. Reused
 work points to its source attempt and is reported separately from executed work.
 The ledger stores typed failure categories but never raw diagnostics, inputs,
-outputs, or configuration.
+outputs, or configuration. Ledger bookkeeping does not block synchronization:
+when Smithers attempt detail is unavailable or an append fails, synchronization
+reports a warning, still reconciles node and run status, and retries on the next
+pass. Synchronization reads each Smithers event stream with
+`smithers events --limit 100000`, the CLI maximum, which returns the oldest
+events first; a stream that returns exactly that many events is reported as
+`WORKFLOW_EVENTS_TRUNCATED`, because any later attempts or usage cannot be read.
 
 For terminal report producers, `report.json#run_metadata.agent_execution`
 contains the full planned attempt chain, the attempts that failed before the
@@ -537,8 +574,9 @@ artifacts/final-report/report.json
 
 `report.json` must satisfy `ultrafuzz/report@3` with the exact
 `ultrafuzz.report.v3` version literal. After a run stops, the runtime can format
-that report and attach whole-run completion information without changing the
-agent's files. Verified publications use:
+that report, attach whole-run completion information, and restate the run
+summary's elapsed time and accounting without changing the agent's files.
+Verified publications use:
 
 ```text
 review/runtime-report/<authority-digest>/report.json
@@ -738,14 +776,23 @@ Blockers:
 
 Repeat blocker and evidence rows in artifact order. Runtime publication compares
 this section with the typed handoff and rejects missing, duplicated, reordered,
-or bare coverage scores. Raw `covg-eval` output is for iteration only and
-defines neither published declaration-completeness view.
+or contradicting scoped scores, and it warns about coverage scores that name no
+exact scope. Raw `covg-eval` output is for iteration only and defines neither
+published declaration-completeness view.
 
-Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
-`threat-model.json`, and `goal-plan.json`, plus source-node provenance for each
-production issue. Detailed threat analysis stays in the dedicated threat-model
-artifacts and is not duplicated into the report. `report.json` preserves the
-same `source_nodes` arrays.
+A coverage score that names no exact declaration-completeness scope, whether in
+`report.md`, the coverage producer's Markdown, or `report.json` text, does not
+fail publication, although text that exceeds the 2,048-candidate scan limit
+still does. When no coverage producer was planned or admitted,
+`report.json.coverage_evidence` or a `report.md` score that names an exact
+scope fails the final report.
+
+Current-run `report.md` contains source-node provenance for each production
+issue and does not link to other run files. Detailed threat analysis stays in
+the dedicated threat-model artifacts and is not duplicated into the report.
+`report.json` preserves the same `source_nodes` arrays. Inline link and image
+syntax inside report prose, including prose preserved byte-for-byte from
+upstream findings, renders as literal text.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and
@@ -755,13 +802,20 @@ available cumulative values into the markdown run summary and into
 persisted estimate is partial because some token usage did not have pricing
 data.
 
-If cumulative metadata has not synchronized when the final-report producer
-starts, its live Smithers fallback is a snapshot through that producer's start.
-It includes earlier attempts but cannot include the producer's own eventual
-duration, model fallback, tokens, or cost. A terminal presentation of an existing
-verified agent report preserves those accounting values. Report v3 has no
-metric-scope field, so use
-`ultrafuzz stats` after terminal synchronization for closed-run accounting.
+The final-report producer receives its run summary when its task starts: from
+cumulative metadata when it has synchronized, otherwise from a live Smithers
+fallback. Either way it is a snapshot through that producer's start. It includes
+earlier attempts but cannot include the producer's own eventual duration, model
+fallback, tokens, or cost, and the agent's `report.json` and `report.md` keep
+that snapshot. Runtime presentations (the verified terminal publication and
+unchecked reports) restate the run summary instead: elapsed time from
+`run.json#created_at` to `state.json#finished_at`, and models, tokens,
+estimated spend, and `partial_pricing` from the current
+`accounting.cumulative`. Tokens, estimated spend, and `partial_pricing` are
+restated together whenever `accounting.cumulative` records a token count, so a
+whole-run spend recorded as `unavailable` stays `unavailable` instead of showing
+the agent's report-start figure. Otherwise, a value those records lack keeps the
+agent's copy. Use `ultrafuzz stats` for the full accounting breakdown.
 
 `accounting.segments` publishes one rollup per checkpoint generation, and
 `accounting.current` identifies the latest segment. Each segment retains every
@@ -769,7 +823,15 @@ source event sequence as audit evidence, but accounting uses only the latest
 cumulative usage snapshot for each workflow attempt. `accounting.cumulative`
 combines those canonical attempt snapshots with any source-run lineage.
 `accounting.checkpoint` records the raw ledger position used by the durable
-metadata snapshot. Usage and pricing completeness are reported independently
+metadata snapshot. The accounting block is a cache that every synchronization
+rebuilds from `usage.jsonl`, and a usage row is recorded once and never
+re-derived, so a synchronization interrupted between the usage append and the
+`run.json` write is repaired by the next one. A failed accounting pass is
+reported as a `WORKFLOW_ACCOUNTING_FAILED` warning and does not block run status.
+An invalid usage field in an unrecorded `TokenUsageReported` event fails each
+later accounting pass this way, so no further usage is recorded for the run
+while node and run status keep reconciling.
+Usage and pricing completeness are reported independently
 through `usage_complete`/`usage_incomplete_reasons` and
 `pricing_complete`/`pricing_incomplete_reasons`.
 
@@ -796,7 +858,9 @@ a usable cost. Kimi-family models are priced from the pinned Moonshot provider
 entry, while DeepSeek-family models are priced from the pinned first-party
 DeepSeek entry. Either family stays listed in
 `pricing_catalog.unresolved_models` when its first-party entry is absent rather
-than borrowing a same-named rate from another provider.
+than borrowing a same-named rate from another provider. A model that a fetched
+catalog does not list stays unresolved without another catalog download; only
+an unavailable catalog is retried on a later synchronization.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.
@@ -857,7 +921,6 @@ runs.jsonl
 scores.jsonl
 summary.json
 summary.md
-telemetry/
 ```
 
 `eval.json` records the resolved suite plus candidate and benchmark lineage,
@@ -892,10 +955,7 @@ available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the
 effective deterministic or optional-judge mode.
 
-`telemetry/` holds durable per-row telemetry cursors with byte offsets, event
-deduplication state, and artifact hashes for the local observer loop. Historical
-publication cursor documents remain readable, but there is no external
-publication command. The underlying Ultrafuzz runs live inside each target
+The underlying Ultrafuzz runs live inside each target
 checkout, not under the eval project; eval artifacts reference them by run ID.
 Grading and these artifacts do not depend on a reporting service.
 See [Eval Suites](evals.md).

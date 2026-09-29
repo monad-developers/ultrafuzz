@@ -139,18 +139,21 @@ resume.
 
 `workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
 records `workflow_deadline_at` in run state when the run is created, and again
-from each `resume`, `replay`, or `fork`, but nothing enforces it on a timer: an
+from each `replay`, `fork`, or `resume` that starts a controller (not one that
+finds the run still active), but nothing enforces it on a timer: an
 unattended run keeps executing, and incurring provider cost, past its deadline.
 The deadline is checked only when a command synchronizes the run: `ultrafuzz
 status` (including each `--watch` poll), `inspect`, `why`, and `stats`, plus
 the dashboard's inspect action and the eval runner's poll loop. `ultrafuzz run`
-does not check it. If the run is not yet terminal (running, pending, or paused)
-at the first synchronization after the deadline, that synchronization requests
-cancellation and, when the request succeeds, marks the run `timed-out` and
-appends a `workflow-deadline-exceeded` event. A failed request is reported as a
-`WORKFLOW_DEADLINE_CANCEL_FAILED` error and leaves the run active; a
-synchronization that fails or is skipped (for example
-`WORKFLOW_STATE_SYNC_SKIPPED`) does not check the deadline at all. A run that
+does not check it. If the run is running or pending at the first
+synchronization after the deadline, that synchronization requests cancellation
+and, when the request succeeds, marks the run `timed-out` and appends a
+`workflow-deadline-exceeded` event. A paused run is not cancelled: it executes
+nothing, and resuming it records a new deadline. A failed request is reported as
+a `WORKFLOW_DEADLINE_CANCEL_FAILED` warning and leaves the run active, and the
+next synchronization requests cancellation again; a synchronization that fails
+or is skipped (for example `WORKFLOW_STATE_SYNC_SKIPPED` or
+`WORKFLOW_SYNC_IN_PROGRESS`) does not check the deadline at all. A run that
 finished first keeps its terminal outcome, with no timeout record. To bound an
 unattended run, run `ultrafuzz status <run-id>` periodically (for example from
 cron) and act on its warnings, or cancel it with `ultrafuzz cancel <run-id>`.
@@ -174,8 +177,7 @@ Every submitted workflow starts a run-scoped recovery supervisor. The
 supervisor renews controller ownership through runner heartbeats and uses an
 atomic claim before taking over expired ownership, so completed work is not
 resubmitted. The workflow deadline is separate from per-node timeouts and is
-checked whenever run state is synchronized by status, inspect, reporting, or
-eval watchers.
+checked only when run state is synchronized, as described above.
 
 ## Execution
 
@@ -387,6 +389,7 @@ is local and remains the default.
 | `ULTRAFUZZ_PRICING_CATALOG_URL`         | Live model-pricing catalog URL, or `disabled`, `none`, or `off`.                                                                                                                                                                                               |
 | `ULTRAFUZZ_PRICING_TIMEOUT_MS`          | Positive catalog request timeout in milliseconds, capped at 60 seconds.                                                                                                                                                                                        |
 | `ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS` | Optional deadline in milliseconds for the run-state refresh before `status`, `inspect`, `why`, and `stats`. Unset means no deadline (observers wait for full synchronization); a positive value bounds it, capped at 60000; `0` or `off` is the same as unset. |
+| `ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS`     | Timeout in milliseconds for each read-only runner query (`inspect`, `events`, `node`, `status`, `why`, `ps`, `timeline`, `snapshots`); one that exceeds it fails. Defaults to 120000, capped at 600000; `0`, `off`, or any invalid value means the default.    |
 
 Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 
@@ -399,6 +402,20 @@ bound the refresh; values above 60000 are capped at 60000, and `0` or `off` is
 the same as unset. When a configured deadline passes, the command reports a
 `WORKFLOW_SYNC_DEADLINE_EXCEEDED` warning and continues with the local run
 state, whose node states, attempt ledgers, and usage counts may then be stale.
+
+A command or eval poll that finds another synchronization of the same run in
+progress skips its own pass instead of running alongside it, reports
+`WORKFLOW_SYNC_IN_PROGRESS`, and continues with the local run state. The lock
+behind this lives in `.workflow-sync.lock` in the run directory; one left behind
+by a killed process is taken over five minutes after its holder last refreshed
+it. A pass that cannot create the lock, for example in a read-only run
+directory, reports `WORKFLOW_SYNC_LOCK_FAILED` and writes nothing. During its
+refresh, `status` reports a failed or malformed runner `inspect` or `events`
+query, a lock it cannot take, and an unexpected synchronization error as
+warnings, so it still shows the workflow runner's health and `--watch` keeps
+polling. When nothing but the observation time changed,
+`status` and any synchronization of a finished run leave `state.json` untouched;
+any other synchronization of a live run still renews its controller lease.
 
 Custom pricing catalogs must use HTTPS without credentials, query parameters,
 or fragments and must resolve entirely to public addresses. The validated DNS

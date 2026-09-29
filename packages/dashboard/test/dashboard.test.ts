@@ -81,8 +81,6 @@ test("serves logical topology flow with expanded attempt details", async () => {
     assert.ok(flow.nodes.every((node) => node.id === node.data.logicalNodeId));
     assert.equal(flow.capabilities.runNewCampaign, true);
     assert.equal(flow.capabilities.referencesStatus, true);
-    assert.equal(flow.capabilities.doctor, false);
-    assert.equal(flow.capabilities.merge, false);
   } finally {
     await handle.close();
   }

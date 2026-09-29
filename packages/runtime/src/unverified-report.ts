@@ -14,6 +14,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { projectCanonicalFinalReport } from "./final-report-markdown.js";
+import { withWholeRunSummary } from "./terminal-report-projection.js";
 import {
   loadCurrentFinalReportSnapshot,
   publishTerminalReport,
@@ -111,11 +112,19 @@ function publishUncheckedPresentation(root: string, file: string, bytes: Buffer)
 
 function captureUnverifiedReport(inputs: UnverifiedReportInputs): ReportSnapshot {
   validateSafeId(inputs.runId, "run ID");
-  const projection = projectCanonicalFinalReport({
-    ...inputs.agentReport,
-    verification: inputs.verification,
-    observed_completion: inputs.observed
-  });
+  const projection = projectCanonicalFinalReport(
+    {
+      ...inputs.agentReport,
+      run_metadata: withWholeRunSummary(
+        inputs.agentReport.run_metadata as Record<string, unknown>,
+        inputs.metadata,
+        inputs.state?.finished_at
+      ),
+      verification: inputs.verification,
+      observed_completion: inputs.observed
+    },
+    { goalSearchCoverage: inputs.goalSearchCoverage }
+  );
   const jsonBytes = Buffer.from(`${JSON.stringify(projection.report, null, 2)}\n`, "utf8");
   const markdownBytes = Buffer.from(projection.markdown, "utf8");
   const generation = sha256Bytes(Buffer.concat([jsonBytes, markdownBytes]));

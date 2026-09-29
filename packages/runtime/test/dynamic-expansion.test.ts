@@ -81,6 +81,69 @@ function item(index: number): Record<string, unknown> {
   };
 }
 
+/** A run whose sealed runtime controls fan `goals` from `planner` out into `fanout`, joined by `join`. */
+function sealedDynamicRun(runId: string, goals: Array<Record<string, unknown>>) {
+  const projectRoot = tempDirectory();
+  const runRoot = path.join(projectRoot, "runs", runId);
+  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
+  const templatePath = path.join(runRoot, "templates", "worker.md");
+  const graphPath = path.join(runRoot, "graph.json");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
+  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
+  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
+  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
+  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals })}\n`, "utf8");
+  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
+  const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
+  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
+  const group: CompiledSmithersDynamicGroup = {
+    groupNodeId: "fanout",
+    logicalNodeId: "fanout",
+    source: {
+      concreteNodeId: "planner",
+      attemptId: "planner",
+      verifierSmithersNodeId: "verify:planner",
+      artifactPath: sourceArtifactPath
+    },
+    sourcePath: "$.goals",
+    keyPath: "id",
+    nodeIdTemplate: "dynamic:item:{{ item.id }}",
+    templatePath,
+    templateDigest: digest(fs.readFileSync(templatePath)),
+    templateFingerprint: digest("template-fingerprint"),
+    continueOnFail: true,
+    maxDynamicNodes: 100,
+    reservedNodeIds: ["planner", "fanout", "join"],
+    taskTemplates: [templateTask],
+    promptContext: promptContext(projectRoot, runRoot)
+  };
+  // The seal keeps byte copies of the pre-expansion controls beside the mutable ones.
+  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
+  fs.writeFileSync(
+    tasksPath,
+    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
+    "utf8"
+  );
+  fs.copyFileSync(graphPath, baseGraphPath);
+  fs.copyFileSync(tasksPath, baseTasksPath);
+  return {
+    sourceArtifactPath,
+    controls: {
+      runId,
+      projectRoot,
+      runRoot,
+      graphPath,
+      tasksPath,
+      baseGraphPath,
+      baseTasksPath,
+      baseTasks: [joinTask],
+      groups: [group]
+    }
+  };
+}
+
 test("dynamic expansion deterministically persists empty, one-item, and 100-item manifests", () => {
   for (const count of [0, 1, 100]) {
     const fixture = expansionFixture({
@@ -212,7 +275,7 @@ test("dynamic expansion rejects duplicate keys, reserved IDs, and malformed huma
   assert.equal(dotted.items[0]?.variables["oracle.v2:stale-price"], "stale prices");
 });
 
-test("persisted expansion rejects tampering, transplantation, source changes, and symlink manifests", () => {
+test("persisted expansion rejects tampering, transplantation, and symlink manifests", () => {
   const tampered = expansionFixture({ runId: "tampered", items: [item(0)] });
   tampered.invoke();
   const manifestPath = path.join(tampered.runRoot, "dynamic-expansions", "fanout.json");
@@ -224,14 +287,6 @@ test("persisted expansion rejects tampering, transplantation, source changes, an
   assert.throws(
     () => tampered.invoke(),
     (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_MANIFEST_INVALID"
-  );
-
-  const changed = expansionFixture({ runId: "changed", items: [item(0)] });
-  changed.invoke();
-  fs.writeFileSync(changed.sourcePath, `${JSON.stringify({ goals: [item(1)] })}\n`, "utf8");
-  assert.throws(
-    () => changed.invoke(),
-    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_EXPANSION_CHANGED"
   );
 
   const transplanted = expansionFixture({ runId: "origin-run", items: [item(0)] });
@@ -253,7 +308,7 @@ test("persisted expansion rejects tampering, transplantation, source changes, an
   );
 });
 
-test("persisted expansion rejects prompt-template and dynamic-limit changes", () => {
+test("persisted expansion rejects prompt-template, topology-contract, and dynamic-limit changes", () => {
   const changedTemplate = expansionFixture({ runId: "changed-template", items: [item(0)] });
   changedTemplate.invoke();
   fs.writeFileSync(changedTemplate.templatePath, "Changed {{item.goal_prompt}}.\n", "utf8");
@@ -261,6 +316,23 @@ test("persisted expansion rejects prompt-template and dynamic-limit changes", ()
     () => changedTemplate.invoke(),
     (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_TEMPLATE_CHANGED"
   );
+
+  // A published manifest is reused without reading the source again, so this comparison is what
+  // keeps a changed group definition from silently adopting the old items.
+  const changedContract = expansionFixture({ runId: "changed-contract", items: [item(0)] });
+  changedContract.invoke();
+  for (const overrides of [
+    { sourcePath: "$.other_goals" },
+    { keyPath: "goal_prompt" },
+    { nodeIdTemplate: "dynamic:other:{{ item.id }}" },
+    { templateFingerprint: digest("fingerprint:other") }
+  ]) {
+    assert.throws(
+      () => changedContract.invoke(overrides),
+      (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_EXPANSION_CHANGED",
+      JSON.stringify(overrides)
+    );
+  }
 
   const changedLimit = expansionFixture({ runId: "changed-limit", items: [item(0)], maxDynamicNodes: 100 });
   changedLimit.invoke();
@@ -371,82 +443,27 @@ test("explicit source retry archives a complete expansion generation and rejects
   ]);
 
   // Unrecognized manifest state is refused before anything is reset or moved.
-  const locked = expansionFixture({ runId: "retry-archive-locked", items: [item(0)] });
-  locked.invoke();
-  fs.writeFileSync(path.join(locked.runRoot, "dynamic-expansions", ".expansion.lock"), "other-owner\n", "utf8");
+  const unrecognized = expansionFixture({ runId: "retry-archive-unrecognized", items: [item(0)] });
+  unrecognized.invoke();
+  fs.writeFileSync(path.join(unrecognized.runRoot, "dynamic-expansions", "notes.txt"), "operator note\n", "utf8");
   assert.throws(
     () =>
       planDynamicExpansionRetryArchive({
-        projectRoot: locked.runRoot,
-        runRoot: locked.runRoot,
+        projectRoot: unrecognized.runRoot,
+        runRoot: unrecognized.runRoot,
         sourceNodeIds: ["node:planner"]
       }),
     (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_RETRY_EXPANSION_INVALID"
   );
-  assert.deepEqual(fs.readdirSync(path.join(locked.runRoot, "dynamic-expansions")).sort(), [
-    ".expansion.lock",
-    "fanout.json"
+  assert.deepEqual(fs.readdirSync(path.join(unrecognized.runRoot, "dynamic-expansions")).sort(), [
+    "fanout.json",
+    "notes.txt"
   ]);
 });
 
 test("explicit source retry re-derives the base runtime controls after archiving an expansion", () => {
-  const runId = "retry-rematerialize";
-  const projectRoot = tempDirectory();
-  const runRoot = path.join(projectRoot, "runs", runId);
-  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
-  const templatePath = path.join(runRoot, "templates", "worker.md");
-  const graphPath = path.join(runRoot, "graph.json");
-  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
-  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
-  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
-  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
-  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
-  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
-  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(0)] })}\n`, "utf8");
-  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
-  const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
-  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
-  const group: CompiledSmithersDynamicGroup = {
-    groupNodeId: "fanout",
-    logicalNodeId: "fanout",
-    source: {
-      concreteNodeId: "planner",
-      attemptId: "planner",
-      verifierSmithersNodeId: "verify:planner",
-      artifactPath: sourceArtifactPath
-    },
-    sourcePath: "$.goals",
-    keyPath: "id",
-    nodeIdTemplate: "dynamic:item:{{ item.id }}",
-    templatePath,
-    templateDigest: digest(fs.readFileSync(templatePath)),
-    templateFingerprint: digest("template-fingerprint"),
-    continueOnFail: true,
-    maxDynamicNodes: 100,
-    reservedNodeIds: ["planner", "fanout", "join"],
-    taskTemplates: [templateTask],
-    promptContext: promptContext(projectRoot, runRoot)
-  };
-  // The seal keeps byte copies of the pre-expansion controls beside the mutable ones.
-  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
-  fs.writeFileSync(
-    tasksPath,
-    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
-    "utf8"
-  );
-  fs.copyFileSync(graphPath, baseGraphPath);
-  fs.copyFileSync(tasksPath, baseTasksPath);
-  const controls = {
-    runId,
-    projectRoot,
-    runRoot,
-    graphPath,
-    tasksPath,
-    baseGraphPath,
-    baseTasksPath,
-    baseTasks: [joinTask],
-    groups: [group]
-  };
+  const { controls } = sealedDynamicRun("retry-rematerialize", [item(0)]);
+  const { runId, projectRoot, runRoot } = controls;
   const expanded = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
   assert.deepEqual(expanded.expandedGroupIds, ["fanout"]);
   const generated = expanded.tasks.find((task) => task.metadata.node.dynamic !== undefined);
@@ -504,49 +521,25 @@ test("explicit source retry re-derives the base runtime controls after archiving
   );
 });
 
-test("dynamic expansion retries when a contended lock disappears before inspection", () => {
-  const fixture = expansionFixture({ runId: "lock-release-race", items: [item(0)] });
-  const originalOpenSync = fs.openSync;
-  let simulated = false;
-  fs.openSync = ((...args: Parameters<typeof fs.openSync>) => {
-    if (!simulated && String(args[0]).endsWith(".expansion.lock")) {
-      simulated = true;
-      throw Object.assign(new Error("simulated released contender"), { code: "EEXIST" });
-    }
-    return originalOpenSync(...args);
-  }) as typeof fs.openSync;
-
-  try {
-    assert.equal(fixture.invoke().items.length, 1);
-    assert.equal(simulated, true);
-  } finally {
-    fs.openSync = originalOpenSync;
-  }
-});
-
-test("dynamic expansion never steals an old lock owned by another materializer", () => {
-  const fixture = expansionFixture({ runId: "old-lock", items: [item(0)] });
+test("a lock file left by a killed materializer blocks neither expansion nor a source retry", () => {
+  // Earlier builds serialized every expansion read behind this file and never reclaimed it, so a
+  // process killed while holding it failed every later render and admission check (#1142).
+  const fixture = expansionFixture({ runId: "stale-lock", items: [item(0)] });
   const manifestDirectory = path.join(fixture.runRoot, "dynamic-expansions");
-  const lockPath = path.join(manifestDirectory, ".expansion.lock");
   fs.mkdirSync(manifestDirectory);
-  fs.writeFileSync(lockPath, "other-owner\n", "utf8");
-  const old = new Date("2020-01-01T00:00:00.000Z");
-  fs.utimesSync(lockPath, old, old);
-  const originalNow = Date.now;
-  const base = originalNow();
-  let reads = 0;
-  Date.now = () => base + reads++ * 6_000;
-
-  try {
-    assert.throws(
-      () => fixture.invoke(),
-      (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_EXPANSION_LOCKED"
-    );
-  } finally {
-    Date.now = originalNow;
-  }
-  assert.equal(fs.readFileSync(lockPath, "utf8"), "other-owner\n");
-  assert.equal(fs.statSync(lockPath).mtimeMs, old.getTime());
+  fs.writeFileSync(path.join(manifestDirectory, ".expansion.lock"), "999999:deadbeef\n", "utf8");
+  const created = fixture.invoke();
+  assert.equal(created.items.length, 1);
+  assert.deepEqual(fixture.invoke(), created);
+  const plan = planDynamicExpansionRetryArchive({
+    projectRoot: fixture.runRoot,
+    runRoot: fixture.runRoot,
+    sourceNodeIds: ["node:planner"]
+  });
+  assert.deepEqual(
+    plan?.manifests.map((manifest) => manifest.group_node_id),
+    ["fanout"]
+  );
 });
 
 test("runtime materialization preserves required inputs and allows partial review joins", () => {
@@ -643,6 +636,29 @@ test("runtime materialization preserves required inputs and allows partial revie
       assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /goal 0 using context 0/u);
     }
   }
+});
+
+test("a re-run dynamic source keeps the published fan-out for renders and admission", () => {
+  const { sourceArtifactPath, controls } = sealedDynamicRun("source-rerun", [item(0), item(1)]);
+  const render = (readyGroupIds: string[]) =>
+    dynamicRuntimeFingerprint(materializeDynamicRuntime({ ...controls, readyGroupIds }));
+
+  const published = render(["fanout"]);
+  // A reset re-runs the planner: its agent attempt first wipes the canonical artifact directory,
+  // then writes a new plan, and the verifier only accepts that plan later. Every render in between
+  // still sees the published manifest, and so do the lifecycle admission checks.
+  fs.rmSync(sourceArtifactPath);
+  assert.equal(render([]), published);
+  assert.equal(dynamicRuntimeFingerprint(verifyDynamicRuntimeMaterialization(controls)), published);
+  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(2)] })}\n`, "utf8");
+  assert.equal(render([]), published);
+  assert.equal(render(["fanout"]), published);
+  assert.equal(dynamicRuntimeFingerprint(verifyDynamicRuntimeMaterialization(controls)), published);
+  const tasks = JSON.parse(fs.readFileSync(controls.tasksPath, "utf8")) as { tasks: CompiledSmithersTask[] };
+  assert.deepEqual(
+    tasks.tasks.flatMap((task) => task.metadata.node.dynamic?.expansionKey ?? []),
+    ["goal-0", "goal-1"]
+  );
 });
 
 test("100 generated attempts remain queued under the ordinary concurrency projection", () => {

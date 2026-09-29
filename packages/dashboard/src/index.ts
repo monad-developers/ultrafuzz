@@ -1595,14 +1595,7 @@ class DashboardApp {
       materialize: hasRun,
       clean: hasRun,
       config: true,
-      restartWholeRun: false,
-      status: hasRun,
-      doctor: false,
-      triage: false,
-      merge: false,
-      restartFromNode: false,
-      rerunSelectedNode: false,
-      arbitraryShell: false
+      status: hasRun
     };
   }
 

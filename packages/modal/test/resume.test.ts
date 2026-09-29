@@ -15,14 +15,14 @@ import {
 
 import {
   findModalResumeWorkspace,
-  locateModalResumeWorkspace,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
   NonResumableTerminalRunError,
   finalizeModalEvalRunRecord,
-  readModalDurableRunState
+  readModalDurableRunState,
+  type ModalResumeWorkspace
 } from "../src/resume.js";
 import { currentRunState } from "./current-artifact-fixtures.js";
 
@@ -213,6 +213,12 @@ function fixture() {
   return { workRoot, target, control, evalRunId, evalDir };
 }
 
+async function resumableWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {
+  const found = await findModalResumeWorkspace(workRoot);
+  if (found.kind === "not-started") throw new Error(found.reason);
+  return found.workspace;
+}
+
 describe("Modal durable evaluation resume", () => {
   it("uses durable resume without any node reset path", () => {
     expect(modalDurableResumeCommand("/opt/tool/cli.js", "durable-run-one", "/workspace/target")).toEqual([
@@ -332,21 +338,6 @@ describe("Modal durable evaluation resume", () => {
       })
     ).toBe(true);
     expect(modalDurableRunAdvanced(before, { ...before, run_id: "durable-run-two", status: "running" })).toBe(false);
-  });
-
-  it("locates one exact linked durable run and rejects ambiguity", async () => {
-    const value = fixture();
-    await expect(locateModalResumeWorkspace(value.workRoot)).resolves.toEqual({
-      target: value.target,
-      control: value.control,
-      evalRunId: value.evalRunId,
-      productRunId: "durable-run-one"
-    });
-    fs.appendFileSync(
-      path.join(value.evalDir, "runs.jsonl"),
-      `${JSON.stringify(currentEvalRunRecord(value.target, value.evalRunId, { rowId: "row-two", runId: "durable-run-two" }))}\n`
-    );
-    await expect(locateModalResumeWorkspace(value.workRoot)).rejects.toThrow("exactly one linked durable run");
   });
 
   it("validates the exact current eval manifest and refuses historical, mismatched, or symlinked manifests", async () => {
@@ -662,7 +653,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {
     const value = fixture();
-    const workspace = await locateModalResumeWorkspace(value.workRoot);
+    const workspace = await resumableWorkspace(value.workRoot);
     await finalizeModalEvalRunRecord(
       workspace,
       { run_id: "durable-run-one", status: "succeeded", started_at: T0, finished_at: T1 },
@@ -698,7 +689,7 @@ describe("Modal durable evaluation resume", () => {
 
   it("fails closed for operational terminal states and unrelated runs", async () => {
     const value = fixture();
-    const workspace = await locateModalResumeWorkspace(value.workRoot);
+    const workspace = await resumableWorkspace(value.workRoot);
     const rejected = finalizeModalEvalRunRecord(
       workspace,
       { run_id: "durable-run-one", status: "failed" },

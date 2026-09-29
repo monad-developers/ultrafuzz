@@ -3104,6 +3104,22 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
       }
     },
     {
+      // The shared registry gate owns the stateful sequence length, so a
+      // one-step campaign fails here, inside the attempt, not at the host.
+      label: "stateful sequence length",
+      mutate: (plan, result, summary) => {
+        const command = GENERATED_CAMPAIGN_COMMAND.replace("--seq-len 100", "--seq-len 1");
+        record(plan.backend).exact_shell_escaped_command = command;
+        record((plan.command_plan as unknown[])[0]).command = command;
+        result.exact_command = command;
+        record(result.execution).command = command;
+        plan.recon_sequence_length = 1;
+        result.sequence_length = 1;
+        summary.sequence_length = 1;
+      },
+      alsoMatches: /--seq-len 100/u
+    },
+    {
       // #693 surface 3: the wrong-field bug — execution.deadline copied from
       // the plan's fuzzing_deadline_utc instead of final_artifact_deadline_utc.
       // The gate must name the expected final-artifact value next to the
@@ -6175,7 +6191,12 @@ test("generated optional admission rejects a present malformed marker before pub
 
     assert.throws(
       () => harness.prepareAndBuild(consumer, runRoot, { agentRef: "codex" }),
-      /verification marker is schema-invalid optional-producer/u
+      (error: Error & { details?: unknown }) => {
+        assert.match(error.message, /verification marker is schema-invalid optional-producer/u);
+        // A retry would re-read the same producer bytes, so Smithers must not spend the budget (#1144).
+        assert.deepEqual(error.details, { failureRetryable: false });
+        return true;
+      }
     );
     assert.equal(dependencyAuthenticationCount, 1, "a present optional marker must be authenticated");
     assert.equal(harness.hasAdmission(consumer.attemptId), false, "failed authentication must not publish admission");
@@ -6619,7 +6640,11 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   };
   assert.throws(
     () => harness.current(consumer),
-    /dependency authority changed after admission patch-producer/u,
+    (error: Error & { details?: unknown }) => {
+      assert.match(error.message, /dependency authority changed after admission patch-producer/u);
+      assert.deepEqual(error.details, { failureRetryable: false }, "the agent's admission recheck is deterministic");
+      return true;
+    },
     "an identical-byte marker replacement must not inherit the admitted identity"
   );
 
@@ -8112,6 +8137,11 @@ test("agent failure normalization preserves only validated Smithers recovery con
     const normalized = await captureAgentFailure(failure);
     assert.equal(normalized.code, code);
     assert.deepEqual(normalized.details, details);
+  }
+  // Agent CLI deadlines keep their code: run synchronization labels timeouts by code alone (#1144).
+  for (const code of ["PROCESS_TIMEOUT", "PROCESS_IDLE_TIMEOUT"]) {
+    const deadline = await captureAgentFailure(Object.assign(new Error("CLI timed out after 1800000ms"), { code }));
+    assert.equal(deadline.code, code);
   }
 
   const abort = new Error("operation aborted") as Error & { code: string };

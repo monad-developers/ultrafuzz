@@ -1,6 +1,6 @@
 import { z } from "zod/v4";
 
-import { validateWithZod, type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
+import { validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import { executeSemanticGates } from "./semantic-gates.js";
 
 export const INVARIANT_LEDGER_SCHEMA_VERSION = "ultrafuzz.invariant-evidence-ledger.v1" as const;
@@ -71,8 +71,8 @@ export const invariantLedgerSchema = z
     schema_version: z.literal(INVARIANT_LEDGER_SCHEMA_VERSION),
     entries: z.array(invariantLedgerEntrySchema),
     inventory_rows: z.array(invariantInventoryRowSchema).optional(),
-    // Present only on a ledger that records no invariant at all. The gate requires it there
-    // (issue #292): an empty ledger is otherwise indistinguishable from an agent that did not
+    // Present only on a ledger that records no invariant at all. The refinement below requires it
+    // there (issue #292): an empty ledger is otherwise indistinguishable from an agent that did not
     // look, and nothing reads `scan_probes[].result`, so probe text alone cannot carry that claim.
     no_invariants_justification: nonEmptyString.optional(),
     scan_probes: z
@@ -142,7 +142,6 @@ export const invariantLedgerSchema = z
   });
 
 export type InvariantLedgerEntry = z.infer<typeof invariantLedgerEntrySchema>;
-export type InvariantInventoryRow = z.infer<typeof invariantInventoryRowSchema>;
 export type InvariantLedgerArtifact = z.infer<typeof invariantLedgerSchema>;
 
 export function validateInvariantLedgerSchema(
@@ -201,10 +200,6 @@ function publicInvariantLedgerSemanticPath(semanticPath: string, message: string
     message.startsWith("Duplicate scan probe ID ")
     ? `${semanticPath}.id`
     : semanticPath;
-}
-
-export function invariantLedgerSchemaIssues(value: unknown, path = "$"): SchemaValidationIssue[] {
-  return validateInvariantLedgerSchema(value, path).issues;
 }
 
 export const invariantLedgerJsonSchema = {

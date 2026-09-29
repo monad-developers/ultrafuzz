@@ -245,7 +245,14 @@ test("terminal presentation discloses tolerated failures and preserves verified 
   assert.equal(published.completion?.counts.failed, 1);
   assert.equal(published.completion?.outcome, "partial");
   const expected = JSON.parse(fixture.reportBytes.toString("utf8")) as Record<string, unknown>;
-  assert.deepEqual(published.json, { ...expected, completion: published.completion });
+  // The run summary restates elapsed time from run.json and state.json; all review content is the agent's.
+  const elapsed = (published.json as { run_metadata: { elapsed_time: string } }).run_metadata.elapsed_time;
+  assert.match(elapsed, /^\d+\.\ds$/u);
+  assert.deepEqual(published.json, {
+    ...expected,
+    run_metadata: { ...(expected.run_metadata as Record<string, unknown>), elapsed_time: elapsed },
+    completion: published.completion
+  });
   assert.match(published.markdown, /producer/u);
 });
 

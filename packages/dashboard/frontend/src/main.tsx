@@ -223,18 +223,11 @@ type CommandCapabilities = {
   referencesStatus: boolean;
   referencesSync: boolean;
   referencesUpdate: boolean;
-  restartWholeRun: boolean;
   status: boolean;
-  doctor: boolean;
   config: boolean;
   report: boolean;
-  triage: boolean;
-  merge: boolean;
   materialize: boolean;
   clean: boolean;
-  restartFromNode: boolean;
-  rerunSelectedNode: boolean;
-  arbitraryShell: boolean;
 };
 
 type DashboardFlowNode = Node<FlowNodeData>;

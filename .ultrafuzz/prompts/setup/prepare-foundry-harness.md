@@ -22,7 +22,9 @@ production contracts, keep Foundry as the test harness and do not ask Foundry to
 compile `.vy` files as Solidity sources. Configure the harness so generated
 `.t.sol` tests interact with Vyper contracts through Solidity interfaces that
 match the contracts' public/external ABI, or through ABI-derived Solidity
-interfaces when the target repository already generates them.
+interfaces when the target repository already generates them. Declare any new
+interface in the test tree: the workspace handoff rejects every change under the
+production source roots (by default `src/` and `contracts/`).
 
 Create only the minimal harness layout needed by later fuzzing agents.
 

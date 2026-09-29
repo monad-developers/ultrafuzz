@@ -17,7 +17,6 @@ import {
   parseProjectConfigToml,
   parseResolvedConfigJsonBytes,
   resolvedConfigJsonSchema,
-  resolvedConfigValidatorsAgree,
   resolvedConfigZodSchema,
   resolveConfig,
   serializeResolvedConfigJsonBytes,
@@ -319,6 +318,10 @@ describe("resolved config JSON contract", () => {
     }
   );
 });
+
+function resolvedConfigValidatorsAgree(value: unknown): boolean {
+  return validateResolvedConfigJson(value).ok === resolvedConfigZodSchema.safeParse(value).success;
+}
 
 function fixturePath(filename: string): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", filename);

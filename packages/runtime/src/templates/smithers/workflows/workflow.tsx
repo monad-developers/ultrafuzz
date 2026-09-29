@@ -3346,7 +3346,10 @@ function artifactAwareAgent(
       "AGENT_CONFIG_INVALID",
       "AGENT_SESSION_LOST",
       "AGENT_CHECKPOINT_INVALID",
-      "TASK_ABORTED"
+      "TASK_ABORTED",
+      // Agent CLI deadlines. Run synchronization labels timeouts by code only.
+      "PROCESS_TIMEOUT",
+      "PROCESS_IDLE_TIMEOUT"
     ]);
     // #677: a routed-gateway HTTP 402 (provider credit exhausted) reaches this
     // normalizer as an anonymous CLI failure because the subprocess boundary
@@ -3951,10 +3954,11 @@ function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
   try {
     return run();
   } catch (error) {
-    throw new Error(
+    const wrapped = new Error(
       `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
+    throw isNonRetryableFailure(error) ? nonRetryableFailure(wrapped) : wrapped;
   }
 }
 
@@ -5578,6 +5582,14 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
 }
 
 function assertTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {
+  try {
+    admitTaskDependencyInputs(task);
+  } catch (error) {
+    throw nonRetryableFailure(error);
+  }
+}
+
+function admitTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {
   const existingAdmission = dependencyArtifactAdmissionsByTask.get(task.attemptId);
   if (existingAdmission !== undefined) {
     assertDependencyArtifactAdmissionCurrent(task, existingAdmission);
@@ -5705,6 +5717,17 @@ function assertDependencyArtifactAdmissionCurrent(
   task: (typeof taskSpecs)[number],
   expected: DependencyArtifactAdmission = dependencyArtifactAdmission(task)
 ): DependencyArtifactAdmission {
+  try {
+    return checkDependencyArtifactAdmissionCurrent(task, expected);
+  } catch (error) {
+    throw nonRetryableFailure(error);
+  }
+}
+
+function checkDependencyArtifactAdmissionCurrent(
+  task: (typeof taskSpecs)[number],
+  expected: DependencyArtifactAdmission
+): DependencyArtifactAdmission {
   if (expected.task !== task || dependencyArtifactAdmissionsByTask.get(task.attemptId) !== expected) {
     throw new Error(`artifact-contract failure: dependency admission identity changed ${task.attemptId}`);
   }
@@ -5747,6 +5770,22 @@ function assertDependencyArtifactAdmissionCurrent(
     }
   }
   return expected;
+}
+
+/**
+ * A dependency admission failure is deterministic for its consumer: the
+ * producer's verified artifacts are missing, changed, or unsafe, and a retry
+ * re-reads the same bytes. Smithers fails an attempt whose error carries
+ * `details.failureRetryable: false` once, instead of spending the consumer's
+ * retry budget and agent fallback chain on it (#1144).
+ */
+function nonRetryableFailure(error: unknown): Error {
+  const failure = error instanceof Error ? error : new Error(String(error));
+  return Object.assign(failure, { details: { failureRetryable: false } });
+}
+
+function isNonRetryableFailure(error: unknown): boolean {
+  return (error as { details?: { failureRetryable?: unknown } } | undefined)?.details?.failureRetryable === false;
 }
 
 function assertVerifiedDependency(
@@ -10110,7 +10149,11 @@ export default smithers((ctx) => {
                 timeoutMs={task.timeoutMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={task.retries}
-                retryPolicy={task.retryPolicy}
+                // The planned chain is the whole retry budget. Smithers'
+                // default stall verdict would end it after three identical
+                // failures, before later same-agent attempts or fallback
+                // profiles run (#1084).
+                retryPolicy={{ ...task.retryPolicy, maxIdenticalFailures: 0 }}
                 metadata={task.metadata}
               >
                 {fullTaskPrompt}

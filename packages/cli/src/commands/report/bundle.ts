@@ -5,18 +5,12 @@ import path from "node:path";
 import { Args, Command, Flags } from "@oclif/core";
 import {
   DEFAULT_STRICT_JSONL_MAX_BYTES,
-  DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
-  DEFAULT_STRICT_JSONL_MAX_RECORDS,
-  assertEventRecord,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   layoutForRunRoot,
-  parseStrictJsonBytes,
+  parseEventJournalBytes,
   readRegularFileSnapshot,
-  validateStrictJsonlHistory,
-  type EventRecord,
-  type StrictJsonlCodec,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import {
@@ -385,88 +379,11 @@ function loadValidatedEventJournalSnapshot(
 
   assertRegularFileInside(runRoot, eventsPath, "event journal");
   const contents = readRegularFileSnapshot(eventsPath, DEFAULT_STRICT_JSONL_MAX_BYTES);
-  validateEventJournalSnapshot(contents, expectedRunId);
+  parseEventJournalBytes(contents, expectedRunId);
   return {
     absolutePath: eventsPath,
     archivePath: "events.jsonl",
     contents
-  };
-}
-
-function validateEventJournalSnapshot(contents: Buffer, expectedRunId: string): void {
-  if (contents.byteLength === 0) return;
-  if (contents[contents.byteLength - 1] !== 0x0a) {
-    throw new Error("event journal has a torn or unterminated final record");
-  }
-
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
-  } catch (error) {
-    throw new Error("event journal is not valid UTF-8", { cause: error });
-  }
-  const lines = text.split("\n");
-  lines.pop();
-  if (lines.length > DEFAULT_STRICT_JSONL_MAX_RECORDS) {
-    throw new Error(`event journal exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORDS}-record limit`);
-  }
-
-  const codec = eventJournalCodec(expectedRunId);
-  const records: EventRecord[] = [];
-  for (const [index, line] of lines.entries()) {
-    const lineNumber = index + 1;
-    if (line.trim().length === 0) throw new Error(`event journal contains a blank record at line ${lineNumber}`);
-    const lineBytes = Buffer.from(line, "utf8");
-    if (lineBytes.byteLength > DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES) {
-      throw new Error(
-        `event journal record ${lineNumber} exceeds the ${DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES}-byte limit`
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = parseStrictJsonBytes(lineBytes, {
-        maxBytes: DEFAULT_STRICT_JSONL_MAX_RECORD_BYTES,
-        maxDepth: 128,
-        maxItems: 100_000,
-        maxProperties: 100_000
-      });
-    } catch (error) {
-      throw new Error(
-        `event journal record ${lineNumber} is invalid strict JSON: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
-    }
-    records.push(codec.parseRecord(parsed, `$[${index}]`));
-  }
-  validateStrictJsonlHistory(records, codec);
-}
-
-function eventJournalCodec(expectedRunId: string): StrictJsonlCodec<EventRecord> {
-  return {
-    label: "event journal",
-    parseRecord: (value, recordPath) => {
-      const record = assertEventRecord(value, recordPath);
-      if (record.run_id !== expectedRunId) {
-        throw new Error(
-          `${recordPath}.run_id belongs to ${JSON.stringify(record.run_id)}, expected ${JSON.stringify(expectedRunId)}`
-        );
-      }
-      return record;
-    },
-    identity: (record) => record.event_id,
-    validateHistory: (records) => {
-      const firstRunId = records[0]?.run_id;
-      let priorTimestamp = records[0]?.timestamp;
-      for (const [index, record] of records.entries()) {
-        if (firstRunId !== undefined && record.run_id !== firstRunId) {
-          throw new Error(`event journal changes run_id at record ${index + 1}`);
-        }
-        if (priorTimestamp !== undefined && record.timestamp < priorTimestamp) {
-          throw new Error(`event journal timestamps are not ordered at record ${index + 1}`);
-        }
-        priorTimestamp = record.timestamp;
-      }
-    }
   };
 }
 

@@ -43,6 +43,7 @@ state:
 ultrafuzz resume <run-id> --project /path/to/target-protocol
 ultrafuzz resume <run-id> --project /path/to/target-protocol --max-concurrency 4
 ultrafuzz resume <run-id> --project /path/to/target-protocol --refresh-controller
+ultrafuzz resume <run-id> --project /path/to/target-protocol --retry-failed
 ultrafuzz resume <run-id> --project /path/to/target-protocol \
   --reset-node node:failed-task --max-concurrency 4
 ```
@@ -72,8 +73,14 @@ Completed node attempts remain in `attempts.jsonl` across every continuation.
 append-only ledger rather than from a mutable lifecycle counter.
 
 Use `--reset-node` to explicitly retry one failed workflow node and reset its
-dependents before the linked run continues. Ordinary resume performs no reset,
-timetravel, replay, or fork.
+dependents before the linked run continues. `--retry-failed` resets every failed
+or stalled node, retrying a failed artifact verifier from its agent producer.
+Ordinary resume performs no reset, timetravel, replay, or fork.
+
+A task skipped because a prerequisite failed is not reused like a finished row:
+the resumed workflow decides the skip again from the restored task states. It
+stays skipped while the prerequisite is still failed, and runs once a reset lets
+the prerequisite succeed.
 
 ## Replay A Linked Run
 

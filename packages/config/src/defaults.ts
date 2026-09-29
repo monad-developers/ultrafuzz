@@ -15,7 +15,6 @@ import {
   type ModelProfile,
   type PermissionConfig,
   type ProjectConfigInput,
-  type PromptMetadataLayer,
   type RetryConfig,
   type ResolvedConfig,
   type RunConfig
@@ -35,10 +34,6 @@ const DEFAULT_CONFIG = loadDefaultConfig();
 
 export function createDefaultResolvedConfig(): ResolvedConfig {
   return cloneResolvedConfig(DEFAULT_CONFIG);
-}
-
-export function createDefaultPromptMetadataLayer(): PromptMetadataLayer {
-  return {};
 }
 
 export function synthesizeDefaultModelProfile(agent = DEFAULT_AGENT): ModelProfile {

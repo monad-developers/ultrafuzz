@@ -4,20 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { currentRowScore, currentScoreSummary, testRow, testSuite } from "../../packages/evals/test/helpers.ts";
-
 import {
-  AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
-  automaticProducerPolicyDimensions,
-  automaticPublicationPlanRows,
-  assertPublicBenchmarkBundleMatrixScope,
-  readAutomaticPublicationManifest,
-  summarizePublicBenchmarkBundlePublication,
-  trustedCandidateRuntimePolicyDimensions,
+  readBenchmarkControlManifest,
   validateAutomaticPublicationManifest,
   validateAutomaticPairConfig,
-  validateBenchmarkPolicyFiles,
-  validateProducerPolicyDimensions
+  validateBenchmarkPolicyFiles
 } from "./prepare-eval-history-publication.mjs";
 
 const roots: string[] = [];
@@ -34,56 +25,12 @@ afterEach(() => {
 });
 
 describe("trusted automatic eval-history publication handoff", () => {
-  it("strictly reads the exact automatic publication plan before emitting workflow rows", () => {
-    const root = temporaryRoot("ultrafuzz-publication-plan-");
-    const planPath = path.join(root, "plan.json");
-    const pair = smokeManifest().pairs[0]!;
-    const sourceArtifact = `${context.repository}/actions/runs/${context.producerRunId}`;
-    const plan = {
-      schema_version: AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
-      candidate_commit: context.candidateCommit,
-      candidate_repository_url: context.repository,
-      source_artifact: sourceArtifact,
-      producer_run_id: context.producerRunId,
-      producer_run_attempt: context.producerRunAttempt,
-      mode: context.mode,
-      benchmark: "ultrafuzz-bench",
-      pairs: [
-        {
-          pair: pair.pair,
-          provider: pair.provider,
-          model_slug: pair.model_slug,
-          bundle_path: `${pair.pair}/${pair.model_slug}/public-results.json`,
-          unpack_path: pair.pair,
-          eval_run_id: "eval-run-1",
-          benchmark: "ultrafuzz-bench",
-          lane: "smoke",
-          status: "succeeded",
-          target_ids: smokeTargets().map((target) => target.id),
-          executed_case_count: 3,
-          graded_case_count: 3,
-          publication_url: `${sourceArtifact}/artifacts`
-        }
-      ]
-    };
-    fs.writeFileSync(planPath, `${JSON.stringify(plan)}\n`, "utf8");
-    expect(automaticPublicationPlanRows(planPath)).toBe(
-      `${pair.pair}/${pair.model_slug}/public-results.json\t${pair.pair}\teval-run-1\tultrafuzz-bench\tsmoke\t${pair.model_slug}\n`
-    );
-
-    const duplicatePath = path.join(root, "duplicate-plan.json");
-    const serialized = JSON.stringify(plan);
-    const field = `"schema_version":"${AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION}"`;
-    fs.writeFileSync(duplicatePath, `${serialized.replace(field, `${field},"schema_version":"shadow"`)}\n`);
-    expect(() => automaticPublicationPlanRows(duplicatePath)).toThrow(/duplicate property/u);
-  });
-
   it("accepts only the exact event-bound smoke manifest", () => {
     const manifest = smokeManifest();
     expect(validateAutomaticPublicationManifest(manifest, smokeContext())).toBe(manifest);
   });
 
-  it("accepts a safe overridden smoke runner before unpacking producer bundles", () => {
+  it("accepts a safe overridden smoke runner", () => {
     const modelSlug = "benchmark-smoke-gpt-5-6-luna-202607-high";
     const pair = {
       ...smokeManifest().pairs[0]!,
@@ -313,215 +260,6 @@ describe("trusted automatic eval-history publication handoff", () => {
     ).toEqual(changedCohort);
   });
 
-  it("reads producer policy only from a current strict benchmark config", () => {
-    const root = temporaryRoot("ultrafuzz-publication-producer-policy-");
-    const manifest = smokeManifest();
-    manifest.control_timeout_seconds = 12_000;
-    const pair = manifest.pairs[0]!;
-    const configPath = path.join(root, pair.config_path);
-    fs.writeFileSync(configPath, `${JSON.stringify(smokeBenchmarkConfig(manifest, 7_200))}\n`);
-
-    const producerPolicy = automaticProducerPolicyDimensions(manifest, root);
-    expect(producerPolicy).toEqual({
-      matrixRowsPerPair: 3,
-      controlTimeoutSeconds: 12_000,
-      maxParallelEvalRows: 3,
-      maxParallelWorkflowNodes: 4,
-      maxRuntimeSeconds: 7_200
-    });
-    expect(validateProducerPolicyDimensions(producerPolicy, { ...producerPolicy })).toEqual(producerPolicy);
-    expect(() =>
-      validateProducerPolicyDimensions(producerPolicy, {
-        ...producerPolicy,
-        maxRuntimeSeconds: 15_000,
-        controlTimeoutSeconds: 19_800
-      })
-    ).toThrow(/trusted candidate policy/u);
-    expect(
-      validateAutomaticPublicationManifest(manifest, {
-        ...smokeContext(),
-        ...producerPolicy
-      })
-    ).toEqual(manifest);
-
-    const serialized = fs.readFileSync(configPath, "utf8");
-    fs.writeFileSync(configPath, serialized.replace('"run_id":', '"run_id":"shadowed","run_id":'));
-    expect(() => automaticProducerPolicyDimensions(manifest, root)).toThrow(/duplicate/iu);
-  });
-
-  it("reads runtime and concurrency policy from the trusted candidate checkout", () => {
-    expect(trustedCandidateRuntimePolicyDimensions(process.cwd(), "smoke")).toEqual({
-      maxParallelEvalRows: 3,
-      maxParallelWorkflowNodes: 4,
-      openRouterMaxParallel: 1,
-      maxRuntimeSeconds: 15_000,
-      evalCleanupSeconds: 300,
-      scorePerWaveTimeoutSeconds: 2_700,
-      reportTimeoutSeconds: 300,
-      preparationTimeoutSeconds: 1_200,
-      controlPollingGraceSeconds: 300
-    });
-  });
-
-  it("ignores declaration-shaped comments, strings, templates, and nested constants", () => {
-    const root = temporaryRoot("ultrafuzz-publication-policy-decoys-");
-    const benchmarkPath = path.join(root, "packages/evals/src/benchmark-manifest.ts");
-    const workerPath = path.join(root, "packages/modal/src/public-worker.ts");
-    const preparationPath = path.join(root, "scripts/ci/prepare-modal-benchmarks.mjs");
-    for (const filePath of [benchmarkPath, workerPath, preparationPath]) {
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    }
-    fs.writeFileSync(
-      benchmarkPath,
-      [
-        'const decoy = "export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 99;";',
-        "// export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 98;",
-        "function nested() { const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 97; return 97; }",
-        "export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;",
-        "export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;"
-      ].join("\n")
-    );
-    fs.writeFileSync(
-      workerPath,
-      [
-        "const decoy = `export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 99;`;",
-        "/* export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 98; */",
-        "export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;",
-        "export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;",
-        "export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;",
-        "export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;",
-        "export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;",
-        "export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;"
-      ].join("\n")
-    );
-    fs.writeFileSync(
-      preparationPath,
-      [
-        'const decoy = "const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 99;";',
-        "const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;"
-      ].join("\n")
-    );
-
-    expect(trustedCandidateRuntimePolicyDimensions(root, "smoke")).toEqual({
-      maxParallelEvalRows: 3,
-      maxParallelWorkflowNodes: 4,
-      openRouterMaxParallel: 1,
-      maxRuntimeSeconds: 7_200,
-      evalCleanupSeconds: 300,
-      scorePerWaveTimeoutSeconds: 2_700,
-      reportTimeoutSeconds: 300,
-      preparationTimeoutSeconds: 1_200,
-      controlPollingGraceSeconds: 300
-    });
-  });
-
-  it("rejects public bundles that omit a trusted target even when the row count still matches", () => {
-    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
-    const modelSlug = smokeManifest().pairs[0]!.model_slug;
-    const pair = smokeManifest().pairs[0]!.pair;
-    const expected = {
-      matrixRowsPerPair: 3,
-      targetIds,
-      trialsPerVariant: 1,
-      modelSlug
-    };
-
-    expect(() =>
-      assertPublicBenchmarkBundleMatrixScope(bundleWithMatrix(matrixRows(targetIds, modelSlug)), expected, pair)
-    ).not.toThrow();
-    expect(() =>
-      assertPublicBenchmarkBundleMatrixScope(
-        bundleWithMatrix(matrixRows([targetIds[0]!, targetIds[1]!, targetIds[1]!], modelSlug)),
-        expected,
-        pair
-      )
-    ).toThrow(/missing target result\(s\).*stableswap-ng-vyper/u);
-    expect(() =>
-      assertPublicBenchmarkBundleMatrixScope(
-        bundleWithMatrix(matrixRows([targetIds[0]!, targetIds[1]!], modelSlug)),
-        expected,
-        pair
-      )
-    ).toThrow(/row count 2 does not match expected 3/u);
-  });
-
-  it("summarizes only complete scored public bundles for automatic history ingestion", () => {
-    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
-    const modelSlug = smokeManifest().pairs[0]!.model_slug;
-    const pair = smokeManifest().pairs[0]!.pair;
-    const expected = {
-      matrixRowsPerPair: 3,
-      targetIds,
-      trialsPerVariant: 1,
-      modelSlug,
-      evalRunId: "ci-12345-2-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high"
-    };
-    const publicationUrl = "https://github.com/monad-developers/ultrafuzz/actions/runs/12345/artifacts";
-
-    expect(
-      summarizePublicBenchmarkBundlePublication(
-        completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId),
-        expected,
-        pair,
-        publicationUrl
-      )
-    ).toEqual({
-      status: "succeeded",
-      target_ids: targetIds,
-      executed_case_count: 3,
-      graded_case_count: 3,
-      publication_url: publicationUrl
-    });
-    const failedBundle = completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId);
-    failedBundle.status = "failed";
-    failedBundle.targets[2]!.status = "failed";
-    expect(summarizePublicBenchmarkBundlePublication(failedBundle, expected, pair, publicationUrl)).toMatchObject({
-      status: "failed",
-      executed_case_count: 3,
-      graded_case_count: 3
-    });
-    const executedCountMismatch = completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId);
-    executedCountMismatch.executed_case_count = 2;
-    expect(() =>
-      summarizePublicBenchmarkBundlePublication(executedCountMismatch, expected, pair, publicationUrl)
-    ).toThrow(/case counts/u);
-    const gradedCountMismatch = completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId);
-    gradedCountMismatch.graded_case_count = 2;
-    expect(() =>
-      summarizePublicBenchmarkBundlePublication(gradedCountMismatch, expected, pair, publicationUrl)
-    ).toThrow(/case counts/u);
-  });
-
-  it("rejects malformed-present embedded eval documents instead of reparsing them loosely", () => {
-    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
-    const modelSlug = smokeManifest().pairs[0]!.model_slug;
-    const pair = smokeManifest().pairs[0]!.pair;
-    const evalRunId = "ci-12345-2-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high";
-    const expected = {
-      matrixRowsPerPair: 3,
-      targetIds,
-      trialsPerVariant: 1,
-      modelSlug,
-      evalRunId
-    };
-    const publicationUrl = "https://github.com/monad-developers/ultrafuzz/actions/runs/12345/artifacts";
-
-    const matrixBundle = bundleWithMatrix(matrixRows(targetIds, modelSlug));
-    addDuplicateBundleKey(matrixBundle, "eval/matrix.json", "id", "shadowed");
-    expect(() => assertPublicBenchmarkBundleMatrixScope(matrixBundle, expected, pair)).toThrow(/strict JSON/u);
-
-    for (const [relativePath, key] of [
-      ["eval/public-eval-diagnostics.json", "schema_version"],
-      ["eval/summary.json", "schema_version"]
-    ] as const) {
-      const bundle = completeHistoryBundle(matrixRows(targetIds, modelSlug), evalRunId);
-      addDuplicateBundleKey(bundle, relativePath, key, "shadowed");
-      expect(() => summarizePublicBenchmarkBundlePublication(bundle, expected, pair, publicationUrl)).toThrow(
-        /strict JSON/u
-      );
-    }
-  });
-
   it("rejects duplicate-key, symlinked, and oversized producer manifests before context checks", () => {
     const root = temporaryRoot("ultrafuzz-publication-manifest-");
     const target = path.join(root, "manifest.json");
@@ -531,15 +269,15 @@ describe("trusted automatic eval-history publication handoff", () => {
     const serialized = JSON.stringify(smokeManifest());
     const field = '"schema_version":"ultrafuzz.modal.benchmark-control-manifest.v1"';
     fs.writeFileSync(duplicate, `${serialized.replace(field, `${field},"schema_version":"shadow"`)}\n`);
-    expect(() => readAutomaticPublicationManifest(duplicate, smokeContext())).toThrow(/duplicate property/u);
+    expect(() => readBenchmarkControlManifest(duplicate, smokeContext())).toThrow(/duplicate property/u);
 
     const symlink = path.join(root, "manifest-link.json");
     fs.symlinkSync(target, symlink);
-    expect(() => readAutomaticPublicationManifest(symlink, smokeContext())).toThrow();
+    expect(() => readBenchmarkControlManifest(symlink, smokeContext())).toThrow();
 
     const oversized = path.join(root, "oversized.json");
     fs.writeFileSync(oversized, " ".repeat(1024 * 1024 + 1));
-    expect(() => readAutomaticPublicationManifest(oversized, smokeContext())).toThrow();
+    expect(() => readBenchmarkControlManifest(oversized, smokeContext())).toThrow();
   });
 
   it("rejects a clean candidate policy commit whose selected manifest is a symlink", () => {
@@ -714,231 +452,6 @@ function fullTargets() {
     revision: `${String(index % 10).repeat(40)}`,
     framework: "foundry"
   }));
-}
-
-function smokeBenchmarkConfig(manifest: ReturnType<typeof smokeManifest>, maxRuntimeSeconds: number) {
-  const pair = manifest.pairs[0]!;
-  return {
-    schema_version: "ultrafuzz.modal.benchmark.v3",
-    run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
-    app_name: "ultrafuzz-evals",
-    image_name: manifest.image_name,
-    judge: {
-      api_key_env: "OPENAI_API_KEY",
-      url: "https://api.openai.com/v1/chat/completions",
-      credential_ttl_seconds: 57_600
-    },
-    node_timeout_seconds: 1800,
-    loops: 1,
-    models: [
-      {
-        slug: pair.model_slug,
-        model: "gpt-5.6-luna",
-        provider: "openai",
-        agent: "CodexAgent",
-        reasoning: "high",
-        auth_mode: "api-key"
-      }
-    ],
-    public_benchmark: {
-      benchmark: manifest.benchmark,
-      lane: manifest.mode,
-      runner_model_profile: pair.model_slug,
-      candidate_repository: manifest.repository,
-      candidate_commit: manifest.candidate_commit,
-      targets: manifest.targets,
-      max_runtime_seconds: maxRuntimeSeconds
-    }
-  };
-}
-
-type PublicationMatrixRow = ReturnType<typeof testRow>;
-
-function bundleWithMatrix(matrix: PublicationMatrixRow[]) {
-  return {
-    files: [
-      {
-        path: "eval/matrix.json",
-        contents_base64: Buffer.from(`${JSON.stringify(matrix)}\n`, "utf8").toString("base64")
-      }
-    ]
-  };
-}
-
-function completeHistoryBundle(
-  matrix: PublicationMatrixRow[],
-  evalRunId: string,
-  diagnosticsSummaryOverrides: Record<string, unknown> = {},
-  scoreSummaryOverrides: Record<string, unknown> = {}
-) {
-  const modelSlug = matrix[0]!.variant_id;
-  const evalRunSuffix = `-${modelSlug}`;
-  if (!evalRunId.endsWith(evalRunSuffix)) throw new Error("test eval run ID must end with its model slug");
-  const logicalRunId = evalRunId.slice(0, -evalRunSuffix.length);
-  const diagnosticsRows = matrix.map((row, index) => ({
-    row_id: row.id,
-    target_id: row.target_id,
-    variant_id: row.variant_id,
-    trial_id: row.trial_id,
-    run_status: "launched",
-    final_status: "succeeded",
-    workflow_status: "succeeded",
-    workflow_terminal: true,
-    terminal_disposition: "clean",
-    terminal_report_present: true,
-    workflow_ids: [`workflow-${index + 1}`],
-    diagnostic_codes: [],
-    failed_nodes: [],
-    scoring_ready: true,
-    reason_codes: []
-  }));
-  const diagnostics = {
-    schema_version: "ultrafuzz.modal.public-eval-diagnostics.v2",
-    stage: "post-eval-pre-score",
-    benchmark: "ultrafuzz-bench",
-    lane: "smoke",
-    model_slug: modelSlug,
-    model: "gpt-5.6-luna",
-    reasoning: "high",
-    candidate_commit: "a".repeat(40),
-    eval_run_id: evalRunId,
-    created_at: "2026-08-09T00:00:00.000Z",
-    lineage: {
-      logical_run_id: logicalRunId,
-      generation: 1,
-      attempt: 1,
-      attempt_id: "attempt-1",
-      config_fingerprint: "a".repeat(64),
-      source_fingerprint: "b".repeat(64),
-      image_fingerprint: "c".repeat(64),
-      model_fingerprint: "d".repeat(64)
-    },
-    summary: {
-      planned: matrix.length,
-      launched: matrix.length,
-      launch_failed: 0,
-      run_records_missing: 0,
-      workflow_succeeded: matrix.length,
-      workflow_failed: 0,
-      workflow_nonterminal: 0,
-      genuine_task_failure_rows: 0,
-      terminal_reports_present: matrix.length,
-      scoring_ready: true,
-      ...diagnosticsSummaryOverrides
-    },
-    rows: diagnosticsRows
-  };
-  const scoredRows = matrix.map((row) => currentRowScore(row));
-  const baseSummary = currentScoreSummary({
-    row: matrix[0]!,
-    evalRunRoot: "/tmp/publication-eval",
-    evalRunId
-  });
-  const scoreSummary = {
-    ...baseSummary,
-    rows: scoredRows,
-    variants: [
-      {
-        variant_id: modelSlug,
-        row_count: scoredRows.length,
-        precision: 1,
-        recall: 1,
-        f1_score: 1,
-        full_match_rate: 1,
-        human_review_queue_count: 0,
-        duplicate_rate: 0,
-        report_schema_valid_rate: 1
-      }
-    ],
-    recovery_equivalence: {
-      aggregate_non_comparable: "include",
-      included_row_count: scoredRows.length,
-      excluded_row_count: 0,
-      classification_counts: {
-        clean: scoredRows.length,
-        "infrastructure-recovered": 0,
-        "model-reexecuted-within-policy": 0,
-        "non-comparable": 0
-      },
-      non_comparable_variants: []
-    },
-    ...scoreSummaryOverrides
-  };
-  return {
-    status: "succeeded",
-    executed_case_count: matrix.length,
-    graded_case_count: matrix.length,
-    targets: matrix.map((row, index) => ({
-      id: row.target_id,
-      repository: row.target.repo,
-      revision: row.target.ref,
-      framework: index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper",
-      status: "succeeded",
-      executed_case_count: 1,
-      graded_case_count: 1,
-      publication_location: {
-        bundle_path: "public-results.json",
-        report_paths: [`reports/${row.id}/report.md`, `reports/${row.id}/report.json`]
-      }
-    })),
-    files: [
-      {
-        path: "eval/matrix.json",
-        contents_base64: Buffer.from(`${JSON.stringify(matrix)}\n`, "utf8").toString("base64")
-      },
-      {
-        path: "eval/public-eval-diagnostics.json",
-        contents_base64: Buffer.from(`${JSON.stringify(diagnostics)}\n`, "utf8").toString("base64")
-      },
-      {
-        path: "eval/summary.json",
-        contents_base64: Buffer.from(`${JSON.stringify(scoreSummary)}\n`, "utf8").toString("base64")
-      }
-    ]
-  };
-}
-
-function matrixRows(targetIds: string[], modelSlug: string): PublicationMatrixRow[] {
-  const suite = testSuite("/tmp/publication-ground-truth");
-  return targetIds.map((targetId, index) => {
-    const revision = String((index + 1) % 10).repeat(40);
-    return testRow(suite, {
-      id: `${targetId}-row-${index + 1}`,
-      target_id: targetId,
-      variant_id: modelSlug,
-      trial_id: "trial-1",
-      run_id: `publication-${targetId}-row-${index + 1}-trial-1`,
-      target: {
-        id: targetId,
-        repo: `https://github.com/benchmark-targets/${targetId}`,
-        ref: revision,
-        ground_truth: `${targetId}.yml`,
-        ground_truth_path: `/tmp/publication-ground-truth/${targetId}.yml`
-      },
-      variant: { id: modelSlug },
-      runner_model_profile: modelSlug,
-      judge_model_profile: "benchmark-judge-gpt-5-6-sol-xhigh",
-      runner_model: "gpt-5.6-luna",
-      judge_model: "gpt-5.6-sol",
-      runner_reasoning: "high",
-      judge_reasoning: "xhigh"
-    });
-  });
-}
-
-function addDuplicateBundleKey(
-  bundle: { files: Array<{ path: string; contents_base64: string }> },
-  relativePath: string,
-  key: string,
-  shadow: string
-): void {
-  const file = bundle.files.find((entry) => entry.path === relativePath);
-  if (file === undefined) throw new Error(`test bundle is missing ${relativePath}`);
-  const contents = Buffer.from(file.contents_base64, "base64").toString("utf8");
-  const token = `"${key}":`;
-  const duplicated = contents.replace(token, `${token}${JSON.stringify(shadow)},${token}`);
-  if (duplicated === contents) throw new Error(`test bundle ${relativePath} does not contain ${key}`);
-  file.contents_base64 = Buffer.from(duplicated, "utf8").toString("base64");
 }
 
 function temporaryRoot(prefix: string): string {

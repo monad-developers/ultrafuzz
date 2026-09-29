@@ -23,8 +23,7 @@ import {
   TERMINAL_NODE_STATE_STATUSES,
   isTerminalNodeStatus,
   type NodeState,
-  type RunState,
-  type TerminalDispositionDocument
+  type RunState
 } from "./state.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
@@ -825,16 +824,6 @@ export function validateRunStateSchema(value: unknown, path = "$"): SchemaValida
   });
 }
 
-export function validateTerminalDispositionSchema(
-  value: unknown,
-  path = "$"
-): SchemaValidationResult<TerminalDispositionDocument> {
-  return validateWithZod(terminalDispositionSchema as z.ZodType<TerminalDispositionDocument>, value, {
-    path,
-    code: "TERMINAL_DISPOSITION_SCHEMA_INVALID"
-  });
-}
-
 export function validateNodeStateSchema(value: unknown, path = "$"): SchemaValidationResult<NodeState> {
   return validateWithZod(nodeStateSchema as z.ZodType<NodeState>, value, {
     path,
@@ -846,14 +835,6 @@ export function assertRunStateSchema(value: unknown): RunState {
   const result = validateRunStateSchema(value);
   if (!result.ok || !result.value) {
     throw new Error(schemaErrorMessage("run state", result.issues));
-  }
-  return result.value;
-}
-
-export function assertNodeStateSchema(value: unknown): NodeState {
-  const result = validateNodeStateSchema(value);
-  if (!result.ok || !result.value) {
-    throw new Error(schemaErrorMessage("node state", result.issues));
   }
   return result.value;
 }

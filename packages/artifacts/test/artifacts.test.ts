@@ -6,17 +6,13 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  ArtifactPathError,
   ArtifactSecretGateError,
   ARTIFACT_MANIFEST_FILE,
-  GENERATED_TESTS_SCHEMA_VERSION,
-  MAX_GENERATED_TEST_BUNDLE_BYTES,
-  MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   appendUsageEvents,
   assertArtifactPublicationsContainNoSecrets,
   appendNodeAttempt,
   appendEvent,
-  appendLineDurable,
+  createEventRecord,
   assertUsageLedgerEntry,
   createRunLayout,
   getNodeArtifactDir,
@@ -28,8 +24,6 @@ import {
   queryNodeAttempts,
   queryEvents,
   readArtifactManifest,
-  readEventQueryFacade,
-  readGeneratedTestManifest,
   readRunState,
   replayEvents,
   replayUsageEvents,
@@ -42,24 +36,11 @@ import {
   verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
-  writeGeneratedTestManifest as writeGeneratedTestManifestWithFramework,
   writeRunState
 } from "../src/index.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-artifacts-"));
-}
-
-function writeGeneratedTestManifest(
-  input: Omit<Parameters<typeof writeGeneratedTestManifestWithFramework>[0], "framework">
-): ReturnType<typeof writeGeneratedTestManifestWithFramework> {
-  return writeGeneratedTestManifestWithFramework({ ...input, framework: "foundry" });
-}
-
-function errnoError(code: string): NodeJS.ErrnoException {
-  const error = new Error(`injected ${code}`) as NodeJS.ErrnoException;
-  error.code = code;
-  return error;
 }
 
 test("createRunLayout persists product-owned run evidence outside checkpoints", () => {
@@ -111,12 +92,11 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.statePath,
     layout.eventsPath,
     layout.usageLedgerPath,
-    layout.attemptLedgerPath,
-    path.join(layout.eventsIndexDir, "query-inputs.json")
+    layout.attemptLedgerPath
   ]) {
     assert.equal(fs.existsSync(expected), true, expected);
   }
-  for (const expected of [layout.artifactsDir, layout.reviewDir, layout.eventsIndexDir]) {
+  for (const expected of [layout.artifactsDir, layout.reviewDir]) {
     assert.equal(fs.statSync(expected).isDirectory(), true, expected);
   }
   assert.equal(path.basename(getNodeArtifactDir(layout, "node-a", { create: true })), "node-a");
@@ -146,7 +126,7 @@ test("validated usage events append idempotently with exact Smithers identities"
   assert.equal(ledger.entries[0]?.control_generation, "a".repeat(64));
   assert.equal(ledger.entries.length, 1);
 
-  appendLineDurable(layout.usageLedgerPath, "{malformed", layout.root);
+  fs.appendFileSync(layout.usageLedgerPath, "{malformed\n");
   assert.throws(() => replayUsageEvents(layout), /invalid strict JSON/u);
 });
 
@@ -191,11 +171,7 @@ test("usage ledger replay rejects entries copied from another run", () => {
   };
   appendUsageEvents(firstLayout, [input]);
   appendUsageEvents(secondLayout, [input]);
-  appendLineDurable(
-    secondLayout.usageLedgerPath,
-    fs.readFileSync(firstLayout.usageLedgerPath, "utf8"),
-    secondLayout.root
-  );
+  fs.appendFileSync(secondLayout.usageLedgerPath, fs.readFileSync(firstLayout.usageLedgerPath));
 
   assert.throws(() => replayUsageEvents(secondLayout), /run_id belongs to/u);
 });
@@ -301,43 +277,33 @@ function failedAttemptInput(id: string, failureMessage: string) {
   };
 }
 
-test("node attempt ledger replay keeps a persisted failure redaction authoritative across credential rotation", () => {
+test("node attempt ledger records an occurrence once and never re-derives it", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-redacted-replay" });
   const oldCredential = "correct horse battery staple";
   const input = failedAttemptInput("redacted-replay", `provider echoed ${oldCredential}`);
 
   const first = appendNodeAttempt(layout, { ...input, forbiddenSecretValues: [oldCredential] });
   const persistedBytes = fs.readFileSync(layout.attemptLedgerPath);
+  assert.equal(first.appended, true);
   assert.equal(first.entry.failure_message, "provider echoed <redacted>");
   assert.deepEqual(first.entry.failure_message_redaction_span_code_points, [[...oldCredential].length]);
   assert.equal(first.entry.failure_message_truncated, undefined);
 
-  const replayed = appendNodeAttempt(layout, {
-    ...input,
-    forbiddenSecretValues: ["new credential value"]
-  });
-  assert.equal(replayed.appended, false);
-  assert.deepEqual(replayed.entry, first.entry);
-  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
-
-  for (const failureMessage of [
-    `different provider failure ${oldCredential}`,
-    `provider echoed ${oldCredential}; changed non-secret context`
+  // A replay of the same Smithers identity returns the stored entry whatever it
+  // would derive now: a rotated secret, a changed message, or a different outcome.
+  for (const replay of [
+    { ...input, forbiddenSecretValues: ["new credential value"] },
+    { ...input, failureMessage: `different provider failure ${oldCredential}` },
+    { ...input, outcome: "canceled" as const, failureCategory: "canceled" as const, failureMessage: "run-cancelled" }
   ]) {
-    assert.throws(
-      () =>
-        appendNodeAttempt(layout, {
-          ...input,
-          failureMessage,
-          forbiddenSecretValues: ["new credential value"]
-        }),
-      /already recorded with different immutable data/u
-    );
+    const replayed = appendNodeAttempt(layout, replay);
+    assert.equal(replayed.appended, false);
+    assert.deepEqual(replayed.entry, first.entry);
   }
   assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
 });
 
-test("node attempt ledger uses explicit provenance for truncated redaction replay", () => {
+test("node attempt ledger keeps truncation and redaction provenance for long failure messages", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-truncated-replay" });
   const oldCredential = "old credential material ".repeat(30).trim();
   const input = failedAttemptInput(
@@ -346,42 +312,15 @@ test("node attempt ledger uses explicit provenance for truncated redaction repla
   );
 
   const first = appendNodeAttempt(layout, { ...input, forbiddenSecretValues: [oldCredential] });
-  const persistedBytes = fs.readFileSync(layout.attemptLedgerPath);
   assert.equal(Buffer.byteLength(first.entry.failure_message ?? "", "utf8"), MAX_NODE_ATTEMPT_FAILURE_MESSAGE_BYTES);
   assert.deepEqual(first.entry.failure_message_redaction_span_code_points, [[...oldCredential].length]);
   assert.equal(first.entry.failure_message_truncated, true);
 
-  const replayed = appendNodeAttempt(layout, {
-    ...input,
-    forbiddenSecretValues: ["rotated credential value"]
+  const literal = appendNodeAttempt(layout, {
+    ...failedAttemptInput("literal-placeholder", `provider echoed <redacted>; ${"x".repeat(1_500)}`)
   });
-  assert.equal(replayed.appended, false);
-  assert.deepEqual(replayed.entry, first.entry);
-  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), persistedBytes);
-
-  assert.throws(
-    () =>
-      appendNodeAttempt(layout, {
-        ...input,
-        failureMessage: `changed prefix ${oldCredential}; stable context ${"x".repeat(1_500)}`,
-        forbiddenSecretValues: ["rotated credential value"]
-      }),
-    /already recorded with different immutable data/u
-  );
-});
-
-test("node attempt ledger does not infer replay-safe redaction from a literal placeholder", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger-literal-placeholder" });
-  const input = failedAttemptInput("literal-placeholder", `provider echoed <redacted>; ${"x".repeat(1_500)}`);
-
-  const first = appendNodeAttempt(layout, input);
-  assert.equal(first.entry.failure_message_redaction_span_code_points, undefined);
-  assert.equal(first.entry.failure_message_truncated, true);
-  assert.throws(
-    () =>
-      appendNodeAttempt(layout, { ...input, failureMessage: `provider echoed old credential; ${"x".repeat(1_500)}` }),
-    /already recorded with different immutable data/u
-  );
+  assert.equal(literal.entry.failure_message_redaction_span_code_points, undefined);
+  assert.equal(literal.entry.failure_message_truncated, true);
 });
 
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
@@ -796,7 +735,7 @@ test("artifact manifest reuse checks the complete prerequisite chain", () => {
   });
 });
 
-test("events append to JSONL, replay, and expose query indexes", () => {
+test("events append to JSONL, replay, and filter by node and status", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   appendEvent(layout, {
     eventType: "node-synced",
@@ -819,90 +758,53 @@ test("events append to JSONL, replay, and expose query indexes", () => {
     workflow_state: "in-progress"
   });
   assert.equal(queryEvents(layout, { nodeId: "node-a", status: "succeeded" }).length, 1);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", "node-a.jsonl")), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
 });
 
-test("event indexes encode long IDs in a collision-free hash namespace", () => {
-  const maximumRunId = "r".repeat(128);
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
-  const facadeBeforeAppend = readEventQueryFacade(layout);
-  const maximumNodeId = "n".repeat(128);
-  const directBoundaryNodeId = "d".repeat(122);
-  const longBoundaryNodeId = "e".repeat(123);
-  const legacyCollisionNodeId = `${maximumNodeId.slice(0, 97)}-${crypto
-    .createHash("sha256")
-    .update(maximumNodeId, "utf8")
-    .digest("hex")
-    .slice(0, 24)}`;
-  assert.equal(legacyCollisionNodeId.length, 122);
+test("event appends and replays keep working past 100,000 records", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-long-journal" });
+  const template = createEventRecord(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "running",
+    timestamp: "2026-08-05T00:00:00.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
+  });
+  const lines = Array.from({ length: 100_000 }, (_, index) =>
+    JSON.stringify({ ...template, event_id: `evt-${index.toString(16).padStart(24, "0")}` })
+  );
+  fs.writeFileSync(layout.eventsPath, `${lines.join("\n")}\n`);
 
-  const appendNodeSynced = (nodeId: string, workflowTaskId: string): void => {
-    appendEvent(layout, {
+  const appended = appendEvent(layout, {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    timestamp: "2026-08-05T00:00:01.000Z",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
+  });
+  const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
+  assert.equal(replay.records.length, 100_001);
+  assert.equal(replay.records.at(-1)?.event_id, appended.event_id);
+});
+
+test("an event append refuses a repeated or out-of-order event without changing the journal", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-window" });
+  const event = (nodeId: string, timestamp: string) =>
+    ({
       eventType: "node-synced",
       nodeId,
-      status: "running",
-      payload: { workflow_run_id: "workflow-1", workflow_task_id: workflowTaskId }
-    });
-  };
+      status: "succeeded",
+      timestamp,
+      payload: { workflow_run_id: "workflow-1", workflow_task_id: `task-${nodeId}` }
+    }) as const;
+  appendEvent(layout, event("node-a", "2026-08-05T00:00:01.000Z"));
+  appendEvent(layout, event("node-b", "2026-08-05T00:00:01.000Z"));
+  const before = fs.readFileSync(layout.eventsPath);
 
-  appendNodeSynced(maximumNodeId, "task-maximum");
-  appendNodeSynced(longBoundaryNodeId, "task-long-boundary");
-  appendNodeSynced(legacyCollisionNodeId, "task-legacy-collision");
-  appendNodeSynced(directBoundaryNodeId, "task-direct-boundary");
-
-  const hashedIndexPath = (dimension: string, value: string): string =>
-    path.join(
-      layout.eventsIndexDir,
-      dimension,
-      "sha256",
-      `${crypto.createHash("sha256").update(value, "utf8").digest("hex")}.jsonl`
-    );
-  const maximumRunIndex = hashedIndexPath("run", maximumRunId);
-  assert.equal(fs.existsSync(maximumRunIndex), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${legacyCollisionNodeId}.jsonl`)), true);
-  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", `${directBoundaryNodeId}.jsonl`)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("node", longBoundaryNodeId)), true);
-  assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
-
-  const maximumRecords = fs
-    .readFileSync(maximumRunIndex, "utf8")
-    .trimEnd()
-    .split("\n")
-    .map((line) => JSON.parse(line) as { run_id: string });
-  assert.equal(maximumRecords.length, 4);
-  assert.equal(
-    maximumRecords.every((record) => record.run_id === maximumRunId),
-    true
-  );
-  const facadeAfterAppend = readEventQueryFacade(layout) as {
-    filters?: unknown;
-    long_filters?: unknown;
-    index_key_encoding?: unknown;
-  };
-  assert.deepEqual(facadeAfterAppend, facadeBeforeAppend);
-  assert.deepEqual(facadeAfterAppend.filters, {
-    run_id: "events.index/run/<run-id>.jsonl",
-    node_id: "events.index/node/<node-id>.jsonl",
-    event_type: "events.index/type/<event-type>.jsonl",
-    status: "events.index/status/<status>.jsonl",
-    timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
-  });
-  assert.deepEqual(facadeAfterAppend.long_filters, {
-    run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
-    node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
-    event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
-    status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
-  });
-  assert.deepEqual(facadeAfterAppend.index_key_encoding, {
-    version: "ultrafuzz.event-index-key.v1",
-    direct_max_id_length: 122,
-    direct_id_path: "<dimension>/<id>.jsonl",
-    long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
-    digest: "sha256",
-    hash_input_encoding: "utf8",
-    digest_encoding: "hex"
-  });
+  // The same event again in the same millisecond, behind a different one, is still a repeat.
+  assert.throws(() => appendEvent(layout, event("node-a", "2026-08-05T00:00:01.000Z")), /duplicate identity/u);
+  assert.throws(() => appendEvent(layout, event("node-c", "2026-08-05T00:00:00.000Z")), /not ordered/u);
+  assert.deepEqual(fs.readFileSync(layout.eventsPath), before);
+  assert.equal(replayEvents(layout).records.length, 2);
 });
 
 test("event redaction covers token families, AWS keys, URL credentials, and private keys", () => {
@@ -1118,6 +1020,33 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
     )
   );
 
+  // The positive rules must not fire on ordinary contract output either: a
+  // Foundry test deriving and signing with Anvil's published mnemonic and
+  // account (0) key, and a qualified identifier with three long dotted
+  // segments (JWT-shaped until the rule required an eyJ header).
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        [
+          "generated-tests/AnvilSigner.t.sol",
+          Buffer.from(
+            'string memory mnemonic = "test test test test test test test test test test test junk";\n' +
+              "uint256 privateKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;\n" + // gitleaks:allow -- public Anvil dev key fixture for the redaction tests
+              "assertEq(vm.deriveKey(mnemonic, 0), privateKey);\n",
+            "utf8"
+          )
+        ],
+        [
+          "setup/call-graph.md",
+          Buffer.from(
+            "`ReentrancyGuardUpgradeable.nonReentrantModifier.lockedStateCheck` reverts on re-entry\n",
+            "utf8"
+          )
+        ]
+      ])
+    )
+  );
+
   // Every credential format the previous hand-rolled patterns could name is
   // still rejected — via a secretlint library finding or a documented
   // supplemental pattern.
@@ -1180,650 +1109,4 @@ test("updateNodeState accepts an explicit transition timestamp", () => {
 
   assert.equal(running.last_transition_at, "2026-01-01T00:00:05.000Z");
   assert.equal(running.nodes["node-a"]?.wait_since, "2026-01-01T00:00:05.000Z");
-});
-
-test("durable append rejects a symlinked parent before creating outside directories", () => {
-  const root = tempProject();
-  const outside = tempProject();
-  fs.symlinkSync(outside, path.join(root, "linked"), "dir");
-
-  assert.throws(
-    () => appendLineDurable(path.join(root, "linked", "created", "audit.jsonl"), "entry", root),
-    /crosses symlink/u
-  );
-  assert.equal(fs.existsSync(path.join(outside, "created")), false);
-});
-
-test("durable append rejects a half write without retrying the record", (t) => {
-  const root = tempProject();
-  const filePath = path.join(root, "audit.jsonl");
-  const expected = Buffer.from("0123456789\n", "utf8");
-  const partialLength = Math.floor(expected.length / 2);
-  const realWriteSync = fs.writeSync;
-  const realCloseSync = fs.closeSync;
-  const writeSync = t.mock.method(fs, "writeSync", (fd: number, bytes: Uint8Array) =>
-    realWriteSync(fd, Buffer.from(bytes).subarray(0, partialLength))
-  );
-  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
-
-  assert.throws(
-    () => appendLineDurable(filePath, "0123456789"),
-    (error: unknown) => {
-      assert.ok(error instanceof ArtifactPathError);
-      assert.equal(error.code, "short-write");
-      assert.match(error.message, new RegExp(`wrote ${partialLength} of ${expected.length} bytes`, "u"));
-      return true;
-    }
-  );
-
-  assert.equal(writeSync.mock.callCount(), 1);
-  assert.equal(closeSync.mock.callCount(), 1);
-  assert.deepEqual(fs.readFileSync(filePath), expected.subarray(0, partialLength));
-});
-
-test("durable append rejects a zero write without retrying the record", (t) => {
-  const root = tempProject();
-  const filePath = path.join(root, "audit.jsonl");
-  const realCloseSync = fs.closeSync;
-  const writeSync = t.mock.method(fs, "writeSync", () => 0);
-  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
-
-  assert.throws(
-    () => appendLineDurable(filePath, "entry"),
-    (error: unknown) => {
-      assert.ok(error instanceof ArtifactPathError);
-      assert.equal(error.code, "short-write");
-      assert.match(error.message, /wrote 0 of 6 bytes/u);
-      return true;
-    }
-  );
-
-  assert.equal(writeSync.mock.callCount(), 1);
-  assert.equal(closeSync.mock.callCount(), 1);
-  assert.equal(fs.readFileSync(filePath, "utf8"), "");
-});
-
-test("durable append propagates a directory fsync I/O failure", (t) => {
-  const root = tempProject();
-  const filePath = path.join(root, "audit.jsonl");
-  const realFsyncSync = fs.fsyncSync;
-  const realCloseSync = fs.closeSync;
-  let fsyncCall = 0;
-  const fsyncSync = t.mock.method(fs, "fsyncSync", (fd: number) => {
-    fsyncCall += 1;
-    if (fsyncCall === 1) {
-      realFsyncSync(fd);
-      return;
-    }
-    throw errnoError("EIO");
-  });
-  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
-
-  assert.throws(
-    () => appendLineDurable(filePath, "entry"),
-    (error: unknown) => {
-      assert.ok(error instanceof Error && "code" in error);
-      assert.equal(error.code, "EIO");
-      return true;
-    }
-  );
-
-  assert.equal(fsyncSync.mock.callCount(), 2);
-  assert.equal(closeSync.mock.callCount(), 2);
-  assert.equal(fs.readFileSync(filePath, "utf8"), "entry\n");
-});
-
-test("durable append tolerates only an unsupported directory fsync operation", (t) => {
-  const root = tempProject();
-  const filePath = path.join(root, "audit.jsonl");
-  const realFsyncSync = fs.fsyncSync;
-  const realCloseSync = fs.closeSync;
-  let fsyncCall = 0;
-  const fsyncSync = t.mock.method(fs, "fsyncSync", (fd: number) => {
-    fsyncCall += 1;
-    if (fsyncCall === 1) {
-      realFsyncSync(fd);
-      return;
-    }
-    throw errnoError("EINVAL");
-  });
-  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => realCloseSync(fd));
-
-  appendLineDurable(filePath, "entry");
-
-  assert.equal(fsyncSync.mock.callCount(), 2);
-  assert.equal(closeSync.mock.callCount(), 2);
-  assert.equal(fs.readFileSync(filePath, "utf8"), "entry\n");
-});
-
-test("durable append propagates a close failure without retrying close", (t) => {
-  const root = tempProject();
-  const filePath = path.join(root, "audit.jsonl");
-  const realCloseSync = fs.closeSync;
-  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => {
-    realCloseSync(fd);
-    throw errnoError("EIO");
-  });
-
-  assert.throws(
-    () => appendLineDurable(filePath, "entry"),
-    (error: unknown) => {
-      assert.ok(error instanceof Error && "code" in error);
-      assert.equal(error.code, "EIO");
-      return true;
-    }
-  );
-
-  assert.equal(closeSync.mock.callCount(), 1);
-  assert.equal(fs.readFileSync(filePath, "utf8"), "entry\n");
-});
-
-test("durable append aggregates an operation failure with its close failure", (t) => {
-  const root = tempProject();
-  const filePath = path.join(root, "audit.jsonl");
-  const realCloseSync = fs.closeSync;
-  const writeSync = t.mock.method(fs, "writeSync", () => {
-    throw errnoError("EIO");
-  });
-  const closeSync = t.mock.method(fs, "closeSync", (fd: number) => {
-    realCloseSync(fd);
-    throw errnoError("EBADF");
-  });
-
-  assert.throws(
-    () => appendLineDurable(filePath, "entry"),
-    (error: unknown) => {
-      assert.ok(error instanceof AggregateError);
-      assert.deepEqual(
-        error.errors.map((entry: unknown) => (entry instanceof Error && "code" in entry ? entry.code : undefined)),
-        ["EIO", "EBADF"]
-      );
-      return true;
-    }
-  );
-
-  assert.equal(writeSync.mock.callCount(), 1);
-  assert.equal(closeSync.mock.callCount(), 1);
-  assert.equal(fs.readFileSync(filePath, "utf8"), "");
-});
-
-test("generated-test manifests persist explicit generated files with provenance", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
-  const generatedContents = "contract InvariantTest {} // π\n";
-  const supportContents = "library InvariantFixture {} // café\n";
-  const manifest = writeGeneratedTestManifest({
-    layout,
-    nodeId: "strategy-a",
-    provenance: { agent_ref: "CodexAgent", workflow_task_id: "node:strategy-a", attempt_index: 0 },
-    tests: [
-      {
-        path: "generated-tests/Invariant.t.sol",
-        content: generatedContents,
-        language: "solidity"
-      }
-    ],
-    supportFiles: [
-      {
-        path: "generated-tests/helpers/InvariantFixture.sol",
-        content: supportContents,
-        language: "solidity"
-      }
-    ]
-  });
-
-  assert.equal(manifest.schema_version, GENERATED_TESTS_SCHEMA_VERSION);
-  assert.equal(manifest.framework, "foundry");
-  assert.equal(manifest.generated_tests.length, 1);
-  assert.equal(manifest.generated_tests[0]!.path, "generated-tests/Invariant.t.sol");
-  assert.equal(manifest.generated_tests[0]!.size_bytes, Buffer.byteLength(generatedContents));
-  assert.equal(
-    manifest.generated_tests[0]!.sha256,
-    crypto.createHash("sha256").update(generatedContents).digest("hex")
-  );
-  assert.equal(manifest.generated_tests[0]!.provenance!.agent_ref, "CodexAgent");
-  assert.equal(manifest.support_files[0]!.path, "generated-tests/helpers/InvariantFixture.sol");
-  assert.equal(manifest.support_files[0]!.size_bytes, Buffer.byteLength(supportContents));
-  assert.equal(manifest.support_files[0]!.sha256, crypto.createHash("sha256").update(supportContents).digest("hex"));
-  assert.equal(
-    fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Invariant.t.sol")),
-    true
-  );
-});
-
-test("generated-test manifest writer rejects zero-byte companion files", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-empty-generated-test" });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        supportFiles: [],
-        tests: [{ path: "generated-tests/Empty.t.sol", content: "" }]
-      }),
-    /generated test file must be non-empty/u
-  );
-  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
-});
-
-test("generated-test manifest writer rejects support-only bundles before writing files", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-support-only-generated-test" });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [],
-        supportFiles: [{ path: "generated-tests/Helper.sol", content: "library Helper {}\n" }]
-      }),
-    /cannot declare support files without a runnable generated test/u
-  );
-  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
-  assert.equal(
-    fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Helper.sol")),
-    false
-  );
-});
-
-test("generated-test manifest writer rejects excess combined entries before creating bundle paths", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-excess-generated-test-entries" });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: Array.from({ length: MAX_GENERATED_TEST_BUNDLE_ENTRIES + 1 }, (_, index) => ({
-          path: `generated-tests/Test-${index}.sol`,
-          content: "x"
-        })),
-        supportFiles: []
-      }),
-    /1024-entry combined bundle limit/u
-  );
-  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false);
-});
-
-test("generated-test manifest writer rejects excess cumulative existing bytes before reading companions", (t) => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-excess-generated-test-bytes" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir);
-  const tests = Array.from({ length: 5 }, (_, index) => {
-    const relativePath = `generated-tests/Test-${index}.sol`;
-    const absolutePath = path.join(nodeDir, relativePath);
-    fs.writeFileSync(absolutePath, "x", "utf8");
-    fs.truncateSync(absolutePath, MAX_GENERATED_TEST_BUNDLE_BYTES / 4);
-    return { path: relativePath };
-  });
-  const readSync = t.mock.method(fs, "readSync", () => {
-    throw new Error("companion content was read before cumulative resource preflight completed");
-  });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests,
-        supportFiles: []
-      }),
-    /67108864-byte combined companion limit/u
-  );
-  assert.equal(readSync.mock.callCount(), 0);
-  assert.equal(fs.existsSync(path.join(nodeDir, "generated-tests.json")), false);
-});
-
-test("generated-test manifest writer rejects cross-array duplicate paths before changing bundle bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-duplicate-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const companionPath = path.join(generatedTestsDir, "Shared.sol");
-  const manifestPath = path.join(nodeDir, "generated-tests.json");
-  fs.writeFileSync(companionPath, "sentinel companion\n", "utf8");
-  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Shared.sol", content: "replacement test\n" }],
-        supportFiles: [{ path: "generated-tests/Shared.sol", content: "replacement support\n" }]
-      }),
-    /repeats path "generated-tests\/Shared\.sol"/u
-  );
-  assert.equal(fs.readFileSync(companionPath, "utf8"), "sentinel companion\n");
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
-});
-
-test("generated-test manifest writer preflights missing existing companions before overwriting earlier files", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-support-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
-  const manifestPath = path.join(nodeDir, "generated-tests.json");
-  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
-  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
-        supportFiles: [{ path: "generated-tests/MissingHelper.sol" }]
-      }),
-    /generated-test support file does not exist/u
-  );
-  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
-});
-
-test("generated-test manifest writer preflights non-file destinations before overwriting earlier files", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-directory-support-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  const supportDirectory = path.join(generatedTestsDir, "InvariantFixture.sol");
-  fs.mkdirSync(supportDirectory, { recursive: true });
-  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
-  const manifestPath = path.join(nodeDir, "generated-tests.json");
-  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
-  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
-        supportFiles: [{ path: "generated-tests/InvariantFixture.sol", content: "library InvariantFixture {}\n" }]
-      }),
-    /generated-test bundle destination must be a regular file/u
-  );
-  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
-  assert.deepEqual(fs.readdirSync(supportDirectory), []);
-});
-
-test("generated-test manifest writer validates entry metadata before changing bundle bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invalid-metadata-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
-  const manifestPath = path.join(nodeDir, "generated-tests.json");
-  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
-  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
-        supportFiles: [
-          {
-            path: "generated-tests/InvariantFixture.sol",
-            content: "library InvariantFixture {}\n",
-            language: ""
-          }
-        ]
-      }),
-    /generated tests manifest is schema-invalid/u
-  );
-  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
-  assert.equal(fs.existsSync(path.join(generatedTestsDir, "InvariantFixture.sol")), false);
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
-});
-
-test("generated-test manifest writer preflights its manifest destination before changing companion bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-directory-manifest-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  const manifestDirectory = path.join(nodeDir, "generated-tests.json");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  fs.mkdirSync(manifestDirectory);
-  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
-  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
-        supportFiles: []
-      }),
-    /generated-test bundle destination must be a regular file/u
-  );
-  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
-  assert.deepEqual(fs.readdirSync(manifestDirectory), []);
-});
-
-test("generated-test manifest writer rejects a hard-linked manifest destination before changing bundle bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-hardlinked-manifest-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
-  const manifestPath = path.join(nodeDir, "generated-tests.json");
-  const manifestAlias = path.join(tempProject(), "generated-tests-alias.json");
-  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
-  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
-  fs.linkSync(manifestPath, manifestAlias);
-  const manifestInode = fs.lstatSync(manifestPath).ino;
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
-        supportFiles: []
-      }),
-    (error: unknown) => {
-      assert.ok(error instanceof ArtifactPathError);
-      assert.equal(error.code, "hard-link");
-      assert.match(error.message, /bundle destination must be singly linked/u);
-      return true;
-    }
-  );
-  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
-  assert.equal(fs.readFileSync(manifestAlias, "utf8"), "sentinel manifest\n");
-  assert.equal(fs.lstatSync(manifestPath).ino, manifestInode);
-  assert.equal(fs.lstatSync(manifestPath).nlink, 2);
-});
-
-test("generated-test manifest writer rejects a hard-linked companion before changing bundle bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-hardlinked-companion-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const testPath = path.join(generatedTestsDir, "Replay.t.sol");
-  const supportPath = path.join(generatedTestsDir, "InvariantFixture.sol");
-  const supportAlias = path.join(tempProject(), "InvariantFixture-alias.sol");
-  const manifestPath = path.join(nodeDir, "generated-tests.json");
-  fs.writeFileSync(testPath, "sentinel test\n", "utf8");
-  fs.writeFileSync(supportPath, "sentinel support\n", "utf8");
-  fs.linkSync(supportPath, supportAlias);
-  fs.writeFileSync(manifestPath, "sentinel manifest\n", "utf8");
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "replacement test\n" }],
-        supportFiles: [{ path: "generated-tests/InvariantFixture.sol", content: "replacement support\n" }]
-      }),
-    (error: unknown) => {
-      assert.ok(error instanceof ArtifactPathError);
-      assert.equal(error.code, "hard-link");
-      assert.match(error.message, /bundle destination must be singly linked/u);
-      return true;
-    }
-  );
-  assert.equal(fs.readFileSync(testPath, "utf8"), "sentinel test\n");
-  assert.equal(fs.readFileSync(supportPath, "utf8"), "sentinel support\n");
-  assert.equal(fs.readFileSync(supportAlias, "utf8"), "sentinel support\n");
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), "sentinel manifest\n");
-  assert.equal(fs.lstatSync(supportPath).nlink, 2);
-});
-
-test("generated-test manifest reader rejects a hard-linked manifest", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-read-hardlinked-generated-test" });
-  writeGeneratedTestManifest({
-    layout,
-    nodeId: "strategy-a",
-    tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
-    supportFiles: []
-  });
-  const manifestPath = path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json");
-  const manifestAlias = path.join(tempProject(), "generated-tests-alias.json");
-  fs.linkSync(manifestPath, manifestAlias);
-  const manifestBytes = fs.readFileSync(manifestPath);
-
-  assert.throws(
-    () => readGeneratedTestManifest(layout, "strategy-a"),
-    (error: unknown) => {
-      assert.ok(error instanceof ArtifactPathError);
-      assert.equal(error.code, "hard-link");
-      assert.match(error.message, /manifest must be a singly linked regular file/u);
-      return true;
-    }
-  );
-  assert.deepEqual(fs.readFileSync(manifestPath), manifestBytes);
-  assert.deepEqual(fs.readFileSync(manifestAlias), manifestBytes);
-});
-
-test("generated-test manifest writer rejects file-directory path collisions before creating bundle bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-prefix-collision-generated-test" });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
-        supportFiles: [
-          {
-            path: "generated-tests/Replay.t.sol/InvariantFixture.sol",
-            content: "library InvariantFixture {}\n"
-          }
-        ]
-      }),
-    /conflicts with file path/u
-  );
-  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false);
-});
-
-test("generated-test manifest writer rejects noncanonical path aliases without rewriting them", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-noncanonical-path-generated-test" });
-
-  for (const candidate of [
-    "Replay.t.sol",
-    "generated-tests/sub/../Replay.t.sol",
-    "generated-tests/./Replay.t.sol",
-    "generated-tests/sub//Replay.t.sol"
-  ]) {
-    assert.throws(
-      () =>
-        writeGeneratedTestManifest({
-          layout,
-          nodeId: "strategy-a",
-          tests: [{ path: candidate, content: "contract Replay {}\n" }],
-          supportFiles: []
-        }),
-      /must (?:begin with|already be a normalized relative POSIX path)/u,
-      candidate
-    );
-    assert.equal(fs.existsSync(path.join(layout.artifactsDir, "strategy-a")), false, candidate);
-  }
-});
-
-test("generated-test manifest writer rejects non-UTF-8 supplied support before creating bundle bytes", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-binary-support-generated-test" });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        tests: [{ path: "generated-tests/Replay.t.sol", content: "contract Replay {}\n" }],
-        supportFiles: [{ path: "generated-tests/fixture.dat", content: Buffer.from([0xff]) }]
-      }),
-    /generated-test support file must be strict UTF-8 text/u
-  );
-  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
-  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests")), false);
-});
-
-test("generated-test manifest writer rejects final symlinks without touching outside files", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-symlinked-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const outsideDir = tempProject();
-  const outsideFile = path.join(outsideDir, "Outside.t.sol");
-  fs.writeFileSync(outsideFile, "outside sentinel\n");
-  const symlinkPath = path.join(generatedTestsDir, "Linked.t.sol");
-  fs.symlinkSync(outsideFile, symlinkPath);
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        supportFiles: [],
-        tests: [{ path: "generated-tests/Linked.t.sol", content: "replacement\n" }]
-      }),
-    /symlink/u
-  );
-  assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
-  assert.equal(fs.readFileSync(outsideFile, "utf8"), "outside sentinel\n");
-  assert.equal(fs.existsSync(path.join(nodeDir, "generated-tests.json")), false);
-});
-
-test("generated-test manifest writer rejects broken final symlinks before writing content", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-broken-symlink-generated-test" });
-  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
-  const generatedTestsDir = path.join(nodeDir, "generated-tests");
-  fs.mkdirSync(generatedTestsDir, { recursive: true });
-  const missingOutsideFile = path.join(tempProject(), "Missing.t.sol");
-  const symlinkPath = path.join(generatedTestsDir, "Broken.t.sol");
-  fs.symlinkSync(missingOutsideFile, symlinkPath);
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        supportFiles: [],
-        tests: [{ path: "generated-tests/Broken.t.sol", content: "replacement\n" }]
-      }),
-    /symlink/u
-  );
-  assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
-  assert.equal(fs.existsSync(missingOutsideFile), false);
-});
-
-test("generated-test manifest writer rejects paths outside the generated-tests root", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-outside-generated-test" });
-
-  assert.throws(
-    () =>
-      writeGeneratedTestManifest({
-        layout,
-        nodeId: "strategy-a",
-        supportFiles: [],
-        tests: [{ path: "generated-tests/../../Outside.t.sol", content: "outside\n" }]
-      }),
-    /cannot traverse outside/u
-  );
-  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "Outside.t.sol")), false);
 });

@@ -734,20 +734,21 @@ test("a half-published dynamic expansion stays readable while execution stays cl
   assert.equal(fs.existsSync(generated.renderedPromptPath!), false);
 });
 
-test("event observers stay readable while a retried dynamic source is rematerialized", async () => {
+test("a re-running dynamic source keeps published controls admissible and observable", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-source-retry-events" });
   const [firstTask] = fixture.generatedTasks;
   assert.ok(firstTask);
   const eventNodeId = firstTask.smithersNodeId;
   setLifecycle(fixture, [], [{ type: "NodeStarted", nodeId: eventNodeId, attempt: 2 }]);
+  // A reset re-runs the planner, whose agent attempt first wipes its canonical artifact directory.
   const sourcePath = path.join(fixture.runRoot, "artifacts", "planner", "plan.json");
+  const publishedPlan = fs.readFileSync(sourcePath, "utf8");
   fs.rmSync(sourcePath);
 
+  // The published expansion manifest decides the fan-out, so the strict admission that cancel,
+  // pause, fork, and replay require keeps re-deriving the same controls without the source.
   const strict = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-  assert.equal(strict.ok, false);
-  if (!strict.ok) {
-    assert.match(strict.diagnostics[0]?.message ?? "", /dynamic source artifact does not exist/u);
-  }
+  assert.equal(strict.ok, true, "diagnostics" in strict ? JSON.stringify(strict.diagnostics) : "");
 
   const queried = await queryWorkflowEvents({
     projectRoot: fixture.project,
@@ -757,12 +758,9 @@ test("event observers stay readable while a retried dynamic source is rematerial
   assert.equal(queried.ok, true, JSON.stringify(queried.diagnostics));
   assert.equal(queried.value?.events[0]?.category, "NodeStarted");
   assert.equal(queried.value?.events[0]?.node_id, eventNodeId);
-  assert.ok(
-    queried.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED" &&
-        /dynamic source artifact does not exist/u.test(diagnostic.message)
-    ),
+  assert.equal(
+    queried.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED"),
+    false,
     JSON.stringify(queried.diagnostics)
   );
 
@@ -775,13 +773,21 @@ test("event observers stay readable while a retried dynamic source is rematerial
   });
   assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
   assert.equal(streamed[0]?.category, "NodeStarted");
-  assert.ok(
+  assert.equal(
     watched.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED"),
+    false,
     JSON.stringify(watched.diagnostics)
   );
-
   // Observation must not recreate or otherwise repair the dynamic source on the controller's behalf.
   assert.equal(fs.existsSync(sourcePath), false);
+
+  // The re-run then writes a plan whose goal has a different key; admission still follows the
+  // published manifest.
+  const plan = JSON.parse(publishedPlan) as { threat_goals: Array<Record<string, unknown>> };
+  plan.threat_goals = plan.threat_goals.map((goal) => ({ ...goal, id: "liquidation:early" }));
+  fs.writeFileSync(sourcePath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  const rewritten = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+  assert.equal(rewritten.ok, true, "diagnostics" in rewritten ? JSON.stringify(rewritten.diagnostics) : "");
 });
 
 test("controller refresh preserves the sealed dynamic base after runtime materialization", async () => {
@@ -1306,7 +1312,7 @@ test("dynamic child failure, skip, and timeout keep strict joins blocked with du
     const ledgerOutcome = readLedger(fixture).find(
       (entry) => entry.strategy_attempt_id === generated.attemptId
     )?.outcome;
-    // The current strict attempt ledger records only NodeFinished/NodeFailed terminal authorities.
+    // The attempt ledger records only NodeFinished/NodeFailed/NodeCancelled terminal events.
     // A skip or heartbeat timeout remains durable in state without inventing a ledger terminal
     // event that the workflow runner did not emit.
     assert.equal(ledgerOutcome, outcome === "failed" ? "failed" : undefined, outcome);

@@ -1,5 +1,4 @@
 export const FINDINGS_SCHEMA_VERSION = "ultrafuzz.finding.v2" as const;
-export const FINDINGS_SCHEMA_VERSIONS = [FINDINGS_SCHEMA_VERSION] as const;
 export const FINDINGS_FILE = "findings.json";
 
 export const FINDING_STATUSES = [
@@ -24,12 +23,3 @@ export const TRIAGE_CLASSIFICATIONS = [
   "spec-gated",
   "defensive-hardening"
 ] as const;
-
-export type FindingStatus = (typeof FINDING_STATUSES)[number];
-export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
-export type FindingConfidence = (typeof FINDING_CONFIDENCE_LEVELS)[number];
-export type TriageClassification = (typeof TRIAGE_CLASSIFICATIONS)[number];
-
-export function isSupportedFindingsSchemaVersion(value: string): boolean {
-  return value === FINDINGS_SCHEMA_VERSION;
-}
