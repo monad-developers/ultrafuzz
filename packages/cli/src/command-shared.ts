@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,7 +59,16 @@ export function cliIo(): CliIo {
 }
 
 export function projectRoot(flags: { project?: string }): string {
-  return path.resolve(flags.project ?? cliIo().cwd);
+  const root = path.resolve(flags.project ?? cliIo().cwd);
+  // Run layouts and project path checks reject a symlinked root, so resolve
+  // `--project <symlink>` to its directory, as process.cwd() already is after
+  // `cd <symlink>`. A root that cannot be resolved is left for the command to
+  // report.
+  try {
+    return fs.realpathSync(root);
+  } catch {
+    return root;
+  }
 }
 
 export function cliEntrypoint(): string {

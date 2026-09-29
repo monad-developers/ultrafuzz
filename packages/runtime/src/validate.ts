@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   applyModelProfileOverrides,
+  DEFAULT_MODEL_PROFILE_ID,
   hasErrors,
   loadProjectConfig,
   redactDiagnostics,
@@ -35,7 +36,7 @@ import {
 export async function validateProject(input: ValidateProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
   const resolved = await loadResolvedProject(input);
-  const configDiagnosticsList = resolved.diagnostics;
+  const configDiagnosticsList = [...resolved.diagnostics, ...unsupportedModelDefaultDiagnostics(resolved.config)];
   const posture: Partial<PolicyPosture> = {};
 
   posture.config = postureFromDiagnostics("config", "resolved typed configuration", configDiagnosticsList);
@@ -127,6 +128,26 @@ export async function loadResolvedProject(input: ValidateProjectInput): Promise<
     configuredAgentRefs,
     diagnostics
   };
+}
+
+/**
+ * A new run cannot use `[models] default = "<id>"`: the built-in [models.default]
+ * profile always exists, so the run's config.resolved.toml could not also hold
+ * `models.default` as a string. The config still resolves, so commands on
+ * existing runs keep finding them under its `output_dir`.
+ */
+function unsupportedModelDefaultDiagnostics(config: ResolvedConfig | undefined): RuntimeDiagnostic[] {
+  const profileId = config?.models.default;
+  if (profileId === undefined || profileId === DEFAULT_MODEL_PROFILE_ID) return [];
+  return [
+    {
+      code: "CONFIG_MODEL_DEFAULT_UNSUPPORTED",
+      message: `[models] default = ${JSON.stringify(profileId)} is not supported because the built-in [models.default] profile always exists; set [retry] agents = [${JSON.stringify(profileId)}] to make it the primary profile`,
+      severity: "error",
+      source: "validation",
+      path: "models.default"
+    }
+  ];
 }
 
 export function outputRootForConfig(projectRoot: string, config: ResolvedConfig): string {

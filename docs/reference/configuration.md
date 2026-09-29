@@ -137,6 +137,10 @@ part of the durable expansion contract, so changing it requires a new or
 explicitly incompatible run rather than changing an existing expansion on
 resume.
 
+`workflow_deadline_seconds` accepts up to 604,800 (seven days).
+`default_timeout_seconds` and `controller_lease_seconds` accept up to 86,400
+(one day).
+
 `workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
 records `workflow_deadline_at` in run state when the run is created, and again
 from each `replay`, `fork`, or `resume` that starts a controller (not one that
@@ -211,9 +215,11 @@ reasoning = "xhigh"
 timeout_seconds = 3600
 ```
 
-The profile named `default` is selected implicitly. Do not also define
-`[models] default = "default"`: TOML cannot use `models.default` as both a
-string and a table.
+The profile named `default` is selected implicitly. Setting `[models] default`
+to any other profile ID is rejected: the built-in `[models.default]` profile
+always exists, and TOML cannot use `models.default` as both a string and a
+table. To make another profile primary, list it first in `[retry] agents`, for
+example `agents = ["claude"]`.
 
 Profile IDs must use safe ASCII identifier characters. Each profile supports:
 

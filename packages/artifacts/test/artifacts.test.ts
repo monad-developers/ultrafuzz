@@ -10,6 +10,7 @@ import {
   ARTIFACT_MANIFEST_FILE,
   appendUsageEvents,
   assertArtifactPublicationsContainNoSecrets,
+  assertPathInside,
   appendNodeAttempt,
   appendEvent,
   createEventRecord,
@@ -343,6 +344,14 @@ test("safe path helpers reject traversal, absolutes, unsafe IDs, and symlink esc
   const outside = tempProject();
   fs.symlinkSync(outside, path.join(root, "link"));
   assert.throws(() => safeResolveInside(root, "link/file.txt"), /symlink/);
+});
+
+test("safe path helpers admit segments that only begin with two dots", () => {
+  const root = tempProject();
+  assert.equal(safeResolveInside(root, "..data/report.json"), path.join(root, "..data", "report.json"));
+  assert.doesNotThrow(() => assertPathInside(root, root));
+  assert.throws(() => assertPathInside(root, path.dirname(root)), /escapes/);
+  assert.throws(() => assertPathInside(root, path.join(root, "..", "sibling")), /escapes/);
 });
 
 test("validated artifact publication is atomic, exclusive, durable, and idempotent", () => {

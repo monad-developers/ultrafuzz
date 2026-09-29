@@ -144,7 +144,7 @@
           "$ref": "#/$defs/timeoutSeconds"
         },
         "workflowDeadlineSeconds": {
-          "$ref": "#/$defs/timeoutSeconds"
+          "$ref": "#/$defs/workflowDeadlineSeconds"
         },
         "controllerLeaseSeconds": {
           "$ref": "#/$defs/timeoutSeconds"
@@ -550,7 +550,7 @@
           "$ref": "#/$defs/timeoutSeconds"
         },
         "workflow_deadline_seconds": {
-          "$ref": "#/$defs/timeoutSeconds"
+          "$ref": "#/$defs/workflowDeadlineSeconds"
         },
         "invariant_testing_smoke_timeout_seconds": {
           "$ref": "#/$defs/timeoutSeconds"
@@ -576,6 +576,11 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 86400
+    },
+    "workflowDeadlineSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 604800
     },
     "nonWhitespaceString": {
       "type": "string",

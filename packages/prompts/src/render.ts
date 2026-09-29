@@ -782,7 +782,8 @@ function parseAncestorArtifactPathAuthoritySelector(name: string): string[] | un
     }
     seen.add(relativePath);
   }
-  return relativePaths.sort((left, right) => left.localeCompare(right));
+  // Code-unit order: localeCompare would make the sealed selector ID depend on the host locale.
+  return relativePaths.sort();
 }
 
 function parseAncestorContractArtifactAuthoritySelector(name: string): string | undefined {

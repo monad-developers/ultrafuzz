@@ -264,6 +264,57 @@ test("optional producers appear only in the exact admitted dependency set", () =
   );
 });
 
+/** Derive the authority of a consumer that selects `paths` from every producer in `producerIds`. */
+function deriveFromProducers(producerIds: string[], paths: string[]): PromptArtifactAuthorityDocument {
+  const selector = pathSelector(paths);
+  const producers = producerIds.map((attemptId) =>
+    sealedTask({ attemptId, outputs: paths.map((output) => declaredOutput(output, "ultrafuzz/text@1")) })
+  );
+  const consumer = sealedTask({
+    attemptId: "consumer",
+    outputs: [declaredOutput("report.md", "ultrafuzz/nonempty-markdown@1", true)],
+    dependencies: producerIds,
+    dependencyArtifactDirs: producers.map((producer) => producer.artifactDir),
+    promptArtifactAuthoritySelectors: [selector]
+  });
+  return derivePromptArtifactAuthority({
+    sealedTaskManifestBytes: manifestBytes({ ...fixtureManifest(), tasks: [...producers, consumer] }),
+    currentAttemptId: "consumer",
+    relocatedRunRoot,
+    admittedDependencyArtifactDirs: producerIds.map((attemptId) => path.join(relocatedRunRoot, "artifacts", attemptId)),
+    selectors: [selector]
+  });
+}
+
+test("derivation orders producers whose attempt IDs share a prefix, such as loop iterations 1 and 10", () => {
+  const authority = deriveFromProducers(["strategy-1", "strategy-10"], ["findings.json"]);
+  assert.deepEqual(
+    authority.producers.map((producer) => producer.attempt_id),
+    ["strategy-1", "strategy-10"]
+  );
+});
+
+test("derivation accepts selector paths in the order they were sealed", () => {
+  // "Report.md" sorts before "findings.json" by code unit ("R" is 0x52, "f" is
+  // 0x66), which planning now produces, and after it under the en-US collation
+  // that runs sealed before code-unit ordering used.
+  for (const paths of [
+    ["Report.md", "findings.json"],
+    ["findings.json", "Report.md"]
+  ]) {
+    const authority = deriveFromProducers(["strategy"], paths);
+    assert.deepEqual(authority.selectors, [pathSelector(paths)]);
+    assert.deepEqual(
+      authority.producers.flatMap((producer) => producer.outputs.map((output) => output.path)),
+      ["Report.md", "findings.json"]
+    );
+  }
+  assert.throws(
+    () => derivePromptArtifactAuthority(deriveInput({ selectors: [pathSelector(["findings.json", "findings.json"])] })),
+    /input selector 0 paths are duplicated/u
+  );
+});
+
 test("derivation rejects missing required, foreign, and duplicate admitted roots", () => {
   assert.throws(
     () => derivePromptArtifactAuthority(deriveInput({ admittedDependencyArtifactDirs: [] })),

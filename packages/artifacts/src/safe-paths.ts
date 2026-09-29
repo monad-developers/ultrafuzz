@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { isPathInside } from "@ultrafuzz/security";
+
 import { CANONICAL_ARTIFACT_PATH_SEGMENT_PATTERN } from "./artifact-path-primitives.js";
 import { readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -86,11 +88,7 @@ export function normalizeSafeRelativePath(value: string, label = "artifact path"
 
 export function assertPathInside(root: string, candidate: string, label = "path"): void {
   const rootAbsolute = path.resolve(root);
-  const candidateAbsolute = path.resolve(candidate);
-  const relative = path.relative(rootAbsolute, candidateAbsolute);
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return;
-  }
+  if (isPathInside(rootAbsolute, path.resolve(candidate))) return;
   throw new ArtifactPathError("path-escape", `${label} escapes ${rootAbsolute}`);
 }
 

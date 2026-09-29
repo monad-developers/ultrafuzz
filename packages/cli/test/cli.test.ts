@@ -1280,6 +1280,19 @@ test("init and validate emit schema-versioned launch JSON", async (t) => {
   assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
+test("a symlinked --project resolves to the directory it names", async (t) => {
+  const root = tempProject(t);
+  const project = path.join(root, "project");
+  const link = path.join(root, "project-link");
+  fs.mkdirSync(project);
+  fs.symlinkSync(project, link);
+  assert.equal((await cli(project, ["init", "--json"])).code, 0);
+
+  const validate = await cli(link, ["validate", "--json"]);
+  assert.equal(validate.code, 0, validate.stdout);
+  assert.equal((parseJson(validate).data as { project_root: string }).project_root, project);
+});
+
 test("plain init restores a customized agent adapter without touching project config", async (t) => {
   const project = tempProject(t);
   const initial = await cli(project, ["init", "--force"]);

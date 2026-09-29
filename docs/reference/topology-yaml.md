@@ -385,7 +385,9 @@ nodes:
 
 The node above fans out across both model profiles because the group default is
 explicit. A node-level `model_profiles` list replaces the group list. Omitting
-model selection does not fan out; it resolves to `[models].default`.
+model selection does not fan out; it resolves to the primary profile,
+`retry.agents[0]` when a retry list is configured and the `default` profile
+otherwise.
 
 When a concrete node has multiple model profiles, artifact and workspace attempt
 IDs include model and attempt metadata, such as

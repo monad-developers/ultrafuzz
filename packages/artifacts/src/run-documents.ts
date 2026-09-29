@@ -371,12 +371,9 @@ export function assertRunPlanDocument(value: unknown, expectedRunId?: string): R
         );
       }
       if (reference.kind !== "ancestor_artifact_path_authority") continue;
-      if (
-        reference.relativePaths.some(
-          (selectedPath, index) => index > 0 && reference.relativePaths[index - 1]!.localeCompare(selectedPath) >= 0
-        ) ||
-        reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)
-      ) {
+      // The schema already makes the paths unique. Their order is not checked:
+      // plans sealed before code-unit ordering hold them in host-collation order.
+      if (reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)) {
         throw new Error(
           `run plan rendered prompt ${JSON.stringify(prompt.attempt_id)} has an invalid compact path authority group`
         );

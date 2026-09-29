@@ -247,6 +247,32 @@ test("dashboard audit journals reject malformed history without changing its byt
   assert.deepEqual(fs.readFileSync(auditPath), malformedBytes);
 });
 
+test("dashboard audit journals stay appendable after the host clock steps back", () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-dashboard-contracts-"));
+  const auditPath = path.join(root, "dashboard-audit.jsonl");
+  // A record stamped by a clock that later stepped back behind the current time.
+  const ahead = {
+    schema_version: DASHBOARD_AUDIT_SCHEMA_VERSION,
+    audit_id: "00000000-0000-4000-8000-000000000001",
+    timestamp: "2999-01-01T00:00:00.000Z",
+    kind: "config-edit",
+    path: "ultrafuzz.toml",
+    content_hash: "a".repeat(64)
+  };
+  fs.writeFileSync(auditPath, `${JSON.stringify(ahead)}\n`);
+
+  appendDashboardAuditRecord(
+    auditPath,
+    { kind: "config-edit", path: "ultrafuzz.toml", content_hash: "b".repeat(64) },
+    root
+  );
+
+  assert.deepEqual(
+    readDashboardAuditJournal(auditPath).records.map((record) => record.content_hash),
+    ["a".repeat(64), "b".repeat(64)]
+  );
+});
+
 function arraysWithoutItemSchemas(value: unknown, path: string): string[] {
   if (Array.isArray(value)) {
     return value.flatMap((entry, index) => arraysWithoutItemSchemas(entry, `${path}/${index}`));

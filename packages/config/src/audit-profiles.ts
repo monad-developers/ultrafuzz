@@ -7,6 +7,7 @@ import YAML from "yaml";
 import { z } from "zod/v4";
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "@ultrafuzz/artifacts";
 import { errorMessage } from "@ultrafuzz/artifacts";
+import { MAX_WORKFLOW_DEADLINE_SECONDS } from "./constants.js";
 
 export const AUDIT_PROFILE_CATALOG_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_AUDIT_PROFILE_ID = "default" as const;
@@ -76,7 +77,7 @@ const settingsSchema = z
     same_agent_attempts: positiveIntegerSchema.max(MAX_RETRY_CHAIN_ATTEMPTS).optional(),
     max_parallel_agents: positiveIntegerSchema.optional(),
     default_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),
-    workflow_deadline_seconds: positiveIntegerSchema.max(86_400).optional(),
+    workflow_deadline_seconds: positiveIntegerSchema.max(MAX_WORKFLOW_DEADLINE_SECONDS).optional(),
     invariant_testing_smoke_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),
     invariant_testing_fuzzer_timeout_seconds: positiveIntegerSchema.max(86_400).optional(),
     triage_quorum: positiveIntegerSchema.optional(),

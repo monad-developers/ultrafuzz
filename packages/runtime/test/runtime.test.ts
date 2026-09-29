@@ -3184,9 +3184,6 @@ repo = "."
 [run]
 output_dir = ".ultrafuzz/runs"
 
-[models]
-default = "fast"
-
 [models.fast]
 agent = "CodexAgent"
 model = "gpt-test-fast"
@@ -11339,7 +11336,8 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const reportPrompt = plan.value!.rendered_prompts.find((prompt) => prompt.attempt_id === "final-report");
   assert.ok(reportPrompt);
-  const firstPaths = ["reports/alpha.json", "reports/zeta.json"];
+  // Rendering orders each group by code unit, so "Z" precedes "a".
+  const firstPaths = ["reports/Zeta.json", "reports/alpha.json"];
   const secondPaths = ["reports/alpha.json", "reports/beta.json"];
   const firstPathSelector = {
     kind: "path" as const,
@@ -11390,7 +11388,7 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
   const expectedSelectors = [
     { kind: "contract", contract: "ultrafuzz/findings@2" },
     { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
-    ...[firstPathSelector, secondPathSelector].sort((left, right) => left.id.localeCompare(right.id))
+    ...[firstPathSelector, secondPathSelector].sort((left, right) => (left.id < right.id ? -1 : 1))
   ];
 
   const taskManifest = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
