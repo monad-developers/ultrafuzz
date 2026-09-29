@@ -26,8 +26,10 @@ import {
   artifactContractDefinition,
   artifactContractSchemaBinding,
   artifactSchemaBundleDigest,
+  artifactSchemaDirectory,
   artifactSchemaRegistry,
   artifactSchemaRegistryFromDirectory,
+  artifactValidatorSmokeFixturePath,
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   GOAL_PLAN_JSON_SCHEMA_ID,
   THREAT_MODEL_JSON_SCHEMA_ID,
@@ -36,6 +38,7 @@ import {
   goalPlanJsonSchema,
   layoutForRunRoot,
   manifestDigest,
+  parseJsonValidatorPreflightSuccessEnvelope,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -25046,14 +25049,11 @@ test("native continuation does not use historical trusted CLI identity as an aut
   writeSmallTopology(project);
   const runId = "controller-refresh-trusted-cli";
   const env = controllerRefreshTerminalEnv(project, runId);
-  const upPathLog = path.join(project, "fake-smithers-up-path.log");
-  logFakeRunnerUpVariable(env, "PATH", upPathLog);
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
   const trustedMetadataPath = path.join(launched.value!.run_root, "trusted-cli.json");
   fs.writeFileSync(trustedMetadataPath, "{}\n", "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
-  fs.writeFileSync(upPathLog, "", "utf8");
 
   const ordinary = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(ordinary.ok, true, JSON.stringify(ordinary.diagnostics));
@@ -25063,14 +25063,7 @@ test("native continuation does not use historical trusted CLI identity as an aut
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
   assert.equal(refreshed.value?.submitted, true);
   assert.equal(fs.readFileSync(trustedMetadataPath, "utf8"), "{}\n");
-  // The run-owned launcher, which re-verifies itself on every call, stays
-  // first on the runner's PATH instead of leaving tasks to whatever
-  // `ultrafuzz` the operator's PATH holds, and the failure is reported (#1143).
-  const upPaths = fs.readFileSync(upPathLog, "utf8").trim().split("\n");
-  assert.equal(upPaths.length, 2);
-  for (const upPath of upPaths) {
-    assert.equal(upPath.split(path.delimiter)[0], path.join(path.dirname(trustedMetadataPath), "trusted-bin"));
-  }
+  // The failed re-verification is reported instead of swallowed (#1143).
   for (const resumed of [ordinary, refreshed]) {
     assert.equal(
       resumed.diagnostics.some(
@@ -25088,6 +25081,54 @@ test("native continuation does not use historical trusted CLI identity as an aut
       .filter((command) => command.startsWith("up ")).length,
     2
   );
+});
+
+test("a resume that cannot re-verify the trusted CLI leaves tasks on the run's own working launcher", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "resume-keeps-trusted-launcher";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const upPathLog = path.join(project, "fake-smithers-up-path.log");
+  logFakeRunnerUpVariable(env, "PATH", upPathLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  fs.writeFileSync(upPathLog, "", "utf8");
+
+  // Without a CLI entrypoint resume cannot re-verify the launcher, although
+  // the launcher and its closure are intact (#1143).
+  const resumed = await runtimeResumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+
+  // Each task's validator preflight runs `ultrafuzz` from the runner's PATH.
+  // It must still reach the run's launcher, which verifies its closure and
+  // dispatches to the recorded (fake) CLI, never another `ultrafuzz`.
+  const runnerPath = fs.readFileSync(upPathLog, "utf8").trim();
+  const resolved = runnerPath
+    .split(path.delimiter)
+    .map((entry) => path.join(entry, "ultrafuzz"))
+    .find((candidate) => fs.existsSync(candidate));
+  assert.equal(resolved, path.join(launched.value.run_root, "trusted-bin", "ultrafuzz"));
+  const findings = artifactSchemaRegistry().find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const stdout = execFileSync(
+    resolved,
+    [
+      "json",
+      "validate",
+      "--schema",
+      path.join(artifactSchemaDirectory(), findings.filename),
+      "--file",
+      artifactValidatorSmokeFixturePath(),
+      "--json"
+    ],
+    { encoding: "utf8", env: { ...process.env, PATH: runnerPath } }
+  );
+  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
+  const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED");
+  assert.equal(warning?.severity, "warning", JSON.stringify(resumed.diagnostics));
 });
 
 test("native continuation hands generated agents the run's TOML config, so CodexAgent keeps API-key auth", async () => {

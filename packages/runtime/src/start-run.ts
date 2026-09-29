@@ -604,15 +604,19 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         // to prevent Smithers from continuing the workflow. Keep the run-owned
         // launcher first on PATH anyway: it re-verifies its closure on every
         // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
-        const trustedBin = path.join(layout.root, "trusted-bin");
-        const launcherKept = fs.existsSync(
-          path.join(trustedBin, process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz")
+        const launcher = path.join(
+          layout.root,
+          "trusted-bin",
+          process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz"
         );
-        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = trustedBin;
+        const launcherKept = fs.existsSync(launcher);
+        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = path.dirname(launcher);
         diagnostics.push(
           resumeWarning(
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
-            `resume could not re-verify the run's trusted Ultrafuzz CLI${launcherKept ? "; tasks keep calling the run-owned launcher, which checks itself on every call" : ""}`,
+            launcherKept
+              ? `resume could not re-verify the run's trusted Ultrafuzz CLI (tasks still call ${launcher}, and their preflight-json-validator step fails while that launcher cannot verify itself)`
+              : `resume could not re-verify the run's trusted Ultrafuzz CLI (${launcher} does not exist, so tasks call whatever \`ultrafuzz\` is on PATH)`,
             error
           )
         );
