@@ -45,7 +45,7 @@ reporting: # policy only — provider selection/credentials live in ultrafuzz.to
   node_telemetry: true
   heartbeat_interval_seconds: 60
   experiment_prefix: bug-finding
-  artifacts: # still validated, but nothing reads the artifacts policy
+  artifacts: # still validated, but no eval behaviour depends on it
     mode: manifest-only
     include: ["report.md", "report.json"]
     max_file_bytes: 5000000

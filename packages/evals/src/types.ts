@@ -94,7 +94,10 @@ export interface EvalTarget {
   signal_profile?: string;
   /** Relative ground-truth file resolved strictly under the operator-supplied `[eval].ground_truth_root`. */
   ground_truth: string;
-  /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
+  /**
+   * `private` requires the ground truth to be bound to this repo and ref, and
+   * `ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true` before an LLM judge receives it.
+   */
   sensitivity?: "public" | "private";
   /**
    * Benchmark paths the run must never read, such as a reference solution the
@@ -165,17 +168,15 @@ export interface EvalRecoveryEquivalence {
 
 export type EvalArtifactMode = "manifest-only" | "upload";
 
+/**
+ * The suite's `reporting.artifacts` block: validated and recorded, but no eval
+ * behaviour depends on it. `mode` defaults to `manifest-only`.
+ */
 export interface EvalArtifactPolicy {
-  /**
-   * `manifest-only` publishes file names/sizes/hashes only; `upload` also streams payloads.
-   * `manifest-only` is the default and is always forced for `sensitivity: private`
-   * targets unless the suite explicitly sets `upload` (the opt-in).
-   */
   mode: EvalArtifactMode;
-  /** Allowlist of artifact file names eligible for streaming to the provider. */
   include: string[];
   max_file_bytes: number;
-  /** True when the suite YAML explicitly set `mode` (the privacy opt-in signal). */
+  /** True when the suite YAML explicitly set `mode`. */
   mode_explicit: boolean;
 }
 

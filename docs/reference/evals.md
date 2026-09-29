@@ -42,7 +42,7 @@ provider, an endpoint, or an env var.
 launched rows by default; `--no-watch` overrides it. It and
 `reporting.heartbeat_interval_seconds` remain inputs to the execution-policy
 fingerprint. `reporting.experiment_prefix` and `reporting.artifacts` are still
-validated, but nothing reads them.
+validated, but no eval behaviour depends on them.
 
 ### Suite contract and workflow input
 

@@ -744,8 +744,8 @@ directory per target id under `--target-root`) against the pinned git refs;
 `--skip-target-validation` skips that check.
 
 `run` launches Ultrafuzz runs for matrix rows (all rows, or a `--row`
-selection) and polls them to a terminal state. Reports and telemetry remain
-in local run artifacts. `--no-watch` launches detached without polling.
+selection) and polls them to a terminal state. Reports remain in local run
+artifacts. `--no-watch` launches detached without polling.
 
 `status` reads the eval matrix, its latest `runs.jsonl` records, and each
 linked durable `state.json` without synchronizing or changing workflow state.
