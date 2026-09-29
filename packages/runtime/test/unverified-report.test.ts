@@ -231,3 +231,59 @@ test("failure to save the status cache does not suppress explicit report access"
   assert.equal(loadReportSnapshot(root).terminal, true);
   assert.equal(readReportPublicationStatus(root, state).status, "unknown");
 });
+
+test("unchecked reports restate whole-run accounting from run.json", () => {
+  const root = reportRun("whole-run-accounting");
+  writeAgentReport(root);
+  const runId = path.basename(root);
+  const state = JSON.parse(fs.readFileSync(path.join(root, "state.json"), "utf8"));
+  fs.writeFileSync(
+    path.join(root, "state.json"),
+    JSON.stringify({ ...state, finished_at: "2026-09-01T03:30:00.000Z" })
+  );
+  fs.writeFileSync(
+    path.join(root, "run.json"),
+    JSON.stringify({
+      run_id: runId,
+      created_at: "2026-09-01T00:00:00.000Z",
+      accounting: {
+        cumulative: { models: ["model-a"], tokens_used: "4,321", estimated_spend: "$3.00", partial_pricing: false }
+      }
+    })
+  );
+  const report = loadReportSnapshot(root);
+  assert.equal(report.verification, "not-checked");
+  assert.match(report.markdown, /^- Elapsed time: `3h 30m`$/mu);
+  assert.match(report.markdown, /^- Models used: `model-a`$/mu);
+  assert.match(report.markdown, /^- Tokens used: `4,321`$/mu);
+  assert.match(report.markdown, /^- Estimated spend: `\$3\.00`$/mu);
+  assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, false);
+  assertReportSnapshotRemainedCurrent(report);
+});
+
+test("unchecked reports render the run's goal-search census", () => {
+  const root = reportRun("goal-search-census");
+  writeAgentReport(root);
+  const censusPath = path.join(root, "goal-search-coverage.json");
+  fs.writeFileSync(
+    censusPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.goal-search-coverage.v1",
+      run_id: path.basename(root),
+      totals: { planned: 2 },
+      goals: [
+        { node_id: "dynamic:class:1", logical_node_id: "class-goals", status: "completed-no-findings" },
+        { node_id: "dynamic:class:2", logical_node_id: "class-goals", status: "stopped-early" }
+      ]
+    })
+  );
+  const report = loadReportSnapshot(root);
+  assert.match(report.markdown, /^- Targeted goal search lanes: `2`\n- Completed with a verified result: `1`$/mu);
+  assert.doesNotMatch(report.markdown, /Goal search coverage is unknown/u);
+
+  // A census the reader refuses still leaves the report readable, with coverage stated as unknown.
+  const outside = path.join(temporaryRoot("ultrafuzz-outside-"), "goal-search-coverage.json");
+  fs.renameSync(censusPath, outside);
+  fs.symlinkSync(outside, censusPath);
+  assert.match(loadReportSnapshot(root).markdown, /Goal search coverage is unknown/u);
+});

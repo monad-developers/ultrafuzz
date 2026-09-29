@@ -385,24 +385,7 @@ Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues belo
 - Tokens used: `<token usage, or unavailable>`
 - Estimated spend: `<cost estimate such as $123 or $123+ when pricing is partial, or unavailable>`
 - Audit profile: `<effective audit profile, or unavailable>`
-
-## Audit context
-
-- Threat model: [THREAT_MODEL.md](<relative path to THREAT_MODEL.md>); [threat-model.json](<relative path to threat-model.json>)
-- Goal plan: [goal-plan.json](<relative path to goal-plan.json>)
 ```
-
-Render `## Audit context` with exactly this heading, bullet order, and link
-text, immediately after `## Run summary`. Use repository-relative or
-report-relative paths to the run's own `threat-model` and `goal-plan` artifacts;
-never absolute paths or external URLs. Omit an individual link whose artifact
-the run did not produce, omit the `Goal plan` bullet when there is no goal plan,
-and omit the whole section when the run produced none of them. Do not invent a
-different heading, ordering, or link text: `ultrafuzz report` regenerates this
-exact section deterministically from the run's own artifacts and overwrites
-anything else.
-Keep detailed threat content in those dedicated artifacts; do not duplicate it
-in `report.md`.
 
 Each production issue entry must use exactly this Markdown section order. The
 following example is structural only; replace the title, actor names, actions,
@@ -825,8 +808,6 @@ Before finishing, verify that:
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
-- `report.md` renders the fixed `## Audit context` section for every artifact
-  the run produced, without copying their detailed analysis.
 - `report.md` contains `## Property implementation coverage` rendered from the
   exact runtime-authoritative coverage object.
 - `report.md` contains `## Goal search coverage` with counts recomputed from the

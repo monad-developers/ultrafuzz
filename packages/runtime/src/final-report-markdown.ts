@@ -21,7 +21,6 @@ import { redactSecretsInText, type SecretScanMode } from "@ultrafuzz/security";
 
 export const MAX_FINAL_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 export const MAX_FINAL_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
-const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
 /**
  * Secret placeholder for the public projection only. Two constraints pick it:
  *
@@ -29,10 +28,9 @@ const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\
  *   the placeholder must be a fixed point of the redaction pass. The key-name assignment rule's
  *   unquoted value class stops at whitespace, `,`, `;`, `]`, and `}`, so a placeholder containing
  *   any of those is re-redacted on the next pass (`token=[redacted]` becomes `token=[redacted]]`).
- * - The final-review Markdown gate rejects raw HTML, images, and links outside fenced code, and
- *   redacted values land unescaped in inline code (run summary values, coverage paths, source
- *   nodes), so the placeholder must not read as HTML (`<redacted>`), a link (`[redacted](`),
- *   an image, or emphasis (`*`, `_`).
+ * - The final-review Markdown gate rejects raw HTML outside fenced code, including inside inline
+ *   code, where redacted values land unescaped (run summary values, coverage paths, source nodes),
+ *   so the placeholder must not read as HTML (`<redacted>`).
  *
  * A bare uppercase word satisfies both. Every other redaction keeps the security package's default.
  */
@@ -260,9 +258,11 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (!markdown.includes("\n## Property provenance\n")) {
     return "missing property provenance";
   }
+  // Report prose is preserved byte-for-byte from upstream artifacts that the agent cannot repair, so
+  // the only rule left is one escaped prose cannot match: publicProse escapes `<`, and only
+  // unescaped inline-code values can still carry raw HTML.
   const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
-  const proseViolation = finalReportProseDirectiveViolation(prose);
-  if (proseViolation !== undefined) return proseViolation;
+  if (/<[A-Za-z][^>]*>/u.test(prose)) return "contains raw HTML outside fenced code";
   const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const expectedHeadings = rendered.map(renderedIssueHeading);
   const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
@@ -345,31 +345,6 @@ function completionFindingsViolation(
     return "complete report contains partial completion claims";
   }
   return undefined;
-}
-
-function finalReportProseDirectiveViolation(prose: string): string | undefined {
-  // Critical is not a supported report severity, but the word remains valid in explanatory prose
-  // (for example, "a critical invariant"). Reject only a standalone severity-like label rather than
-  // rewriting or discarding the validated finding text.
-  const forbiddenPatterns: ReadonlyArray<readonly [RegExp, string]> = [
-    [/(?:^|\n)(?:#{1,6}\s+|-\s+)?(?:\*\*)?Critical(?:\*\*)?\s*$/imu, "contains the unsupported Critical severity"],
-    [/(?:^|\n)#### Sources\s*$/imu, "contains a legacy Sources section"],
-    [/\*\*Source (?:Node|Property) Id\*\*/iu, "contains a legacy source identifier field"],
-    [/(?:^|\n)- \*\*Item \d+\*\*/imu, "contains a legacy numbered-item field"],
-    [/(?:^|\n)## (?:Executive summary|Issue index|Additional report data)\s*$/imu, "contains a legacy report section"],
-    [/(?:^|\n)#{3,6} (?:Lifecycle|Strategy|Strategy provenance)\s*$/imu, "contains a legacy issue subsection"],
-    [
-      /(?:^|\n)- (?:Strategy loops|Audit profile catalog digest|Topology digest|Prompt digest|Expanded graph fingerprint):/imu,
-      "contains legacy run metadata"
-    ],
-    [/<[A-Za-z][^>]*>/u, "contains raw HTML outside fenced code"],
-    [/!\[[^\]]*\]\(/u, "contains an embedded image outside fenced code"],
-    [
-      /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu,
-      "contains a disallowed Markdown link outside fenced code"
-    ]
-  ];
-  return forbiddenPatterns.find(([pattern]) => pattern.test(prose))?.[1];
 }
 
 function validateReport(report: unknown): JsonRecord {
@@ -695,7 +670,6 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     lines,
     isRecord(report.run_metadata) ? report.run_metadata.artifact_validation_warnings : undefined
   );
-  appendAuditContext(lines, report.audit_context);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   appendCoverageEvidence(lines, report.coverage_evidence);
   const goalCoverage = summarizeGoalSearchCoverage(goalSearchCoverage);
@@ -838,8 +812,10 @@ function appendArtifactValidationWarnings(lines: string[], value: unknown): void
     ""
   );
   for (const warning of value.filter(isRecord)) {
+    // Codes render as plain text. Only `](` is escaped, so the bytes of real gate codes do not change.
+    const code = inlineValue(warning.code).replaceAll("](", "]\\(");
     lines.push(
-      `- ${inlineValue(warning.code)} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+      `- ${code} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
     );
     if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
   }
@@ -959,29 +935,6 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
     }
     lines.push(`- ${label}: \`${inlineValue(value)}\``);
   }
-}
-
-function appendAuditContext(lines: string[], value: unknown): void {
-  if (!isRecord(value)) return;
-  const threat = recordField(value, "threat_model");
-  const goalPlan = recordField(value, "goal_plan");
-  const threatMarkdown = safeReportLink(threat?.markdown);
-  const threatJson = safeReportLink(threat?.json);
-  const goalPlanJson = safeReportLink(goalPlan?.json);
-  if (threatMarkdown === undefined && threatJson === undefined && goalPlanJson === undefined) return;
-  lines.push("", "## Audit context", "");
-  if (threatMarkdown !== undefined || threatJson !== undefined) {
-    const links = [
-      threatMarkdown === undefined ? undefined : `[THREAT_MODEL.md](${threatMarkdown})`,
-      threatJson === undefined ? undefined : `[threat-model.json](${threatJson})`
-    ].filter((entry): entry is string => entry !== undefined);
-    lines.push(`- Threat model: ${links.join("; ")}`);
-  }
-  if (goalPlanJson !== undefined) lines.push(`- Goal plan: [goal-plan.json](${goalPlanJson})`);
-}
-
-function safeReportLink(value: unknown): string | undefined {
-  return typeof value === "string" && SAFE_REPORT_RELATIVE_LINK_PATTERN.test(value) ? value : undefined;
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
@@ -1522,6 +1475,7 @@ function recordTitle(record: JsonRecord, fallback: string): string {
   return typeof record.title === "string" && record.title.trim().length > 0 ? record.title.trim() : fallback;
 }
 
+/** Escaping `(` after every `]` keeps byte-preserved prose from forming an inline link or image. */
 function publicProse(value: string): string {
   return value
     .replace(/\s+/gu, " ")
@@ -1533,6 +1487,7 @@ function publicProse(value: string): string {
     .replaceAll("!", "\\!")
     .replaceAll("#", "\\#")
     .replaceAll("~", "\\~")
+    .replaceAll("](", "]\\(")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }

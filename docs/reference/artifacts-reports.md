@@ -541,8 +541,9 @@ artifacts/final-report/report.json
 
 `report.json` must satisfy `ultrafuzz/report@3` with the exact
 `ultrafuzz.report.v3` version literal. After a run stops, the runtime can format
-that report and attach whole-run completion information without changing the
-agent's files. Verified publications use:
+that report, attach whole-run completion information, and restate the run
+summary's elapsed time and accounting without changing the agent's files.
+Verified publications use:
 
 ```text
 review/runtime-report/<authority-digest>/report.json
@@ -753,11 +754,12 @@ still does. When no coverage producer was planned or admitted,
 `report.json.coverage_evidence` or a `report.md` score that names an exact
 scope fails the final report.
 
-Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
-`threat-model.json`, and `goal-plan.json`, plus source-node provenance for each
-production issue. Detailed threat analysis stays in the dedicated threat-model
-artifacts and is not duplicated into the report. `report.json` preserves the
-same `source_nodes` arrays.
+Current-run `report.md` contains source-node provenance for each production
+issue and does not link to other run files. Detailed threat analysis stays in
+the dedicated threat-model artifacts and is not duplicated into the report.
+`report.json` preserves the same `source_nodes` arrays. Inline link and image
+syntax inside report prose, including prose preserved byte-for-byte from
+upstream findings, renders as literal text.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and
@@ -767,13 +769,20 @@ available cumulative values into the markdown run summary and into
 persisted estimate is partial because some token usage did not have pricing
 data.
 
-If cumulative metadata has not synchronized when the final-report producer
-starts, its live Smithers fallback is a snapshot through that producer's start.
-It includes earlier attempts but cannot include the producer's own eventual
-duration, model fallback, tokens, or cost. A terminal presentation of an existing
-verified agent report preserves those accounting values. Report v3 has no
-metric-scope field, so use
-`ultrafuzz stats` after terminal synchronization for closed-run accounting.
+The final-report producer receives its run summary when its task starts: from
+cumulative metadata when it has synchronized, otherwise from a live Smithers
+fallback. Either way it is a snapshot through that producer's start. It includes
+earlier attempts but cannot include the producer's own eventual duration, model
+fallback, tokens, or cost, and the agent's `report.json` and `report.md` keep
+that snapshot. Runtime presentations (the verified terminal publication and
+unchecked reports) restate the run summary instead: elapsed time from
+`run.json#created_at` to `state.json#finished_at`, and models, tokens,
+estimated spend, and `partial_pricing` from the current
+`accounting.cumulative`. Tokens, estimated spend, and `partial_pricing` are
+restated together whenever `accounting.cumulative` records a token count, so a
+whole-run spend recorded as `unavailable` stays `unavailable` instead of showing
+the agent's report-start figure. Otherwise, a value those records lack keeps the
+agent's copy. Use `ultrafuzz stats` for the full accounting breakdown.
 
 `accounting.segments` publishes one rollup per checkpoint generation, and
 `accounting.current` identifies the latest segment. Each segment retains every

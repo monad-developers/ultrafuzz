@@ -13,6 +13,7 @@ import {
   reportSchema,
   type ReportVerification
 } from "@ultrafuzz/artifacts";
+import { loadGoalSearchCoverageSnapshot } from "./final-report-markdown.js";
 import { ReportUnavailableError } from "./report-unavailable.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -31,6 +32,7 @@ export interface UnverifiedReportInputs {
   observed: ObservedReportCompletion;
   verification: ReportVerification;
   agentReport: JsonRecord;
+  goalSearchCoverage?: unknown;
   sources_sha256: string;
 }
 
@@ -53,8 +55,18 @@ export function readUnverifiedReportInputs(root: string): UnverifiedReportInputs
     observed,
     verification: { status: "not-checked", reason_codes: [...reader.reasons].sort() },
     agentReport,
+    goalSearchCoverage: readGoalSearchCoverage(root),
     sources_sha256: sha256Bytes(Buffer.from(JSON.stringify(reader.sources)))
   };
+}
+
+/** An unreadable census renders as unknown goal-search coverage instead of hiding the report. */
+function readGoalSearchCoverage(root: string): unknown {
+  try {
+    return loadGoalSearchCoverageSnapshot(root);
+  } catch {
+    return undefined;
+  }
 }
 
 class ReportInputReader {
