@@ -26,20 +26,19 @@ test("workflow process diagnostics omit command payloads and retain bounded stdi
   assert.equal(diagnostic.details?.stderr, "runner stderr detail token=<redacted>\n");
 });
 
-test("workflow process diagnostics drop the runner name from prose but keep filesystem paths", () => {
+test("workflow process diagnostics drop the runner name from prose but keep paths, file names and URLs", () => {
   const workflowPath = "/work/target/.smithers/workflows/ultrafuzz-run.tsx";
   const agentsUrl = "file:///work/target/.smithers/agents/index.ts";
+  const names = `${workflowPath} (${agentsUrl}) from smithers.db; delete .smithers and restart`;
+  const docs = "See https://smithers.sh/reference/errors";
   const error = Object.assign(new Error("Command failed"), {
     code: 1,
-    stderr: Buffer.from(
-      `smithers could not load ${workflowPath} (${agentsUrl}); see https://smithers.sh/reference/errors\n`,
-      "utf8"
-    )
+    stderr: Buffer.from(`smithers could not load ${names} smithers. ${docs}\n`, "utf8")
   });
 
   const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
 
-  const expected = `workflow runner could not load ${workflowPath} (${agentsUrl}); see https://workflow runner.sh/reference/errors\n`;
+  const expected = `workflow runner could not load ${names} workflow runner. ${docs}\n`;
   assert.equal(diagnostic.details?.stderr, expected);
   assert.ok(diagnostic.message.endsWith(`stderr: ${expected.trim()}`), diagnostic.message);
 });

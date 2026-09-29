@@ -6622,15 +6622,16 @@ function assertPatchedSmithersRunnerInterpreter(env: Record<string, string | und
 }
 
 /**
- * Replaces the runner's name in text an operator reads, except inside a
- * filesystem path: a rewritten `<target>/.smithers/workflows/...` names a
- * directory that does not exist. A path is a word holding a path separator;
- * web URLs are still scrubbed.
+ * Replaces the runner's name in text an operator reads, except inside a name
+ * that must resolve: a rewritten `<target>/.smithers/workflows/...` names a
+ * directory that does not exist. A word holding a path separator, or a dot
+ * before a letter or digit (`.smithers`, `smithers.db`, a URL's host), is left
+ * whole; a sentence's closing dot is not.
  */
 export function scrubWorkflowRunnerText(value: string): string {
   if (!/smithers/iu.test(value)) return value;
   return value.replace(/[^\s"'`]+/gu, (word) =>
-    /[/\\]/u.test(word) && !/https?:\/\//iu.test(word) ? word : word.replace(/smithers/giu, "workflow runner")
+    /[/\\]|\.\w/u.test(word) ? word : word.replace(/smithers/giu, "workflow runner")
   );
 }
 

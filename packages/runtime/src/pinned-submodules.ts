@@ -248,7 +248,7 @@ export function enablePinnedSubmoduleWorktreeConfig(
 /**
  * Restore a fresh or retried task worktree. All sealed bytes are staged and
  * verified before any existing dependency root is replaced. A transaction left
- * by a hydration that did not finish is rolled back first.
+ * by a hydration that did not finish is removed first.
  */
 export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
   executionSnapshotRoot?: string;
@@ -259,7 +259,7 @@ export function hydratePinnedSubmodulesFromExecutionSnapshot(input: {
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
   const loaded = loadSealedSnapshot(input.executionSnapshotRoot, input.expectation);
   assertSourceIdentity(workspaceRoot, loaded.snapshot);
-  rollBackStaleTransactions(workspaceRoot, loaded.snapshot);
+  removeStaleTransactions(workspaceRoot);
   configureTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot);
 
   const transactionRoot = fs.mkdtempSync(path.join(workspaceRoot, TRANSACTION_PREFIX));
@@ -869,27 +869,12 @@ function assertNoStaleTransactions(workspaceRoot: string): void {
 /**
  * A hydration the controller did not survive (SIGKILL, OOM, reboot) leaves its
  * transaction directory behind, possibly holding a root it had moved aside.
- * Put each such root back, as the interrupted rollback would have, then drop
- * the entry whatever its shape; the hydration that follows replaces every root
- * from the sealed snapshot.
+ * Nothing in it is needed: the hydration that follows replaces every root from
+ * the sealed snapshot, and a root that is missing is simply hydrated.
  */
-function rollBackStaleTransactions(workspaceRoot: string, snapshot: PinnedSubmoduleSnapshot): void {
+function removeStaleTransactions(workspaceRoot: string): void {
   for (const name of fs.readdirSync(workspaceRoot).filter((entry) => entry.startsWith(TRANSACTION_PREFIX))) {
-    const transactionRoot = path.join(workspaceRoot, name);
-    for (const root of snapshot.top_level_roots) {
-      const backup = trackedPath(path.join(transactionRoot, "backup"), root, "stale backup submodule root");
-      try {
-        assertPhysicalDirectory(workspaceRoot, backup, "stale backup submodule root");
-      } catch {
-        // Nothing was moved aside for this root, or what is there is not a directory to put back.
-        continue;
-      }
-      const destination = trackedPath(workspaceRoot, root, "task submodule root");
-      assertPhysicalParents(workspaceRoot, destination, "task submodule root");
-      fs.rmSync(destination, { recursive: true, force: true });
-      fs.renameSync(backup, destination);
-    }
-    fs.rmSync(transactionRoot, { recursive: true, force: true });
+    fs.rmSync(path.join(workspaceRoot, name), { recursive: true, force: true });
   }
 }
 

@@ -118,17 +118,11 @@ describe("EVMBench adapter", () => {
     ).toBe('{"name":"synthetic-package"}\n');
   });
 
-  it("keeps waiting through failed status calls and an incomplete launch", async () => {
+  it("keeps waiting through failed status calls", async () => {
     const fixture = adapterFixture();
     const reportPath = path.join(fixture.auditRoot, "report.md");
     fs.writeFileSync(reportPath, "# Synthetic report\n", "utf8");
-    const polls: Array<EvmbenchStatusVerdict | "fails"> = [
-      "fails",
-      "progressing",
-      "fails",
-      "fails",
-      "launch-incomplete"
-    ];
+    const polls: Array<EvmbenchStatusVerdict | "fails"> = ["fails", "progressing", "fails", "fails"];
     const waits: number[] = [];
 
     await runEvmbenchAdapter({
@@ -141,12 +135,13 @@ describe("EVMBench adapter", () => {
         if (args[0] !== "status") return defaultSuccess(args[0], fixture.auditRoot);
         const poll = polls.shift() ?? "done";
         if (poll === "fails") throw new Error("Ultrafuzz command status failed with exit code 1");
-        return success("status", poll === "launch-incomplete" ? launchIncompleteStatusData() : statusData(poll));
+        return success("status", statusData(poll));
       }
     });
 
     expect(fs.readFileSync(path.join(fixture.submissionRoot, "audit.md"), "utf8")).toBe("# Synthetic report\n");
-    expect(waits).toEqual([2_000, 1_000, 2_000, 4_000, 1_000]);
+    // The successful poll between the failures restarts the backoff at two intervals.
+    expect(waits).toEqual([2_000, 1_000, 2_000, 4_000]);
   });
 
   it("ends the attempt after five consecutive failed status calls", async () => {
@@ -556,11 +551,6 @@ function statusData(
     quota: null,
     generated_at_ms: 1
   };
-}
-
-function launchIncompleteStatusData(): Record<string, unknown> {
-  const { workflow_run_id: _workflowRunId, ...status } = statusData("launch-incomplete", "launch preparation pending");
-  return { ...status, status: "pending", workflow_status: "unsubmitted", workflow_ids: [] };
 }
 
 function adapterFixture(): Omit<Parameters<typeof runEvmbenchAdapter>[0], "execute"> {

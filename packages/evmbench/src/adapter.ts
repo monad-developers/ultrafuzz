@@ -317,8 +317,7 @@ function assertInside(root: string, target: string, label: string): void {
   throw new Error(`${label} escapes its root`);
 }
 
-// `launch-incomplete` is a run whose launch preparation has not finished publishing, not a failure.
-const WAITABLE_VERDICTS = new Set(["launch-incomplete", "running-healthy", "progressing", "stalled", "waiting-quota"]);
+const WAITABLE_VERDICTS = new Set(["running-healthy", "progressing", "stalled", "waiting-quota"]);
 const MAX_CONSECUTIVE_STATUS_FAILURES = 5;
 
 function degradedRunError(runId: string, reason: string): Error {

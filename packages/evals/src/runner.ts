@@ -590,8 +590,9 @@ export interface WatchEvalRowInput {
 }
 
 /**
- * A synchronization that fails the same way this many times in a row is not
- * going to clear by being polled again until the watch deadline.
+ * The same synchronization failure this many times in a row is treated as
+ * persistent: the watch stops and records `EVAL_ROW_SYNC_ABANDONED`. The run
+ * is not cancelled.
  */
 const MAX_IDENTICAL_SYNC_FAILURES = 10;
 
