@@ -197,8 +197,12 @@ test("terminal projection enforces bounded and internally consistent completion 
   assert.match(result.markdown, /identities omitted from this bounded census: `1`/u);
 });
 
-/** A valid run.json whose cumulative accounting already includes the report task's own usage. */
-function metadataWithAccounting(cumulative: { estimated_spend?: string; models?: string[] } = {}): RunMetadataDocument {
+/**
+ * A valid run.json whose cumulative accounting already includes the report task's own usage. When
+ * `priced` is false the usage ledger priced no event, so the whole-run spend is unavailable.
+ */
+function metadataWithAccounting(priced = true): RunMetadataDocument {
+  const unpricedModels = priced ? ["model-b"] : ["model-a", "model-b"];
   const summary = {
     uncached_input_tokens: 9_000_000,
     input_tokens: 9_000_000,
@@ -210,18 +214,27 @@ function metadataWithAccounting(cumulative: { estimated_spend?: string; models?:
     billable_token_total: 12_345_678,
     total_tokens: 12_345_678,
     tokens_used: "12,345,678",
-    estimated_spend: "$41.20+",
-    estimated_spend_usd: 41.2,
-    component_costs_usd: { uncached_input: 30, cache_read: 0, cache_write: 0, output: 11.2, reasoning: 0 },
+    ...(priced
+      ? {
+          estimated_spend: "$41.20+",
+          estimated_spend_usd: 41.2,
+          component_costs_usd: { uncached_input: 30, cache_read: 0, cache_write: 0, output: 11.2, reasoning: 0 }
+        }
+      : {
+          estimated_spend: "unavailable",
+          component_costs_usd: { uncached_input: 0, cache_read: 0, cache_write: 0, output: 0, reasoning: 0 }
+        }),
     usage_complete: true,
     usage_incomplete_reasons: [],
     pricing_complete: false,
-    pricing_incomplete_reasons: [{ code: "model-pricing-unavailable" as const, model: "model-b" }],
+    pricing_incomplete_reasons: (["output", "uncached_input"] as const).flatMap((component) =>
+      unpricedModels.map((model) => ({ code: "model-pricing-unavailable" as const, component, model }))
+    ),
     partial_pricing: true,
     cache_read_pricing_estimated: false,
     event_count: 2,
-    priced_event_count: 1,
-    unpriced_event_count: 1,
+    priced_event_count: priced ? 1 : 0,
+    unpriced_event_count: priced ? 1 : 2,
     models: ["model-a", "model-b"],
     agents: ["agent-a"]
   };
@@ -260,7 +273,7 @@ function metadataWithAccounting(cumulative: { estimated_spend?: string; models?:
       workflow_run_id: "workflow-1",
       current: structuredClone(segment),
       segments: [structuredClone(segment)],
-      cumulative: { ...summary, source_run_ids: [], ...cumulative },
+      cumulative: { ...summary, source_run_ids: [] },
       checkpoint: {
         schema_version: "ultrafuzz.accounting-checkpoint.v1",
         ledger_event_count: 2,
@@ -272,9 +285,9 @@ function metadataWithAccounting(cumulative: { estimated_spend?: string; models?:
         source: "configured-catalog",
         status: "available",
         fetched_at: CREATED_AT,
-        resolved_models: ["model-a"],
-        unresolved_models: ["model-b"],
-        model_prices: { "model-a": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 } }
+        resolved_models: priced ? ["model-a"] : [],
+        unresolved_models: unpricedModels,
+        model_prices: priced ? { "model-a": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 } } : {}
       },
       updated_at: FINISHED_AT
     }
@@ -304,16 +317,14 @@ test("terminal projection restates whole-run accounting instead of the report-st
   assert.equal((result.report.run_metadata as Record<string, unknown>).partial_pricing, true);
   assert.deepEqual(result.report.issues, agentReport().issues);
 
-  // Values the run records do not have keep the agent's copy.
-  const sparse = projectTerminalReport({
-    ...input,
-    metadata: metadataWithAccounting({ estimated_spend: "unavailable", models: [] })
-  });
-  assert.deepEqual(runSummaryLines(sparse.markdown), [
+  // A ledger that priced nothing makes the whole-run spend unavailable. The agent's report-start
+  // spend covers only part of the run, so it is not shown next to whole-run tokens.
+  const unpriced = projectTerminalReport({ ...input, metadata: metadataWithAccounting(false) });
+  assert.deepEqual(runSummaryLines(unpriced.markdown), [
     "- Elapsed time: `6h 02m`",
-    "- Models used: `example-model`",
+    "- Models used: `model-a, model-b`",
     "- Tokens used: `12,345,678`",
-    "- Estimated spend: `$0.01`"
+    "- Estimated spend: `unavailable`"
   ]);
-  assert.equal((sparse.report.run_metadata as Record<string, unknown>).partial_pricing, false);
+  assert.equal((unpriced.report.run_metadata as Record<string, unknown>).partial_pricing, true);
 });

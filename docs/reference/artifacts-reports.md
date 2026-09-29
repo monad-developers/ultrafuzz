@@ -766,9 +766,11 @@ that snapshot. Runtime presentations (the verified terminal publication and
 unchecked reports) restate the run summary instead: elapsed time from
 `run.json#created_at` to `state.json#finished_at`, and models, tokens,
 estimated spend, and `partial_pricing` from the current
-`accounting.cumulative`. A value those records lack, or record as
-`unavailable`, keeps the agent's copy. Use `ultrafuzz stats` for the full
-accounting breakdown.
+`accounting.cumulative`. Tokens, estimated spend, and `partial_pricing` are
+restated together whenever `accounting.cumulative` records a token count, so a
+whole-run spend recorded as `unavailable` stays `unavailable` instead of showing
+the agent's report-start figure. Otherwise, a value those records lack keeps the
+agent's copy. Use `ultrafuzz stats` for the full accounting breakdown.
 
 `accounting.segments` publishes one rollup per checkpoint generation, and
 `accounting.current` identifies the latest segment. Each segment retains every
