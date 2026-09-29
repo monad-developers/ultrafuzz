@@ -590,31 +590,33 @@ non-launching configuration contract unchanged. Doctor reports:
 - config, topology, prompt, and reference validation posture;
 - required topology backends, toolchain, and configured agent executable
   availability in the configured execution environment (the local `PATH` for
-  local runs or a transient probe of the provider image for cloud runs);
+  local runs or a transient probe of the provider image for cloud runs). Only
+  the executables of agents the selected topology can dispatch to, including
+  its `[retry] agents` fallbacks, are required; other configured profiles'
+  executables are listed as not required;
 - the bundled workflow engine version, the version the generated project
   requires, and the installed project-local version and bin target;
 - npm's latest published stable engine version when the registry check is
   available;
-- whether the installed dependency layout passes Ultrafuzz's exact
-  manifest and path validation;
-- whether required compatibility patches, or their upstream replacements, are
-  present. A source carrying neither the patch nor the shape Ultrafuzz patches
-  is reported as modified or incompatible, because the next run fails in that
-  state.
+- whether the project-local dependency layout passes Ultrafuzz's exact
+  manifest and path validation, and the posture of each compatibility patch in
+  it. Both are informational: a launch installs, patches, and seals its own
+  operator-owned controller;
+- the OS temporary directory, where launch and resume install that controller:
+  its free space and how many `ultrafuzz-controller-*` directories it holds,
+  with their total size. Doctor warns when the directory is a RAM-backed tmpfs
+  or has less than 2 GiB free, and never removes those directories, because a
+  native resume keeps its controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies. For cloud execution, checking required commands may create the
 configured provider app on first use and uses a transient sandbox so the probe
 runs inside the same image as workflow nodes.
 
-Diagnostics are stable: `DOCTOR_TOOLCHAIN_MISSING`,
-`DOCTOR_TOOLCHAIN_PROBE_FAILED`,
-`DOCTOR_WORKFLOW_ENGINE_MISSING`,
-`DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH`,
-`DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID`,
-`DOCTOR_WORKFLOW_ENGINE_PATCHES_PENDING`,
-`DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE`,
-`DOCTOR_WORKFLOW_ENGINE_OUTDATED`, and `DOCTOR_REGISTRY_UNAVAILABLE`. A registry or network failure produces a
+Diagnostics are stable: `DOCTOR_AGENT_CREDENTIAL_MISSING`,
+`DOCTOR_TOOLCHAIN_MISSING`, `DOCTOR_TOOLCHAIN_PROBE_FAILED`,
+`DOCTOR_WORKFLOW_ENGINE_OUTDATED`, `DOCTOR_REGISTRY_UNAVAILABLE`, and
+`DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED`. A registry or network failure produces a
 warning and an `unknown` latest version instead of failing an otherwise valid
 offline project. Doctor never installs, mutates, or upgrades dependencies.
 

@@ -34,7 +34,7 @@ function renderDoctor(value: DoctorValue): string {
         `- ${entry.name}: ${
           entry.available
             ? `${entry.path ?? "available"}${entry.version == null ? "" : ` (${entry.version})`}`
-            : "missing from execution environment"
+            : `missing from execution environment${entry.required ? "" : " (not required)"}`
         }`
     ),
     "Workflow engine:",

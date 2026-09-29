@@ -601,7 +601,9 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*supervisor descriptor /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*terminal state restore /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: .*resume hydration /u);
-  assert.match(human.stdout + human.stderr, /- recon: missing from execution environment/u);
+  assert.match(human.stdout + human.stderr, /^- recon: missing from execution environment$/mu);
+  // The scaffold's opt-in Kimi profile is configured but not selected by the topology.
+  assert.match(human.stdout + human.stderr, /^- kimi: missing from execution environment \(not required\)$/mu);
   assert.doesNotMatch(human.stdout + human.stderr, /smthrs/u);
   assert.doesNotMatch(human.stdout + human.stderr, /smthrs/iu);
 

@@ -552,6 +552,8 @@ export function controllerOwnedGovernancePaths(projectRoot: string, runRoot: str
     path.join(projectRoot, ".ultrafuzz", "runs"),
     path.join(projectRoot, ".smithers", "node_modules"),
     path.join(projectRoot, ".smithers", "workflows"),
+    // `resume --refresh-controller` renders each refreshed controller here.
+    path.join(projectRoot, ".smithers", "continuations"),
     // The workflow engine opens its SQLite database in the target root, so a
     // launched run leaves engine state in the governed worktree.
     path.join(projectRoot, "smithers.db"),
