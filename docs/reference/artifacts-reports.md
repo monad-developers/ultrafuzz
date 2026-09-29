@@ -208,17 +208,44 @@ manifests.
 
 Each new attempt also records its selected Smithers chain index, model-profile
 ID, agent reference, optional model/reasoning values, and
-primary-or-fallback role. Selection is reconciled against Smithers' durable
-attempt metadata and the sealed task chain; it is never inferred from the retry
-number or token model. Failed primaries therefore remain visible even when a
-later fallback produces the accepted output.
+primary-or-fallback role when Smithers' durable attempt metadata identifies a
+rung of the sealed task chain; selection is never inferred from the retry number
+or token model. Failed primaries therefore remain visible even when a later
+fallback produces the accepted output. An attempt that fails before Smithers
+selects a rung ran no model and is not recorded, unless a reset supersedes it
+first (see below).
+
+Each attempt is identified by its terminal Smithers event and is recorded once:
+later synchronization never re-derives or rewrites it, even when the node's
+status changes afterwards. Finished, failed, timed-out, and cancelled attempts
+are recorded; a cancellation has outcome and category `canceled` and the
+Smithers cancellation reason as its message. A terminal event with no started
+attempt in the same Smithers activation, or stamped before that attempt
+started, is skipped. A finished attempt whose node then fails, for example
+because the verifier or artifact gates reject its output, is recorded as failed
+with category `invalid-output` for findings validation and
+`artifact-validation` otherwise.
+`resume --retry-failed` and `--reset-node` restart Smithers' attempt numbering,
+after which Smithers' attempt row describes only the replacement. A failed,
+timed-out, or cancelled attempt that such a reset superseded before any
+synchronization recorded it is therefore recorded from its events without the
+agent block. That includes a pre-agent failure, which then counts toward the
+node's `retry_count` although no model ran. A superseded finished attempt that
+was not recorded before the reset is not recorded, because the node's output
+manifest now belongs to the replacement.
 
 Attempt summaries and retry counts are derived from this ledger. Replaying a
 known transition does not append it again, so resume, replay, checkpoint
 continuation, and controller takeover preserve prior lifecycle history. Reused
 work points to its source attempt and is reported separately from executed work.
 The ledger stores typed failure categories but never raw diagnostics, inputs,
-outputs, or configuration.
+outputs, or configuration. Ledger bookkeeping does not block synchronization:
+when Smithers attempt detail is unavailable or an append fails, synchronization
+reports a warning, still reconciles node and run status, and retries on the next
+pass. Synchronization reads each Smithers event stream with
+`smithers events --limit 100000`, the CLI maximum, which returns the oldest
+events first; a stream that returns exactly that many events is reported as
+`WORKFLOW_EVENTS_TRUNCATED`, because any later attempts or usage cannot be read.
 
 For terminal report producers, `report.json#run_metadata.agent_execution`
 contains the full planned attempt chain, the attempts that failed before the
@@ -790,7 +817,15 @@ source event sequence as audit evidence, but accounting uses only the latest
 cumulative usage snapshot for each workflow attempt. `accounting.cumulative`
 combines those canonical attempt snapshots with any source-run lineage.
 `accounting.checkpoint` records the raw ledger position used by the durable
-metadata snapshot. Usage and pricing completeness are reported independently
+metadata snapshot. The accounting block is a cache that every synchronization
+rebuilds from `usage.jsonl`, and a usage row is recorded once and never
+re-derived, so a synchronization interrupted between the usage append and the
+`run.json` write is repaired by the next one. A failed accounting pass is
+reported as a `WORKFLOW_ACCOUNTING_FAILED` warning and does not block run status.
+An invalid usage field in an unrecorded `TokenUsageReported` event fails each
+later accounting pass this way, so no further usage is recorded for the run
+while node and run status keep reconciling.
+Usage and pricing completeness are reported independently
 through `usage_complete`/`usage_incomplete_reasons` and
 `pricing_complete`/`pricing_incomplete_reasons`.
 
@@ -817,7 +852,9 @@ a usable cost. Kimi-family models are priced from the pinned Moonshot provider
 entry, while DeepSeek-family models are priced from the pinned first-party
 DeepSeek entry. Either family stays listed in
 `pricing_catalog.unresolved_models` when its first-party entry is absent rather
-than borrowing a same-named rate from another provider.
+than borrowing a same-named rate from another provider. A model that a fetched
+catalog does not list stays unresolved without another catalog download; only
+an unavailable catalog is retried on a later synchronization.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

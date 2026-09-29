@@ -2190,15 +2190,19 @@ function fakeLifecycleSmithersEnv(
     "utf8"
   );
   fs.mkdirSync(nodeDetailsDirectory, { recursive: true });
-  const terminalAttempts = new Map<string, Array<{ attempt: number; state: "finished" | "failed" }>>();
+  const terminalAttempts = new Map<string, Array<{ attempt: number; state: "finished" | "failed" | "cancelled" }>>();
+  const terminalStates = { NodeFinished: "finished", NodeFailed: "failed", NodeCancelled: "cancelled" } as const;
   for (const line of (input.events ?? "").trim().split("\n").filter(Boolean)) {
     const event = JSON.parse(line) as { type?: unknown; payload?: Record<string, unknown> };
-    if (event.type !== "NodeFinished" && event.type !== "NodeFailed") continue;
+    if (event.type !== "NodeFinished" && event.type !== "NodeFailed" && event.type !== "NodeCancelled") continue;
     const nodeId = event.payload?.nodeId;
     const attempt = event.payload?.attempt;
     if (typeof nodeId !== "string" || !nodeId.startsWith("node:") || typeof attempt !== "number") continue;
     const rows = terminalAttempts.get(nodeId) ?? [];
-    rows.push({ attempt, state: event.type === "NodeFinished" ? "finished" : "failed" });
+    // Smithers upserts one row per attempt number, so a reused number keeps its latest state.
+    const reused = rows.findIndex((row) => row.attempt === attempt);
+    if (reused !== -1) rows.splice(reused, 1);
+    rows.push({ attempt, state: terminalStates[event.type] });
     terminalAttempts.set(nodeId, rows);
   }
   for (const [nodeId, attempts] of terminalAttempts) {
@@ -2589,10 +2593,8 @@ function workflowEvents(
         payload.inputTokens = 0;
         // Smithers 0.35.0 emits both of these: `freshInputTokens` on every usage
         // event `normalizeTokenUsage` produces, and `costUsd` for any model in
-        // the runner's built-in price table. Synchronization is exact-key on this
-        // payload, so a fixture without them is not a document the pinned runner
-        // can produce and every sync test would be testing a shape that no
-        // longer exists.
+        // the runner's built-in price table. A fixture without them is not a
+        // document the pinned runner can produce.
         payload.freshInputTokens = 0;
         payload.costUsd = 0;
         payload.outputTokens = 0;
@@ -18605,11 +18607,11 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     "the pinned runner's node token usage shape no longer matches what Ultrafuzz parses"
   );
 
-  // 12. `TokenUsageReported`. The durable sync path is exact-key on this payload
-  // and re-throws everywhere except `stats`, so a key added upstream takes out
-  // every run's synchronization on its first agent task. The failure-path emitter
-  // splices its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own
-  // return shape is unioned in rather than read off the emitter literal.
+  // 12. `TokenUsageReported`. Synchronization reads only the keys it knows, so a
+  // usage field added upstream would be silently left out of accounting; this
+  // diff surfaces it at the pin bump instead. The failure-path emitter splices
+  // its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own return
+  // shape is unioned in rather than read off the emitter literal.
   const engineSource = fs.readFileSync(
     path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js"),
     "utf8"
@@ -18633,8 +18635,8 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
   }
   assert.deepEqual(
     sortedKeys(emittedTokenKeys),
-    sortedKeys(CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed),
-    "the pinned engine's TokenUsageReported payload no longer matches what workflow synchronization accepts"
+    sortedKeys(CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.known),
+    "the pinned engine's TokenUsageReported payload no longer matches the keys workflow synchronization reads"
   );
 
   // 13. Event types. `ultrafuzz events` without `--type` gets the runner's own
@@ -20468,7 +20470,7 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
 
   // Every event the runner emits carries this trace envelope, so refusing it left
   // no real run syncable at all.
-  const synced = async (runId: string, correlationAttempt: number, control: Parameters<typeof syncRun>[1] = {}) => {
+  const synced = async (runId: string, correlationAttempt: number) => {
     const workflowRunId = `ultrafuzz-${runId}`;
     const env = fakeLifecycleSmithersEnv(project, {
       inspect: workflowInspect({
@@ -20505,34 +20507,29 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
     const run = await startRun({ projectRoot: project, runId, env });
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
     writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-    return syncRun({ projectRoot: project, runId, env }, control);
+    return syncRun({ projectRoot: project, runId, env });
   };
 
   const accepted = await synced("correlated-usage", 1);
   assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
 
   // A trace envelope that names another attempt is a mixed-up event, not a
-  // routing detail to ignore, so the read fails closed instead of accounting it.
-  await assert.rejects(
-    () => synced("correlated-usage-mismatch", 2),
-    /correlation attempt disagrees with the reported usage/u
-  );
-
-  const observational = await synced("correlated-usage-mismatch-observational", 2, {
-    tolerateInvalidEventStreams: true
-  });
-  assert.equal(observational.ok, false);
-  assert.ok(
-    observational.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_INVALID"),
-    JSON.stringify(observational.diagnostics)
+  // routing detail to ignore, so accounting refuses it; the run still syncs.
+  const mismatched = await synced("correlated-usage-mismatch", 2);
+  assert.equal(mismatched.ok, true, JSON.stringify(mismatched.diagnostics));
+  assert.equal(mismatched.value?.status, accepted.value?.status);
+  assert.deepEqual(
+    mismatched.diagnostics
+      .filter((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED")
+      .map((diagnostic) => [diagnostic.severity, diagnostic.message]),
+    [["warning", "TokenUsageReported correlation attempt disagrees with the reported usage"]]
   );
 });
 
 // Smithers 0.35.0 puts `freshInputTokens` on every usage event and `costUsd` on
-// every priced one. `validateSmithersEventPayload` is exact-key and re-throws
-// everywhere except `stats`, so before these were allowlisted the first agent
-// task of any 0.35.0 run took out `status`, `state`, `diagnose` and the evals
-// row sync for that run permanently.
+// every priced one. While `validateSmithersEventPayload` was exact-key, the first
+// agent task of any 0.35.0 run took out `status`, `state`, `diagnose` and the
+// evals row sync for that run permanently.
 test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new fields", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -20644,25 +20641,32 @@ test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new f
   assert.equal(contradictoryMetadata.accounting?.current?.pricing_complete, true);
 
   // Both new fields stay bounded: a non-integer token count and a negative cost
-  // are contract violations, not values to coerce.
-  await assert.rejects(
-    () => syncWithUsage("fresh-input-fractional", { inputTokens: 5, freshInputTokens: 1.5, outputTokens: 1 }),
-    /freshInputTokens is invalid/u
-  );
-  await assert.rejects(
-    () => syncWithUsage("cost-negative", { inputTokens: 5, outputTokens: 1, costUsd: -1 }),
-    /costUsd is invalid/u
-  );
-  await assert.rejects(
-    () => syncWithUsage("cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }),
-    /costUsd is invalid/u
-  );
-  // A key outside the contract still fails closed; widening it for two fields
-  // must not have relaxed the assertion itself.
-  await assert.rejects(
-    () => syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 6 }),
-    /contains unsupported fields/u
-  );
+  // are contract violations, not values to coerce. They fail the accounting pass
+  // with a warning and never reach the usage ledger, and the run reconciles as
+  // it does with valid usage.
+  for (const [runId, usage, field] of [
+    ["fresh-input-fractional", { inputTokens: 5, freshInputTokens: 1.5, outputTokens: 1 }, "freshInputTokens"],
+    ["cost-negative", { inputTokens: 5, outputTokens: 1, costUsd: -1 }, "costUsd"],
+    ["cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }, "costUsd"]
+  ] as const) {
+    const rejected = await syncWithUsage(runId, usage);
+    assert.equal(rejected.result.ok, true, JSON.stringify(rejected.result.diagnostics));
+    assert.equal(rejected.result.value?.status, accepted.result.value?.status);
+    assert.deepEqual(
+      rejected.result.diagnostics
+        .filter((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED")
+        .map((diagnostic) => [diagnostic.severity, diagnostic.message]),
+      [["warning", `TokenUsageReported ${field} is invalid`]]
+    );
+    assert.equal(fs.readFileSync(path.join(rejected.runRoot, "usage.jsonl"), "utf8"), "");
+  }
+  // A key synchronization does not read is ignored; it no longer fails the sync.
+  const unknownKey = await syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 60 });
+  assert.equal(unknownKey.result.ok, true, JSON.stringify(unknownKey.result.diagnostics));
+  const unknownKeyMetadata = JSON.parse(fs.readFileSync(path.join(unknownKey.runRoot, "run.json"), "utf8")) as {
+    accounting?: { current?: { total_tokens?: number } };
+  };
+  assert.equal(unknownKeyMetadata.accounting?.current?.total_tokens, 6);
 });
 
 test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {
@@ -20994,10 +20998,10 @@ test("syncRun appends unseen usage events to the current control segment", async
   assert.equal(fs.readFileSync(path.join(runRoot, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
 });
 
-test("syncRun rejects a malformed-present usage ledger without accounting fallback", async () => {
+test("syncRun reports a malformed usage ledger without blocking run status", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
 
   const workflowRunId = "ultrafuzz-malformed-only-usage";
   const env = fakeLifecycleSmithersEnv(project, {
@@ -21013,19 +21017,26 @@ test("syncRun rejects a malformed-present usage ledger without accounting fallba
   });
   const run = await startRun({ projectRoot: project, runId: "malformed-only-usage", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  fs.writeFileSync(path.join(run.value!.run_root, "usage.jsonl"), "{malformed\n", "utf8");
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  fs.writeFileSync(path.join(run.value.run_root, "usage.jsonl"), "{malformed\n", "utf8");
 
-  const usagePath = path.join(run.value!.run_root, "usage.jsonl");
+  const usagePath = path.join(run.value.run_root, "usage.jsonl");
   const usageBefore = fs.readFileSync(usagePath);
-  const metadataBefore = fs.readFileSync(path.join(run.value!.run_root, "run.json"));
+  const metadataBefore = fs.readFileSync(path.join(run.value.run_root, "run.json"));
 
-  await assert.rejects(
-    () => syncRun({ projectRoot: project, runId: "malformed-only-usage", env }),
-    /usage ledger record 1 is invalid strict JSON/u
+  const sync = await syncRun({ projectRoot: project, runId: "malformed-only-usage", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+  const warnings = sync.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED");
+  assert.deepEqual(
+    warnings.map((diagnostic) => diagnostic.severity),
+    ["warning"]
   );
+  assert.match(warnings[0]?.message ?? "", /usage ledger record 1 is invalid strict JSON/u);
   assert.deepEqual(fs.readFileSync(usagePath), usageBefore);
-  assert.deepEqual(fs.readFileSync(path.join(run.value!.run_root, "run.json")), metadataBefore);
+  assert.deepEqual(fs.readFileSync(path.join(run.value.run_root, "run.json")), metadataBefore);
 });
 
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
@@ -22952,10 +22963,12 @@ test("syncRun keeps redacted failure state and attempt evidence stable across cr
     assert.doesNotMatch(fs.readFileSync(file, "utf8"), new RegExp(`${oldCredential}|${rotatedCredential}`, "u"));
   }
 
+  // A recorded occurrence is never re-derived, so even a different message for
+  // the same terminal event neither rewrites it nor reports a ledger conflict.
   fs.writeFileSync(lifecycleEnv.SMITHERS_FAKE_EVENTS!, failureEvents(`different provider failure ${oldCredential}`));
   const changed = await synchronize(rotatedEnv);
   assert.equal(changed.ok, true, JSON.stringify(changed.diagnostics));
-  assert.ok(changed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.ok(!changed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
   for (const [file, before] of snapshots) assert.deepEqual(fs.readFileSync(file), before);
 });
 
@@ -23105,10 +23118,10 @@ test("syncRun trusts non-ordinal Smithers selection when opaque profiles share a
   });
 });
 
-test("syncRun fails closed when Smithers selection does not match the sealed chain", async () => {
+test("syncRun records an attempt without agent provenance when Smithers selection does not match the sealed chain", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
   const workflowRunId = "ultrafuzz-mismatched-selection";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -23128,23 +23141,33 @@ test("syncRun fails closed when Smithers selection does not match the sealed cha
   });
   const run = await startRun({ projectRoot: project, runId: "mismatched-selection", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const sync = await syncRun({ projectRoot: project, runId: "mismatched-selection", env });
 
-  assert.equal(sync.ok, false);
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+  const warnings = sync.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED");
+  assert.equal(warnings.length, 1, JSON.stringify(sync.diagnostics));
+  assert.equal(warnings[0]?.severity, "warning");
+  assert.match(warnings[0]?.message ?? "", /agent ID does not match sealed chain rung 0/u);
+  const entries = fs
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { outcome?: string; agent?: unknown });
   assert.deepEqual(
-    sync.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+    entries.map((entry) => [entry.outcome, entry.agent]),
+    [["succeeded", undefined]]
   );
-  assert.match(sync.diagnostics[0]?.message ?? "", /agent ID does not match sealed chain rung 0/u);
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
 });
 
-test("syncRun rejects forged provenance in an existing immutable attempt", async () => {
+test("syncRun never re-derives or re-inspects a recorded attempt", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-forged-recorded-provenance";
+  const workflowRunId = "ultrafuzz-recorded-attempt-final";
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
@@ -23156,87 +23179,33 @@ test("syncRun rejects forged provenance in an existing immutable attempt", async
       { type: "RunFinished" }
     ])
   });
-  const run = await startRun({ projectRoot: project, runId: "forged-recorded-provenance", env });
+  const run = await startRun({ projectRoot: project, runId: "recorded-attempt-final", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
-  const firstSync = await syncRun({ projectRoot: project, runId: "forged-recorded-provenance", env });
+  const firstSync = await syncRun({ projectRoot: project, runId: "recorded-attempt-final", env });
   assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
   const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
   const entry = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as Record<string, unknown>;
-  entry.agent = {
-    chain_index: 0,
-    profile_id: "default",
-    agent_ref: "CodexAgent",
-    model_name: "forged-model",
-    reasoning_effort: "xhigh",
-    role: "primary",
-    selection: "observed"
-  };
-  const forgedLedger = `${JSON.stringify(entry)}\n`;
-  fs.writeFileSync(ledgerPath, forgedLedger, "utf8");
-
-  const replayed = await syncRun({ projectRoot: project, runId: "forged-recorded-provenance", env });
-
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.ok(replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  assert.match(
-    replayed.diagnostics.find((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED")?.message ?? "",
-    /already recorded with different immutable data/u
-  );
-  assert.equal(fs.readFileSync(ledgerPath, "utf8"), forgedLedger);
-  assert.equal(
-    fs
-      .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
-      .split("\n")
-      .filter((line) => line.startsWith("node node:project-discovery ")).length,
-    2
-  );
-});
-
-test("syncRun rejects a legacy agentless immutable local attempt", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const workflowRunId = "ultrafuzz-agentless-recorded-provenance";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "RunFinished" }
-    ])
-  });
-  const run = await startRun({ projectRoot: project, runId: "agentless-recorded-provenance", env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-
-  const firstSync = await syncRun({ projectRoot: project, runId: "agentless-recorded-provenance", env });
-  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
-  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
-  const entry = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as Record<string, unknown>;
+  // A row that differs from what this build would derive now, such as one an
+  // older build wrote without agent provenance, stays exactly as recorded.
   delete entry.agent;
-  const legacyLedger = `${JSON.stringify(entry)}\n`;
-  fs.writeFileSync(ledgerPath, legacyLedger, "utf8");
+  const recordedLedger = `${JSON.stringify(entry)}\n`;
+  fs.writeFileSync(ledgerPath, recordedLedger, "utf8");
 
-  const replayed = await syncRun({ projectRoot: project, runId: "agentless-recorded-provenance", env });
+  const replayed = await syncRun({ projectRoot: project, runId: "recorded-attempt-final", env });
 
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.ok(replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  assert.match(
-    replayed.diagnostics.find((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED")?.message ?? "",
-    /already recorded with different immutable data/u
-  );
-  assert.equal(fs.readFileSync(ledgerPath, "utf8"), legacyLedger);
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.equal(fs.readFileSync(ledgerPath, "utf8"), recordedLedger);
+  // Only the first pass needed Smithers attempt detail; a recorded attempt costs
+  // no runner subprocess on later passes.
   assert.equal(
     fs
       .readFileSync(env.SMITHERS_FAKE_LOG!, "utf8")
       .split("\n")
       .filter((line) => line.startsWith("node node:project-discovery ")).length,
-    2
+    1
   );
 });
 
@@ -23433,61 +23402,7 @@ test("syncRun preserves a recorded terminal occurrence when Smithers reuses its 
   );
 });
 
-test("syncRun accepts a superseded unadmitted success with exact sealed trace authority", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "sync-traced-reused-attempt";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const nodeId = "node:project-discovery";
-  const base = Date.parse("2026-07-03T00:00:00.000Z");
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      status: "running",
-      state: "running",
-      steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
-    }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId, attempt: 1 },
-      {
-        type: "AgentTraceSummary",
-        nodeId,
-        extra: {
-          iteration: 0,
-          attempt: 1,
-          summary: {
-            runId: workflowRunId,
-            nodeId,
-            iteration: 0,
-            attempt: 1,
-            traceStartedAtMs: base + 50,
-            traceFinishedAtMs: base + 100,
-            agentId: "ultrafuzz-agent:project-discovery:0:default",
-            model: "gpt-5.5"
-          }
-        }
-      },
-      { type: "NodeFinished", nodeId, attempt: 1 },
-      { type: "RunStarted" },
-      { type: "NodeStarted", nodeId, attempt: 1 }
-    ])
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-
-  const sync = await syncRun({ projectRoot: project, runId, env });
-
-  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  assert.equal(sync.value?.status, "running");
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
-  assert.equal(
-    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
-    false
-  );
-});
-
-test("syncRun accepts exact historical trace authority after an immutable output-validation failure", async () => {
+test("syncRun keeps an immutable output-validation failure when its successful occurrence is superseded", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -23608,8 +23523,20 @@ test("syncRun accepts exact historical trace authority after an immutable output
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
   assert.equal(fs.existsSync(path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json")), false);
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node node:project-discovery /mu);
+  // The replacement executor finished but the host rejected its output, and the
+  // sealed disposition carries no finalization diagnostic to classify it by.
+  const entries = fs
+    .readFileSync(layout.attemptLedgerPath, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    entries.map((entry) => [entry.source_event_sequence, entry.outcome, entry.failure_category]),
+    [[7, "failed", "artifact-validation"]]
+  );
 });
 
 test("syncRun preserves a published replacement verified under a later activation", async () => {
@@ -23732,172 +23659,13 @@ test("syncRun preserves a published replacement verified under a later activatio
 
   const rejected = await syncRun({ projectRoot: project, runId, env });
 
-  assert.equal(rejected.ok, false);
-  assert.deepEqual(
-    rejected.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
-  );
-  assert.match(rejected.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+  assert.equal(rejected.ok, true, JSON.stringify(rejected.diagnostics));
   assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
   assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
   assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
 });
 
-test("syncRun binds an abandoned reused attempt to the final published higher retry", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
-  const runId = "sync-published-after-abandoned-reuse";
-  const workflowRunId = `ultrafuzz-${runId}`;
-  const nodeId = "node:project-discovery";
-  const verifierNodeId = "verify:project-discovery";
-  const base = Date.parse("2026-07-03T00:00:00.000Z");
-  const publishedEvents: Parameters<typeof workflowEvents>[1] = [
-    { type: "RunStarted", sequence: 6, timestampMs: base + 600 },
-    { type: "NodeStarted", nodeId, attempt: 3, sequence: 7, timestampMs: base + 700 },
-    {
-      type: "AgentTraceSummary",
-      nodeId,
-      sequence: 8,
-      timestampMs: base + 800,
-      extra: {
-        iteration: 0,
-        attempt: 3,
-        summary: {
-          runId: workflowRunId,
-          nodeId,
-          iteration: 0,
-          attempt: 3,
-          traceStartedAtMs: base + 750,
-          traceFinishedAtMs: base + 800,
-          agentId: "ultrafuzz-agent:project-discovery:0:default",
-          model: "gpt-5.5"
-        }
-      }
-    },
-    { type: "NodeFinished", nodeId, attempt: 3, sequence: 9, timestampMs: base + 900 },
-    { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, sequence: 10, timestampMs: base + 1_000 },
-    { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, sequence: 11, timestampMs: base + 1_100 },
-    { type: "RunFinished", sequence: 12, timestampMs: base + 1_200 }
-  ];
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
-      workflowRunId,
-      steps: [
-        { id: nodeId, state: "finished", attempt: 3 },
-        { id: verifierNodeId, state: "finished", attempt: 1 }
-      ]
-    }),
-    events: workflowEvents(workflowRunId, publishedEvents)
-  });
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
-  const published = await syncRun({ projectRoot: project, runId, env });
-  assert.equal(published.ok, true, JSON.stringify(published.diagnostics));
-  assert.equal(published.value?.status, "succeeded", JSON.stringify(published.diagnostics));
-  const layout = layoutForRunRoot(run.value!.run_root, runId);
-  const manifestPath = path.join(layout.artifactsDir, "project-discovery", "artifact-manifest.json");
-  const manifestBeforeReplay = fs.readFileSync(manifestPath);
-  const taskStateBeforeReplay = structuredClone(readRunState(layout).nodes["project-discovery"]);
-  const ledgerBeforeReplay = fs.readFileSync(layout.attemptLedgerPath);
-
-  const historicalEvents: Parameters<typeof workflowEvents>[1] = [
-    { type: "RunStarted", sequence: 0, timestampMs: base },
-    { type: "NodeStarted", nodeId, attempt: 2, sequence: 1, timestampMs: base + 100 },
-    {
-      type: "AgentTraceSummary",
-      nodeId,
-      sequence: 2,
-      timestampMs: base + 200,
-      extra: {
-        iteration: 0,
-        attempt: 2,
-        summary: {
-          runId: workflowRunId,
-          nodeId,
-          iteration: 0,
-          attempt: 2,
-          traceStartedAtMs: base + 150,
-          traceFinishedAtMs: base + 200,
-          agentId: "ultrafuzz-agent:project-discovery:0:default",
-          model: "gpt-5.5"
-        }
-      }
-    },
-    { type: "NodeFinished", nodeId, attempt: 2, sequence: 3, timestampMs: base + 300 },
-    { type: "RunStarted", sequence: 4, timestampMs: base + 400 },
-    { type: "NodeStarted", nodeId, attempt: 2, sequence: 5, timestampMs: base + 500 },
-    ...publishedEvents
-  ];
-  fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, workflowEvents(workflowRunId, historicalEvents), "utf8");
-
-  const replayed = await syncRun({ projectRoot: project, runId, env });
-
-  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.equal(replayed.value?.status, "succeeded");
-  assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
-  assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
-  assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
-
-  const expectRejected = async (events: Parameters<typeof workflowEvents>[1]): Promise<void> => {
-    fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, workflowEvents(workflowRunId, events), "utf8");
-    const rejected = await syncRun({ projectRoot: project, runId, env });
-    assert.equal(rejected.ok, false);
-    assert.deepEqual(
-      rejected.diagnostics.map((diagnostic) => diagnostic.code),
-      ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
-    );
-    assert.match(rejected.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
-    assert.deepEqual(fs.readFileSync(manifestPath), manifestBeforeReplay);
-    assert.deepEqual(readRunState(layout).nodes["project-discovery"], taskStateBeforeReplay);
-    assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledgerBeforeReplay);
-  };
-
-  await expectRejected(historicalEvents.filter((event) => event.sequence !== 6));
-
-  const terminalBeforeBoundary = historicalEvents.map((event) =>
-    event.sequence !== undefined && event.sequence >= 6 ? { ...event, sequence: event.sequence + 1 } : event
-  );
-  terminalBeforeBoundary.push({
-    type: "NodeFailed",
-    nodeId,
-    attempt: 2,
-    sequence: 6,
-    timestampMs: base + 550,
-    error: { message: "intervening occurrence terminated" }
-  });
-  terminalBeforeBoundary.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
-  await expectRejected(terminalBeforeBoundary);
-
-  const ambiguousReplacementTrace = historicalEvents.map((event) =>
-    event.sequence !== undefined && event.sequence >= 9 ? { ...event, sequence: event.sequence + 1 } : event
-  );
-  ambiguousReplacementTrace.push({
-    type: "AgentTraceSummary",
-    nodeId,
-    sequence: 9,
-    timestampMs: base + 850,
-    extra: {
-      iteration: 0,
-      attempt: 3,
-      summary: {
-        runId: workflowRunId,
-        nodeId,
-        iteration: 0,
-        attempt: 3,
-        traceStartedAtMs: base + 825,
-        traceFinishedAtMs: base + 850,
-        agentId: "ultrafuzz-agent:project-discovery:0:default",
-        model: "gpt-5.5"
-      }
-    }
-  });
-  ambiguousReplacementTrace.sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
-  await expectRejected(ambiguousReplacementTrace);
-});
-
-test("syncRun rejects trace-only supersession of an immutable successful publication", async () => {
+test("syncRun keeps an immutable successful publication when its attempt identity is reused", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -23952,15 +23720,11 @@ test("syncRun rejects trace-only supersession of an immutable successful publica
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
-  assert.equal(sync.ok, false);
-  assert.deepEqual(
-    sync.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
-  );
-  assert.match(sync.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
 });
 
-test("syncRun rejects exact trace authority when an attempt identity is reused within one activation", async () => {
+test("syncRun drops a superseded occurrence when an attempt identity is reused within one activation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -24005,16 +23769,12 @@ test("syncRun rejects exact trace authority when an attempt identity is reused w
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
-  assert.equal(sync.ok, false);
-  assert.deepEqual(
-    sync.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
-  );
-  assert.match(sync.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
 });
 
-test("syncRun replays bounded production lifecycle history with ledgered and trace-authorized supersessions", async () => {
+test("syncRun replays bounded production lifecycle history with ledgered and unrecorded supersessions", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -24131,7 +23891,7 @@ test("syncRun replays bounded production lifecycle history with ledgered and tra
   assert.doesNotMatch(commandLog, /--raw|--type agent/u);
 });
 
-test("syncRun rejects a superseded unadmitted success without exact trace authority", async () => {
+test("syncRun drops a superseded unadmitted success without trace evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -24156,15 +23916,11 @@ test("syncRun rejects a superseded unadmitted success without exact trace author
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
-  assert.equal(sync.ok, false);
-  assert.deepEqual(
-    sync.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
-  );
-  assert.match(sync.diagnostics[0]?.message ?? "", /before durable attempt recording/u);
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
 });
 
-test("syncRun rejects an unrecorded terminal occurrence superseded by a reused attempt number", async () => {
+test("syncRun records an unrecorded failed occurrence superseded by a reused attempt number", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -24192,19 +23948,33 @@ test("syncRun rejects an unrecorded terminal occurrence superseded by a reused a
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
-  assert.equal(sync.ok, false);
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  // Smithers' attempt row now describes the replacement, so the superseded
+  // failure is recorded from its own events, without agent provenance.
+  const entries = fs
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(
-    sync.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
+    entries.map((entry) => [
+      entry.started_event_sequence,
+      entry.source_event_sequence,
+      entry.outcome,
+      entry.failure_message,
+      entry.agent
+    ]),
+    [[0, 1, "failed", "unrecorded occurrence", undefined]]
   );
-  assert.match(sync.diagnostics[0]?.message ?? "", /supersedes terminal event 1 before durable attempt recording/u);
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+  assert.doesNotMatch(fs.readFileSync(fakeRunnerPath(env, "SMITHERS_FAKE_LOG"), "utf8"), /^node /mu);
 });
 
-test("syncRun rejects duplicate active starts for one reused attempt identity", async () => {
+test("syncRun tolerates duplicate active starts for one attempt identity", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -24225,15 +23995,13 @@ test("syncRun rejects duplicate active starts for one reused attempt identity", 
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
-  assert.equal(sync.ok, false);
-  assert.deepEqual(
-    sync.diagnostics.map((diagnostic) => diagnostic.code),
-    ["WORKFLOW_ATTEMPT_INSPECT_FAILED"]
-  );
-  assert.match(sync.diagnostics[0]?.message ?? "", /multiple active NodeStarted events/u);
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
 });
 
 test("syncRun abandons an unterminated occurrence at a later run activation boundary", async () => {
@@ -27816,7 +27584,7 @@ function workspaceRoot(): string {
 }
 
 for (const recovery of ["reset", "retry", "refresh"] as const) {
-  test(`resume preserves unobserved failed executor history before stopped ${recovery}`, async () => {
+  test(`an unobserved failed occurrence stays in the attempt ledger across a stopped ${recovery}`, async () => {
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
     writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
@@ -27843,13 +27611,6 @@ for (const recovery of ["reset", "retry", "refresh"] as const) {
     const ledgerPath = path.join(run.value.run_root, "attempts.jsonl");
     const sealPath = path.join(run.value.run_root, "smithers", "control-integrity.json");
     const seal = fs.readFileSync(sealPath);
-    const metadata = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "run.json"), "utf8")) as {
-      workflow: { control_generation: string };
-    };
-    assert.equal(fs.readFileSync(ledgerPath, "utf8"), "");
-    const commandLog = env.SMITHERS_FAKE_LOG;
-    assert.ok(commandLog);
-    fs.writeFileSync(commandLog, "", "utf8");
     const resumed = await resumeRun({
       projectRoot: project,
       runId,
@@ -27858,37 +27619,14 @@ for (const recovery of ["reset", "retry", "refresh"] as const) {
       ...(recovery === "refresh" ? { refreshController: true } : {})
     });
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    const retained = fs.readFileSync(ledgerPath, "utf8");
-    const entries = retained
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map(
-        (line) => JSON.parse(line) as { source_event_sequence: number; control_generation: string; outcome: string }
-      );
-    assert.equal(
-      entries.length,
-      1,
-      "reset must preserve the unobserved failed occurrence before mutable attempt detail is replaced"
-    );
-    const firstEntry = entries[0];
-    assert.ok(firstEntry);
-    assert.equal(firstEntry.source_event_sequence, 2);
-    assert.equal(firstEntry.control_generation, metadata.workflow.control_generation);
-    assert.equal(firstEntry.outcome, "failed");
+    assert.match(fs.readFileSync(fakeRunnerPath(env, "SMITHERS_FAKE_LOG"), "utf8"), /^timetravel /mu);
     assert.deepEqual(
       fs.readFileSync(sealPath),
       seal,
       "rendering a continuation must retain original control authority"
     );
-    const commands = fs.readFileSync(commandLog, "utf8");
-    const nodeInspectionIndex = commands.indexOf(`node ${nodeId} `);
-    const resetIndex = commands.indexOf("timetravel ");
-    assert.ok(nodeInspectionIndex >= 0 && resetIndex >= 0 && nodeInspectionIndex < resetIndex);
-    assert.equal(
-      fs.existsSync(path.join(run.value.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
-      false
-    );
+    // The reset restarts numbering at attempt 1 and Smithers upserts that row, so
+    // the failed occurrence survives only in the append-only event log.
     const activeEnv = fakeLifecycleSmithersEnv(project, {
       inspect: workflowInspect({
         workflowRunId,
@@ -27902,12 +27640,23 @@ for (const recovery of ["reset", "retry", "refresh"] as const) {
         { type: "NodeStarted", nodeId, attempt: 1 }
       ])
     });
-    for (let observation = 0; observation < 2; observation += 1) {
-      const sync = await syncRun({ projectRoot: project, runId, env: activeEnv });
-      assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-      assert.equal(sync.value?.status, "running");
-      assert.equal(fs.readFileSync(ledgerPath, "utf8"), retained);
-    }
+    const first = await syncRun({ projectRoot: project, runId, env: activeEnv });
+    assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+    assert.equal(first.value?.status, "running");
+    const retained = fs.readFileSync(ledgerPath, "utf8");
+    assert.deepEqual(
+      retained
+        .trim()
+        .split("\n")
+        .map((line) => {
+          const entry = JSON.parse(line) as { source_event_sequence: number; outcome: string; failure_message: string };
+          return [entry.source_event_sequence, entry.outcome, entry.failure_message];
+        }),
+      [[2, "failed", "failed before observation"]]
+    );
+    const second = await syncRun({ projectRoot: project, runId, env: activeEnv });
+    assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+    assert.equal(fs.readFileSync(ledgerPath, "utf8"), retained);
   });
 }
 
@@ -27954,101 +27703,128 @@ async function unobservedFailedResetFixture(runId: string) {
   };
 }
 
-test("stopped reset refuses an incompatible recorded failure before any reset", async () => {
-  const fixture = await unobservedFailedResetFixture("reset-incompatible-ledger");
+test("resume resets a stopped run even when its attempt ledger holds an edited row", async () => {
+  const fixture = await unobservedFailedResetFixture("reset-edited-ledger");
   const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
   assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
   const row = JSON.parse(fs.readFileSync(fixture.ledgerPath, "utf8")) as { manifests: { input_sha256: string } };
   row.manifests.input_sha256 = "0".repeat(64);
-  const incompatible = `${JSON.stringify(row)}\n`;
-  fs.writeFileSync(fixture.ledgerPath, incompatible);
+  const edited = `${JSON.stringify(row)}\n`;
+  fs.writeFileSync(fixture.ledgerPath, edited);
   fs.writeFileSync(fixture.commandLog, "");
-  const resumed = await resumeRun({
-    projectRoot: fixture.project,
-    runId: fixture.runId,
-    resetNode: fixture.nodeId,
-    env: fixture.env
-  });
-  assert.equal(resumed.ok, false);
-  assert.match(JSON.stringify(resumed.diagnostics), /immutable event authority/u);
-  assert.equal(fs.readFileSync(fixture.ledgerPath, "utf8"), incompatible);
-  assert.doesNotMatch(fs.readFileSync(fixture.commandLog, "utf8"), /^timetravel |^up /mu);
-});
 
-test("stopped reset cannot downgrade missing sealed tasks to native legacy", async () => {
-  const fixture = await unobservedFailedResetFixture("reset-missing-tasks");
-  fs.rmSync(path.join(fixture.runRoot, "smithers", "tasks.json"));
   const resumed = await resumeRun({
     projectRoot: fixture.project,
     runId: fixture.runId,
     resetNode: fixture.nodeId,
     env: fixture.env
   });
-  assert.equal(resumed.ok, false);
-  assert.equal(fs.readFileSync(fixture.ledgerPath, "utf8"), "");
-  assert.doesNotMatch(fs.readFileSync(fixture.commandLog, "utf8"), /^timetravel |^up /mu);
-});
 
-test("stopped reset uses authenticated config after its mutable presentation copy is lost", async () => {
-  const fixture = await unobservedFailedResetFixture("reset-missing-config-presentation");
-  fs.rmSync(path.join(fixture.runRoot, "smithers", "resolved-config.json"));
-  const resumed = await resumeRun({
-    projectRoot: fixture.project,
-    runId: fixture.runId,
-    resetNode: fixture.nodeId,
-    env: fixture.env
-  });
+  // Attempt bookkeeping is not an admission check for the operator's recovery.
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const entries = fs.readFileSync(fixture.ledgerPath, "utf8").trim().split("\n");
-  assert.equal(entries.length, 1);
-  assert.equal((JSON.parse(entries[0] ?? "null") as { outcome: string }).outcome, "failed");
-  assert.match(fs.readFileSync(fixture.commandLog, "utf8"), /^node node:project-discovery /mu);
+  assert.equal(fs.readFileSync(fixture.ledgerPath, "utf8"), edited);
+  assert.match(fs.readFileSync(fixture.commandLog, "utf8"), /^timetravel /mu);
 });
 
-test("stopped reset validates every selected attempt before appending a checkpoint", async () => {
-  const fixture = await unobservedFailedResetFixture("reset-invalid-later-selection");
-  const env = fakeLifecycleSmithersEnv(fixture.project, {
-    inspect: workflowInspect({
-      workflowRunId: fixture.workflowRunId,
-      status: "failed",
-      state: "failed",
-      steps: [{ id: fixture.nodeId, state: "failed", attempt: 2 }]
-    }),
-    events: workflowEvents(fixture.workflowRunId, [
-      ...fixture.events,
-      { type: "NodeStarted", nodeId: fixture.nodeId, attempt: 2 },
-      { type: "NodeFailed", nodeId: fixture.nodeId, attempt: 2, error: { message: "second failed occurrence" } }
-    ]),
-    nodeDetails: {
-      [fixture.nodeId]: {
-        node: { nodeId: fixture.nodeId, lastAttempt: 2 },
-        attempts: [1, 2].map((attempt) => ({
-          nodeId: fixture.nodeId,
-          attempt,
-          state: "failed",
-          meta: {
-            agentChainIndex: attempt === 1 ? 0 : 9,
-            agentId: "ultrafuzz-agent:project-discovery:0:default",
-            agentModel: "gpt-5.5"
+for (const historical of ["failed", "succeeded"] as const) {
+  test(`syncRun reconciles a finished workflow after an unrecorded ${historical} occurrence is reused`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+    const runId = `sync-1099-${historical}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const nodeId = "node:project-discovery";
+    const verifierNodeId = "verify:project-discovery";
+    const base = Date.parse("2026-07-03T00:00:00.000Z");
+    // Occurrence 1 finishes (or fails) and is never observed by Ultrafuzz. A
+    // supported reset (Smithers timetravel/retry-task) then restarts numbering
+    // at attempt 1 and upserts the mutable attempt row, so only the replacement
+    // occurrence remains described by `smithers node`.
+    const events: Parameters<typeof workflowEvents>[1] = [
+      { type: "RunStarted", sequence: 0, timestampMs: base },
+      { type: "NodeStarted", nodeId, attempt: 1, sequence: 1, timestampMs: base + 100 },
+      historical === "failed"
+        ? {
+            type: "NodeFailed",
+            nodeId,
+            attempt: 1,
+            sequence: 2,
+            timestampMs: base + 200,
+            error: { message: "historical occurrence failed" }
           }
-        }))
+        : { type: "NodeFinished", nodeId, attempt: 1, sequence: 2, timestampMs: base + 200 },
+      { type: "RunStarted", sequence: 3, timestampMs: base + 300 },
+      { type: "NodeStarted", nodeId, attempt: 1, sequence: 4, timestampMs: base + 400 },
+      { type: "NodeFinished", nodeId, attempt: 1, sequence: 5, timestampMs: base + 500 },
+      { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, sequence: 6, timestampMs: base + 600 },
+      { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, sequence: 7, timestampMs: base + 700 },
+      { type: "RunFinished", sequence: 8, timestampMs: base + 800 }
+    ];
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [
+          { id: nodeId, state: "finished", attempt: 1 },
+          { id: verifierNodeId, state: "finished", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, events),
+      nodeDetails: {
+        [nodeId]: {
+          node: { nodeId, lastAttempt: 1 },
+          attempts: [
+            {
+              nodeId,
+              attempt: 1,
+              state: "finished",
+              meta: {
+                agentChainIndex: 0,
+                agentId: "ultrafuzz-agent:project-discovery:0:default",
+                agentModel: "gpt-5.5"
+              }
+            }
+          ]
+        }
       }
-    }
-  });
-  const resumed = await resumeRun({
-    projectRoot: fixture.project,
-    runId: fixture.runId,
-    resetNode: fixture.nodeId,
-    retryFailed: true,
-    env
-  });
-  assert.equal(resumed.ok, false);
-  assert.equal(fs.readFileSync(fixture.ledgerPath, "utf8"), "");
-  assert.doesNotMatch(fs.readFileSync(fixture.commandLog, "utf8"), /^timetravel |^up /mu);
-});
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+    const layout = layoutForRunRoot(run.value.run_root, runId);
 
-test("stopped reset retains pre-agent failure admission without inventing an executed attempt", async () => {
-  const fixture = await unobservedFailedResetFixture("reset-pre-agent-failure");
+    const first = await syncRun({ projectRoot: project, runId, env });
+
+    assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+    assert.ok(
+      !first.diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+      JSON.stringify(first.diagnostics)
+    );
+    assert.equal(first.value?.status, "succeeded", JSON.stringify(first.diagnostics));
+    assert.equal(readRunState(layout).status, "succeeded");
+    const ledger = fs.readFileSync(layout.attemptLedgerPath);
+    // The superseded failure is recorded from its own events; the superseded
+    // success was never verified by the host, so it has no output to record.
+    assert.deepEqual(
+      ledger
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .map((line) => (JSON.parse(line) as { source_event_sequence: number }).source_event_sequence),
+      historical === "failed" ? [2, 5] : [5]
+    );
+
+    const second = await syncRun({ projectRoot: project, runId, env });
+
+    assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+    assert.equal(second.value?.status, "succeeded");
+    assert.deepEqual(fs.readFileSync(layout.attemptLedgerPath), ledger);
+  });
+}
+
+test("resume --retry-failed after a pre-agent failure keeps synchronizing the reused attempt", async () => {
+  const fixture = await unobservedFailedResetFixture("retry-pre-agent-failure-sync");
+  // Smithers never selected an agent for the failed attempt.
   fs.writeFileSync(
     path.join(fixture.detailRoot, `${fixture.nodeId}.json`),
     JSON.stringify({
@@ -28071,104 +27847,641 @@ test("stopped reset retains pre-agent failure admission without inventing an exe
   });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(fs.readFileSync(fixture.ledgerPath, "utf8"), "");
-  assert.match(fs.readFileSync(fixture.commandLog, "utf8"), /^timetravel /mu);
+  const activeEnv = fakeLifecycleSmithersEnv(fixture.project, {
+    inspect: workflowInspect({
+      workflowRunId: fixture.workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: fixture.nodeId, state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(fixture.workflowRunId, [
+      ...fixture.events,
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: fixture.nodeId, attempt: 1 }
+    ])
+  });
+  for (let observation = 0; observation < 2; observation += 1) {
+    const sync = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: activeEnv });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(sync.value?.status, "running");
+  }
+  // Once the reused attempt number supersedes it, Smithers' attempt row
+  // describes the replacement, so the failure is recorded without agent
+  // provenance and counts as an executed attempt.
+  assert.deepEqual(
+    attemptLedgerRows(fixture.runRoot).map((entry) => [
+      entry.source_event_sequence,
+      entry.outcome,
+      (entry.reuse as { status?: string }).status,
+      entry.agent
+    ]),
+    [[2, "failed", "executed", undefined]]
+  );
+  assert.equal(
+    readRunState(layoutForRunRoot(fixture.runRoot, fixture.runId)).nodes["project-discovery"]?.retry_count,
+    1
+  );
 });
 
-test("stopped reset checkpoint survives interruption with mutable attempt detail removed", async () => {
-  const fixture = await unobservedFailedResetFixture("reset-checkpoint-retry");
-  const failed = await resumeRun({
-    projectRoot: fixture.project,
-    runId: fixture.runId,
-    resetNode: fixture.nodeId,
-    env: { ...fixture.env, SMITHERS_FAKE_FAIL_UP: "1" }
-  });
-  assert.equal(failed.ok, false);
-  const retained = fs.readFileSync(fixture.ledgerPath);
-  assert.ok(retained.length > 0);
-  // Emulate interruption after reset took effect but before its marker became durable.
-  fs.rmSync(path.join(fixture.runRoot, "smithers", "reset-node-applied.json"));
-  fs.writeFileSync(
-    path.join(fixture.detailRoot, `${fixture.nodeId}.json`),
-    JSON.stringify({ node: { nodeId: fixture.nodeId, lastAttempt: 1 }, attempts: [] })
-  );
-  fs.writeFileSync(
-    fixture.inspectPath,
-    JSON.stringify(
-      workflowInspect({
-        workflowRunId: fixture.workflowRunId,
-        status: "failed",
-        state: "failed",
-        steps: [{ id: fixture.nodeId, state: "pending", attempt: 1 }]
-      })
-    )
-  );
-  fs.writeFileSync(fixture.commandLog, "");
-  const resumed = await resumeRun({
-    projectRoot: fixture.project,
-    runId: fixture.runId,
-    resetNode: fixture.nodeId,
-    env: fixture.env
-  });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.deepEqual(fs.readFileSync(fixture.ledgerPath), retained);
-  const commands = fs.readFileSync(fixture.commandLog, "utf8");
-  assert.doesNotMatch(commands, /^node /mu);
-  assert.match(commands, /^timetravel /mu);
-});
+function fakeRunnerPath(env: Record<string, string | undefined>, name: string): string {
+  const value = env[name];
+  assert.ok(value, `${name} is not set`);
+  return value;
+}
 
-test("stopped reset checkpoint runs once and skips active, ordinary and committed-marker continuations", async () => {
+function attemptLedgerRows(runRoot: string): Array<Record<string, unknown>> {
+  const text = fs.readFileSync(path.join(runRoot, "attempts.jsonl"), "utf8").trim();
+  return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("syncRun records a cancelled attempt with its Smithers reason", async () => {
   const project = tempProject();
-  const workflowRunId = "ultrafuzz-reset-hook-selection";
-  const nodeId = "node:fixture";
-  const failedInspect = workflowInspect({
-    workflowRunId,
-    status: "failed",
-    state: "failed",
-    steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-cancelled-attempt";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "cancelled",
+      state: "cancelled",
+      includeVerifierSteps: false,
+      steps: [{ id: nodeId, state: "cancelled", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeCancelled", nodeId, attempt: 1, extra: { reason: "run-cancelled" } },
+      { type: "RunCancelled" }
+    ])
   });
-  const env = fakeLifecycleSmithersEnv(project, { inspect: failedInspect });
-  const inspectPath = env.SMITHERS_FAKE_INSPECT;
-  assert.ok(inspectPath);
-  let checkpoints = 0;
-  const input = {
-    action: "resume" as const,
-    smithersRunId: workflowRunId,
-    workflowPath: path.join(project, ".smithers", "workflows", "workflow.tsx"),
-    projectRoot: project,
-    relaunchPaths: { runRoot: project, logsDir: path.join(project, "logs") },
-    keepWorkspaces: false,
-    controllerLeaseSeconds: 60,
-    env,
-    environmentVariableNames: ["SMITHERS_FAKE_FAIL_UP"],
-    beforeStoppedReset: () => {
-      checkpoints += 1;
-      return Promise.resolve();
-    }
-  };
-  await runSmithersLifecycleCommand({ ...input, retryFailed: true, resetNode: nodeId });
-  assert.equal(checkpoints, 1, "combined reset options preserve the stopped history once");
-  checkpoints = 0;
-  await runSmithersLifecycleCommand(input);
-  assert.equal(checkpoints, 0, "ordinary continuation does not gain an attempt gate");
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [
+      entry.started_event_sequence,
+      entry.source_event_sequence,
+      entry.outcome,
+      entry.failure_category,
+      entry.failure_message,
+      (entry.agent as { profile_id?: string } | undefined)?.profile_id
+    ]),
+    [[1, 2, "canceled", "canceled", "run-cancelled", "default"]]
+  );
+});
+
+test("syncRun ignores a cancellation that names no live attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-unmatched-cancellation";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      // Smithers can persist a cancellation before the attempt's NodeStarted,
+      // after its terminal event, or with `attempt: null` for a waiting node.
+      { type: "NodeCancelled", nodeId, attempt: 1, extra: { reason: "run-cancelled" } },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFailed", nodeId, attempt: 1, error: { message: "provider overloaded" } },
+      { type: "NodeCancelled", nodeId, attempt: 1, extra: { reason: "run-cancelled" } },
+      { type: "NodeCancelled", nodeId, extra: { attempt: null, reason: "run-cancelled" } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [entry.source_event_sequence, entry.outcome]),
+    [[2, "failed"]]
+  );
+});
+
+test("syncRun skips a cancellation stamped before its attempt started and records the task's later attempts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-cancellation-before-start";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: nodeId, state: "finished", attempt: 2 },
+        { id: verifierNodeId, state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted", timestampMs: base },
+      // Smithers stamps a run cancellation's NodeCancelled with an instant taken
+      // before its transaction, so an attempt that started meanwhile has the
+      // earlier sequence but the later timestamp.
+      { type: "NodeStarted", nodeId, attempt: 1, timestampMs: base + 200 },
+      { type: "NodeCancelled", nodeId, attempt: 1, timestampMs: base + 100, extra: { reason: "run-cancelled" } },
+      { type: "RunCancelled", timestampMs: base + 300 },
+      { type: "RunStarted", timestampMs: base + 400 },
+      { type: "NodeStarted", nodeId, attempt: 2, timestampMs: base + 500 },
+      { type: "NodeFinished", nodeId, attempt: 2, timestampMs: base + 600 },
+      { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1, timestampMs: base + 700 },
+      { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1, timestampMs: base + 800 },
+      { type: "RunFinished", timestampMs: base + 900 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(
+    !sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"),
+    JSON.stringify(sync.diagnostics)
+  );
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [entry.attempt, entry.source_event_sequence, entry.outcome]),
+    [[2, 6, "succeeded"]]
+  );
+});
+
+test("syncRun keeps a cancelled occurrence that a reset superseded before any sync", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-cancelled-then-reused";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: nodeId, state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeCancelled", nodeId, attempt: 1, extra: { reason: "run-cancelled" } },
+      { type: "RunCancelled" },
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId, attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [
+      entry.started_event_sequence,
+      entry.source_event_sequence,
+      entry.outcome,
+      entry.agent === undefined ? "no agent" : "agent"
+    ]),
+    [
+      [1, 2, "canceled", "no agent"],
+      [5, 6, "succeeded", "agent"]
+    ]
+  );
+});
+
+test("syncRun attributes a verifier rejection to the agent's own attempt and never re-derives it", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-verifier-rejects-retried-agent";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const failedPass: Parameters<typeof workflowEvents>[1] = [
+    { type: "RunStarted" },
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    { type: "NodeFailed", nodeId, attempt: 1, error: { message: "provider overloaded" } },
+    { type: "NodeStarted", nodeId, attempt: 2 },
+    { type: "NodeFinished", nodeId, attempt: 2 },
+    { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1 },
+    { type: "NodeFailed", nodeId: verifierNodeId, attempt: 1, error: { message: "verifier process crashed" } },
+    { type: "RunFailed" }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: nodeId, state: "finished", attempt: 2 },
+        { id: verifierNodeId, state: "failed", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, failedPass)
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const failed = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
+  assert.equal(failed.value?.status, "failed");
+  assert.ok(!failed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const recorded = fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8");
+  // The verifier numbers its attempts independently: its failure belongs to the
+  // agent's finished attempt 2, not to the agent's earlier failed attempt 1.
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [
+      entry.attempt,
+      entry.outcome,
+      entry.failure_category,
+      entry.failure_message
+    ]),
+    [
+      [1, "failed", "executor-error", "provider overloaded"],
+      [2, "failed", "artifact-validation", "verifier process crashed"]
+    ]
+  );
+
+  // Re-running only the verifier changes the node status after both attempts
+  // were recorded; the recorded rows stay final instead of becoming conflicts.
   fs.writeFileSync(
-    inspectPath,
-    JSON.stringify(
+    fakeRunnerPath(env, "SMITHERS_FAKE_EVENTS"),
+    workflowEvents(workflowRunId, [
+      ...failedPass,
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  );
+  fs.writeFileSync(
+    fakeRunnerPath(env, "SMITHERS_FAKE_INSPECT"),
+    `${JSON.stringify(
       workflowInspect({
         workflowRunId,
-        status: "running",
-        state: "running",
-        steps: [{ id: nodeId, state: "in-progress", attempt: 1 }]
+        steps: [
+          { id: nodeId, state: "finished", attempt: 2 },
+          { id: verifierNodeId, state: "finished", attempt: 1 }
+        ]
       })
-    )
+    )}\n`
   );
-  await runSmithersLifecycleCommand({ ...input, resetNode: nodeId, force: true });
-  assert.equal(checkpoints, 0, "active force reset retains its existing behavior");
-  fs.writeFileSync(inspectPath, JSON.stringify(failedInspect));
-  await assert.rejects(
-    runSmithersLifecycleCommand({ ...input, resetNode: nodeId, env: { ...env, SMITHERS_FAKE_FAIL_UP: "1" } })
+  for (let observation = 0; observation < 2; observation += 1) {
+    const recovered = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(recovered.value?.status, "succeeded", JSON.stringify(recovered.diagnostics));
+    assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+    assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), recorded);
+  }
+});
+
+test("syncRun reconciles node state when Smithers attempt detail is unavailable and records it later", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-attempt-detail-unavailable";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFailed", nodeId, attempt: 1, error: { message: "agent failed" } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const detailPath = path.join(fakeRunnerPath(env, "SMITHERS_FAKE_NODE_DETAILS"), `${nodeId}.json`);
+  const detail = fs.readFileSync(detailPath);
+  fs.rmSync(detailPath);
+
+  const unavailable = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(unavailable.ok, true, JSON.stringify(unavailable.diagnostics));
+  assert.equal(unavailable.value?.status, "failed");
+  assert.deepEqual(
+    unavailable.diagnostics
+      .filter((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED")
+      .map((diagnostic) => diagnostic.severity),
+    ["warning"]
   );
-  assert.equal(checkpoints, 1);
-  checkpoints = 0;
-  await runSmithersLifecycleCommand({ ...input, resetNode: nodeId });
-  assert.equal(checkpoints, 0, "a committed reset only needs its pending continuation");
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
+  assert.deepEqual(attemptLedgerRows(run.value.run_root), []);
+
+  fs.writeFileSync(detailPath, detail);
+  const recovered = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [
+      entry.outcome,
+      (entry.agent as { profile_id?: string } | undefined)?.profile_id
+    ]),
+    [["failed", "default"]]
+  );
+});
+
+test("syncRun keeps a succeeded node's retry count in step with attempts recorded after it finalized", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-immutable-retry-count";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const verifierNodeId = "verify:project-discovery";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: nodeId, state: "finished", attempt: 2 },
+        { id: verifierNodeId, state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId, attempt: 1 },
+      { type: "NodeFailed", nodeId, attempt: 1, error: { message: "provider overloaded" } },
+      { type: "NodeStarted", nodeId, attempt: 2 },
+      { type: "NodeFinished", nodeId, attempt: 2 },
+      { type: "NodeStarted", nodeId: verifierNodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId: verifierNodeId, attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
+  // Attempt detail is unavailable in the pass that finalizes the node as
+  // succeeded, so that pass defers both attempts.
+  const detailPath = path.join(fakeRunnerPath(env, "SMITHERS_FAKE_NODE_DETAILS"), `${nodeId}.json`);
+  const detail = fs.readFileSync(detailPath);
+  fs.rmSync(detailPath);
+  const finalizing = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(finalizing.ok, true, JSON.stringify(finalizing.diagnostics));
+  assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded");
+  assert.deepEqual(attemptLedgerRows(run.value.run_root), []);
+
+  fs.writeFileSync(detailPath, detail);
+  const recorded = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(recorded.ok, true, JSON.stringify(recorded.diagnostics));
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [entry.attempt, entry.outcome]),
+    [
+      [1, "failed"],
+      [2, "succeeded"]
+    ]
+  );
+  assert.equal(readRunState(layout).nodes["project-discovery"]?.retry_count, 1);
+});
+
+test("syncRun rebuilds run.json accounting after a pass stopped between the usage and run.json writes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "usage-crash-window";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const usage = (sequence: number, inputTokens: number) => ({
+    type: "TokenUsageReported",
+    nodeId: "node:project-discovery",
+    attempt: 1,
+    sequence,
+    extra: { iteration: 0, inputTokens, outputTokens: 1, model: "test-model", agent: "test-agent" }
+  });
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, sequence: 0 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, sequence: 2 },
+      { type: "RunFinished", sequence: 3 }
+    ]),
+    tokenEvents: workflowEvents(workflowRunId, [usage(1, 10)])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  const metadataPath = path.join(runRoot, "run.json");
+  const metadataBeforeLaterUsage = fs.readFileSync(metadataPath);
+
+  // A later usage snapshot reaches usage.jsonl, but the pass stops before it
+  // rewrites run.json: restore run.json to the bytes that pass never replaced.
+  fs.writeFileSync(
+    fakeRunnerPath(env, "SMITHERS_FAKE_TOKEN_EVENTS"),
+    workflowEvents(workflowRunId, [usage(1, 10), usage(4, 30)])
+  );
+  const interrupted = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(interrupted.ok, true, JSON.stringify(interrupted.diagnostics));
+  assert.equal(fs.readFileSync(path.join(runRoot, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
+  fs.writeFileSync(metadataPath, metadataBeforeLaterUsage);
+
+  const recovered = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    accounting?: { checkpoint?: { ledger_event_count?: number }; current?: { total_tokens?: number } };
+  };
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
+  assert.equal(metadata.accounting?.current?.total_tokens, 31);
+});
+
+test("syncRun keeps a recorded usage row that this build would derive differently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "usage-row-recorded-once";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: { iteration: 0, inputTokens: 10, outputTokens: 5, model: "test-model", agent: "codex" }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  const usagePath = path.join(runRoot, "usage.jsonl");
+  const row = JSON.parse(fs.readFileSync(usagePath, "utf8")) as { usage: { agent: string } };
+  // Stands in for a row an earlier build normalized differently from this one.
+  row.usage.agent = "earlier-build-agent";
+  const recordedUsage = `${JSON.stringify(row)}\n`;
+  fs.writeFileSync(usagePath, recordedUsage);
+
+  const replayed = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  assert.equal(fs.readFileSync(usagePath, "utf8"), recordedUsage);
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
+    accounting?: { current?: { agents?: string[] } };
+  };
+  assert.deepEqual(metadata.accounting?.current?.agents, ["earlier-build-agent"]);
+});
+
+test("syncRun settles a model the fetched pricing catalog does not list instead of refetching it", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "unlisted-model-pricing";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          costUsd: undefined,
+          model: "unlisted-model",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    test: { models: { "listed-model": { cost: { input: 1, output: 1 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  let catalogFetches = 0;
+  const countingFetch: typeof fetch = (input, init) => {
+    catalogFetches += 1;
+    return testPricingFetch(input, init);
+  };
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const sync = await runtimeSyncRun(
+      { projectRoot: project, runId, env },
+      { pricingFetch: countingFetch, pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }] }
+    );
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  }
+
+  assert.equal(catalogFetches, 1);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "run.json"), "utf8")) as {
+    accounting?: { pricing_catalog?: { status?: string; unresolved_models?: string[] } };
+  };
+  assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["unlisted-model"]);
+});
+
+test("syncRun warns that a Smithers event stream at the CLI event limit may be truncated", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "event-stream-limit";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  // `smithers events --limit 100000` stops at exactly this many events, oldest
+  // first, with no truncation marker in its JSON output.
+  const lifecycle = Array.from(
+    { length: 100_000 },
+    (_, sequence) =>
+      `${JSON.stringify({
+        runId: workflowRunId,
+        seq: sequence,
+        timestampMs: base + sequence,
+        type: "RunStatusChanged",
+        payload: { type: "RunStatusChanged", runId: workflowRunId, timestampMs: base + sequence }
+      })}\n`
+  ).join("");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: lifecycle,
+    tokenEvents: ""
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics.slice(0, 3)));
+  assert.equal(sync.value?.status, "running");
+  assert.deepEqual(
+    sync.diagnostics
+      .filter((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_TRUNCATED")
+      .map((diagnostic) => [diagnostic.severity, diagnostic.message]),
+    [
+      [
+        "warning",
+        "Smithers returned its 100000-event limit for the lifecycle stream; events after sequence 99999 are not synchronized, so node evidence and the attempt ledger can be incomplete"
+      ]
+    ]
+  );
 });
