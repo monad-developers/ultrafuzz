@@ -1811,9 +1811,9 @@ function inspectionExecutionControl(
  * Fetch `smithers node` detail for the local occurrences that still need agent
  * provenance: those neither recorded nor superseded (a superseded occurrence's
  * attempt row now describes its replacement). Synchronization therefore
- * inspects only attempts it has not recorded; a pre-agent failure is never
- * recorded, so it is inspected again on each pass. A failed inspection is a
- * warning that defers the node's occurrences to a later pass.
+ * inspects only attempts it has not recorded; an unsuperseded pre-agent failure
+ * is not recorded, so it is inspected again on each pass. A failed inspection is
+ * a warning that defers the node's occurrences to a later pass.
  */
 async function inspectTerminalAttemptAuthorities(input: {
   projectRoot: string;
@@ -4815,6 +4815,9 @@ function appendTerminalTaskAttempts(input: {
       continue;
     }
     let agent: NodeAttemptAgentProvenance | undefined;
+    // A superseded occurrence is recorded without agent provenance, because
+    // Smithers' attempt row now describes its replacement. That includes a
+    // pre-agent failure, which then counts as an executed attempt.
     if (input.task.execution.mode === "local" && !attempt.superseded) {
       const detail = input.attemptAuthorities.get(smithersNodeAttemptAuthorityKey(attempt.nodeId, attempt.iteration));
       // Inspection was unavailable this pass; a later pass retries the occurrence.
@@ -4852,8 +4855,8 @@ function appendTerminalTaskAttempts(input: {
     // artifact-validation failure.  The attempt ledger is immutable, so wait
     // for a later synchronization pass with the manifest instead of turning a
     // successful executor outcome into a permanent phantom failure (#352).
-    // A finished occurrence that a reset superseded before the host verified
-    // it has no output of its own left to record.
+    // A finished occurrence that a reset superseded before it was recorded has
+    // no output of its own left to record: the manifest is the replacement's.
     if (outcome === "succeeded" && (outputDigest === undefined || attempt.superseded)) continue;
     if (isCurrent && (outcome === "failed" || outcome === "timed-out")) {
       failureMessage = input.finalization.lastError ?? failureMessage;
@@ -5050,8 +5053,9 @@ function finalizationFailureCategory(
   if (outcome !== "failed") {
     return undefined;
   }
-  // Only a finished executor occurrence reaches this overlay, so its failed
-  // node was rejected host-side: by its verifier or by the artifact gates.
+  // Only a finished executor occurrence reaches this overlay, so its node
+  // failed after the executor finished: a verifier or artifact-gate rejection,
+  // or a cancellation while the verifier ran.
   return finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_VALIDATION_FAILED")
     ? "invalid-output"
     : "artifact-validation";

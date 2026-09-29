@@ -208,20 +208,27 @@ primary-or-fallback role when Smithers' durable attempt metadata identifies a
 rung of the sealed task chain; selection is never inferred from the retry number
 or token model. Failed primaries therefore remain visible even when a later
 fallback produces the accepted output. An attempt that fails before Smithers
-selects a rung ran no model and is not recorded.
+selects a rung ran no model and is not recorded, unless a reset supersedes it
+first (see below).
 
 Each attempt is identified by its terminal Smithers event and is recorded once:
 later synchronization never re-derives or rewrites it, even when the node's
 status changes afterwards. Finished, failed, timed-out, and cancelled attempts
 are recorded; a cancellation has outcome and category `canceled` and the
-Smithers cancellation reason as its message. A finished attempt whose output the
-verifier or artifact gates reject is recorded as failed with category
-`invalid-output` for findings validation and `artifact-validation` otherwise.
+Smithers cancellation reason as its message. A terminal event with no started
+attempt in the same Smithers activation, or stamped before that attempt
+started, is skipped. A finished attempt whose node then fails, for example
+because the verifier or artifact gates reject its output, is recorded as failed
+with category `invalid-output` for findings validation and
+`artifact-validation` otherwise.
 `resume --retry-failed` and `--reset-node` restart Smithers' attempt numbering,
-after which Smithers' attempt row describes only the replacement. An attempt
-that such a reset superseded before any synchronization recorded it is therefore
-recorded from its events without the agent block, and a superseded finished
-attempt that the host never verified is not recorded.
+after which Smithers' attempt row describes only the replacement. A failed,
+timed-out, or cancelled attempt that such a reset superseded before any
+synchronization recorded it is therefore recorded from its events without the
+agent block. That includes a pre-agent failure, which then counts toward the
+node's `retry_count` although no model ran. A superseded finished attempt that
+was not recorded before the reset is not recorded, because the node's output
+manifest now belongs to the replacement.
 
 Attempt summaries and retry counts are derived from this ledger. Replaying a
 known transition does not append it again, so resume, replay, checkpoint
@@ -794,6 +801,9 @@ rebuilds from `usage.jsonl`, and a usage row is recorded once and never
 re-derived, so a synchronization interrupted between the usage append and the
 `run.json` write is repaired by the next one. A failed accounting pass is
 reported as a `WORKFLOW_ACCOUNTING_FAILED` warning and does not block run status.
+An invalid usage field in an unrecorded `TokenUsageReported` event fails each
+later accounting pass this way, so no further usage is recorded for the run
+while node and run status keep reconciling.
 Usage and pricing completeness are reported independently
 through `usage_complete`/`usage_incomplete_reasons` and
 `pricing_complete`/`pricing_incomplete_reasons`.

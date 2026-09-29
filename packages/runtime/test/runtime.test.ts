@@ -26977,7 +26977,7 @@ for (const historical of ["failed", "succeeded"] as const) {
 
 test("resume --retry-failed after a pre-agent failure keeps synchronizing the reused attempt", async () => {
   const fixture = await unobservedFailedResetFixture("retry-pre-agent-failure-sync");
-  // Smithers never selected an agent, so resume has no model attempt to record.
+  // Smithers never selected an agent for the failed attempt.
   fs.writeFileSync(
     path.join(fixture.detailRoot, `${fixture.nodeId}.json`),
     JSON.stringify({
@@ -27018,6 +27018,22 @@ test("resume --retry-failed after a pre-agent failure keeps synchronizing the re
     assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
     assert.equal(sync.value?.status, "running");
   }
+  // Once the reused attempt number supersedes it, Smithers' attempt row
+  // describes the replacement, so the failure is recorded without agent
+  // provenance and counts as an executed attempt.
+  assert.deepEqual(
+    attemptLedgerRows(fixture.runRoot).map((entry) => [
+      entry.source_event_sequence,
+      entry.outcome,
+      (entry.reuse as { status?: string }).status,
+      entry.agent
+    ]),
+    [[2, "failed", "executed", undefined]]
+  );
+  assert.equal(
+    readRunState(layoutForRunRoot(fixture.runRoot, fixture.runId)).nodes["project-discovery"]?.retry_count,
+    1
+  );
 });
 
 function fakeRunnerPath(env: Record<string, string | undefined>, name: string): string {
