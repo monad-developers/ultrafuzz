@@ -52,7 +52,7 @@ describe("agent preamble MDX", () => {
       new Set(["friction_log_directory"])
     );
     expect(template).not.toMatch(/ULTRAFUZZ_FRICTION_LOG|\$[A-Z_]{3,}/u);
-    const directory = "/runs/example/friction/.agents/friction-log";
+    const directory = "/runs/example/friction";
     const fragment = renderAgentPreambleTemplate("friction-log", { friction_log_directory: directory });
     expect(fragment).toContain(`${directory}/<UTC time as YYYYMMDDHHMMSS>-`);
     expect(fragment).toContain("/friction.md");

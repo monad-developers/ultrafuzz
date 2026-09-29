@@ -7155,9 +7155,9 @@ test("generated agent prompt places the run friction log after the trust boundar
   const instructions = loadAgentPreambleTemplate("friction-log");
   const render = loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"), {
     instructions,
-    entriesPath: "friction/.agents/friction-log"
+    entriesPath: "friction"
   });
-  const directory = "/project/.ultrafuzz/runs/run-1/friction/.agents/friction-log";
+  const directory = "/project/.ultrafuzz/runs/run-1/friction";
   const values = { runtimeContext: "## Topology Runtime Context", operatorPrompt: "", taskPrompt: "# Task\n" };
   const withLog = render({ ...values, frictionLogDirectory: directory });
   const expectedFragment = instructions.replaceAll("{{friction_log_directory}}", directory);

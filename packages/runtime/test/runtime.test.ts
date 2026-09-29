@@ -11817,7 +11817,7 @@ nodes:
   // each task resolves the directory from its own run root.
   assert.deepEqual(JSON.parse(frictionLog), {
     instructions: loadAgentPreambleTemplate("friction-log"),
-    entriesPath: "friction/.agents/friction-log"
+    entriesPath: "friction"
   });
   // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
   // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock

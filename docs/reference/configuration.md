@@ -182,11 +182,10 @@ evidence without applying the limit to the workflow controller.
 
 The friction log is disabled by default. With `friction_log_enabled = true`,
 every local task may record Ultrafuzz, tooling, or instruction roadblocks as
-Markdown entries under
-`<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md`. Each
-task resolves that directory from its own run root, receives write access to
-it, and creates it during preparation. Ultrafuzz adds no dependency for it, so a
-disabled run installs, seals, and renders nothing extra.
+Markdown entries under `<run>/friction/<YYYYMMDDHHMMSS>-<slug>/friction.md`.
+Each task resolves that directory from its own run root, receives write access
+to it, and creates it during preparation. Ultrafuzz adds no dependency for it,
+so a disabled run installs, seals, and renders nothing extra.
 Cloud tasks do not receive the friction log.
 
 Entries stay local. Review them before publishing anything, because they can
