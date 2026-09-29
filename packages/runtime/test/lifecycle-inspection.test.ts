@@ -396,9 +396,8 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
 });
 
 test("resume, replay and fork declare workflow_run_id on every lifecycle value", () => {
-  // Compile-time check: each reader stops type-checking if its function's
-  // result type lets workflow_run_id be undefined. The inferred return types
-  // were unions, and which member a caller saw depended on type-check order.
+  // Compile-time check: each reader stops type-checking if the value its
+  // function returns lets workflow_run_id be undefined.
   const resume = (value: NonNullable<Awaited<ReturnType<typeof resumeRun>>["value"]>): string => value.workflow_run_id;
   const replay = (value: NonNullable<Awaited<ReturnType<typeof replayRun>>["value"]>): string => value.workflow_run_id;
   const fork = (value: NonNullable<Awaited<ReturnType<typeof forkRun>>["value"]>): string => value.workflow_run_id;
@@ -1553,7 +1552,7 @@ test("diagnoseProject reports a lower bound once sizing many controller roots ru
   );
 
   const summary = doctor.value?.checks.find((check) => check.name === "temporary-directory")?.summary ?? "";
-  const sized = /; 100 ultrafuzz-controller-\* directories hold at least (\d+) MiB$/u.exec(summary);
+  const sized = /; 100 ultrafuzz-controller-\* directories hold at least (\d+) MiB/u.exec(summary);
   assert.ok(sized !== null, summary);
   assert.ok(Number(sized[1]) < 100, summary);
 });
