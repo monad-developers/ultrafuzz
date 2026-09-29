@@ -1482,7 +1482,16 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(statusData.eta.seconds, 1_200);
   assert.equal(statusData.current_step.running_count, 0);
   assert.equal(statusData.current_step.elapsed_seconds, null);
+  const finalReport = await assertStatusRenderingAndWatch(project, env, runData);
+  await assertReportAndLifecycleCommands(project, env, runData, finalReport);
+});
 
+// Status rendering and `status --watch` for the run launched by the test above.
+async function assertStatusRenderingAndWatch(
+  project: string,
+  env: Record<string, string | undefined>,
+  runData: { run_id: string; run_root: string }
+): Promise<{ reportDir: string; reportSnapshot: FinalReportByteSnapshot }> {
   const statePath = path.join(runData.run_root, "state.json");
   const runningState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
     status: string;
@@ -1640,7 +1649,16 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal((watchedEnvelopes[0]!.data as { status: string }).status, "running");
   assert.equal((watchedEnvelopes[1]!.data as { status: string }).status, "succeeded");
   assert.equal((watchedEnvelopes[1]?.data as { ended?: boolean } | undefined)?.ended, true);
+  return { reportDir, reportSnapshot };
+}
 
+// Report, materialize, clean, and lifecycle commands for the run launched by the test above.
+async function assertReportAndLifecycleCommands(
+  project: string,
+  env: Record<string, string | undefined>,
+  runData: { run_id: string; run_root: string },
+  { reportDir, reportSnapshot }: { reportDir: string; reportSnapshot: FinalReportByteSnapshot }
+): Promise<void> {
   writeRunAccounting(runData.run_root, {
     totalTokens: 123,
     tokensUsed: "123",
@@ -1780,7 +1798,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(pauseData.action, "pause");
   assert.equal(pauseData.status, "pause-requested");
   assert.equal(pauseData.submitted, true);
-});
+}
 
 test("status --watch --json keeps a failing poll on one NDJSON line", async (t) => {
   const project = tempProject(t);
@@ -2770,7 +2788,19 @@ test("report bundle creates a portable ZIP without workspaces", async (t) => {
   assert.equal(data.bytes, fs.statSync(data.zip_path).size);
   assert.match(data.sha256, /^[a-f0-9]{64}$/u);
   assert.equal(data.entry_count > 0, true);
+  assertPortableBundleEntries(runData, data, artifactDir, supportPublicationPath, selectedClassPath, reportSnapshot);
+  await assertReportBundleOutputs(project, runData, data, reportDir, reportSnapshot);
+});
 
+// The entries, manifests, and portable engine-log names of the ZIP the test above bundled.
+function assertPortableBundleEntries(
+  runData: { run_id: string; run_root: string },
+  data: { zip_path: string },
+  artifactDir: string,
+  supportPublicationPath: string,
+  selectedClassPath: string,
+  reportSnapshot: FinalReportByteSnapshot
+): void {
   const zip = new AdmZip(data.zip_path);
   assertBundledFinalReport(zip, reportSnapshot);
   const entries = zip
@@ -2866,7 +2896,16 @@ test("report bundle creates a portable ZIP without workspaces", async (t) => {
     assert.equal(entry.size_bytes, bytes.length);
     assert.equal(entry.sha256, crypto.createHash("sha256").update(bytes).digest("hex"));
   }
+}
 
+// Rebundling and output-path handling for the run the test above bundled.
+async function assertReportBundleOutputs(
+  project: string,
+  runData: { run_id: string; run_root: string },
+  data: { zip_path: string },
+  reportDir: string,
+  reportSnapshot: FinalReportByteSnapshot
+): Promise<void> {
   const existing = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
   assert.equal(existing.code, 1);
   assert.match(JSON.stringify(parseJson(existing).diagnostics), /already exists/u);
@@ -2914,7 +2953,7 @@ test("report bundle creates a portable ZIP without workspaces", async (t) => {
   assert.equal(linkedParentAttempt.code, 1);
   assert.match(JSON.stringify(parseJson(linkedParentAttempt).diagnostics), /symlink/u);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
-});
+}
 
 test("report bundle manifest records files it could not package", async (t) => {
   const project = tempProject(t);
