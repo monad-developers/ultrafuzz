@@ -276,6 +276,8 @@ function readAgentReport(
  * including those its task names as credentials, and keep it unavailable on a
  * hit rather than rewrite agent content. JSON escapes a quote, a backslash and
  * a control character, so the decoded strings are scanned beside the JSON text.
+ * They are joined by NUL, which no pattern treats as a word gap, so words that
+ * end one field and start the next never read as one phrase.
  */
 function assertRejectedReportHasNoSecrets(
   outputPath: string,
@@ -291,7 +293,7 @@ function assertRejectedReportHasNoSecrets(
     assertArtifactPublicationsContainNoSecrets(
       new Map([
         [outputPath, Buffer.from(json, "utf8")],
-        [`${outputPath} strings`, Buffer.from(strings.join("\n"), "utf8")]
+        [`${outputPath} strings`, Buffer.from(strings.join("\0"), "utf8")]
       ]),
       sensitiveEnvironmentValues(process.env, [
         ...(execution?.agentCredentialEnv ?? []),

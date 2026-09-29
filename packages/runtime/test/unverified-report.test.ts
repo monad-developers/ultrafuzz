@@ -328,6 +328,20 @@ test("a report its verifier rejected stays unavailable when it holds a line-brok
   assert.equal(fs.existsSync(path.join(root, "review")), false);
 });
 
+test("a report its verifier rejected is published when only adjacent fields together form a recovery phrase", () => {
+  const root = reportRun("verifier-rejected-adjacent-fields");
+  writeAgentReport(root);
+  const file = failReportAttempt(root, "verify:final-report");
+  const report = JSON.parse(fs.readFileSync(file, "utf8")) as {
+    run_metadata: { repository: string; elapsed_time: string };
+  };
+  // Eleven "abandon" and one "about" are a valid phrase, but here they span two separate fields.
+  report.run_metadata.repository = `example/repository ${Array<string>(6).fill("abandon").join(" ")}`;
+  report.run_metadata.elapsed_time = `${[...Array<string>(5).fill("abandon"), "about"].join(" ")} 1m`;
+  fs.writeFileSync(file, JSON.stringify(report));
+  assert.equal(loadReportSnapshot(root).verification, "not-checked");
+});
+
 test("unchecked agent reports disclose saved failures without inventing planned counts", () => {
   const root = reportRun("failed-records");
   writeAgentReport(root);
