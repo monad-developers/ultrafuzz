@@ -229,7 +229,7 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   );
 });
 
-test("a failed immediate submodule restore preserves the transaction backup", (context) => {
+test("the next hydration rolls back a transaction an interrupted one left behind", (context) => {
   const fixture = nestedSubmoduleFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
 
@@ -248,42 +248,52 @@ test("a failed immediate submodule restore preserves the transaction backup", (c
   git(fixture.source, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
   const dependencyRoot = path.join(task, "vendor/dependency");
   fs.writeFileSync(path.join(dependencyRoot, "preexisting.txt"), "recoverable bytes\n");
-
-  const originalRenameSync = fs.renameSync;
-  fs.renameSync = ((oldPath, newPath) => {
-    const source = oldPath.toString();
-    const destination = newPath.toString();
-    const transactionSource = source.includes(`${path.sep}.ultrafuzz-submodule-transaction-`);
-    if (
-      destination === dependencyRoot &&
-      transactionSource &&
-      (source.includes(`${path.sep}staged${path.sep}`) || source.includes(`${path.sep}backup${path.sep}`))
-    ) {
-      throw new Error("injected rename failure");
+  const snapshotInput = { executionSnapshotRoot: executionRoot, workspaceRoot: task, expectation };
+  const hydrate = () => hydratePinnedSubmodulesFromExecutionSnapshot(snapshotInput);
+  const transactions = () =>
+    fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
+  const failRenamesIntoDependencyRoot = (from: readonly string[], run: () => void): void => {
+    const originalRenameSync = fs.renameSync;
+    fs.renameSync = ((oldPath, newPath) => {
+      const source = oldPath.toString();
+      if (
+        newPath.toString() === dependencyRoot &&
+        source.includes(`${path.sep}.ultrafuzz-submodule-transaction-`) &&
+        from.some((directory) => source.includes(`${path.sep}${directory}${path.sep}`))
+      ) {
+        throw new Error("injected rename failure");
+      }
+      originalRenameSync(oldPath, newPath);
+    }) as typeof fs.renameSync;
+    try {
+      run();
+    } finally {
+      fs.renameSync = originalRenameSync;
     }
-    originalRenameSync(oldPath, newPath);
-  }) as typeof fs.renameSync;
-  try {
-    assert.throws(
-      () =>
-        hydratePinnedSubmodulesFromExecutionSnapshot({
-          executionSnapshotRoot: executionRoot,
-          workspaceRoot: task,
-          expectation
-        }),
-      /transaction rollback is incomplete/u
-    );
-  } finally {
-    fs.renameSync = originalRenameSync;
-  }
+  };
 
-  const transactions = fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
-  assert.equal(transactions.length, 1);
+  // The root moved aside, nothing moved in: what a controller killed between the two renames leaves too.
+  failRenamesIntoDependencyRoot(["staged", "backup"], () =>
+    assert.throws(hydrate, /transaction rollback is incomplete/u)
+  );
+  const [stale] = transactions();
+  assert.ok(stale !== undefined);
+  assert.deepEqual(transactions(), [stale]);
   assert.equal(fs.existsSync(dependencyRoot), false);
   assert.equal(
-    fs.readFileSync(path.join(task, transactions[0]!, "backup/vendor/dependency/preexisting.txt"), "utf8"),
+    fs.readFileSync(path.join(task, stale, "backup/vendor/dependency/preexisting.txt"), "utf8"),
     "recoverable bytes\n"
   );
+
+  // The next hydration first puts that root back, so when its own swap fails it rolls back to those bytes.
+  failRenamesIntoDependencyRoot(["staged"], () => assert.throws(hydrate, /injected rename failure/u));
+  assert.deepEqual(transactions(), []);
+  assert.equal(fs.readFileSync(path.join(dependencyRoot, "preexisting.txt"), "utf8"), "recoverable bytes\n");
+
+  assert.deepEqual(hydrate(), captured);
+  assert.deepEqual(transactions(), []);
+  assert.equal(fs.existsSync(path.join(dependencyRoot, "preexisting.txt")), false);
+  assert.deepEqual(verifyPinnedSubmodulesFromExecutionSnapshot(snapshotInput), captured);
 });
 
 test("Aave-shaped nine-pin task worktree is restored transactionally and verified after agent work", (context) => {
@@ -481,10 +491,13 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
 
   const staleTransaction = path.join(task, ".ultrafuzz-submodule-transaction-crashed");
   fs.mkdirSync(staleTransaction);
+  // Not something a crash leaves, but nothing stops an agent writing it into its worktree.
+  const staleFile = path.join(task, ".ultrafuzz-submodule-transaction-file");
+  fs.writeFileSync(staleFile, "not a transaction\n");
   assert.throws(verify, /stale pinned submodule transaction/u);
-  assert.throws(hydrate, /stale pinned submodule transaction/u);
-  assert.equal(fs.existsSync(staleTransaction), true);
-  fs.rmdirSync(staleTransaction);
+  hydrate();
+  assert.equal(fs.existsSync(staleTransaction), false);
+  assert.equal(fs.existsSync(staleFile), false);
   verify();
 
   const directRoot = captured.top_level_roots[0]!;
