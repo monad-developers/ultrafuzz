@@ -145,6 +145,7 @@ interface WorkflowInspect {
   steps: WorkflowStep[];
   failedWorkflowTaskIds: string[];
   exhaustedLoops: CurrentSmithersInspect["exhaustedLoops"];
+  runError?: CurrentSmithersInspect["runError"];
 }
 
 type SmithersRunStatus = CurrentSmithersInspect["runStatus"];
@@ -6092,11 +6093,12 @@ function nonBlockingRuntimeNodeIds(graph: PlannedGraph): ReadonlySet<string> {
   return ids;
 }
 
-// A workflow that ends terminally failed while every durable node is still
-// non-terminal is unrecoverable by node-level retry: there is nothing to reset
-// and the next resume re-finalizes identically. That is a defect in failure
-// attribution, so name the workflow tasks the failure was charged to instead of
-// leaving the run indistinguishable from an idle one.
+// A workflow that ends terminally failed while no durable node failed stopped on
+// something no durable node owns: a run-level runner error (for example
+// WORKFLOW_RENDER_FAILED) or a failed workflow task outside the durable graph.
+// Name the failing workflow tasks and the runner's own error so the run is not
+// indistinguishable from an idle one. Recovery is a same-id resume once that
+// cause is removed (smithers-terminal-resume.integration.test.ts).
 function unattributedTerminalWorkflowFailure(
   inspect: WorkflowInspect,
   nodeStatuses: Map<string, NodeStatus>,
@@ -6114,11 +6116,17 @@ function unattributedTerminalWorkflowFailure(
     return undefined;
   }
   const failedWorkflowTasks = inspect.failedWorkflowTaskIds;
+  const runError = inspect.runError;
+  // Message only: the durable event payload built from `details` stays ids-only.
+  const runErrorText =
+    runError === undefined
+      ? ""
+      : `; workflow run error${runError.code === undefined ? "" : ` ${runError.code}`}: ${runError.message}`;
   return {
     code: "WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE",
     message: `workflow run ended ${workflowState} with no failed durable node; failing workflow task(s): ${
       failedWorkflowTasks.length === 0 ? "unreported" : failedWorkflowTasks.join(", ")
-    }`,
+    }${runErrorText}`,
     severity: "error",
     source: "workflow",
     details: {
@@ -6321,7 +6329,8 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
     runState: current.runState,
     steps: current.nodes.map((node) => ({ id: node.nodeId, state: node.state, attempt: node.attempt })),
     failedWorkflowTaskIds: [...failedWorkflowTaskIds].sort(),
-    exhaustedLoops: current.exhaustedLoops
+    exhaustedLoops: current.exhaustedLoops,
+    ...(current.runError === undefined ? {} : { runError: current.runError })
   };
 }
 

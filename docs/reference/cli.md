@@ -331,6 +331,16 @@ same file); for a run whose resolved config does not parse, resume sets no
 registrations, it reports a `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and
 continues.
 
+A run that ends `failed` with no failed durable node was stopped by something
+no durable node owns: a run-level workflow runner error, such as an exception
+thrown while rendering the workflow, or a failed workflow task outside the
+durable graph. `status` reports it as `WORKFLOW_TERMINAL_WITHOUT_FAILED_NODE`,
+names any failed workflow tasks, and appends the runner's run-level error to
+the message. For a run-level error, fix that cause, then `resume` the same run;
+it continues from the tasks that already finished. While the cause persists,
+the resume either fails with `WORKFLOW_LIFECYCLE_FAILED` or the run fails
+again.
+
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
 that same Smithers run. It does not publish or authenticate a historical
