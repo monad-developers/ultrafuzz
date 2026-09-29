@@ -37,5 +37,6 @@ Blockers:
 
 Repeat blocker and evidence rows in artifact order. Runtime publication compares
 this section with the typed handoff and rejects missing, duplicated, reordered,
-or bare coverage scores. Raw `covg-eval` output is for iteration only and
-defines neither published declaration-completeness view.
+or contradicting scoped scores, and it warns about coverage scores that name no
+exact scope. Raw `covg-eval` output is for iteration only and defines neither
+published declaration-completeness view.

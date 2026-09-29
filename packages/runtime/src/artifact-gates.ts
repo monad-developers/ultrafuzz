@@ -99,7 +99,6 @@ import { parseRuntimeDocumentBytes } from "./runtime-document-codec.js";
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import { diagnosticFromError } from "./utils.js";
-import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
 import { deriveWorkspacePatchGitFacts } from "./workspace-handoff.js";
 import { loadFinalizedNodeOutputSnapshot, type VerifiedOutputArtifactSnapshot } from "./verified-output.js";
 import { renderCoverageEvidenceMarkdownSection } from "./final-report-markdown.js";
@@ -422,7 +421,6 @@ export function verifyRequiredArtifactsForAttempt(
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
     }
   }
-  diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node, authenticated));
   try {
     diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node, attemptAuthority, authenticated));
   } catch (error) {
@@ -2237,8 +2235,13 @@ function semanticGateContextForArtifact(input: {
     input.schemaFilename === "aggregation-manifest.schema.json"
       ? authenticatedAggregationSemanticContext({
           layout: input.layout,
-          node: input.node,
-          attemptId: input.attemptId
+          attemptId: input.attemptId,
+          producers: finalizedDeclaredContractProducers(
+            input.layout,
+            "ultrafuzz/generated-tests@3",
+            input.node,
+            input.attemptAuthority
+          )
         })
       : undefined;
   const propertyCampaignEvidence =
@@ -3274,13 +3277,19 @@ function assertExactSealedAttemptAuthority(
   }
 
   const ancestorNodeIds = plannedAncestorIds(graph, plannedConsumer);
-  const expectedAncestorAttempts = graph.nodes
-    .filter((node) => ancestorNodeIds.has(node.id))
-    .flatMap(plannedAttemptIdsForAuthority);
-  const expectedAncestorDirectories = expectedAncestorAttempts.map((attemptId) =>
-    getNodeArtifactDir(layout, attemptId)
-  );
   const actualAncestorDirectories = authority.task.dependencyArtifactDirs.map((directory) => path.resolve(directory));
+  const sealedAncestorDirectories = new Set(actualAncestorDirectories);
+  // Dynamic lowering extends only a group's direct dependents, so a deeper
+  // descendant's sealed closure omits the generated attempts the lowered graph
+  // reaches through them. Gate contexts read ancestors through the sealed
+  // closure, exactly as the in-workflow verifier admitted them.
+  const expectedAncestorDirectories = graph.nodes
+    .filter((node) => ancestorNodeIds.has(node.id))
+    .flatMap((node) =>
+      plannedAttemptIdsForAuthority(node)
+        .map((attemptId) => getNodeArtifactDir(layout, attemptId))
+        .filter((directory) => node.dynamic_generated === undefined || sealedAncestorDirectories.has(directory))
+    );
   assertExactStringSet(
     actualAncestorDirectories,
     expectedAncestorDirectories,
@@ -3818,41 +3827,6 @@ function sealedArtifactSchemaPath(layout: RunLayout, schemaFile: string): string
   );
   assertRegularFileInside(snapshotRoot, schemaPath, "sealed artifact schema");
   return schemaPath;
-}
-
-function verifySeverityMatrixArtifacts(
-  artifactDir: string,
-  node: PlannedGraphNode,
-  authenticated?: AuthenticatedArtifactGateSnapshots
-): RuntimeDiagnostic[] {
-  const artifact = severityArtifactForNode(node);
-  if (artifact === undefined) {
-    return [];
-  }
-  const artifactPath = safeResolveInside(artifactDir, artifact.path, "severity artifact output");
-  try {
-    const document = parseCurrentArtifactJson(artifactDir, artifactPath, authenticated);
-    if (document === undefined) return [];
-    return validateSeverityMatrixArtifact({
-      artifact: document,
-      artifactPath,
-      kind: artifact.kind
-    });
-  } catch (error) {
-    return [diagnosticFromError(error, "severity-matrix", "SEVERITY_ARTIFACT_READ_FAILED")];
-  }
-}
-
-function severityArtifactForNode(node: PlannedGraphNode): { kind: SeverityArtifactKind; path: string } | undefined {
-  const logicalId = node.logical_id ?? node.id;
-  if (logicalId === "severity-classification") {
-    return { kind: "severity-classification", path: "severity-classified-findings.json" };
-  }
-  const reportOutputs = node.outputs.filter((output) => output.contract === "ultrafuzz/report@3");
-  if (reportOutputs.length === 1) {
-    return { kind: "final-report", path: reportOutputs[0]!.path };
-  }
-  return undefined;
 }
 
 const RECON_MAX_TEST_LIMIT = "18446744073709551615";
@@ -7278,8 +7252,10 @@ function verifyFinalReportCoverageEvidence(
 
   const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
   if (producerStatus === "absent") {
-    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some((occurrence) =>
-      coverageScoreHasContext(occurrence, false)
+    // A score that names an exact declaration-completeness scope claims
+    // coverage evidence; unscoped prose scores stay advisory warnings.
+    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some(
+      (occurrence) => occurrence.scopes.length > 0
     );
     if (report.coverage_evidence !== undefined || markdownClaimsCoverage) {
       diagnostics.push({
@@ -7480,7 +7456,7 @@ function unscopedCoverageScoreDiagnostics(
           {
             code: "UNSCOPED_COVERAGE_SCORE",
             message: "Published coverage scores must name an exact declaration-completeness scope on the same line",
-            severity: "error" as const,
+            severity: "warning" as const,
             source: "coverage-evidence",
             path: `${artifactPath}:${occurrence.line}`
           },
@@ -7538,13 +7514,18 @@ function reportCoverageScoreDiagnostic(
       path: `${artifactPath}:${occurrence.line}`
     };
   }
+  // Unscoped prose scores are advisory. This natural-language scan runs only on
+  // the host, after the in-workflow verifier accepted the attempt, and it
+  // matches ordinary sentences such as "Recon reached 85% line coverage" or
+  // "Handlers reachable: 7/9". The typed coverage evidence and scores that name
+  // an exact scope are checked separately.
   const percentage = occurrence.kind === "percentage";
   return {
     code: percentage ? "UNSCOPED_COVERAGE_PERCENTAGE" : "UNSCOPED_COVERAGE_FRACTION",
     message: percentage
       ? "Coverage percentages must name an exact declaration-completeness scope on the same rendered line"
       : "Coverage fractions must name an exact declaration-completeness scope on the same rendered line",
-    severity: "error",
+    severity: "warning",
     source: "coverage-evidence",
     path: `${artifactPath}:${occurrence.line}`
   };

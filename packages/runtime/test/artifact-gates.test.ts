@@ -617,7 +617,7 @@ function writeSealedFixtureTaskAuthority(
   suppliedTasks?: readonly SmithersTaskManifestTask[]
 ): void {
   const sealedNodes = nodes.map((node) => {
-    if (node.kind !== "agentic" || node.workflow !== undefined) return node;
+    if (node.kind !== "agentic" || node.workflow !== undefined || node.dynamic !== undefined) return node;
     const attempts = fixtureAttemptIds(node);
     return {
       ...node,
@@ -2508,6 +2508,57 @@ test("severity classification gates preserve triaged fields and enforce the fina
   );
 });
 
+test("severity classification keeps a false-positive record without severity, impact, or likelihood", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-severity-false-positive" });
+  const triageNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "triage",
+    logical_id: "triage",
+    artifact_dir: "artifacts/triage",
+    outputs: [boundOutput("triaged-findings.json", "ultrafuzz/triaged-findings@1", true)]
+  };
+  const severityNode: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: "severity-classification",
+    logical_id: "severity-classification",
+    depends_on: [triageNode.id],
+    artifact_dir: "artifacts/severity-classification",
+    outputs: [boundOutput("severity-classified-findings.json", "ultrafuzz/severity-classified-findings@1", true)]
+  };
+  const nodes = [triageNode, severityNode];
+  writePlannedGraph(layout, nodes);
+  const triageTask = sealedTaskForNode(layout, triageNode);
+  const severityTask = sealedTaskForNode(layout, severityNode, [triageTask]);
+  const tasks = [triageTask, severityTask];
+  // The schema requires the severity fields only for true positives, and the
+  // prompt forbids guessing them for records it keeps but does not promote.
+  const falsePositive = currentFinding("finding-unreachable", {
+    status: "false-positive",
+    triage_classification: "false-positive",
+    notes: [
+      "triage_reason=the state is unreachable through the public path",
+      "demotion_reason=no public entrypoint reaches the failing state"
+    ]
+  });
+  writeDeclaredArtifactNode(layout, triageTask.attemptId, triageNode.outputs, {
+    "triaged-findings.json": JSON.stringify([falsePositive])
+  });
+  writeDeclaredArtifactNode(layout, severityTask.attemptId, severityNode.outputs, {
+    "severity-classified-findings.json": JSON.stringify([falsePositive])
+  });
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  const result = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    severityNode,
+    severityTask.attemptId,
+    { task: severityTask, tasks },
+    authenticatedSnapshotsForNode(layout, severityNode, severityTask.attemptId)
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
 test("triage gates preserve every deduped finding and upstream note", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-triage-preservation" });
   const dedupeNode: PlannedGraphNode = {
@@ -3624,6 +3675,434 @@ for (const markerAuthority of ["dangling leaf", "symlinked root"] as const) {
     );
   });
 }
+
+const AGGREGATION_FIXTURE_GROUPS = {
+  strategies: { defaults: { failure_policy: "continue" } },
+  goals: { defaults: { failure_policy: "continue" } },
+  review: {}
+};
+const AGGREGATION_DYNAMIC_STORAGE_ID = "dynamic-goal-template-0123456789abcdef0123456789abcdef";
+
+interface AggregationFixtureSource {
+  attemptId: string;
+  logicalNodeId: string;
+  manifestPath: string;
+  manifestSha256: string;
+  testRelativePath: string;
+  testPath: string;
+  testBytes: Buffer;
+}
+
+function aggregationFixtureNode(
+  id: string,
+  options: { group?: string; dependsOn?: string[]; outputs?: PlannedGraphNode["outputs"] } = {}
+): PlannedGraphNode {
+  return {
+    ...plannedNode([]),
+    id,
+    logical_id: id,
+    display_name: id,
+    ...(options.group === undefined ? {} : { group: options.group }),
+    depends_on: options.dependsOn ?? [],
+    artifact_dir: `artifacts/${id}`,
+    prompt_id: id,
+    prompt_path: `strategies/${id}.md`,
+    outputs: options.outputs ?? [boundOutput("generated-tests.json", "ultrafuzz/generated-tests@3", true)]
+  };
+}
+
+/** A goal template and one materialized goal, with the identity split `materializeDynamicRuntime` writes. */
+function aggregationDynamicGoalNodes(sourceNodeId: string): {
+  template: PlannedGraphNode;
+  generated: PlannedGraphNode;
+} {
+  const template: PlannedGraphNode = {
+    ...aggregationFixtureNode("goal-template", { group: "goals", dependsOn: [sourceNodeId] }),
+    dynamic: {
+      from: { node: sourceNodeId, path: "goal-plan.md" },
+      key: "id",
+      node_id: "dynamic:threat:{{ item.id }}",
+      status: "pending"
+    }
+  };
+  const generated: PlannedGraphNode = {
+    ...template,
+    id: "dynamic:threat:t1",
+    display_name: "goal-template: t1",
+    artifact_dir: `artifacts/${AGGREGATION_DYNAMIC_STORAGE_ID}`,
+    artifact_dirs: [`artifacts/${AGGREGATION_DYNAMIC_STORAGE_ID}`],
+    model_fanout: [
+      {
+        attempt_id: AGGREGATION_DYNAMIC_STORAGE_ID,
+        model_profile_id: "default",
+        agent_ref: "CodexAgent",
+        model_name: "gpt-test",
+        reasoning_effort: "high",
+        model_index: 0,
+        loop_index: 0,
+        attempt_index: 0
+      }
+    ],
+    workflow: {
+      node_id: `node:${AGGREGATION_DYNAMIC_STORAGE_ID}`,
+      task_node_ids: [`node:${AGGREGATION_DYNAMIC_STORAGE_ID}`]
+    },
+    dynamic: undefined,
+    dynamic_generated: {
+      group_node_id: template.id,
+      source_node_id: sourceNodeId,
+      source_attempt_id: sourceNodeId,
+      expansion_key: "t1",
+      item_sha256: "a".repeat(64),
+      storage_id: AGGREGATION_DYNAMIC_STORAGE_ID,
+      manifest_path: `dynamic-expansions/${template.id}.json`
+    }
+  };
+  return { template, generated };
+}
+
+/** Publish and controller-finalize a generated-tests producer attempt holding one test file. */
+function finalizeGeneratedTestsProducer(
+  layout: ReturnType<typeof createRunLayout>,
+  node: PlannedGraphNode,
+  attemptId = node.id
+): AggregationFixtureSource {
+  const testRelativePath = `generated-tests/${node.logical_id}.t.sol`;
+  const testBytes = Buffer.from(`contract GeneratedBy${attemptId.length} {}\n`, "utf8");
+  registerArtifactNode(layout, attemptId, node.outputs);
+  const testPath = writeArtifactFile(layout, attemptId, testRelativePath, testBytes);
+  const manifestPath = writeArtifactFile(
+    layout,
+    attemptId,
+    "generated-tests.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: layout.runId,
+      node_id: node.logical_id,
+      framework: "foundry",
+      generated_tests: [
+        {
+          path: testRelativePath,
+          size_bytes: testBytes.byteLength,
+          sha256: createHash("sha256").update(testBytes).digest("hex")
+        }
+      ],
+      support_files: []
+    })
+  );
+  finalizeArtifactNode(layout, attemptId, node.outputs, { concreteNodeId: node.id, logicalNodeId: node.logical_id }, [
+    testRelativePath
+  ]);
+  return {
+    attemptId,
+    logicalNodeId: node.logical_id,
+    manifestPath,
+    manifestSha256: createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex"),
+    testRelativePath,
+    testPath,
+    testBytes
+  };
+}
+
+/** The aggregation manifest an agent writes after copying every listed source bundle into its workspace. */
+function writeAggregationManifestCopying(
+  layout: ReturnType<typeof createRunLayout>,
+  aggregationNode: PlannedGraphNode,
+  sources: readonly AggregationFixtureSource[]
+): void {
+  const workspace = path.join(layout.workspacesDir, aggregationNode.id);
+  fs.mkdirSync(workspace, { recursive: true });
+  const bundleIdentity = (source: AggregationFixtureSource) => ({
+    strategy: source.logicalNodeId,
+    node_id: source.logicalNodeId,
+    source_attempt_id: source.attemptId,
+    attempt_index: 0,
+    source_manifest_path: source.manifestPath,
+    source_manifest_relative_path: "generated-tests.json",
+    source_manifest_sha256: source.manifestSha256
+  });
+  const files = sources.map((source) => {
+    const destinationRelativePath = `test/foundry/${source.attemptId}/${path.basename(source.testPath)}`;
+    const destinationPath = path.join(workspace, ...destinationRelativePath.split("/"));
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.writeFileSync(destinationPath, source.testBytes);
+    return {
+      ...bundleIdentity(source),
+      source_artifact_path: source.testPath,
+      source_relative_path: source.testRelativePath,
+      destination_path: destinationPath,
+      destination_relative_path: destinationRelativePath,
+      size_bytes: source.testBytes.byteLength,
+      sha256: createHash("sha256").update(source.testBytes).digest("hex")
+    };
+  });
+  writeArtifactFile(
+    layout,
+    aggregationNode.id,
+    "aggregation.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.aggregation-manifest.v1",
+      source_generated_tests: sources.length,
+      copied_generated_tests: sources.length,
+      source_support_files: 0,
+      copied_support_files: 0,
+      source_bundles: sources.map((source) => ({
+        ...bundleIdentity(source),
+        source_run_id: layout.runId,
+        framework: "foundry",
+        generated_test_count: 1,
+        support_file_count: 0,
+        disposition: "copied"
+      })),
+      files,
+      support_files: [],
+      skipped_files: []
+    })
+  );
+}
+
+/** Run the host gate the way finalization does: on the persisted graph node with its sealed task set. */
+function verifyAggregationAttempt(
+  layout: ReturnType<typeof createRunLayout>,
+  aggregationTask: SmithersTaskManifestTask,
+  tasks: SmithersTaskManifestTask[],
+  admittedDependencyAttemptIds: string[]
+): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph;
+  const node = graph.nodes.find((candidate) => candidate.id === aggregationTask.concreteNodeId);
+  assert.ok(node);
+  return verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    aggregationTask.attemptId,
+    { task: aggregationTask, tasks, admittedDependencyAttemptIds },
+    authenticatedSnapshotsForNode(layout, node, aggregationTask.attemptId)
+  );
+}
+
+test("host aggregation intake skips a failed optional generated-tests producer the verifier did not admit", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-failed-optional" });
+  const verified = aggregationFixtureNode("strategy-a", { group: "strategies" });
+  const failed = aggregationFixtureNode("strategy-b", { group: "strategies" });
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [verified.id, failed.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [verified, failed, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const verifiedTask = sealedTaskForNode(layout, verified);
+  const failedTask = sealedTaskForNode(layout, failed);
+  const aggregationTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, aggregationNode, [verifiedTask, failedTask]),
+    optionalDependencyArtifactDirs: [verifiedTask.artifactDir, failedTask.artifactDir]
+  };
+  const tasks = [verifiedTask, failedTask, aggregationTask];
+  const source = finalizeGeneratedTestsProducer(layout, verified);
+  // The continue-policy strategy failed before its verifier wrote a marker.
+  registerArtifactNode(layout, failedTask.attemptId, failed.outputs);
+  updateNodeState(layout, failedTask.attemptId, { status: "failed" });
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, [source]);
+  const result = verifyAggregationAttempt(layout, aggregationTask, tasks, [verifiedTask.attemptId]);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // The admitted producer is still part of the authority: omitting it fails.
+  writeAggregationManifestCopying(layout, aggregationNode, []);
+  const omitted = verifyAggregationAttempt(layout, aggregationTask, tasks, [verifiedTask.attemptId]);
+  assert.equal(omitted.ok, false);
+  assert.ok(
+    omitted.diagnostics.some((diagnostic) => diagnostic.message.includes("omits authenticated source bundle")),
+    JSON.stringify(omitted.diagnostics)
+  );
+
+  // An admitted producer is read only once the controller finalized it.
+  writeAggregationManifestCopying(layout, aggregationNode, [source]);
+  fs.unlinkSync(path.join(layout.root, ".ultrafuzz-verification", `${verifiedTask.attemptId}.json`));
+  const unfinalized = verifyAggregationAttempt(layout, aggregationTask, tasks, [verifiedTask.attemptId]);
+  assert.equal(unfinalized.ok, false);
+  assert.ok(
+    unfinalized.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" &&
+        diagnostic.message.includes(`authority is invalid for ${verifiedTask.attemptId}`)
+    ),
+    JSON.stringify(unfinalized.diagnostics)
+  );
+});
+
+test("host aggregation intake keys a directly consumed dynamic producer by its storage attempt ID", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-direct-dynamic" });
+  const source = aggregationFixtureNode("goal-plan", {
+    outputs: [boundOutput("goal-plan.md", "ultrafuzz/nonempty-markdown@1", true)]
+  });
+  const { template, generated } = aggregationDynamicGoalNodes(source.id);
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [generated.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [source, template, generated, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const sourceTask = sealedTaskForNode(layout, source);
+  const generatedTask = sealedTaskForNode(layout, generated, [sourceTask], AGGREGATION_DYNAMIC_STORAGE_ID);
+  const aggregationTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, aggregationNode, [generatedTask]),
+    optionalDependencyArtifactDirs: [generatedTask.artifactDir]
+  };
+  const tasks = [sourceTask, generatedTask, aggregationTask];
+  writeDeclaredArtifactNode(layout, sourceTask.attemptId, source.outputs, { "goal-plan.md": "# Goal plan\n" });
+  const dynamicSource = finalizeGeneratedTestsProducer(layout, generated, AGGREGATION_DYNAMIC_STORAGE_ID);
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, [dynamicSource]);
+  const result = verifyAggregationAttempt(layout, aggregationTask, tasks, [
+    sourceTask.attemptId,
+    AGGREGATION_DYNAMIC_STORAGE_ID
+  ]);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("host aggregation intake attributes model-fanout bundles to the loop attempt index the verifier uses", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-model-fanout" });
+  const fanout: PlannedGraphNode = {
+    ...aggregationFixtureNode("strategy-a", { group: "strategies" }),
+    model_fanout: [0, 1].map((modelIndex) => ({
+      model_profile_id: `model-${modelIndex}`,
+      agent_ref: "CodexAgent",
+      model_name: "gpt-test",
+      reasoning_effort: "high",
+      model_index: modelIndex,
+      loop_index: 0,
+      attempt_index: modelIndex
+    }))
+  };
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [fanout.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [fanout, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const fanoutTasks = [0, 1].map((modelIndex) =>
+    smithersTaskForNode({
+      layout,
+      node: fanout,
+      attemptId: `${fanout.id}__model_${modelIndex}__attempt_${modelIndex}`,
+      modelIndex
+    })
+  );
+  const aggregationTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, aggregationNode, fanoutTasks),
+    optionalDependencyArtifactDirs: fanoutTasks.map((task) => task.artifactDir)
+  };
+  const tasks = [...fanoutTasks, aggregationTask];
+  const sources = fanoutTasks.map((task) => {
+    const source = finalizeGeneratedTestsProducer(layout, fanout, task.attemptId);
+    // The controller records the model attempt index (here 0 and 1) in each
+    // producer manifest; the verifier attributes both bundles to loop attempt 0.
+    const manifestPath = path.join(task.artifactDir, "artifact-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { provenance: { attempt_index?: number } };
+    manifest.provenance.attempt_index = task.metadata.model.attemptIndex;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    const state = readRunState(layout);
+    const provenance = state.nodes[task.attemptId]?.provenance;
+    assert.ok(provenance !== undefined && "output_contracts" in provenance && provenance.output_contracts);
+    provenance.output_contracts.artifact_manifest_sha256 = createHash("sha256")
+      .update(fs.readFileSync(manifestPath))
+      .digest("hex");
+    writeRunState(layout, state);
+    return source;
+  });
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, sources);
+  const result = verifyAggregationAttempt(
+    layout,
+    aggregationTask,
+    tasks,
+    fanoutTasks.map((task) => task.attemptId)
+  );
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("host aggregation intake follows the sealed closure below a dynamic group's direct dependent", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-transitive-dynamic" });
+  const source = aggregationFixtureNode("goal-plan", {
+    outputs: [boundOutput("goal-plan.md", "ultrafuzz/nonempty-markdown@1", true)]
+  });
+  const { template, generated } = aggregationDynamicGoalNodes(source.id);
+  const join = aggregationFixtureNode("goal-join", {
+    group: "review",
+    dependsOn: [generated.id],
+    outputs: [boundOutput("goal-join.md", "ultrafuzz/nonempty-markdown@1", true)]
+  });
+  const strategy = aggregationFixtureNode("strategy-a", { group: "strategies" });
+  const unrelated = aggregationFixtureNode("strategy-z", { group: "strategies" });
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [join.id, strategy.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [source, template, generated, join, strategy, unrelated, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const sourceTask = sealedTaskForNode(layout, source);
+  const generatedTask = sealedTaskForNode(layout, generated, [sourceTask], AGGREGATION_DYNAMIC_STORAGE_ID);
+  const joinTask: SmithersTaskManifestTask = {
+    ...sealedTaskForNode(layout, join, [generatedTask]),
+    optionalDependencyArtifactDirs: [generatedTask.artifactDir]
+  };
+  const strategyTask = sealedTaskForNode(layout, strategy);
+  const unrelatedTask = sealedTaskForNode(layout, unrelated);
+  // Dynamic lowering extends only a group's direct dependents, so the sealed
+  // closure of this grandchild keeps its compile-time ancestors and never
+  // names the generated attempt that the lowered planned graph reaches.
+  const aggregationTaskWithClosure = (closure: readonly SmithersTaskManifestTask[]): SmithersTaskManifestTask => ({
+    ...smithersTaskForNode({
+      layout,
+      node: aggregationNode,
+      attemptId: aggregationNode.id,
+      dependencies: [joinTask.attemptId, strategyTask.attemptId],
+      dependencyArtifactDirs: closure.map((task) => task.artifactDir)
+    }),
+    optionalDependencyArtifactDirs: closure
+      .filter((task) => task.metadata.node.group === "strategies")
+      .map((task) => task.artifactDir)
+  });
+  const aggregationTask = aggregationTaskWithClosure([sourceTask, joinTask, strategyTask]);
+  const tasks = [sourceTask, generatedTask, joinTask, strategyTask, unrelatedTask, aggregationTask];
+  writeDeclaredArtifactNode(layout, sourceTask.attemptId, source.outputs, { "goal-plan.md": "# Goal plan\n" });
+  finalizeGeneratedTestsProducer(layout, generated, AGGREGATION_DYNAMIC_STORAGE_ID);
+  const strategySource = finalizeGeneratedTestsProducer(layout, strategy);
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+
+  writeAggregationManifestCopying(layout, aggregationNode, [strategySource]);
+  const admitted = [sourceTask.attemptId, joinTask.attemptId, strategyTask.attemptId];
+  const result = verifyAggregationAttempt(layout, aggregationTask, tasks, admitted);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // Only generated attempts may be absent; the closure still may not reach
+  // outside the planned ancestors.
+  const widenedTask = aggregationTaskWithClosure([sourceTask, joinTask, strategyTask, unrelatedTask]);
+  const widened = verifyAggregationAttempt(
+    layout,
+    widenedTask,
+    tasks.map((task) => (task === aggregationTask ? widenedTask : task)),
+    admitted
+  );
+  assert.equal(widened.ok, false);
+  assert.ok(
+    widened.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        `artifact ancestor closure does not match the exact planned set; unexpected: ${JSON.stringify(unrelatedTask.artifactDir)}`
+      )
+    ),
+    JSON.stringify(widened.diagnostics)
+  );
+});
 
 test("review lifecycle and strategy gates authenticate every dedupe, triage, and severity transition", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-review-lifecycle" });
@@ -8781,6 +9260,19 @@ test("producer-free final reports require the exact not-planned implementation c
   const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  for (const [prose, code] of [
+    ["Recon reached 85% line coverage on Vault.sol.", "UNSCOPED_COVERAGE_PERCENTAGE"],
+    ["Coverage of withdraw() was 3/4 branches in the replay.", "UNSCOPED_COVERAGE_FRACTION"]
+  ] as const) {
+    writeDeclaredArtifactNode(layout, node.id, outputs, {
+      "deliverables/report.md": `# Ultrafuzz report\n\n${prose}\n`,
+      "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
+    });
+    const unscopedProse = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(unscopedProse.ok, true, `${prose}: ${JSON.stringify(unscopedProse.diagnostics)}`);
+    assertAdvisoryCoverageScore(unscopedProse, code, prose);
+  }
+
   writeDeclaredArtifactNode(layout, node.id, outputs, {
     "deliverables/report.md": "# Ultrafuzz report\n\nrecon-selected-declaration-completeness: `1/1`\n",
     "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
@@ -8885,6 +9377,18 @@ test("final reports disclose planned but omitted implementation coverage without
     fs.existsSync(path.join(layout.artifactsDir, optionalTask.attemptId, "implemented-properties.json")),
     false
   );
+
+  const prose = "Recon reached 85% line coverage on Vault.sol.";
+  writeArtifactFile(layout, reportTask.attemptId, "report.md", `# Ultrafuzz report\n\n${prose}\n`);
+  const unadmittedCoverageProse = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    reportNode,
+    reportTask.attemptId,
+    { task: reportTask, tasks, admittedDependencyAttemptIds: [] },
+    authenticatedSnapshotsForNode(layout, reportNode, reportTask.attemptId)
+  );
+  assert.equal(unadmittedCoverageProse.ok, true, JSON.stringify(unadmittedCoverageProse.diagnostics));
+  assertAdvisoryCoverageScore(unadmittedCoverageProse, "UNSCOPED_COVERAGE_PERCENTAGE", prose);
 });
 
 test("final report gate joins the default recon-only campaign backend", () => {
@@ -12568,10 +13072,16 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   ]) {
     publish(evidence, `${scopedMarkdown}\n## Notes\n\n${unscopedProducerScore}\n`);
     const hiddenProducerScope = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-    assert.equal(hiddenProducerScope.ok, false, unscopedProducerScore);
+    // Prose scores are advisory; the typed evidence and canonical section bind the result.
+    assert.equal(
+      hiddenProducerScope.ok,
+      true,
+      `${unscopedProducerScore}: ${JSON.stringify(hiddenProducerScope.diagnostics)}`
+    );
     assert.ok(
-      hiddenProducerScope.diagnostics.some((diagnostic) =>
-        /^UNSCOPED_COVERAGE_(?:FRACTION|PERCENTAGE)$/u.test(diagnostic.code)
+      hiddenProducerScope.diagnostics.some(
+        (diagnostic) =>
+          /^UNSCOPED_COVERAGE_(?:FRACTION|PERCENTAGE)$/u.test(diagnostic.code) && diagnostic.severity === "warning"
       ),
       JSON.stringify(hiddenProducerScope.diagnostics)
     );
@@ -12903,13 +13413,22 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
     JSON.stringify(contradictoryScopedFraction.diagnostics)
   );
 
-  publish(evidence, `${scopedMarkdown}\n## Notes\n\nRetry 1/2 reproduced the same revert.\n`);
-  const ordinaryFraction = verifyRequiredArtifactsForAttempt(layout, node, node.id);
-  assert.equal(ordinaryFraction.ok, false);
-  assert.ok(
-    ordinaryFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_SCORE"),
-    JSON.stringify(ordinaryFraction.diagnostics)
-  );
+  for (const ordinaryProse of [
+    "Retry 1/2 reproduced the same revert.",
+    "Handlers reachable: 7/9",
+    "Target: 90% of Recon-selected declarations.",
+    "After iteration 2 we covered 41 of 57 functions."
+  ]) {
+    publish(evidence, `${scopedMarkdown}\n## Notes\n\n${ordinaryProse}\n`);
+    const ordinary = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(ordinary.ok, true, `${ordinaryProse}: ${JSON.stringify(ordinary.diagnostics)}`);
+    assert.ok(
+      ordinary.diagnostics.some(
+        (diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_SCORE" && diagnostic.severity === "warning"
+      ),
+      `${ordinaryProse}: ${JSON.stringify(ordinary.diagnostics)}`
+    );
+  }
 
   const staleGoal = structuredClone(goal);
   staleGoal.current_measurement.covered_ranges = 0;
@@ -13715,6 +14234,24 @@ test("coverage gate authenticates Vyper declaration boundaries in the Recon sele
   );
 });
 
+/** Natural-language coverage scores are reported only as advisory warnings, never as gate errors. */
+function assertAdvisoryCoverageScore(
+  result: ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt>,
+  code: "UNSCOPED_COVERAGE_PERCENTAGE" | "UNSCOPED_COVERAGE_FRACTION",
+  label: string
+): void {
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === code && diagnostic.severity === "warning"),
+    `${label}: ${JSON.stringify(result.diagnostics)}`
+  );
+  assert.ok(
+    result.diagnostics.every(
+      (diagnostic) => !diagnostic.code.startsWith("UNSCOPED_COVERAGE_") || diagnostic.severity === "warning"
+    ),
+    `${label}: ${JSON.stringify(result.diagnostics)}`
+  );
+}
+
 test("final report preserves typed coverage evidence and its canonical Markdown projection", () => {
   const lcovArtifactPath = "reports/2026/08/coverage-input.lcov";
   const layout = createRunLayout({
@@ -14094,16 +14631,12 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${mixedScore}\n`);
     const mixed = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(mixed.ok, false, mixedScore);
     const normalizedMixedScore = mixedScore.normalize("NFKC").replace(/[\u2044\u2215\u29f8]/gu, "/");
-    assert.ok(
-      mixed.diagnostics.some(
-        (diagnostic) =>
-          diagnostic.code ===
-          (/%|٪|&(?:percnt|#0*37|#x0*25);|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
-            ? "UNSCOPED_COVERAGE_PERCENTAGE"
-            : "UNSCOPED_COVERAGE_FRACTION")
-      ),
+    assertAdvisoryCoverageScore(
+      mixed,
+      /%|٪|&(?:percnt|#0*37|#x0*25);|\bpct\b\.?|\bper[ -]?cent(?:age)?\b/iu.test(normalizedMixedScore)
+        ? "UNSCOPED_COVERAGE_PERCENTAGE"
+        : "UNSCOPED_COVERAGE_FRACTION",
       mixedScore
     );
   }
@@ -14216,11 +14749,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${crossRenderedLineScope}\n`);
     const crossLine = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(crossLine.ok, false, crossRenderedLineScope);
-    assert.ok(
-      crossLine.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-      `${crossRenderedLineScope}: ${JSON.stringify(crossLine.diagnostics)}`
-    );
+    assert.equal(crossLine.ok, true, `${crossRenderedLineScope}: ${JSON.stringify(crossLine.diagnostics)}`);
+    assertAdvisoryCoverageScore(crossLine, "UNSCOPED_COVERAGE_PERCENTAGE", crossRenderedLineScope);
   }
 
   for (const implicitlyVisibleScore of [
@@ -14252,11 +14782,13 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
     const visibleAfterImplicitClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(visibleAfterImplicitClose.ok, false, implicitlyVisibleScore);
-    assert.ok(
-      visibleAfterImplicitClose.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+    // Only the stylesheet cases fail; the prose score itself stays advisory.
+    assert.equal(
+      visibleAfterImplicitClose.ok,
+      !implicitlyVisibleScore.startsWith("<style>"),
       `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterImplicitClose.diagnostics)}`
     );
+    assertAdvisoryCoverageScore(visibleAfterImplicitClose, "UNSCOPED_COVERAGE_PERCENTAGE", implicitlyVisibleScore);
   }
 
   for (const paragraphClosingTag of [
@@ -14275,11 +14807,12 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     const implicitlyVisibleScore = `<p hidden>x<${paragraphClosingTag}${openAttribute}>Overall coverage was 100%.</${paragraphClosingTag}>`;
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
     const visibleAfterParagraphClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(visibleAfterParagraphClose.ok, false, implicitlyVisibleScore);
-    assert.ok(
-      visibleAfterParagraphClose.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
+    assert.equal(
+      visibleAfterParagraphClose.ok,
+      true,
       `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterParagraphClose.diagnostics)}`
     );
+    assertAdvisoryCoverageScore(visibleAfterParagraphClose, "UNSCOPED_COVERAGE_PERCENTAGE", implicitlyVisibleScore);
   }
 
   writeArtifact(
@@ -14294,11 +14827,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   const nestedHtml = `${"<span>".repeat(4_000)}Coverage was 100%.${"</span>".repeat(4_000)}`;
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${nestedHtml}\n`);
   const deeplyNestedHtml = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(deeplyNestedHtml.ok, false);
-  assert.ok(
-    deeplyNestedHtml.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-    JSON.stringify(deeplyNestedHtml.diagnostics)
-  );
+  assert.equal(deeplyNestedHtml.ok, true, JSON.stringify(deeplyNestedHtml.diagnostics));
+  assertAdvisoryCoverageScore(deeplyNestedHtml, "UNSCOPED_COVERAGE_PERCENTAGE", "deeply nested HTML");
 
   writeArtifact(
     layout,
@@ -14404,18 +14934,18 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized score: 100%.\n`);
   const disguisedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(disguisedPercentage.ok, false);
-  assert.ok(disguisedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(disguisedPercentage.ok, true, JSON.stringify(disguisedPercentage.diagnostics));
+  assertAdvisoryCoverageScore(disguisedPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "disguisedPercentage");
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nOverall coverage reached 99.5%.\n`);
   const decimalPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(decimalPercentage.ok, false);
-  assert.ok(decimalPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(decimalPercentage.ok, true, JSON.stringify(decimalPercentage.diagnostics));
+  assertAdvisoryCoverageScore(decimalPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "decimalPercentage");
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n100&#37; standardized coverage.\n`);
   const encodedPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(encodedPercentage.ok, false);
-  assert.ok(encodedPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(encodedPercentage.ok, true, JSON.stringify(encodedPercentage.diagnostics));
+  assertAdvisoryCoverageScore(encodedPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "encodedPercentage");
 
   writeArtifact(
     layout,
@@ -14424,13 +14954,13 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     `${scopedMarkdown}\n## Notes\n\nStandardized coverage was 100&percnt;.\n`
   );
   const namedEntityPercentage = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(namedEntityPercentage.ok, false);
-  assert.ok(namedEntityPercentage.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"));
+  assert.equal(namedEntityPercentage.ok, true, JSON.stringify(namedEntityPercentage.diagnostics));
+  assertAdvisoryCoverageScore(namedEntityPercentage, "UNSCOPED_COVERAGE_PERCENTAGE", "namedEntityPercentage");
 
   writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\nStandardized coverage: 39/39.\n`);
   const disguisedFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(disguisedFraction.ok, false);
-  assert.ok(disguisedFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"));
+  assert.equal(disguisedFraction.ok, true, JSON.stringify(disguisedFraction.diagnostics));
+  assertAdvisoryCoverageScore(disguisedFraction, "UNSCOPED_COVERAGE_FRACTION", "disguisedFraction");
 
   writeArtifact(
     layout,
@@ -14536,11 +15066,27 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [coverageProseIssue] }))
   );
   const proseInTypedReport = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(proseInTypedReport.ok, false);
-  assert.ok(
-    proseInTypedReport.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-    JSON.stringify(proseInTypedReport.diagnostics)
-  );
+  assert.equal(proseInTypedReport.ok, true, JSON.stringify(proseInTypedReport.diagnostics));
+  assertAdvisoryCoverageScore(proseInTypedReport, "UNSCOPED_COVERAGE_PERCENTAGE", "typed report prose");
+
+  for (const [note, code] of [
+    ["Recon reached 85% line coverage on Vault.sol.", "UNSCOPED_COVERAGE_PERCENTAGE"],
+    ["Coverage of withdraw() was 3/4 branches in the replay.", "UNSCOPED_COVERAGE_FRACTION"]
+  ] as const) {
+    const campaignProseIssue = {
+      ...structuredClone(coverageProseIssue),
+      notes: ["triage_reason=public path is reachable", note]
+    };
+    writeArtifact(
+      layout,
+      reportNode.id,
+      "report.json",
+      JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [campaignProseIssue] }))
+    );
+    const campaignProse = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(campaignProse.ok, true, `${note}: ${JSON.stringify(campaignProse.diagnostics)}`);
+    assertAdvisoryCoverageScore(campaignProse, code, note);
+  }
 
   for (const noteSequence of [["Coverage:\n\n100%."], ["Coverage overview:\n\n100%."], ["Coverage:", "100%."]]) {
     const jsonBypassIssue = {
@@ -14554,11 +15100,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
       JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [jsonBypassIssue] }))
     );
     const jsonBypass = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-    assert.equal(jsonBypass.ok, false, JSON.stringify(noteSequence));
-    assert.ok(
-      jsonBypass.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_PERCENTAGE"),
-      `${JSON.stringify(noteSequence)}: ${JSON.stringify(jsonBypass.diagnostics)}`
-    );
+    assert.equal(jsonBypass.ok, true, `${JSON.stringify(noteSequence)}: ${JSON.stringify(jsonBypass.diagnostics)}`);
+    assertAdvisoryCoverageScore(jsonBypass, "UNSCOPED_COVERAGE_PERCENTAGE", JSON.stringify(noteSequence));
   }
 
   const persistentCoverageLabelIssue = {
@@ -14650,11 +15193,8 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
     JSON.stringify(currentReport(layout.runId, { coverage_evidence: evidence, issues: [evaluatorFractionIssue] }))
   );
   const evaluatorFraction = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
-  assert.equal(evaluatorFraction.ok, false);
-  assert.ok(
-    evaluatorFraction.diagnostics.some((diagnostic) => diagnostic.code === "UNSCOPED_COVERAGE_FRACTION"),
-    JSON.stringify(evaluatorFraction.diagnostics)
-  );
+  assert.equal(evaluatorFraction.ok, true, JSON.stringify(evaluatorFraction.diagnostics));
+  assertAdvisoryCoverageScore(evaluatorFraction, "UNSCOPED_COVERAGE_FRACTION", "evaluator fraction");
 
   const nestedCoverageReport = currentReport(layout.runId, { coverage_evidence: evidence }) as Record<string, unknown>;
   nestedCoverageReport.coverage = { score: "100%" };
