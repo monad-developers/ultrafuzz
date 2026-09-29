@@ -35,11 +35,7 @@ import type {
   SyncRunInput,
   WorkflowCommandSummary
 } from "./types.js";
-import {
-  isTransientSnapshotRace,
-  retryTransientSnapshotObservation,
-  retryTransientSnapshotRead
-} from "./observation-snapshot.js";
+import { isTransientSnapshotRace, retryTransientSnapshotObservation } from "./observation-snapshot.js";
 import { summarizeRunProgress } from "./run-progress.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import {
@@ -327,10 +323,8 @@ export async function getRunHealth(input: {
     ]);
   }
   const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
-  const { state, metadata } = retryTransientSnapshotRead(() => ({
-    state: readRunState(evidence.layout),
-    metadata: readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId)
-  }));
+  const state = readRunState(evidence.layout);
+  const metadata = readRunMetadataDocument(evidence.layout.runMetadataPath, evidence.layout.runId);
   const auditProfile = metadata.audit_profile;
   const lifecycleDivergence = workflowLifecycleDivergenceDiagnostic(
     state.status,
@@ -499,12 +493,8 @@ function checkedRunLayout(runsRoot: string, runId: string) {
 
 function readRunListEntry(runRoot: string, runId: string): RunListEntry {
   const layout = layoutForRunRoot(runRoot, runId);
-  // A live run's controller, and observe-only synchronization from a concurrent `status`, republish
-  // both documents by atomic rename, so both strict reads share one bounded retry.
-  const { metadata, state } = retryTransientSnapshotRead(() => ({
-    metadata: readRunMetadataDocument(layout.runMetadataPath, runId),
-    state: readRunState(layout)
-  }));
+  const metadata = readRunMetadataDocument(layout.runMetadataPath, runId);
+  const state = readRunState(layout);
   return {
     run_id: runId,
     run_root: runRoot,
