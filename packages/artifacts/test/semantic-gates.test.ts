@@ -3304,7 +3304,7 @@ test("strict final reports preserve dropped false positives as exactly one non-p
     "copying the stale embedded lifecycle must still fail"
   );
   assert.equal(
-    checkPreservation({ ...row, summary: "Changed source summary" }).status,
+    checkPreservation({ ...row, severity_guess: "High" }).status,
     "failed",
     "other severity fields must still be preserved"
   );
@@ -3489,21 +3489,21 @@ test("bounded final reports close over every authenticated deduped finding", () 
     }).status,
     "passed"
   );
-  const tamperedProse = structuredClone(enrichedRow);
-  tamperedProse.summary = "Rewritten summary.";
+  const tamperedTitle = structuredClone(enrichedRow);
+  tamperedTitle.title = "Rewritten title";
   const tampered = executeSemanticGate("report-severity-classification-preservation", {
-    document: { issues: [], non_production_outcomes: [tamperedProse] },
+    document: { issues: [], non_production_outcomes: [tamperedTitle] },
     context: embeddedContext
   });
   assert.equal(tampered.status, "failed");
   assert.ok(
     tampered.status === "failed" &&
-      tampered.issues.some((entry) => /did not preserve dedupe field "summary"/u.test(entry.message))
+      tampered.issues.some((entry) => /did not preserve dedupe field "title"/u.test(entry.message))
   );
 
   // A promoted row must author its severity assessment even when the dedupe
-  // row already carried preliminary values (#931); every evidence field stays
-  // byte-preserved.
+  // row already carried preliminary values (#931); every identifying and
+  // classifying field stays exact.
   const promotedSourceFinding = {
     ...finding,
     impact: "Low",
@@ -3544,16 +3544,16 @@ test("bounded final reports close over every authenticated deduped finding", () 
     }).status,
     "passed"
   );
-  const promotedTamperedEvidence = structuredClone(promotedRow);
-  promotedTamperedEvidence.summary = "Rewritten promoted summary.";
+  const promotedTamperedGuess = structuredClone(promotedRow);
+  promotedTamperedGuess.severity_guess = "High";
   const promotedTampered = executeSemanticGate("report-severity-classification-preservation", {
-    document: { issues: [promotedTamperedEvidence], non_production_outcomes: [] },
+    document: { issues: [promotedTamperedGuess], non_production_outcomes: [] },
     context: promotedContext
   });
   assert.equal(promotedTampered.status, "failed");
   assert.ok(
     promotedTampered.status === "failed" &&
-      promotedTampered.issues.some((entry) => /did not preserve dedupe field "summary"/u.test(entry.message))
+      promotedTampered.issues.some((entry) => /did not preserve dedupe field "severity_guess"/u.test(entry.message))
   );
 
   // The disposition follows the row's own enriched classification, so a
@@ -3596,6 +3596,123 @@ test("bounded final reports close over every authenticated deduped finding", () 
           /Bounded lifecycle disposition must be promoted/u.test(entry.message)
       )
   );
+});
+
+test("a final report that rewords a carried finding's prose verifies with warnings in both report modes", () => {
+  // A bounded smoke run lost its whole report, before and after
+  // `resume --retry-failed`, because the report agent reworded one PoC step of a
+  // carried dedupe finding. Prose drift is a warning; the finding's identity,
+  // location, and classification fields still fail when changed.
+  const finding = {
+    id: "finding-a",
+    title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
+    summary: "Withdrawals round up against a donated balance.",
+    severity_guess: "Low",
+    dedupe_key: "root-a",
+    affected_files: ["src/Vault.sol"],
+    description: "Shareholder can withdraw one share which leads to capturing the forced surplus.",
+    proof_of_concept: {
+      scenario: ["Alice deposits 2 wei and receives 2 shares.", "Alice withdraws 1 share and receives 2 wei."],
+      language: "solidity",
+      code: "function testWithdrawCeiling() public {}"
+    },
+    recommendation: "Use floor division for withdrawals.",
+    recommended_next_action: "Confirm the rounding direction with the maintainers."
+  };
+  const assessment = {
+    triage_classification: "true-positive",
+    impact: "Low",
+    likelihood: "Low",
+    impact_rationale: "Only a rounding surplus moves.",
+    likelihood_rationale: "A donation must precede a partial withdrawal.",
+    severity: "Low",
+    severity_rationale: "Low impact and Low likelihood map to Low."
+  };
+  const dedupeLifecycle = {
+    dedupe_key: "root-a",
+    source_artifacts: [],
+    stages: [{ stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-a" }]
+  };
+  const promotedLifecycle = {
+    ...dedupeLifecycle,
+    triage_classification: "true-positive",
+    triage_reason: "The generated reproducer passes.",
+    canonical_severity: "Low",
+    final_disposition: "promoted"
+  };
+  const row = {
+    ...finding,
+    ...assessment,
+    id: "L-01",
+    title: `[L-01] - ${finding.title}`,
+    lifecycle: promotedLifecycle
+  };
+  const rewordedProse = {
+    summary: "Withdrawals round up once a donation lands.",
+    description: "Shareholder can withdraw one share after a donation which leads to capturing the surplus.",
+    proof_of_concept: {
+      ...finding.proof_of_concept,
+      scenario: [
+        "Alice deposits 2 wei through the public deposit entrypoint and receives 2 shares.",
+        "Alice withdraws 1 share and receives 2 wei."
+      ]
+    },
+    recommendation: "Round withdrawals down.",
+    recommended_next_action: "Ask the maintainers which rounding direction is intended."
+  };
+  const rewordedRationales = {
+    impact_rationale: "The surplus is only a rounding remainder.",
+    likelihood_rationale: "A partial withdrawal must follow a donation.",
+    severity_rationale: "The matrix maps Low impact and Low likelihood to Low."
+  };
+  const modes = [
+    // A bounded promoted row authors its own rationales, so only the strict
+    // severity handoff carries them into the report.
+    {
+      mode: "bounded",
+      rewording: rewordedProse,
+      artifactSet: {
+        severityClassifiedFindings: null,
+        dedupedFindings: [finding],
+        findingLifecycleLedger: { records: [dedupeLifecycle] }
+      }
+    },
+    {
+      mode: "strict",
+      rewording: { ...rewordedProse, ...rewordedRationales },
+      artifactSet: {
+        severityClassifiedFindings: [{ ...finding, ...assessment }],
+        findingLifecycleLedger: { records: [promotedLifecycle] }
+      }
+    }
+  ];
+  for (const { mode, rewording, artifactSet } of modes) {
+    const check = (candidate: unknown) =>
+      executeSemanticGate("report-severity-classification-preservation", {
+        document: { issues: [candidate], non_production_outcomes: [] },
+        context: { artifactSet }
+      });
+    assert.equal(check(row).status, "passed", mode);
+
+    const reworded = { ...row, ...rewording };
+    const result = check(reworded);
+    assert.equal(result.status, "warning", mode);
+    assert.deepEqual(
+      result.status === "warning" && result.issues.map((entry) => [entry.path, entry.severity]).sort(),
+      Object.keys(rewording)
+        .map((field) => [`$.issues[0].${field}`, "warning"])
+        .sort(),
+      mode
+    );
+
+    for (const [field, value] of [
+      ["affected_files", ["src/Other.sol"]],
+      ["severity_guess", "High"],
+      ["severity", "Medium"]
+    ] as const) {
+      assert.equal(check({ ...reworded, [field]: value }).status, "failed", `${mode}: ${field}`);
+    }
+  }
 });
 
 test("differential reconciliation diagnostics expose exact expected machine-derived values", () => {

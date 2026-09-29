@@ -883,6 +883,36 @@ function reportHistoricalMetadataIssues(
   return issues;
 }
 
+// The findings@2 free text that explains a finding to a reader. None of it
+// identifies, classifies, or locates the finding, so a report that rewords it
+// still reports the same finding and gets a warning, not a discarded report.
+// IDs, dedupe keys, titles, status, every enum, locations, notes, evidence,
+// and provenance keep exact equality.
+const FINDING_NARRATIVE_FIELDS = new Set([
+  "summary",
+  "description",
+  "proof_of_concept",
+  "recommendation",
+  "recommended_next_action",
+  "impact_rationale",
+  "likelihood_rationale",
+  "severity_rationale"
+]);
+
+function reportCarriedFieldIssues(
+  entry: { row: unknown; path: string },
+  source: Readonly<Record<string, unknown>>,
+  field: string,
+  message: string
+): SemanticGateIssue[] {
+  const fieldPath = `${entry.path}.${field}`;
+  const actual = at(entry.row, [field]);
+  if (FINDING_ADVISORY_FIELDS.has(field) && actual === undefined) return [metadataOmission(fieldPath)];
+  if (isDeepStrictEqual(actual, source[field])) return [];
+  const difference = issue(fieldPath, `${message} ${JSON.stringify(field)}`);
+  return [FINDING_NARRATIVE_FIELDS.has(field) ? { ...difference, severity: "warning" } : difference];
+}
+
 function reportSeverityClassificationPreservationIssues(
   document: unknown,
   context: SemanticGateContext
@@ -1098,15 +1128,7 @@ function reportSeverityClassificationPreservationIssues(
       // make the report impossible to preserve against the dedicated ledger.
       if (field === "lifecycle") continue;
       if (disposition === "promoted" && (field === "id" || field === "title")) continue;
-      if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
-        issues.push(metadataOmission(`${reportEntry.path}.${field}`));
-        continue;
-      }
-      if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
-        issues.push(
-          issue(`${reportEntry.path}.${field}`, `Report did not preserve severity field ${JSON.stringify(field)}`)
-        );
-      }
+      issues.push(...reportCarriedFieldIssues(reportEntry, finding, field, "Report did not preserve severity field"));
     }
   }
 
@@ -1390,15 +1412,9 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
       // against the authenticated ledger with the exact owned-field set, and
       // the row classification must equal the enriched lifecycle record's.
       if (field === "lifecycle" || field === "triage_classification") continue;
-      if (FINDING_ADVISORY_FIELDS.has(field) && reportEntry.row[field] === undefined) {
-        issues.push(metadataOmission(`${reportEntry.path}.${field}`));
-        continue;
-      }
-      if (!isDeepStrictEqual(reportEntry.row[field], finding[field])) {
-        issues.push(
-          issue(`${reportEntry.path}.${field}`, `Bounded report did not preserve dedupe field ${JSON.stringify(field)}`)
-        );
-      }
+      issues.push(
+        ...reportCarriedFieldIssues(reportEntry, finding, field, "Bounded report did not preserve dedupe field")
+      );
     }
   }
 
