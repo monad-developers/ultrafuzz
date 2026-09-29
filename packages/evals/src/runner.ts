@@ -48,6 +48,7 @@ import {
 import {
   EvalError,
   boundedEvalWorkflowRunId,
+  describeEvalError,
   diagnosticFromError,
   evalRunRoot,
   generateEvalRunId,
@@ -173,18 +174,36 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       ...(plan.provenance?.candidate !== undefined ? { candidateProvenance: plan.provenance.candidate } : {})
     });
     if (record.status === "launched" && record.ultrafuzz_run_root !== undefined && watch) {
-      const watched = await watchEvalRow({
-        plan,
-        row,
-        record,
-        evalRunRoot: root,
-        ...(input.env !== undefined ? { env: input.env } : {}),
-        ...(input.sync !== undefined ? { sync: input.sync } : {}),
-        ...(input.pollIntervalMs !== undefined ? { pollIntervalMs: input.pollIntervalMs } : {}),
-        ...(input.watchTimeoutSeconds !== undefined ? { timeoutSeconds: input.watchTimeoutSeconds } : {})
-      });
-      diagnostics.push(...watched.diagnostics);
-      return watched.record;
+      try {
+        const watched = await watchEvalRow({
+          plan,
+          row,
+          record,
+          evalRunRoot: root,
+          ...(input.env !== undefined ? { env: input.env } : {}),
+          ...(input.sync !== undefined ? { sync: input.sync } : {}),
+          ...(input.pollIntervalMs !== undefined ? { pollIntervalMs: input.pollIntervalMs } : {}),
+          ...(input.watchTimeoutSeconds !== undefined ? { timeoutSeconds: input.watchTimeoutSeconds } : {})
+        });
+        diagnostics.push(...watched.diagnostics);
+        return watched.record;
+      } catch (error) {
+        // One row whose run evidence cannot be read (an invalid graph.json, a foreign state.json) must not
+        // cost the suite its summary or the other rows their watch. The row stays launched and unobserved.
+        const failure: RuntimeDiagnostic = {
+          code: "EVAL_ROW_WATCH_FAILED",
+          message: `eval row ${row.id} could not be watched: ${describeEvalError(error)}`,
+          severity: "error",
+          source: "evals"
+        };
+        diagnostics.push(failure);
+        const unwatched: EvalRunRecord = {
+          ...record,
+          diagnostics: [...record.diagnostics, ...durableEvalDiagnostics([failure])]
+        };
+        appendEvalRunRecord(path.join(root, "runs.jsonl"), unwatched);
+        return unwatched;
+      }
     }
     return record;
   });
@@ -571,9 +590,17 @@ export interface WatchEvalRowInput {
 }
 
 /**
+ * A synchronization that fails the same way this many times in a row is not
+ * going to clear by being polled again until the watch deadline.
+ */
+const MAX_IDENTICAL_SYNC_FAILURES = 10;
+
+/**
  * Poll the detached workflow until its durable state is terminal or the watch
  * deadline passes: sync, read `state.json`, sleep. A failed sync is counted and
- * recorded on the row; it does not end the watch.
+ * recorded on the row. Only the same failure repeated
+ * `MAX_IDENTICAL_SYNC_FAILURES` times in a row ends the watch early, and never
+ * the run itself.
  */
 export async function watchEvalRow(
   input: WatchEvalRowInput
@@ -588,6 +615,7 @@ export async function watchEvalRow(
   const deadline = Date.now() + (input.timeoutSeconds ?? DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS) * 1000;
   let syncFailureCount = 0;
   let consecutiveSyncFailures = 0;
+  let identicalSyncFailures = 0;
   let firstSyncFailureAt: string | undefined;
   let lastSyncFailureAt: string | undefined;
   let lastSyncFailureMessage: string | undefined;
@@ -604,11 +632,15 @@ export async function watchEvalRow(
       consecutiveSyncFailures = 0;
     } catch (error) {
       const observedAt = new Date().toISOString();
+      const message = error instanceof Error ? error.message : String(error);
+      const repeated = consecutiveSyncFailures > 0 && message === lastSyncFailureMessage;
+      identicalSyncFailures = repeated ? identicalSyncFailures + 1 : 1;
       syncFailureCount += 1;
       consecutiveSyncFailures += 1;
       firstSyncFailureAt ??= observedAt;
       lastSyncFailureAt = observedAt;
-      lastSyncFailureMessage = error instanceof Error ? error.message : String(error);
+      lastSyncFailureMessage = message;
+      if (identicalSyncFailures === MAX_IDENTICAL_SYNC_FAILURES) break;
     }
     state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
     if (state !== undefined && isTerminalRunStatus(state.status)) {
@@ -620,7 +652,9 @@ export async function watchEvalRow(
   // Other syncers (`ultrafuzz status`, the dashboard) also write state.json; a
   // run they finished during the final sleep is terminal, not timed out.
   state = readStateSafe(runRoot, input.record.ultrafuzz_run_id);
-  const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
+  const observedTerminal = state !== undefined && isTerminalRunStatus(state.status);
+  const watchTimedOut = Date.now() >= deadline && !observedTerminal;
+  const syncAbandoned = identicalSyncFailures === MAX_IDENTICAL_SYNC_FAILURES && !observedTerminal;
   const syncFailureDiagnostic: RuntimeDiagnostic | undefined =
     syncFailureCount === 0
       ? undefined
@@ -637,6 +671,14 @@ export async function watchEvalRow(
           }
         };
   if (syncFailureDiagnostic !== undefined) diagnostics.push(syncFailureDiagnostic);
+  if (syncAbandoned) {
+    diagnostics.push({
+      code: "EVAL_ROW_SYNC_ABANDONED",
+      message: `eval row ${input.row.id} stopped watching after ${String(MAX_IDENTICAL_SYNC_FAILURES)} identical consecutive workflow synchronization failures; the run was not cancelled`,
+      severity: "error",
+      source: "evals"
+    });
+  }
   const timeoutDiagnostic: RuntimeDiagnostic | undefined = watchTimedOut
     ? {
         code: "EVAL_ROW_WATCH_TIMEOUT",
@@ -646,13 +688,12 @@ export async function watchEvalRow(
       }
     : undefined;
   if (timeoutDiagnostic !== undefined) diagnostics.push(timeoutDiagnostic);
-  const recoveryEquivalence =
-    state !== undefined && isTerminalRunStatus(state.status)
-      ? classifyRecoveryEquivalence({
-          runRoot,
-          policy: input.plan.suite.recovery_equivalence
-        })
-      : undefined;
+  const recoveryEquivalence = observedTerminal
+    ? classifyRecoveryEquivalence({
+        runRoot,
+        policy: input.plan.suite.recovery_equivalence
+      })
+    : undefined;
   const updatedRecord: EvalRunRecord = {
     ...input.record,
     final_status: watchTimedOut ? "timed-out" : rowStatus(state),
@@ -663,17 +704,9 @@ export async function watchEvalRow(
           expansion: evalRunExpansion({ runRoot, state })
         }),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
-    ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
+    ...(diagnostics.length === 0
       ? {}
-      : {
-          diagnostics: [
-            ...input.record.diagnostics,
-            ...durableEvalDiagnostics([
-              ...(syncFailureDiagnostic === undefined ? [] : [syncFailureDiagnostic]),
-              ...(timeoutDiagnostic === undefined ? [] : [timeoutDiagnostic])
-            ])
-          ]
-        })
+      : { diagnostics: [...input.record.diagnostics, ...durableEvalDiagnostics(diagnostics)] })
   };
   appendEvalRunRecord(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {

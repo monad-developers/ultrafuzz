@@ -228,8 +228,11 @@ terminal or the watch deadline passes: synchronize the run, read `state.json`,
 and sleep for the poll interval. It reads `state.json` once more before
 recording the row, so a run that another command synchronized to a terminal
 state during the last sleep is not recorded as timed out. A failed
-synchronization is counted and recorded on the row as `EVAL_ROW_SYNC_FAILED`;
-it does not end the watch.
+synchronization is counted and recorded on the row as `EVAL_ROW_SYNC_FAILED`.
+Only the same failure ten times in a row ends the watch early, recorded as
+`EVAL_ROW_SYNC_ABANDONED`; the run itself is not cancelled. A row whose run
+evidence cannot be read is recorded as `EVAL_ROW_WATCH_FAILED`, and the other
+rows and `run-summary.json` are still written.
 There is no reporter or telemetry-export interface.
 
 ## Versioned lineage
