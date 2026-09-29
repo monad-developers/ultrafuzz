@@ -18,3 +18,5 @@ packages/config/test/fixtures/resolved-config.valid.pre-same-agent-attempts.json
 prompts/**/*.md
 docs/reference/audit-profiles.md
 docs/reference/prompt-catalog.md
+
+eslint-suppressions.json

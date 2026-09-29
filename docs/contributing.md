@@ -78,3 +78,26 @@ pnpm -r test
 
 Prefer narrow package checks while iterating, then run broader gates before PR
 handoff when a change touches shared behavior or release workflows.
+
+## Complexity and Size Budgets
+
+`pnpm -w lint` applies complexity and size budgets to all code under
+`packages/` and `scripts/`: cyclomatic complexity 20, nesting depth 4, 500 lines
+per file, 80 lines and 40 statements per function, 5 parameters, and 4 nested
+callbacks. Tests and workflow templates allow complexity 25, 1000 lines per
+file, 150 lines and 80 statements per function, and 6 parameters.
+
+Violations that predate the budgets are counted per file and rule in
+`eslint-suppressions.json`, ESLint's bulk-suppressions file:
+
+- A change that adds a violation to a file fails lint, because that file's
+  count for the rule rises above the recorded count. Fix the new violation.
+- A change that removes violations also fails lint, with "There are
+  suppressions left that do not occur anymore". Run `pnpm -w lint:prune` and
+  commit the smaller `eslint-suppressions.json`.
+- Moving code that already exceeds a budget, including renaming its file,
+  needs its count moved to the new path in `eslint-suppressions.json`.
+
+Counts are per file and rule, so a function that already exceeds a budget can
+grow without failing lint. `pnpm -w lint:strict:ci` adds the type-aware strict
+rules, `no-console`, and the TODO/FIXME check for changed lines only.
