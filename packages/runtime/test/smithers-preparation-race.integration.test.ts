@@ -311,7 +311,16 @@ test("graceful pause drains in-flight tasks and refuses a second controller unti
     }
     assert.notEqual(pidOf(finished, "c start"), ownerPid, "only the replacement controller ran c");
   } finally {
+    // Release any task still held, then give every engine that ran a task
+    // time to exit. Deleting the root first would delete the release marker
+    // too, leaving a detached engine polling until its 120 s hold expires and
+    // writing its logs back under the deleted root.
     fs.writeFileSync(releasePath, "", "utf8");
+    await waitUntil(
+      () => !trace().some((line) => processIsAlive(Number(line.split(" ")[0]))),
+      30_000,
+      "the detached engines exit"
+    ).catch(() => undefined);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -504,6 +513,15 @@ async function waitForFile(filePath: string, timeoutMs: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`timed out waiting for ${filePath}`);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 async function waitUntil(condition: () => boolean, timeoutMs: number, label: string): Promise<void> {
