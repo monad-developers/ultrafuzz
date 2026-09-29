@@ -649,7 +649,7 @@ test("diagnoseRun names the ultrafuzz command for each recovery the runner sugge
     [
       "ultrafuzz inspect smithers-probe",
       "ultrafuzz resume smithers-probe --reset-node node:project-discovery",
-      "ultrafuzz events smithers-probe --watch"
+      "ultrafuzz events smithers-probe --watch --history"
     ]
   );
   // An `up` without `--resume` starts a run rather than resuming this one, so it is not rebuilt and

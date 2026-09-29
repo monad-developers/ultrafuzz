@@ -1991,7 +1991,7 @@ function ultrafuzzRecoveryCommand(runnerCommand: string, runId: string, runFaile
       return frame === undefined ? undefined : `ultrafuzz fork ${runId} --frame ${frame}`;
     }
     case "logs":
-      return `ultrafuzz events ${runId} --watch`;
+      return `ultrafuzz events ${runId} --watch --history`;
     case "inspect":
       return `ultrafuzz inspect ${runId}`;
     default:
