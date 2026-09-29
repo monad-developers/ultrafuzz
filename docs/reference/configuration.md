@@ -388,7 +388,7 @@ is local and remains the default.
 | `ULTRAFUZZ_PRICING_CATALOG_URL`         | Live model-pricing catalog URL, or `disabled`, `none`, or `off`.                                                                                                                                                                                               |
 | `ULTRAFUZZ_PRICING_TIMEOUT_MS`          | Positive catalog request timeout in milliseconds, capped at 60 seconds.                                                                                                                                                                                        |
 | `ULTRAFUZZ_OBSERVATION_SYNC_TIMEOUT_MS` | Optional deadline in milliseconds for the run-state refresh before `status`, `inspect`, `why`, and `stats`. Unset means no deadline (observers wait for full synchronization); a positive value bounds it, capped at 60000; `0` or `off` is the same as unset. |
-| `ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS`     | Timeout in milliseconds for each read-only workflow runner query (`inspect`, `events`, `node`, `status`, `why`, `ps`, `timeline`, `snapshots`). Defaults to 120000, capped at 600000. A query that exceeds it is reported as a failed query.                   |
+| `ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS`     | Timeout in milliseconds for each read-only runner query (`inspect`, `events`, `node`, `status`, `why`, `ps`, `timeline`, `snapshots`); one that exceeds it fails. Defaults to 120000, capped at 600000; `0`, `off`, or any invalid value means the default.    |
 
 Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 
@@ -404,10 +404,15 @@ state, whose node states, attempt ledgers, and usage counts may then be stale.
 
 A command or eval poll that finds another synchronization of the same run in
 progress skips its own pass instead of running alongside it, reports
-`WORKFLOW_SYNC_IN_PROGRESS`, and continues with the local run state. During its
+`WORKFLOW_SYNC_IN_PROGRESS`, and continues with the local run state. The lock
+behind this lives in `.workflow-sync.lock` in the run directory; one left behind
+by a killed process is taken over five minutes after its holder last refreshed
+it. A pass that cannot create the lock, for example in a read-only run
+directory, reports `WORKFLOW_SYNC_LOCK_FAILED` and writes nothing. During its
 refresh, `status` reports a failed or malformed runner `inspect` or `events`
-query, and an unexpected synchronization error, as warnings, so it still shows
-the workflow runner's health. When nothing but the observation time changed,
+query, a lock it cannot take, and an unexpected synchronization error as
+warnings, so it still shows the workflow runner's health and `--watch` keeps
+polling. When nothing but the observation time changed,
 `status` and any synchronization of a finished run leave `state.json` untouched;
 any other synchronization of a live run still renews its controller lease.
 
