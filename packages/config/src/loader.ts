@@ -121,7 +121,10 @@ export async function loadProjectConfig(
 export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): ConfigResult<ProjectConfigInput> {
   let table: TomlTable;
   try {
-    table = parse(text);
+    // smol-toml 1.9 builds every table with Object.create(null), which this
+    // loader's plain-object checks and entry sorts do not accept. structuredClone
+    // returns the same data as ordinary objects.
+    table = structuredClone(parse(text));
   } catch (error) {
     return fail([
       diagnostic("CONFIG_TOML_PARSE_FAILED", `${file} is not valid TOML`, [], "project-toml", tomlLocation(error, file))

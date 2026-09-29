@@ -9,6 +9,11 @@ const browserFiles = ["packages/dashboard/frontend/{public,src}/**/*.{js,ts,tsx}
 const typescriptFiles = ["packages/**/*.{ts,tsx}", "scripts/**/*.{ts,tsx}"];
 const typeCheckedFiles = ["packages/*/src/**/*.ts", "packages/dashboard/frontend/src/**/*.{ts,tsx}"];
 const sourceFiles = ["packages/**/*.{js,mjs,cjs,ts,tsx}", "scripts/**/*.{js,mjs,cjs,ts,tsx}"];
+// Global cyclomatic complexity ceiling (#960). It is set at the current maximum,
+// with no suppressions, so no function can grow past the worst one today; lower
+// it as the most complex functions are simplified. Changed lines are held to the
+// stricter budgets below by `pnpm -w lint:strict:ci`.
+const complexityCeilingConfigs = [{ files: sourceFiles, rules: { complexity: ["error", 90] } }];
 const strictConfigs = strictLint
   ? [
       ...tseslint.configs.strict.map((config) => ({
@@ -77,6 +82,7 @@ export default tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  ...complexityCeilingConfigs,
   ...strictConfigs,
   {
     files: ["**/*.{js,mjs,cjs,ts,tsx}"],

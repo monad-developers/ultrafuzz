@@ -55,5 +55,5 @@ adapter responsibility in the same reviewed pull request.
 
 The gate is `packages/runtime/test/agent-adapter-boundaries.test.ts`. It scans
 every TypeScript source file in the adapter directory, derives shipped adapters
-from `agentFactories`, and runs in both the required pull-request runtime smoke
-path and the full runtime supporting-test shard.
+from `agentFactories`, and runs in the runtime supporting-test lane, which pull
+requests require.

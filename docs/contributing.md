@@ -78,3 +78,12 @@ pnpm -r test
 
 Prefer narrow package checks while iterating, then run broader gates before PR
 handoff when a change touches shared behavior or release workflows.
+
+## Complexity Ceiling
+
+`pnpm -w lint` fails any function under `packages/` or `scripts/` whose
+cyclomatic complexity is above 90, the highest value in the codebase when the
+ceiling was added. There are no suppressions: lower the ceiling in
+`eslint.config.js` when the most complex functions are simplified.
+`pnpm -w lint:strict:ci` holds changed lines to the stricter complexity, size,
+and type-aware budgets.
