@@ -1999,8 +1999,6 @@ async function synchronizeWorkflowAccounting(input: {
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
   const nextMetadata = assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
-  const validatedAccounting = storedAccountingDocument(nextMetadata.accounting, input.workflowRunId);
-  assertAccountingMatchesUsageLedger(validatedAccounting, preparedUsage.entries, "proposed run.json#$.accounting");
 
   if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
     return { changed: false, available: true };
@@ -2168,6 +2166,7 @@ function normalizedUsageLedgerInput(
     throw new Error("usage ledger input is not an exact TokenUsageReported event for the linked workflow");
   }
   const payload = event.payload;
+  assertWorkflowEventCorrelation(payload, "TokenUsageReported");
   return {
     workflowRunId,
     controlGeneration,
@@ -5746,16 +5745,14 @@ function parseWorkflowEvents(stdout: string, expectedWorkflowRunId: string): Wor
   return events;
 }
 
+/**
+ * Usage fields are validated where the usage ledger records them, inside the
+ * accounting pass, so a malformed `TokenUsageReported` event is an accounting
+ * warning rather than a failure to read the run's events.
+ */
 function validateSmithersEventPayload(type: string, payload: Record<string, unknown>, lineNumber: number): void {
   const label = `Smithers ${type} payload at line ${lineNumber}`;
-  const attemptEventTypes = new Set([
-    "NodeStarted",
-    "NodeFinished",
-    "NodeFailed",
-    "NodeRetrying",
-    "TokenUsageReported"
-  ]);
-  if (attemptEventTypes.has(type)) {
+  if (["NodeStarted", "NodeFinished", "NodeFailed", "NodeRetrying"].includes(type)) {
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
     requiredWorkflowEventCount(payload.attempt, `${label} attempt`);
@@ -5763,18 +5760,6 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     requiredWorkflowEventString(payload.nodeId, `${label} nodeId`);
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
   }
-  if (type !== "TokenUsageReported") return;
-  assertWorkflowEventCorrelation(payload, label);
-  requiredWorkflowEventString(payload.model, `${label} model`);
-  requiredWorkflowEventString(payload.agent, `${label} agent`);
-  requiredWorkflowEventCount(payload.inputTokens, `${label} inputTokens`);
-  requiredWorkflowEventCount(payload.outputTokens, `${label} outputTokens`);
-  for (const field of ["freshInputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
-    if (payload[field] !== undefined) requiredWorkflowEventCount(payload[field], `${label} ${field}`);
-  }
-  // Cost is a fractional USD estimate, not a token count, so it gets the
-  // finite-non-negative bound rather than the safe-integer one.
-  if (payload.costUsd !== undefined) requiredWorkflowEventCostUsd(payload.costUsd, `${label} costUsd`);
 }
 
 function requiredWorkflowEventString(value: unknown, label: string): string {

@@ -19888,7 +19888,7 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
 
   // Every event the runner emits carries this trace envelope, so refusing it left
   // no real run syncable at all.
-  const synced = async (runId: string, correlationAttempt: number, control: Parameters<typeof syncRun>[1] = {}) => {
+  const synced = async (runId: string, correlationAttempt: number) => {
     const workflowRunId = `ultrafuzz-${runId}`;
     const env = fakeLifecycleSmithersEnv(project, {
       inspect: workflowInspect({
@@ -19925,26 +19925,22 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
     const run = await startRun({ projectRoot: project, runId, env });
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
     writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-    return syncRun({ projectRoot: project, runId, env }, control);
+    return syncRun({ projectRoot: project, runId, env });
   };
 
   const accepted = await synced("correlated-usage", 1);
   assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
 
   // A trace envelope that names another attempt is a mixed-up event, not a
-  // routing detail to ignore, so the read fails closed instead of accounting it.
-  await assert.rejects(
-    () => synced("correlated-usage-mismatch", 2),
-    /correlation attempt disagrees with the reported usage/u
-  );
-
-  const observational = await synced("correlated-usage-mismatch-observational", 2, {
-    tolerateInvalidEventStreams: true
-  });
-  assert.equal(observational.ok, false);
-  assert.ok(
-    observational.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_INVALID"),
-    JSON.stringify(observational.diagnostics)
+  // routing detail to ignore, so accounting refuses it; the run still syncs.
+  const mismatched = await synced("correlated-usage-mismatch", 2);
+  assert.equal(mismatched.ok, true, JSON.stringify(mismatched.diagnostics));
+  assert.equal(mismatched.value?.status, accepted.value?.status);
+  assert.deepEqual(
+    mismatched.diagnostics
+      .filter((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED")
+      .map((diagnostic) => [diagnostic.severity, diagnostic.message]),
+    [["warning", "TokenUsageReported correlation attempt disagrees with the reported usage"]]
   );
 });
 
@@ -20063,19 +20059,25 @@ test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new f
   assert.equal(contradictoryMetadata.accounting?.current?.pricing_complete, true);
 
   // Both new fields stay bounded: a non-integer token count and a negative cost
-  // are contract violations, not values to coerce.
-  await assert.rejects(
-    () => syncWithUsage("fresh-input-fractional", { inputTokens: 5, freshInputTokens: 1.5, outputTokens: 1 }),
-    /freshInputTokens is invalid/u
-  );
-  await assert.rejects(
-    () => syncWithUsage("cost-negative", { inputTokens: 5, outputTokens: 1, costUsd: -1 }),
-    /costUsd is invalid/u
-  );
-  await assert.rejects(
-    () => syncWithUsage("cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }),
-    /costUsd is invalid/u
-  );
+  // are contract violations, not values to coerce. They fail the accounting pass
+  // with a warning and never reach the usage ledger, and the run reconciles as
+  // it does with valid usage.
+  for (const [runId, usage, field] of [
+    ["fresh-input-fractional", { inputTokens: 5, freshInputTokens: 1.5, outputTokens: 1 }, "freshInputTokens"],
+    ["cost-negative", { inputTokens: 5, outputTokens: 1, costUsd: -1 }, "costUsd"],
+    ["cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }, "costUsd"]
+  ] as const) {
+    const rejected = await syncWithUsage(runId, usage);
+    assert.equal(rejected.result.ok, true, JSON.stringify(rejected.result.diagnostics));
+    assert.equal(rejected.result.value?.status, accepted.result.value?.status);
+    assert.deepEqual(
+      rejected.result.diagnostics
+        .filter((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED")
+        .map((diagnostic) => [diagnostic.severity, diagnostic.message]),
+      [["warning", `TokenUsageReported ${field} is invalid`]]
+    );
+    assert.equal(fs.readFileSync(path.join(rejected.runRoot, "usage.jsonl"), "utf8"), "");
+  }
   // A key synchronization does not read is ignored; it no longer fails the sync.
   const unknownKey = await syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 60 });
   assert.equal(unknownKey.result.ok, true, JSON.stringify(unknownKey.result.diagnostics));
