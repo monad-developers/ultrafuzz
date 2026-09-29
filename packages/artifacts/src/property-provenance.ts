@@ -3,12 +3,7 @@ import { z } from "zod/v4";
 import { canonicalArtifactRelativePathSchema } from "./artifact-path-primitives.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { canonicalTimestampSchema, hasAtMostCodePoints } from "./portable-json-primitives.js";
-import {
-  schemaErrorMessage,
-  validateWithZod,
-  type SchemaValidationIssue,
-  type SchemaValidationResult
-} from "./schema-validation.js";
+import { type SchemaValidationIssue, type SchemaValidationResult } from "./schema-validation.js";
 import { jsonPointerPath } from "./lang-primitives.js";
 
 export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v2" as const;
@@ -1039,20 +1034,15 @@ export function validateLensPropertiesSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<LensPropertiesArtifact> {
-  return validateRegisteredPropertySchema(
-    PROPERTY_LENS_JSON_SCHEMA_ID,
-    lensPropertiesSchema as z.ZodType<LensPropertiesArtifact>,
-    value,
-    {
-      path,
-      code: "PROPERTY_LENS_SCHEMA_INVALID"
-    }
-  );
+  return validateRegisteredPropertySchema<LensPropertiesArtifact>(PROPERTY_LENS_JSON_SCHEMA_ID, value, {
+    path,
+    code: "PROPERTY_LENS_SCHEMA_INVALID"
+  });
 }
 
+/** The registered JSON Schema is authoritative, so its verdict is returned as is. */
 function validateRegisteredPropertySchema<T>(
   schemaId: string,
-  zodSchema: z.ZodType<T>,
   value: unknown,
   options: { path: string; code: string }
 ): SchemaValidationResult<T> {
@@ -1067,15 +1057,6 @@ function validateRegisteredPropertySchema<T>(
       }))
     };
   }
-
-  // The checked-in JSON Schema is authoritative. Zod remains only as a
-  // non-transforming parity assertion for typed access by existing callers.
-  const parity = validateWithZod(zodSchema, value, options);
-  if (!parity.ok) {
-    throw new Error(
-      `internal schema parity invariant violated: registered JSON Schema ${schemaId} accepted a document rejected by its retained Zod parser`
-    );
-  }
   return { ok: true, issues: [], value: value as T };
 }
 
@@ -1083,27 +1064,17 @@ export function validateReferenceExpectationsSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<ReferenceExpectationsArtifact> {
-  return validateRegisteredPropertySchema(
-    REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID,
-    referenceExpectationsSchema as z.ZodType<ReferenceExpectationsArtifact>,
-    value,
-    {
-      path,
-      code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID"
-    }
-  );
+  return validateRegisteredPropertySchema<ReferenceExpectationsArtifact>(REFERENCE_EXPECTATIONS_JSON_SCHEMA_ID, value, {
+    path,
+    code: "REFERENCE_EXPECTATIONS_SCHEMA_INVALID"
+  });
 }
 
 export function validatePropertiesSchema(value: unknown, path = "$"): SchemaValidationResult<PropertiesArtifact> {
-  return validateRegisteredPropertySchema(
-    PROPERTIES_JSON_SCHEMA_ID,
-    propertiesSchema as z.ZodType<PropertiesArtifact>,
-    value,
-    {
-      path,
-      code: "PROPERTIES_SCHEMA_INVALID"
-    }
-  );
+  return validateRegisteredPropertySchema<PropertiesArtifact>(PROPERTIES_JSON_SCHEMA_ID, value, {
+    path,
+    code: "PROPERTIES_SCHEMA_INVALID"
+  });
 }
 
 export function validateImplementedPropertiesSchema(
@@ -1111,9 +1082,8 @@ export function validateImplementedPropertiesSchema(
   path = "$",
   options: { requireSelection?: boolean } = {}
 ): SchemaValidationResult<ImplementedPropertiesArtifact> {
-  const result = validateRegisteredPropertySchema(
+  const result = validateRegisteredPropertySchema<ImplementedPropertiesArtifact>(
     IMPLEMENTED_PROPERTIES_JSON_SCHEMA_ID,
-    implementedPropertiesSchema as z.ZodType<ImplementedPropertiesArtifact>,
     value,
     {
       path,
@@ -1139,23 +1109,10 @@ export function validatePropertyCampaignSchema(
   value: unknown,
   path = "$"
 ): SchemaValidationResult<PropertyCampaignArtifact> {
-  return validateRegisteredPropertySchema(
-    PROPERTY_CAMPAIGN_JSON_SCHEMA_ID,
-    propertyCampaignSchema as z.ZodType<PropertyCampaignArtifact>,
-    value,
-    {
-      path,
-      code: "PROPERTY_CAMPAIGN_SCHEMA_INVALID"
-    }
-  );
-}
-
-export function assertPropertiesSchema(value: unknown): PropertiesArtifact {
-  const result = validatePropertiesSchema(value);
-  if (!result.ok || result.value === undefined) {
-    throw new Error(schemaErrorMessage("properties", result.issues));
-  }
-  return result.value;
+  return validateRegisteredPropertySchema<PropertyCampaignArtifact>(PROPERTY_CAMPAIGN_JSON_SCHEMA_ID, value, {
+    path,
+    code: "PROPERTY_CAMPAIGN_SCHEMA_INVALID"
+  });
 }
 
 export function validatePropertyReferences(

@@ -332,7 +332,6 @@ const applicabilityDecisionSchema = z
   });
 
 export const GOAL_LANE_KINDS = ["threat", "class", "roaming"] as const;
-export type GoalLaneKind = (typeof GOAL_LANE_KINDS)[number];
 
 /**
  * One goal lane: a named unit of hunting work and the concrete node IDs it owns.
@@ -598,9 +597,6 @@ export const goalPlanJsonSchema = {
 } as Record<string, unknown>;
 
 export type GoalPlan = z.infer<typeof goalPlanSchema>;
-export type ThreatGoalPlanItem = z.infer<typeof threatGoalSchema>;
-export type ClassGoalPlanItem = z.infer<typeof classGoalSchema>;
-export type ApplicabilityDecision = z.infer<typeof applicabilityDecisionSchema>;
 
 export function validateGoalPlan(value: unknown, path = "$"): SchemaValidationResult<GoalPlan> {
   return validateWithZod(goalPlanSchema, value, { path, code: "GOAL_PLAN_SCHEMA_INVALID" });

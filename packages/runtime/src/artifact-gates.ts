@@ -1917,7 +1917,6 @@ function semanticGateContextForArtifact(input: {
       rootDirectory: input.artifactDir,
       ...(input.authenticated === undefined ? {} : { files: input.authenticated.publications })
     },
-    plannedGraph: { node: input.node },
     artifactIdentity: {
       runId: input.layout.runId,
       nodeId: input.node.logical_id ?? input.node.id,
