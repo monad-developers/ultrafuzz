@@ -22,6 +22,7 @@ const statistics: RunStatisticsValue = {
       running: 0,
       succeeded: 0,
       failed: 0,
+      canceled: 0,
       skipped: 0,
       "timed-out": 0,
       "reused-from-prior-run": 0,

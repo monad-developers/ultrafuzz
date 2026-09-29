@@ -20,6 +20,8 @@ import {
 } from "@ultrafuzz/artifacts";
 import { assertRunMetadataAccountingUsageAuthority } from "@ultrafuzz/runtime";
 
+import { envelope } from "../src/command-shared.js";
+import { buildStatisticsCommandResult } from "../src/commands/stats.js";
 import { deriveRunStatistics, type StatisticsEvidence } from "../src/run-statistics.js";
 
 const RUN_ID = "stats-unit";
@@ -168,6 +170,7 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
     running: 0,
     succeeded: 1,
     failed: 0,
+    canceled: 0,
     skipped: 0,
     "timed-out": 0,
     "reused-from-prior-run": 0,
@@ -190,6 +193,38 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
     source_run_ids: []
   });
   assert.deepEqual(derived.diagnostics, []);
+});
+
+test("stats counts a failed node whose task Smithers cancelled as canceled", () => {
+  const status = (workflowState: "cancelled" | "failed") => {
+    const node: NodeState = {
+      ...terminalNodeState("node", "node"),
+      status: "failed",
+      outputs: [],
+      provenance: {
+        workflow: {
+          run_id: WORKFLOW_RUN_ID,
+          task_id: "node:node",
+          agent_task_id: "node:node",
+          verifier_task_id: "verify:node",
+          state: workflowState,
+          attempt: 1
+        }
+      }
+    };
+    // Smithers cancelled the task before it selected an agent, so no attempt was recorded.
+    const { value } = deriveRunStatistics(
+      evidence({ state: runState([node], "canceled"), attempts: [] }),
+      Date.parse(FINISHED_AT)
+    );
+    // The JSON envelope is validated against the closed CLI result schema.
+    envelope("stats", buildStatisticsCommandResult(value, []));
+    return [value.nodes[0]?.status, value.totals.status_counts.failed, value.totals.status_counts.canceled];
+  };
+
+  // Run state records a cancelled task as failed; `status` counts it apart from failures (#1087).
+  assert.deepEqual(status("cancelled"), ["canceled", 0, 1]);
+  assert.deepEqual(status("failed"), ["failed", 1, 0]);
 });
 
 test("stats counts only the latest cumulative usage snapshot for each attempt", () => {
