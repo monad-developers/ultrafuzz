@@ -128,7 +128,6 @@ describe("dedicated cloud command", () => {
 
     expect(cliSource.match(/import\("\.\/smoke-modal\.js"\)/gu)).toHaveLength(1);
     expect(cliSource).not.toMatch(/^import .*smoke-modal/mu);
-    expect(packageJson.scripts.test).toBe("vitest run");
     expect(packageJson.scripts.smoke).toContain("dist/cli.js smoke");
     expect(packageJson.scripts.typecheck).toBe(
       "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"

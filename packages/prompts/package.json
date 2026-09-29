@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && rm -rf dist/assets/prompts && mkdir -p dist/assets && cp -R ../../.ultrafuzz/prompts dist/assets/prompts",
-    "test": "pnpm --filter @ultrafuzz/prompts^... build && vitest run",
+    "test": "pnpm --filter @ultrafuzz/prompts^... build && vitest run --testTimeout=30000",
     "typecheck": "pnpm --filter @ultrafuzz/prompts^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {

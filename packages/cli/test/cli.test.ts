@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
@@ -44,6 +44,7 @@ import AdmZip from "adm-zip";
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
 import { runCli } from "../src/index.js";
 import { formatStatusDuration } from "../src/status-rendering.js";
+import { temporaryRoot } from "./temporary-root.js";
 
 interface Capture {
   stdout: string;
@@ -51,8 +52,8 @@ interface Capture {
   code: number;
 }
 
-function tempProject(): string {
-  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-"));
+function tempProject(t: TestContext): string {
+  return temporaryRoot("ufz-cli-", t);
 }
 
 function shellQuote(value: string): string {
@@ -758,8 +759,8 @@ function writeCanonicalReportPair(reportDir: string, report: Record<string, unkn
   fs.writeFileSync(path.join(reportDir, "report.md"), projection.markdown, "utf8");
 }
 
-test("report render gives producers the exact canonical Markdown without host repair", async () => {
-  const project = tempProject();
+test("report render gives producers the exact canonical Markdown without host repair", async (t) => {
+  const project = tempProject(t);
   const reportPath = path.join(project, "report.json");
   const markdownPath = path.join(project, "report.md");
   const report = currentReport("producer-render", [currentReportIssue()]);
@@ -777,8 +778,8 @@ test("report render gives producers the exact canonical Markdown without host re
   assert.deepEqual(fs.readFileSync(markdownPath), before);
 });
 
-test("report render renders goal coverage from the run-root census only through its flag", async () => {
-  const project = tempProject();
+test("report render renders goal coverage from the run-root census only through its flag", async (t) => {
+  const project = tempProject(t);
   const runId = "census-render";
   const runRoot = path.join(project, "runs", runId);
   fs.mkdirSync(runRoot, { recursive: true });
@@ -1238,8 +1239,8 @@ function writeJsonRecord(filePath: string, value: Record<string, unknown>): void
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-test("init and validate emit schema-versioned launch JSON", async () => {
-  const project = tempProject();
+test("init and validate emit schema-versioned launch JSON", async (t) => {
+  const project = tempProject(t);
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# owned\n", "utf8");
 
   const init = await cli(project, ["init", "--json"]);
@@ -1279,8 +1280,8 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
-test("plain init restores a customized agent adapter without touching project config", async () => {
-  const project = tempProject();
+test("plain init restores a customized agent adapter without touching project config", async (t) => {
+  const project = tempProject(t);
   const initial = await cli(project, ["init", "--force"]);
   assert.equal(initial.code, 0, initial.stderr);
 
@@ -1299,8 +1300,8 @@ test("plain init restores a customized agent adapter without touching project co
   assert.equal(fs.readFileSync(configPath, "utf8"), customConfig);
 });
 
-test("run exposes the trusted reference expectation catalog option", async () => {
-  const project = tempProject();
+test("run exposes the trusted reference expectation catalog option", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeSmallTopology(project);
   const run = await cli(
@@ -1318,8 +1319,8 @@ test("run exposes the trusted reference expectation catalog option", async () =>
   );
 });
 
-test("run input flags are explicit, strict, and never reinterpret malformed inline JSON as a path", async () => {
-  const project = tempProject();
+test("run input flags are explicit, strict, and never reinterpret malformed inline JSON as a path", async (t) => {
+  const project = tempProject(t);
   fs.writeFileSync(path.join(project, "looks-like-a-path.json"), '{"loaded":true}\n', "utf8");
 
   const malformedInline = await cli(project, ["run", "--input-json", "looks-like-a-path.json", "--json"]);
@@ -1354,8 +1355,8 @@ test("run input flags are explicit, strict, and never reinterpret malformed inli
   assert.match(JSON.stringify(parseJson(linkedInput).diagnostics), /cannot open regular file/iu);
 });
 
-test("run reads a bounded immutable workflow-input file", async () => {
-  const project = tempProject();
+test("run reads a bounded immutable workflow-input file", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeSmallTopology(project);
   fs.writeFileSync(path.join(project, "operator-input.json"), '{"ticket":3}\n', "utf8");
@@ -1378,8 +1379,8 @@ test("run reads a bounded immutable workflow-input file", async () => {
   assert.equal(savedConfig.retry.sameAgentAttempts, 3);
 });
 
-test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
-  const project = tempProject();
+test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
 
@@ -1781,8 +1782,8 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(pauseData.submitted, true);
 });
 
-test("status --watch --json keeps a failing poll on one NDJSON line", async () => {
-  const project = tempProject();
+test("status --watch --json keeps a failing poll on one NDJSON line", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   const init = await cli(project, ["init", "--json"], env);
   assert.equal(init.code, 0, init.stderr);
@@ -1805,8 +1806,8 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 });
 
-test("ps text prefers linked workflow terminal status over a stale local running projection", async () => {
-  const project = tempProject();
+test("ps text prefers linked workflow terminal status over a stale local running projection", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
@@ -1848,8 +1849,8 @@ test("ps text prefers linked workflow terminal status over a stale local running
   assert.equal(jsonData.runs[0]?.workflow_status, "failed");
 });
 
-test("status observes an incomplete launch with a successful CLI envelope and unknown liveness", async () => {
-  const project = tempProject();
+test("status observes an incomplete launch with a successful CLI envelope and unknown liveness", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
@@ -1879,8 +1880,8 @@ test("status observes an incomplete launch with a successful CLI envelope and un
   assert.doesNotMatch(text.stdout, /Progress: 0%|ETA: 0|running-healthy/u);
 });
 
-test("status surfaces a terminal product and live workflow lifecycle divergence", async () => {
-  const project = tempProject();
+test("status surfaces a terminal product and live workflow lifecycle divergence", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
@@ -1920,8 +1921,8 @@ test("status surfaces a terminal product and live workflow lifecycle divergence"
   );
 });
 
-test("resume of an already-active run says no controller was started instead of claiming a submission", async () => {
-  const project = tempProject();
+test("resume of an already-active run says no controller was started instead of claiming a submission", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
@@ -1940,8 +1941,8 @@ test("resume of an already-active run says no controller was started instead of 
   assert.doesNotMatch(resumed.stdout, /Submitted/u);
 });
 
-test("status --watch stops immediately on a degraded verdict even while product state is nonterminal", async () => {
-  const project = tempProject();
+test("status --watch stops immediately on a degraded verdict even while product state is nonterminal", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
@@ -1962,8 +1963,8 @@ test("status --watch stops immediately on a degraded verdict even while product 
   assert.equal(body.data?.report?.status, "unknown");
 });
 
-test("status surfaces quota parking with preserved attempts and the resume remediation", async () => {
-  const project = tempProject();
+test("status surfaces quota parking with preserved attempts and the resume remediation", async (t) => {
+  const project = tempProject(t);
   const env = fakeSmithersEnv(project);
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
@@ -2019,8 +2020,8 @@ test("status surfaces quota parking with preserved attempts and the resume remed
   assert.doesNotMatch(healthy.stdout, /^Quota:/mu);
 });
 
-test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {
-  const project = tempProject();
+test("old commands and backend flags are rejected instead of aliased or shimmed", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
 
   for (const argv of [
@@ -2040,8 +2041,8 @@ test("old commands and backend flags are rejected instead of aliased or shimmed"
   }
 });
 
-test("references status is restored and reports offline cache state", async () => {
-  const project = tempProject();
+test("references status is restored and reports offline cache state", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = path.join(project, "empty-cache");
@@ -2076,8 +2077,8 @@ test("references status is restored and reports offline cache state", async () =
   }
 });
 
-test("runtime command failures emit a failing exit code with JSON", async () => {
-  const project = tempProject();
+test("runtime command failures emit a failing exit code with JSON", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeSmallTopology(project);
 
@@ -2090,8 +2091,8 @@ test("runtime command failures emit a failing exit code with JSON", async () => 
   assert.match(JSON.stringify(body.diagnostics), /CONFIG_MODEL_AGENT_INVALID/);
 });
 
-test("run rejects an OpenRouter override whose effective model is invalid", async () => {
-  const project = tempProject();
+test("run rejects an OpenRouter override whose effective model is invalid", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeSmallTopology(project);
 
@@ -2115,8 +2116,8 @@ test("run rejects an OpenRouter override whose effective model is invalid", asyn
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "invalid-openrouter-model")), false);
 });
 
-test("report accepts populated accounting snapshots and preserves partial-pricing marker", async () => {
-  const project = tempProject();
+test("report accepts populated accounting snapshots and preserves partial-pricing marker", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
 
@@ -2210,8 +2211,8 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   assert.equal(fs.readFileSync(metadataPath, "utf8"), "{");
 });
 
-test("report validates current artifacts without rewriting agent-owned bytes", async () => {
-  const project = tempProject();
+test("report validates current artifacts without rewriting agent-owned bytes", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-current-artifacts");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
@@ -2243,8 +2244,8 @@ test("report validates current artifacts without rewriting agent-owned bytes", a
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report displays authenticated final-verifier warnings while preserving the report files", async () => {
-  const project = tempProject();
+test("report displays authenticated final-verifier warnings while preserving the report files", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-host-warnings");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   fs.mkdirSync(reportDir, { recursive: true });
@@ -2271,8 +2272,8 @@ test("report displays authenticated final-verifier warnings while preserving the
   assertFinalReportUnchanged(reportDir, before);
 });
 
-test("report exposes terminal partial coverage and bundles only the authenticated runtime publication", async () => {
-  const project = tempProject();
+test("report exposes terminal partial coverage and bundles only the authenticated runtime publication", async (t) => {
+  const project = tempProject(t);
   const { run, report, stateBytes } = await createTerminalPartialReport(project, "report-runtime-partial");
   const staleDirectory = path.join(run.run_root, "review", "runtime-report", "unverified-generation");
   fs.mkdirSync(staleDirectory, { recursive: true });
@@ -2310,8 +2311,8 @@ test("report exposes terminal partial coverage and bundles only the authenticate
   assert.deepEqual(fs.readFileSync(path.join(run.run_root, "state.json")), stateBytes);
 });
 
-test("report verification is optional and unchecked bundles contain only the labeled report pair", async () => {
-  const project = tempProject();
+test("report verification is optional and unchecked bundles contain only the labeled report pair", async (t) => {
+  const project = tempProject(t);
   const { run, report, stateBytes } = await createTerminalPartialReport(project, "report-optional-verification");
   const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
   assert.ok(receipt);
@@ -2368,8 +2369,8 @@ test("report verification is optional and unchecked bundles contain only the lab
   assert.match(JSON.stringify(parseJson(withoutAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
 });
 
-test("report bundle --require-verified rejects receipt bytes changed only during archive capture", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects receipt bytes changed only during archive capture", async (t) => {
+  const project = tempProject(t);
   const { run, report } = await createTerminalPartialReport(project, "report-runtime-receipt-change");
   const receipt = report.publications?.find((publication) => path.basename(publication.path) === "terminal.json");
   assert.ok(receipt);
@@ -2384,8 +2385,8 @@ test("report bundle --require-verified rejects receipt bytes changed only during
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "bundles", `${run.run_id}-report-bundle.zip`)), false);
 });
 
-test("eval report validates the registered summary and never synthesizes missing Markdown", async () => {
-  const project = tempProject();
+test("eval report validates the registered summary and never synthesizes missing Markdown", async (t) => {
+  const project = tempProject(t);
   const evalRunId = "eval-report-strict";
   const runRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
   const summaryPath = path.join(runRoot, "summary.json");
@@ -2473,8 +2474,8 @@ test("eval report validates the registered summary and never synthesizes missing
   assert.equal((parseJson(valid).data as { eval_run_id: string }).eval_run_id, evalRunId);
 });
 
-test("report --require-verified rejects final_severity compatibility aliases without rewriting artifacts", async () => {
-  const project = tempProject();
+test("report --require-verified rejects final_severity compatibility aliases without rewriting artifacts", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-rejects-severity-alias");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
@@ -2496,8 +2497,8 @@ test("report --require-verified rejects final_severity compatibility aliases wit
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report --require-verified does not synthesize missing Markdown", async () => {
-  const project = tempProject();
+test("report --require-verified does not synthesize missing Markdown", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-missing-markdown");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
@@ -2519,8 +2520,8 @@ test("report --require-verified does not synthesize missing Markdown", async () 
   assert.equal(digest(fs.readFileSync(reportPath)), jsonSha256Before);
 });
 
-test("report accepts canonical severity and complete proof without rewriting either artifact", async () => {
-  const project = tempProject();
+test("report accepts canonical severity and complete proof without rewriting either artifact", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-canonical-severity", writeBoundedDedupeReportTopology);
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
@@ -2543,8 +2544,8 @@ test("report accepts canonical severity and complete proof without rewriting eit
   assert.equal(Object.hasOwn(report.issues[0] ?? {}, "final_severity"), false);
 });
 
-test("report --require-verified rejects malformed issues without rewriting stale bytes", async () => {
-  const project = tempProject();
+test("report --require-verified rejects malformed issues without rewriting stale bytes", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-current-malformed");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
@@ -2579,8 +2580,8 @@ test("report --require-verified rejects malformed issues without rewriting stale
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report --require-verified rejects legacy report versions without a compatibility reader", async () => {
-  const project = tempProject();
+test("report --require-verified rejects legacy report versions without a compatibility reader", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-legacy-version");
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   const reportPath = path.join(reportDir, "report.json");
@@ -2602,8 +2603,8 @@ test("report --require-verified rejects legacy report versions without a compati
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("agent-owned bytes stay identical across validation, sync, aggregation, report, dashboard, and bundle reads", async () => {
-  const project = tempProject();
+test("agent-owned bytes stay identical across validation, sync, aggregation, report, dashboard, and bundle reads", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeByteIdentityTopology(project);
   const env = fakeSmithersEnv(project, true, ["aggregate-test-files"]);
@@ -2711,8 +2712,8 @@ test("agent-owned bytes stay identical across validation, sync, aggregation, rep
   assertAgentBytesUnchanged();
 });
 
-test("report bundle creates a portable ZIP without workspaces", async () => {
-  const project = tempProject();
+test("report bundle creates a portable ZIP without workspaces", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
 
@@ -2915,8 +2916,8 @@ test("report bundle creates a portable ZIP without workspaces", async () => {
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 });
 
-test("report bundle manifest records files it could not package", async () => {
-  const project = tempProject();
+test("report bundle manifest records files it could not package", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-omissions");
 
   const engineLogDir = path.join(runData.run_root, "smithers", "logs");
@@ -2959,8 +2960,8 @@ test("report bundle manifest records files it could not package", async () => {
   );
 });
 
-test("report bundle --require-verified rejects a changed authenticated publication from any finalized producer", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects a changed authenticated publication from any finalized producer", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-mutated-publication");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   const supportPublicationPath = "evidence/discovery-trace.txt";
@@ -2983,8 +2984,8 @@ test("report bundle --require-verified rejects a changed authenticated publicati
   );
 });
 
-test("report bundle --require-verified rejects manifest bytes injected only into the recursive archive read", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects manifest bytes injected only into the recursive archive read", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-manifest-read-injection");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
@@ -3007,8 +3008,8 @@ test("report bundle --require-verified rejects manifest bytes injected only into
   );
 });
 
-test("report bundle --require-verified rejects graph-fingerprint bytes injected only into the archive read", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects graph-fingerprint bytes injected only into the archive read", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-fingerprint-read-injection");
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
@@ -3031,8 +3032,8 @@ test("report bundle --require-verified rejects graph-fingerprint bytes injected 
   );
 });
 
-test("report bundle --require-verified rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects a persistently tampered sealed graph fingerprint before writing a ZIP", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-fingerprint-persistent-tamper");
   const fingerprintPath = path.join(runData.run_root, "graph.fingerprint");
   const tamperedBytes = Buffer.from(`${"a".repeat(64)}\n`, "utf8");
@@ -3049,8 +3050,8 @@ test("report bundle --require-verified rejects a persistently tampered sealed gr
   );
 });
 
-test("report bundle --require-verified rejects a declared report producer that claims success without finalization authority", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects a declared report producer that claims success without finalization authority", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-invalid-success-claim");
   const layout = layoutForRunRoot(runData.run_root, runData.run_id);
   updateNodeState(layout, "final-report", {
@@ -3072,8 +3073,8 @@ test("report bundle --require-verified rejects a declared report producer that c
   );
 });
 
-test("report bundle --require-verified applies canonical report-pair validation to custom declarations", async () => {
-  const project = tempProject();
+test("report bundle --require-verified applies canonical report-pair validation to custom declarations", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeCustomReportTopology(project);
   const run = await cli(
@@ -3107,8 +3108,8 @@ test("report bundle --require-verified applies canonical report-pair validation 
   );
 });
 
-test("report bundle preserves the exact validated event-record-v2 journal snapshot", async () => {
-  const project = tempProject();
+test("report bundle preserves the exact validated event-record-v2 journal snapshot", async (t) => {
+  const project = tempProject(t);
   const runId = "report-bundle-event-snapshot";
   const runRoot = (await createReportRun(project, runId)).run_root;
   const record = bundleFixtureEvent(runId);
@@ -3124,8 +3125,8 @@ test("report bundle preserves the exact validated event-record-v2 journal snapsh
   assert.deepEqual(captured, journalBytes);
 });
 
-test("report bundle treats only an absent event journal as optional", async () => {
-  const project = tempProject();
+test("report bundle treats only an absent event journal as optional", async (t) => {
+  const project = tempProject(t);
   const runId = "report-bundle-no-event-journal";
   const runRoot = (await createReportRun(project, runId)).run_root;
   fs.rmSync(path.join(runRoot, "events.jsonl"), { force: true });
@@ -3139,8 +3140,8 @@ test("report bundle treats only an absent event journal as optional", async () =
   assert.equal(zip.readAsText("graph.fingerprint"), fs.readFileSync(path.join(runRoot, "graph.fingerprint"), "utf8"));
 });
 
-test("report bundle --require-verified rejects historical runs without current sealed workflow authority", async () => {
-  const project = tempProject();
+test("report bundle --require-verified rejects historical runs without current sealed workflow authority", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   const runId = "report-bundle-historical-unsealed";
   const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
@@ -3155,7 +3156,7 @@ test("report bundle --require-verified rejects historical runs without current s
 });
 
 test("report bundle --require-verified fails closed on every present invalid event journal", async (context) => {
-  const project = tempProject();
+  const project = tempProject(context);
   const cases: Array<{
     name: string;
     prepare(eventsPath: string, runId: string): void;
@@ -3233,8 +3234,8 @@ test("report bundle --require-verified fails closed on every present invalid eve
   }
 });
 
-test("report bundle packages incomplete runs without a final-report JSON", async () => {
-  const project = tempProject();
+test("report bundle packages incomplete runs without a final-report JSON", async (t) => {
+  const project = tempProject(t);
   const runData = await createReportRun(project, "report-bundle-incomplete");
 
   const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
@@ -3254,8 +3255,8 @@ test("report bundle packages incomplete runs without a final-report JSON", async
   );
 });
 
-test("stats reads strict local current evidence and reports genuinely absent ledgers", async () => {
-  const project = tempProject();
+test("stats reads strict local current evidence and reports genuinely absent ledgers", async (t) => {
+  const project = tempProject(t);
   const fixture = writeStatsFixture(project, "stats-local", { linked: false });
 
   const captured = await cli(project, ["stats", fixture.runId, "--json"]);
@@ -3306,7 +3307,7 @@ test("stats reads strict local current evidence and reports genuinely absent led
 });
 
 test("stats falls back to unchanged local evidence when workflow event output is malformed", async (context) => {
-  const project = tempProject();
+  const project = tempProject(context);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
@@ -3340,8 +3341,8 @@ test("stats falls back to unchanged local evidence when workflow event output is
   }
 });
 
-test("stats queries a current report bundle offline and reports genuinely missing ledgers", async () => {
-  const project = tempProject();
+test("stats queries a current report bundle offline and reports genuinely missing ledgers", async (t) => {
+  const project = tempProject(t);
   const fixture = writeStatsFixture(project, "stats-bundle");
   const bundlePath = path.join(project, "stats-bundle.zip");
   writeStatsBundle(bundlePath, fixture);
@@ -3377,8 +3378,8 @@ test("stats queries a current report bundle offline and reports genuinely missin
   );
 });
 
-test("stats rejects a historical report-bundle manifest", async () => {
-  const project = tempProject();
+test("stats rejects a historical report-bundle manifest", async (t) => {
+  const project = tempProject(t);
   const fixture = writeStatsFixture(project, "stats-v1-bundle");
   const bundlePath = path.join(project, "stats-v1-bundle.zip");
   writeStatsBundle(bundlePath, fixture, {
@@ -3394,7 +3395,7 @@ test("stats rejects a historical report-bundle manifest", async () => {
 });
 
 test("stats fails closed for malformed present bundle evidence", async (context) => {
-  const project = tempProject();
+  const project = tempProject(context);
   const cases: Array<{
     name: string;
     member?: string;
@@ -3568,7 +3569,7 @@ test("stats fails closed for malformed present bundle evidence", async (context)
 });
 
 test("stats binds the v3 manifest entry count and rejects ZIP path aliases", async (context) => {
-  const project = tempProject();
+  const project = tempProject(context);
   await context.test("manifest entry count", async () => {
     const fixture = writeStatsFixture(project, "stats-count-mismatch");
     const bundlePath = path.join(project, "stats-count-mismatch.zip");
@@ -3629,8 +3630,8 @@ test("stats binds the v3 manifest entry count and rejects ZIP path aliases", asy
   });
 });
 
-test("stats rejects local evidence whose leaf is a symlink", async () => {
-  const project = tempProject();
+test("stats rejects local evidence whose leaf is a symlink", async (t) => {
+  const project = tempProject(t);
   const fixture = writeStatsFixture(project, "stats-symlink");
   const usagePath = path.join(fixture.runRoot, "usage.jsonl");
   const outsidePath = path.join(project, "outside-usage.jsonl");
@@ -3643,8 +3644,8 @@ test("stats rejects local evidence whose leaf is a symlink", async () => {
   assert.match(JSON.stringify(parseJson(captured).diagnostics), /symlink/u);
 });
 
-test("stats rejects linked local evidence without sealed workflow authority", async () => {
-  const project = tempProject();
+test("stats rejects linked local evidence without sealed workflow authority", async (t) => {
+  const project = tempProject(t);
   const fixture = writeStatsFixture(project, "stats-missing-control-authority");
 
   const captured = await cli(project, ["stats", fixture.runId, "--json"]);
