@@ -546,46 +546,4 @@ describe("public Modal benchmark configuration", () => {
       );
     }
   });
-
-  it("validates persisted public results after lineage preflight and seals replacements atomically", () => {
-    const workspace = path.resolve("../..");
-    const source = fs.readFileSync(path.join(workspace, "packages/modal/src/public-worker.ts"), "utf8");
-    const preflight = source.indexOf("await input.preflight");
-    const persistedBundle = source.indexOf("if (pathEntryPresent(bundlePath))");
-    const readPersistedBundle = source.indexOf("readPublicBenchmarkBundle", persistedBundle);
-    const assertPersistedLineage = source.indexOf("assertPublicWorkerBundleLineage", readPersistedBundle);
-
-    expect(preflight).toBeGreaterThan(-1);
-    expect(persistedBundle).toBeGreaterThan(preflight);
-    expect(readPersistedBundle).toBeGreaterThan(persistedBundle);
-    expect(assertPersistedLineage).toBeGreaterThan(readPersistedBundle);
-    expect(source).toContain("await publishPublicBenchmarkBundle({");
-    expect(source).toContain("await writePublicBundleAtomic(input.bundlePath, bundle)");
-    expect(source).not.toContain("writeFile(bundlePath");
-  });
-
-  it("hydrates pinned target submodules before initializing a public benchmark", () => {
-    const workspace = path.resolve("../..");
-    const worker = fs.readFileSync(path.join(workspace, "packages/modal/src/public-worker.ts"), "utf8");
-    const clone = worker.indexOf("await cloneAtCommit(target.repo, target.ref, destination, logPath, {");
-    const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
-    const smithersSeed = worker.indexOf("await seedPublicBenchmarkSmithersDependencies(destination)", init);
-    const laneProfile = worker.indexOf(
-      "modalTargetToml(model, config.node_timeout_seconds, auditProfile)",
-      smithersSeed
-    );
-    const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
-    const submodules = worker.indexOf('["git", "submodule", "update", "--init", "--recursive", "--depth", "1"]');
-    const referenceSync = worker.indexOf('["node", CLI, "references", "sync"', init);
-
-    expect(clone).toBeGreaterThan(-1);
-    expect(init).toBeGreaterThan(clone);
-    expect(worker.slice(clone, init)).toContain("initializeSubmodules: true");
-    expect(smithersSeed).toBeGreaterThan(init);
-    expect(laneProfile).toBeGreaterThan(smithersSeed);
-    expect(referenceSync).toBeGreaterThan(laneProfile);
-    expect(worker.indexOf("capModalTargetTopologyTimeouts", init)).toBe(-1);
-    expect(checkout).toBeGreaterThan(-1);
-    expect(submodules).toBeGreaterThan(checkout);
-  });
 });

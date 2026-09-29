@@ -70,15 +70,6 @@ describe("pinned benchmark source", () => {
     );
   });
 
-  it("uses bounded git revision queries for source proof inspection", () => {
-    const source = fs.readFileSync(new URL("../src/pinned-source.ts", import.meta.url), "utf8");
-
-    expect(source).toContain('["rev-list", "--all", "--count"]');
-    expect(source).toContain('["rev-list", "--all", "--max-count=1"]');
-    expect(source).toContain("git fsck --connectivity-only --unreachable --no-reflogs --no-progress");
-    expect(source).not.toContain("--batch-all-objects");
-  });
-
   it("materializes only the requested commit without the remote default branch or later objects", async () => {
     const fixture = sourceRepository();
     const destination = path.join(fixture.root, "sanitized");

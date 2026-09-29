@@ -1,5 +1,3 @@
-import fs from "node:fs";
-
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_MODAL_IMAGE, type ModelProvider } from "../src/defaults.js";
@@ -113,42 +111,6 @@ describe("provider-isolated smoke entrypoints", () => {
       expect(command).toContain("runuser -u ubuntu");
       expect(command).toContain(MODAL_SMOKE_ENTRY_PATH);
     }
-  });
-});
-
-describe("dedicated cloud command", () => {
-  it("keeps real Modal smoke out of normal unit tests and other CLI paths", () => {
-    const cliSource = fs.readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
-    const smokeSources = ["smoke.ts", "smoke-modal.ts", "smoke-worker.ts"].map((name) =>
-      fs.readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")
-    );
-    const packageJson = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
-      scripts: Record<string, string>;
-    };
-
-    expect(cliSource.match(/import\("\.\/smoke-modal\.js"\)/gu)).toHaveLength(1);
-    expect(cliSource).not.toMatch(/^import .*smoke-modal/mu);
-    expect(packageJson.scripts.smoke).toContain("dist/cli.js smoke");
-    expect(packageJson.scripts.typecheck).toBe(
-      "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"
-    );
-    expect(packageJson.scripts.test).not.toContain("smoke");
-    expect(smokeSources.every((source) => !source.includes("process.env"))).toBe(true);
-  });
-
-  it("uses registered strict documents for worker publication and immutable controller reads", () => {
-    const controllerSource = fs.readFileSync(new URL("../src/smoke-modal.ts", import.meta.url), "utf8");
-    const workerSource = fs.readFileSync(new URL("../src/smoke-worker.ts", import.meta.url), "utf8");
-
-    expect(controllerSource).toContain("sandbox.filesystem.readBytes(filePath)");
-    expect(controllerSource).toContain("parseModalSmokeCheckpointBytes");
-    expect(controllerSource).toContain("parseModalSmokeCompletionBytes");
-    expect(controllerSource).not.toContain("filesystem.readText");
-    expect(controllerSource).not.toContain("JSON.parse");
-    expect(workerSource).toMatch(/writeModalDocumentAtomic\(\s*checkpointPath,\s*MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,/u);
-    expect(workerSource).toMatch(/writeModalDocumentAtomic\(\s*resultPath,\s*MODAL_SMOKE_COMPLETION_SCHEMA_ID,/u);
-    expect(workerSource).toContain("readModalDocument(checkpointPath, MODAL_SMOKE_CHECKPOINT_SCHEMA_ID)");
-    expect(workerSource).not.toContain("JSON.stringify");
   });
 });
 

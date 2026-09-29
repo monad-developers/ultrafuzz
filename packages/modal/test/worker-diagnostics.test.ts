@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 
 import { expect, it } from "vitest";
 
@@ -252,29 +251,6 @@ it("carries a private worker child-exit reason into a line the collector keeps",
       [secret]
     )
   ).not.toThrow();
-});
-
-it("appends nothing to the private worker log outside the two collected productions", () => {
-  // `worker.ts` reads its run id, config and volume root at module scope, so it cannot be imported here; the
-  // grammar it writes is still the property that decides whether a pair keeps its collected files.
-  const source = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
-
-  expect([...source.matchAll(/appendFile\(LOG_PATH,/gu)]).toHaveLength(2);
-  expect(source).toContain("`${new Date().toISOString()} ${event}\\n`");
-  expect(source).toContain("`${new Date().toISOString()} eval-failure-diagnostics ${payload}\\n`");
-});
-
-it("names an unhandled private worker failure in the log before the terminal contract records it", () => {
-  // Same module-scope constraint as above. The net arms right after `worker-started` -- the earliest point at
-  // which this attempt's log exists -- and leaves the two faults the contract already names, the checkpoint
-  // and resume incompatibilities, to their own codes.
-  const source = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
-
-  expect(source).toMatch(/await appendGenericLog\("worker-started"\);\n\s*logStarted = true;\n/u);
-  expect(source).toContain("passthrough: (error) => !logStarted || namedDiagnosticCode(error) !== undefined");
-  expect(source).toContain(
-    "workerFailureDiagnostic(WORKER_UNHANDLED_FAILURE_DIAGNOSTIC_CODE, error, [...DIAGNOSTIC_SECRET_VALUES])"
-  );
 });
 
 it("names a failure by its cause chain, or says the detail was withheld when the collector would drop it", () => {

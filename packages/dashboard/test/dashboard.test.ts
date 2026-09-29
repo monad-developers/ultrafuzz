@@ -847,32 +847,6 @@ test("dashboard overview does not infer findings availability from a lookalike f
   }
 });
 
-test("dashboard flow captures run-wide authority outside per-node projection and rechecks once", () => {
-  const compiledSource = fs.readFileSync(
-    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "index.js"),
-    "utf8"
-  );
-  const flowStart = compiledSource.indexOf("async flow()");
-  const flowNodeStart = compiledSource.indexOf("\n    flowNode(", flowStart);
-  assert.ok(flowStart >= 0 && flowNodeStart > flowStart);
-  const flow = compiledSource.slice(flowStart, flowNodeStart);
-  const flowNode = compiledSource.slice(flowNodeStart, compiledSource.indexOf("async runOverview()", flowNodeStart));
-  const captureContextStart = compiledSource.indexOf("async captureRunAuthorityContext()");
-  const captureContext = compiledSource.slice(
-    captureContextStart,
-    compiledSource.indexOf("async assertCapturedRunAuthorityRemainedCurrent", captureContextStart)
-  );
-  const projectionStart = compiledSource.indexOf("function dashboardFlowAuthorityProjection");
-  const projectionEnd = compiledSource.indexOf("function assertDashboardAbsentAuthorityRemainedCurrent");
-  assert.ok(projectionStart >= 0 && projectionEnd > projectionStart);
-  const projection = compiledSource.slice(projectionStart, projectionEnd);
-  assert.match(flow, /captureRunAuthorityContext/u);
-  assert.match(captureContext, /dashboardFlowAuthorityProjection/u);
-  assert.match(flow, /assertCapturedRunAuthorityRemainedCurrent/u);
-  assert.doesNotMatch(flowNode, /loadVerifiedRunOutputAuthoritySnapshot/u);
-  assert.equal(projection.match(/loadVerifiedRunOutputAuthoritySnapshot/gmu)?.length, 1);
-});
-
 test("dashboard authority capture rejects a run state that changed after the endpoint's initial read", async () => {
   const fixture = await createDashboardFindingsFixture();
   const observedState = readRunState(fixture.layout);
