@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -103,7 +104,15 @@ export async function writeDeterministicTarGzip(rootPath: string, outputPath: st
   } catch (error) {
     pack?.destroy();
     gzip?.destroy();
-    output?.destroy();
+    if (output !== undefined) {
+      // Destroying the stream closes its descriptor, even with autoClose off, and it does so
+      // asynchronously. Wait for that close and never close the number again: by then it may name
+      // another file.
+      const closed = output.closed ? undefined : once(output, "close");
+      output.destroy();
+      await closed;
+      outputDescriptor = undefined;
+    }
     await completion?.catch(() => undefined);
     if (outputIdentity !== undefined && outputAccessPath !== undefined) {
       removeCreatedOutput(outputAccessPath, outputIdentity);
