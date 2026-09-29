@@ -5390,19 +5390,28 @@ export async function runSmithersInspectionCommand(input: {
     const stderr = typeof record.stderr === "string" ? record.stderr : "";
     // Node reports the kill of its own execution timeout as `killed` with SIGTERM.
     const timedOut = record.killed === true && record.signal === "SIGTERM";
+    const parsed = jsonField(stdout);
     return {
       command: smithersDisplayCommand(command),
       ok: false,
       stdout,
       stderr,
-      ...jsonField(stdout),
+      ...parsed,
       error: timedOut
         ? `workflow runner query exceeded its time limit and was stopped (ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS=${String(commandTimeoutMs)})`
-        : error instanceof Error
-          ? error.message
-          : String(error)
+        : (runnerReportedError(parsed.json) ?? (error instanceof Error ? error.message : String(error)))
     };
   }
+}
+
+/**
+ * The runner's own reason for a failed command, from its JSON envelope. The process error only says
+ * the command exited, and names the whole runner invocation instead.
+ */
+function runnerReportedError(json: unknown): string | undefined {
+  const message =
+    isObjectRecord(json) && json.ok === false && isObjectRecord(json.error) ? json.error.message : undefined;
+  return typeof message === "string" && message.trim().length > 0 ? message : undefined;
 }
 
 function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {
