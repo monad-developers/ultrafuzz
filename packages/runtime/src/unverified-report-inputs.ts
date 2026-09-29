@@ -2,12 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  assertArtifactPublicationsContainNoSecrets,
   assertNoSymlinkComponents,
   NODE_REFERENCE_PATTERN,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
   readSinglyLinkedRegularFileSnapshotInside,
   safeResolveInside,
+  sensitiveEnvironmentValues,
   sha256Bytes,
   type ObservedReportCompletion,
   reportSchema,
@@ -244,8 +246,9 @@ function readAgentReport(
   const outputPath = outputs.length === 1 ? outputs[0]?.path : undefined;
   if (typeof outputPath !== "string" || !safeReportPath(outputPath))
     throw new ReportUnavailableError("the declared report output path is invalid");
-  // Only a passing verifier publishes declared outputs into artifacts/. A report
-  // it rejected is still where the agent wrote it, in the workspace mirror.
+  // A rejected attempt has no trusted artifacts/ copy: the verifier publishes
+  // only output it accepts, and the controller rejects a publication that then
+  // changed. The agent's own output is still in the workspace mirror.
   if (attempt.rejected) reader.reasons.add("record-invalid");
   const directory = attempt.rejected ? `workspaces/${attempt.id}/artifacts/${attempt.id}` : `artifacts/${attempt.id}`;
   const value = reader.record(`${directory}/${outputPath}`, false, MAX_REPORT_BYTES);
@@ -260,10 +263,28 @@ function readAgentReport(
     parsed.data.observed_completion !== undefined
   )
     throw new ReportUnavailableError("the agent report contains runtime-owned completion metadata");
+  if (attempt.rejected) assertRejectedReportHasNoSecrets(outputPath, parsed.data);
   return parsed.data;
 }
 
-/** A unique successful attempt, else a unique attempt whose agent finished but whose verifier failed. */
+/**
+ * The verifier runs its secret gate just before it publishes, so a report it
+ * rejected may never have passed that gate. Scan the parsed report, which holds
+ * all agent-written presentation content, and keep it unavailable on a hit
+ * rather than rewrite agent content.
+ */
+function assertRejectedReportHasNoSecrets(outputPath: string, report: unknown): void {
+  try {
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([[outputPath, Buffer.from(JSON.stringify(report), "utf8")]]),
+      sensitiveEnvironmentValues(process.env)
+    );
+  } catch {
+    throw new ReportUnavailableError("the rejected report-agent JSON did not pass the artifact secret gate");
+  }
+}
+
+/** A unique successful attempt, else a unique attempt whose agent finished but whose output was rejected. */
 function currentReportAttempt(
   producerId: string,
   nodes: JsonRecord,
@@ -288,7 +309,11 @@ function currentReportAttempt(
   return { id: attempt, rejected: successful.length === 0 };
 }
 
-/** Synchronization names the verifier as the cause only after the agent task itself succeeded. */
+/**
+ * Synchronization names the verifier as the cause only after the agent task
+ * itself succeeded: the verifier failed, or the controller rejected the
+ * verifier's publication.
+ */
 function verifierRejected(value: unknown): boolean {
   const node = asRecord(value);
   const provenance = asRecord(node?.provenance);

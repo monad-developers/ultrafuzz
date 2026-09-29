@@ -574,7 +574,10 @@ report gate; the host does not synthesize it from older handoffs.
 
 ## Final Report
 
-Final report content is always agent-written. The final-report agent normally writes:
+Final report content is always agent-written. The final-report agent writes
+`report.md` and `report.json` in its workspace, under
+`workspaces/<attempt>/artifacts/<attempt>/`. Output that passes verification is
+published as:
 
 ```text
 artifacts/final-report/report.md
@@ -620,8 +623,8 @@ A successful report agent produces a PARTIAL report when planned coverage is
 incomplete. If every strategy fails, review can still report missing coverage
 when its execution prerequisites and time limits permit it. If the report
 agent cannot start, fails, or exhausts its allowed attempts, the run ends with
-**report unavailable** and preserves the saved task results; a report that the
-artifact verifier rejected is the exception described below. The runtime does
+**report unavailable** and preserves the saved task results; a report rejected
+at verification is the exception described below. The runtime does
 not synthesize a replacement report from raw findings. `ultrafuzz report`
 returns a clear error when no current report-agent output is available.
 
@@ -630,11 +633,16 @@ verification is optional: when supporting records cannot be fully verified,
 a readable, schema-valid report from the current successful report-agent attempt
 can be formatted as an unchecked PARTIAL report under
 `review/unverified-report/<digest>/report.json` and `report.md`. When the report
-agent finished but the artifact verifier rejected its output, a readable,
-schema-valid `report.json` in that attempt's workspace output directory is
-formatted the same way, and its reason codes include `record-invalid`. These
-files preserve the agent-written content; they are not fallback analysis
-reports.
+agent finished but its output was rejected at verification (the artifact
+verifier failed, or the controller rejected the verified publication, for
+example because it changed), the runtime formats the agent's own
+`workspaces/<attempt>/artifacts/<attempt>/report.json` the same way and never
+reads the copy under `artifacts/`. That file must be readable and schema-valid
+and must pass the artifact secret gate; the reason codes then include
+`record-invalid`. The unchecked report does not say why verification rejected
+it; the report node's `last_error`, shown by `ultrafuzz inspect <run-id> --json`,
+does. These files preserve the agent-written content; they are not fallback
+analysis reports.
 
 The command's JSON result includes `source` (`verified-agent-report`,
 `verified-runtime-report`, or `unverified-runtime-report`), `verification`

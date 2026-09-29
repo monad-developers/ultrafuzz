@@ -183,6 +183,17 @@ for (const causalTaskId of ["node:final-report", "prepare:final-report"]) {
   });
 }
 
+test("a report its verifier rejected stays unavailable when it fails the artifact secret gate", () => {
+  const root = reportRun("verifier-rejected-secret");
+  writeAgentReport(root);
+  const { file } = failReportAttempt(root, "verify:final-report");
+  const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+  report.run_metadata.repository = "example/repository ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  fs.writeFileSync(file, JSON.stringify(report));
+  assert.throws(() => loadReportSnapshot(root), /Report unavailable: .* did not pass the artifact secret gate/u);
+  assert.equal(fs.existsSync(path.join(root, "review")), false);
+});
+
 test("unchecked agent reports disclose saved failures without inventing planned counts", () => {
   const root = reportRun("failed-records");
   writeAgentReport(root);
