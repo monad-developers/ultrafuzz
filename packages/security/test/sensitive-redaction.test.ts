@@ -272,9 +272,18 @@ test("positive-only scans publish Anvil's dev mnemonic and keys while other mnem
   );
 });
 
-test("the JWT rule requires eyJ header and payload segments, so dotted identifiers publish", () => {
+test("the JWT rule requires an eyJ header, so dotted identifiers publish", () => {
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"; // gitleaks:allow -- fake credential fixture for the redaction tests
   assert.equal(redactSecretsInText(`session=${jwt};`, undefined, [], "positive-only"), "session=<redacted>;");
+  // Only the header is constrained. A JWE's second segment is its encrypted
+  // key, and a payload with a space after '{' encodes to "eyA".
+  const base64url = (json: string): string => Buffer.from(json).toString("base64url");
+  for (const token of [
+    `${base64url('{"alg":"RSA-OAEP","enc":"A256GCM"}')}.OKOawDo13gRp2ojaHV7LFpZcgV7T.48V1_ALb6US04U3b.5eym8TW_c8SuK0ltJ3rpYIzOeDQz.XFBoMYUZodetZdvTiFvSkQ`,
+    `${base64url('{"alg":"HS256"}')}.${base64url('{ "sub": "1234567890" }')}.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk`
+  ]) {
+    assert.equal(containsSensitiveSecrets(`session=${token};`, [], "positive-only"), true, token);
+  }
   for (const fixture of [
     "ReentrancyGuardUpgradeable.nonReentrantModifier.lockedStateCheck",
     "IExampleLendingPoolCore.liquidationCall.healthFactorBefore",

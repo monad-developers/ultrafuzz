@@ -1121,7 +1121,7 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
   // The positive rules must not fire on ordinary contract output either: a
   // Foundry test deriving and signing with Anvil's published mnemonic and
   // account (0) key, and a qualified identifier with three long dotted
-  // segments (JWT-shaped until the rule required the eyJ header and payload).
+  // segments (JWT-shaped until the rule required an eyJ header).
   assert.doesNotThrow(() =>
     assertArtifactPublicationsContainNoSecrets(
       new Map([

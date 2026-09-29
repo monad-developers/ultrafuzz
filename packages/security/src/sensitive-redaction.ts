@@ -49,11 +49,13 @@ const SUPPLEMENTAL_SECRET_PATTERNS: readonly RegExp[] = [
   /\b(?:ak|as)-[A-Za-z0-9_]{16,}\b/gu,
   // No Google OAuth access-token rule in the recommended preset.
   /\bya29\.[A-Za-z0-9._-]{20,}\b/gu,
-  // No JWT rule in the recommended preset. A JWT's header and payload are
-  // base64url JSON objects, which encode to "eyJ" when they open with '{"' and
-  // a letter; that prefix is the identification. Three dotted segments alone
-  // also match qualified identifiers such as Contract.function.check.
-  /\b(?=eyJ)[A-Za-z0-9_-]{20,}\.(?=eyJ)[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu,
+  // No JWT rule in the recommended preset. A JWT header is a base64url JSON
+  // object, which encodes to "eyJ" when it opens with '{"' and a letter; that
+  // prefix is the identification. Three long dotted segments alone also
+  // describe qualified names such as
+  // ReentrancyGuardUpgradeable.nonReentrantModifier.lockedStateCheck. Later
+  // segments stay unconstrained: a JWE's second one is its encrypted key.
+  /\b(?=eyJ)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu,
   // Provider-keyed RPC URLs embed the credential in the path; no secretlint
   // rule covers Alchemy/Infura project keys.
   /\b(?:https?|wss?):\/\/[^\s"'`]*(?:alchemy\.com\/v2\/|infura\.io\/v3\/)[A-Za-z0-9_-]{16,}\b/giu
