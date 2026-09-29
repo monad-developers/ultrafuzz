@@ -19,9 +19,7 @@ import {
   derivePromptArtifactAuthority,
   MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
   parsePromptArtifactAuthorityBytes,
-  PROMPT_ARTIFACT_AUTHORITY_JSON_SCHEMA_ID,
   PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION,
-  promptArtifactAuthorityJsonSchema,
   serializePromptArtifactAuthority,
   type DerivePromptArtifactAuthorityInput,
   type PromptArtifactAuthorityDocument
@@ -214,8 +212,6 @@ function deriveInput(overrides: Partial<DerivePromptArtifactAuthorityInput> = {}
 
 test("per-task prompt authority is portable, minimized, deterministic, and round-trips", () => {
   const authority = derivePromptArtifactAuthority(deriveInput());
-
-  assert.equal(promptArtifactAuthorityJsonSchema.$id, PROMPT_ARTIFACT_AUTHORITY_JSON_SCHEMA_ID);
 
   assert.deepEqual(authority, {
     schema_version: PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION,

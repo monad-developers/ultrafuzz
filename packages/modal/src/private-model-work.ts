@@ -51,6 +51,8 @@ export function privateEvalModelWorkEvidence(projectRoot: string): PrivateEvalMo
   );
 
   if (state.status === "succeeded" && modelNodeIds.size > 0) return "started";
+  // A model node without a record does not show that it never began.
+  if ([...modelNodeIds].some((id) => state.nodes[id] === undefined)) return "unknown";
   // Run state also records each model attempt under its attempt ID and each generated dynamic node under its
   // storage ID, neither of which the graph names. Only agentic nodes get such records, so they are model work.
   for (const [id, node] of Object.entries(state.nodes)) {

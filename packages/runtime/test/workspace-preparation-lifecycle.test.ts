@@ -26,6 +26,7 @@ type Task = {
   productionSourceRoots: string[];
   dependencyArtifactDirs: string[];
   outputs: Array<{ path: string; contract: string }>;
+  pinnedSubmodules?: unknown;
   metadata: {
     artifacts: { dir: string };
     node: { logicalNodeId: string };
@@ -80,7 +81,14 @@ function dependencySnapshot(dependency: string) {
  * dependency epoch checks, patch validation, replay, journals, snapshots, handoff,
  * and both invariant baseline copies use the production implementations.
  */
-function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean; onPreflight?: () => void } = {}) {
+function preparationHarness(
+  tasks: Task[],
+  options: {
+    rejectAdmission?: boolean;
+    onPreflight?: () => void;
+    onPinnedSubmodules?: (step: "hydrate" | "verify", expectation: unknown) => void;
+  } = {}
+) {
   const source = ts.createSourceFile(
     templatePath(),
     fs.readFileSync(templatePath(), "utf8"),
@@ -141,8 +149,10 @@ function preparationHarness(tasks: Task[], options: { rejectAdmission?: boolean;
     },
     taskSpecs: tasks,
     replacePromptSchemas: true,
-    hydratePinnedSubmodulesFromExecutionSnapshot: () => undefined,
-    verifyPinnedSubmodulesFromExecutionSnapshot: () => undefined
+    hydratePinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>
+      options.onPinnedSubmodules?.("hydrate", input.expectation),
+    verifyPinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>
+      options.onPinnedSubmodules?.("verify", input.expectation)
   };
   for (const name of localConstants) Reflect.deleteProperty(collaborators, name);
   return new Function(
@@ -323,6 +333,55 @@ test("#1081 complete preparation regenerates every pre-agent store after a depen
     const authoredTree = runtime.captureWorkspaceTree(fixture.task.workspacePath);
     reopened.prepare(fixture.task, { replayWorkspacePatches: false, evidenceMode: "require" });
     assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), authoredTree);
+  }));
+
+test("a pre-agent preparation pass restores inherited invariant sources, and only the post-agent pass keeps the worktree's", () =>
+  lifecycleFixture((fixture) => {
+    // An invariant stage inherits its ancestor's suite after the workspace preparation tree is captured,
+    // so when a later pass restores that tree only the invariant workspace snapshot can bring it back.
+    const setup = fixture.tasks[0];
+    assert.ok(setup);
+    setup.metadata.node.logicalNodeId = "stateful-invariant-setup";
+    const inherited = "test/recon/Inherited.sol";
+    const contents = "contract Inherited {}\n";
+    const edited = "contract Inherited { uint256 edited; }\n";
+    fs.mkdirSync(path.join(setup.artifactDir, "invariant-suite/test/recon"), { recursive: true });
+    fs.writeFileSync(path.join(setup.artifactDir, "invariant-suite", inherited), contents);
+    fs.writeFileSync(
+      path.join(setup.artifactDir, "invariant-suite-manifest.json"),
+      JSON.stringify({
+        schema_version: artifacts.INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION,
+        producer_node_id: setup.metadata.node.logicalNodeId,
+        producer_attempt_id: setup.attemptId,
+        files: [
+          {
+            path: inherited,
+            size_bytes: Buffer.byteLength(contents),
+            sha256: createHash("sha256").update(contents).digest("hex")
+          }
+        ],
+        tombstones: []
+      })
+    );
+    const harness = preparationHarness(fixture.tasks);
+    harness.prepare(fixture.task);
+    const target = path.join(fixture.task.workspacePath, inherited);
+    assert.equal(fs.readFileSync(target, "utf8"), contents);
+
+    // A preparation retry and a durable resume both start the attempt from the snapshot, whatever the
+    // previous attempt did to the source.
+    for (const prepare of [
+      () => harness.prepare(fixture.task),
+      () => preparationHarness(fixture.tasks).prepare(fixture.task)
+    ]) {
+      fs.writeFileSync(target, edited);
+      prepare();
+      assert.equal(fs.readFileSync(target, "utf8"), contents);
+    }
+    // The post-agent pass keeps this attempt's edit until the workspace patch captures it.
+    fs.writeFileSync(target, edited);
+    harness.prepare(fixture.task, { replayWorkspacePatches: false, evidenceMode: "require" });
+    assert.equal(fs.readFileSync(target, "utf8"), edited);
   }));
 
 test("#1081 invalid previous evidence or unauthenticated replacement leaves the worktree untouched", () => {
@@ -532,13 +591,17 @@ test("#1115 an interrupted workspace replacement still binds property-only depen
     assert.equal(runtime.captureWorkspaceTree(fixture.task.workspacePath), fixture.second);
   }));
 
-test("the post-agent verify pass does not preflight the agent-facing validator CLI", () =>
+test("the post-agent verify pass checks the task's pinned submodules and does not preflight the agent-facing validator CLI", () =>
   lifecycleFixture((fixture) => {
     let preflights = 0;
+    const submoduleSteps: Array<[string, unknown]> = [];
+    const pinnedSubmodules = { submodules: [{ path: "lib/forge-std", commit: "a".repeat(40) }] };
+    fixture.task.pinnedSubmodules = pinnedSubmodules;
     const harness = preparationHarness(fixture.tasks, {
       onPreflight: () => {
         preflights += 1;
-      }
+      },
+      onPinnedSubmodules: (step, expectation) => submoduleSteps.push([step, expectation])
     });
     // prepare:* and the reset before each agent attempt run ahead of an agent that uses the CLI.
     harness.prepare(fixture.task);
@@ -552,4 +615,11 @@ test("the post-agent verify pass does not preflight the agent-facing validator C
       pinnedSubmodules: "verify"
     });
     assert.equal(preflights, 2);
+    // Without the task's expectation the verify pass has nothing to compare, so it would accept any
+    // submodule state the agent left behind.
+    assert.deepEqual(submoduleSteps, [
+      ["hydrate", pinnedSubmodules],
+      ["hydrate", pinnedSubmodules],
+      ["verify", pinnedSubmodules]
+    ]);
   }));

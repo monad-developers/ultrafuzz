@@ -139,13 +139,28 @@ interface FakeInspectionFixtures {
   events?: string;
   eventsFirstRead?: string;
   cancelStatus?: string;
-  cancelExitCode?: number;
 }
 
-type FakeInspectionControl = "cancel-terminal" | "error-exit-code" | "error-text" | "kill-self";
+const FAKE_INSPECTION_CONTROLS = ["cancel-terminal", "error-exit-code", "error-text", "kill-self"] as const;
+type FakeInspectionControl = (typeof FAKE_INSPECTION_CONTROLS)[number];
 
 function fakeInspectionControlPath(project: string, control: FakeInspectionControl): string {
   return path.join(project, `fake-${control}`);
+}
+
+function fakeInspectionFiles(project: string) {
+  return {
+    why: path.join(project, "fake-why.json"),
+    timeline: path.join(project, "fake-timeline.json"),
+    snapshots: path.join(project, "fake-snapshots.json"),
+    node: path.join(project, "fake-node.json"),
+    nodeWatch: path.join(project, "fake-node-watch.ndjson"),
+    events: path.join(project, "fake-events.ndjson"),
+    eventsFirstRead: path.join(project, "fake-events-first-read.ndjson"),
+    eventsFirstReadMarker: path.join(project, "fake-events-first-read-complete"),
+    cancel: path.join(project, "fake-cancel.json"),
+    commandLog: path.join(project, "smithers-commands.log")
+  };
 }
 
 function failFakeInspectionRunner(project: string, message: string, exitCode: number): void {
@@ -182,22 +197,20 @@ function smithersEventLine(input: {
 }
 
 /**
- * A fake workflow runner that answers the inspection and lifecycle commands
- * with the exact JSON shapes the pinned engine emits.
+ * Sets the answers the fake runner gives, and clears the previous answers, the
+ * control files and the command log, so a test sees only its own commands.
  */
-function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): Record<string, string | undefined> {
-  const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
-  fs.mkdirSync(binDir, { recursive: true });
-  registerTemporaryPath(binDir);
-  const files = {
-    why: path.join(project, "fake-why.json"),
-    timeline: path.join(project, "fake-timeline.json"),
-    snapshots: path.join(project, "fake-snapshots.json"),
-    node: path.join(project, "fake-node.json"),
-    events: path.join(project, "fake-events.ndjson"),
-    eventsFirstRead: path.join(project, "fake-events-first-read.ndjson"),
-    eventsFirstReadMarker: path.join(project, "fake-events-first-read-complete")
-  };
+function writeInspectionFixtures(project: string, fixtures: FakeInspectionFixtures): void {
+  const files = fakeInspectionFiles(project);
+  for (const stale of [
+    files.nodeWatch,
+    files.eventsFirstRead,
+    files.eventsFirstReadMarker,
+    files.commandLog,
+    ...FAKE_INSPECTION_CONTROLS.map((control) => fakeInspectionControlPath(project, control))
+  ]) {
+    fs.rmSync(stale, { force: true });
+  }
   fs.writeFileSync(
     files.why,
     `${JSON.stringify({
@@ -230,17 +243,33 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   if (fixtures.eventsFirstRead !== undefined) {
     fs.writeFileSync(files.eventsFirstRead, fixtures.eventsFirstRead, "utf8");
   }
-  const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
   if (fixtures.nodeWatchLines !== undefined) {
-    fs.writeFileSync(nodeWatchPath, fixtures.nodeWatchLines, "utf8");
+    fs.writeFileSync(files.nodeWatch, fixtures.nodeWatchLines, "utf8");
   }
+  fs.writeFileSync(
+    files.cancel,
+    `${JSON.stringify({ ok: true, data: { status: fixtures.cancelStatus ?? "cancel-requested" } })}\n`,
+    "utf8"
+  );
+}
 
+/**
+ * A fake workflow runner that answers the inspection and lifecycle commands
+ * with the exact JSON shapes the pinned engine emits. It reads every answer
+ * from the files `writeInspectionFixtures` sets, so the runner a run was
+ * launched with never has to change.
+ */
+function fakeInspectionEnv(project: string): Record<string, string | undefined> {
+  const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
+  fs.mkdirSync(binDir, { recursive: true });
+  registerTemporaryPath(binDir);
+  const files = fakeInspectionFiles(project);
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
     [
       "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${shellQuote(path.join(project, "smithers-commands.log"))}`,
+      `printf '%s\\n' "$*" >> ${shellQuote(files.commandLog)}`,
       `if [ -f ${shellQuote(fakeInspectionControlPath(project, "kill-self"))} ]; then kill -9 $$; fi`,
       `if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-exit-code"))} ]; then`,
       `  if [ -f ${shellQuote(fakeInspectionControlPath(project, "error-text"))} ]; then cat ${shellQuote(fakeInspectionControlPath(project, "error-text"))} >&2; fi`,
@@ -257,27 +286,23 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.snapshots)}`,
       "    ;;",
       "  node)",
-      `    cat ${shellQuote(fixtures.nodeWatchLines === undefined ? files.node : nodeWatchPath)}`,
+      `    if [ -f ${shellQuote(files.nodeWatch)} ]; then cat ${shellQuote(files.nodeWatch)}; else cat ${shellQuote(files.node)}; fi`,
       "    ;;",
       "  events)",
-      ...(fixtures.eventsFirstRead === undefined
-        ? [`    cat ${shellQuote(files.events)}`]
-        : [
-            `    if [ ! -f ${shellQuote(files.eventsFirstReadMarker)} ]; then`,
-            `      : > ${shellQuote(files.eventsFirstReadMarker)}`,
-            `      cat ${shellQuote(files.eventsFirstRead)}`,
-            "    else",
-            `      cat ${shellQuote(files.events)}`,
-            "    fi"
-          ]),
+      `    if [ -f ${shellQuote(files.eventsFirstRead)} ] && [ ! -f ${shellQuote(files.eventsFirstReadMarker)} ]; then`,
+      `      : > ${shellQuote(files.eventsFirstReadMarker)}`,
+      `      cat ${shellQuote(files.eventsFirstRead)}`,
+      "    else",
+      `      cat ${shellQuote(files.events)}`,
+      "    fi",
       "    ;;",
       "  cancel)",
       `    if [ -f ${shellQuote(fakeInspectionControlPath(project, "cancel-terminal"))} ]; then`,
       '      printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE","message":"Run is not active"}}\'',
       "      exit 4",
       "    fi",
-      `    printf '%s\\n' '{"ok":true,"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
-      `    exit ${fixtures.cancelExitCode ?? 2}`,
+      `    cat ${shellQuote(files.cancel)}`,
+      "    exit 2",
       "    ;;",
       "  *)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -298,13 +323,19 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   );
 }
 
-async function launchedProject(
-  fixtures: FakeInspectionFixtures
-): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
+/** A project with the fake runner installed and no run; `diagnoseProject` never reads one. */
+function projectWithFakeRunner(): { project: string; env: Record<string, string | undefined> } {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const env = fakeInspectionEnv(project, fixtures);
+  return { project, env: fakeInspectionEnv(project) };
+}
+
+async function launchedProject(
+  fixtures: FakeInspectionFixtures
+): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
+  const { project, env } = projectWithFakeRunner();
+  writeInspectionFixtures(project, fixtures);
   const run = await startRun({
     projectRoot: project,
     runId: "inspect-run",
@@ -315,8 +346,55 @@ async function launchedProject(
   return { project, env, runRoot: run.value!.run_root };
 }
 
+/** The run documents a lifecycle command writes: metadata, status, the event log and the engine link. */
+const SHARED_RUN_DOCUMENTS = [
+  "run.json",
+  "state.json",
+  "events.jsonl",
+  path.join("smithers", "workflow-run-link-journal.json")
+] as const;
+
+function readRunDocuments(runRoot: string): Record<string, string | null> {
+  return Object.fromEntries(
+    SHARED_RUN_DOCUMENTS.map((document) => {
+      const documentPath = path.join(runRoot, document);
+      return [document, fs.existsSync(documentPath) ? fs.readFileSync(documentPath, "utf8") : null];
+    })
+  );
+}
+
+let sharedInspectedRun:
+  | Promise<Awaited<ReturnType<typeof launchedProject>> & { launchedDocuments: Record<string, string | null> }>
+  | undefined;
+
+/**
+ * Launching a run is the slow part of these tests. Tests whose commands leave
+ * the run's files unchanged share one run, and each call only resets the
+ * runner's answers. A test whose cancel succeeds, or that rewrites run
+ * metadata, launches its own run with `launchedProject`; each call checks that
+ * no earlier test broke that rule.
+ */
+async function inspectedRun(fixtures: FakeInspectionFixtures): ReturnType<typeof launchedProject> {
+  // A failed launch stays cached, so every later caller reports it as the shared launch failing, not
+  // as its own regression.
+  sharedInspectedRun ??= launchedProject({}).then(
+    (launched) => ({ ...launched, launchedDocuments: readRunDocuments(launched.runRoot) }),
+    (error: unknown) => {
+      throw new Error("the shared inspection run failed to launch, so this test did not run", { cause: error });
+    }
+  );
+  const { launchedDocuments, ...launched } = await sharedInspectedRun;
+  assert.deepEqual(
+    readRunDocuments(launched.runRoot),
+    launchedDocuments,
+    "an earlier test changed the shared inspection run; a test that changes run state must launch its own run with launchedProject"
+  );
+  writeInspectionFixtures(launched.project, fixtures);
+  return launched;
+}
+
 function smithersLog(project: string): string {
-  return fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8");
+  return fs.readFileSync(fakeInspectionFiles(project).commandLog, "utf8");
 }
 
 function assertNoEngineBranding(value: unknown): void {
@@ -362,7 +440,7 @@ test("cancelRun persists the canonical canceled state once the engine confirms",
 });
 
 test("cancelRun reports a stable diagnostic when the engine command fails", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = await inspectedRun({});
   failFakeInspectionRunner(project, "boom", 9);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
@@ -393,7 +471,7 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
 });
 
 test("diagnoseRun adapts the engine diagnosis without engine-branded public text", async () => {
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     why: {
       runId: WORKFLOW_RUN_ID,
       status: "running",
@@ -466,7 +544,7 @@ test("diagnoseRun adapts the engine diagnosis without engine-branded public text
 
 test("diagnoseRun keeps a runner path intact in public text", async () => {
   const workflowPath = "/work/target/.smithers/workflows/ultrafuzz-inspect-run.tsx";
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     why: {
       runId: WORKFLOW_RUN_ID,
       status: "running",
@@ -487,7 +565,7 @@ test("diagnoseRun keeps a runner path intact in public text", async () => {
 });
 
 test("diagnoseRun rejects an unexpected engine response", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = await inspectedRun({});
   fs.writeFileSync(path.join(project, "fake-why.json"), "not json\n", "utf8");
 
   const diagnosis = await diagnoseRun({ projectRoot: project, runId: "inspect-run", env });
@@ -497,7 +575,7 @@ test("diagnoseRun rejects an unexpected engine response", async () => {
 });
 
 test("diagnoseRun rejects aliases, extra fields, and duplicate keys instead of normalizing them", async () => {
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     why: {
       runId: WORKFLOW_RUN_ID,
       status: "running",
@@ -545,7 +623,7 @@ test("diagnoseRun rejects aliases, extra fields, and duplicate keys instead of n
 });
 
 test("getRunTimeline adapts frames and fork lineage in tree mode", async () => {
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     timeline: {
       timeline: {
         runId: WORKFLOW_RUN_ID,
@@ -594,7 +672,7 @@ test("getRunTimeline adapts frames and fork lineage in tree mode", async () => {
 });
 
 test("getRunTimeline stays read-only and omits --tree by default", async () => {
-  const { project, env, runRoot } = await launchedProject({
+  const { project, env, runRoot } = await inspectedRun({
     timeline: { timeline: { runId: WORKFLOW_RUN_ID, branch: null, frames: [], children: [] } }
   });
   const eventsBefore = fs.readFileSync(path.join(runRoot, "events.jsonl"), "utf8");
@@ -609,7 +687,7 @@ test("getRunTimeline stays read-only and omits --tree by default", async () => {
 });
 
 test("listRunSnapshots adapts the checkpoint list", async () => {
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     snapshots: {
       snapshots: [
         {
@@ -644,7 +722,7 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
 });
 
 test("queryWorkflowEvents returns lifecycle events while execution holds the control lock", async () => {
-  const { project, env, runRoot } = await launchedProject({
+  const { project, env, runRoot } = await inspectedRun({
     events: [
       smithersEventLine({
         seq: 1,
@@ -717,7 +795,7 @@ test("queryWorkflowEvents returns lifecycle events while execution holds the con
 });
 
 test("queryWorkflowEvents rejects malformed, aliased, mismatched, extra-field, duplicate-key, and blank records", async () => {
-  const { project, env } = await launchedProject({ events: "" });
+  const { project, env } = await inspectedRun({ events: "" });
   const fixturePath = path.join(project, "fake-events.ndjson");
   const exactLine = smithersEventLine({
     seq: 1,
@@ -765,7 +843,7 @@ test("queryWorkflowEvents retries an unterminated final record from a live appen
     type: "NodeStarted",
     payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
   });
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     eventsFirstRead: exactLine.slice(0, -1),
     events: `${exactLine}\n`
   });
@@ -785,7 +863,7 @@ test("queryWorkflowEvents does not retry malformed non-final records", async () 
     type: "NodeFinished",
     payload: { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }
   });
-  const { project, env } = await launchedProject({ events: `{"unterminated":"value\n${exactLine}\n` });
+  const { project, env } = await inspectedRun({ events: `{"unterminated":"value\n${exactLine}\n` });
 
   const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
 
@@ -795,7 +873,7 @@ test("queryWorkflowEvents does not retry malformed non-final records", async () 
 });
 
 test("queryWorkflowEvents bounds retries for a persistently malformed final record", async () => {
-  const { project, env } = await launchedProject({ events: '{"unterminated":"value' });
+  const { project, env } = await inspectedRun({ events: '{"unterminated":"value' });
 
   const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
 
@@ -813,7 +891,7 @@ test("queryWorkflowEvents caps the limit and reports truncation", async () => {
       payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
-  const { project, env } = await launchedProject({ events: lines.join("\n") });
+  const { project, env } = await inspectedRun({ events: lines.join("\n") });
 
   const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 2 });
 
@@ -828,7 +906,7 @@ test("queryWorkflowEvents caps the limit and reports truncation", async () => {
 });
 
 test("queryWorkflowEvents forwards node, type, since, and history filters", async () => {
-  const { project, env } = await launchedProject({ events: "" });
+  const { project, env } = await inspectedRun({ events: "" });
 
   const events = await queryWorkflowEvents({
     projectRoot: project,
@@ -849,7 +927,7 @@ test("queryWorkflowEvents forwards node, type, since, and history filters", asyn
 });
 
 test("watchWorkflowEvents streams each event and terminates cleanly", async () => {
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     events: [
       smithersEventLine({
         seq: 1,
@@ -884,7 +962,7 @@ test("watchWorkflowEvents streams each event and terminates cleanly", async () =
 });
 
 test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
-  const { project, env } = await launchedProject({ events: "" });
+  const { project, env } = await inspectedRun({ events: "" });
   const controller = new AbortController();
   controller.abort();
 
@@ -903,7 +981,7 @@ test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
 });
 
 test("event queries report a diagnostic when the engine command exits nonzero", async () => {
-  const { project, env } = await launchedProject({ events: "" });
+  const { project, env } = await inspectedRun({ events: "" });
   failFakeInspectionRunner(project, "run not found", 4);
 
   // A failed query must not look like a run with no events.
@@ -926,7 +1004,7 @@ test("event queries report a diagnostic when the engine command exits nonzero", 
 });
 
 test("event queries report a diagnostic when the engine process is killed by a signal", async () => {
-  const { project, env } = await launchedProject({ events: "" });
+  const { project, env } = await inspectedRun({ events: "" });
   // An OOM-style external kill leaves no exit code, which must still be a
   // failure rather than an empty success.
   enableFakeInspectionControl(project, "kill-self");
@@ -948,7 +1026,7 @@ test("a truncated event stream stays successful even though the process is kille
       payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
-  const { project, env } = await launchedProject({ events: lines.join("\n") });
+  const { project, env } = await inspectedRun({ events: lines.join("\n") });
 
   const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 2 });
 
@@ -958,7 +1036,7 @@ test("a truncated event stream stays successful even though the process is kille
 });
 
 test("getWorkflowNode returns focused status without attempt or tool detail by default", async () => {
-  const { project, env } = await launchedProject({ node: nodeDetailFixture() });
+  const { project, env } = await inspectedRun({ node: nodeDetailFixture() });
 
   const node = await getWorkflowNode({
     projectRoot: project,
@@ -1013,7 +1091,7 @@ test("getWorkflowNode accepts a reset current attempt below retained history", a
     usage: attempt.tokenUsage
   }));
   detail.node.lastAttempt = 1;
-  const { project, env } = await launchedProject({ node: detail });
+  const { project, env } = await inspectedRun({ node: detail });
 
   const node = await getWorkflowNode({
     projectRoot: project,
@@ -1035,7 +1113,7 @@ test("getWorkflowNode accepts a reset current attempt below retained history", a
 });
 
 test("getWorkflowNode includes attempts on request and tool payloads only with --tools", async () => {
-  const { project, env } = await launchedProject({ node: nodeDetailFixture() });
+  const { project, env } = await inspectedRun({ node: nodeDetailFixture() });
 
   const attemptsOnly = await getWorkflowNode({
     projectRoot: project,
@@ -1074,7 +1152,7 @@ test("getWorkflowNode includes attempts on request and tool payloads only with -
 
 test("watchWorkflowNode accepts clean raw JSONL records", async () => {
   const detail = JSON.stringify(nodeDetailFixture());
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     nodeWatchLines: `${detail}\n${detail}\n${detail}\n`
   });
   const snapshots: string[] = [];
@@ -1101,7 +1179,7 @@ test("watchWorkflowNode accepts clean raw JSONL records", async () => {
 
 test("watchWorkflowNode rejects terminal control bytes instead of repairing JSONL", async () => {
   const detail = JSON.stringify(nodeDetailFixture());
-  const { project, env } = await launchedProject({
+  const { project, env } = await inspectedRun({
     nodeWatchLines: `${detail}\n\u001B[2J\u001B[0f${detail}\n`
   });
 
@@ -1133,7 +1211,7 @@ test("cancelRun converges when the engine reports the run is already terminal", 
 });
 
 test("cancelRun still fails on an unrelated engine error exit", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = await inspectedRun({});
   failFakeInspectionRunner(project, "database is locked", 4);
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
@@ -1151,7 +1229,7 @@ test("queryWorkflowEvents does not call an exact-limit result truncated", async 
       payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
-  const { project, env } = await launchedProject({ events: lines.join("\n") });
+  const { project, env } = await inspectedRun({ events: lines.join("\n") });
 
   const exact = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 2 });
 
@@ -1169,7 +1247,7 @@ test("watchWorkflowEvents stops the stream when the caller aborts mid-stream", a
       payload: { nodeId: "node:project-discovery", iteration: 0 }
     })
   );
-  const { project, env } = await launchedProject({ events: lines.join("\n") });
+  const { project, env } = await inspectedRun({ events: lines.join("\n") });
   const controller = new AbortController();
   let observed = 0;
 
@@ -1193,7 +1271,7 @@ test("watchWorkflowEvents stops the stream when the caller aborts mid-stream", a
 });
 
 test("getWorkflowNode rejects an unexpected engine response", async () => {
-  const { project, env } = await launchedProject({ node: { status: "succeeded" } });
+  const { project, env } = await inspectedRun({ node: { status: "succeeded" } });
 
   const node = await getWorkflowNode({
     projectRoot: project,
@@ -1207,7 +1285,7 @@ test("getWorkflowNode rejects an unexpected engine response", async () => {
 });
 
 test("diagnoseProject keeps project-local engine posture informational", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = projectWithFakeRunner();
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
 
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
@@ -1733,7 +1811,7 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 // progress, and an unreported posture reads as healthy. Cover every tracked
 // workaround, not just the CLI pair.
 test("diagnoseProject reports a posture for every tracked compatibility patch", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = projectWithFakeRunner();
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const nodeModules = path.join(project, ".smithers", "node_modules");
   // Group by source because many workflow-path workarounds patch the same file.
@@ -1798,7 +1876,7 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
 });
 
 test("diagnoseProject reports a missing install and a version mismatch", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = projectWithFakeRunner();
 
   const missing = await diagnoseProject({ projectRoot: project, env, offline: true });
   assert.equal(missing.value?.workflow_engine.installed_version, null);
@@ -1817,7 +1895,7 @@ test("diagnoseProject reports a missing install and a version mismatch", async (
 });
 
 test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = projectWithFakeRunner();
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const failingBin = path.join(project, "offline-bin");
   fs.mkdirSync(failingBin, { recursive: true });
@@ -1839,7 +1917,7 @@ test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
 });
 
 test("diagnoseProject does not mutate the installed dependency layout", async () => {
-  const { project, env } = await launchedProject({});
+  const { project, env } = projectWithFakeRunner();
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const manifestPath = path.join(project, ".smithers", "node_modules", "smthrs", "package.json");
   const before = fs.readFileSync(manifestPath, "utf8");
