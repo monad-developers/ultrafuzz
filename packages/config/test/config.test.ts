@@ -15,10 +15,12 @@ import {
   redactDiagnostics,
   redactResolvedConfig,
   resolveConfig,
+  resolveExecutionResources,
   serializeRedactedResolvedConfigToml,
   type ConfigDiagnostic,
   type ProjectConfigInput,
   validateAgentConfigs,
+  validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
 
@@ -348,6 +350,56 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     expect(scaffolded.ok).toBe(true);
     if (!scaffolded.ok) return;
     expect(resolveConfig({ projectConfig: scaffolded.value, env: {} }).ok).toBe(true);
+  });
+
+  // The inert [execution] table is still validated: `validate` and `run` reject an unknown node
+  // override, and every compiled task records the merged resources in tasks.json.
+  it("merges local [execution] node resource overrides, rejects unknown nodes and bad bounds, and round-trips them", () => {
+    const parsed = parseProjectConfigToml(`
+[execution]
+retention_days = 45
+
+[execution.resources]
+cpu = 8
+memory_mib = 16384
+timeout_seconds = 3600
+
+[execution.nodes.project-discovery.resources]
+cpu = 16
+memory_mib = 32768
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({ projectConfig: parsed.value, env: {} });
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
+    expect(resolveExecutionResources(resolved.value, "project-discovery")).toEqual({
+      cpu: 16,
+      memoryMiB: 32768,
+      timeoutSeconds: 3600
+    });
+    expect(resolveExecutionResources(resolved.value, "other-node")).toEqual({
+      cpu: 8,
+      memoryMiB: 16384,
+      timeoutSeconds: 3600
+    });
+    expect(validateExecutionNodeOverrides(resolved.value, ["project-discovery"])).toEqual([]);
+    expect(validateExecutionNodeOverrides(resolved.value, ["different-node"])).toEqual([
+      validationDiagnostic(
+        "CONFIG_EXECUTION_NODE_UNKNOWN",
+        "execution resource override references unknown logical topology node `project-discovery`",
+        ["execution", "nodes", "project-discovery"]
+      )
+    ]);
+
+    const serialized = serializeRedactedResolvedConfigToml(resolved.value);
+    expect(serialized).toContain("[execution.nodes.project-discovery.resources]\ncpu = 16\nmemory_mib = 32768\n");
+    const reparsed = parseProjectConfigToml(serialized);
+    if (!reparsed.ok) throw new Error(JSON.stringify(reparsed.diagnostics, null, 2));
+    const roundTripped = resolveConfig({ projectConfig: reparsed.value, env: {} });
+    if (!roundTripped.ok) throw new Error(JSON.stringify(roundTripped.diagnostics, null, 2));
+    expect(roundTripped.value.execution).toEqual(resolved.value.execution);
+
+    expect(resolveConfig({ env: {}, projectConfig: { execution: { resources: { cpu: 0 } } } }).ok).toBe(false);
   });
 
   it("applies defaults, project TOML, env, then runtime overrides", () => {
