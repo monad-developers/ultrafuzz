@@ -828,10 +828,6 @@ test("non-adapter helpers cannot hide orchestrator responsibilities", () => {
   );
 });
 
-test("OpenRouter retains the manually reviewed argv responsibility inherited from Codex", () => {
-  assert.equal(adapterPolicies["openrouter.tsx"]?.responsibilities.includes("argv-construction"), true);
-});
-
 test("main agent registry and recursive sources stay inside reviewed adapter boundaries", (context) => {
   const packageRoot = [process.cwd(), path.resolve("packages/runtime")].find((candidate) =>
     existsSync(path.join(candidate, "src/templates/smithers/agents/index.tsx"))

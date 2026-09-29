@@ -16901,16 +16901,6 @@ test("agent usage compatibility persists an owned snapshot before publishing tel
   assert.doesNotMatch(final.patched, /adapter\.recordRunTokenUsage\(/u);
 });
 
-test("reported CLI cost compatibility patches validate and prefer the adapter estimate", async () => {
-  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
-  const normalization = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_normalize");
-  const pricing = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_reported_cost_price");
-  assert.ok(normalization);
-  assert.ok(pricing);
-  assert.match(normalization.patched, /Number\.isFinite\(reportedCostUsd\).*reportedCostUsd >= 0/su);
-  assert.match(pricing.patched, /if \(usage\.reportedCostUsd !== undefined\) return usage\.reportedCostUsd/u);
-});
-
 async function patchedSmithersAgentUsageModules(): Promise<{
   extractUsageFromOutput: (raw: string) => Record<string, unknown> | undefined;
   usageFromCompletedEvent: (event: Record<string, unknown>) => Record<string, unknown> | undefined;

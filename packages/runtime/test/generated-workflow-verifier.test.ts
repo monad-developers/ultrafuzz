@@ -62,7 +62,10 @@ import {
   type PromptArtifactAuthorityDocument,
   type PromptArtifactAuthoritySelector
 } from "../src/prompt-artifact-authority.js";
-import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
+import {
+  declaredAncestorOutputsByContract,
+  declaredSiblingOutputsByContract
+} from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -227,8 +230,15 @@ type ArtifactAwareAgentFixture = {
   generate(args: unknown): Promise<unknown>;
 };
 
+type TaskLocalAuthority = "dependency-admission" | "prompt-artifacts" | "report-run-metadata" | "report-prompt";
+
 function loadArtifactAwareAgent(
-  options: { onAuthorityCheck?: () => void; onReset?: () => void; onSourceVerify?: () => void } = {}
+  options: {
+    onAuthorityCheck?: () => void;
+    onCheck?: (authority: TaskLocalAuthority) => void;
+    onReset?: () => void;
+    onSourceVerify?: () => void;
+  } = {}
 ): (
   task: unknown,
   chainIndex: number,
@@ -276,10 +286,13 @@ function loadArtifactAwareAgent(
     () => "ultrafuzz-agent:test",
     normalizeNodeAttemptFailureMessage,
     sensitiveEnvironmentValues,
-    () => undefined,
-    () => options.onAuthorityCheck?.(),
-    () => undefined,
-    () => undefined,
+    () => options.onCheck?.("dependency-admission"),
+    () => {
+      options.onCheck?.("prompt-artifacts");
+      options.onAuthorityCheck?.();
+    },
+    () => options.onCheck?.("report-run-metadata"),
+    () => options.onCheck?.("report-prompt"),
     () => undefined
   ) as ReturnType<typeof loadArtifactAwareAgent>;
 }
@@ -360,6 +373,42 @@ test("artifact-aware agents own process completion without constraining terminal
       assert.equal(result.text, (terminalResult as Record<string, unknown>).text);
     }
   }
+});
+
+test("artifact-aware agents recheck every task-local authority after the model returns, succeeding or failing", async () => {
+  const timeline: string[] = [];
+  let providerFails = false;
+  const wrapped = loadArtifactAwareAgent({ onCheck: (authority) => timeline.push(authority) })(
+    { agentChain: [{}] },
+    0,
+    "prompt",
+    {
+      async generate(): Promise<unknown> {
+        timeline.push("generate");
+        if (providerFails) throw new Error("provider failed after the model ran");
+        return { text: "done" };
+      }
+    }
+  );
+  // The model may have rewritten any file it can reach, so success is reported, and a
+  // failure rethrown, only after every authority it could have touched is rechecked.
+  const expected = [
+    "dependency-admission",
+    "report-prompt",
+    "generate",
+    "dependency-admission",
+    "prompt-artifacts",
+    "report-run-metadata",
+    "report-prompt"
+  ];
+
+  await wrapped.generate({ taskContext: { attempt: 1 } });
+  assert.deepEqual(timeline, expected);
+
+  timeline.length = 0;
+  providerFails = true;
+  await assert.rejects(wrapped.generate({ taskContext: { attempt: 2 } }), /provider failed after the model ran/u);
+  assert.deepEqual(timeline, expected);
 });
 
 async function withEnvironment(values: Record<string, string>, callback: () => Promise<void>): Promise<void> {
@@ -771,6 +820,18 @@ function loadTaskPromptPathForArtifactReset(): (
   >;
 }
 
+/** The runtime-owned evidence files a canonical retry reset keeps, as the template names them. */
+function canonicalRetryResetPreservedFiles(): string[] {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  return ["INVARIANT_SUITE_BASELINE_FILE", "WORKSPACE_PATCH_BASELINE_FILE", "WORKSPACE_PATCH_PREPARATION_FILE"].map(
+    (name) => {
+      const declared = new RegExp(`\\nconst ${name} = ("[^"\\n]+");`, "u").exec(source)?.[1];
+      assert.ok(declared !== undefined, `the template does not declare ${name}`);
+      return JSON.parse(declared) as string;
+    }
+  );
+}
+
 function loadCanonicalTaskArtifactRetryReset(): (
   artifactDir: string,
   attemptId: string,
@@ -818,9 +879,7 @@ function loadCanonicalTaskArtifactRetryReset(): (
     assertRegularFileInside,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
-    "invariant-suite-baseline.json",
-    "workspace-patch-baseline.json",
-    "workspace-patch-preparation.json"
+    ...canonicalRetryResetPreservedFiles()
   ) as ReturnType<typeof loadCanonicalTaskArtifactRetryReset>;
 }
 
@@ -905,7 +964,10 @@ type GeneratedPromptArtifactAuthorityTask = {
   promptArtifactAuthoritySelectors?: readonly PromptArtifactAuthoritySelector[];
 };
 
-function loadGeneratedPromptArtifactAuthorityHarness(initialAdmittedDependencyArtifactDirs: readonly string[]): {
+function loadGeneratedPromptArtifactAuthorityHarness(
+  initialAdmittedDependencyArtifactDirs: readonly string[],
+  options: { writeFileDurable?: typeof writeFileDurable } = {}
+): {
   assertUnchanged(task: GeneratedPromptArtifactAuthorityTask): void;
   derivationInputs: DerivePromptArtifactAuthorityInput[];
   materialize(task: GeneratedPromptArtifactAuthorityTask): void;
@@ -975,7 +1037,7 @@ function loadGeneratedPromptArtifactAuthorityHarness(initialAdmittedDependencyAr
     serializePromptArtifactAuthority,
     () => ({ directories: admittedDependencyArtifactDirs }),
     prepareSafeFilePath,
-    writeFileDurable,
+    options.writeFileDurable ?? writeFileDurable,
     parsePromptArtifactAuthorityBytes,
     fs.lstatSync,
     fs.rmSync,
@@ -1252,7 +1314,9 @@ function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) =>
   ) as (root: string, candidate: string) => string;
 }
 
-function loadPreservePinnedSourceProof(): (task: {
+function loadPreservePinnedSourceProof(
+  usesPinnedSource = true
+): (task: {
   attemptId: string;
   workspacePath: string;
   metadata: { artifacts: { dir: string } };
@@ -1299,7 +1363,7 @@ function loadPreservePinnedSourceProof(): (task: {
     Buffer,
     publishFileDurableExclusive,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
-    true,
+    usesPinnedSource,
     "refs/heads/ultrafuzz-pinned",
     command
   ) as (task: {
@@ -1642,39 +1706,6 @@ test("safe invariant-suite directory permits nested paths under a symlinked root
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test("generated Smithers verifier rejects zero-byte generated-test companions", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function readBoundedRegularArtifactSnapshot");
-  const verifierStart = source.indexOf("function verifyGeneratedTestFiles");
-  const workflowStart = source.indexOf("export default smithers");
-
-  assert.ok(helperStart >= 0, source);
-  assert.ok(verifierStart > helperStart, source);
-  assert.ok(workflowStart > verifierStart, source);
-
-  const helper = source.slice(helperStart, verifierStart);
-  assert.match(
-    source,
-    /artifactContractSchemaBinding,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContractBytes/u
-  );
-  assert.match(source, /validateArtifactContractBytes,[\s\S]*writeFileDurable[\s\S]*= await import/u);
-  assert.doesNotMatch(source, /validateArtifactContract\(/u);
-  assert.match(source, /validateArtifactContractBytes\([\s\S]*snapshot\.bytes/u);
-  assert.match(source, /validateArtifactContractBytes\(output\.contract, file\.bytes, output\.path\)/u);
-  assert.match(source, /assertRegularFileInside\(artifactDir, artifactPath, failureMessage\)/u);
-  assert.match(helper, /readRegularFileSnapshot\(resolvedPath, maxBytes\)/u);
-  assert.match(helper, /requireNonEmpty && bytes\.length === 0/u);
-  assert.match(helper, /file is empty/u);
-
-  const generatedTestVerifier = source.slice(verifierStart, workflowStart);
-  assert.match(generatedTestVerifier, /readBoundedRegularArtifactSnapshot\(/u);
-  assert.match(generatedTestVerifier, /MAX_GENERATED_TEST_COMPANION_BYTES,\s*true/u);
-  assert.match(generatedTestVerifier, /companion\.stats\.size === 0/u);
-  assert.match(generatedTestVerifier, /decodeStrictUtf8Snapshot\(snapshot/u);
-  assert.match(generatedTestVerifier, /snapshot\.bytes\.length !== entry\.size_bytes/u);
-  assert.match(generatedTestVerifier, /createHash\("sha256"\)\.update\(snapshot\.bytes\).*entry\.sha256/su);
-});
-
 test("generated Smithers authenticates the final generated-test publication snapshot", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const verifierStart = source.indexOf("function verifyGeneratedTestFiles");
@@ -1859,6 +1890,7 @@ type VerifyArtifactsTask = {
     plannedTimeoutSeconds: number;
     finalizationReserveSeconds: number;
   } | null;
+  execution?: { agentCredentialEnv?: string[]; modal?: { credentialEnv?: string[] } };
   metadata: {
     run: { ultrafuzzRunId: string };
     artifacts: { dir: string };
@@ -1884,6 +1916,9 @@ function loadVerifyArtifactsHarness(
     authenticatedDependencyDirs?: readonly string[];
     onSemanticGate?: () => void;
     onPublishArtifacts?: () => void;
+    generatedTestFiles?: (artifactRoot: string, manifest: unknown) => Array<{ path: string; contents: Buffer }>;
+    /** Scan the real process environment before publication; off by default so host variables cannot leak in. */
+    scanProcessEnvironment?: boolean;
   } = {}
 ): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
@@ -1906,6 +1941,7 @@ function loadVerifyArtifactsHarness(
   };
   publications: Map<string, Buffer>;
   markerWrites: unknown[];
+  clearedMarkers: string[];
   authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }>;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
@@ -1937,6 +1973,7 @@ function loadVerifyArtifactsHarness(
   ).outputText;
   const publications = new Map<string, Buffer>();
   const markerWrites: unknown[] = [];
+  const clearedMarkers: string[] = [];
   const authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }> = [];
   const harnessTaskSpecs = options.taskSpecs ?? [];
   const authenticatedDependencies = new Set(
@@ -2129,7 +2166,9 @@ function loadVerifyArtifactsHarness(
         throw new Error(`artifact-contract failure: unsafe verified publication path ${relativePath}`);
       }
     },
-    () => undefined,
+    (task: VerifyArtifactsTask) => {
+      clearedMarkers.push(task.attemptId);
+    },
     (snapshot: { bytes: Buffer }, failureMessage: string) => {
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
@@ -2161,13 +2200,13 @@ function loadVerifyArtifactsHarness(
     normalizeNodeAttemptFailureMessage,
     () => undefined,
     remember,
-    () => [],
+    options.generatedTestFiles ?? (() => []),
     () => undefined,
     new Set<string>(),
     () => undefined,
     createHash,
     assertArtifactPublicationsContainNoSecrets,
-    () => [],
+    options.scanProcessEnvironment === true ? sensitiveEnvironmentValues : () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -2200,7 +2239,7 @@ function loadVerifyArtifactsHarness(
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
   };
-  return { ...factory, publications, markerWrites, authenticatedDependencyChecks };
+  return { ...factory, publications, markerWrites, clearedMarkers, authenticatedDependencyChecks };
 }
 
 function loadArtifactVerificationMarkerWriter(
@@ -2677,6 +2716,9 @@ test("generated Smithers verifier rejects invalid UTF-8 and duplicate JSON keys 
     const invalidUtf8 = invalidUtf8Harness.captureTaskOutputs(textTask);
     assert.throws(() => invalidUtf8Harness.verifyArtifacts(textTask, invalidUtf8), /not valid UTF-8/u);
     assert.equal(invalidUtf8Harness.publications.size, 0);
+    // A marker from an earlier attempt must not outlive a verification that fails.
+    assert.deepEqual(invalidUtf8Harness.clearedMarkers, ["attempt-one"]);
+    assert.equal(invalidUtf8Harness.markerWrites.length, 0);
 
     const duplicateHarness = loadVerifyArtifactsHarness();
     fs.writeFileSync(outputPath, '{"schema_version":"one","schema_version":"two"}\n', "utf8");
@@ -2708,6 +2750,53 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers verifier refuses to publish the value of any credential the task is configured with", () => {
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-configured-secret-output-"));
+  // A cloud task carries the credential names its agents and its Modal sandbox are configured with.
+  // Neither name below looks like a credential to the environment-name heuristic, and neither value
+  // has a vendor format, so only those configured lists can keep the values out of an artifact.
+  const credentials: Array<[string, string, NonNullable<VerifyArtifactsTask["execution"]>]> = [
+    [
+      "ULTRAFUZZ_TEST_GATEWAY_KEY",
+      "q7Vx2Lm9Rt4Wz8Kp3Nb6Hc1Jd5Fg0Sa",
+      { agentCredentialEnv: ["ULTRAFUZZ_TEST_GATEWAY_KEY"] }
+    ],
+    [
+      "ULTRAFUZZ_TEST_SANDBOX_KEY",
+      "Zr5Pw1Mx8Qn3Lc6Vb9Kt2Hj7Gf4Ds0Ae",
+      { modal: { credentialEnv: ["ULTRAFUZZ_TEST_SANDBOX_KEY"] } }
+    ]
+  ];
+  const previous = credentials.map(([name]) => [name, process.env[name]] as const);
+  try {
+    for (const [name, value, execution] of credentials) {
+      process.env[name] = value;
+      fs.writeFileSync(path.join(root, "result.json"), `analysis ${value}\n`, "utf8");
+
+      const unconfigured = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+      const control = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
+      control.verifyArtifacts(unconfigured, control.captureTaskOutputs(unconfigured));
+      assert.equal(control.publications.size, 1, `${name} is published when the task does not name it`);
+
+      const configured = { ...singleOutputVerificationTask(root, "ultrafuzz/text@1"), execution };
+      const harness = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
+      assert.throws(
+        () => harness.verifyArtifacts(configured, harness.captureTaskOutputs(configured)),
+        /contains sensitive data/u,
+        name
+      );
+      assert.equal(harness.publications.size, 0, name);
+      assert.equal(harness.markerWrites.length, 0, name);
+    }
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = value;
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -2845,6 +2934,44 @@ test("generated Smithers rejects non-UTF-8 generated-test support companions", (
     );
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the verifier publishes every generated-test companion the manifest authenticates", () => {
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-generated-companions-"));
+  try {
+    fs.mkdirSync(path.join(root, "generated-tests"));
+    const replayContents = "contract Replay {}\n";
+    fs.writeFileSync(path.join(root, "generated-tests", "Replay.t.sol"), replayContents, "utf8");
+    const document = {
+      schema_version: "ultrafuzz.generated-tests.v3",
+      run_id: "run-one",
+      node_id: "node-one",
+      framework: "foundry",
+      generated_tests: [generatedTestEntry("generated-tests/Replay.t.sol", replayContents)],
+      support_files: []
+    };
+    fs.writeFileSync(path.join(root, "result.json"), `${JSON.stringify(document)}\n`, "utf8");
+    const authenticated: unknown[] = [];
+    const harness = loadVerifyArtifactsHarness({
+      generatedTestFiles: (artifactRoot, manifest) => {
+        authenticated.push([artifactRoot, manifest]);
+        return [{ path: "generated-tests/Replay.t.sol", contents: Buffer.from(replayContents, "utf8") }];
+      }
+    });
+    const task = singleOutputVerificationTask(root, "ultrafuzz/generated-tests@3");
+    const [manifestOutput] = task.outputs;
+    assert.ok(manifestOutput);
+    manifestOutput.schemaFile = "generated-tests.schema.json";
+
+    harness.verifyArtifacts(task, harness.captureTaskOutputs(task));
+
+    assert.deepEqual(authenticated, [[root, document]]);
+    assert.deepEqual([...harness.publications.keys()].sort(), ["generated-tests/Replay.t.sol", "result.json"]);
+    assert.equal(harness.publications.get("generated-tests/Replay.t.sol")?.toString("utf8"), replayContents);
+    assert.equal(harness.markerWrites.length, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -4457,6 +4584,198 @@ test("generated semantic contexts match host semantics when property producers a
   });
 });
 
+type DifferentialHarnessTask = {
+  attemptId: string;
+  runRoot: string;
+  artifactDir: string;
+  dependencyArtifactDirs: string[];
+  outputs: Array<{ path: string; contract: string; schemaFile: string }>;
+  metadata: {
+    run: { ultrafuzzRunId: string };
+    node: { logicalNodeId: string };
+    loop: { attemptIndex: number };
+    dependencies: { attemptIds: string[] };
+  };
+};
+
+/**
+ * The template's semantic context for one verified output, with its real declaration-based sibling
+ * and ancestor lookups. Only reading an ancestor's verified document is replaced.
+ */
+function loadDifferentialSemanticContextHarness(
+  taskSpecs: readonly DifferentialHarnessTask[]
+): (
+  task: DifferentialHarnessTask,
+  output: DifferentialHarnessTask["outputs"][number],
+  verifiedOutputs: ReadonlyMap<string, { artifactRoot: string; value: unknown }>
+) => SemanticGateContext {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const markers: Array<[string, string]> = [
+    ["function semanticArtifactTaskDeclarations", "\n\nfunction declaredInvariantLedgerProducerPair"],
+    ["function declaredAncestorContractOutputs", "\n\nfunction verifiedSingletonAncestorJsonArtifact"],
+    ["type DifferentialSemanticArtifactBinding", "\n\nfunction verifiedAncestorPropertyLenses"],
+    ["function semanticGateContextForVerifiedOutput", "\n\nfunction verifyOutputSemanticGates"]
+  ];
+  const slices = markers.map(([startMarker, endMarker]) => {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    assert.ok(start >= 0 && end > start, `${startMarker} is not followed by ${endMarker}`);
+    return source.slice(start, end);
+  });
+  const emitted = ts.transpileModule(slices.join("\n\n"), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "declaredAncestorOutputsByContract",
+    "declaredSiblingOutputsByContract",
+    "admittedDependencyArtifactDirs",
+    "verifiedDependencyJsonArtifact",
+    `${emitted}; return semanticGateContextForVerifiedOutput;`
+  )(
+    path,
+    taskSpecs,
+    declaredAncestorOutputsByContract,
+    declaredSiblingOutputsByContract,
+    () => {
+      throw new Error("no fixture dependency is optional");
+    },
+    (_task: unknown, artifactDir: string, producer: DifferentialHarnessTask, relativePath: string) => ({
+      path: path.join(artifactDir, relativePath),
+      value: { producer: producer.attemptId, path: relativePath }
+    })
+  ) as ReturnType<typeof loadDifferentialSemanticContextHarness>;
+}
+
+test("generated differential verification gives each lane schema its exact declared siblings and ancestors", () => {
+  // The differential chain of config/topologies/exhaustive.yml. Each node's artifact ancestry is the full
+  // chain before it, so a lookup that reads ancestors where it should read siblings finds other artifacts.
+  const runRoot = path.resolve("/ultrafuzz-differential-run");
+  const at = (node: string, file: string) => `artifacts/${node}/${file}`;
+  const chain: Array<[string, Array<[string, string, string]>]> = [
+    ["differential-oracle-planner", [["differential-plan.json", "differential-plan@1", "differential-plan"]]],
+    ["reference-harness-author", [["reference-harness.json", "reference-harness@1", "reference-harness"]]],
+    [
+      "reference-and-lane-auditor",
+      [["audited-differential-lanes.json", "audited-differential-lanes@1", "audited-differential-lanes"]]
+    ],
+    [
+      "differential-lane-author",
+      [
+        ["lane-result.json", "differential-lane-result@1", "differential-lane-result"],
+        ["findings.json", "findings@2", "findings"]
+      ]
+    ],
+    [
+      "differential-red-triage",
+      [
+        ["semantic-red-registry.json", "semantic-red-registry@1", "semantic-red-registry"],
+        ["triage-a.json", "differential-red-triage@1", "differential-red-triage"],
+        ["triage-b.json", "differential-red-triage@1", "differential-red-triage"]
+      ]
+    ],
+    [
+      "differential-repair-and-report-review",
+      [
+        ["repair-summary.json", "differential-repair-summary@1", "differential-repair-summary"],
+        ["gap-review.json", "differential-gap-review@1", "differential-gap-review"],
+        ["differential-report-review.json", "differential-report-review@1", "differential-report-review"],
+        ["findings.json", "findings@2", "findings"]
+      ]
+    ]
+  ];
+  const taskSpecs: DifferentialHarnessTask[] = chain.map(([node, outputs], index) => ({
+    attemptId: node,
+    runRoot,
+    artifactDir: path.join(runRoot, "artifacts", node),
+    dependencyArtifactDirs: chain.slice(0, index).map(([ancestor]) => path.join(runRoot, "artifacts", ancestor)),
+    outputs: outputs.map(([file, contract, schema]) => ({
+      path: file,
+      contract: `ultrafuzz/${contract}`,
+      schemaFile: `${schema}.schema.json`
+    })),
+    metadata: {
+      run: { ultrafuzzRunId: "differential-run" },
+      node: { logicalNodeId: node },
+      loop: { attemptIndex: 0 },
+      dependencies: { attemptIds: chain.slice(Math.max(0, index - 1), index).map(([direct]) => direct) }
+    }
+  }));
+  const plan = at("differential-oracle-planner", "differential-plan.json");
+  const harness = at("reference-harness-author", "reference-harness.json");
+  const audited = at("reference-and-lane-auditor", "audited-differential-lanes.json");
+  const lane = at("differential-lane-author", "lane-result.json");
+  const registry = at("differential-red-triage", "semantic-red-registry.json");
+  const triageA = at("differential-red-triage", "triage-a.json");
+  const triageB = at("differential-red-triage", "triage-b.json");
+  const triages = [triageA, triageB];
+  const review = (file: string) => at("differential-repair-and-report-review", file);
+  const expected = new Map<string, Record<string, string | string[]>>([
+    [harness, { current: harness, plans: [plan] }],
+    [audited, { current: audited, plans: [plan], harnesses: [harness] }],
+    [lane, { current: lane, auditedLanes: [audited] }],
+    [registry, { laneResults: [lane] }],
+    [triageA, { current: triageA, registries: [registry] }],
+    [triageB, { current: triageB, registries: [registry] }],
+    [review("repair-summary.json"), { registries: [registry], triages }],
+    [review("gap-review.json"), { auditedLanes: [audited], laneResults: [lane] }],
+    [
+      review("differential-report-review.json"),
+      {
+        registries: [registry],
+        triages,
+        repairSummaries: [review("repair-summary.json")],
+        gapReviews: [review("gap-review.json")],
+        findings: [review("findings.json")]
+      }
+    ]
+  ]);
+
+  const contextFor = loadDifferentialSemanticContextHarness(taskSpecs);
+  const checked: string[] = [];
+  for (const task of taskSpecs) {
+    const verifiedOutputs = new Map(
+      task.outputs.map((output) => [
+        output.path,
+        { artifactRoot: task.artifactDir, value: { producer: task.attemptId, path: output.path } }
+      ])
+    );
+    for (const output of task.outputs) {
+      const artifact = at(task.attemptId, output.path);
+      const bindings = expected.get(artifact);
+      if (bindings === undefined) continue;
+      checked.push(artifact);
+      const context = contextFor(task, output, verifiedOutputs);
+      const differential = context.artifactSet?.differentialArtifacts ?? {};
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(differential).map(([key, value]) => [
+            key,
+            Array.isArray(value)
+              ? value.map((binding: { path: string }) => binding.path)
+              : (value as { path: string }).path
+          ])
+        ),
+        bindings,
+        artifact
+      );
+
+      // Every contextual gate of the schema runs against that context, and it is the differential
+      // context that satisfies them: without it at least one gate would only report what it lacks.
+      const schemaFile = output.schemaFile as Parameters<typeof executeSchemaSemanticGates>[0];
+      const document = verifiedOutputs.get(output.path)?.value;
+      const unsatisfied = (gateContext: SemanticGateContext) =>
+        executeSchemaSemanticGates(schemaFile, { document, context: gateContext })
+          .filter((result) => result.status === "requires-context")
+          .map((result) => result.gate);
+      assert.deepEqual(unsatisfied(context), [], artifact);
+      assert.notDeepEqual(unsatisfied({ ...context, artifactSet: {} }), [], artifact);
+    }
+  }
+  assert.deepEqual(checked, [...expected.keys()]);
+});
+
 function loadVerifiedAncestorPropertyLensesHarness(
   taskSpecs: readonly PropertyLensHarnessProducer[],
   documents: ReadonlyMap<string, unknown>
@@ -4645,6 +4964,16 @@ test("generated Smithers accepts direct lenses, excludes transitive lenses, and 
       document: { properties: [{ id: "direct-one" }] }
     }
   ]);
+
+  // A producer binds at most one lens: a second declared lens output is ambiguous, not additive.
+  const directProducer = producers[1];
+  assert.ok(directProducer);
+  directProducer.outputs.push({ path: "custom/direct-extra.json", contract: "ultrafuzz/property-lens@2" });
+  documents.set("attempt-direct\u0000custom/direct-extra.json", { properties: [{ id: "direct-two" }] });
+  assert.throws(
+    () => loadVerifiedAncestorPropertyLensesHarness(taskSpecs, documents)(consumer),
+    /property-lens producer is ambiguous attempt-direct/u
+  );
 });
 
 test("report prompt coverage distinguishes an omitted planned implementation from an unplanned track", () => {
@@ -4733,23 +5062,6 @@ test("generated Smithers selects property and discovery inputs by their declared
   assert.doesNotMatch(expectations, /path\.join\(dependencyRoot, "implemented-properties\.json"\)/u);
 });
 
-test("generated severity verification authenticates the triaged finding preservation context", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function semanticGateContextForVerifiedOutput");
-  const helperEnd = source.indexOf("\n\nfunction verifyOutputSemanticGates", helperStart);
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-  const helper = source.slice(helperStart, helperEnd);
-
-  assert.match(helper, /output\.schemaFile === "severity-classified-findings\.schema\.json"/u);
-  assert.match(
-    helper,
-    /verifiedSingletonAncestorJsonArtifact\(\s*task,\s*"ultrafuzz\/triaged-findings@1",\s*"triaged findings",\s*\{ directOnly: true \}\s*\)/u
-  );
-  assert.doesNotMatch(helper, /"triage"|"triaged-findings\.json"/u);
-  assert.match(helper, /triagedFindingsArtifactPath: triagedFindings\.runRelativePath/u);
-});
-
 function loadGeneratedReviewContextProjectionHarness(): (
   task: {
     attemptId: string;
@@ -4790,7 +5102,7 @@ function loadGeneratedReviewContextProjectionHarness(): (
     "workspacePatchSemanticGitContext",
     `${emitted}; return semanticGateContextForVerifiedOutput;`
   )(
-    (_task: unknown, contract: string) => {
+    (_task: unknown, contract: string, _label: string, options?: { directOnly?: boolean }) => {
       if (contract === "ultrafuzz/findings@2") {
         return {
           path: "custom/deduped.json",
@@ -4799,11 +5111,18 @@ function loadGeneratedReviewContextProjectionHarness(): (
         };
       }
       if (contract === "ultrafuzz/triaged-findings@1") {
-        return {
-          path: "custom/triaged.json",
-          runRelativePath: "artifacts/triage/custom/triaged.json",
-          value: triagedFindings
-        };
+        // Severity must bind the triage it consumes directly, never an unrelated upstream one.
+        return options?.directOnly === true
+          ? {
+              path: "custom/triaged.json",
+              runRelativePath: "artifacts/triage/custom/triaged.json",
+              value: triagedFindings
+            }
+          : {
+              path: "custom/triaged.json",
+              runRelativePath: "artifacts/upstream-triage/custom/triaged.json",
+              value: [{ id: "unrelated-upstream-triage" }]
+            };
       }
       if (contract === "ultrafuzz/campaign-summary@2") {
         return {
@@ -5501,36 +5820,6 @@ test("generated final-severity gates share one producer epoch and reject a cross
   }
 });
 
-test("generated review verification uses declared immutable review-stage authority", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("type ReviewStageSemanticContext");
-  const helperEnd = source.indexOf("\n\ntype DifferentialSemanticArtifactBinding", helperStart);
-  const contextStart = source.indexOf("function semanticGateContextForVerifiedOutput");
-  const contextEnd = source.indexOf("\n\nfunction verifyOutputSemanticGates", contextStart);
-  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
-  assert.ok(contextStart >= 0 && contextEnd > contextStart, source);
-  const helper = source.slice(helperStart, helperEnd);
-  const context = source.slice(contextStart, contextEnd);
-
-  assert.match(helper, /verifiedSiblingJsonArtifact/u);
-  assert.match(helper, /findingsArtifactPath: findings\.path/u);
-  assert.doesNotMatch(helper, /findings\.artifactPath|snapshot\.file\.path/u);
-  assert.match(helper, /verifiedSingletonAncestorJsonArtifact/u);
-  assert.match(helper, /directOnly: true/u);
-  assert.match(helper, /declaredAncestorContractOutputs/u);
-  assert.match(helper, /producer\.outputs\.filter/u);
-  assert.match(helper, /verifiedDependencyJsonArtifact/u);
-  assert.doesNotMatch(helper, /findLogicalNodeArtifact|readFileSync|existsSync|logicalNodeId\s*===/u);
-  assert.doesNotMatch(helper, /deduped-findings\.json|triaged-findings\.json|severity-classified-findings\.json/u);
-
-  assert.match(context, /output\.schemaFile === "triaged-findings\.schema\.json"/u);
-  assert.match(context, /output\.schemaFile === "finding-lifecycle-ledger\.schema\.json"/u);
-  assert.match(context, /output\.schemaFile === "strategy-detections\.schema\.json"/u);
-  assert.match(context, /reviewStageSemanticContext\(task, verifiedOutputs\)/u);
-  assert.match(context, /verifiedFinalSeverityReviewAuthority\(task\)/u);
-  assert.match(context, /\.\.\.finalSeverityAuthority/u);
-});
-
 test("generated report verification rejects completion claims without controller census authority", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const start = source.indexOf("function semanticGateContextForVerifiedOutput");
@@ -5744,38 +6033,6 @@ test("generated dynamic verification passes the resolved policy and exact declar
 
   const compilerSource = fs.readFileSync(path.join(runtimePackageRoot, "src", "smithers.ts"), "utf8");
   assert.match(compilerSource, /dynamicStrategiesEnumeratorPolicy:\s*config\.dynamicStrategiesEnumerator/u);
-});
-
-test("generated differential verification uses exact declared siblings and ancestors", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const runtimeImportStart = source.indexOf("const {", source.indexOf("await import(artifactsModule)"));
-  const runtimeImportEnd = source.indexOf("} = await import(runtimeModule);", runtimeImportStart);
-  const helperStart = source.indexOf("function siblingDynamicStrategySemanticArtifacts");
-  const helperEnd = source.indexOf("\n\nfunction verifiedAncestorPropertyLenses", helperStart);
-  assert.ok(runtimeImportStart >= 0 && runtimeImportEnd > runtimeImportStart, source);
-  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
-  const runtimeImport = source.slice(runtimeImportStart, runtimeImportEnd);
-  const helper = source.slice(helperStart, helperEnd);
-
-  assert.match(runtimeImport, /declaredAncestorOutputsByContract/u);
-  assert.match(runtimeImport, /declaredSiblingOutputsByContract/u);
-  assert.match(helper, /ancestorDifferentialBindings/u);
-  assert.match(helper, /siblingDifferentialBindings/u);
-  assert.match(helper, /verifiedDependencyJsonArtifact/u);
-  assert.match(helper, /verifiedOutputs/u);
-  assert.doesNotMatch(helper, /verifiedCurrentAncestorJsonArtifact|findLogicalNodeArtifact/u);
-  for (const schema of [
-    "reference-harness.schema.json",
-    "audited-differential-lanes.schema.json",
-    "differential-lane-result.schema.json",
-    "semantic-red-registry.schema.json",
-    "differential-red-triage.schema.json",
-    "differential-repair-summary.schema.json",
-    "differential-gap-review.schema.json",
-    "differential-report-review.schema.json"
-  ]) {
-    assert.match(helper, new RegExp(schema.replaceAll(".", "\\."), "u"), schema);
-  }
 });
 
 test("generated Smithers workflow prepares output directories without creating agent-owned files", () => {
@@ -6480,6 +6737,76 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
   }
 });
 
+function loadFinalizeAndVerifyArtifacts(calls: string[]): (task: unknown, agentProcess: unknown) => unknown {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const schemaStart = source.indexOf("const agentProcessOutput = z.strictObject(");
+  const schemaEnd = source.indexOf("\n\nconst preparationOutput", schemaStart);
+  const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts(");
+  const finalizerEnd = source.indexOf("\n\nfunction verifyArtifacts(", finalizerStart);
+  assert.ok(schemaStart >= 0 && schemaEnd > schemaStart, source);
+  assert.ok(finalizerStart >= 0 && finalizerEnd > finalizerStart, source);
+  const emitted = ts.transpileModule(
+    `${source.slice(schemaStart, schemaEnd)}\n${source.slice(finalizerStart, finalizerEnd)}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  const record =
+    (name: string) =>
+    (_task: unknown, options?: unknown): void => {
+      calls.push(options === undefined ? name : `${name} ${JSON.stringify(options)}`);
+    };
+  return new Function(
+    "z",
+    "clearArtifactVerificationMarker",
+    "prepareArtifactMirror",
+    "materializeCanonicalThreatModelArtifact",
+    "materializeGoalPlanDatabaseArtifacts",
+    "materializeWorkspacePatch",
+    "captureTaskOutputs",
+    "verifyArtifacts",
+    `${emitted}; return finalizeAndVerifyArtifacts;`
+  )(
+    z,
+    record("clear marker"),
+    record("prepare"),
+    record("materialize threat model"),
+    record("materialize goal plan"),
+    record("materialize workspace patch"),
+    () => {
+      calls.push("capture outputs");
+      return [];
+    },
+    () => {
+      calls.push("verify");
+      return { verified: true };
+    }
+  ) as (task: unknown, agentProcess: unknown) => unknown;
+}
+
+test("the verifier publishes nothing for an unsuccessful agent and verifies pinned submodules without restoring them", () => {
+  const calls: string[] = [];
+  const finalize = loadFinalizeAndVerifyArtifacts(calls);
+  const task = { attemptId: "node-one" };
+
+  for (const agentProcess of [undefined, { completed: false }, { completed: true, summary: "model-authored" }]) {
+    calls.length = 0;
+    assert.throws(() => finalize(task, agentProcess), /agent task did not succeed node-one/u);
+    // A marker left by an earlier attempt is cleared even though this one publishes nothing.
+    assert.deepEqual(calls, ["clear marker"]);
+  }
+
+  calls.length = 0;
+  assert.deepEqual(finalize(task, { completed: true }), { verified: true });
+  assert.deepEqual(calls, [
+    "clear marker",
+    'prepare {"replayWorkspacePatches":false,"evidenceMode":"require","pinnedSubmodules":"verify"}',
+    "materialize threat model",
+    "materialize goal plan",
+    "materialize workspace patch",
+    "capture outputs",
+    "verify"
+  ]);
+});
+
 test("generated verifiers require the runtime-owned process marker before publishing artifacts", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");
@@ -6691,73 +7018,6 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   assert.doesNotMatch(hydration, /readBoundedRegularArtifactSnapshot|readFileSync|resolveRegularArtifactFile/u);
 });
 
-test("generated Smithers restores sealed submodules before inputs and verifies them only in the finalizer", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const preparationEnd = source.indexOf("\n\nfunction preservePinnedSourceProof", preparationStart);
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const agentEnd = source.indexOf("function resetTaskArtifactsForRetry", agentStart);
-  const finalizerStart = source.indexOf("function finalizeAndVerifyArtifacts");
-  const finalizerEnd = source.indexOf("\n\nfunction verifyArtifacts", finalizerStart);
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(preparationEnd > preparationStart, source);
-  assert.ok(agentStart >= 0, source);
-  assert.ok(agentEnd > agentStart, source);
-  assert.ok(finalizerStart >= 0, source);
-  assert.ok(finalizerEnd > finalizerStart, source);
-
-  const preparation = source.slice(preparationStart, preparationEnd);
-  const agent = source.slice(agentStart, agentEnd);
-  const finalizer = source.slice(finalizerStart, finalizerEnd);
-  assert.match(preparation, /options\.pinnedSubmodules === "verify"/u);
-  assert.match(preparation, /verifyPinnedSubmodulesFromExecutionSnapshot\(/u);
-  assert.match(preparation, /hydratePinnedSubmodulesFromExecutionSnapshot\(/u);
-  assert.match(preparation, /expectation: task\.pinnedSubmodules \?\? undefined/u);
-  assert.ok(
-    preparation.indexOf("hydratePinnedSubmodulesFromExecutionSnapshot") <
-      preparation.indexOf("assertTaskInputs(task, workspaceRoot)"),
-    preparation
-  );
-  assert.ok(
-    preparation.indexOf("verifyPinnedSubmodulesFromExecutionSnapshot") <
-      preparation.indexOf("preservePinnedSourceProof(task)"),
-    preparation
-  );
-  assert.doesNotMatch(
-    agent,
-    /hydratePinnedSubmodulesFromExecutionSnapshot|verifyPinnedSubmodulesFromExecutionSnapshot/u
-  );
-  assert.match(finalizer, /prepareArtifactMirror\(task, \{[\s\S]*?pinnedSubmodules: "verify"[\s\S]*?\}\);/u);
-});
-
-test("generated Smithers workflow binds every planned output to the preflighted schema bundle before agent work", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const artifactsImportStart = source.indexOf("const {");
-  const artifactsImportEnd = source.indexOf("} = await import(artifactsModule);", artifactsImportStart);
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const bindingStart = source.indexOf("function assertTaskOutputSchemaBindings", preparationStart);
-  const preflightStart = source.indexOf("function preflightJsonValidator", bindingStart);
-  const preparation = source.slice(preparationStart, bindingStart);
-  const binding = source.slice(bindingStart, preflightStart);
-
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(artifactsImportStart >= 0 && artifactsImportEnd > artifactsImportStart, source);
-  assert.ok(bindingStart > preparationStart, source);
-  assert.ok(preflightStart > bindingStart, source);
-  assert.ok(
-    preparation.indexOf("assertTaskOutputSchemaBindings(task)") < preparation.indexOf("preflightJsonValidator"),
-    preparation
-  );
-  assert.match(binding, /for \(const output of task\.outputs\)/u);
-  assert.match(binding, /artifactContractSchemaBinding\(/u);
-  assert.match(source.slice(artifactsImportStart, artifactsImportEnd), /parseJsonValidatorPreflightSuccessEnvelope/u);
-  assert.match(source, /parseJsonValidatorPreflightSuccessEnvelope\(Buffer\.from\(stdout, "utf8"\)\)/u);
-  assert.doesNotMatch(
-    source.slice(preflightStart, source.indexOf("function taskPublishesWorkspacePatch")),
-    /JSON\.parse|parseStrictJsonBytes|\bok\??:|\bstatus\??:|registered !== true/u
-  );
-});
-
 test("generated task preparation binds output schema content but not the validator build", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const start = source.indexOf("function assertTaskOutputSchemaBindings");
@@ -6867,40 +7127,6 @@ test("generated agent prompt inserts literal braces from task and operator promp
   );
 });
 
-test("generated Smithers workflow does not precreate runtime-owned workspace patch outputs", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function prepareArtifactMirror");
-  const helperEnd = source.indexOf("\n\nfunction taskPublishesWorkspacePatch", helperStart);
-
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-
-  const helper = source.slice(helperStart, helperEnd);
-  assert.doesNotMatch(helper, /workspace\.patch|workspace-patch\.json|writeFileDurable/u);
-});
-
-test("generated Smithers workflow guards runtime-owned workspace patch publication", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
-  const helperEnd = source.indexOf("\n\nfunction captureInvariantSuiteBaseline", helperStart);
-
-  assert.ok(helperStart >= 0, source);
-  assert.ok(helperEnd > helperStart, source);
-
-  const helper = source.slice(helperStart, helperEnd);
-  assert.match(helper, /resolveRegularArtifactFile\(/u);
-  assert.match(helper, /These paths are runtime-owned/u);
-  assert.match(helper, /existingContents !== "" && existingContents !== "\\n"/u);
-  assert.match(helper, /workspace patch artifact was modified/u);
-  assert.match(helper, /writeFileDurable\(target, contents\)/u);
-  // #357 widened the rule from "replace only an empty placeholder" to "replace an empty placeholder,
-  // or a pair this node published in an earlier generation". The rejection must stay gated on the
-  // caller's classification rather than becoming unconditional, so pin both halves: the throw is
-  // guarded by the flag, and the flag defaults to rejecting.
-  assert.match(helper, /replaceSuperseded = false/u);
-  assert.match(helper, /if \(!replaceSuperseded\) \{/u);
-});
-
 test("generated Smithers verification publishes its exact workspace patch baseline snapshot", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const verificationStart = source.indexOf("function verifyArtifacts");
@@ -6991,9 +7217,36 @@ test("runtime workspace patch publication replaces empty placeholders but reject
   }
 });
 
-test("generated Smithers workflow prefers its relocatable task prompt path", () => {
+test("a task prompt comes from its relocatable prompt path before the dispatch input's path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
+  const promptStart = source.indexOf("function promptForTask");
+  const promptEnd = source.indexOf("\n\nconst promptArtifactAuthoritySnapshotsByTask", promptStart);
+  assert.ok(promptStart >= 0 && promptEnd > promptStart, source);
+  const promptForTask = new Function(
+    "readFileSync",
+    "mirroredArtifactDir",
+    `${ts.transpileModule(source.slice(promptStart, promptEnd), { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }).outputText}; return promptForTask;`
+  )(fs.readFileSync, (task: { artifactDir: string }) => task.artifactDir) as (
+    task: { prompt: string; promptPath?: string; sourceProjectRoot: string; artifactDir: string },
+    inputTask?: { prompt?: string; prompt_path?: string }
+  ) => string;
+  const root = temporaryRoot("ultrafuzz-task-prompt-");
+  const taskPromptPath = path.join(root, "task-prompt.md");
+  const inputPromptPath = path.join(root, "input-prompt.md");
+  fs.writeFileSync(taskPromptPath, "relocated task prompt", "utf8");
+  fs.writeFileSync(inputPromptPath, "dispatch input prompt", "utf8");
+  const task = { prompt: "", promptPath: taskPromptPath, sourceProjectRoot: "", artifactDir: root };
+
+  assert.equal(promptForTask(task, { prompt_path: inputPromptPath }), "relocated task prompt");
+  assert.equal(
+    promptForTask({ ...task, promptPath: undefined }, { prompt_path: inputPromptPath }),
+    "dispatch input prompt"
+  );
+  assert.equal(
+    promptForTask({ ...task, prompt: "inline task prompt" }, { prompt_path: inputPromptPath }),
+    "inline task prompt"
+  );
+  assert.equal(promptForTask(task, { prompt: "dispatch prompt", prompt_path: inputPromptPath }), "dispatch prompt");
 });
 
 test("generated local and cloud prompt relocation rebases task-local authority paths without exposing controls", () => {
@@ -7078,76 +7331,6 @@ test("generated local and cloud prompt relocation rebases task-local authority p
       `${label}: stale canonical artifact root`
     );
   }
-});
-
-test("generated prompt authority is derived from sealed controls immediately before each first generation", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const runtimeImportStart = source.indexOf("const {", source.indexOf("await import(artifactsModule)"));
-  const runtimeImportEnd = source.indexOf("} = await import(runtimeModule);", runtimeImportStart);
-  const authorityStart = source.indexOf("const promptArtifactAuthoritySnapshotsByTask");
-  const authorityEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", authorityStart);
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const agentEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", agentStart);
-  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
-  const resetEnd = source.indexOf("\n\nfunction resetTaskArtifactContents", resetStart);
-  assert.ok(runtimeImportStart >= 0 && runtimeImportEnd > runtimeImportStart, source);
-  assert.ok(authorityStart >= 0 && authorityEnd > authorityStart, source);
-  assert.ok(agentStart >= 0 && agentEnd > agentStart, source);
-  assert.ok(resetStart >= 0 && resetEnd > resetStart, source);
-  const runtimeImport = source.slice(runtimeImportStart, runtimeImportEnd);
-  const authority = source.slice(authorityStart, authorityEnd);
-  const agent = source.slice(agentStart, agentEnd);
-  const reset = source.slice(resetStart, resetEnd);
-
-  for (const runtimeHelper of [
-    "derivePromptArtifactAuthority",
-    "parsePromptArtifactAuthorityBytes",
-    "serializePromptArtifactAuthority"
-  ]) {
-    assert.match(runtimeImport, new RegExp(`\\b${runtimeHelper}\\b`, "u"));
-  }
-  assert.match(authority, /PROMPT_ARTIFACT_AUTHORITY_DIRECTORY, `\$\{task\.attemptId\}\.json`/u);
-  assert.match(authority, /const manifestPath = path\.resolve\(task\.taskManifestPath\)/u);
-  assert.match(
-    authority,
-    /readBoundedRegularArtifactSnapshot\([\s\S]*?manifestPath[\s\S]*?MAX_SEALED_TASK_MANIFEST_BYTES[\s\S]*?true/u
-  );
-  assert.match(
-    authority,
-    /const admission = assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?derivePromptArtifactAuthority\(\{[\s\S]*?sealedTaskManifestBytes: manifest\.bytes,[\s\S]*?currentAttemptId: task\.attemptId,[\s\S]*?relocatedRunRoot: realpathSync\(task\.runRoot\),[\s\S]*?admittedDependencyArtifactDirs: admission\.directories,[\s\S]*?selectors[\s\S]*?\}\)/u
-  );
-  assert.match(
-    authority,
-    /const expected = serializePromptArtifactAuthority\(authority\);[\s\S]*?prepareTaskLocalAuthorityPath\(workspaceRoot, promptArtifactAuthorityRelativePath\(task\)\)[\s\S]*?writeFileDurable\(authorityPath, expected\)/u
-  );
-  assert.match(authority, /writeFileDurable\(authorityPath, expected\)/u);
-  assert.match(authority, /parsePromptArtifactAuthorityBytes\(captured\.bytes\)/u);
-  assert.match(authority, /captured\.bytes\.equals\(expected\)/u);
-  assert.match(authority, /sameImmutableFileIdentity\(captured\.identity, expected\.identity\)/u);
-  assert.match(authority, /captured\.bytes\.equals\(expected\.bytes\)/u);
-  assert.doesNotMatch(authority, /task\.metadata|task\.modelName|task\.workspacePath\s*[,}]/u);
-
-  assert.match(
-    reset,
-    /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\);\s*materializePromptArtifactAuthority\(task\);\s*return materializeFinalReportRunMetadataAuthority\(task, runtime\);\s*\}/u
-  );
-  assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task,") < agent.indexOf("executionAgent.generate(unstructuredArgs)")
-  );
-  assert.match(agent, /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task,/u);
-  assert.match(
-    agent,
-    /else \{\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);\s*\}/u
-  );
-  assert.match(
-    agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
-  );
-  assert.match(
-    agent,
-    /catch \(error\) \{\s*try \{\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\)/u
-  );
-  assert.equal(source.match(/materializePromptArtifactAuthority\(task\);/gu)?.length, 1);
 });
 
 test("generated immutable file identities preserve bigint device, inode, size, and nanosecond precision", () => {
@@ -7393,6 +7576,16 @@ test("generated task-local prompt authority is minimized, tamper-evident, and re
       assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
       assert.doesNotThrow(() => harness.assertUnchanged(task));
     }
+
+    // The model must read exactly the derived bytes: a schema-valid re-serialization is still rejected.
+    const reserializing = loadGeneratedPromptArtifactAuthorityHarness([requiredDir], {
+      writeFileDurable: (target, contents) =>
+        writeFileDurable(target, `${JSON.stringify(JSON.parse(Buffer.from(contents).toString("utf8")))}\n`)
+    });
+    assert.throws(
+      () => reserializing.materialize(task),
+      /prompt artifact authority changed while materialized consumer/u
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -7595,45 +7788,39 @@ test("generated Smithers invariant snapshot delegates the pin check to the share
   }
 });
 
-test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
+test("a task worktree must still sit at the recorded launch commit, through its ref as well as HEAD", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const proofStart = source.indexOf("function preservePinnedSourceProof");
-  const proofEnd = source.indexOf(
-    "\n\n/** Directory names whose task-owned generated-test work must be cleared before a retry. */",
-    proofStart
-  );
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const workflowStart = source.indexOf("export default smithers");
+  const helperStart = source.indexOf("function assertWorkspaceSourceRevision(");
+  const helperEnd = source.indexOf("\nfunction worktreeBaseBranch(", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
+  const assertWorkspaceSourceRevision = new Function(
+    "execFileSync",
+    "realpathSync",
+    `${ts.transpileModule(source.slice(helperStart, helperEnd), { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }).outputText}; return assertWorkspaceSourceRevision;`
+  )(execFileSync, fs.realpathSync) as (task: {
+    attemptId: string;
+    workspacePath: string;
+    sourceRevision: string | null;
+    sourceRef: string | null;
+  }) => void;
+  const workspace = temporaryRoot("ultrafuzz-source-revision-");
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: workspace, encoding: "utf8" }).trim();
+  git("init", "--quiet", "--initial-branch=main");
+  git("config", "user.email", "test@invalid");
+  git("config", "user.name", "Ultrafuzz Test");
+  git("commit", "--quiet", "--allow-empty", "-m", "launch");
+  const launch = git("rev-parse", "HEAD");
+  git("branch", "launch-ref");
+  git("commit", "--quiet", "--allow-empty", "-m", "later");
+  const task = { attemptId: "node-one", workspacePath: workspace, sourceRevision: launch, sourceRef: null };
+  const mismatch = /workspace node-one does not match the recorded launch commit/u;
 
-  assert.ok(proofStart > preparationStart, source);
-  assert.ok(proofEnd > proofStart, source);
-  assert.ok(workflowStart > proofStart, source);
-  assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
-  assert.match(source, /const baseBranch = worktreeBaseBranch\(task\)/u);
-  assert.match(source, /baseBranch === undefined \? \{\} : \{ baseBranch \}/u);
-  assert.match(source, /function assertWorkspaceSourceRevision/u);
-  assert.match(source, /git\("HEAD\^\{commit\}"\)/u);
-  assert.match(source, /head !== task\.sourceRevision \|\| sourceRef !== task\.sourceRevision/u);
-  assert.match(source, /if \(firstGenerationForAttempt\) \{\s*assertWorkspaceSourceRevision\(task\)/u);
-  assert.match(
-    source,
-    /replayWorkspacePatches !== false\) \{\s*preparationStep\(task\.attemptId, "assert-workspace-source-revision", \(\) => assertWorkspaceSourceRevision\(task\)\)/u
-  );
-  assert.match(source, /if \(!usesPinnedSource\) return/u);
-  assert.match(source, /preservePinnedSourceProof\(task\)/u);
-  assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
-  assert.match(source, /git\(\["rev-parse", pinnedSourceRef\]\)/u);
-  assert.match(source, /git\(\["rev-list", "--all", "--count"\]\)/u);
-  assert.match(source, /git\(\["rev-list", "--all", "--max-count=1"\]\)/u);
-  assert.match(source, /git fsck --connectivity-only --unreachable --no-reflogs --no-progress/u);
-  assert.doesNotMatch(source.slice(proofStart, proofEnd), /--batch-all-objects/u);
-  assert.match(source, /git\(\["remote"\]\)/u);
-  assert.match(source, /source-isolation failure/u);
-  assert.match(source, /"source-proofs"/u);
-  assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
-  assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
-  assert.match(source, /ultrafuzz\.agent-source-proof\.v2/u);
-  assert.match(source.slice(proofStart, proofEnd), /dependencies: pinnedDependencies/u);
+  assert.throws(() => assertWorkspaceSourceRevision(task), mismatch);
+  git("checkout", "--quiet", launch);
+  assert.doesNotThrow(() => assertWorkspaceSourceRevision(task));
+  assert.doesNotThrow(() => assertWorkspaceSourceRevision({ ...task, sourceRef: "launch-ref" }));
+  assert.throws(() => assertWorkspaceSourceRevision({ ...task, sourceRef: "main" }), mismatch);
+  assert.doesNotThrow(() => assertWorkspaceSourceRevision({ ...task, sourceRevision: null }));
 });
 
 test("runtime task reconstruction preserves source identity and rejects undefined worktree bases", () => {
@@ -7867,6 +8054,18 @@ test("generated Smithers pinned source proof rejects any previously published by
     git(["commit", "--quiet", "-m", "pinned"]);
     const pinnedCommit = git(["rev-parse", "HEAD"]);
     git(["branch", "ultrafuzz/test-run/actors-flows", pinnedCommit]);
+
+    // With a remote the agent could fetch upstream history, read it and prune it again; the ref and
+    // object-count checks only see what is left. The pinned proof refuses it before recording anything,
+    // and an unpinned run keeps no proof at all.
+    git(["remote", "add", "origin", root]);
+    assert.throws(
+      () => preservePinnedSourceProof(task),
+      /source-isolation failure: final worktree property-specification-certora is not pinned/u
+    );
+    loadPreservePinnedSourceProof(false)(task);
+    assert.equal(fs.existsSync(proofPath), false);
+    git(["remote", "remove", "origin"]);
 
     preservePinnedSourceProof(task);
     const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as {
@@ -9059,32 +9258,6 @@ test("multi-rung report-producer authority budgets a contended Smithers read and
   assert.equal(authority.smithersReads(), 1);
 });
 
-test("generated retries do not inspect or inject previous failure text", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const agent = source.slice(
-    source.indexOf("function artifactAwareAgent"),
-    source.indexOf("function isStrictlyInsideDirectory")
-  );
-  assert.doesNotMatch(source, /retryFailureAwareArgs|retryFailureText|Untrusted prior-attempt failure/u);
-  assert.doesNotMatch(agent, /previousFailure|error\.message|String\(error\)/u);
-  assert.match(agent, /prompt: typeof args\?\.prompt === "string" \? args\.prompt : originalPrompt/u);
-  assert.match(agent, /resumeSession: undefined/u);
-  assert.match(agent, /continueSession: false/u);
-  assert.match(agent, /lastHeartbeat: undefined/u);
-  assert.match(agent, /Reflect\.deleteProperty\(continuationFreeArgs, "messages"\)/u);
-  // #955: the continuation-pointer scrub must be built before the attempt gate,
-  // so a resumed activation re-dispatching attempt 1 is scrubbed too. Only the
-  // prompt/conversation reset below it is retry-only.
-  assert.match(
-    agent,
-    /const continuationFreeArgs = \{\s*\.\.\.\(args \?\? \{\}\),\s*resumeSession: undefined,\s*continueSession: false,\s*lastHeartbeat: undefined\s*\};[\s\S]*?if \(smithersAttempt <= 1\) return continuationFreeArgs;/u
-  );
-  assert.match(
-    agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
-  );
-});
-
 test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
   const root = temporaryRoot("ultrafuzz-retry-prompt-");
   try {
@@ -9129,83 +9302,35 @@ test("retry cleanup preserves only a task-owned prompt and accepts a sealed snap
       /unsafe canonical task input final-report/u
     );
     assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+    fs.unlinkSync(linkedPrompt);
+
+    // The reset runs before every attempt's first generation, attempt 1 included, and the preparation
+    // after it requires this evidence: without the patch baseline every patch-publishing task would fail
+    // before its model ran.
+    const preservedFiles = canonicalRetryResetPreservedFiles();
+    for (const name of preservedFiles) fs.writeFileSync(path.join(artifactDir, name), `${name}\n`);
+    fs.writeFileSync(path.join(artifactDir, "stale-report.json"), "{}\n");
+    resetCanonicalArtifacts(artifactDir, "final-report", undefined);
+    assert.deepEqual(fs.readdirSync(artifactDir).sort(), [...preservedFiles].sort());
+    for (const name of preservedFiles) {
+      assert.equal(fs.readFileSync(path.join(artifactDir, name), "utf8"), `${name}\n`, name);
+    }
+
+    // A reset root replaced by a symlink is refused, not followed: the reset would otherwise empty
+    // whatever directory the link names.
+    const outside = path.join(root, "run", "outside-the-task");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "not task-owned\n");
+    fs.rmSync(artifactDir, { recursive: true, force: true });
+    fs.symlinkSync(outside, artifactDir);
+    assert.throws(
+      () => resetCanonicalArtifacts(artifactDir, "final-report", undefined),
+      /unsafe canonical task artifact root final-report/u
+    );
+    assert.deepEqual(fs.readdirSync(outside), ["keep.txt"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("generated Smithers resets exact task-owned artifact contents before every selected attempt", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const rootsStart = source.indexOf("function resetTaskArtifactsForRetry");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-
-  assert.ok(agentStart >= 0, source);
-  assert.ok(rootsStart > agentStart, source);
-  assert.ok(preparationStart > rootsStart, source);
-
-  const agent = source.slice(agentStart, rootsStart);
-  assert.match(agent, /if \(firstGenerationForAttempt\)/u);
-  assert.ok(
-    agent.indexOf("resetTaskArtifactsForRetry(task,") < agent.indexOf("executionAgent.generate(unstructuredArgs)"),
-    agent
-  );
-
-  const reset = source.slice(rootsStart, preparationStart);
-  assert.match(
-    reset,
-    /const promptPath = taskPromptPathForArtifactReset\(task\.metadata\.artifacts\.dir, task\.promptPath\)/u
-  );
-  assert.match(
-    reset,
-    /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical", promptPath\)/u
-  );
-  assert.match(
-    reset,
-    /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
-  );
-  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@3"/u);
-  assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
-  assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
-  assert.match(reset, /for \(const nodeId of generatedTestNodeIds\(task\)\)/u);
-  assert.match(reset, /path\.join\(foundryParent, nodeId\), nodeId, "generated-test"/u);
-  assert.match(reset, /path\.basename\(candidate\) !== attemptId/u);
-  assert.match(reset, /const parent = realpathSync\(path\.dirname\(candidate\)\)/u);
-  assert.match(reset, /const anchoredRoot = realpathSync\(candidate\)/u);
-  assert.match(reset, /anchoredRoot !== path\.join\(parent, attemptId\)/u);
-  assert.match(reset, /const preservedInput =/u);
-  assert.match(reset, /candidate === preservedInput/u);
-  assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
-  assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
-  assert.match(reset, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false, evidenceMode: "require" \}\)/u);
-  assert.match(reset, /materializePromptArtifactAuthority\(task\)/u);
-  assert.match(reset, /WORKSPACE_PATCH_BASELINE_FILE/u);
-});
-
-test("post-agent preparation preserves newly added invariant sources for workspace-patch capture", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
-  const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
-  const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
-
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(materializeStart > preparationStart, source);
-  assert.ok(restoreStart >= 0, source);
-  assert.ok(restoreEnd > restoreStart, source);
-
-  const preparation = source.slice(preparationStart, materializeStart);
-  const restore = source.slice(restoreStart, restoreEnd);
-
-  // The post-agent preparation pass must not delete a source that the agent
-  // just authored before materializeWorkspacePatch can capture it.
-  assert.match(
-    preparation,
-    /restoreInvariantSuiteWorkspaceSnapshot\(task, \{[\s\S]*preserveCurrentSources: options\.replayWorkspacePatches === false/u
-  );
-  assert.match(restore, /preserveCurrentSources\?: boolean/u);
-  assert.match(restore, /snapshot\.has\(safePath\) \|\| preserveCurrentSources/u);
-  assert.match(restore, /if \(preserveCurrentSources\) return/u);
 });
 
 test("post-agent snapshot restoration keeps modified, deleted, and new source state", () => {
@@ -9241,35 +9366,6 @@ test("post-agent snapshot restoration keeps modified, deleted, and new source st
   }
 });
 
-test("generated Smithers agent boundary performs only task-local authority checks after completion", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const agentStart = source.indexOf("function artifactAwareAgent");
-  const agentEnd = source.indexOf("\n\nfunction isStrictlyInsideDirectory", agentStart);
-
-  assert.ok(agentStart >= 0, source);
-  assert.ok(agentEnd > agentStart, source);
-
-  const agent = source.slice(agentStart, agentEnd);
-  assert.match(
-    agent,
-    /assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "outputSchema"\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\);\s*assertDependencyArtifactAdmissionCurrent\(task\);\s*assertPromptArtifactAuthorityUnchanged\(task\);\s*assertFinalReportRunMetadataAuthorityUnchanged\(task\);\s*assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?_output: \{ completed: true \}/u
-  );
-  assert.doesNotMatch(
-    agent,
-    /prepareArtifactMirror|materializeMissing|normalizeLegacy|materializeGeneratedTestCompanions|verifyArtifacts/u
-  );
-  assert.match(source, /function finalizeAndVerifyArtifacts/u);
-  assert.match(source, /dependsOn=\{\[task\.id\]\}[\s\S]*?retries=\{0\}/u);
-});
-
-test("generated Smithers workflow contains no output repair or legacy normalization helpers", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(
-    source,
-    /canonicalEmptyArtifact|materializeMissingMarkdownArtifacts|materializeMissingDedupeArtifact|materializeMissingFinalReportArtifacts|materializeGeneratedTestCompanion|normalizeLegacyFinding|normalizeLegacyReportProvenance|normalizeLegacyGeneratedTest/u
-  );
-});
-
 test("durable writer replaces a destination symlink without overwriting its target", () => {
   const root = temporaryRoot("ultrafuzz-durable-writer-");
   try {
@@ -9286,19 +9382,6 @@ test("durable writer replaces a destination symlink without overwriting its targ
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("generated Smithers agent never promotes dedupe findings into a final report", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(
-    source,
-    /materializeMissingFinalReportArtifacts|meaningfulFinalReport|normalizedFallbackReportIssue/u
-  );
-});
-
-test("generated Smithers agent never synthesizes final-report Markdown", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(source, /materializeMissingMarkdownArtifacts|agentResultSummary|writeRecoveredReportMarkdown/u);
 });
 
 test("generated Smithers verifier treats the final-report projector only as a non-mutating oracle", () => {
@@ -9523,175 +9606,6 @@ test("generated canonical report verification enforces census-rendered goal cove
   );
 });
 
-test("generated Smithers agent rejects v2 and legacy generated-test lists without conversion", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(source, /normalizeLegacyGeneratedTestManifests|typeof entry === "string" \? \{ path: entry \}/u);
-  assert.doesNotMatch(source, /ultrafuzz\/generated-tests@2|support_files\?:|\.support_files\s*\?\?\s*\[\]/u);
-});
-
-test("generated Smithers agent does not strip finding path suffixes", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(source, /normalizeLegacyPathReference|withoutHashLineSuffix/u);
-});
-
-test("generated Smithers agent does not convert legacy finding field shapes", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(
-    source,
-    /normalizeLegacyFindingFields|finding\.confidence = String|finding\.evidence = \[evidence\]/u
-  );
-});
-
-test("generated Smithers agent does not convert legacy report provenance", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(source, /normalizeLegacyReportProvenance|normalizeFinalReportSeverityRecord|originalIsValid/u);
-});
-
-test("generated Smithers never infers or repairs missing generated-test companions", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  assert.doesNotMatch(source, /materializeGeneratedTestCompanion/u);
-  assert.doesNotMatch(source, /generated test sources conflict/u);
-  assert.match(
-    source,
-    /Generated-test companions are agent-owned outputs[\s\S]*?verifyOutputSemanticGates\(task, verifiedOutputs, campaignEvidence\)/u
-  );
-  assert.doesNotMatch(source, /const workspaceRelativePath = relativePath\.slice/u);
-});
-
-test("generated Smithers retries clear every task-owned generated-test work directory", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const resetStart = source.indexOf("function resetTaskArtifactsForRetry");
-  const resetEnd = source.indexOf("function resetTaskArtifactContents", resetStart);
-  assert.ok(resetStart >= 0, source);
-  assert.ok(resetEnd > resetStart, source);
-
-  const reset = source.slice(resetStart, resetEnd);
-  assert.match(reset, /for \(const nodeId of generatedTestNodeIds\(task\)\) \{/u);
-  assert.match(reset, /resetTaskArtifactContents\(path\.join\(foundryParent, nodeId\), nodeId, "generated-test"\)/u);
-  assert.match(
-    source,
-    /function generatedTestNodeIds[\s\S]*new Set\(\[task\.metadata\.node\.logicalNodeId, task\.metadata\.node\.concreteNodeId\]\)/u
-  );
-});
-
-test("generated Smithers workflow preserves the complete invariant suite across worktree handoffs", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
-  const verifierStart = source.indexOf("function verifyArtifacts");
-  const workflowStart = source.indexOf("export default smithers");
-
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(resolverStart > preparationStart, source);
-  assert.ok(workflowStart > verifierStart, source);
-  assert.match(source, /materializeInvariantSuiteFromDependencies\(task, workspaceRoot\)/u);
-  assert.match(source, /materializeInvariantSuiteCompanions\(task, capturedOutputs\)/u);
-  assert.match(source, /validateImplementedPropertiesSchema/u);
-  assert.match(source, /invariant-suite/u);
-  assert.match(source, /changedTestTreePaths/u);
-  assert.match(source, /changedInvariantSourcePaths/u);
-  assert.match(source, /CryticTester/u);
-  assert.match(source, /TargetFunctions/u);
-  assert.match(source, /Properties/u);
-  assert.match(source, /copyInvariantSuiteIntoWorkspace/u);
-  assert.match(source, /rememberInvariantSuitePublications\(task, publications, artifactRoots\)/u);
-  assert.match(source, /artifact handoff is missing invariant-suite sources/u);
-  assert.match(source, /stateful-invariant-setup/u);
-  assert.match(source, /stateful-invariant-handlers/u);
-  assert.match(source, /stateful-invariant-coverage/u);
-  assert.match(source, /directDependencies/u);
-  assert.match(source, /leftDirect \? 1 : -1/u);
-  assert.match(source, /safeInvariantSuiteDirectory/u);
-  assert.match(source, /invariant suite destination is a symlink/u);
-  assert.match(source, /invariant suite directory is unsafe/u);
-  assert.match(source, /MAX_INVARIANT_SUITE_PATH_LENGTH/u);
-  assert.match(source, /MAX_INVARIANT_SUITE_SEGMENT_LENGTH/u);
-  assert.match(source, /MAX_INVARIANT_SUITE_FILES/u);
-  assert.match(source, /MAX_INVARIANT_SUITE_SOURCE_BYTES/u);
-  assert.match(source, /MAX_INVARIANT_SUITE_TOTAL_BYTES/u);
-  assert.match(source, /INVARIANT_SUITE_BASELINE_FILE/u);
-  assert.match(source, /captureInvariantSuiteBaseline/u);
-  assert.match(source, /invariantSuiteProtectedBaselinePath/u);
-  assert.match(source, /protected invariant suite baseline was modified/u);
-  assert.match(source, /INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID/u);
-  assert.match(source, /parseRuntimeDocumentBytes\(\s*INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,\s*snapshot\.bytes/u);
-  assert.match(source, /gitTestTreePaths/u);
-  assert.match(source, /INVARIANT_SUITE_SENSITIVE_SEGMENTS/u);
-  assert.match(source, /assertSafeInvariantSuiteTestPath/u);
-  assert.match(source, /record\.implementation_paths/u);
-  assert.match(source, /record\.test_paths/u);
-  assert.match(source, /pinnedSourceRef, "HEAD\^"/u);
-  assert.match(source, /\$\{baseRef\}\.\.\.HEAD/u);
-  assert.match(source, /implemented properties JSON is invalid/u);
-  assert.match(source, /selectedSources/u);
-  assert.match(source, /ancestor invariant suite sources conflict/u);
-  assert.match(source, /src\/contracts/u);
-  assert.match(source, /invariant suite source is hard-linked/u);
-  assert.match(source, /unable to enumerate changed invariant suite sources/u);
-  assert.match(source, /writeFileDurable\(anchoredDestination/u);
-  assert.match(source, /for \(const \[relativePath, bytes\] of publicationSnapshot\)/u);
-  assert.match(source, /invariantSuiteDependencySnapshots/u);
-  assert.match(source, /invariant suite dependency changed/u);
-  assert.match(source, /captureInvariantSuiteWorkspaceSnapshot/u);
-  assert.match(source, /restoreInvariantSuiteWorkspaceSnapshot/u);
-  assert.match(source, /INVARIANT_SUITE_MANIFEST_FILE/u);
-  assert.match(source, /INVARIANT_SUITE_MANIFEST_SCHEMA_VERSION/u);
-  assert.match(source, /assertValidInvariantSuiteManifest\(manifest\)/u);
-  assert.match(source, /parseInvariantSuiteManifestBytes\(manifestBytes\)/u);
-  assert.doesNotMatch(source, /invariant-suite-manifest\.v1/u);
-  assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
-  assert.match(source, /ancestor invariant suite sources conflict/u);
-
-  const suiteMaterializerStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
-  const suitePublicationStart = source.indexOf("function rememberInvariantSuitePublications");
-  assert.ok(suiteMaterializerStart > preparationStart, source);
-  assert.ok(suitePublicationStart > suiteMaterializerStart, source);
-  assert.ok(resolverStart > suitePublicationStart, source);
-  assert.ok(workflowStart > resolverStart, source);
-});
-
-test("generated Smithers invariant discovery uses a Git-compatible ls-files invocation", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-
-  assert.doesNotMatch(source, /--no-exclude-standard/u);
-  assert.match(
-    source,
-    /invariantSuiteGitPaths\(workspaceRoot, \[\s*"ls-files",\s*"--cached",\s*"--others",\s*"--",\s*"src",\s*"contracts",\s*"test",\s*"tests"\s*\]\)/u
-  );
-  assert.match(source, /\["ls-files", "--others", "--", "src", "contracts"\]/u);
-  assert.match(source, /\["ls-files", "--others", "--", "test", "tests"\]/u);
-});
-
-test("generated Smithers invariant discovery bounds every git enumeration it captures", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-
-  // Node's `execFileSync` default is 1 MB, and an oversized listing then dies as an anonymous
-  // `spawnSync git ENOBUFS` (#310, #323). Each discovery capture goes through the one helper that states
-  // the bound, so a new call site that reintroduces a bare `execFileSync` fails here.
-  assert.match(source, /const MAX_INVARIANT_SUITE_ENUMERATION_BYTES = /u);
-  assert.match(source, /maxBuffer: MAX_INVARIANT_SUITE_ENUMERATION_BYTES/u);
-  assert.match(source, /function rethrowOversizedInvariantSuiteEnumeration/u);
-  assert.match(source, /listed more than the \$\{MAX_INVARIANT_SUITE_ENUMERATION_BYTES\}-byte enumeration buffer/u);
-  for (const enumeration of [
-    "captureInvariantSuiteBaseline",
-    "invariantWorkspaceSourcePaths",
-    "changedTestTreePaths",
-    "changedInvariantSourcePaths",
-    "gitTestTreePaths",
-    "removeStaleWorkspaceFiles"
-  ]) {
-    const start = source.indexOf(`function ${enumeration}(`);
-    assert.ok(start >= 0, enumeration);
-    const body = source.slice(start, source.indexOf("\n}\n", start));
-    assert.match(body, /invariantSuiteGitPaths\(/u, enumeration);
-    assert.doesNotMatch(body, /execFileSync\(\s*"git",\s*\["ls-files"/u, enumeration);
-  }
-  // The stale-file cleanup (#691) captures nothing outside the bounded helper -- not even its ls-tree.
-  const staleCleanupStart = source.indexOf("function removeStaleWorkspaceFiles(");
-  const staleCleanup = source.slice(staleCleanupStart, source.indexOf("\n}\n", staleCleanupStart));
-  assert.doesNotMatch(staleCleanup, /execFileSync\(/u);
-});
-
 test("#691 every git capture in the generated workflow states an explicit maxBuffer", () => {
   // #323 bounded the three enumeration sites it happened to list and missed a fourth,
   // `removeStaleWorkspaceFiles`, whose `--ignored` listing overflows Node's 1 MB default on any
@@ -9737,54 +9651,6 @@ test("#691 every git capture in the generated workflow states an explicit maxBuf
   // The criterion covers every spawn flavor: nothing else in the template shells out to git at all.
   assert.doesNotMatch(source, /(?:^|[^.\w])execSync\(/u);
   assert.doesNotMatch(source, /spawnSync\(/u);
-});
-
-test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
-  const workspace = temporaryRoot("ultrafuzz-git-discovery-");
-  try {
-    execFileSync("git", ["init", "--quiet", workspace]);
-    for (const relativePath of [
-      "src/tracked.sol",
-      "contracts/untracked.sol",
-      "test/ignored.sol",
-      "tests/visible.sol"
-    ]) {
-      const filePath = path.join(workspace, relativePath);
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, "contract Source {}\n");
-    }
-    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\n");
-    execFileSync("git", ["add", "--", ".gitignore", "src/tracked.sol", "tests/visible.sol"], { cwd: workspace });
-
-    const sourcePaths = execFileSync(
-      "git",
-      ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"],
-      { cwd: workspace, encoding: "utf8" }
-    )
-      .split(/\r?\n/u)
-      .filter(Boolean);
-    assert.deepEqual(
-      new Set(sourcePaths),
-      new Set(["contracts/untracked.sol", "src/tracked.sol", "test/ignored.sol", "tests/visible.sol"])
-    );
-  } finally {
-    fs.rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
-test("generated Smithers invariant provenance accepts only supported source roots", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const pathStart = source.indexOf("function assertSafeInvariantSuitePath");
-  const pathEnd = source.indexOf("function assertSafeInvariantSuiteTestPath", pathStart);
-
-  assert.ok(pathStart >= 0, source);
-  assert.ok(pathEnd > pathStart, source);
-  const validator = source.slice(pathStart, pathEnd);
-  assert.match(validator, /INVARIANT_SUITE_ALLOWED_ROOTS\.some/u);
-  assert.match(source, /const INVARIANT_SUITE_ALLOWED_ROOTS = \["src", "contracts", "test", "tests"\]/u);
-  assert.match(validator, /unsupported invariant suite source root/u);
-  assert.doesNotMatch(validator, /artifacts/u);
-  assert.match(validator, /segment === "\.envrc"/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
@@ -9867,107 +9733,6 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.match(restore, /safeInvariantSuiteDirectory\(workspaceRoot, path\.dirname\(candidate\)\)/u);
   assert.match(restore, /stat\.isSymbolicLink\(\)/u);
   assert.match(restore, /writeFileDurable\(anchored, bytes\)/u);
-});
-
-test("generated Smithers verifier publishes the complete validated set before task success", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const verifierStart = source.indexOf("function verifyArtifacts");
-  const workflowStart = source.indexOf("export default smithers");
-
-  assert.ok(verifierStart >= 0, source);
-  assert.ok(workflowStart > verifierStart, source);
-  assert.match(source, /publishFileDurableExclusive/u);
-
-  const verifier = source.slice(verifierStart, workflowStart);
-  assert.match(verifier, /const publications = new Map<string, Buffer>\(\)/u);
-  assert.match(source, /function captureTaskOutputs/u);
-  assert.match(source, /return task\.outputs\.map/u);
-  assert.match(source, /MAX_VERIFIED_ARTIFACT_BYTES/u);
-  assert.match(verifier, /rememberVerifiedPublication\(publications, output\.path, verified\.file\.bytes\)/u);
-  assert.match(verifier, /verifyGeneratedTestFiles\(verified\.artifactRoot, verified\.value\)/u);
-  assert.match(verifier, /rememberVerifiedPublication\(publications, companion\.path, companion\.contents\)/u);
-  assert.match(verifier, /publishFileDurableExclusive\(artifactDir, relativePath, contents\)/u);
-  assert.ok(
-    verifier.indexOf("validateCapturedTaskOutputs(task, capturedOutputs)") <
-      verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)")
-  );
-  assert.ok(
-    verifier.indexOf("verifyOutputSemanticGates(task, verifiedOutputs, campaignEvidence)") <
-      verifier.indexOf("const publications = new Map<string, Buffer>()")
-  );
-  assert.ok(
-    verifier.indexOf("assertArtifactPublicationsContainNoSecrets(") > verifier.indexOf("primary === undefined")
-  );
-  assert.ok(
-    verifier.indexOf("assertArtifactPublicationsContainNoSecrets(") <
-      verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)")
-  );
-  assert.match(verifier, /sensitiveEnvironmentValues\(process\.env/u);
-  assert.match(verifier, /task\.execution\?\.agentCredentialEnv/u);
-  assert.match(verifier, /task\.execution\?\.modal\?\.credentialEnv/u);
-  assert.ok(
-    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") > verifier.indexOf("primary === undefined")
-  );
-  assert.ok(
-    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
-      verifier.indexOf(
-        "const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings)"
-      )
-  );
-  assert.ok(
-    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
-      verifier.indexOf("assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch)")
-  );
-  assert.ok(
-    verifier.indexOf("assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch)") <
-      verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings)")
-  );
-});
-
-test("generated Smithers preparation requires a successful dependency artifact verification", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
-  const verifierStart = source.indexOf("function verifyArtifacts");
-  const workflowStart = source.indexOf("export default smithers");
-
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(materializeStart > preparationStart, source);
-  assert.ok(verifierStart > materializeStart, source);
-  assert.ok(workflowStart > verifierStart, source);
-
-  const verifier = source.slice(verifierStart, workflowStart);
-  assert.match(source, /ARTIFACT_VERIFICATION_DIRECTORY/u);
-  assert.match(source, /function assertVerifiedDependency/u);
-  assert.match(source, /artifact dependency has not passed verification/u);
-  assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
-  assert.match(source, /verifiedDependencySnapshot\(task, dependency, producer\)/u);
-  assert.match(source, /artifacts: authenticatedArtifacts/u);
-  assert.match(source, /marker:\s*Object\.freeze\(\{[\s\S]*?bytes: Buffer\.from\(markerSnapshot\.bytes\)/u);
-  assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
-  assert.match(verifier, /beginVerifiedDependencySnapshotEpoch\(task\)/u);
-  assert.match(verifier, /assertVerifiedDependencySnapshotEpochRemainedCurrent\(task, dependencySnapshotEpoch\)/u);
-  assert.match(verifier, /endVerifiedDependencySnapshotEpoch\(task, dependencySnapshotEpoch\)/u);
-  assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications, validationWarnings\)/u);
-  assert.match(source, /publications: publicationEntries/u);
-  assert.match(source, /rememberVerifiedPublication\(publications, INVARIANT_SUITE_MANIFEST_FILE/u);
-  assert.match(source, /const expectedPublicationShas = new Map/u);
-  assert.match(source, /rememberExpectedVerifiedPublication\(expectedPublicationShas, companion\.path/u);
-  assert.match(
-    source,
-    /rememberExpectedInvariantSuitePublications\(dependencyTask, dependency, expectedPublicationShas\)/u
-  );
-  assert.match(source, /files: manifestFiles/u);
-  assert.notEqual(verifier.indexOf("clearArtifactVerificationMarker(task)"), -1, verifier);
-  assert.ok(
-    verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("const artifactRoots"),
-    verifier
-  );
-  assert.ok(
-    verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings)") >
-      verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)"),
-    verifier
-  );
 });
 
 test("generated Smithers dependency verification fails closed before descendant preparation", () => {

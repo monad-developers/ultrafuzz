@@ -90,6 +90,7 @@ type WorkflowHelpers = {
   ) => void;
   resetTaskArtifactsForRetry?: (task: TaskSpecLike) => void;
   changedTestTreePaths?: (workspaceRoot: string, baselinePath?: string, protectedBaselinePath?: string) => string[];
+  changedInvariantSourcePaths?: (workspaceRoot: string) => string[];
   listInvariantSuiteSources?: (suiteRoot: string, relative?: string, budget?: SuiteBudget) => string[];
   captureInvariantSuiteBaseline?: (task: TaskSpecLike, workspaceRoot: string) => void;
   invariantSuiteProtectedBaselinePath?: (task: TaskSpecLike) => string;
@@ -771,6 +772,55 @@ test("invariant-suite expectations ignore reference ancestors but fail closed fo
     assert.throws(
       () => assertExpectations(consumer, consumer.dependencyArtifactDirs, new Map()),
       /producer declaration is unavailable/u
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("invariant-suite expectations fail closed when a producer claims implemented sources but published no suite", () => {
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-missing-suite-"));
+  try {
+    // Only the hard-coded invariant stages publish an invariant-suite/, so a custom or renamed
+    // implementation node can claim sources without one. Skipping it would run the next stage
+    // without the harness its properties need (#211).
+    const producer = makeTaskSpec(runRoot, "custom-implement", "custom-implement-properties", [], []);
+    producer.outputs.push({ path: "implemented-properties.json", contract: "ultrafuzz/implemented-properties@3" });
+    fs.writeFileSync(path.join(producer.artifactDir, "implemented-properties.json"), "{}\n", "utf8");
+    const consumer = makeTaskSpec(
+      runRoot,
+      "campaign",
+      "stateful-invariant-campaign",
+      [producer.attemptId],
+      [producer.attemptId]
+    );
+    const helpers = loadWorkflowHelpers(
+      ["assertInvariantSuiteDependencyExpectations"],
+      createHarnessState([producer, consumer]),
+      {
+        validateImplementedPropertiesSchema: () => ({
+          ok: true,
+          value: {
+            properties: [{ status: "implemented", implementation_paths: [], test_paths: ["test/recon/Properties.sol"] }]
+          }
+        })
+      }
+    );
+    const assertExpectations = helpers.assertInvariantSuiteDependencyExpectations;
+    assert.ok(assertExpectations);
+
+    assert.throws(
+      () => assertExpectations(consumer, consumer.dependencyArtifactDirs, new Map()),
+      /artifact handoff is missing invariant-suite sources for stateful-invariant-campaign: /u
+    );
+
+    writeSuiteSource(producer.artifactDir, "test/recon/Properties.sol", "contract Properties {}\n");
+    assert.doesNotThrow(() =>
+      assertExpectations(
+        consumer,
+        consumer.dependencyArtifactDirs,
+        new Map([[producer.artifactDir, ["test/recon/Properties.sol"]]])
+      )
     );
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });
@@ -1465,6 +1515,93 @@ test("#217 an emptied test-tree source is tombstoned on both discovery paths", (
   }
 });
 
+test("changed-source discovery includes untracked and gitignored sources under every supported root", () => {
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-changed-sources-"));
+  try {
+    const workspaceRoot = fs.realpathSync(runRoot);
+    const git = (...args: string[]): void => {
+      execFileSync("git", args, { cwd: workspaceRoot, stdio: "ignore" });
+    };
+    const write = (relativePath: string, contents: string): void => {
+      fs.mkdirSync(path.dirname(path.join(workspaceRoot, relativePath)), { recursive: true });
+      fs.writeFileSync(path.join(workspaceRoot, relativePath), contents, "utf8");
+    };
+    git("init", "--quiet");
+    git("config", "user.email", "ultrafuzz@example.com");
+    git("config", "user.name", "ultrafuzz");
+    write(".gitignore", "src/generated/\ntest/generated/\n");
+    write("src/Tracked.sol", "contract Tracked {}\n");
+    write("test/Tracked.t.sol", "contract TrackedTest {}\n");
+    git("add", "--all");
+    git("commit", "--quiet", "-m", "baseline");
+    // An agent edits tracked sources and adds new ones, some of them under paths the target gitignores.
+    write("src/Tracked.sol", "contract Tracked { uint256 edited; }\n");
+    write("contracts/Untracked.sol", "contract Untracked {}\n");
+    write("src/generated/Ignored.sol", "contract Ignored {}\n");
+    write("test/Tracked.t.sol", "contract TrackedTest { uint256 edited; }\n");
+    write("tests/Untracked.t.sol", "contract UntrackedTest {}\n");
+    write("test/generated/Ignored.t.sol", "contract IgnoredTest {}\n");
+
+    const helpers = loadWorkflowHelpers(["changedInvariantSourcePaths", ...DISCOVERY_HELPERS], createHarnessState([]));
+    assert.ok(helpers.changedInvariantSourcePaths && helpers.changedTestTreePaths);
+    assert.deepEqual(helpers.changedInvariantSourcePaths(workspaceRoot), [
+      "contracts/Untracked.sol",
+      "src/Tracked.sol",
+      "src/generated/Ignored.sol"
+    ]);
+    // With no invariant baseline yet, the test tree is discovered through git as well.
+    assert.deepEqual(helpers.changedTestTreePaths(workspaceRoot), [
+      "test/Tracked.t.sol",
+      "test/generated/Ignored.t.sol",
+      "tests/Untracked.t.sol"
+    ]);
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
+test("test-tree discovery refuses a hard-linked source, whose bytes another path can still change", () => {
+  const runRoot = fs.mkdtempSync(path.join(process.cwd(), "ultrafuzz-invariant-hard-link-"));
+  try {
+    const workspaceRoot = fs.realpathSync(runRoot);
+    execFileSync("git", ["init", "--quiet"], { cwd: workspaceRoot, stdio: "ignore" });
+    const relativePath = "test/recon/Properties.sol";
+    const sourcePath = path.join(workspaceRoot, relativePath);
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    fs.writeFileSync(sourcePath, "contract Properties { /* v2 */ }\n", "utf8");
+    const baseline = "contract Properties { /* v1 */ }\n";
+    const baselinePath = path.join(workspaceRoot, "invariant-suite-baseline.json");
+    fs.writeFileSync(
+      baselinePath,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.invariant-suite-baseline.v1",
+        files: [
+          {
+            path: relativePath,
+            size: Buffer.byteLength(baseline),
+            sha256: createHash("sha256").update(baseline).digest("hex")
+          }
+        ]
+      })}\n`,
+      "utf8"
+    );
+    const changedTestTreePaths = loadWorkflowHelpers(
+      [...DISCOVERY_HELPERS],
+      createHarnessState([])
+    ).changedTestTreePaths;
+    assert.ok(changedTestTreePaths);
+    assert.deepEqual(changedTestTreePaths(workspaceRoot, baselinePath), [relativePath]);
+
+    fs.linkSync(sourcePath, path.join(workspaceRoot, "elsewhere.sol"));
+    assert.throws(
+      () => changedTestTreePaths(workspaceRoot, baselinePath),
+      /invariant suite source is hard-linked test\/recon\/Properties\.sol/u
+    );
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("#315 a later ancestor's rewrite supersedes an earlier one instead of failing as a conflict", () => {
   // R50's exact shape. `implement-properties` depends DIRECTLY only on `coverage`, so `setup` and
   // `handlers` are both INDIRECT ancestors -- equal directness, which is the case that used to throw
@@ -1891,6 +2028,14 @@ test("#213 the protected baseline outranks a sidecar the agent rewrote", () => {
     );
     fs.writeFileSync(sidecarPath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
 
+    // While this process still holds the digest it captured, a rewritten protected copy is refused.
+    fs.writeFileSync(protectedPath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
+    assert.throws(
+      () => captureInvariantSuiteBaseline(setup, workspaceRoot),
+      /protected invariant suite baseline was modified/u
+    );
+    fs.writeFileSync(protectedPath, captured, "utf8");
+
     // Durable resume: the workflow process restarted, so the in-memory digests
     // that would otherwise catch the edit are gone.
     state.baselineSnapshots.clear();
@@ -2045,6 +2190,50 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
   }
 });
 
+test("retry cleanup clears every task-owned root before it re-prepares the attempt and its authorities", () => {
+  const { runRoot, handlers, state } = createInvariantChain();
+  try {
+    const canonicalRunRoot = fs.realpathSync(runRoot);
+    // A repository can keep tests under both supported roots; the model may have written to either.
+    fs.mkdirSync(path.join(handlers.workspacePath, "test"), { recursive: true });
+    fs.mkdirSync(path.join(handlers.workspacePath, "tests", "recon"), { recursive: true });
+    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@3" }];
+    const calls: string[] = [];
+    const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state, {
+      resetTaskArtifactContents: (rootPath: string, _attemptId: string, label: string) =>
+        calls.push(
+          `reset ${label} ${path.join(path.relative(canonicalRunRoot, fs.realpathSync(path.dirname(rootPath))), path.basename(rootPath))}`
+        ),
+      restoreInvariantSuiteWorkspaceSnapshot: () => calls.push("restore invariant suite"),
+      restoreWorkspacePatchPreparation: () => calls.push("restore workspace patch preparation"),
+      prepareArtifactMirror: (_task: unknown, options: unknown) => calls.push(`prepare ${JSON.stringify(options)}`),
+      materializePromptArtifactAuthority: () => calls.push("materialize prompt authority"),
+      materializeFinalReportRunMetadataAuthority: () => calls.push("materialize report run metadata")
+    });
+    assert.ok(helpers.resetTaskArtifactsForRetry);
+    helpers.resetTaskArtifactsForRetry(handlers);
+
+    // A previous attempt's outputs must not survive into the canonical root, the workspace
+    // mirror or either generated-test directory, and the authorities the model reads are
+    // derived again only after the attempt's inputs are prepared.
+    assert.deepEqual(calls, [
+      "reset canonical artifacts/handlers",
+      "restore invariant suite",
+      "reset mirror workspaces/handlers/artifacts/handlers",
+      "reset generated-test workspaces/handlers/test/foundry/stateful-invariant-handlers",
+      "reset generated-test workspaces/handlers/test/foundry/handlers",
+      "reset generated-test workspaces/handlers/tests/foundry/stateful-invariant-handlers",
+      "reset generated-test workspaces/handlers/tests/foundry/handlers",
+      "restore workspace patch preparation",
+      'prepare {"replayWorkspacePatches":false,"evidenceMode":"require"}',
+      "materialize prompt authority",
+      "materialize report run metadata"
+    ]);
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("#211 an inherited-only suite source survives a stage that never touches it", () => {
   // `downstream` sees ONLY handlers' artifact directory, so Setup.sol reaches
   // it exclusively through handlers republishing what it inherited. Every other
@@ -2136,6 +2325,8 @@ test("#211 invariant suite provenance is restricted to supported source roots", 
   for (const rejected of [
     "artifacts/workspace-state.json",
     ".envrc",
+    "src/.envrc",
+    "tests/.npmrc",
     ".git/config",
     "src/../.envrc",
     "src/.ultrafuzz/state.json",
