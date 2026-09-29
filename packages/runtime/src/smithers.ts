@@ -1011,6 +1011,35 @@ const SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH = `  const pendingOwnershipChe
     pendingOwnershipChecks.add(check);
   };`;
 
+// After each successful fenced attempt-row heartbeat write, the engine appends a
+// TaskHeartbeat event (an `_smithers_events` row plus a stream.ndjson line) that
+// carries no heartbeat data, because Ultrafuzz never passes any. A quiet agent
+// task writes one per throttled liveness pulse, up to two a second; an agent that
+// streams output writes one per ownership check its stdout, stderr and tool
+// callbacks force past the throttle. In a baseline campaign they were 83% of the
+// event rows (#1147), and Ultrafuzz never acts on them (it handles only
+// TaskHeartbeatTimeout). Liveness is the attempt-row write: the heartbeat-timeout
+// watchdog advances only when it succeeds, and `smithers why` reads the row. Keep
+// the write and drop the event.
+const SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE = `        "heartbeat:record",
+      );
+      await eventBus.emitEventQueued({
+        type: "TaskHeartbeat",
+        runId,
+        nodeId: desc.nodeId,
+        iteration: desc.iteration,
+        attempt: attemptNo,
+        hasData: heartbeatDataJson !== null,
+        dataSizeBytes,
+        intervalMs: intervalMs ?? undefined,
+        timestampMs: heartbeatAtMs,
+      });
+    } catch (error) {`;
+const SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH = `        "heartbeat:record",
+      );
+      // ultrafuzz: the fenced attempt row above is the liveness record (#1147).
+    } catch (error) {`;
+
 // Every event the engine persists first runs an idempotency probe that
 // filters `_smithers_events` on (run_id, timestamp_ms, type, payload_json).
 // The table's only index is its (run_id, seq) primary key, and the probe's
@@ -2438,6 +2467,7 @@ export type SmithersCompatibilityPatchId =
   | "terminal_state_restore"
   | "resume_hydration"
   | "engine_agent_event_ownership"
+  | "engine_task_heartbeat_event"
   | "engine_agent_usage_progress"
   | "engine_main_usage_invocation"
   | "engine_json_correction_usage_invocation"
@@ -2584,6 +2614,14 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
     // Upstream coalescing its own in-flight proof retires this patch.
     upstreamAbsent: ["heartbeatOwnershipCheckInFlight"]
+  },
+  {
+    id: "engine_task_heartbeat_event",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE,
+    patched: SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH,
+    upstreamAbsent: []
   },
   {
     id: "engine_agent_usage_progress",
@@ -7067,6 +7105,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       SMITHERS_ENGINE_AGENT_EVENT_OWNERSHIP_PATCH,
       "agent event ownership coalescing"
     ],
+    [SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_SOURCE, SMITHERS_ENGINE_TASK_HEARTBEAT_EVENT_PATCH, "task heartbeat event"],
     [
       SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_SOURCE,
       SMITHERS_ENGINE_AGENT_USAGE_PROGRESS_PATCH,
