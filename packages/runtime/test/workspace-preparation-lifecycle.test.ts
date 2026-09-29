@@ -133,6 +133,7 @@ function preparationHarness(
     ...artifacts,
     ...runtime,
     ...replacements,
+    frictionLog: null,
     path,
     z,
     createHash,
