@@ -358,7 +358,9 @@ fan-out unchanged. The exception is `resume --retry-failed` for a source whose
 verifier failed: it moves the published manifests to
 `dynamic-expansion-history/` before the source runs again (and refuses if
 another source published any of them), so the group expands again from the new
-output.
+output. The generated children's artifacts and the rendered prompts of later
+nodes that wait on the group move with them, so those prompts render again from
+the new expansion.
 
 ## Model Fan-Out
 
