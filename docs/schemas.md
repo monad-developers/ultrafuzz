@@ -66,20 +66,26 @@ ultrafuzz json validate \
 Use repeatable `--ref` flags only for explicitly supplied local dependencies.
 Bundled sibling schemas resolve offline without flags. The CLI and host use the
 same non-mutating parser, schema registry, Ajv configuration, resource limits,
-schema digest, bundle digest, and validator-build identity.
+schema digest, and bundle digest, and each reports its validator-build identity.
 
 Every planned JSON output persists the registered schema filename, `$id`,
 schema SHA-256, owning package's schema-bundle SHA-256, and validator build.
 The expanded graph, run state, `ultrafuzz.artifact-verification.v2` marker, and
-`ultrafuzz.artifact-manifest.v3` repeat that binding. A missing, partial, stale,
-or mismatched identity is a host setup/verification failure even when the JSON
-would match a different schema with the same general shape.
+`ultrafuzz.artifact-manifest.v3` repeat that binding. The host validates each
+artifact against the schema content that binding names: the installed schemas
+when their bundle digest is the planned one, otherwise the bundle sealed in the
+run's execution snapshot. A missing or partial binding, or schema content that
+neither holds, is a host verification failure even when the JSON would match a
+different schema with the same general shape. The validator build is
+provenance: graph reads, host artifact gates, and the validator preflight do not
+compare it with the build doing the checking.
 
 Schema-backed producers receive a run-owned trusted launcher ahead of
 target-controlled `PATH` entries. Local and Modal environments use that launcher
-to validate a real known-valid fixture and compare the returned schema, bundle,
-and validator-build identity before model work. Local launchers resolve only a
-verified content-addressed snapshot of the CLI and every transitive package, so
+to validate a real known-valid fixture and compare the returned schema and
+bundle identity before model work; the returned validator build is provenance.
+Local launchers resolve only a verified content-addressed snapshot of the CLI
+and every transitive package, so
 a working-tree rebuild cannot change an active run. Ambient Node loader/search
 variables are removed and both ESM and CommonJS module resolution must stay
 inside that snapshot; document reads are unaffected. A path lookup alone is not

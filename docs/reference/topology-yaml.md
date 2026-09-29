@@ -420,8 +420,10 @@ the planned output:
 - validator build identity.
 
 The expanded graph, run state, verification marker, and
-`artifact-manifest.json` carry the same identity. The host rejects a missing,
-partial, stale, or mismatched binding before publication.
+`artifact-manifest.json` carry the same identity. The host rejects a missing or
+partial binding, and an artifact its planned schema content rejects, before
+publication. The validator build identity is recorded as provenance and is not
+compared with the build doing the checking.
 
 Topology YAML remains version `2`; the persisted expanded graph uses
 `graphVersion: "4"` and schema ID
