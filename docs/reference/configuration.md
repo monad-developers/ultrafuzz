@@ -139,7 +139,8 @@ resume.
 
 `workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
 records `workflow_deadline_at` in run state when the run is created, and again
-from each `resume`, `replay`, or `fork`, but nothing enforces it on a timer: an
+from each `replay`, `fork`, or `resume` that starts a controller (not one that
+finds the run still active), but nothing enforces it on a timer: an
 unattended run keeps executing, and incurring provider cost, past its deadline.
 The deadline is checked only when a command synchronizes the run: `ultrafuzz
 status` (including each `--watch` poll), `inspect`, `why`, and `stats`, plus
