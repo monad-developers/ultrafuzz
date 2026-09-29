@@ -830,7 +830,12 @@ export async function forkRun(input: WorkflowLifecycleInput) {
 
 export async function pauseRun(input: PauseRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  // Like `cancel`, pausing only asks the runner to park the linked run, so diverged control
+  // documents must not block it.
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, {
+    tolerateControlDivergence: true,
+    observeOnly: true
+  });
   if (!evidence.ok) {
     return runtimeFailure<PauseRunValue>(evidence.diagnostics);
   }
@@ -1364,8 +1369,9 @@ export async function readLinkedWorkflowEvidence(
       throw new Error("run metadata workflow IDs do not exactly match the active workflow run");
     }
 
-    // Observers pass `tolerateControlDivergence` so a divergent control file downgrades to a reported
-    // warning instead of hiding a live run entirely (issue #674). Execution callers omit it and keep
+    // Observers, `pause` and `cancel` pass `tolerateControlDivergence` so a divergent control file is
+    // collected in `divergences` instead of failing the read: observers report it as a warning, and
+    // `pause` and `cancel` still reach the runner (issue #674). Execution callers omit it and keep
     // failing closed.
     const tolerateDivergence = options.tolerateControlDivergence === true;
     const verifiedControl = verifyWorkflowControlSnapshot(resolvedProjectRoot, layout, { tolerateDivergence });
@@ -1512,7 +1518,7 @@ function invalidLinkedWorkflowEvidence(metadataPath: string, error: unknown): Li
 /**
  * A pending state records incomplete launch preparation, not launcher liveness.
  * It also survives an interrupted launch. Unreadable state retains the strict
- * missing-seal diagnostic.
+ * missing-seal or missing-journal diagnostic.
  */
 function runStatusIsPreSubmission(layout: RunLayout): boolean {
   try {
@@ -1547,6 +1553,18 @@ function missingLinkedWorkflowEvidenceDiagnostic(
   }
   const linkJournalPath = workflowRunLinkJournalPath(layout);
   if (pathIsMissing(linkJournalPath)) {
+    // Launch writes this journal only after publishing the execution snapshot, its longest step, so a
+    // lock-free reader such as `status`, `pause` or `cancel` can meet a launch still in progress here.
+    // Report it with the seal's pending code, which `status` already renders as an incomplete launch.
+    if (runStatusIsPreSubmission(layout)) {
+      return {
+        code: "WORKFLOW_CONTROL_SEAL_PENDING",
+        message: `run ${layout.runId} has incomplete launch preparation: its workflow-link journal has not been written. Launcher liveness is unknown. If the original launch is still active, wait for it to finish; otherwise inspect its error before retrying`,
+        severity: "warning",
+        source: "workflow",
+        path: linkJournalPath
+      };
+    }
     return {
       code: "WORKFLOW_RUN_LINK_JOURNAL_MISSING",
       message: `run ${layout.runId} lacks the required authenticated workflow-link journal; it may predate authenticated lifecycle links or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,
