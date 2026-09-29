@@ -17,6 +17,7 @@ import {
   readRegularFileSnapshot,
   readRunMetadataDocument,
   readRunState,
+  replayEvents,
   safeResolveInside,
   sensitiveEnvironmentValues,
   updateRunStatus,
@@ -190,12 +191,19 @@ function controllerRefreshInspectionEnvironment(
 }
 
 export async function startRun(input: StartRunInput) {
+  let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
     enforceDataGovernance: true,
     beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph)
+      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph),
+    afterLayoutCreated: (layout) => {
+      createdLayout = layout;
+    }
   });
   if (!planned.ok || !planned.value) {
+    if (createdLayout !== undefined) {
+      recordLaunchFailure(createdLayout, planned.diagnostics, sensitiveEnvironmentValues(input.env ?? process.env));
+    }
     return runtimeFailure<StartRunValue>(planned.diagnostics);
   }
 
@@ -210,7 +218,9 @@ export async function startRun(input: StartRunInput) {
   try {
     releaseControlLock = await acquireWorkflowControlLock(plan.layout);
   } catch (error) {
-    return runtimeFailure<StartRunValue>([smithersDiagnostic(error, "WORKFLOW_CONTROL_PREPARATION_FAILED")]);
+    const diagnostic = smithersDiagnostic(error, "WORKFLOW_CONTROL_PREPARATION_FAILED");
+    recordLaunchFailure(plan.layout, [diagnostic], forbiddenSecretValues);
+    return runtimeFailure<StartRunValue>([diagnostic]);
   }
   try {
     const compiled = compileSmithersWorkflow({
@@ -332,13 +342,7 @@ export async function startRun(input: StartRunInput) {
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
-    updateRunStatus(plan.layout, "failed", undefined, { forbiddenSecretValues });
-    appendEvent(plan.layout, {
-      eventType: "workflow-submit-failed",
-      status: "failed",
-      payload: workflowSubmissionFailureEventPayload(diagnostic),
-      forbiddenSecretValues
-    });
+    recordLaunchFailure(plan.layout, [diagnostic], forbiddenSecretValues);
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
     await releaseControlLock();
@@ -487,6 +491,11 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
     assertPathInside(runsRoot, layout.root, "run root");
     if (fs.existsSync(runsRoot)) assertNoSymlinkComponents(runsRoot, layout.root, "run root");
+    // Checked before the lifecycle lock, whose directory a launch that failed before compiling never created.
+    const launchFailure = pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)
+      ? recordedLaunchFailure(layout)
+      : undefined;
+    if (launchFailure !== undefined) return runtimeFailure<WorkflowLifecycleValue>([launchFailure]);
     releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
 
     assertRegularFileInside(layout.root, layout.runMetadataPath, "run metadata");
@@ -879,13 +888,53 @@ export async function pauseRun(input: PauseRunInput) {
   }
 }
 
-function workflowSubmissionFailureEventPayload(
-  diagnostic: RuntimeDiagnostic
-): Extract<AppendEventInput, { eventType: "workflow-submit-failed" }>["payload"] {
-  if (!isWorkflowSubmissionFailureEventPayload(diagnostic)) {
-    throw new Error("workflow submission diagnostic does not match the current event contract");
+/**
+ * A launch that fails after its run directory exists must not look pending, running, or resumable:
+ * mark the run failed and keep the original error, which readers report in place of a missing seal.
+ * The event contract allows one code, so any other code is kept in the message.
+ */
+function recordLaunchFailure(
+  layout: RunLayout,
+  diagnostics: readonly RuntimeDiagnostic[],
+  forbiddenSecretValues: readonly string[]
+): void {
+  const errors = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  const [only] = errors;
+  const payload =
+    errors.length === 1 && only !== undefined && isWorkflowSubmissionFailureEventPayload(only)
+      ? only
+      : {
+          code: "WORKFLOW_SUBMISSION_FAILED" as const,
+          message: errors.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join("; "),
+          severity: "error" as const,
+          source: "workflow" as const,
+          details: {}
+        };
+  try {
+    updateRunStatus(layout, "failed", undefined, { forbiddenSecretValues });
+    appendEvent(layout, { eventType: "workflow-submit-failed", status: "failed", payload, forbiddenSecretValues });
+  } catch {
+    // Best effort: the caller returns the original diagnostics either way.
   }
-  return diagnostic;
+}
+
+/** A failed launch's recorded error; callers ask only about runs whose workflow controls were never sealed. */
+function recordedLaunchFailure(layout: RunLayout): RuntimeDiagnostic | undefined {
+  try {
+    const failure = replayEvents(layout, Number.MAX_SAFE_INTEGER)
+      .records.filter((record) => record.event_type === "workflow-submit-failed")
+      .at(-1);
+    if (failure?.event_type !== "workflow-submit-failed") return undefined;
+    return {
+      code: "RUN_LAUNCH_FAILED",
+      message: `run ${layout.runId} failed to launch: ${failure.payload.message}. A run whose launch failed cannot be resumed; fix the cause and start a new run`,
+      severity: "error",
+      source: "workflow",
+      path: layout.eventsPath
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function isWorkflowSubmissionFailureEventPayload(
@@ -1543,6 +1592,8 @@ function missingLinkedWorkflowEvidenceDiagnostic(
         path: controlSealPath
       };
     }
+    const launchFailure = recordedLaunchFailure(layout);
+    if (launchFailure !== undefined) return launchFailure;
     return {
       code: "WORKFLOW_CONTROL_SEAL_MISSING",
       message: `run ${layout.runId} lacks the required workflow control seal; it may predate sealed runs or be incomplete and cannot be safely upgraded in place. Preserve its stored artifacts and start a new run with a new run ID`,

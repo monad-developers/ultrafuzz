@@ -34,11 +34,13 @@ import {
   GOAL_PLAN_JSON_SCHEMA_ID,
   THREAT_MODEL_JSON_SCHEMA_ID,
   appendEvent,
+  assertSmithersTaskManifestMatchesPlannedGraph,
   createEventRecord,
   goalPlanJsonSchema,
   layoutForRunRoot,
   manifestDigest,
   parseJsonValidatorPreflightSuccessEnvelope,
+  parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
@@ -55,6 +57,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import {
   MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
+  loadAuditProfileCatalog,
   parseProjectConfigToml,
   parseResolvedConfigJsonBytes,
   resolveConfig,
@@ -10524,6 +10527,60 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
     assert.equal(body.includes("unavailable/"), false);
     fs.accessSync(expected, fs.constants.R_OK);
   }
+});
+
+test("every packaged audit profile compiles into a task plan the launch manifest gate accepts", async () => {
+  // #1140: after #1120 changed which inputs the compiler marks optional, the gate's older copy of
+  // that rule rejected the default, low-cost, exhaustive, and invariant-only launches before any
+  // model ran.
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  const rejected: string[] = [];
+  try {
+    for (const auditProfile of Object.keys(loadAuditProfileCatalog().profiles)) {
+      const runId = `packaged-${auditProfile}`;
+      const plan = await planRun({ projectRoot: project, runId, env: {}, runtimeOverrides: { auditProfile } });
+      assert.ok(plan.ok && plan.value, `${auditProfile}: ${JSON.stringify(plan.diagnostics)}`);
+      const { graph, expanded_graph, layout, rendered_prompts, resolved_config } = plan.value;
+      const compiled = compileSmithersWorkflow({
+        projectRoot: project,
+        config: resolved_config,
+        graph: expanded_graph,
+        runLayout: layout,
+        workflowName: `ultrafuzz-${runId}`,
+        renderedPrompts: rendered_prompts
+      });
+      // Launch binds each planned node to its compiled tasks before it runs the gate.
+      for (const node of graph.nodes) {
+        const taskNodeIds = compiled.tasks
+          .filter((task) => task.concreteNodeId === node.id)
+          .map((task) => task.smithersNodeId);
+        const [primary] = taskNodeIds;
+        if (primary !== undefined) node.workflow = { node_id: primary, task_node_ids: taskNodeIds };
+      }
+      try {
+        assertSmithersTaskManifestMatchesPlannedGraph(
+          parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath)),
+          graph
+        );
+      } catch (error) {
+        rejected.push(`${auditProfile}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+  assert.deepEqual(rejected, []);
 });
 
 test("project and runtime topology paths override a profile topology atomically", async () => {
@@ -26462,6 +26519,110 @@ test("resume continues under a superseded generated manifest without changing ei
   const migrated = await readLinkedWorkflowEvidence(project, runId);
   assert.equal(migrated.ok, true, JSON.stringify(migrated.ok ? [] : migrated.diagnostics));
   if (before.ok && migrated.ok) assert.equal(migrated.smithersRunId, before.smithersRunId);
+});
+
+test("a launch that fails after creating its run directory is recorded failed and reports its own error", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz Test"]);
+  git(["config", "user.email", "test@invalid"]);
+  git(["commit", "--quiet", "--allow-empty", "-m", "earlier"]);
+  const earlier = git(["rev-parse", "HEAD"]);
+  git(["add", "--all"]);
+  git(["commit", "--quiet", "-m", "launch"]);
+  // A source ref left by an earlier run with the same ID fails planning once the run directory exists.
+  git(["update-ref", "refs/ultrafuzz/runs/stale-source-ref/source", earlier]);
+  const env = fakeSmithersEnv(project);
+  const launches = [
+    { runId: "stale-source-ref", error: /RUN_SOURCE_REVISION_PERSIST_FAILED: run source ref .+ different commit/u },
+    // Planning accepts this run ID and compilation rejects it, before workflow controls are sealed.
+    { runId: "Uppercase-Run", error: /"Uppercase-Run" does not produce a current workflow runner run ID/u }
+  ];
+  for (const { runId, error } of launches) {
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, false, runId);
+    const layout = layoutForRunRoot(path.join(project, ".ultrafuzz", "runs", runId), runId);
+    assert.equal(readRunState(layout).status, "failed", runId);
+    const health = await getRunHealth({ projectRoot: project, runId, env });
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    for (const result of [health, resumed]) {
+      assert.equal(result.ok, false, runId);
+      assert.equal(result.diagnostics[0]?.code, "RUN_LAUNCH_FAILED", JSON.stringify(result.diagnostics));
+      assert.match(result.diagnostics[0]?.message ?? "", error);
+    }
+  }
+  assert.equal(fs.existsSync(path.join(project, "smithers-commands.log")), false, "no workflow command ran");
+});
+
+test("planning errors that need no run directory leave none behind", async () => {
+  // A graph-only topology error: goal planning without its pinned vulnerability database.
+  const graphProject = tempProject();
+  assert.equal(initProject({ projectRoot: graphProject, force: true }).ok, true);
+  writeSmallTopology(graphProject);
+  const topologyPath = path.join(graphProject, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs.readFileSync(topologyPath, "utf8").replaceAll("project-discovery\n", "threat-model\n"),
+    "utf8"
+  );
+  const graphPlan = await planRun({ projectRoot: graphProject, runId: "no-vulnerability-database", env: {} });
+  assert.equal(graphPlan.ok, false);
+  assert.equal(
+    graphPlan.diagnostics[0]?.code,
+    "VULNERABILITY_DATABASE_REFERENCE_REQUIRED",
+    JSON.stringify(graphPlan.diagnostics)
+  );
+  assert.equal(fs.existsSync(path.join(graphProject, ".ultrafuzz", "runs", "no-vulnerability-database")), false);
+
+  // An operator setup error: a pinned reference whose cache was never synced. It is reported before
+  // provider preflight, which can create a cloud app.
+  const cacheProject = tempProject();
+  assert.equal(initProject({ projectRoot: cacheProject, force: true }).ok, true);
+  writeReferenceTopology(cacheProject);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = path.join(cacheProject, "empty-cache");
+  let cachePlan: Awaited<ReturnType<typeof planRun>>;
+  let preflights = 0;
+  try {
+    cachePlan = await planRun(
+      { projectRoot: cacheProject, runId: "unsynced-reference", env: {} },
+      {
+        beforeMaterialize: async () => {
+          preflights += 1;
+          return [];
+        }
+      }
+    );
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+  assert.equal(cachePlan.ok, false);
+  assert.equal(cachePlan.diagnostics[0]?.code, "MISSING_CACHE", JSON.stringify(cachePlan.diagnostics));
+  assert.match(cachePlan.diagnostics[0]?.message ?? "", /ultrafuzz references sync/u);
+  assert.equal(preflights, 0);
+  assert.equal(fs.existsSync(path.join(cacheProject, ".ultrafuzz", "runs", "unsynced-reference")), false);
+});
+
+test("a planning step that fails after the run directory exists returns its failure for the launch to record", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  // A file where the rendered-prompt snapshot directory belongs makes the snapshot write fail.
+  const plan = await planRun(
+    { projectRoot: project, runId: "blocked-prompt-snapshots", env: {} },
+    { afterLayoutCreated: (layout) => fs.writeFileSync(path.join(layout.root, "prompt-snapshots"), "") }
+  );
+  assert.equal(plan.ok, false);
+  assert.equal(plan.diagnostics[0]?.source, "prompts", JSON.stringify(plan.diagnostics));
+  assert.match(plan.diagnostics[0]?.message ?? "", /prompt-snapshots/u);
 });
 
 test("incomplete launch is observable without granting execution authority or claiming liveness", async () => {
