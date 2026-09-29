@@ -781,8 +781,11 @@ test("a re-running dynamic source keeps published controls admissible and observ
   // Observation must not recreate or otherwise repair the dynamic source on the controller's behalf.
   assert.equal(fs.existsSync(sourcePath), false);
 
-  // The re-run then writes a different plan; admission still follows the published manifest.
-  fs.writeFileSync(sourcePath, `${publishedPlan}\n`, "utf8");
+  // The re-run then writes a plan whose goal has a different key; admission still follows the
+  // published manifest.
+  const plan = JSON.parse(publishedPlan) as { threat_goals: Array<Record<string, unknown>> };
+  plan.threat_goals = plan.threat_goals.map((goal) => ({ ...goal, id: "liquidation:early" }));
+  fs.writeFileSync(sourcePath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
   const rewritten = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
   assert.equal(rewritten.ok, true, "diagnostics" in rewritten ? JSON.stringify(rewritten.diagnostics) : "");
 });

@@ -81,6 +81,69 @@ function item(index: number): Record<string, unknown> {
   };
 }
 
+/** A run whose sealed runtime controls fan `goals` from `planner` out into `fanout`, joined by `join`. */
+function sealedDynamicRun(runId: string, goals: Array<Record<string, unknown>>) {
+  const projectRoot = tempDirectory();
+  const runRoot = path.join(projectRoot, "runs", runId);
+  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
+  const templatePath = path.join(runRoot, "templates", "worker.md");
+  const graphPath = path.join(runRoot, "graph.json");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
+  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
+  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
+  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
+  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals })}\n`, "utf8");
+  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
+  const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
+  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
+  const group: CompiledSmithersDynamicGroup = {
+    groupNodeId: "fanout",
+    logicalNodeId: "fanout",
+    source: {
+      concreteNodeId: "planner",
+      attemptId: "planner",
+      verifierSmithersNodeId: "verify:planner",
+      artifactPath: sourceArtifactPath
+    },
+    sourcePath: "$.goals",
+    keyPath: "id",
+    nodeIdTemplate: "dynamic:item:{{ item.id }}",
+    templatePath,
+    templateDigest: digest(fs.readFileSync(templatePath)),
+    templateFingerprint: digest("template-fingerprint"),
+    continueOnFail: true,
+    maxDynamicNodes: 100,
+    reservedNodeIds: ["planner", "fanout", "join"],
+    taskTemplates: [templateTask],
+    promptContext: promptContext(projectRoot, runRoot)
+  };
+  // The seal keeps byte copies of the pre-expansion controls beside the mutable ones.
+  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
+  fs.writeFileSync(
+    tasksPath,
+    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
+    "utf8"
+  );
+  fs.copyFileSync(graphPath, baseGraphPath);
+  fs.copyFileSync(tasksPath, baseTasksPath);
+  return {
+    sourceArtifactPath,
+    controls: {
+      runId,
+      projectRoot,
+      runRoot,
+      graphPath,
+      tasksPath,
+      baseGraphPath,
+      baseTasksPath,
+      baseTasks: [joinTask],
+      groups: [group]
+    }
+  };
+}
+
 test("dynamic expansion deterministically persists empty, one-item, and 100-item manifests", () => {
   for (const count of [0, 1, 100]) {
     const fixture = expansionFixture({
@@ -245,7 +308,7 @@ test("persisted expansion rejects tampering, transplantation, and symlink manife
   );
 });
 
-test("persisted expansion rejects prompt-template and dynamic-limit changes", () => {
+test("persisted expansion rejects prompt-template, topology-contract, and dynamic-limit changes", () => {
   const changedTemplate = expansionFixture({ runId: "changed-template", items: [item(0)] });
   changedTemplate.invoke();
   fs.writeFileSync(changedTemplate.templatePath, "Changed {{item.goal_prompt}}.\n", "utf8");
@@ -253,6 +316,23 @@ test("persisted expansion rejects prompt-template and dynamic-limit changes", ()
     () => changedTemplate.invoke(),
     (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_TEMPLATE_CHANGED"
   );
+
+  // A published manifest is reused without reading the source again, so this comparison is what
+  // keeps a changed group definition from silently adopting the old items.
+  const changedContract = expansionFixture({ runId: "changed-contract", items: [item(0)] });
+  changedContract.invoke();
+  for (const overrides of [
+    { sourcePath: "$.other_goals" },
+    { keyPath: "goal_prompt" },
+    { nodeIdTemplate: "dynamic:other:{{ item.id }}" },
+    { templateFingerprint: digest("fingerprint:other") }
+  ]) {
+    assert.throws(
+      () => changedContract.invoke(overrides),
+      (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_EXPANSION_CHANGED",
+      JSON.stringify(overrides)
+    );
+  }
 
   const changedLimit = expansionFixture({ runId: "changed-limit", items: [item(0)], maxDynamicNodes: 100 });
   changedLimit.invoke();
@@ -382,63 +462,8 @@ test("explicit source retry archives a complete expansion generation and rejects
 });
 
 test("explicit source retry re-derives the base runtime controls after archiving an expansion", () => {
-  const runId = "retry-rematerialize";
-  const projectRoot = tempDirectory();
-  const runRoot = path.join(projectRoot, "runs", runId);
-  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
-  const templatePath = path.join(runRoot, "templates", "worker.md");
-  const graphPath = path.join(runRoot, "graph.json");
-  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
-  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
-  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
-  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
-  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
-  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
-  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(0)] })}\n`, "utf8");
-  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
-  const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
-  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
-  const group: CompiledSmithersDynamicGroup = {
-    groupNodeId: "fanout",
-    logicalNodeId: "fanout",
-    source: {
-      concreteNodeId: "planner",
-      attemptId: "planner",
-      verifierSmithersNodeId: "verify:planner",
-      artifactPath: sourceArtifactPath
-    },
-    sourcePath: "$.goals",
-    keyPath: "id",
-    nodeIdTemplate: "dynamic:item:{{ item.id }}",
-    templatePath,
-    templateDigest: digest(fs.readFileSync(templatePath)),
-    templateFingerprint: digest("template-fingerprint"),
-    continueOnFail: true,
-    maxDynamicNodes: 100,
-    reservedNodeIds: ["planner", "fanout", "join"],
-    taskTemplates: [templateTask],
-    promptContext: promptContext(projectRoot, runRoot)
-  };
-  // The seal keeps byte copies of the pre-expansion controls beside the mutable ones.
-  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
-  fs.writeFileSync(
-    tasksPath,
-    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
-    "utf8"
-  );
-  fs.copyFileSync(graphPath, baseGraphPath);
-  fs.copyFileSync(tasksPath, baseTasksPath);
-  const controls = {
-    runId,
-    projectRoot,
-    runRoot,
-    graphPath,
-    tasksPath,
-    baseGraphPath,
-    baseTasksPath,
-    baseTasks: [joinTask],
-    groups: [group]
-  };
+  const { controls } = sealedDynamicRun("retry-rematerialize", [item(0)]);
+  const { runId, projectRoot, runRoot } = controls;
   const expanded = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
   assert.deepEqual(expanded.expandedGroupIds, ["fanout"]);
   const generated = expanded.tasks.find((task) => task.metadata.node.dynamic !== undefined);
@@ -614,61 +639,7 @@ test("runtime materialization preserves required inputs and allows partial revie
 });
 
 test("a re-run dynamic source keeps the published fan-out for renders and admission", () => {
-  const runId = "source-rerun";
-  const projectRoot = tempDirectory();
-  const runRoot = path.join(projectRoot, "runs", runId);
-  const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
-  const templatePath = path.join(runRoot, "templates", "worker.md");
-  const graphPath = path.join(runRoot, "graph.json");
-  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
-  const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
-  const baseTasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
-  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
-  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
-  fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
-  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(0), item(1)] })}\n`, "utf8");
-  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
-  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
-  const group: CompiledSmithersDynamicGroup = {
-    groupNodeId: "fanout",
-    logicalNodeId: "fanout",
-    source: {
-      concreteNodeId: "planner",
-      attemptId: "planner",
-      verifierSmithersNodeId: "verify:planner",
-      artifactPath: sourceArtifactPath
-    },
-    sourcePath: "$.goals",
-    keyPath: "id",
-    nodeIdTemplate: "dynamic:item:{{ item.id }}",
-    templatePath,
-    templateDigest: digest(fs.readFileSync(templatePath)),
-    templateFingerprint: digest("template-fingerprint"),
-    continueOnFail: true,
-    maxDynamicNodes: 100,
-    reservedNodeIds: ["planner", "fanout", "join"],
-    taskTemplates: [compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath)],
-    promptContext: promptContext(projectRoot, runRoot)
-  };
-  fs.writeFileSync(graphPath, `${JSON.stringify(plannedGraph(runId))}\n`, "utf8");
-  fs.writeFileSync(
-    tasksPath,
-    `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [joinTask], dynamic_groups: [group] })}\n`,
-    "utf8"
-  );
-  fs.copyFileSync(graphPath, baseGraphPath);
-  fs.copyFileSync(tasksPath, baseTasksPath);
-  const controls = {
-    runId,
-    projectRoot,
-    runRoot,
-    graphPath,
-    tasksPath,
-    baseGraphPath,
-    baseTasksPath,
-    baseTasks: [joinTask],
-    groups: [group]
-  };
+  const { sourceArtifactPath, controls } = sealedDynamicRun("source-rerun", [item(0), item(1)]);
   const render = (readyGroupIds: string[]) =>
     dynamicRuntimeFingerprint(materializeDynamicRuntime({ ...controls, readyGroupIds }));
 
@@ -683,7 +654,7 @@ test("a re-run dynamic source keeps the published fan-out for renders and admiss
   assert.equal(render([]), published);
   assert.equal(render(["fanout"]), published);
   assert.equal(dynamicRuntimeFingerprint(verifyDynamicRuntimeMaterialization(controls)), published);
-  const tasks = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as { tasks: CompiledSmithersTask[] };
+  const tasks = JSON.parse(fs.readFileSync(controls.tasksPath, "utf8")) as { tasks: CompiledSmithersTask[] };
   assert.deepEqual(
     tasks.tasks.flatMap((task) => task.metadata.node.dynamic?.expansionKey ?? []),
     ["goal-0", "goal-1"]
