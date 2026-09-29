@@ -27463,3 +27463,53 @@ test("syncRun settles a model the fetched pricing catalog does not list instead 
   assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
   assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["unlisted-model"]);
 });
+
+test("syncRun warns that a Smithers event stream at the CLI event limit may be truncated", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "event-stream-limit";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const base = Date.parse("2026-07-03T00:00:00.000Z");
+  // `smithers events --limit 100000` stops at exactly this many events, oldest
+  // first, with no truncation marker in its JSON output.
+  const lifecycle = Array.from(
+    { length: 100_000 },
+    (_, sequence) =>
+      `${JSON.stringify({
+        runId: workflowRunId,
+        seq: sequence,
+        timestampMs: base + sequence,
+        type: "RunStatusChanged",
+        payload: { type: "RunStatusChanged", runId: workflowRunId, timestampMs: base + sequence }
+      })}\n`
+  ).join("");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: lifecycle,
+    tokenEvents: ""
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics.slice(0, 3)));
+  assert.equal(sync.value?.status, "running");
+  assert.deepEqual(
+    sync.diagnostics
+      .filter((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_TRUNCATED")
+      .map((diagnostic) => [diagnostic.severity, diagnostic.message]),
+    [
+      [
+        "warning",
+        "Smithers returned its 100000-event limit for the lifecycle stream; events after sequence 99999 are not synchronized, so node evidence and the attempt ledger can be incomplete"
+      ]
+    ]
+  );
+});

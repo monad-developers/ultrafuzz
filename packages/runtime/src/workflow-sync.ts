@@ -387,6 +387,12 @@ export interface WorkflowSynchronizationControl {
 }
 
 const MAX_OBSERVATION_SYNC_TIMEOUT_MS = 60_000;
+/**
+ * `smithers events` returns at most this many events, oldest first, and says
+ * nothing when it stops there. The pinned CLI has no sequence cursor to page
+ * past it, so synchronization can only report that the rest is missing.
+ */
+const SMITHERS_EVENTS_LIMIT = 100_000;
 
 /**
  * Optionally bound the state refresh performed before read-only observer
@@ -510,7 +516,7 @@ export async function refinalizeControllerFailures(
     }
 
     const eventsSnapshot = await runSmithersInspectionCommand({
-      args: ["events", input.workflowRunId, "--limit", "100000", "--json"],
+      args: ["events", input.workflowRunId, "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
       projectRoot: input.projectRoot,
       env: inspectionEnvironment
     });
@@ -1129,7 +1135,7 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
   const eventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
@@ -1140,7 +1146,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: [postEventsBudgetDiagnostic] };
   }
   const tokenEventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--type", "token", "--limit", String(SMITHERS_EVENTS_LIMIT), "--json"],
     projectRoot,
     env: linkedWorkflowExecutionEnvironment(evidence, input.env),
     ...inspectionExecutionControl(control, synchronizationNowMs)
@@ -1189,6 +1195,19 @@ export async function synchronizeLinkedWorkflowRun(
       ok: false,
       diagnostics: [diagnosticFromError(error, "workflow", "WORKFLOW_TOKEN_EVENTS_INVALID")]
     };
+  }
+  for (const [stream, consequence, parsed] of [
+    ["lifecycle", "node evidence and the attempt ledger can be incomplete", events],
+    ["token", "usage accounting can be incomplete", tokenEvents]
+  ] as const) {
+    const last = parsed.at(-1);
+    if (parsed.length < SMITHERS_EVENTS_LIMIT || last === undefined) continue;
+    diagnostics.push({
+      code: "WORKFLOW_EVENTS_TRUNCATED",
+      message: `Smithers returned its ${String(SMITHERS_EVENTS_LIMIT)}-event limit for the ${stream} stream; events after sequence ${String(last.sourceEventSequence)} are not synchronized, so ${consequence}`,
+      severity: "warning",
+      source: "workflow"
+    });
   }
   // Attempt-ledger bookkeeping never blocks reconciling node and run state.
   let attemptAuthorities: SmithersNodeAttemptAuthorities = new Map();
