@@ -3599,10 +3599,12 @@ test("bounded final reports close over every authenticated deduped finding", () 
 });
 
 test("a final report that rewords a carried finding's prose verifies with warnings in both report modes", () => {
-  // A bounded smoke run lost its whole report, before and after
-  // `resume --retry-failed`, because the report agent reworded one PoC step of a
-  // carried dedupe finding. Prose drift is a warning; the finding's identity,
-  // location, and classification fields still fail when changed.
+  // A bounded smoke run lost its whole report twice, before and after
+  // `resume --retry-failed`, on a carried dedupe finding's proof_of_concept. In
+  // the saved attempt the report agent reworded three of five steps and, as the
+  // report prompt asks, replaced the code field's pointer to a generated test
+  // with the inline reproducer. Changed or omitted prose is a warning; the
+  // finding's identity, location, and classification fields still fail.
   const finding = {
     id: "finding-a",
     title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
@@ -3614,7 +3616,7 @@ test("a final report that rewords a carried finding's prose verifies with warnin
     proof_of_concept: {
       scenario: ["Alice deposits 2 wei and receives 2 shares.", "Alice withdraws 1 share and receives 2 wei."],
       language: "solidity",
-      code: "function testWithdrawCeiling() public {}"
+      code: "See generated-tests/test/foundry/Vault.t.sol"
     },
     recommendation: "Use floor division for withdrawals.",
     recommended_next_action: "Confirm the rounding direction with the maintainers."
@@ -3655,7 +3657,8 @@ test("a final report that rewords a carried finding's prose verifies with warnin
       scenario: [
         "Alice deposits 2 wei through the public deposit entrypoint and receives 2 shares.",
         "Alice withdraws 1 share and receives 2 wei."
-      ]
+      ],
+      code: "function testWithdrawCeiling() public {}"
     },
     recommendation: "Round withdrawals down.",
     recommended_next_action: "Ask the maintainers which rounding direction is intended."
@@ -3704,6 +3707,10 @@ test("a final report that rewords a carried finding's prose verifies with warnin
         .sort(),
       mode
     );
+
+    const omitted: Record<string, unknown> = { ...reworded };
+    delete omitted.recommendation;
+    assert.equal(check(omitted).status, "warning", `${mode}: omitted recommendation`);
 
     for (const [field, value] of [
       ["affected_files", ["src/Other.sol"]],

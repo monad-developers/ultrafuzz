@@ -884,10 +884,10 @@ function reportHistoricalMetadataIssues(
 }
 
 // The findings@2 free text that explains a finding to a reader. None of it
-// identifies, classifies, or locates the finding, so a report that rewords it
-// still reports the same finding and gets a warning, not a discarded report.
-// IDs, dedupe keys, titles, status, every enum, locations, notes, evidence,
-// and provenance keep exact equality.
+// identifies, classifies, or locates the finding, so a report that changes or
+// omits it still reports the same finding and gets a warning, not a discarded
+// report. Every other field compared here keeps exact equality, including prose
+// nested in evidence, deduplication, family variants, and related findings.
 const FINDING_NARRATIVE_FIELDS = new Set([
   "summary",
   "description",

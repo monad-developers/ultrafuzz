@@ -598,15 +598,17 @@ review/runtime-report/current.json
 ```
 
 Each report row carries a source finding: the severity-classified finding, or
-the deduplicated finding in bounded classification mode. Verification keeps the
-carried identity, location, provenance, evidence, and classification fields
-exact, except for fields the report owns: the ID and title of production
-issues and, in bounded classification mode, the triage classification,
-lifecycle enrichment, and severity assessment of production issues. Reworded
+the deduplicated finding in bounded classification mode. Changed or omitted
 explanatory text (`summary`, `description`, `proof_of_concept`,
 `recommendation`, `recommended_next_action`, and the impact, likelihood, and
 severity rationales) produces a verification warning and does not fail the
-report.
+report. Verification keeps every other carried field exact: identity,
+location, provenance, evidence, and classification fields, `notes`, and the
+prose nested in `evidence`, `deduplication`, `family_variants`, and
+`related_findings`. The exceptions are fields the report owns: the ID and title
+of production issues and, in bounded classification mode, the triage
+classification, lifecycle enrichment, and severity assessment of production
+issues.
 
 New runs use `run.completion_policy = "best-effort"` by default. Stock strategy
 groups continue after ordinary task failures. Independent work can finish;
