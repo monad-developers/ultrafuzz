@@ -700,8 +700,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli.environmentVariableNames
       )
     });
-    // Attaching to an already-active run started no controller. Its state
-    // (status, lease, deadline) belongs to the live owner, so leave it alone.
+    // An attach to a run Smithers still reports active started no controller,
+    // so it must not re-record status, lease or deadline; the resume that
+    // starts the next controller does.
     if (result.alreadyRunning !== true) {
       recordNativeContinuationState({ layout, config, requestedConcurrency: input.maxConcurrency });
     }
