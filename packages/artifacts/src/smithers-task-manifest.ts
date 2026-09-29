@@ -1412,8 +1412,8 @@ export function assertSmithersTaskManifestMatchesPlannedGraph(
 
   // Safety only: a producer that halts on failure can never have its output treated as optional.
   // Which consumers opt in to a continuing producer's output is compiler policy and is not
-  // re-derived here: a second copy of that policy rejected every plan the compiler produced once
-  // the two drifted apart (#1140).
+  // re-derived here: once a second copy of that policy drifted from the compiler, it rejected the
+  // default, low-cost, exhaustive and invariant-only launches (#1140).
   const continuingAttemptIds = new Set(
     manifest.tasks
       .filter((task) => {

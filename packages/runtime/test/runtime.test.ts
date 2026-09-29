@@ -10513,8 +10513,9 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
 });
 
 test("every packaged audit profile compiles into a task plan the launch manifest gate accepts", async () => {
-  // #1140: after #1120 changed which inputs the compiler marks optional, this gate rejected the
-  // default, exhaustive, and invariant-only launches before any model ran.
+  // #1140: after #1120 changed which inputs the compiler marks optional, the gate's older copy of
+  // that rule rejected the default, low-cost, exhaustive, and invariant-only launches before any
+  // model ran.
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const xdgCacheHome = path.join(project, "xdg-cache");

@@ -316,14 +316,17 @@ the linked workflow status when it is available; its JSON output retains both
 `workflow_status` and `ultrafuzz_status` so lifecycle divergence remains
 explicit.
 
-A launch that fails while planning or compiling, after its run directory
-exists, records the run as `failed` with its original error. `status`,
-`resume`, and the other commands that read the linked workflow then report
-that error as `RUN_LAUNCH_FAILED`. Such a run never reached Smithers and cannot
-be resumed; fix the cause and start a new run. A goal-planning topology without
-its vulnerability-database reference, and a missing or invalid reference cache
-(run `ultrafuzz references sync`), are rejected before the run directory is
-created.
+A launch that fails after planning has created its run directory, but before
+its workflow controls are sealed (while planning, compiling the workflow, or
+checking its task manifest), records the run as `failed` with its original
+error. `status`, `resume`, and the other commands that read the linked
+workflow then report that error as `RUN_LAUNCH_FAILED`. Such a run never
+reached Smithers and cannot be resumed; fix the cause and start a new run. A
+launch that fails after sealing is also recorded as `failed`, with its error in
+`events.jsonl`, but those commands do not report it as `RUN_LAUNCH_FAILED`. A
+goal-planning topology without its vulnerability-database reference, and a
+missing or invalid reference cache (run `ultrafuzz references sync`), are
+rejected before the run directory is created.
 
 `resume` delegates continuation to Smithers with the same Ultrafuzz and
 Smithers run IDs and automatically accepts changed workflow source. Control
