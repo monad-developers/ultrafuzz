@@ -2573,10 +2573,8 @@ function workflowEvents(
         payload.inputTokens = 0;
         // Smithers 0.35.0 emits both of these: `freshInputTokens` on every usage
         // event `normalizeTokenUsage` produces, and `costUsd` for any model in
-        // the runner's built-in price table. Synchronization is exact-key on this
-        // payload, so a fixture without them is not a document the pinned runner
-        // can produce and every sync test would be testing a shape that no
-        // longer exists.
+        // the runner's built-in price table. A fixture without them is not a
+        // document the pinned runner can produce.
         payload.freshInputTokens = 0;
         payload.costUsd = 0;
         payload.outputTokens = 0;
@@ -18082,11 +18080,11 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
     "the pinned runner's node token usage shape no longer matches what Ultrafuzz parses"
   );
 
-  // 12. `TokenUsageReported`. The durable sync path is exact-key on this payload
-  // and re-throws everywhere except `stats`, so a key added upstream takes out
-  // every run's synchronization on its first agent task. The failure-path emitter
-  // splices its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own
-  // return shape is unioned in rather than read off the emitter literal.
+  // 12. `TokenUsageReported`. Synchronization reads only the keys it knows, so a
+  // usage field added upstream would be silently left out of accounting; this
+  // diff surfaces it at the pin bump instead. The failure-path emitter splices
+  // its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own return
+  // shape is unioned in rather than read off the emitter literal.
   const engineSource = fs.readFileSync(
     path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js"),
     "utf8"
@@ -18110,8 +18108,8 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
   }
   assert.deepEqual(
     sortedKeys(emittedTokenKeys),
-    sortedKeys(CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed),
-    "the pinned engine's TokenUsageReported payload no longer matches what workflow synchronization accepts"
+    sortedKeys(CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.known),
+    "the pinned engine's TokenUsageReported payload no longer matches the keys workflow synchronization reads"
   );
 
   // 13. Event types. `ultrafuzz events` without `--type` gets the runner's own
@@ -19951,10 +19949,9 @@ test("syncRun accepts the runner's correlation envelope and rejects a mismatched
 });
 
 // Smithers 0.35.0 puts `freshInputTokens` on every usage event and `costUsd` on
-// every priced one. `validateSmithersEventPayload` is exact-key and re-throws
-// everywhere except `stats`, so before these were allowlisted the first agent
-// task of any 0.35.0 run took out `status`, `state`, `diagnose` and the evals
-// row sync for that run permanently.
+// every priced one. While `validateSmithersEventPayload` was exact-key, the first
+// agent task of any 0.35.0 run took out `status`, `state`, `diagnose` and the
+// evals row sync for that run permanently.
 test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new fields", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -20079,12 +20076,13 @@ test("syncRun accepts the pinned 0.35.0 usage payload and still bounds its new f
     () => syncWithUsage("cost-not-a-number", { inputTokens: 5, outputTokens: 1, costUsd: "0.01" }),
     /costUsd is invalid/u
   );
-  // A key outside the contract still fails closed; widening it for two fields
-  // must not have relaxed the assertion itself.
-  await assert.rejects(
-    () => syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 6 }),
-    /contains unsupported fields/u
-  );
+  // A key synchronization does not read is ignored; it no longer fails the sync.
+  const unknownKey = await syncWithUsage("unknown-usage-key", { inputTokens: 5, outputTokens: 1, totalTokens: 60 });
+  assert.equal(unknownKey.result.ok, true, JSON.stringify(unknownKey.result.diagnostics));
+  const unknownKeyMetadata = JSON.parse(fs.readFileSync(path.join(unknownKey.runRoot, "run.json"), "utf8")) as {
+    accounting?: { current?: { total_tokens?: number } };
+  };
+  assert.equal(unknownKeyMetadata.accounting?.current?.total_tokens, 6);
 });
 
 test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {
@@ -20416,10 +20414,10 @@ test("syncRun appends unseen usage events to the current control segment", async
   assert.equal(fs.readFileSync(path.join(runRoot, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
 });
 
-test("syncRun rejects a malformed-present usage ledger without accounting fallback", async () => {
+test("syncRun reports a malformed usage ledger without blocking run status", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
 
   const workflowRunId = "ultrafuzz-malformed-only-usage";
   const env = fakeLifecycleSmithersEnv(project, {
@@ -20435,19 +20433,26 @@ test("syncRun rejects a malformed-present usage ledger without accounting fallba
   });
   const run = await startRun({ projectRoot: project, runId: "malformed-only-usage", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  fs.writeFileSync(path.join(run.value!.run_root, "usage.jsonl"), "{malformed\n", "utf8");
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  fs.writeFileSync(path.join(run.value.run_root, "usage.jsonl"), "{malformed\n", "utf8");
 
-  const usagePath = path.join(run.value!.run_root, "usage.jsonl");
+  const usagePath = path.join(run.value.run_root, "usage.jsonl");
   const usageBefore = fs.readFileSync(usagePath);
-  const metadataBefore = fs.readFileSync(path.join(run.value!.run_root, "run.json"));
+  const metadataBefore = fs.readFileSync(path.join(run.value.run_root, "run.json"));
 
-  await assert.rejects(
-    () => syncRun({ projectRoot: project, runId: "malformed-only-usage", env }),
-    /usage ledger record 1 is invalid strict JSON/u
+  const sync = await syncRun({ projectRoot: project, runId: "malformed-only-usage", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+  const warnings = sync.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED");
+  assert.deepEqual(
+    warnings.map((diagnostic) => diagnostic.severity),
+    ["warning"]
   );
+  assert.match(warnings[0]?.message ?? "", /usage ledger record 1 is invalid strict JSON/u);
   assert.deepEqual(fs.readFileSync(usagePath), usageBefore);
-  assert.deepEqual(fs.readFileSync(path.join(run.value!.run_root, "run.json")), metadataBefore);
+  assert.deepEqual(fs.readFileSync(path.join(run.value.run_root, "run.json")), metadataBefore);
 });
 
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
@@ -22552,7 +22557,8 @@ test("syncRun records an attempt without agent provenance when Smithers selectio
   });
   const run = await startRun({ projectRoot: project, runId: "mismatched-selection", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const sync = await syncRun({ projectRoot: project, runId: "mismatched-selection", env });
 
@@ -22563,7 +22569,7 @@ test("syncRun records an attempt without agent provenance when Smithers selectio
   assert.equal(warnings[0]?.severity, "warning");
   assert.match(warnings[0]?.message ?? "", /agent ID does not match sealed chain rung 0/u);
   const entries = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as { outcome?: string; agent?: unknown });
@@ -23358,6 +23364,7 @@ test("syncRun records an unrecorded failed occurrence superseded by a reused att
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
@@ -23366,7 +23373,7 @@ test("syncRun records an unrecorded failed occurrence superseded by a reused att
   // Smithers' attempt row now describes the replacement, so the superseded
   // failure is recorded from its own events, without agent provenance.
   const entries = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -23380,7 +23387,7 @@ test("syncRun records an unrecorded failed occurrence superseded by a reused att
     ]),
     [[0, 1, "failed", "unrecorded occurrence", undefined]]
   );
-  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^node /mu);
+  assert.doesNotMatch(fs.readFileSync(fakeRunnerPath(env, "SMITHERS_FAKE_LOG"), "utf8"), /^node /mu);
 });
 
 test("syncRun tolerates duplicate active starts for one attempt identity", async () => {
@@ -23404,12 +23411,13 @@ test("syncRun tolerates duplicate active starts for one attempt identity", async
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "running");
-  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+  assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
 });
 
 test("syncRun abandons an unterminated occurrence at a later run activation boundary", async () => {
@@ -26762,7 +26770,7 @@ for (const recovery of ["reset", "retry", "refresh"] as const) {
       ...(recovery === "refresh" ? { refreshController: true } : {})
     });
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^timetravel /mu);
+    assert.match(fs.readFileSync(fakeRunnerPath(env, "SMITHERS_FAKE_LOG"), "utf8"), /^timetravel /mu);
     assert.deepEqual(
       fs.readFileSync(sealPath),
       seal,
@@ -27010,6 +27018,12 @@ test("resume --retry-failed after a pre-agent failure keeps synchronizing the re
   }
 });
 
+function fakeRunnerPath(env: Record<string, string | undefined>, name: string): string {
+  const value = env[name];
+  assert.ok(value, `${name} is not set`);
+  return value;
+}
+
 function attemptLedgerRows(runRoot: string): Array<Record<string, unknown>> {
   const text = fs.readFileSync(path.join(runRoot, "attempts.jsonl"), "utf8").trim();
   return text === "" ? [] : text.split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -27039,12 +27053,13 @@ test("syncRun records a cancelled attempt with its Smithers reason", async () =>
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.deepEqual(
-    attemptLedgerRows(run.value!.run_root).map((entry) => [
+    attemptLedgerRows(run.value.run_root).map((entry) => [
       entry.started_event_sequence,
       entry.source_event_sequence,
       entry.outcome,
@@ -27082,13 +27097,14 @@ test("syncRun ignores a cancellation that names no live attempt", async () => {
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
   assert.deepEqual(
-    attemptLedgerRows(run.value!.run_root).map((entry) => [entry.source_event_sequence, entry.outcome]),
+    attemptLedgerRows(run.value.run_root).map((entry) => [entry.source_event_sequence, entry.outcome]),
     [[2, "failed"]]
   );
 });
@@ -27120,14 +27136,15 @@ test("syncRun keeps a cancelled occurrence that a reset superseded before any sy
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
   assert.deepEqual(
-    attemptLedgerRows(run.value!.run_root).map((entry) => [
+    attemptLedgerRows(run.value.run_root).map((entry) => [
       entry.started_event_sequence,
       entry.source_event_sequence,
       entry.outcome,
@@ -27172,18 +27189,19 @@ test("syncRun attributes a verifier rejection to the agent's own attempt and nev
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const failed = await syncRun({ projectRoot: project, runId, env });
 
   assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
   assert.equal(failed.value?.status, "failed");
   assert.ok(!failed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-  const recorded = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+  const recorded = fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8");
   // The verifier numbers its attempts independently: its failure belongs to the
   // agent's finished attempt 2, not to the agent's earlier failed attempt 1.
   assert.deepEqual(
-    attemptLedgerRows(run.value!.run_root).map((entry) => [
+    attemptLedgerRows(run.value.run_root).map((entry) => [
       entry.attempt,
       entry.outcome,
       entry.failure_category,
@@ -27198,7 +27216,7 @@ test("syncRun attributes a verifier rejection to the agent's own attempt and nev
   // Re-running only the verifier changes the node status after both attempts
   // were recorded; the recorded rows stay final instead of becoming conflicts.
   fs.writeFileSync(
-    env.SMITHERS_FAKE_EVENTS!,
+    fakeRunnerPath(env, "SMITHERS_FAKE_EVENTS"),
     workflowEvents(workflowRunId, [
       ...failedPass,
       { type: "RunStarted" },
@@ -27208,7 +27226,7 @@ test("syncRun attributes a verifier rejection to the agent's own attempt and nev
     ])
   );
   fs.writeFileSync(
-    env.SMITHERS_FAKE_INSPECT!,
+    fakeRunnerPath(env, "SMITHERS_FAKE_INSPECT"),
     `${JSON.stringify(
       workflowInspect({
         workflowRunId,
@@ -27224,7 +27242,7 @@ test("syncRun attributes a verifier rejection to the agent's own attempt and nev
     assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
     assert.equal(recovered.value?.status, "succeeded", JSON.stringify(recovered.diagnostics));
     assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
-    assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), recorded);
+    assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), recorded);
   }
 });
 
@@ -27249,7 +27267,8 @@ test("syncRun reconciles node state when Smithers attempt detail is unavailable 
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const detailPath = path.join(env.SMITHERS_FAKE_NODE_DETAILS!, `${nodeId}.json`);
+  assert.ok(run.value);
+  const detailPath = path.join(fakeRunnerPath(env, "SMITHERS_FAKE_NODE_DETAILS"), `${nodeId}.json`);
   const detail = fs.readFileSync(detailPath);
   fs.rmSync(detailPath);
 
@@ -27263,9 +27282,9 @@ test("syncRun reconciles node state when Smithers attempt detail is unavailable 
       .map((diagnostic) => diagnostic.severity),
     ["warning"]
   );
-  const layout = layoutForRunRoot(run.value!.run_root, runId);
+  const layout = layoutForRunRoot(run.value.run_root, runId);
   assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "failed");
-  assert.deepEqual(attemptLedgerRows(run.value!.run_root), []);
+  assert.deepEqual(attemptLedgerRows(run.value.run_root), []);
 
   fs.writeFileSync(detailPath, detail);
   const recovered = await syncRun({ projectRoot: project, runId, env });
@@ -27273,10 +27292,174 @@ test("syncRun reconciles node state when Smithers attempt detail is unavailable 
   assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
   assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ATTEMPT_INSPECT_FAILED"));
   assert.deepEqual(
-    attemptLedgerRows(run.value!.run_root).map((entry) => [
+    attemptLedgerRows(run.value.run_root).map((entry) => [
       entry.outcome,
       (entry.agent as { profile_id?: string } | undefined)?.profile_id
     ]),
     [["failed", "default"]]
   );
+});
+
+test("syncRun rebuilds run.json accounting after a pass stopped between the usage and run.json writes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "usage-crash-window";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const usage = (sequence: number, inputTokens: number) => ({
+    type: "TokenUsageReported",
+    nodeId: "node:project-discovery",
+    attempt: 1,
+    sequence,
+    extra: { iteration: 0, inputTokens, outputTokens: 1, model: "test-model", agent: "test-agent" }
+  });
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, sequence: 0 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, sequence: 2 },
+      { type: "RunFinished", sequence: 3 }
+    ]),
+    tokenEvents: workflowEvents(workflowRunId, [usage(1, 10)])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  const metadataPath = path.join(runRoot, "run.json");
+  const metadataBeforeLaterUsage = fs.readFileSync(metadataPath);
+
+  // A later usage snapshot reaches usage.jsonl, but the pass stops before it
+  // rewrites run.json: restore run.json to the bytes that pass never replaced.
+  fs.writeFileSync(
+    fakeRunnerPath(env, "SMITHERS_FAKE_TOKEN_EVENTS"),
+    workflowEvents(workflowRunId, [usage(1, 10), usage(4, 30)])
+  );
+  const interrupted = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(interrupted.ok, true, JSON.stringify(interrupted.diagnostics));
+  assert.equal(fs.readFileSync(path.join(runRoot, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
+  fs.writeFileSync(metadataPath, metadataBeforeLaterUsage);
+
+  const recovered = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    accounting?: { checkpoint?: { ledger_event_count?: number }; current?: { total_tokens?: number } };
+  };
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 2);
+  assert.equal(metadata.accounting?.current?.total_tokens, 31);
+});
+
+test("syncRun keeps a recorded usage row that this build would derive differently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "usage-row-recorded-once";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: { iteration: 0, inputTokens: 10, outputTokens: 5, model: "test-model", agent: "codex" }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  const usagePath = path.join(runRoot, "usage.jsonl");
+  const row = JSON.parse(fs.readFileSync(usagePath, "utf8")) as { usage: { agent: string } };
+  // Stands in for a row an earlier build normalized differently from this one.
+  row.usage.agent = "earlier-build-agent";
+  const recordedUsage = `${JSON.stringify(row)}\n`;
+  fs.writeFileSync(usagePath, recordedUsage);
+
+  const replayed = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  assert.equal(fs.readFileSync(usagePath, "utf8"), recordedUsage);
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
+    accounting?: { current?: { agents?: string[] } };
+  };
+  assert.deepEqual(metadata.accounting?.current?.agents, ["earlier-build-agent"]);
+});
+
+test("syncRun settles a model the fetched pricing catalog does not list instead of refetching it", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "unlisted-model-pricing";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          costUsd: undefined,
+          model: "unlisted-model",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    test: { models: { "listed-model": { cost: { input: 1, output: 1 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  let catalogFetches = 0;
+  const countingFetch: typeof fetch = (input, init) => {
+    catalogFetches += 1;
+    return testPricingFetch(input, init);
+  };
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const sync = await runtimeSyncRun(
+      { projectRoot: project, runId, env },
+      { pricingFetch: countingFetch, pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }] }
+    );
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  }
+
+  assert.equal(catalogFetches, 1);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "run.json"), "utf8")) as {
+    accounting?: { pricing_catalog?: { status?: string; unresolved_models?: string[] } };
+  };
+  assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["unlisted-model"]);
 });

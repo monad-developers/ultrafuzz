@@ -120,7 +120,6 @@ import {
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
-import { runtimeSemanticGateDiagnostics } from "./semantic-gates.js";
 import {
   inspectSmithersAttemptAgentSelection,
   type SmithersAttemptAgentSelection
@@ -1295,16 +1294,24 @@ export async function synchronizeLinkedWorkflowRun(
   if (preAccountingBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
   }
-  const accountingResult = await synchronizeWorkflowAccounting({
-    layout,
-    workflowRunId: evidence.smithersRunId,
-    controlGeneration: evidence.controlGeneration,
-    events: tokenEvents,
-    tasks: loaded.tasks,
-    attemptEvents: events,
-    control,
-    env: input.env ?? process.env
-  });
+  // Usage accounting is a projection of the usage ledger: a failure is reported
+  // and retried on the next pass, never allowed to block run status.
+  let accountingResult: Awaited<ReturnType<typeof synchronizeWorkflowAccounting>> = {
+    changed: false,
+    available: false
+  };
+  try {
+    accountingResult = await synchronizeWorkflowAccounting({
+      layout,
+      workflowRunId: evidence.smithersRunId,
+      controlGeneration: evidence.controlGeneration,
+      events: tokenEvents,
+      control,
+      env: input.env ?? process.env
+    });
+  } catch (error) {
+    diagnostics.push({ ...diagnosticFromError(error, "workflow", "WORKFLOW_ACCOUNTING_FAILED"), severity: "warning" });
+  }
   if (accountingResult.budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
   }
@@ -1850,8 +1857,6 @@ async function synchronizeWorkflowAccounting(input: {
   workflowRunId: string;
   controlGeneration: string;
   events: WorkflowEvent[];
-  tasks: readonly StoredWorkflowTask[];
-  attemptEvents: WorkflowEvent[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
@@ -1866,18 +1871,17 @@ async function synchronizeWorkflowAccounting(input: {
   if (metadata.workflow.control_generation !== input.controlGeneration) {
     throw new Error("run.json workflow control generation does not match the linked Smithers run");
   }
-  const storedAccounting =
-    metadata.accounting === undefined ? undefined : storedAccountingDocument(metadata.accounting, input.workflowRunId);
-  const existingUsageReplay = replayUsageEvents(input.layout);
-  if (storedAccounting !== undefined) {
-    assertAccountingMatchesUsageLedger(storedAccounting, existingUsageReplay.entries, "run.json#$.accounting");
-  }
+  // run.json accounting is a cache derived from usage.jsonl: every pass rebuilds
+  // it from the ledger and reads the prior copy only for its cached prices. A
+  // pass stopped between the ledger append and the run.json write therefore
+  // leaves a stale cache that the next pass replaces (#1138).
+  const storedAccounting = cachedAccountingDocument(metadata.accounting, input.workflowRunId);
   const preparedUsage = prepareWorkflowUsageEvents(
     input.layout,
     input.workflowRunId,
     input.controlGeneration,
     input.events,
-    existingUsageReplay
+    replayUsageEvents(input.layout)
   );
 
   const stateSourceRunId = readRunState(input.layout).source_run_id;
@@ -1885,7 +1889,7 @@ async function synchronizeWorkflowAccounting(input: {
     throw new Error("run.json and state.json disagree on source_run_id");
   }
   if (preparedUsage.entries.length === 0) {
-    if (storedAccounting !== undefined) {
+    if (metadata.accounting !== undefined) {
       throw new Error("run.json accounting cannot exist when the usage ledger is empty");
     }
     return { changed: false, available: false };
@@ -1893,8 +1897,13 @@ async function synchronizeWorkflowAccounting(input: {
 
   const storedPricingCatalog = storedAccounting?.pricingCatalog;
   const storedPricing = storedAccounting?.pricing ?? new Map<string, ModelPricing>();
-  const previouslyUnresolvedModels =
-    storedPricingCatalog?.status === "disabled" ? new Set(storedPricingCatalog.unresolved_models) : new Set<string>();
+  // A model that a disabled or successfully fetched catalog does not list stays
+  // unpriced; only an unavailable catalog is fetched again on a later pass.
+  const previouslyUnresolvedModels = new Set(
+    storedPricingCatalog === undefined || storedPricingCatalog.status === "unavailable"
+      ? []
+      : storedPricingCatalog.unresolved_models
+  );
   const latestLedgerEvents = workflowEventsFromUsageLedger(latestUsageLedgerEntriesByAttempt(preparedUsage.entries));
   const requiredModels = modelsRequiringPricing(latestLedgerEvents);
   const missingModels = requiredModels.filter(
@@ -1986,12 +1995,7 @@ async function synchronizeWorkflowAccounting(input: {
     return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
   }
 
-  if (preparedUsage.inputs.length > 0) {
-    const appended = appendUsageEvents(input.layout, preparedUsage.inputs);
-    if (!isDeepStrictEqual(appended.replay.entries, preparedUsage.entries)) {
-      throw new Error("usage ledger changed after its immutable validation snapshot");
-    }
-  }
+  if (preparedUsage.inputs.length > 0) appendUsageEvents(input.layout, preparedUsage.inputs);
   if (accountingChanged) {
     writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
   }
@@ -2113,70 +2117,25 @@ function prepareWorkflowUsageEvents(
   events: WorkflowEvent[],
   existingReplay: UsageLedgerReplay
 ): PreparedUsageLedgerAppend {
-  const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
-  const existingByIdentity = new Map(
-    existingReplay.entries.map((entry) => [usageLedgerIdentity(entry), entry] as const)
-  );
-  const candidateInputs = new Map<string, AppendUsageEventInput>();
-  const candidates = new Map<string, UsageLedgerEntry>();
-  for (const event of usageEvents) {
-    const candidateInput = normalizedUsageLedgerInput(workflowRunId, controlGeneration, event);
-    const candidate = createUsageLedgerEntry(layout, candidateInput);
-    const identity = usageLedgerIdentity(candidate);
-    const duplicateCandidate = candidates.get(identity);
-    if (duplicateCandidate !== undefined) {
-      if (!isDeepStrictEqual(duplicateCandidate, candidate)) {
-        throw new Error(`usage event ${identity} appears with conflicting immutable data in the source snapshot`);
-      }
-      continue;
-    }
-    const existing = existingByIdentity.get(identity);
-    if (existing !== undefined) {
-      if (!isDeepStrictEqual(existing, candidate)) {
-        throw new Error(`usage event ${identity} was already recorded with different immutable data`);
-      }
-      continue;
-    }
-    candidates.set(identity, candidate);
-    candidateInputs.set(identity, candidateInput);
-  }
-
-  const entries = existingReplay.entries.map((entry) => candidates.get(usageLedgerIdentity(entry)) ?? entry);
+  // A usage event is recorded once by its Smithers identity and never
+  // re-derived, so a row written by an earlier build cannot become a conflict.
+  const recorded = new Set(existingReplay.entries.map((entry) => usageLedgerIdentity(entry)));
+  const entries = [...existingReplay.entries];
   const pendingEntries: UsageLedgerEntry[] = [];
   const inputs: AppendUsageEventInput[] = [];
-  for (const [identity, candidate] of candidates) {
-    if (existingByIdentity.has(identity)) continue;
-    entries.push(candidate);
-    pendingEntries.push(candidate);
-    inputs.push(candidateInputs.get(identity)!);
-  }
-  const context = {
-    usageLedger: { entries },
-    eventLog: {
-      events: events.map((event) => ({
-        workflow_run_id: event.workflowRunId,
-        source_event_sequence: event.sourceEventSequence,
-        timestamp_ms: event.timestampMs,
-        type: event.type,
-        payload: event.payload
-      }))
-    }
-  };
-  for (const candidate of candidates.values()) {
-    const diagnostics = runtimeSemanticGateDiagnostics({
-      schemaFilename: "usage-ledger.schema.json",
-      document: candidate,
-      artifactPath: layout.usageLedgerPath,
-      context
+  for (const event of events) {
+    if (event.type !== "TokenUsageReported") continue;
+    const identity = usageLedgerIdentity({
+      workflow_run_id: event.workflowRunId,
+      source_event_sequence: event.sourceEventSequence
     });
-    if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
-      throw new Error(
-        diagnostics
-          .filter((diagnostic) => diagnostic.severity === "error")
-          .map((diagnostic) => diagnostic.message)
-          .join("; ")
-      );
-    }
+    if (recorded.has(identity)) continue;
+    recorded.add(identity);
+    const usageInput = normalizedUsageLedgerInput(workflowRunId, controlGeneration, event);
+    const entry = createUsageLedgerEntry(layout, usageInput);
+    entries.push(entry);
+    pendingEntries.push(entry);
+    inputs.push(usageInput);
   }
   return { inputs, entries, pendingEntries };
 }
@@ -2363,6 +2322,16 @@ function emptyAccountingSummary(): AccountingSummary {
     models: [],
     agents: []
   };
+}
+
+function cachedAccountingDocument(value: unknown, workflowRunId: string): StoredAccountingDocument | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return storedAccountingDocument(value, workflowRunId);
+  } catch {
+    // An unreadable cache is recomputed from the usage ledger, not trusted.
+    return undefined;
+  }
 }
 
 function storedAccountingDocument(value: unknown, expectedWorkflowRunId?: string): StoredAccountingDocument {
@@ -5651,16 +5620,15 @@ function parseInspectSnapshot(snapshot: SmithersCommandSnapshot, expectedWorkflo
 }
 
 /**
- * The closed-world key contract Ultrafuzz enforces on the pinned runner's
- * `TokenUsageReported` payload, which `synchronizeLinkedWorkflowRun` reads on
- * every status, state, diagnose and evals row sync. Exported so a test can diff
- * it against the engine's own emitters: the check is exact-key and re-throws
- * everywhere except `stats`, so a key added upstream takes out synchronization
- * for every run on its first agent task -- which is exactly what 0.35.0's
- * `freshInputTokens` and `costUsd` did.
+ * The keys of the pinned runner's `TokenUsageReported` payload. Synchronization
+ * validates each accounting field it reads and ignores any other key, so a key
+ * added upstream no longer takes out synchronization the way 0.35.0's
+ * `freshInputTokens` and `costUsd` did. A test diffs this list against the
+ * engine's own emitters, so a new usage field is noticed at the pin bump
+ * rather than silently left out of accounting.
  */
 export const CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT = {
-  allowed: [
+  known: [
     "type",
     "runId",
     "nodeId",
@@ -5764,9 +5732,6 @@ function validateSmithersEventPayload(type: string, payload: Record<string, unkn
     requiredWorkflowEventCount(payload.iteration, `${label} iteration`);
   }
   if (type !== "TokenUsageReported") return;
-  if (!hasOnlyKeys(payload, CURRENT_SMITHERS_TOKEN_EVENT_KEY_CONTRACT.allowed)) {
-    throw new Error(`${label} contains unsupported fields`);
-  }
   assertWorkflowEventCorrelation(payload, label);
   requiredWorkflowEventString(payload.model, `${label} model`);
   requiredWorkflowEventString(payload.agent, `${label} agent`);
