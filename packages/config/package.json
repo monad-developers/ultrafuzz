@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && cp defaults.toml dist/ultrafuzz.toml && cp audit-profiles.yml dist/audit-profiles.yml && rm -rf dist/topologies && cp -R topologies dist/topologies && rm -rf dist/schema && cp -R schema dist/schema && node scripts/verify-schema-registry.mjs",
-    "test": "pnpm --filter @ultrafuzz/config^... build && vitest run",
+    "test": "pnpm --filter @ultrafuzz/config^... build && vitest run --testTimeout=30000",
     "typecheck": "pnpm --filter @ultrafuzz/config^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {

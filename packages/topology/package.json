@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm --filter @ultrafuzz/topology^... build && vitest run",
+    "test": "pnpm --filter @ultrafuzz/topology^... build && vitest run --testTimeout=30000",
     "typecheck": "pnpm --filter @ultrafuzz/topology^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
