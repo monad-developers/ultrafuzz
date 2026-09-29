@@ -8018,10 +8018,27 @@ bunAdapterTest(
         type: "message_end",
         message: { role: "assistant", responseId, content: [{ type: "text", text }], usage }
       });
-      const lines = [
-        { type: "session", id: "inconsistent-usage-session" },
-        // A provider that folds reasoning into totalTokens, one that omits the
-        // cost breakdown, and one whose cost total disagrees with its parts.
+      const generateUsage = async (responses: unknown[]) => {
+        const lines = [
+          { type: "session", id: "inconsistent-usage-session" },
+          ...responses,
+          { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "final answer" }] }] }
+        ];
+        const agent = createPiAgent({ model: "openai/gpt-mini-latest" });
+        agent.buildCommand = async () => ({
+          command: process.execPath,
+          args: ["-e", lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")],
+          outputFormat: "stream-json"
+        });
+        // A short idle timeout turns a stalled invocation into a prompt failure
+        // instead of waiting for the node timeout.
+        const result = await agent.generate({ prompt: "inconsistent usage", timeout: { idleMs: 5_000 } });
+        assert.equal(result.text, "final answer");
+        return result.usage as Record<string, unknown>;
+      };
+      // A provider that folds reasoning into totalTokens, one that omits the
+      // cost breakdown, and one whose cost total disagrees with its parts.
+      const inconsistent = [
         assistant("reasoning-in-total", "first", {
           input: 1,
           output: 2,
@@ -8038,38 +8055,46 @@ bunAdapterTest(
           cacheWrite: 0,
           totalTokens: 3,
           cost: { ...cost, total: 1 }
-        }),
-        assistant("consistent", "final answer", {
-          input: 4,
-          output: 5,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 9,
-          cost
-        }),
-        { type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "final answer" }] }] }
+        })
       ];
-      const agent = createPiAgent({ model: "openai/gpt-mini-latest" });
-      agent.buildCommand = async () => ({
-        command: process.execPath,
-        args: ["-e", lines.map((line) => `console.log(${JSON.stringify(JSON.stringify(line))});`).join("")],
-        outputFormat: "stream-json"
+      const consistent = assistant("consistent", "final answer", {
+        input: 4,
+        output: 5,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 9,
+        cost
       });
-
-      // A short idle timeout turns a stalled invocation into a prompt failure
-      // instead of waiting for the node timeout.
-      const result = await agent.generate({ prompt: "inconsistent usage", timeout: { idleMs: 5_000 } });
-
-      assert.equal(result.text, "final answer");
-      // Only the consistent response is counted.
-      assert.deepEqual(result.usage, {
+      const consistentUsage = {
         inputTokens: 4,
         inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 0, cacheWriteTokens: 0 },
         outputTokens: 5,
         outputTokenDetails: { textTokens: undefined, reasoningTokens: 0 },
         totalTokens: 9,
         reportedCostUsd: 0.003
+      };
+
+      // Each inconsistent response is left out whole, so the invocation's
+      // usage is a lower bound: only the consistent response is counted.
+      assert.deepEqual(await generateUsage([...inconsistent, consistent]), consistentUsage);
+      // A response that would push a running total past the safe-integer range
+      // is left out whole too, not counted up to the field that overflowed.
+      const overflow = assistant("overflow", "fourth", {
+        input: 1,
+        output: Number.MAX_SAFE_INTEGER - 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: Number.MAX_SAFE_INTEGER,
+        cost
       });
+      assert.deepEqual(await generateUsage([consistent, overflow]), consistentUsage);
+      // With nothing countable the invocation reports no token counts, rather
+      // than Smithers' reading of Pi's raw last-response usage object.
+      const uncounted = await generateUsage(inconsistent);
+      assert.deepEqual(
+        [uncounted.inputTokens, uncounted.outputTokens, uncounted.totalTokens],
+        [undefined, undefined, undefined]
+      );
     } finally {
       if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
       else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;

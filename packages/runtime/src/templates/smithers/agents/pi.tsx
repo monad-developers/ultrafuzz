@@ -101,7 +101,10 @@ export class CompatiblePiAgent extends SmithersPiAgent {
       onStdoutLine: (line) => {
         // This runs inside the child's stdout listener, where a throw escapes
         // the invocation instead of failing it and leaves the task waiting for
-        // its timeout. A usage event Pi reports inconsistently stays uncounted.
+        // its timeout. A response whose usage Pi reports inconsistently is left
+        // out whole, so the invocation's usage is then a lower bound. It cannot
+        // become unknown instead: earlier responses were already reported as
+        // cumulative usage snapshots, which the engine persists.
         const observation = failOpen(() => observePiLine(usage, line));
         sessionId = observation?.sessionId ?? sessionId;
         // A fresh Smithers interpreter sees only the latest authoritative
@@ -205,11 +208,9 @@ function observePiLine(totals: PiInvocationUsage, line: string): PiLineObservati
   if (message?.role !== "assistant") return;
   const usage = objectRecord(message.usage);
   if (usage === undefined) return;
-  const responseId = message.responseId;
-  if (typeof responseId === "string" && responseId.length > 0) {
-    if (totals.responseIds.has(responseId)) return;
-    totals.responseIds.add(responseId);
-  }
+  const responseId =
+    typeof message.responseId === "string" && message.responseId.length > 0 ? message.responseId : undefined;
+  if (responseId !== undefined && totals.responseIds.has(responseId)) return;
   const freshInputTokens = piUsageCount(usage.input, "input");
   const outputTokens = piUsageCount(usage.output, "output");
   const cacheReadTokens = piUsageCount(usage.cacheRead, "cacheRead");
@@ -235,18 +236,24 @@ function observePiLine(totals: PiInvocationUsage, line: string): PiLineObservati
   if (Math.abs(reportedCostUsd - componentCost) > Math.max(1e-12, Math.abs(reportedCostUsd) * 1e-9)) {
     throw new Error("Pi assistant adapter-recorded cost total does not equal its cost component sum");
   }
-  totals.messageCount += 1;
-  totals.freshInputTokens = safePiUsageSum(totals.freshInputTokens, freshInputTokens);
-  totals.outputTokens = safePiUsageSum(totals.outputTokens, outputTokens);
-  totals.cacheReadTokens = safePiUsageSum(totals.cacheReadTokens, cacheReadTokens);
-  totals.cacheWriteTokens = safePiUsageSum(totals.cacheWriteTokens, cacheWriteTokens);
-  totals.reasoningTokens = safePiUsageSum(totals.reasoningTokens, reasoningTokens);
-  totals.reportedCostUsd += reportedCostUsd;
-  if (!Number.isFinite(totals.reportedCostUsd) || totals.reportedCostUsd < 0) {
+  const next: PiInvocationUsage = {
+    responseIds: totals.responseIds,
+    messageCount: totals.messageCount + 1,
+    freshInputTokens: safePiUsageSum(totals.freshInputTokens, freshInputTokens),
+    outputTokens: safePiUsageSum(totals.outputTokens, outputTokens),
+    cacheReadTokens: safePiUsageSum(totals.cacheReadTokens, cacheReadTokens),
+    cacheWriteTokens: safePiUsageSum(totals.cacheWriteTokens, cacheWriteTokens),
+    reasoningTokens: safePiUsageSum(totals.reasoningTokens, reasoningTokens),
+    reportedCostUsd: totals.reportedCostUsd + reportedCostUsd
+  };
+  if (!Number.isFinite(next.reportedCostUsd) || next.reportedCostUsd < 0) {
     throw new Error("Pi assistant reported cost aggregate is invalid");
   }
-  const cumulativeUsage = reportedPiUsage(totals);
+  const cumulativeUsage = reportedPiUsage(next);
   if (cumulativeUsage === undefined) throw new Error("Pi assistant usage aggregate was not recorded");
+  // Commit only after every check passed, so a response is never half counted.
+  Object.assign(totals, next);
+  if (responseId !== undefined) totals.responseIds.add(responseId);
   return {
     progress: {
       usage: cumulativeUsage,
@@ -387,7 +394,11 @@ function applyPiTerminalAnswer<T>(
   for (const value of Array.isArray(events) ? events : [events]) {
     const event = objectRecord(value);
     if (event?.type !== "completed") continue;
-    if (usage !== undefined) event.usage = usage;
+    // Smithers' interpreter keeps Pi's raw last-response usage object, from
+    // which the engine can read only a total. With nothing counted here, that
+    // lone total would be reported as the invocation's usage.
+    if (usage === undefined) delete event.usage;
+    else event.usage = usage;
     if (terminalError !== undefined) {
       event.ok = false;
       event.error = terminalError;

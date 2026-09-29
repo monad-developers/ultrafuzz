@@ -379,6 +379,13 @@ execution. The Smithers type surface pinned by this release stops at `xhigh`,
 but pi's command surface also accepts `max`, so the adapter validates and
 forwards that final level without degrading it.
 
+The adapter counts usage from each assistant `message_end` event. A response
+whose usage Pi reports inconsistently (token counts that do not add up to
+`totalTokens`, or a cost breakdown that is missing or does not add up), or
+whose counts are invalid or would overflow the running totals, is left out
+whole instead of failing the invocation, so that invocation's usage is then a
+lower bound.
+
 ## Forge process guard
 
 Worker environments put a run-scoped Forge wrapper ahead of the installed
