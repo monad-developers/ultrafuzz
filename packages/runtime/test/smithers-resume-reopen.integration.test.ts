@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
+import { patchedSmithersRunner } from "./patched-smithers-runner.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 interface Inspection {
@@ -98,7 +99,13 @@ let sharedRunner: string | undefined;
 
 function startCampaign(prefix: string, sideTask: keyof typeof SIDE_TASKS = "independent") {
   const root = temporaryRoot(prefix);
-  const runner = (sharedRunner ??= patchedSmithersRunner(temporaryRoot("ufz-patched-smithers-")));
+  // Ultrafuzz's scheduler patches and resume hydration together decide what a resumed session runs again.
+  const runner = (sharedRunner ??= patchedSmithersRunner(
+    temporaryRoot("ufz-patched-smithers-"),
+    SMITHERS_COMPATIBILITY_PATCHES.filter(
+      (patch) => patch.packageName === "@smthrs/scheduler" || patch.id === "resume_hydration"
+    )
+  ));
   const runId = `${path.basename(root)}-${process.pid}`;
   const workflow = path.join(root, ".smithers", "workflows", "reopen.tsx");
   fs.mkdirSync(path.dirname(workflow), { recursive: true });
@@ -140,38 +147,6 @@ function startCampaign(prefix: string, sideTask: keyof typeof SIDE_TASKS = "inde
       throw new Error(`workflow did not finish: ${JSON.stringify(inspected)}`);
     }
   };
-}
-
-// The pinned runner with Ultrafuzz's scheduler patches and resume hydration
-// applied, which together decide what a resumed session runs again. The pnpm
-// store is shared by every checkout on the machine, so it is never written:
-// the Smithers packages (the only importers of the patched modules) are
-// copied, and every other package links back to the store.
-function patchedSmithersRunner(copy: string): string {
-  const runner = fs.realpathSync(path.join(runtimePackageRoot(), "node_modules", "smthrs"));
-  const store = path.resolve(runner, "..", "..", "..");
-  const patches = SMITHERS_COMPATIBILITY_PATCHES.filter(
-    (patch) => patch.packageName === "@smthrs/scheduler" || patch.id === "resume_hydration"
-  );
-  const applied = new Set<string>();
-  for (const entry of fs.readdirSync(store)) {
-    if (!entry.startsWith("smthrs@") && !entry.startsWith("@smthrs+")) {
-      fs.symlinkSync(path.join(store, entry), path.join(copy, entry));
-      continue;
-    }
-    fs.cpSync(path.join(store, entry), path.join(copy, entry), { recursive: true, verbatimSymlinks: true });
-    for (const patch of patches) {
-      const home = path.join(copy, entry, "node_modules", ...patch.packageName.split("/"));
-      if (!fs.existsSync(home) || fs.lstatSync(home).isSymbolicLink()) continue;
-      const source = path.join(home, ...patch.sourceRelativePath.split("/"));
-      const parts = fs.readFileSync(source, "utf8").split(patch.patchable);
-      assert.equal(parts.length, 2, `${patch.id} no longer anchors in ${source}`);
-      fs.writeFileSync(source, parts.join(patch.patched));
-      applied.add(patch.id);
-    }
-  }
-  assert.deepEqual([...applied].sort(), patches.map((patch) => patch.id).sort(), "a patched module was not copied");
-  return path.join(copy, path.relative(store, runner));
 }
 
 // A producer -> consumer -> downstream chain of generated prepare/node/verify

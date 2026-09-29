@@ -297,6 +297,42 @@ test(
   }
 );
 
+test(
+  "native operator continuations run Bun without the target repository's bunfig.toml or .env",
+  { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  async () => {
+    const root = temporaryDirectory("ufz-native-operator-bun-config-"),
+      operatorRoot = path.join(root, "operator"),
+      targetRoot = path.join(root, "target"),
+      runner = path.join(operatorRoot, ".smithers", "node_modules", "smthrs", "src", "bin", "smithers.js"),
+      preloaded = path.join(root, "target-preload-ran");
+    fs.mkdirSync(path.dirname(runner), { recursive: true });
+    fs.mkdirSync(targetRoot);
+    // Bun reads both files from its working directory, which is the target repository.
+    fs.writeFileSync(path.join(targetRoot, "bunfig.toml"), 'preload = ["./preload.js"]\n');
+    fs.writeFileSync(
+      path.join(targetRoot, "preload.js"),
+      `require("node:fs").writeFileSync(${JSON.stringify(preloaded)}, "");\n`
+    );
+    fs.writeFileSync(path.join(targetRoot, ".env"), "TARGET_DOTENV=loaded\n");
+    writeExecutable(
+      runner,
+      "#!/usr/bin/env bun\nconsole.log(JSON.stringify({ dotenv: process.env.TARGET_DOTENV ?? null }));\n"
+    );
+    const env = bindOperatorSmithersExecutableCapability({}, runner, operatorRoot, () => {}, targetRoot, true);
+
+    const result = await runSmithersInspectionCommand({
+      args: ["inspect", "fixture", "--format", "json"],
+      projectRoot: targetRoot,
+      env
+    });
+
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.json, { dotenv: null });
+    assert.equal(fs.existsSync(preloaded), false);
+  }
+);
+
 test("streaming Smithers commands keep the executable anchor through child close", async () => {
   const root = temporaryDirectory("ufz-runner-stream-");
   const runner = nodeRunner(root, "console.log(JSON.stringify({ sequence: 1 }));\n");
