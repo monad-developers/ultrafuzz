@@ -161,11 +161,14 @@ export class KimiCode029Agent extends SmithersKimiAgent {
         return base.onStderrLine?.(line) ?? [];
       },
       onExit: (result) => {
-        this.issuedSessionId ??= sessionIdFromIndex(this.activeRuntimeHome);
+        // Session recovery and usage are read back from files the CLI wrote.
+        // An unreadable or unexpected record leaves them unknown; it must never
+        // replace the invocation's own result with a telemetry failure.
+        this.issuedSessionId ??= failOpen(() => sessionIdFromIndex(this.activeRuntimeHome));
         // Kimi Code 0.29.1 prints no usage on stdout, so the pinned Smithers
         // BaseCliAgent falls back to the completed event. Attach this
         // invocation's own wire-record delta there.
-        const delta = this.invocationUsage();
+        const delta = failOpen(() => this.invocationUsage());
         this.pendingFailureUsage = delta === undefined ? undefined : kimiSmithersUsage(delta);
         const events = base.onExit?.(result) ?? [];
         if (delta === undefined) return events;
@@ -234,11 +237,14 @@ export class KimiCode029Agent extends SmithersKimiAgent {
         );
       }
       if (executionConfigDir !== undefined && sessionStoreDir !== undefined) {
-        runtimeHome = createKimiRuntimeHome(executionConfigDir, sessionStoreDir);
-        seedKimiSessionState(sessionStoreDir, runtimeHome, knownSession);
+        const seededHome = createKimiRuntimeHome(executionConfigDir, sessionStoreDir);
+        runtimeHome = seededHome;
+        seedKimiSessionState(sessionStoreDir, seededHome, knownSession);
         // Baseline AFTER seeding so a resumed session reports only the tokens
-        // this invocation adds, never the history it inherited.
-        usageBaseline = kimiUsageBaseline(runtimeHome);
+        // this invocation adds, never the history it inherited. Unreadable
+        // inherited history (for example a wire torn by a killed attempt)
+        // leaves this invocation's usage unknown instead of failing it.
+        usageBaseline = failOpen(() => kimiUsageBaseline(seededHome));
       }
     } catch (error) {
       await command.cleanup?.();
@@ -1508,27 +1514,22 @@ function combineCleanup(
   };
 }
 
+// Runs inside the child's stdout/stderr listeners, where a throw escapes the
+// invocation instead of failing it and leaves the task waiting for its timeout.
+// Any line that is not an unambiguous resume hint therefore carries no session.
 function sessionIdFromJsonLine(line: string): string | undefined {
   const first = firstNonJsonWhitespace(line);
   if (first === undefined || first !== "{") return undefined;
-  let value: unknown;
-  try {
-    value = parseStrictJson(line, {
+  const value = failOpen(() =>
+    parseStrictJson(line, {
       maxBytes: KIMI_WIRE_MAX_LINE_BYTES,
       maxDepth: KIMI_JSON_MAX_DEPTH,
       maxItems: KIMI_JSON_MAX_ITEMS,
       maxProperties: KIMI_JSON_MAX_PROPERTIES
-    });
-  } catch (error) {
-    throw new Error(`Kimi output JSON is invalid: ${error instanceof Error ? error.message : String(error)}`, {
-      cause: error
-    });
-  }
+    })
+  );
   if (!isRecord(value) || value.type !== KIMI_RESUME_HINT_TYPE) return undefined;
-  if (typeof value.session_id !== "string") throw new Error("Kimi session.resume_hint session_id must be a string");
-  const sessionId = validSessionId(value.session_id);
-  if (sessionId === undefined) throw new Error("Kimi session.resume_hint session_id is invalid");
-  return sessionId;
+  return typeof value.session_id === "string" ? validSessionId(value.session_id) : undefined;
 }
 
 function firstNonJsonWhitespace(value: string): string | undefined {
@@ -1557,6 +1558,14 @@ function requiredSessionId(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function failOpen<T>(read: () => T): T | undefined {
+  try {
+    return read();
+  } catch {
+    return undefined;
+  }
 }
 
 function pathEntryExists(filePath: string): boolean {

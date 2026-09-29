@@ -104,16 +104,19 @@ ultrafuzz.toml
 .ultrafuzz/cache/
 ```
 
-Without `--force`, existing config, topology, prompts, reference catalogs, and
-agent adapters are preserved except for recognized stock migrations. `init`
+Without `--force`, existing config, topology, prompts, and reference catalogs
+are preserved. The `.smithers/agents` adapter closure is not project-owned:
+planning accepts only the byte-exact packaged copy, so every `init` rewrites
+each adapter that differs from the current templates and leaves matching ones
+untouched. Refreshing the adapters after an upgrade therefore needs no
+`--force`. A symbolic link, hard link, or special file at an adapter path makes
+`init` fail with `INIT_PATH_UNSAFE` instead of being followed or written
+through. `init` also
 migrates a recognized generated `smithers-orchestrator@0.32.0` manifest or a
 `smthrs@0.34.0` manifest to the current `smthrs@0.35.0` pin. The 0.34.0 migration
-requires the rest of the manifest to match the current generated document.
-During a recognized manifest migration, known byte-identical prior stock
-adapters are also upgraded; customized or unrecognized adapters remain
-preserved. Use `--force` to replace existing generated files with the current
-templates. `init` emits an actionable diagnostic when a preserved adapter
-requires manual review.
+requires the rest of the manifest to match the current generated document. Use
+`--force` to replace the other existing generated files with the current
+templates.
 
 ## Validate
 

@@ -12,7 +12,7 @@ const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_DECLARATION = Buffer.from(
   "utf8"
 );
 const UNTRUSTED_SOURCE =
-  "controller adapter source must exactly match the packaged stock closure; rerun ultrafuzz init --force";
+  "controller adapter source must exactly match the packaged stock closure; rerun ultrafuzz init";
 const CONTROLLER_NAMES =
   "claude codex deepseek environment index kimi opencode openrouter pi provider-home strict-json toml".split(" ");
 export const STOCK_CONTROLLER_SOURCE_TEMPLATES: Readonly<Record<string, string>> = Object.freeze(
@@ -80,7 +80,7 @@ export function assertProviderScopedSensitiveEnvironmentCapability(
   if (environment === undefined || !environment.contents.includes(PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_DECLARATION)) {
     throw new Error(
       "sealed controller predates provider-scoped sensitive allowlisted environment handling; " +
-        "rerun ultrafuzz init --force and start a new run"
+        "rerun ultrafuzz init and start a new run"
     );
   }
 }

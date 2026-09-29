@@ -71,7 +71,7 @@ Agent configuration and model profiles may name only `ClaudeAgent`, `CodexAgent`
 `DeepSeekAgent`, `KimiAgent`, `OpenCodeAgent`, `OpenRouterAgent`, or `PiAgent`.
 The complete `.smithers/agents`
 tree must byte-match the packaged stock closure; custom adapters and registries
-are unsupported, and `ultrafuzz init --force` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
+are unsupported, and `ultrafuzz init` restores the authenticated copy. The stock closure always uses YOLO/bypass-permissions; stricter per-project adapters are unsupported.
 
 Each stock agent's `api_key_env` must use its canonical provider credential
 name. Custom environment variable names fail config validation.
@@ -204,7 +204,9 @@ Kimi's four components — uncached input, output, cache reads, and cache
 creation — are reported independently; Kimi already folds thinking tokens into
 output, so no separate reasoning total is published. Malformed or absent usage
 stays absent rather than becoming zeros, which keeps accounting honest about
-what it does not know. Kimi model pricing resolves against the Moonshot
+what it does not know. An unreadable wire, including inherited history torn by
+a killed attempt, leaves that invocation's usage absent instead of failing the
+invocation. Kimi model pricing resolves against the Moonshot
 provider entry in the pricing catalog, so the configured alias must match a
 Moonshot catalog model id such as `kimi-k3`; anything else is reported as an
 unresolved model instead of being priced from a same-named third-party entry.
@@ -253,9 +255,10 @@ value is rejected before execution. See DeepSeek's
 and [Anthropic API guide](https://api-docs.deepseek.com/guides/anthropic_api).
 
 DeepSeek's automatic disk cache reports cache misses and hits independently.
-Ultrafuzz records those as uncached input and cache-read tokens, records no
-cache-write charge, and treats the provider's output count as already including
-thinking tokens rather than publishing a second reasoning component. Pricing
+Claude Code reports them under Anthropic field names (`input_tokens`,
+`cache_read_input_tokens`), which the pinned Smithers Claude Code adapter
+already reads, so the DeepSeek adapter does no usage parsing of its own. The
+output count already includes thinking tokens. Pricing
 is pinned to the first-party `deepseek` catalog entry so a same-named hosted or
 subscription plan cannot supply a zero or unrelated rate. The current
 [DeepSeek price table](https://api-docs.deepseek.com/quick_start/pricing) lists
@@ -382,6 +385,13 @@ When a Pi profile sets `reasoning`, the adapter passes it to pi as
 execution. The Smithers type surface pinned by this release stops at `xhigh`,
 but pi's command surface also accepts `max`, so the adapter validates and
 forwards that final level without degrading it.
+
+The adapter counts usage from each assistant `message_end` event. A response
+whose usage Pi reports inconsistently (token counts that do not add up to
+`totalTokens`, or a cost breakdown that is missing or does not add up), or
+whose counts are invalid or would overflow the running totals, is left out
+whole instead of failing the invocation, so that invocation's usage is then a
+lower bound.
 
 ## OpenRouter guardrails
 
