@@ -33,7 +33,6 @@ import {
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   GOAL_PLAN_JSON_SCHEMA_ID,
   THREAT_MODEL_JSON_SCHEMA_ID,
-  appendEvent,
   assertSmithersTaskManifestMatchesPlannedGraph,
   createEventRecord,
   goalPlanJsonSchema,
@@ -2643,83 +2642,6 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
     fs.writeFileSync(filePath, contents, "utf8");
   }
   writeCurrentArtifactVerificationMarker(runRoot, nodeId);
-}
-
-function recordSubmittedReportRecoveryFixture(runRoot: string): void {
-  const layout = layoutForRunRoot(runRoot);
-  const state = readRunState(layout);
-  const workflow = state.provenance?.workflow;
-  assert.ok(workflow);
-  const invocation = appendEvent(layout, {
-    eventType: "workflow-lifecycle-invoking",
-    status: "running",
-    payload: {
-      action: "resume",
-      retry_failed: true,
-      workflow_run_id: workflow.runId,
-      workflow_link_id: workflow.linkId,
-      control_generation: workflow.controlGeneration
-    }
-  });
-  const controller = {
-    controller_invocation_id: invocation.event_id,
-    controller_invoked_at: invocation.timestamp
-  };
-  const result = appendEvent(layout, {
-    eventType: "workflow-lifecycle-result",
-    status: "running",
-    payload: {
-      action: "resume",
-      retry_failed: true,
-      source_workflow_run_id: workflow.runId,
-      source_workflow_link_id: workflow.linkId,
-      workflow_run_id: workflow.runId,
-      control_generation: workflow.controlGeneration,
-      ...controller
-    }
-  });
-  const submitted = appendEvent(layout, {
-    eventType: "workflow-lifecycle-submitted",
-    status: "running",
-    payload: {
-      action: "resume",
-      retry_failed: true,
-      workflow_run_id: workflow.runId,
-      workflow_link_id: workflow.linkId,
-      control_generation: workflow.controlGeneration,
-      ...controller
-    }
-  });
-  writeRunState(layout, {
-    ...state,
-    provenance: {
-      workflow,
-      recovery: {
-        recovery_id: crypto.randomUUID(),
-        submission_status: "submitted",
-        recovered: false,
-        prior_status: "failed",
-        failed_nodes: [
-          {
-            node_id: "final-report",
-            workflow_task_id: "node:final-report",
-            failed_attempt: 1,
-            failure_category: "agent-failure"
-          }
-        ],
-        source_workflow_run_id: workflow.runId,
-        source_workflow_link_id: workflow.linkId,
-        workflow_run_id: workflow.runId,
-        workflow_link_id: workflow.linkId,
-        control_generation: workflow.controlGeneration,
-        ...controller,
-        lifecycle_result_event_id: result.event_id,
-        lifecycle_result_at: result.timestamp,
-        lifecycle_submission_event_id: submitted.event_id,
-        lifecycle_submitted_at: submitted.timestamp
-      }
-    }
-  });
 }
 
 function writeEmptyFinalReportArtifactSet(runRoot: string, runId: string) {
@@ -20175,7 +20097,7 @@ test("syncRun keeps a preparation failure superseded by a later successful attem
   assert.equal(state.nodes?.["actors-flows"]?.status, "succeeded");
 });
 
-test("syncRun publishes a report after recovery of a failed report agent", async () => {
+test("syncRun publishes a report after a resumed report agent succeeds", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSingleFinalReportTopology(project);
@@ -20220,14 +20142,13 @@ test("syncRun publishes a report after recovery of a failed report agent", async
     false
   );
 
-  // Model a retained submitted recovery disposition. Synchronization must
-  // authenticate its journal and publish the later finished task evidence.
-  recordSubmittedReportRecoveryFixture(run.value.run_root);
+  // A same-ID resume re-runs the failed report agent and the runner then
+  // reports the run succeeded; synchronization publishes the later attempt.
   const recoveredEnv = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
-      status: "failed",
-      state: "failed",
+      status: "finished",
+      state: "succeeded",
       steps: [{ id: "node:final-report", state: "finished", attempt: 2 }]
     }),
     events: workflowEvents(workflowRunId, [
@@ -20241,7 +20162,8 @@ test("syncRun publishes a report after recovery of a failed report agent", async
       { type: "RunFailed" },
       { type: "NodeStarted", nodeId: "node:final-report", attempt: 2 },
       { type: "NodeFinished", nodeId: "node:final-report", attempt: 2 },
-      { type: "NodeFinished", nodeId: "verify:final-report", attempt: 2 }
+      { type: "NodeFinished", nodeId: "verify:final-report", attempt: 2 },
+      { type: "RunFinished" }
     ])
   });
   const finalReport = writeEmptyFinalReportArtifactSet(run.value.run_root, runId);
@@ -20253,11 +20175,6 @@ test("syncRun publishes a report after recovery of a failed report agent", async
     recovered.diagnostics.some((diagnostic) => diagnostic.severity === "error"),
     false,
     JSON.stringify(recovered.diagnostics)
-  );
-  const recoveredState = readRunState(path.join(run.value.run_root, "state.json"));
-  assert.equal(recoveredState.provenance?.recovery?.recovered, true);
-  assert.ok(
-    replayEvents(layoutForRunRoot(run.value.run_root)).records.some((event) => event.event_type === "run-recovered")
   );
   const recoveredReport = loadCurrentFinalReportSnapshot(run.value.run_root);
   assert.equal(recoveredReport.artifacts.source, "verified-runtime-report");
@@ -20274,6 +20191,68 @@ test("syncRun publishes a report after recovery of a failed report agent", async
     run_metadata: { ...(finalReport.report.run_metadata as Record<string, unknown>), elapsed_time: elapsed },
     completion: recoveredReport.completion
   });
+});
+
+test("syncRun follows the runner past a retry-failed recovery a pre-#961 build left prepared", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSingleFinalReportTopology(project);
+  const runId = "sync-retained-recovery-disposition";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "finished",
+      state: "succeeded",
+      steps: [{ id: "node:final-report", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:final-report", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:final-report", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeEmptyFinalReportArtifactSet(run.value.run_root, runId);
+  // Only `resume --retry-failed` before native continuation (#961) wrote a recovery
+  // disposition; one that stopped before submitting left it prepared.
+  const layout = layoutForRunRoot(run.value.run_root);
+  const state = readRunState(layout);
+  const workflow = state.provenance?.workflow;
+  assert.ok(workflow);
+  writeRunState(layout, {
+    ...state,
+    provenance: {
+      workflow,
+      recovery: {
+        recovery_id: crypto.randomUUID(),
+        submission_status: "prepared",
+        recovered: false,
+        prior_status: "failed",
+        failed_nodes: [
+          {
+            node_id: "final-report",
+            workflow_task_id: "node:final-report",
+            failed_attempt: 1,
+            failure_category: "agent-failure"
+          }
+        ],
+        source_workflow_run_id: workflow.runId,
+        source_workflow_link_id: workflow.linkId,
+        control_generation: workflow.controlGeneration,
+        controller_invocation_id: `evt-${"0".repeat(24)}`,
+        controller_invoked_at: new Date().toISOString()
+      }
+    }
+  });
+
+  const synced = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  assert.equal(synced.value?.status, "succeeded", JSON.stringify(synced.diagnostics));
 });
 
 for (const variant of ["failed-verifier", "changed-output", "exhausted-loop"] as const) {

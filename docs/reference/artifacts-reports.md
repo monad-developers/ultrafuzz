@@ -634,9 +634,9 @@ report content.
 
 An explicit retry can replace a failed attempt. A new terminal publication must
 match the current execution and successful report attempt; an older report must
-not appear as the current result of a resumed run. Verified publication still
-checks the recovery evidence before accepting a recovered product outcome that
-differs from the workflow engine's retained aggregate state.
+not appear as the current result of a resumed run. A run whose workflow engine
+run ended failed is reported failed, and verified publication rejects a
+succeeded outcome for it.
 
 ### Whole-run completion contract
 
