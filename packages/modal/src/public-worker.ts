@@ -9,8 +9,6 @@ import {
   adaptBenchmarkManifestToEvalSuite,
   benchmarkLaneConcurrency,
   benchmarkLaneSelectedTargetIds,
-  BENCHMARK_FULL_MAX_PARALLEL_RUNS,
-  BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
   boundedEvalId,
   evalSuiteInputDocument,
   evalRunRoot,
@@ -84,13 +82,11 @@ import { OperationalDispositionError, runNamingUnhandledFailure } from "./termin
 
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
-export const PUBLIC_SMITHERS_SEED_ROOT = "/opt/ultrafuzz-smithers-seed";
+const PUBLIC_SMITHERS_SEED_ROOT = "/opt/ultrafuzz-smithers-seed";
 const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
 const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
-export const PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS = BENCHMARK_SMOKE_MAX_PARALLEL_RUNS;
-export const PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS = BENCHMARK_FULL_MAX_PARALLEL_RUNS;
-export const PUBLIC_BENCHMARK_PREPARATION_PARALLELISM = 8;
+const PUBLIC_BENCHMARK_PREPARATION_PARALLELISM = 8;
 export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;
 export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;
@@ -99,12 +95,12 @@ export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
 // whose runner is OpenRouter runs one eval row at a time and one workflow node inside it.
 // Every trusted policy re-derivation reads this constant, so the launch, cleanup, and
 // publication guardrails agree with the suite the Modal worker actually runs.
-export const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;
+const PUBLIC_BENCHMARK_OPENROUTER_MAX_PARALLEL = 1;
 // The smoke graph has four sequential agent stages. Each stage may use both of
 // its 1,800-second attempts, so retain ten minutes beyond the four-hour
 // topology bound for workflow transitions and final synchronization.
-export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
-export const PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS = 15_000;
+const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
+const PUBLIC_BENCHMARK_THREAT_MODEL_MAX_RUNTIME_SECONDS = 15_000;
 // A manual full row retains the packaged specialist timeouts, including the
 // 7,200-second invariant campaign. This is a bounded row execution budget, not
 // a guarantee that every topology node can consume its worst-case timeout.
@@ -1660,14 +1656,6 @@ export function publicEvalFailureEnvelopeDiagnostics(stdout: string): WorkerDiag
   }
   if (!isPlainRecord(parsed) || !Array.isArray(parsed.diagnostics)) return undefined;
   return failedEvalDiagnostics(parsed.diagnostics);
-}
-
-export function publicEvalFailureDiagnosticLogPayload(
-  stdout: string,
-  forbiddenSecretValues: readonly string[]
-): string | undefined {
-  const diagnostics = publicEvalFailureEnvelopeDiagnostics(stdout);
-  return diagnostics === undefined ? undefined : workerDiagnosticLogPayload(diagnostics, forbiddenSecretValues);
 }
 
 export function publicEvalFailureDiagnosticLogPayloadFromRecords(

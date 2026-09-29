@@ -1,4 +1,4 @@
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parse as parseYaml } from "yaml";
 
 export const PROMPT_FRONTMATTER_FIELDS = ["id", "display_name"] as const;
 
@@ -12,12 +12,6 @@ export interface PromptFrontmatter {
 export interface ParsedPromptDocument {
   frontmatter: PromptFrontmatter;
   body: string;
-  rawFrontmatter?: string;
-  unknownFrontmatter?: Record<string, unknown>;
-}
-
-export interface ParsePromptFrontmatterOptions {
-  allowUnknownFields?: boolean;
 }
 
 export type PromptErrorCode =
@@ -27,7 +21,6 @@ export type PromptErrorCode =
   | "invalid-frontmatter"
   | "invalid-prompt-path"
   | "invalid-render-input"
-  | "invalid-rename"
   | "missing-template-variable"
   | "not-ancestor"
   | "symlink-prompt-path"
@@ -47,10 +40,7 @@ export class PromptError extends Error {
   }
 }
 
-export function parsePromptFrontmatter(
-  markdown: string,
-  options: ParsePromptFrontmatterOptions = {}
-): ParsedPromptDocument {
+export function parsePromptFrontmatter(markdown: string): ParsedPromptDocument {
   const frontmatterBlock = readFrontmatterBlock(markdown);
   if (!frontmatterBlock) {
     return {
@@ -76,16 +66,12 @@ export function parsePromptFrontmatter(
     throw new PromptError("invalid-frontmatter", "prompt frontmatter must be a YAML mapping");
   }
 
-  const unknownFrontmatter: Record<string, unknown> = {};
   for (const key of Object.keys(parsed)) {
     if (key === "category") {
       throw new PromptError("invalid-frontmatter", "`category` is no longer supported in prompt frontmatter");
     }
     if (!PROMPT_FRONTMATTER_FIELDS.includes(key as PromptFrontmatterField)) {
-      if (!options.allowUnknownFields) {
-        throw new PromptError("invalid-frontmatter", `unsupported prompt frontmatter field: ${key}`);
-      }
-      unknownFrontmatter[key] = parsed[key];
+      throw new PromptError("invalid-frontmatter", `unsupported prompt frontmatter field: ${key}`);
     }
   }
 
@@ -105,59 +91,7 @@ export function parsePromptFrontmatter(
   }
   return {
     frontmatter,
-    body: frontmatterBlock.body,
-    rawFrontmatter: frontmatterBlock.raw,
-    ...(Object.keys(unknownFrontmatter).length > 0 ? { unknownFrontmatter } : {})
-  };
-}
-
-export function serializePromptDocument(
-  frontmatter: PromptFrontmatter,
-  body: string,
-  unknownFrontmatter: Record<string, unknown> = {}
-): string {
-  const mapping: Record<string, unknown> = {};
-  for (const key of PROMPT_FRONTMATTER_FIELDS) {
-    const value = frontmatter[key];
-    if (value !== undefined) {
-      mapping[key] = value;
-    }
-  }
-  for (const [key, value] of Object.entries(unknownFrontmatter)) {
-    if (!(key in mapping)) {
-      mapping[key] = value;
-    }
-  }
-
-  if (Object.keys(mapping).length === 0) {
-    return body;
-  }
-
-  const yaml = stringifyYaml(mapping, { sortMapEntries: true }).trimEnd();
-  const normalizedBody = body.startsWith("\n") ? body.slice(1) : body;
-  return `---\n${yaml}\n---\n\n${normalizedBody}`;
-}
-
-export interface PromptIdentityDiff {
-  idChanged: boolean;
-  displayNameChanged: boolean;
-  executionIdentityChanged: boolean;
-  displayNameOnly: boolean;
-}
-
-export function diffPromptIdentity(beforeMarkdown: string, afterMarkdown: string): PromptIdentityDiff {
-  const before = parsePromptFrontmatter(beforeMarkdown);
-  const after = parsePromptFrontmatter(afterMarkdown);
-
-  const idChanged = before.frontmatter.id !== after.frontmatter.id;
-  const displayNameChanged = before.frontmatter.display_name !== after.frontmatter.display_name;
-  const executionIdentityChanged = idChanged || before.body !== after.body;
-
-  return {
-    idChanged,
-    displayNameChanged,
-    executionIdentityChanged,
-    displayNameOnly: displayNameChanged && !executionIdentityChanged
+    body: frontmatterBlock.body
   };
 }
 

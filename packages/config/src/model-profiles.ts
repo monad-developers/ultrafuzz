@@ -66,10 +66,6 @@ export function validProfileId(id: string): boolean {
   return profileIdSchema.safeParse(id).success;
 }
 
-export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: DefaultProfileOverrides): void {
-  applyModelProfileOverrides(config, config.models.default, overrides);
-}
-
 export function applyModelProfileOverrides(
   config: ResolvedConfig,
   profileId: string,

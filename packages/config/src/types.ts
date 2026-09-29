@@ -3,14 +3,7 @@ import type { AuditProfileSettings, DynamicStrategiesEnumerator } from "./audit-
 export type DiagnosticSeverity = "error" | "warning";
 
 export type ConfigDiagnosticSource =
-  | "defaults"
-  | "audit-profile"
-  | "prompt-metadata"
-  | "project-toml"
-  | "environment"
-  | "runtime"
-  | "validation"
-  | "redaction";
+  "defaults" | "audit-profile" | "project-toml" | "environment" | "runtime" | "validation";
 
 export interface ConfigDiagnostic {
   code: string;
@@ -240,11 +233,6 @@ export interface AuditProfileResolution {
 export type AuditProfileSettingOrigin =
   "default" | "audit-profile" | "project-config" | "environment" | "runtime-override";
 
-export interface PromptMetadataLayer {
-  models?: Record<string, Partial<ModelProfile> & { id?: string }>;
-  run?: Partial<RunConfig>;
-}
-
 export interface ProjectConfigInput {
   schemaVersion?: typeof PROJECT_CONFIG_SCHEMA_VERSION;
   auditProfile?: string;
@@ -304,7 +292,6 @@ export interface RuntimeConfigOverrides extends ProjectConfigInput {
 
 export interface ResolveConfigInput {
   projectConfig?: ProjectConfigInput;
-  promptMetadata?: PromptMetadataLayer;
   env?: Record<string, string | undefined>;
   runtimeOverrides?: RuntimeConfigOverrides;
 }
