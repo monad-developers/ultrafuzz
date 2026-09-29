@@ -13561,9 +13561,10 @@ test("status keeps reporting runner health when run-state synchronization fails"
   );
   fs.rmSync(failEvents);
 
-  // A torn ledger append makes the synchronization itself throw.
-  fs.appendFileSync(path.join(runRoot, "usage.jsonl"), '{"torn":');
-  const thrown = await reportedHealth("torn usage ledger");
+  // A second link to the event journal leaves it readable, but the pass refuses
+  // to append to a hard-linked journal, so the synchronization itself throws.
+  fs.linkSync(path.join(runRoot, "events.jsonl"), path.join(project, "events-journal-link.jsonl"));
+  const thrown = await reportedHealth("hard-linked event journal");
   assert.ok(
     thrown.some((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_FAILED" && diagnostic.severity === "warning"),
     JSON.stringify(thrown)
@@ -25702,7 +25703,14 @@ test("native continuation hands generated agents the run's TOML config, so Codex
   // Build the stock adapter from the config path the resumed runner received.
   // The init config selects `auth = "api-key"` for CodexAgent; an adapter that
   // cannot read it falls back to subscription auth and clears the key.
-  const { createCodexAgent } = await loadGeneratedCodexAgent(project);
+  // The adapter loads its route helpers from the runtime module a launch stages,
+  // which this copy outside the run cannot reach; point it at this build, as the
+  // Bun adapter tests do.
+  const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE;
+  process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/index.js", import.meta.url).href;
+  const { createCodexAgent } = await loadGeneratedCodexAgent(project).finally(() => {
+    if (runtimeModule === undefined) delete process.env.ULTRAFUZZ_RUNTIME_MODULE;
+  });
   const previous = { config: process.env.ULTRAFUZZ_CONFIG_PATH, key: process.env.OPENAI_API_KEY };
   process.env.ULTRAFUZZ_CONFIG_PATH = fs.readFileSync(configPathLog, "utf8").trim();
   process.env.OPENAI_API_KEY = "continuation-codex-key";
