@@ -343,6 +343,7 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
       }
     ]);
   }
+  const failed = diagnosis.status === "failed";
   return runtimeResult<DiagnoseRunValue>(
     true,
     {
@@ -350,14 +351,19 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
       workflow_run_id: evidence.smithersRunId,
       run_status: runStatus,
       workflow_status: diagnosis.status,
-      summary: publicWorkflowText(diagnosis.summary),
+      summary: publicRecoveryText(diagnosis.summary, input.runId, failed),
       current_node_id: diagnosis.currentNodeId,
-      blockers: diagnosis.blockers.map(adaptBlocker),
+      // An unblocker is one whole runner command.
+      blockers: diagnosis.blockers.map((row) =>
+        adaptBlocker(row, ultrafuzzRecoveryCommand(row.unblocker, input.runId, failed))
+      ),
       // The runner renders `warnings` and `information` in the same operator
       // section of `why`, so they land in the same public `notes` list rather
       // than a new field nothing downstream reads. Warnings lead, matching the
       // runner's own ordering.
-      notes: [...diagnosis.warnings, ...diagnosis.information].map(publicWorkflowText),
+      notes: [...diagnosis.warnings, ...diagnosis.information].map((note) =>
+        publicRecoveryText(note, input.runId, failed)
+      ),
       generated_at: timestampFromMs(diagnosis.generatedAtMs)
     },
     syncDiagnostics
@@ -1710,13 +1716,13 @@ function contractError(message: string, cause?: unknown): never {
   throw new SmithersInspectionContractError(message, cause === undefined ? undefined : { cause });
 }
 
-function adaptBlocker(row: CurrentWhyBlocker): RunBlocker {
+function adaptBlocker(row: CurrentWhyBlocker, unblocker: string | undefined): RunBlocker {
   return {
     kind: row.kind,
     node_id: row.nodeId,
     iteration: row.iteration,
     reason: publicWorkflowText(row.reason),
-    unblocker: publicWorkflowText(row.unblocker),
+    unblocker: unblocker ?? publicWorkflowText(row.unblocker),
     waiting_since: timestampFromMs(row.waitingSince),
     attempt: row.attempt ?? null,
     max_attempts: row.maxAttempts ?? null
@@ -1944,6 +1950,52 @@ function publicWorkflowText(value: string): string {
           : `${open}workflow runner ${command}${close}`
     )
   );
+}
+
+/**
+ * Runner prose with each recovery command it quotes in backticks rebuilt as the `ultrafuzz` command.
+ * A rebuilt command skips the scrub, which would rewrite a run ID that contains "smithers".
+ */
+function publicRecoveryText(value: string, runId: string, runFailed: boolean): string {
+  return value
+    .split(/(`smithers [^`]+`)/u)
+    .map((part, index) => {
+      const command = index % 2 === 1 ? ultrafuzzRecoveryCommand(part.slice(1, -1), runId, runFailed) : undefined;
+      return command === undefined ? publicWorkflowText(part) : `\`${command}\``;
+    })
+    .join("");
+}
+
+/**
+ * The `ultrafuzz` command that does what a runner recovery command does. The runner's command names
+ * its own CLI, its workflow file and its own run ID, none of which `ultrafuzz` takes, so the command is
+ * rebuilt from the Ultrafuzz run ID rather than renamed. On a failed run a plain resume leaves every
+ * failed node failed, so resuming or retrying a task there becomes `--retry-failed`, which also retries
+ * a failed artifact verifier from its producer. Undefined when `ultrafuzz` has no such command, as for
+ * approving or signalling, which generated workflows never wait on.
+ */
+function ultrafuzzRecoveryCommand(runnerCommand: string, runId: string, runFailed: boolean): string | undefined {
+  const [runner, command, ...args] = runnerCommand.trim().split(/\s+/u);
+  const option = (name: string) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+  if (runner !== "smithers") return undefined;
+  switch (command) {
+    case "up":
+    case "retry-task": {
+      const node = command === "retry-task" ? option("--node-id") : undefined;
+      if (runFailed) return `ultrafuzz resume ${runId} --retry-failed`;
+      return node === undefined ? `ultrafuzz resume ${runId}` : `ultrafuzz resume ${runId} --reset-node ${node}`;
+    }
+    case "replay": {
+      const frame = option("--frame");
+      return frame === undefined ? undefined : `ultrafuzz fork ${runId} --frame ${frame}`;
+    }
+    case "logs":
+      return `ultrafuzz events ${runId} --watch`;
+    case "inspect":
+      return `ultrafuzz inspect ${runId}`;
+    default:
+      return undefined;
+  }
 }
 
 function timestampFromMs(value: number): string;

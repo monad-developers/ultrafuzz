@@ -207,7 +207,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
             iteration: 0,
             reason: "3 identical failures in a row",
             waitingSince: 1_699_999_700_000,
-            unblocker: "smithers resume --retry-failed"
+            // The pinned runner's own suggestion names its CLI, its workflow file and its run ID.
+            unblocker: `smithers retry-task ${path.join(project, ".smithers", "workflows", `${WORKFLOW_RUN_ID}.tsx`)} --run-id ${WORKFLOW_RUN_ID} --node-id node:strategy --iteration 0`
           }
         ]
       },
@@ -395,6 +396,7 @@ test("why reports the diagnosis in human and JSON output", async (t) => {
   assert.match(human.stdout, /^Current node: node:project-discovery$/mu);
   assert.match(human.stdout, /waiting-approval: waiting on a human approval \(attempt 1\/3\)/u);
   assert.match(human.stdout, /unblock with: approve the pending request/u);
+  assert.match(human.stdout, /^ {2}unblock with: ultrafuzz resume lifecycle-cli-run --reset-node node:strategy$/mu);
   assert.doesNotMatch(human.stdout, /smithers/iu);
 
   const json = await cli(project, ["why", RUN_ID, "--json"], env);
