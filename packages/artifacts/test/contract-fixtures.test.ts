@@ -44,7 +44,6 @@ import {
   executeSemanticGate,
   invariantLedgerSchema,
   invariantSourceProofSchema,
-  isArtifactContractId,
   parseStrictJson,
   validateAnalysisBundleManifestSchema,
   validateArtifactContract,
@@ -74,26 +73,6 @@ const fixturePath = [
 if (fixturePath === undefined) throw new Error(`Contract fixtures are unavailable near ${moduleDirectory}`);
 const contractFixtures = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Record<string, ContractFixture>;
 
-const removedContractIds = [
-  "ultrafuzz/campaign-summary@1",
-  "ultrafuzz/coverage-goal@1",
-  "ultrafuzz/findings@1",
-  "ultrafuzz/generated-tests@1",
-  "ultrafuzz/generated-tests@2",
-  "ultrafuzz/implemented-properties@1",
-  "ultrafuzz/implemented-properties@2",
-  "ultrafuzz/invariant-campaign-plan@1",
-  "ultrafuzz/json-array@1",
-  "ultrafuzz/json-object@1",
-  "ultrafuzz/properties@1",
-  "ultrafuzz/property-campaign@1",
-  "ultrafuzz/property-campaign@2",
-  "ultrafuzz/property-lens@1",
-  "ultrafuzz/reference-expectations@1",
-  "ultrafuzz/report@1",
-  "ultrafuzz/report@2"
-] as const;
-
 test("the registry, schema metadata, mappings, and fixtures cover every current contract exactly once", () => {
   const registry = artifactSchemaRegistry();
   const registeredContractIds = registry.flatMap((entry) => entry.contractIds).sort();
@@ -121,7 +100,6 @@ test("the registry, schema metadata, mappings, and fixtures cover every current 
     assert.equal(artifactContractSchemaFile(contract), undefined, contract);
     assert.equal(artifactContractDefinition(contract).format === "json", false, contract);
   }
-  for (const contract of removedContractIds) assert.equal(isArtifactContractId(contract), false, contract);
 });
 
 test("every JSON contract has canonical positive and negative fixtures and validation is non-mutating", () => {

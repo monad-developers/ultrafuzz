@@ -1129,10 +1129,8 @@ const fixtures = {
   }
 } satisfies Partial<Record<SemanticGateName, GateFixture>>;
 
-test("the exact-name registry matches metadata and declares honest scopes", () => {
-  const metadataNames = Object.values(ARTIFACT_SCHEMA_METADATA).flatMap((entry) => entry.semanticGates);
-  assert.equal(new Set(metadataNames).size, metadataNames.length, "metadata must not repeat gate names");
-  assert.deepEqual(Object.keys(SEMANTIC_GATE_REGISTRY).sort(), [...metadataNames].sort());
+// Registry and metadata name agreement is asserted when semantic-gates.ts loads.
+test("the exact-name registry declares honest scopes", () => {
   for (const [name, registration] of Object.entries(SEMANTIC_GATE_REGISTRY)) {
     assert.equal(registration.name, name);
     assert.ok(SEMANTIC_GATE_SCOPES.includes(registration.scope));
