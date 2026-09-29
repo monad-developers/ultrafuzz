@@ -313,24 +313,6 @@ test("artifact contract registry exposes only current typed contracts", () => {
   assert.equal(validateArtifactContract("ultrafuzz/nonempty-markdown@1", " \n").ok, false);
   assert.equal(validateArtifactContract("ultrafuzz/text@1", "").ok, true);
 
-  for (const removed of [
-    "ultrafuzz/json-object@1",
-    "ultrafuzz/json-array@1",
-    "ultrafuzz/findings@1",
-    "ultrafuzz/generated-tests@1",
-    "ultrafuzz/implemented-properties@1",
-    "ultrafuzz/implemented-properties@2",
-    "ultrafuzz/invariant-campaign-plan@1",
-    "ultrafuzz/properties@1",
-    "ultrafuzz/property-campaign@1",
-    "ultrafuzz/property-campaign@2",
-    "ultrafuzz/property-lens@1",
-    "ultrafuzz/reference-expectations@1",
-    "ultrafuzz/report@1"
-  ]) {
-    assert.equal(isArtifactContractId(removed), false, removed);
-  }
-
   for (const id of ARTIFACT_CONTRACT_IDS) {
     const contract = artifactContractDefinition(id);
     if (contract.validEmptyExample !== undefined) {

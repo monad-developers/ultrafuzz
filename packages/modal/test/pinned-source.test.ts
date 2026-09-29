@@ -70,15 +70,6 @@ describe("pinned benchmark source", () => {
     );
   });
 
-  it("uses bounded git revision queries for source proof inspection", () => {
-    const source = fs.readFileSync(new URL("../src/pinned-source.ts", import.meta.url), "utf8");
-
-    expect(source).toContain('["rev-list", "--all", "--count"]');
-    expect(source).toContain('["rev-list", "--all", "--max-count=1"]');
-    expect(source).toContain("git fsck --connectivity-only --unreachable --no-reflogs --no-progress");
-    expect(source).not.toContain("--batch-all-objects");
-  });
-
   it("materializes only the requested commit without the remote default branch or later objects", async () => {
     const fixture = sourceRepository();
     const destination = path.join(fixture.root, "sanitized");
@@ -200,6 +191,9 @@ describe("pinned benchmark source", () => {
     expect(invocations).toContain(
       [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "update", "--init", "--recursive", "--depth", "1"].join(" ")
     );
+    // Source proof inspection ran under the probe, and counted revisions without enumerating every object.
+    expect(invocations).toContain("rev-list --all --count");
+    expect(invocations.filter((line) => line.includes("--batch-all-objects"))).toEqual([]);
     expect(proof).toMatchObject({ commit: fixture.pinned, revision_count: 1, remotes: [] });
     expect(proof.schema_version).toBe("ultrafuzz.pinned-source-proof.v2");
     expect(proof.submodules).toMatchObject({

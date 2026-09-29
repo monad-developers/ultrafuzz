@@ -16,8 +16,10 @@
     "packages/modal": {
       "entry": [
         "src/index.ts",
+        "src/cli.ts",
         "scripts/prepare-smithers-seed.mjs",
         "src/worker.ts",
+        "src/smoke-worker.ts",
         "test/modal-download-helper-fixture.mjs"
       ]
     },
