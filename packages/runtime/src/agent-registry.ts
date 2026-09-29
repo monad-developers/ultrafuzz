@@ -5,8 +5,9 @@ import { readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts"
 import type * as TypeScript from "typescript";
 import { errorMessage } from "@ultrafuzz/artifacts";
 
-// Required by analyzeAgentRegistry rather than imported: every Smithers engine process imports this
-// package's index through the generated workflow, and only `validate` and `init` analyze a registry.
+// Required by analyzeAgentRegistry rather than imported: every ultrafuzz CLI process imports this
+// package's index, including each agent's `json validate` call, and only `validate` and `init` analyze a
+// registry. (Smithers engine processes load TypeScript through smthrs anyway.)
 let ts: typeof TypeScript;
 
 export const AGENT_REGISTRY_RELATIVE_PATH = ".smithers/agents/index.ts";

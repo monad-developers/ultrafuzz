@@ -12,9 +12,9 @@ import { temporaryRoot } from "./temporary-root.js";
 
 /**
  * Every Smithers engine process parses and transpiles the whole generated workflow (#1146). With a
- * fixed-length project root the packaged default topology compiles to 2,070,382 bytes, 1.59 MB of it
- * the same 65 tasks serialized twice (as compiled tasks and as task specs). Raise this only
- * deliberately: #1146 asks for the file to shrink.
+ * fixed-length project root the packaged default topology compiles to about 2.06-2.07 MB (the exact
+ * size varies between environments), 1.59 MB of it the same 65 tasks serialized twice (as compiled
+ * tasks and as task specs). Raise this only deliberately: #1146 asks for the file to shrink.
  */
 const GENERATED_DEFAULT_WORKFLOW_BUDGET_BYTES = 2_300_000;
 
@@ -54,8 +54,9 @@ test("the packaged default topology compiles to a generated workflow under its b
 });
 
 test("importing the runtime package does not load the TypeScript compiler", () => {
-  // The generated workflow imports this package's index in every engine process. Run the import in a
-  // fresh process so this test file's own TypeScript import cannot mask it.
+  // Every ultrafuzz CLI process, including each agent's validator call, imports this package's index.
+  // (Engine processes load TypeScript through smthrs regardless.) Run the import in a fresh process so
+  // this test file's own TypeScript import cannot mask it.
   const project = temporaryRoot("ufz-footprint-registry-");
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const runtimeIndex = new URL("../src/index.js", import.meta.url).href;

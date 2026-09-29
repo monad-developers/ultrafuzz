@@ -3746,7 +3746,7 @@ function assertRefreshedModuleAuthority(
   }
   const dependencies = new Set(Object.keys(issuers[0]!.dependencies));
   const executablePaths = new Set(dependencyMap.executable_paths);
-  // Required here rather than imported: the generated workflow imports this module in every engine process.
+  // Required here rather than imported: every ultrafuzz CLI process imports this module.
   const ts = createRequire(import.meta.url)("typescript") as typeof TypeScript;
   for (const file of files) {
     if (file.executable !== executablePaths.has(file.snapshotPath)) {
