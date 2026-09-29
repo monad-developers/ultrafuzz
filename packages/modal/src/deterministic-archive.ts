@@ -108,7 +108,7 @@ export async function writeDeterministicTarGzip(rootPath: string, outputPath: st
       // asynchronously. Wait for that close and never close the number again: by then it may name
       // another file. A stream error while closing must not replace the error being reported.
       const stream = output;
-      const closed = stream.closed ? undefined : new Promise<void>((resolve) => stream.once("close", () => resolve()));
+      const closed = stream.closed ? undefined : new Promise<void>((resolve) => stream.once("close", resolve));
       stream.on("error", () => undefined);
       stream.destroy();
       await closed;
