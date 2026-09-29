@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import { packagedTopology } from "@ultrafuzz/config";
 
 import { runCli } from "../src/index.js";
+import { temporaryRoot } from "./temporary-root.js";
 
 interface Capture {
   stdout: string;
@@ -14,8 +14,8 @@ interface Capture {
   code: number;
 }
 
-function tempProject(): string {
-  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-cli-profile-"));
+function tempProject(t: TestContext): string {
+  return temporaryRoot("ufz-cli-profile-", t);
 }
 
 async function cli(project: string, argv: string[]): Promise<Capture> {
@@ -44,8 +44,8 @@ function data(capture: Capture): Record<string, unknown> {
   return (JSON.parse(capture.stdout) as { data: Record<string, unknown> }).data;
 }
 
-test("profile list and detail expose the catalog and effective project policy", async () => {
-  const project = tempProject();
+test("profile list and detail expose the catalog and effective project policy", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   assert.deepEqual(
     fs.readFileSync(path.join(project, ".ultrafuzz", "topology.yml")),
@@ -84,8 +84,8 @@ test("profile list and detail expose the catalog and effective project policy", 
   assert.equal(detailData.effective_settings.strategy_loops, 1);
 });
 
-test("topology list, show, and copy use the packaged assets safely", async () => {
-  const project = tempProject();
+test("topology list, show, and copy use the packaged assets safely", async (t) => {
+  const project = tempProject(t);
   const listed = await cli(project, ["topology", "list", "--json"]);
   assert.equal(listed.code, 0, listed.stderr);
   const listData = data(listed) as {
@@ -128,8 +128,8 @@ test("topology list, show, and copy use the packaged assets safely", async () =>
   assert.equal(fs.existsSync(path.join(project, "..", "outside.yml")), false);
 });
 
-test("validate accepts CLI profile and topology overrides with the documented precedence", async () => {
-  const project = tempProject();
+test("validate accepts CLI profile and topology overrides with the documented precedence", async (t) => {
+  const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
 

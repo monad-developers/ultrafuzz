@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import { runCli } from "../src/index.js";
+import { temporaryRoot } from "./temporary-root.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-lifecycle-cli-run";
 const RUN_ID = "lifecycle-cli-run";
@@ -15,8 +15,8 @@ interface Capture {
   code: number;
 }
 
-function tempProject(): string {
-  return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-lifecycle-cli-"));
+function tempProject(t: TestContext): string {
+  return temporaryRoot("ufz-lifecycle-cli-", t);
 }
 
 function shellQuote(value: string): string {
@@ -372,9 +372,10 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
 }
 
 async function launchedProject(
+  t: TestContext,
   options: { cancelStatus?: string } = {}
 ): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
-  const project = tempProject();
+  const project = tempProject(t);
   const env = fakeEnv(project, options);
   const init = await cli(project, ["init", "--json"], env);
   assert.equal(init.code, 0, init.stderr);
@@ -385,8 +386,8 @@ async function launchedProject(
   return { project, env, runRoot: runData.run_root };
 }
 
-test("why reports the diagnosis in human and JSON output", async () => {
-  const { project, env } = await launchedProject();
+test("why reports the diagnosis in human and JSON output", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const human = await cli(project, ["why", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
@@ -408,8 +409,8 @@ test("why reports the diagnosis in human and JSON output", async () => {
   assert.equal(data.blockers[1]?.node_id, "node:strategy");
 });
 
-test("timeline surfaces frame numbers for fork --frame", async () => {
-  const { project, env } = await launchedProject();
+test("timeline surfaces frame numbers for fork --frame", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const human = await cli(project, ["timeline", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
@@ -429,8 +430,8 @@ test("timeline surfaces frame numbers for fork --frame", async () => {
   );
 });
 
-test("snapshots lists checkpoints without engine-internal identifiers", async () => {
-  const { project, env } = await launchedProject();
+test("snapshots lists checkpoints without engine-internal identifiers", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const human = await cli(project, ["snapshots", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
@@ -444,8 +445,8 @@ test("snapshots lists checkpoints without engine-internal identifiers", async ()
   assert.doesNotMatch(JSON.stringify(body), /commit-1|op-1|workspace/u);
 });
 
-test("events returns bounded lifecycle events in human and JSON output", async () => {
-  const { project, env } = await launchedProject();
+test("events returns bounded lifecycle events in human and JSON output", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const human = await cli(project, ["events", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
@@ -460,8 +461,8 @@ test("events returns bounded lifecycle events in human and JSON output", async (
   assert.doesNotMatch(fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8"), /--raw/u);
 });
 
-test("events --watch streams one line per event and terminates", async () => {
-  const { project, env } = await launchedProject();
+test("events --watch streams one line per event and terminates", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const human = await cli(project, ["events", RUN_ID, "--watch", "--interval", "1"], env);
   assert.equal(human.code, 0, human.stderr);
@@ -482,8 +483,8 @@ test("events --watch streams one line per event and terminates", async () => {
   }
 });
 
-test("node reports focused status and only expands tool payloads with --tools", async () => {
-  const { project, env } = await launchedProject();
+test("node reports focused status and only expands tool payloads with --tools", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const human = await cli(project, ["node", RUN_ID, "node:project-discovery"], env);
   assert.equal(human.code, 0, human.stderr);
@@ -510,8 +511,8 @@ test("node reports focused status and only expands tool payloads with --tools", 
   assert.deepEqual(data.attempts[0]?.tool_calls[0]?.input, { command: "forge build" });
 });
 
-test("node --watch emits NDJSON envelopes and terminates", async () => {
-  const { project, env } = await launchedProject();
+test("node --watch emits NDJSON envelopes and terminates", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const watched = await cli(project, ["node", RUN_ID, "node:project-discovery", "--watch", "--json"], env);
 
@@ -527,8 +528,8 @@ test("node --watch emits NDJSON envelopes and terminates", async () => {
   );
 });
 
-test("events rejects a raw event category instead of widening the view", async () => {
-  const { project, env } = await launchedProject();
+test("events rejects a raw event category instead of widening the view", async (t) => {
+  const { project, env } = await launchedProject(t);
 
   const rejected = await cli(project, ["events", RUN_ID, "--type", "agent", "--json"], env);
 
@@ -544,8 +545,8 @@ test("events rejects a raw event category instead of widening the view", async (
   assert.equal(accepted.code, 0, accepted.stderr);
 });
 
-test("events --watch --json keeps a stream failure on one NDJSON line", async () => {
-  const { project, env } = await launchedProject();
+test("events --watch --json keeps a stream failure on one NDJSON line", async (t) => {
+  const { project, env } = await launchedProject(t);
   fs.writeFileSync(path.join(project, "fake-events-failure"), "stream broke\n", "utf8");
 
   const watched = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
@@ -559,8 +560,8 @@ test("events --watch --json keeps a stream failure on one NDJSON line", async ()
   assertNoEngineBranding(body);
 });
 
-test("cancel distinguishes a submitted request from a confirmed cancellation", async () => {
-  const requested = await launchedProject({ cancelStatus: "cancel-requested" });
+test("cancel distinguishes a submitted request from a confirmed cancellation", async (t) => {
+  const requested = await launchedProject(t, { cancelStatus: "cancel-requested" });
 
   const human = await cli(requested.project, ["cancel", RUN_ID], requested.env);
   assert.equal(human.code, 0, human.stderr);
@@ -570,7 +571,7 @@ test("cancel distinguishes a submitted request from a confirmed cancellation", a
   };
   assert.equal(runningState.status, "running");
 
-  const confirmed = await launchedProject({ cancelStatus: "cancelled" });
+  const confirmed = await launchedProject(t, { cancelStatus: "cancelled" });
   const json = await cli(confirmed.project, ["cancel", RUN_ID, "--json"], confirmed.env);
   assert.equal(json.code, 0, json.stderr);
   const body = parseJson(json);
@@ -584,8 +585,8 @@ test("cancel distinguishes a submitted request from a confirmed cancellation", a
   assert.match(humanConfirmed.stdout, /^Cancellation confirmed: lifecycle-cli-run is canceled$/mu);
 });
 
-test("doctor reports install posture in human and JSON output", async () => {
-  const { project, env } = await launchedProject();
+test("doctor reports install posture in human and JSON output", async (t) => {
+  const { project, env } = await launchedProject(t);
   writeSmallTopology(project, "recon");
   const doctorEnv = { ...env, PATH: path.dirname(env.SMITHERS_BIN!) };
 
@@ -642,8 +643,8 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.ok(overrideBody.diagnostics.some((diagnostic) => diagnostic.code === "DOCTOR_AGENT_CREDENTIAL_MISSING"));
 });
 
-test("status recommends ultrafuzz why instead of the engine command", async () => {
-  const project = tempProject();
+test("status recommends ultrafuzz why instead of the engine command", async (t) => {
+  const project = tempProject(t);
   const binDir = path.join(path.dirname(project), path.basename(project) + "-fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
