@@ -9,8 +9,6 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
-  artifactContractDefinition,
-  artifactContractSchemaBinding,
   boundArtifactValidationWarnings,
   layoutForRunRoot,
   parseStrictJsonBytes,
@@ -39,7 +37,11 @@ import {
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 
-import { verifyRequiredArtifactsForAttempt, type ArtifactGateAttemptAuthority } from "./artifact-gates.js";
+import {
+  verifyRequiredArtifactSchemaBinding,
+  verifyRequiredArtifactsForAttempt,
+  type ArtifactGateAttemptAuthority
+} from "./artifact-gates.js";
 import { authenticatedDependencyAdmissionAttemptIds } from "./dependency-admission.js";
 import { loadGoalSearchCoverageSnapshot, projectCanonicalFinalReport } from "./final-report-markdown.js";
 import { verifySealedTaskManifestSnapshot, type VerifiedSealedTaskManifestSnapshot } from "./workflow-integrity.js";
@@ -369,7 +371,7 @@ function loadFinalizedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): F
 
   const artifactDir = safeResolveInside(layout.artifactsDir, candidate.attemptId, "verified artifact directory");
   const publicationSnapshots = readAndBindPublications(artifactDir, plannedNode, documents);
-  const outputSnapshots = validatePlannedOutputSnapshots(artifactDir, plannedNode, publicationSnapshots);
+  const outputSnapshots = validatePlannedOutputSnapshots(layout, artifactDir, plannedNode, publicationSnapshots);
   assertPropertyCampaignEvidencePublications(outputSnapshots, publicationSnapshots);
 
   const manifestSeal = finalizedManifestSeal(candidate.state);
@@ -1170,15 +1172,28 @@ function readAndBindGateContextFiles(
 }
 
 function validatePlannedOutputSnapshots(
+  layout: RunLayout,
   artifactDir: string,
   plannedNode: PlannedGraphNodeDocument,
   publications: ReadonlyMap<string, PublicationSnapshot>
 ): VerifiedOutputArtifactSnapshot[] {
   return plannedNode.outputs.map((output) => {
-    assertCurrentContractBinding(output);
     const publication = publications.get(output.path);
     if (publication === undefined) throw invalidAuthority(`planned output is not published: ${output.path}`);
-    const validation = validateArtifactContractBytes(output.contract, publication.bytes, publication.absolutePath);
+    // A schema-backed output is validated against the schema content it was planned with, not this
+    // build's, so a later rebuild or upgrade cannot turn an already verified output invalid (#921).
+    const schemaIssues = verifyRequiredArtifactSchemaBinding(
+      layout,
+      publication.absolutePath,
+      output,
+      publication.bytes
+    );
+    const validation =
+      schemaIssues.length > 0
+        ? { ok: false, issues: schemaIssues, value: undefined }
+        : output.schema_file === undefined
+          ? validateArtifactContractBytes(output.contract, publication.bytes, publication.absolutePath)
+          : { ok: true, issues: [], value: parseStrictJsonBytes(publication.bytes) };
     if (!validation.ok) {
       throw invalidOutput(
         `verified output failed ${output.contract} validation for ${output.path}: ${validation.issues
@@ -1343,27 +1358,6 @@ function assertRunAuthorityIdentity(layout: RunLayout, state: RunState): void {
   }
 }
 
-function assertCurrentContractBinding(output: PlannedGraphOutput): void {
-  const definition = artifactContractDefinition(output.contract);
-  if (definition.digest !== output.contract_digest) {
-    throw invalidAuthority(`current contract digest changed for ${output.path}`);
-  }
-  const binding = artifactContractSchemaBinding(output.contract);
-  const actualBinding = schemaBinding(output);
-  if (
-    binding === undefined
-      ? actualBinding !== undefined
-      : actualBinding === undefined ||
-        binding.schema_file !== actualBinding.schema_file ||
-        binding.schema_id !== actualBinding.schema_id ||
-        binding.schema_sha256 !== actualBinding.schema_sha256 ||
-        binding.validator_build !== actualBinding.validator_build ||
-        !/^[0-9a-f]{64}$/u.test(actualBinding.schema_bundle_sha256)
-  ) {
-    throw invalidAuthority(`current JSON Schema binding changed for ${output.path}`);
-  }
-}
-
 function sameOutputContracts(
   actual: readonly ArtifactManifestOutputContract[],
   expected: readonly PlannedGraphOutput[]
@@ -1386,17 +1380,6 @@ function sameVerificationArtifacts(
 function withoutSha256(entry: ArtifactVerificationEntry): Omit<ArtifactVerificationEntry, "sha256"> {
   const { sha256: _sha256, ...binding } = entry;
   return binding;
-}
-
-function schemaBinding(output: PlannedGraphOutput): ReturnType<typeof artifactContractSchemaBinding> {
-  if (output.schema_file === undefined) return undefined;
-  return Object.freeze({
-    schema_file: output.schema_file,
-    schema_id: output.schema_id!,
-    schema_sha256: output.schema_sha256!,
-    schema_bundle_sha256: output.schema_bundle_sha256!,
-    validator_build: output.validator_build!
-  });
 }
 
 function concreteNodeIdFromManifest(manifest: ArtifactManifest): string | undefined {

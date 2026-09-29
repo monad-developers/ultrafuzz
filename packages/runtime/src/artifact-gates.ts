@@ -3294,49 +3294,40 @@ function readStrictRegisteredDocument(artifactPath: string, schemaFilename: Arti
   return document;
 }
 
-function verifyRequiredArtifactSchemaBinding(
+/**
+ * Validate one artifact against the schema content its planned output names. Verified reads use the
+ * same check, so a verified output stays valid for as long as its own schema snapshot exists.
+ */
+export function verifyRequiredArtifactSchemaBinding(
   layout: RunLayout,
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number],
   artifactBytes: Uint8Array
 ): RuntimeDiagnostic[] {
   const current = artifactContractSchemaBinding(output.contract);
-  const actual = {
+  const planned = {
     schema_file: output.schema_file,
     schema_id: output.schema_id,
     schema_sha256: output.schema_sha256,
     schema_bundle_sha256: output.schema_bundle_sha256,
     validator_build: output.validator_build
   };
-  if (current === undefined) {
-    if (Object.values(actual).every((value) => value === undefined)) return [];
-    return [schemaBindingMismatchDiagnostic(absolutePath, output, null, actual)];
-  }
-  if (
-    current.schema_file !== actual.schema_file ||
-    current.schema_id !== actual.schema_id ||
-    current.schema_sha256 !== actual.schema_sha256 ||
-    current.validator_build !== actual.validator_build ||
-    typeof actual.schema_bundle_sha256 !== "string" ||
-    !/^[0-9a-f]{64}$/u.test(actual.schema_bundle_sha256)
-  ) {
-    return [schemaBindingMismatchDiagnostic(absolutePath, output, current, actual)];
+  if (current === undefined && Object.values(planned).every((value) => value === undefined)) return [];
+  if (current === undefined || planned.schema_file === undefined || planned.schema_bundle_sha256 === undefined) {
+    return [schemaBindingMismatchDiagnostic(absolutePath, output, planned)];
   }
 
-  const expected = {
-    schema_file: actual.schema_file,
-    schema_id: actual.schema_id,
-    schema_sha256: actual.schema_sha256,
-    schema_bundle_sha256: actual.schema_bundle_sha256,
-    validator_build: actual.validator_build
-  } as const;
+  // The planned binding names schema content. Its validator build only records which build planned
+  // the output and is never compared: validate with the installed schemas when they are the planned
+  // bundle, and otherwise with the bundle sealed into this run's execution snapshot, so a rebuild or
+  // upgrade does not change which schema an in-flight run's artifacts must satisfy (#921).
   let schemaPath: string;
   let schemaRegistry: ReturnType<typeof artifactSchemaRegistryFromDirectory> | undefined;
   try {
-    if (current.schema_bundle_sha256 === expected.schema_bundle_sha256) {
-      schemaPath = path.join(artifactSchemaDirectory(), current.schema_file);
+    if (current.schema_bundle_sha256 === planned.schema_bundle_sha256) {
+      schemaPath = safeResolveInside(artifactSchemaDirectory(), planned.schema_file, "planned artifact schema");
     } else {
-      schemaPath = sealedArtifactSchemaPath(layout, current.schema_file);
+      schemaPath = sealedArtifactSchemaPath(layout, planned.schema_file);
       schemaRegistry = artifactSchemaRegistryFromDirectory(path.dirname(schemaPath));
     }
   } catch (error) {
@@ -3358,19 +3349,18 @@ function verifyRequiredArtifactSchemaBinding(
     ...(schemaRegistry === undefined ? {} : { schemaRegistry })
   });
   if (
-    validation.schema?.id !== expected.schema_id ||
-    validation.schema?.sha256 !== expected.schema_sha256 ||
-    validation.schema?.bundle_sha256 !== expected.schema_bundle_sha256 ||
-    validation.schema?.validator_build !== expected.validator_build
+    validation.schema?.id !== planned.schema_id ||
+    validation.schema?.sha256 !== planned.schema_sha256 ||
+    validation.schema?.bundle_sha256 !== planned.schema_bundle_sha256
   ) {
     return [
       {
         code: "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
-        message: `Host validator identity for ${output.path} does not match the planned schema binding`,
+        message: `The schema available for ${output.path} does not match its planned schema binding`,
         severity: "error",
         source: "artifact-schema",
         path: absolutePath,
-        details: { contract: output.contract, expected, actual: validation.schema }
+        details: { contract: output.contract, expected: planned, actual: validation.schema }
       }
     ];
   }
@@ -3383,10 +3373,10 @@ function verifyRequiredArtifactSchemaBinding(
     path: `${absolutePath}${diagnostic.instancePath === undefined ? "" : `#${diagnostic.instancePath || "/"}`}`,
     details: {
       contract: output.contract,
-      schema_id: expected.schema_id,
-      schema_sha256: expected.schema_sha256,
-      schema_bundle_sha256: expected.schema_bundle_sha256,
-      validator_build: expected.validator_build,
+      schema_id: planned.schema_id,
+      schema_sha256: planned.schema_sha256,
+      schema_bundle_sha256: planned.schema_bundle_sha256,
+      validator_build: planned.validator_build,
       ...(diagnostic.schemaPath === undefined ? {} : { schema_path: diagnostic.schemaPath }),
       ...(diagnostic.keyword === undefined ? {} : { keyword: diagnostic.keyword })
     }
@@ -3396,16 +3386,15 @@ function verifyRequiredArtifactSchemaBinding(
 function schemaBindingMismatchDiagnostic(
   absolutePath: string,
   output: PlannedGraphNode["outputs"][number],
-  expected: ReturnType<typeof artifactContractSchemaBinding> | null,
-  actual: Readonly<Record<string, unknown>>
+  planned: Readonly<Record<string, unknown>>
 ): RuntimeDiagnostic {
   return {
     code: "ARTIFACT_SCHEMA_BINDING_MISMATCH",
-    message: `Planned schema identity for ${output.path} does not match validator build ${expected?.validator_build ?? "unbound"}`,
+    message: `Planned schema binding for ${output.path} does not fit contract ${output.contract}`,
     severity: "error",
     source: "artifact-schema",
     path: absolutePath,
-    details: { contract: output.contract, expected, actual }
+    details: { contract: output.contract, planned }
   };
 }
 

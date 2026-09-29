@@ -9,7 +9,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
-  artifactContractDefinition,
   artifactContractSchemaBinding,
   assertRunPlanDocument,
   assertValidSmithersTaskManifest,
@@ -8672,6 +8671,12 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
   });
 }
 
+/**
+ * Rebind each declared output's schema to the bundle this build installs into task workspaces (#982).
+ * The contract digest and validator build keep their recorded values: they only record the build
+ * that planned the output, and the refreshed workflow copies them into its markers (and, for a
+ * dynamic run, its runtime task plan), which are compared with the run's sealed plan (#921).
+ */
 function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmithersTask {
   return {
     ...task,
@@ -8684,7 +8689,7 @@ function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmi
           return {
             path: output.path,
             contract: output.contract,
-            contractDigest: artifactContractDefinition(output.contract).digest,
+            contractDigest: output.contractDigest,
             primary: output.primary,
             ...(binding === undefined
               ? {}
@@ -8693,7 +8698,7 @@ function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmi
                   schemaId: binding.schema_id,
                   schemaSha256: binding.schema_sha256,
                   schemaBundleSha256: binding.schema_bundle_sha256,
-                  validatorBuild: binding.validator_build
+                  validatorBuild: output.validatorBuild ?? binding.validator_build
                 })
           };
         })

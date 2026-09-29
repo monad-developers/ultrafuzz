@@ -243,8 +243,15 @@ Every planned JSON output MUST resolve through the checked-in schema registry.
 The planned and expanded graph representations MUST persist the schema filename,
 fragment-free schema ID, schema SHA-256, package schema-bundle SHA-256, and
 validator build identity. Missing or partial bindings MUST fail planning or host
-verification. Operators declare the versioned contract in topology; they MUST
-NOT supply these trust identities manually in YAML.
+verification. Host artifact gates and verified reads MUST validate against the
+schema content a binding names, using the run's sealed schema snapshot when the
+installed bundle differs. The recorded validator build and contract digest are
+provenance: graph reads, host artifact gates, verified reads, task preparation,
+dependency admission, and the validator preflight MUST NOT require them to equal
+the reading build's own. Task preparation and the validator preflight MUST still
+require the schema bundle they validate with to be the planned one. Operators
+declare the versioned contract in topology; they MUST NOT supply these trust
+identities manually in YAML.
 
 ## Prompts
 
@@ -447,9 +454,10 @@ every non-builtin module whose lexical or physical resolution escapes the
 closure. Ordinary artifact and schema data reads remain outside this module
 boundary. Modal MUST provide the equivalent root-owned,
 read-only entrypoint. Both environments MUST run a real known-valid fixture and
-verify the returned schema ID, schema digest, bundle digest, and validator build;
-`command -v` alone is insufficient. A missing, tampered, or stale launcher or
-closure is a setup failure for new model work. It MUST NOT turn historical
+verify the returned schema ID, schema digest, and bundle digest; the returned
+validator build is provenance and MUST NOT be compared. `command -v` alone is
+insufficient. A missing, tampered, or stale launcher or closure is a setup
+failure for new model work. It MUST NOT turn historical
 seals or schema identities into resume authorization. A current-controller
 continuation MAY select current validator packages while retaining historical
 source and artifacts as provenance.

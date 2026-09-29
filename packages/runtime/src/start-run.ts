@@ -1158,23 +1158,14 @@ function parseSealedTaskManifestForObserver(contents: Readonly<{ graph: Buffer; 
 /**
  * `assertSealedPlannedGraph` does two different jobs behind one name. The first is structural: the
  * bytes must validate against the planned-graph schema, and nothing can report on a document that is
- * not a planned graph at all. The second, `assertPlannedGraphSemantics`, re-derives the graph against
- * *this build* — it looks every output contract up in the running process's artifact-contract registry
- * and insists the digests, schema IDs and validator build recorded at compile time still match what
- * this checkout produces.
+ * not a planned graph at all. The second, `assertPlannedGraphSemantics`, checks the graph's internal
+ * consistency (unique IDs, dependency joins, artifact directories, loop and model coordinates) with
+ * the rules of the build doing the reading.
  *
- * That second job is not a property of the run; it is a property of the tree observing the run. An
- * operator whose checkout has moved on since the run was submitted -- a rebased branch, a newer
- * release, a contract whose schema was revised -- gets `planned graph output schema binding changed`
- * and loses `status` for a run that is otherwise intact and possibly still executing. That is the same
- * failure as issue #866, one throw further along the same read-only path: the run is fine, the
- * observer's registry disagrees, and the operator is the one punished. `packages/artifacts`'s own
- * semantic-gate collects exactly this condition as an issue rather than raising it, so the softer
- * reading already exists in the codebase.
- *
- * Execution must still refuse: running a node whose output contract no longer matches the registry
- * that will validate its artifacts would produce evidence nothing can check. So the downgrade is
- * observer-only, and schema invalidity stays fatal for everyone.
+ * Those rules belong to the tree observing the run, not to the run: a sealed graph that a newer
+ * checkout's rules reject is still the graph the run is executing, and losing `status` for it is the
+ * same failure as issue #866, one throw further along the same read-only path. So the downgrade is
+ * observer-only: execution callers still refuse, and schema invalidity stays fatal for everyone.
  */
 function parseSealedPlannedGraphForObserver(graphBytes: Buffer): {
   graph: PlannedGraphDocument;
@@ -1185,12 +1176,12 @@ function parseSealedPlannedGraphForObserver(graphBytes: Buffer): {
   if (!validatePlannedGraph(value).ok) return { graph: assertSealedPlannedGraph(value), divergences: [] };
   const graph = value as PlannedGraphDocument;
   try {
-    assertPlannedGraphSemantics(graph, { allowHistoricalSchemaBundle: true });
+    assertPlannedGraphSemantics(graph);
   } catch (error) {
     return {
       graph,
       divergences: [
-        `sealed planned graph no longer re-derives against this build's artifact contracts: ${error instanceof Error ? error.message : String(error)}`
+        `sealed planned graph fails this build's planned-graph semantics: ${error instanceof Error ? error.message : String(error)}`
       ]
     };
   }

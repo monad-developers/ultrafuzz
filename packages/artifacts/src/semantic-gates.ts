@@ -216,7 +216,6 @@ export interface SemanticValidatorPreflightContext {
   schemaId: string;
   schemaSha256: string;
   schemaBundleSha256: string;
-  validatorBuild: string;
   artifactSha256: string;
 }
 
@@ -415,7 +414,8 @@ function jsonValidatorPreflightIdentityIssues(document: unknown, context: Semant
     ["$.data.schema.id", at(document, ["data", "schema", "id"]), expected.schemaId],
     ["$.data.schema.sha256", at(document, ["data", "schema", "sha256"]), expected.schemaSha256],
     ["$.data.schema.bundle_sha256", at(document, ["data", "schema", "bundle_sha256"]), expected.schemaBundleSha256],
-    ["$.data.schema.validator_build", at(document, ["data", "schema", "validator_build"]), expected.validatorBuild],
+    // `validator_build` is provenance: the validator that reported the identity may come from another
+    // build of the same schemas, which must not stop an in-flight run's preflight (#921).
     ["$.data.artifact_sha256", at(document, ["data", "artifact_sha256"]), expected.artifactSha256]
   ] as const;
   return checks.flatMap(([pathValue, actual, wanted]) =>
@@ -6840,7 +6840,6 @@ const gateSpecifications = {
       "validatorPreflight.schemaId",
       "validatorPreflight.schemaSha256",
       "validatorPreflight.schemaBundleSha256",
-      "validatorPreflight.validatorBuild",
       "validatorPreflight.artifactSha256"
     ],
     jsonValidatorPreflightIdentityIssues
