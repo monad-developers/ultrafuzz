@@ -64,11 +64,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "adminConfigBoundaryMatrixSchema",
     ["admin-config-surface-id-uniqueness", "admin-config-surface-joins"]
   ),
-  "agent-source-proof.schema.json": runtime("agentSourceProofJsonSchema", undefined, [
-    "agent-source-proof-ref-uniqueness",
-    "agent-source-proof-dependency-lineage",
-    "agent-source-proof-commit-binding"
-  ]),
+  "agent-source-proof.schema.json": runtime("agentSourceProofJsonSchema"),
   "aggregation-manifest.schema.json": artifact(
     "ultrafuzz/aggregation-manifest@1",
     "aggregationManifestJsonSchema",
@@ -83,8 +79,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     ]
   ),
   "analysis-bundle.schema.json": runtime("analysisBundleManifestJsonSchema", "analysisBundleManifestSchema", [
-    "analysis-bundle-path-order",
-    "analysis-bundle-file-digest"
+    "analysis-bundle-path-order"
   ]),
   "analysis-bundle-accounting-summary.schema.json": runtime(
     "analysisAccountingSummaryJsonSchema",
@@ -116,19 +111,8 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "analysisTerminalStatusSchema",
     ["analysis-bundle-terminal-status-reconciliation"]
   ),
-  "artifact-manifest.schema.json": runtime("artifactManifestJsonSchema", undefined, [
-    "artifact-manifest-file-path-uniqueness",
-    "artifact-manifest-output-path-uniqueness",
-    "artifact-manifest-prerequisite-node-uniqueness",
-    "artifact-manifest-file-digest"
-  ]),
-  "artifact-verification.schema.json": runtime("artifactVerificationJsonSchema", undefined, [
-    "artifact-verification-artifact-path-uniqueness",
-    "artifact-verification-publication-path-uniqueness",
-    "artifact-verification-exactly-one-primary",
-    "artifact-verification-publication-digest-correspondence",
-    "artifact-verification-plan-contract-identity"
-  ]),
+  "artifact-manifest.schema.json": runtime("artifactManifestJsonSchema"),
+  "artifact-verification.schema.json": runtime("artifactVerificationJsonSchema"),
   "audited-differential-lanes.schema.json": artifact(
     "ultrafuzz/audited-differential-lanes@1",
     "auditedDifferentialLanesJsonSchema",
@@ -147,10 +131,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "campaignSummarySchema",
     ["campaign-summary-backend-uniqueness", "campaign-summary-count-coupling"]
   ),
-  "config-redactions.schema.json": runtime("configRedactionsJsonSchema", undefined, [
-    "config-redactions-path-key-equality",
-    "config-redactions-path-uniqueness"
-  ]),
+  "config-redactions.schema.json": runtime("configRedactionsJsonSchema"),
   "coverage-goal.schema.json": artifact("ultrafuzz/coverage-goal@2", "coverageGoalJsonSchema", "coverageGoalSchema", [
     "coverage-goal-reconciliation"
   ]),
@@ -241,11 +222,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
   "finding.schema.json": {
     role: "subschema",
     contractIds: [],
-    semanticGates: [
-      "finding-campaign-provenance-coherence",
-      "finding-evidence-span-consistency",
-      "finding-projected-reference-uniqueness"
-    ],
+    semanticGates: [],
     typescriptExport: "findingJsonSchema",
     zodParser: "findingSchema"
   },
@@ -294,11 +271,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "invariant-source-proof-path-uniqueness",
     "invariant-source-proof-git-binding"
   ]),
-  "invariant-suite-manifest.schema.json": runtime("invariantSuiteManifestJsonSchema", undefined, [
-    "invariant-suite-file-path-uniqueness",
-    "invariant-suite-tombstone-uniqueness",
-    "invariant-suite-file-tombstone-disjointness"
-  ]),
+  "invariant-suite-manifest.schema.json": runtime("invariantSuiteManifestJsonSchema"),
   "json-validator-preflight-success.schema.json": runtime("jsonValidatorPreflightSuccessJsonSchema", undefined, [
     "json-validator-preflight-current-identity"
   ]),
@@ -337,20 +310,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "lensPropertiesSchema",
     ["property-lens-id-uniqueness"]
   ),
-  "planned-graph.schema.json": runtime("plannedGraphJsonSchema", undefined, [
-    "planned-graph-node-id-uniqueness",
-    "planned-graph-dependency-join",
-    "planned-graph-acyclicity",
-    "planned-graph-output-path-uniqueness",
-    "planned-graph-exactly-one-primary",
-    "planned-graph-model-fanout-uniqueness",
-    "planned-graph-workflow-task-uniqueness",
-    "planned-graph-workflow-node-join",
-    "planned-graph-artifact-dir-identity",
-    "planned-graph-loop-coupling",
-    "planned-graph-contract-identity",
-    "planned-graph-model-loop-coupling"
-  ]),
+  "planned-graph.schema.json": runtime("plannedGraphJsonSchema"),
   "reference-expectations.schema.json": artifact(
     "ultrafuzz/reference-expectations@2",
     "referenceExpectationsJsonSchema",
@@ -383,17 +343,10 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
     "report-severity-classification-preservation",
     "report-property-provenance-join"
   ]),
-  "run-plan.schema.json": runtime("runPlanJsonSchema", undefined, ["run-plan-attempt-id-uniqueness"]),
-  "run-metadata.schema.json": runtime("runMetadataJsonSchema", undefined, [
-    "run-metadata-workflow-id-equality",
-    "run-metadata-current-segment-equality",
-    "run-metadata-accounting-workflow-identity"
-  ]),
-  "run-state.schema.json": runtime("runStateJsonSchema", "runStateSchema", [
-    "run-state-fingerprint",
-    "run-state-node-key-equality"
-  ]),
-  "source-run.schema.json": runtime("sourceRunJsonSchema", undefined, ["source-run-not-self"]),
+  "run-plan.schema.json": runtime("runPlanJsonSchema"),
+  "run-metadata.schema.json": runtime("runMetadataJsonSchema"),
+  "run-state.schema.json": runtime("runStateJsonSchema", "runStateSchema", ["run-state-node-key-equality"]),
+  "source-run.schema.json": runtime("sourceRunJsonSchema"),
   "terminal-disposition.schema.json": runtime("terminalDispositionJsonSchema", "terminalDispositionSchema"),
   "selected-strategies.schema.json": artifact(
     "ultrafuzz/selected-strategies@1",
@@ -419,17 +372,7 @@ export const ARTIFACT_SCHEMA_METADATA = Object.freeze({
       "severity-classification-upstream-preservation"
     ]
   ),
-  "smithers-task-manifest.schema.json": runtime("smithersTaskManifestJsonSchema", undefined, [
-    "smithers-task-attempt-id-uniqueness",
-    "smithers-task-workflow-id-uniqueness",
-    "smithers-task-document-identity",
-    "smithers-task-pinned-submodule-expectation",
-    "smithers-task-dependency-join",
-    "smithers-task-dependency-acyclicity",
-    "smithers-task-planned-graph-coverage",
-    "smithers-task-planned-graph-identity",
-    "smithers-task-planned-graph-dependency-join"
-  ]),
+  "smithers-task-manifest.schema.json": runtime("smithersTaskManifestJsonSchema"),
   "strategy-detections.schema.json": artifact(
     "ultrafuzz/strategy-detections@1",
     "strategyDetectionsJsonSchema",

@@ -260,7 +260,8 @@ million cache-hit input tokens, and $0.87 per million output tokens.
 
 `ultrafuzz init` also generates a dedicated `OpenCodeAgent`. It is opt-in and
 non-default: nothing selects it until a topology group or `--agent` names it.
-The default root config includes an opt-in OpenCode profile:
+The default root config has the `[agents.OpenCodeAgent]` block below but no
+OpenCode model profile, so add one such as `[models.opencode]` to use it:
 
 ```toml
 [models.opencode]
@@ -376,6 +377,43 @@ execution. The Smithers type surface pinned by this release stops at `xhigh`,
 but pi's command surface also accepts `max`, so the adapter validates and
 forwards that final level without degrading it.
 
+## OpenRouter guardrails
+
+`OpenRouterAgent`, `PiAgent`, and `OpenCodeAgent` with an `openrouter/` model
+send their requests through OpenRouter with the key in `OPENROUTER_API_KEY`. If
+any guardrail covering that key sets
+[prompt-injection detection](https://openrouter.ai/docs/guides/features/guardrails/prompt-injection)
+to **Block**, OpenRouter rejects each request its detector matches with HTTP
+403 `Request blocked: prompt injection patterns detected` before it reaches a
+model.
+
+The match need not be in Ultrafuzz's task prompt. These harnesses also send
+their own system prompts and the target source and test output the agent reads,
+and by default OpenRouter scans every message in a request, including base64-
+and hex-decoded text. For example, the default system prompt of OpenCode
+1.18.18, used for models without a model-specific prompt such as DeepSeek,
+Qwen, or GLM, has an `assistant: [...]` line followed by a `user:` line, which
+matches OpenRouter's documented `role_delimiter_injection` pattern.
+
+In the **Security** section of every guardrail that covers the key (the
+workspace default and any member or API-key guardrail), set prompt-injection
+detection to **Flag**, which records matches without enforcing them, or turn it
+off. OpenRouter applies the most restrictive action when several guardrails
+apply. Do not use **Redact** either: it replaces each match with
+`[PROMPT_INJECTION]` and forwards the request, so the model can work from
+altered source or tool output with no error for Ultrafuzz to report.
+
+The workspace default covers every key in its workspace and a member guardrail
+every key of that member, so relaxing either can affect more than Ultrafuzz.
+Creating the Ultrafuzz key in a workspace of its own confines the
+workspace-default change to that key. In an organization account, only an
+organization admin can change guardrails.
+
+Ultrafuzz has no special handling for this rejection: the attempt fails like any
+other agent error and follows the `[retry]` policy above. A retry on the same
+profile sends the same task prompt with the same key, so it is rejected again
+when the match is in that prompt or in the harness's system prompt.
+
 ## Forge process guard
 
 Worker environments put a run-scoped Forge wrapper ahead of the installed
@@ -458,10 +496,8 @@ trusted local execution model remains unchanged.
 ## Redaction
 
 Run artifacts store redacted resolved config and a redaction manifest.
-Sensitive model values are redacted before persistence. Launch guards for
-literal redaction placeholders may fail before workflow launch when enabled,
-and manifest entries mark values that must be restored from current config
-before launch.
+Sensitive model values are redacted before persistence. The manifest records
+which values were redacted; no command restores values from it.
 
 ## Eval suites
 

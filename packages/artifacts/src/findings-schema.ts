@@ -1,5 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
-
 import { z } from "zod/v4";
 
 import {
@@ -25,7 +23,7 @@ import {
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
 import { hasAtMostCodePoints } from "./portable-json-primitives.js";
 import { NODE_REFERENCE_PATTERN } from "./safe-paths.js";
-import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
+import { type SchemaValidationResult } from "./schema-validation.js";
 import { jsonPointerPath } from "./lang-primitives.js";
 
 export const FINDING_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:finding:2" as const;
@@ -992,24 +990,22 @@ export const findingsJsonSchema = {
 } as const;
 
 export function validateFindingSchema(value: unknown, path = "$"): SchemaValidationResult<NormalizedFinding> {
-  return validateRegisteredFindingSchema(FINDING_JSON_SCHEMA_ID, findingSchema as z.ZodType<NormalizedFinding>, value, {
+  return validateRegisteredFindingSchema<NormalizedFinding>(FINDING_JSON_SCHEMA_ID, value, {
     path,
     code: "FINDING_SCHEMA_INVALID"
   });
 }
 
 export function validateFindingsSchema(value: unknown, path = "$"): SchemaValidationResult<NormalizedFinding[]> {
-  return validateRegisteredFindingSchema(
-    FINDINGS_JSON_SCHEMA_ID,
-    findingsSchema as z.ZodType<NormalizedFinding[]>,
-    value,
-    { path, code: "FINDINGS_SCHEMA_INVALID" }
-  );
+  return validateRegisteredFindingSchema<NormalizedFinding[]>(FINDINGS_JSON_SCHEMA_ID, value, {
+    path,
+    code: "FINDINGS_SCHEMA_INVALID"
+  });
 }
 
+/** The registered JSON Schema is authoritative, so its verdict is returned as is. */
 function validateRegisteredFindingSchema<T>(
   schemaId: string,
-  zodSchema: z.ZodType<T>,
   value: unknown,
   options: { path: string; code: string }
 ): SchemaValidationResult<T> {
@@ -1024,35 +1020,5 @@ function validateRegisteredFindingSchema<T>(
       }))
     };
   }
-
-  // The checked-in JSON Schema is authoritative. Zod remains only as a
-  // non-transforming parity assertion for typed access by existing callers.
-  const parity = validateWithZod(zodSchema, value, options);
-  if (!parity.ok) {
-    throw new Error(
-      `internal schema parity invariant violated: registered JSON Schema ${schemaId} accepted a document rejected by its retained Zod parser`
-    );
-  }
-  if (!isDeepStrictEqual(parity.value, value)) {
-    throw new Error(
-      `internal schema parity invariant violated: retained Zod parser for registered JSON Schema ${schemaId} transformed its input`
-    );
-  }
   return { ok: true, issues: [], value: value as T };
-}
-
-export function assertFindingSchema(value: unknown): NormalizedFinding {
-  const result = validateFindingSchema(value);
-  if (!result.ok || !result.value) {
-    throw new Error(schemaErrorMessage("finding", result.issues));
-  }
-  return result.value;
-}
-
-export function assertFindingsSchema(value: unknown): NormalizedFinding[] {
-  const result = validateFindingsSchema(value);
-  if (!result.ok || !result.value) {
-    throw new Error(schemaErrorMessage("findings", result.issues));
-  }
-  return result.value;
 }

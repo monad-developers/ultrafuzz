@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { createEventQueryFacadeInputs } from "./events.js";
 import { assertPlannedGraph, PLANNED_GRAPH_SCHEMA_VERSION, type PlannedGraphDocument } from "./planned-graph.js";
 import {
   CONFIG_REDACTIONS_SCHEMA_VERSION,
@@ -44,7 +43,6 @@ export interface RunLayout {
   eventsPath: string;
   usageLedgerPath: string;
   attemptLedgerPath: string;
-  eventsIndexDir: string;
 }
 
 export interface CreateRunLayoutInput {
@@ -80,13 +78,7 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
   assertNoSymlinkComponents(guardRoot, root, "run root");
 
   const layout = layoutForRunRoot(root, runId);
-  for (const directory of [
-    layout.root,
-    layout.artifactsDir,
-    layout.workspacesDir,
-    layout.eventsIndexDir,
-    layout.reviewDir
-  ]) {
+  for (const directory of [layout.root, layout.artifactsDir, layout.workspacesDir, layout.reviewDir]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 
@@ -165,11 +157,6 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
   if ((input.overwrite ?? false) || !fs.existsSync(layout.attemptLedgerPath)) {
     writeFileDurable(layout.attemptLedgerPath, "");
   }
-  writeJsonIfNeeded(
-    path.join(layout.eventsIndexDir, "query-inputs.json"),
-    createEventQueryFacadeInputs(layout),
-    input.overwrite ?? false
-  );
 
   return layout;
 }
@@ -193,8 +180,7 @@ export function layoutForRunRoot(root: string, runId = path.basename(root)): Run
     statePath: path.join(absoluteRoot, "state.json"),
     eventsPath: path.join(absoluteRoot, "events.jsonl"),
     usageLedgerPath: path.join(absoluteRoot, "usage.jsonl"),
-    attemptLedgerPath: path.join(absoluteRoot, "attempts.jsonl"),
-    eventsIndexDir: path.join(absoluteRoot, "events.index")
+    attemptLedgerPath: path.join(absoluteRoot, "attempts.jsonl")
   };
 }
 

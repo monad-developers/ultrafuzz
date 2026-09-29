@@ -23,10 +23,6 @@ export const EVAL_SUITE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:suite:2" as cons
 export const EVAL_ADJUDICATION_HANDOFF_SCHEMA_ID = "urn:ultrafuzz:schema:evals:adjudication-handoff:1" as const;
 export const EVAL_FINDING_MANIFEST_SCHEMA_ID = "urn:ultrafuzz:schema:evals:finding-manifest:1" as const;
 export const EVAL_GROUND_TRUTH_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth:1" as const;
-export const EVAL_HISTORY_AUTOMATIC_PUBLICATION_PLAN_SCHEMA_ID =
-  "urn:ultrafuzz:schema:evals:history-automatic-publication-plan:1" as const;
-export const EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_ID =
-  "urn:ultrafuzz:schema:evals:history-publication-generation:1" as const;
 export const EVAL_HISTORY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:history:2" as const;
 export const EVAL_INSTANCE_CLUSTERS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:instance-clusters:1" as const;
 export const EVAL_GROUND_TRUTH_CREDITS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:ground-truth-credits:1" as const;
@@ -49,9 +45,7 @@ export const EVAL_SCORE_SUMMARY_SCHEMA_ID = "urn:ultrafuzz:schema:evals:score-su
 export const EVAL_RECOVERY_EQUIVALENCE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:recovery-equivalence:1" as const;
 export const EVAL_STATUS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:status:1" as const;
 export const EVAL_REVIEW_QUEUE_ITEM_SCHEMA_ID = "urn:ultrafuzz:schema:evals:review-queue-item:2" as const;
-export const EVAL_PUBLICATION_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:evals:publication-state:1" as const;
 export const EVAL_PUBLIC_DIAGNOSTICS_SCHEMA_ID = "urn:ultrafuzz:schema:evals:public-eval-diagnostics:2" as const;
-export const EVAL_TELEMETRY_CURSOR_SCHEMA_ID = "urn:ultrafuzz:schema:evals:telemetry-cursor:1" as const;
 
 const MAX_EVAL_SCHEMA_BYTES = 2 * 1024 * 1024;
 
@@ -125,16 +119,6 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     zodParser: "evalHistoryZodSchema",
     semanticGates: ["eval-history-integrity"]
   },
-  "eval-history-automatic-publication-plan.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "evalHistoryAutomaticPublicationPlanJsonSchema",
-    semanticGates: ["eval-history-automatic-publication-plan-integrity"]
-  },
-  "eval-history-publication-generation.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "evalHistoryPublicationGenerationJsonSchema",
-    semanticGates: ["eval-history-publication-generation-integrity"]
-  },
   "eval-matrix.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalMatrixJsonSchema",
@@ -143,11 +127,6 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
   "eval-llm-judge-result.schema.json": {
     role: "runtime-state",
     typescriptExport: "evalLlmJudgeResultJsonSchema",
-    semanticGates: []
-  },
-  "eval-publication-state.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "evalPublicationStateJsonSchema",
     semanticGates: []
   },
   "eval-recovery-equivalence.schema.json": {
@@ -226,11 +205,6 @@ export const EVAL_SCHEMA_METADATA: Readonly<Record<string, EvalSchemaMetadata>> 
     role: "runtime-state",
     typescriptExport: "evalInstanceClustersJsonSchema",
     semanticGates: ["eval-instance-clusters-identity-joins"]
-  },
-  "telemetry-cursor.schema.json": {
-    role: "runtime-state",
-    typescriptExport: "evalTelemetryCursorJsonSchema",
-    semanticGates: []
   }
 });
 
@@ -266,12 +240,6 @@ export const evalBenchmarkProvenanceJsonSchema = loadSchemaDocument("benchmark-p
 export const evalBenchmarkSourceManifestJsonSchema = loadSchemaDocument("benchmark-source-manifest.schema.json");
 export const evalFindingScoreJsonSchema = loadSchemaDocument("eval-finding-score.schema.json");
 export const evalGroundTruthJsonSchema = loadSchemaDocument("eval-ground-truth.schema.json");
-export const evalHistoryAutomaticPublicationPlanJsonSchema = loadSchemaDocument(
-  "eval-history-automatic-publication-plan.schema.json"
-);
-export const evalHistoryPublicationGenerationJsonSchema = loadSchemaDocument(
-  "eval-history-publication-generation.schema.json"
-);
 export const evalHistoryJsonSchema = loadSchemaDocument("eval-history.schema.json");
 export const evalFindingManifestJsonSchema = loadSchemaDocument("finding-manifest.schema.json");
 export const evalGroundTruthCreditsJsonSchema = loadSchemaDocument("ground-truth-credits.schema.json");
@@ -279,7 +247,6 @@ export const evalInstanceClustersJsonSchema = loadSchemaDocument("instance-clust
 export const evalLlmJudgeResultJsonSchema = loadSchemaDocument("eval-llm-judge-result.schema.json");
 export const evalMatrixJsonSchema = loadSchemaDocument("eval-matrix.schema.json");
 export const evalPublicDiagnosticsJsonSchema = loadSchemaDocument("eval-public-diagnostics.schema.json");
-export const evalPublicationStateJsonSchema = loadSchemaDocument("eval-publication-state.schema.json");
 export const evalRecoveryEquivalenceJsonSchema = loadSchemaDocument("eval-recovery-equivalence.schema.json");
 export const evalReviewQueueItemJsonSchema = loadSchemaDocument("eval-review-queue-item.schema.json");
 export const evalRunManifestJsonSchema = loadSchemaDocument("eval-run-manifest.schema.json");
@@ -289,7 +256,6 @@ export const evalScoreSummaryJsonSchema = loadSchemaDocument("eval-score-summary
 export const evalStatusJsonSchema = loadSchemaDocument("eval-status.schema.json");
 export const evalSuiteJsonSchema = loadSchemaDocument("eval-suite.schema.json");
 export const evalEvmbenchCohortJsonSchema = loadSchemaDocument("evmbench-cohort.schema.json");
-export const evalTelemetryCursorJsonSchema = loadSchemaDocument("telemetry-cursor.schema.json");
 
 export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalAdjudicationHandoffJsonSchema,
@@ -301,8 +267,6 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalCommonJsonSchema,
   evalFindingScoreJsonSchema,
   evalGroundTruthJsonSchema,
-  evalHistoryAutomaticPublicationPlanJsonSchema,
-  evalHistoryPublicationGenerationJsonSchema,
   evalHistoryJsonSchema,
   evalFindingManifestJsonSchema,
   evalGroundTruthCreditsJsonSchema,
@@ -310,7 +274,6 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalLlmJudgeResultJsonSchema,
   evalMatrixJsonSchema,
   evalPublicDiagnosticsJsonSchema,
-  evalPublicationStateJsonSchema,
   evalRecoveryEquivalenceJsonSchema,
   evalReviewQueueItemJsonSchema,
   evalRunManifestJsonSchema,
@@ -319,8 +282,7 @@ export const EVAL_SCHEMA_EXPORTS = Object.freeze({
   evalScoreSummaryJsonSchema,
   evalStatusJsonSchema,
   evalSuiteJsonSchema,
-  evalEvmbenchCohortJsonSchema,
-  evalTelemetryCursorJsonSchema
+  evalEvmbenchCohortJsonSchema
 });
 
 const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, unknown>>>> = Object.freeze({
@@ -333,12 +295,9 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "eval-common.schema.json": evalCommonJsonSchema,
   "eval-finding-score.schema.json": evalFindingScoreJsonSchema,
   "eval-ground-truth.schema.json": evalGroundTruthJsonSchema,
-  "eval-history-automatic-publication-plan.schema.json": evalHistoryAutomaticPublicationPlanJsonSchema,
-  "eval-history-publication-generation.schema.json": evalHistoryPublicationGenerationJsonSchema,
   "eval-history.schema.json": evalHistoryJsonSchema,
   "eval-matrix.schema.json": evalMatrixJsonSchema,
   "eval-public-diagnostics.schema.json": evalPublicDiagnosticsJsonSchema,
-  "eval-publication-state.schema.json": evalPublicationStateJsonSchema,
   "eval-recovery-equivalence.schema.json": evalRecoveryEquivalenceJsonSchema,
   "eval-review-queue-item.schema.json": evalReviewQueueItemJsonSchema,
   "eval-run-manifest.schema.json": evalRunManifestJsonSchema,
@@ -351,8 +310,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "finding-manifest.schema.json": evalFindingManifestJsonSchema,
   "ground-truth-credits.schema.json": evalGroundTruthCreditsJsonSchema,
   "instance-clusters.schema.json": evalInstanceClustersJsonSchema,
-  "eval-llm-judge-result.schema.json": evalLlmJudgeResultJsonSchema,
-  "telemetry-cursor.schema.json": evalTelemetryCursorJsonSchema
+  "eval-llm-judge-result.schema.json": evalLlmJudgeResultJsonSchema
 });
 
 let cachedRegistry: readonly SchemaRegistryEntry[] | undefined;

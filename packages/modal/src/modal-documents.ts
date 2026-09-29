@@ -6,7 +6,6 @@ import path from "node:path";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
-  DEFAULT_MAX_JSON_INSTANCE_BYTES,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   validateRegisteredJsonBytesSync,
@@ -23,8 +22,6 @@ import {
   validateModalJsonSchema
 } from "./modal-schema-registry.js";
 import { assertModalDocumentSemantics } from "./modal-semantic-gates.js";
-
-export const MAX_MODAL_DOCUMENT_BYTES = DEFAULT_MAX_JSON_INSTANCE_BYTES;
 
 export interface ModalDocumentSnapshot<SchemaId extends ModalContractSchemaId> {
   readonly schema_id: SchemaId;

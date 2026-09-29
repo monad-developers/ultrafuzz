@@ -4,7 +4,7 @@ import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz
  * Bytes of child stderr retained while the rest is discarded, so a non-zero exit can name its own reason
  * without persisting provider responses or benchmark contents.
  */
-export const WORKER_STDERR_TAIL_BYTES = 8_192;
+const WORKER_STDERR_TAIL_BYTES = 8_192;
 
 /**
  * Byte bound on one diagnostic message. It is the collector's bound, not this module's:

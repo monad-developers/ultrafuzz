@@ -48,6 +48,5 @@ export const reportObservedCompletionSchema = z.strictObject({
 });
 
 export type ReportVerification = z.infer<typeof reportVerificationSchema>;
-export type ReportVerificationReasonCode = ReportVerification["reason_codes"][number];
 export type ReportObservedCompletion = z.infer<typeof reportObservedCompletionSchema>;
 export type ObservedReportCompletion = ReportObservedCompletion;

@@ -30,14 +30,18 @@ trusted-cli.json
 trusted-bin/
 artifacts/
 review/
-events.index/
 workspaces/
 workspaces.json
 ```
 
-`source-run.json` is present when the run derives from another run. Event query
-indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
-of the artifact contract.
+`source-run.json` is present when the run derives from another run.
+`events.jsonl` is the only event journal: event queries filter it, and SQLite
+events are not part of the artifact contract. An append checks the new event
+against the final event and any trailing events with the same timestamp;
+`replayEvents` and `queryEvents` validate the whole journal. The journal has no
+record-count limit; its 64 MiB byte limit still applies. Runs created before
+this change may also have an `events.index/` directory. Nothing reads it, and
+report bundles still copy it.
 
 `usage.jsonl` is an append-only ledger of normalized workflow usage events.
 Each entry's immutable identity is the exact Smithers pair
@@ -537,8 +541,9 @@ artifacts/final-report/report.json
 
 `report.json` must satisfy `ultrafuzz/report@3` with the exact
 `ultrafuzz.report.v3` version literal. After a run stops, the runtime can format
-that report and attach whole-run completion information without changing the
-agent's files. Verified publications use:
+that report, attach whole-run completion information, and restate the run
+summary's elapsed time and accounting without changing the agent's files.
+Verified publications use:
 
 ```text
 review/runtime-report/<authority-digest>/report.json
@@ -738,14 +743,23 @@ Blockers:
 
 Repeat blocker and evidence rows in artifact order. Runtime publication compares
 this section with the typed handoff and rejects missing, duplicated, reordered,
-or bare coverage scores. Raw `covg-eval` output is for iteration only and
-defines neither published declaration-completeness view.
+or contradicting scoped scores, and it warns about coverage scores that name no
+exact scope. Raw `covg-eval` output is for iteration only and defines neither
+published declaration-completeness view.
 
-Current-run `report.md` contains concise links to `THREAT_MODEL.md`,
-`threat-model.json`, and `goal-plan.json`, plus source-node provenance for each
-production issue. Detailed threat analysis stays in the dedicated threat-model
-artifacts and is not duplicated into the report. `report.json` preserves the
-same `source_nodes` arrays.
+A coverage score that names no exact declaration-completeness scope, whether in
+`report.md`, the coverage producer's Markdown, or `report.json` text, does not
+fail publication, although text that exceeds the 2,048-candidate scan limit
+still does. When no coverage producer was planned or admitted,
+`report.json.coverage_evidence` or a `report.md` score that names an exact
+scope fails the final report.
+
+Current-run `report.md` contains source-node provenance for each production
+issue and does not link to other run files. Detailed threat analysis stays in
+the dedicated threat-model artifacts and is not duplicated into the report.
+`report.json` preserves the same `source_nodes` arrays. Inline link and image
+syntax inside report prose, including prose preserved byte-for-byte from
+upstream findings, renders as literal text.
 
 When workflow usage data is available, run metadata includes
 `accounting.cumulative.tokens_used` and
@@ -755,13 +769,20 @@ available cumulative values into the markdown run summary and into
 persisted estimate is partial because some token usage did not have pricing
 data.
 
-If cumulative metadata has not synchronized when the final-report producer
-starts, its live Smithers fallback is a snapshot through that producer's start.
-It includes earlier attempts but cannot include the producer's own eventual
-duration, model fallback, tokens, or cost. A terminal presentation of an existing
-verified agent report preserves those accounting values. Report v3 has no
-metric-scope field, so use
-`ultrafuzz stats` after terminal synchronization for closed-run accounting.
+The final-report producer receives its run summary when its task starts: from
+cumulative metadata when it has synchronized, otherwise from a live Smithers
+fallback. Either way it is a snapshot through that producer's start. It includes
+earlier attempts but cannot include the producer's own eventual duration, model
+fallback, tokens, or cost, and the agent's `report.json` and `report.md` keep
+that snapshot. Runtime presentations (the verified terminal publication and
+unchecked reports) restate the run summary instead: elapsed time from
+`run.json#created_at` to `state.json#finished_at`, and models, tokens,
+estimated spend, and `partial_pricing` from the current
+`accounting.cumulative`. Tokens, estimated spend, and `partial_pricing` are
+restated together whenever `accounting.cumulative` records a token count, so a
+whole-run spend recorded as `unavailable` stays `unavailable` instead of showing
+the agent's report-start figure. Otherwise, a value those records lack keeps the
+agent's copy. Use `ultrafuzz stats` for the full accounting breakdown.
 
 `accounting.segments` publishes one rollup per checkpoint generation, and
 `accounting.current` identifies the latest segment. Each segment retains every
@@ -857,7 +878,6 @@ runs.jsonl
 scores.jsonl
 summary.json
 summary.md
-telemetry/
 ```
 
 `eval.json` records the resolved suite plus candidate and benchmark lineage,
@@ -892,10 +912,7 @@ available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
 the variant ranking plus scoring lineage to `summary.json`, including the
 effective deterministic or optional-judge mode.
 
-`telemetry/` holds durable per-row telemetry cursors with byte offsets, event
-deduplication state, and artifact hashes for the local observer loop. Historical
-publication cursor documents remain readable, but there is no external
-publication command. The underlying Ultrafuzz runs live inside each target
+The underlying Ultrafuzz runs live inside each target
 checkout, not under the eval project; eval artifacts reference them by run ID.
 Grading and these artifacts do not depend on a reporting service.
 See [Eval Suites](evals.md).

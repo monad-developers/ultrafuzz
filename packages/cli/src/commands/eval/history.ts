@@ -2,7 +2,6 @@ import path from "node:path";
 
 import { Args, Command, Flags } from "@oclif/core";
 import {
-  assertEvalHistoryRecency,
   checkEvalHistoryCharts,
   publishEvalRunToHistory,
   readEvalHistory,
@@ -36,11 +35,7 @@ export default class EvalHistory extends Command {
     "benchmark-policy-root": Flags.string({
       summary: "Candidate checkout whose benchmark manifests define the published run"
     }),
-    check: Flags.boolean({ summary: "Validate history and fail when checked-in charts are stale" }),
-    "max-age-days": Flags.integer({
-      summary: "Fail when the newest observation is older than this many days",
-      min: 1
-    })
+    check: Flags.boolean({ summary: "Validate history and fail when checked-in charts are stale" })
   };
 
   async run(): Promise<void> {
@@ -51,7 +46,6 @@ export default class EvalHistory extends Command {
     try {
       if (args.evalRunId !== undefined) {
         if (flags.check) throw new Error("--check cannot append an eval run");
-        if (flags["max-age-days"] !== undefined) throw new Error("--max-age-days cannot append an eval run");
         if (
           flags.benchmark === undefined ||
           flags.lane === undefined ||
@@ -96,9 +90,6 @@ export default class EvalHistory extends Command {
       }
 
       const history = readEvalHistory(historyPath);
-      if (flags["max-age-days"] !== undefined) {
-        assertEvalHistoryRecency({ history, maxAgeDays: flags["max-age-days"], now: new Date() });
-      }
       if (flags.check) {
         const mismatches = checkEvalHistoryCharts(history, chartsDirectory);
         if (mismatches.length > 0) throw new Error(`eval history charts are stale: ${mismatches.join(", ")}`);

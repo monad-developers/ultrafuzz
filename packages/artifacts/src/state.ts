@@ -1,5 +1,3 @@
-import fs from "node:fs";
-
 import { redactSecretsInText, SENSITIVE_REDACTION_PLACEHOLDER } from "@ultrafuzz/security";
 
 import type { ArtifactContractId } from "./artifact-contract-ids.js";
@@ -555,19 +553,6 @@ function assertCurrentRunState(value: unknown): asserts value is RunState {
   if (nodeKeys.status !== "passed") {
     throw new Error("run-state node-key validation unexpectedly requires context");
   }
-}
-
-export function loadOrCreateRunState(
-  target: RunLayoutStateLike | string,
-  state: RunState,
-  options: RunStateWriteOptions = {}
-): RunState {
-  const statePath = resolveStatePath(target);
-  if (fs.existsSync(statePath)) {
-    return readRunState(statePath);
-  }
-  writeRunState(statePath, state, options);
-  return state;
 }
 
 export function updateRunStatus(

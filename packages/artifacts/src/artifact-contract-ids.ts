@@ -62,7 +62,3 @@ export const JSON_ARTIFACT_CONTRACT_IDS = ARTIFACT_CONTRACT_IDS.filter(
 export function isArtifactContractId(value: unknown): value is ArtifactContractId {
   return typeof value === "string" && (ARTIFACT_CONTRACT_IDS as readonly string[]).includes(value);
 }
-
-export function isJsonArtifactContractId(value: unknown): value is JsonArtifactContractId {
-  return typeof value === "string" && (JSON_ARTIFACT_CONTRACT_IDS as readonly string[]).includes(value);
-}

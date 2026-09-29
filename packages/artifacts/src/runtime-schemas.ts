@@ -192,29 +192,6 @@ export const agentSourceProofJsonSchema = {
   }
 } as const;
 
-export interface AgentSourceProof {
-  schema_version: typeof AGENT_SOURCE_PROOF_SCHEMA_VERSION;
-  attempt_id: string;
-  commit: string;
-  tree: string;
-  base_ref: "refs/heads/ultrafuzz-pinned";
-  refs: Array<{ name: string; object: string }>;
-  remotes: [];
-  revision_count: 1;
-  commit_object_count: 1;
-  dependencies: {
-    schema_version: "ultrafuzz.pinned-submodules-expectation.v1";
-    source_commit: string;
-    source_tree: string;
-    manifest_sha256: string;
-    top_level_roots: string[];
-    recursive_gitlinks: Array<{ path: string; commit: string; tree: string }>;
-    entry_count: number;
-    file_count: number;
-    total_file_bytes: number;
-  } | null;
-}
-
 export interface ArtifactVerificationEntry {
   path: string;
   contract: ArtifactContractId;

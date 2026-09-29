@@ -227,12 +227,8 @@ export function loadOrCreateDynamicExpansion(input: {
   const runRoot = path.resolve(input.runRoot);
   assertPathInside(runRoot, input.sourceArtifactPath, "dynamic source artifact");
   assertPathInside(runRoot, input.templatePath, "dynamic prompt template");
-  assertNoSymlinkComponents(runRoot, input.sourceArtifactPath, "dynamic source artifact");
   assertNoSymlinkComponents(runRoot, input.templatePath, "dynamic prompt template");
-  assertRegularFileInside(runRoot, input.sourceArtifactPath, "dynamic source artifact");
   assertRegularFileInside(runRoot, input.templatePath, "dynamic prompt template");
-  const sourceBytes = fs.readFileSync(input.sourceArtifactPath);
-  const sourceDigest = sha256Bytes(sourceBytes);
   const actualTemplateDigest = sha256Bytes(fs.readFileSync(input.templatePath));
   if (actualTemplateDigest !== input.templateDigest) {
     throw dynamicError("DYNAMIC_TEMPLATE_CHANGED", `Dynamic group ${input.groupNodeId} prompt template changed`, {
@@ -248,88 +244,99 @@ export function loadOrCreateDynamicExpansion(input: {
   assertNoSymlinkComponents(runRoot, manifestDir, "dynamic expansion manifest directory");
   const manifestPath = path.join(manifestDir, `${validateSafeId(input.groupNodeId, "dynamic group node ID")}.json`);
   const sourceArtifactRelativePath = path.relative(runRoot, input.sourceArtifactPath).split(path.sep).join("/");
-  return withDynamicExpansionLock(manifestDir, () => {
-    const priorManifests = readExpansionManifests(manifestDir);
-    assertManifestSetMatchesInput(priorManifests, {
-      runId: input.runId,
-      maxDynamicNodes: input.maxDynamicNodes,
-      reservedNodeIds: input.reservedNodeIds
-    });
-    const existing = priorManifests.find((manifest) => manifest.group_node_id === input.groupNodeId);
-    if (existing !== undefined) {
-      assertCompatibleManifest(existing, {
-        runId: input.runId,
-        groupNodeId: input.groupNodeId,
-        sourceNodeId: input.sourceNodeId,
-        sourceAttemptId: input.sourceAttemptId,
-        sourceArtifactPath: sourceArtifactRelativePath,
-        sourceDigest,
-        templateDigest: input.templateDigest,
-        templateFingerprint: input.templateFingerprint,
-        sourcePath: input.sourcePath,
-        keyPath: input.keyPath,
-        nodeIdTemplate: input.nodeIdTemplate,
-        maxDynamicNodes: input.maxDynamicNodes
-      });
-      return existing;
-    }
-
-    let sourceDocument: unknown;
-    try {
-      sourceDocument = JSON.parse(sourceBytes.toString("utf8")) as unknown;
-    } catch (error) {
-      throw dynamicError("DYNAMIC_SOURCE_JSON_INVALID", `Dynamic source artifact is not valid JSON`, {
-        groupNodeId: input.groupNodeId,
-        reason: error instanceof Error ? error.message : String(error)
-      });
-    }
-    const reserved = new Set(input.reservedNodeIds ?? []);
-    for (const manifest of priorManifests) {
-      for (const item of manifest.items) reserved.add(item.node_id);
-    }
-    const manifest = planDynamicExpansion({
+  // No lock (#1142): the one this replaced was never reclaimed, so a process killed while holding it
+  // failed every later render and lifecycle admission. Published manifests are never rewritten, so
+  // reads need none; on a filesystem without hard links a concurrent reader can still catch one
+  // mid-publication and fail that read. Creation assumes one renderer per run (Smithers refuses to
+  // resume a run whose driver is live before it renders). Renderers that load the same outputs
+  // publish identical bytes, which publishFileDurableExclusive accepts. Two that create different
+  // groups at once can take the same `sequence`; the re-read after publication detects that but
+  // cannot undo it, and the run then needs manual repair.
+  const priorManifests = readExpansionManifests(manifestDir);
+  assertManifestSetMatchesInput(priorManifests, {
+    runId: input.runId,
+    maxDynamicNodes: input.maxDynamicNodes,
+    reservedNodeIds: input.reservedNodeIds
+  });
+  const existing = priorManifests.find((manifest) => manifest.group_node_id === input.groupNodeId);
+  if (existing !== undefined) {
+    // A published manifest is the group's membership. `source.output_sha256` records the bytes it
+    // was planned from; the live source is not consulted again, because a reset re-runs the source,
+    // whose agent attempt wipes that artifact and then writes a new one.
+    assertCompatibleManifest(existing, {
       runId: input.runId,
       groupNodeId: input.groupNodeId,
       sourceNodeId: input.sourceNodeId,
       sourceAttemptId: input.sourceAttemptId,
       sourceArtifactPath: sourceArtifactRelativePath,
-      sourceDigest,
-      sourceDocument,
+      templateDigest: input.templateDigest,
+      templateFingerprint: input.templateFingerprint,
       sourcePath: input.sourcePath,
       keyPath: input.keyPath,
       nodeIdTemplate: input.nodeIdTemplate,
-      templateDigest: input.templateDigest,
-      templateFingerprint: input.templateFingerprint,
-      maxDynamicNodes: input.maxDynamicNodes,
-      sequence: priorManifests.length,
-      alreadyExpandedNodes: priorManifests.reduce((sum, entry) => sum + entry.items.length, 0),
-      reservedNodeIds: reserved
+      maxDynamicNodes: input.maxDynamicNodes
     });
-    // Validate the complete candidate set in memory first: a manifest that would make the set
-    // invalid must never reach durable storage, otherwise every automatic resume keeps failing
-    // until an operator removes or repairs the published file by hand.
-    const candidateSet = [...priorManifests, manifest];
-    validateManifestSet(candidateSet, manifestDir);
-    assertManifestSetMatchesInput(candidateSet, {
-      runId: input.runId,
-      maxDynamicNodes: input.maxDynamicNodes,
-      reservedNodeIds: input.reservedNodeIds
+    return existing;
+  }
+
+  assertNoSymlinkComponents(runRoot, input.sourceArtifactPath, "dynamic source artifact");
+  assertRegularFileInside(runRoot, input.sourceArtifactPath, "dynamic source artifact");
+  const sourceBytes = fs.readFileSync(input.sourceArtifactPath);
+  let sourceDocument: unknown;
+  try {
+    sourceDocument = JSON.parse(sourceBytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw dynamicError("DYNAMIC_SOURCE_JSON_INVALID", `Dynamic source artifact is not valid JSON`, {
+      groupNodeId: input.groupNodeId,
+      reason: error instanceof Error ? error.message : String(error)
     });
-    publishFileDurableExclusive(manifestDir, `${input.groupNodeId}.json`, `${JSON.stringify(manifest, null, 2)}\n`);
-    const publishedManifests = readExpansionManifests(manifestDir);
-    assertManifestSetMatchesInput(publishedManifests, {
-      runId: input.runId,
-      maxDynamicNodes: input.maxDynamicNodes,
-      reservedNodeIds: input.reservedNodeIds
-    });
-    const published = publishedManifests.find((candidate) => candidate.group_node_id === input.groupNodeId);
-    if (published === undefined || !fs.existsSync(manifestPath)) {
-      throw dynamicError("DYNAMIC_MANIFEST_PUBLISH_FAILED", "Dynamic expansion manifest publication failed", {
-        groupNodeId: input.groupNodeId
-      });
-    }
-    return published;
+  }
+  const reserved = new Set(input.reservedNodeIds ?? []);
+  for (const manifest of priorManifests) {
+    for (const item of manifest.items) reserved.add(item.node_id);
+  }
+  const manifest = planDynamicExpansion({
+    runId: input.runId,
+    groupNodeId: input.groupNodeId,
+    sourceNodeId: input.sourceNodeId,
+    sourceAttemptId: input.sourceAttemptId,
+    sourceArtifactPath: sourceArtifactRelativePath,
+    sourceDigest: sha256Bytes(sourceBytes),
+    sourceDocument,
+    sourcePath: input.sourcePath,
+    keyPath: input.keyPath,
+    nodeIdTemplate: input.nodeIdTemplate,
+    templateDigest: input.templateDigest,
+    templateFingerprint: input.templateFingerprint,
+    maxDynamicNodes: input.maxDynamicNodes,
+    sequence: priorManifests.length,
+    alreadyExpandedNodes: priorManifests.reduce((sum, entry) => sum + entry.items.length, 0),
+    reservedNodeIds: reserved
   });
+  // Validate the complete candidate set in memory first: a manifest that would make the set
+  // invalid must never reach durable storage, otherwise every automatic resume keeps failing
+  // until an operator removes or repairs the published file by hand.
+  const candidateSet = [...priorManifests, manifest];
+  validateManifestSet(candidateSet, manifestDir);
+  assertManifestSetMatchesInput(candidateSet, {
+    runId: input.runId,
+    maxDynamicNodes: input.maxDynamicNodes,
+    reservedNodeIds: input.reservedNodeIds
+  });
+  publishFileDurableExclusive(manifestDir, `${input.groupNodeId}.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+  const publishedManifests = readExpansionManifests(manifestDir);
+  assertManifestSetMatchesInput(publishedManifests, {
+    runId: input.runId,
+    maxDynamicNodes: input.maxDynamicNodes,
+    reservedNodeIds: input.reservedNodeIds
+  });
+  const published = publishedManifests.find((candidate) => candidate.group_node_id === input.groupNodeId);
+  if (published === undefined || !fs.existsSync(manifestPath)) {
+    throw dynamicError("DYNAMIC_MANIFEST_PUBLISH_FAILED", "Dynamic expansion manifest publication failed", {
+      groupNodeId: input.groupNodeId
+    });
+  }
+  return published;
 }
 
 export function dynamicStorageId(groupNodeId: string, generatedNodeId: string): string {
@@ -778,61 +785,6 @@ function assertManifestSetMatchesInput(
   }
 }
 
-function withDynamicExpansionLock<T>(manifestDir: string, operation: () => T): T {
-  const lockPath = path.join(manifestDir, ".expansion.lock");
-  const deadline = Date.now() + 5_000;
-  const token = `${process.pid}:${crypto.randomBytes(16).toString("hex")}`;
-  let descriptor: number | undefined;
-  while (descriptor === undefined) {
-    try {
-      descriptor = fs.openSync(lockPath, "wx", 0o600);
-      fs.writeFileSync(descriptor, `${token}\n`, "utf8");
-    } catch (error) {
-      if (!isAlreadyExistsError(error)) throw error;
-      let stat: fs.Stats;
-      try {
-        stat = fs.lstatSync(lockPath);
-      } catch (statError) {
-        // The holder may release between our exclusive-create failure and the
-        // inspection. That is ordinary lock contention, not a run failure.
-        if (isNoEntryError(statError)) continue;
-        throw statError;
-      }
-      if (stat.isSymbolicLink() || !stat.isFile()) {
-        throw dynamicError("DYNAMIC_EXPANSION_LOCK_INVALID", "Dynamic expansion lock is unsafe", { lockPath });
-      }
-      // Never steal a lock based on age. Between an age check and unlink, the
-      // observed inode can disappear and a new owner can publish a fresh lock
-      // at the same path. Only the token-owning holder releases the lock;
-      // contenders fail after the bounded wait and leave recovery explicit.
-      if (Date.now() >= deadline) {
-        throw dynamicError("DYNAMIC_EXPANSION_LOCKED", "Dynamic expansion is already being materialized", {
-          lockPath
-        });
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
-  }
-  try {
-    return operation();
-  } finally {
-    fs.closeSync(descriptor);
-    try {
-      if (fs.readFileSync(lockPath, "utf8").trim() === token) fs.unlinkSync(lockPath);
-    } catch {
-      // A missing lock after the operation cannot weaken manifest validation.
-    }
-  }
-}
-
-function isAlreadyExistsError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "EEXIST";
-}
-
-function isNoEntryError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
 type ManifestFailure = (reason: string, details?: Record<string, unknown>) => never;
 
 function assertExactKeys(
@@ -933,7 +885,6 @@ function assertCompatibleManifest(
     sourceNodeId: string;
     sourceAttemptId: string;
     sourceArtifactPath: string;
-    sourceDigest: string;
     templateDigest: string;
     templateFingerprint: string;
     sourcePath: string;
@@ -948,7 +899,6 @@ function assertCompatibleManifest(
     ["source node ID", manifest.source.node_id, expected.sourceNodeId],
     ["source attempt ID", manifest.source.attempt_id, expected.sourceAttemptId],
     ["source artifact", manifest.source.artifact_path, expected.sourceArtifactPath],
-    ["source output", manifest.source.output_sha256, expected.sourceDigest],
     ["source path", manifest.source.json_path, expected.sourcePath],
     ["key path", manifest.template.key_path, expected.keyPath],
     ["node ID template", manifest.template.node_id, expected.nodeIdTemplate],
