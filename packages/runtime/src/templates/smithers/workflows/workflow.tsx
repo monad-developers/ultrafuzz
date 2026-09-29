@@ -1661,8 +1661,7 @@ const cloudExecutionGeneration = readCloudExecutionGeneration();
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
-// Null unless run.friction_log_enabled is set. Agents write Frog-format entries
-// directly; no Frog code runs inside the campaign.
+// Null unless run.friction_log_enabled is set. Agents write the entries directly.
 const frictionLog: { instructions: string; entriesPath: string } | null = __ULTRAFUZZ_FRICTION_LOG__;
 
 /**

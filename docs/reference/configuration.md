@@ -121,7 +121,7 @@ empty path components, and dot components fail validation.
 | `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
 | `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
 | `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
-| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local Frog friction log.      |
+| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local friction log.           |
 | `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
 | `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
 | `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).    |
@@ -182,21 +182,15 @@ evidence without applying the limit to the workflow controller.
 
 The friction log is disabled by default. With `friction_log_enabled = true`,
 every local task may record Ultrafuzz, tooling, or instruction roadblocks as
-[Frog](https://github.com/wevm/frog) entries under
+Markdown entries under
 `<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md`. Each
 task resolves that directory from its own run root, receives write access to
-it, and creates it during preparation. Ultrafuzz ships no Frog code and runs no
-Frog command, so a disabled run installs, seals, and renders nothing extra.
+it, and creates it during preparation. Ultrafuzz adds no dependency for it, so a
+disabled run installs, seals, and renders nothing extra.
 Cloud tasks do not receive the friction log.
 
 Entries stay local. Review them before publishing anything, because they can
-describe private targets. Run directories sit inside the target repository and
-Frog anchors itself at the enclosing Git root, so stop Git discovery at the run
-directory when you inspect them with Frog:
-
-```bash
-GIT_CEILING_DIRECTORIES=<run> npx frog list --cwd <run>/friction
-```
+describe private targets.
 
 The agent instructions are one paragraph appended after the shared trust
 boundary. Its only variable is the entry directory, which is the same for every

@@ -45,7 +45,7 @@ describe("agent preamble MDX", () => {
     ).toBe(`${mandatoryPrefix}${operatorPrompt}\n\n${taskPrompt}`);
   });
 
-  it("tells agents to write Frog-format friction entries into the run's friction directory", () => {
+  it("tells agents to write friction entries into the run's friction directory", () => {
     const template = loadAgentPreambleTemplate("friction-log");
     // The directory is the only variable: nothing reaches the agent through the environment.
     expect(new Set([...template.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu)].map((match) => match[1]))).toEqual(
@@ -56,7 +56,7 @@ describe("agent preamble MDX", () => {
     const fragment = renderAgentPreambleTemplate("friction-log", { friction_log_directory: directory });
     expect(fragment).toContain(`${directory}/<UTC time as YYYYMMDDHHMMSS>-`);
     expect(fragment).toContain("/friction.md");
-    // Frog's front matter and its five entry sections, in Frog's order.
+    // The entry front matter and its five sections, in order.
     expect(fragment).toMatch(/---\ntitle: '[^\n]+'\nseverity: '[^\n]+'\n---/u);
     const sections = [
       "Expected Behavior",

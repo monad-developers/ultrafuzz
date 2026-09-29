@@ -132,8 +132,7 @@ const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const MAX_WORKFLOW_EXECUTION_FILE_BYTES = 64 * 1024 * 1024;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
-// Frog's on-disk layout (`<root>/.agents/friction-log/<id>/friction.md`) rooted at
-// `<run>/friction`, so an operator can review the entries with `frog` after the run.
+// Friction entries live at `<run>/friction/.agents/friction-log/<id>/friction.md`.
 const FRICTION_LOG_ENTRIES_PATH = "friction/.agents/friction-log";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;

@@ -9,7 +9,7 @@ prompts:
     description: Establishes that every task is an authorized local defensive security review.
   - path: _templates/agent-preamble/friction-log.mdx
     category: Runtime control
-    description: When run.friction_log_enabled is set, tells local agents to record tooling roadblocks as Frog-format entries in the run friction log.
+    description: When run.friction_log_enabled is set, tells local agents to record tooling roadblocks as Markdown entries in the run friction log.
   - path: _templates/agent-preamble/topology-runtime-context.mdx
     category: Runtime control
     description: Injects timeout, working-budget, deadline, and finalization-reserve instructions into every node.
