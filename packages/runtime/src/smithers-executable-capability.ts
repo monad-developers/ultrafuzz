@@ -4,6 +4,18 @@ import path from "node:path";
 
 const SMITHERS_EXECUTABLE_CAPABILITY: unique symbol = Symbol("ultrafuzz.smithers-executable-capability");
 const TARGET_LOCAL_DELEGATION_ANCHOR = "if (!delegateToLocalCliIfPresent()) {";
+/**
+ * Bun reads `bunfig.toml` (and runs its `preload` list) and `.env` from its
+ * working directory, which for every controller process is the target
+ * repository. A controller Bun process without execution-snapshot startup
+ * controls runs with these flags, so target configuration never reaches it.
+ */
+export const BUN_TARGET_CONFIGURATION_GUARD_ARGS: readonly string[] = [
+  "--config=/dev/null",
+  "--no-env-file",
+  "--no-install",
+  "--no-addons"
+];
 
 interface FileIdentity {
   path: string;
@@ -224,14 +236,13 @@ export function acquireSmithersExecutableAnchor(
     if (bunControls !== undefined)
       for (const [name, identity] of Object.entries(capability.bunStartup!))
         assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
-    // An unsealed native continuation has no startup controls. It still runs in
-    // the target repository, so it must not load that repository's bunfig.toml
-    // (and its preload) or .env either.
+    // An unsealed native continuation has no startup controls but still runs
+    // in the target repository.
     const interpreterArguments =
       capability.interpreter.runtime !== "bun"
         ? []
         : bunControls === undefined
-          ? ["--config=/dev/null", "--no-env-file", "--no-install", "--no-addons"]
+          ? BUN_TARGET_CONFIGURATION_GUARD_ARGS
           : [
               `--config=${bunControls.config}`,
               `--env-file=${bunControls.environment}`,

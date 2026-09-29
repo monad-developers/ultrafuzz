@@ -17625,6 +17625,7 @@ const sleep = (milliseconds) => Atomics.wait(sleepArray, 0, 0, milliseconds);
 async function launchSupervisor(child, logFile, workflowArgument) {
   const cliPath = process.argv[1];
   const supervisorArgs = [cliPath, "supervisor", workflowArgument];
+  const options = {};
   let supervisorPid;
   const fail = (failure) => ({ failure });
 ${supervisorPatch.patched}
@@ -17945,6 +17946,7 @@ testWhen(process.platform !== "win32" && fs.existsSync("/proc/self/fd"))(
     const configPath = path.join(root, "controls", "ultrafuzz.toml");
     const scriptPath = path.join(root, "descriptor-generations.mjs");
     const logPath = path.join(coordinationRoot, "detached.log");
+    const runLogDir = path.join(coordinationRoot, "run-logs");
     const launcherRecordPath = path.join(coordinationRoot, "launcher.json");
     const supervisorRecordPath = path.join(coordinationRoot, "supervisor.json");
     const resumeLaunchPath = path.join(coordinationRoot, "resume-launch.json");
@@ -18045,6 +18047,7 @@ ${detachedTransferPatch.patched}
 function launchSupervisor() {
   const supervisorArgs = [process.argv[1], "supervisor"];
   const logFile = process.env.UFZ_LOG_PATH;
+  const options = { logDir: process.env.UFZ_RUN_LOG_DIR };
   let supervisorPid;
 ${supervisorPatch.patched}
   return supervisorPid;
@@ -18131,7 +18134,7 @@ if (phase === "supervisor") {
   writeFileSync(process.env.UFZ_RESUME_LAUNCH_PATH, JSON.stringify({ logged: logged.args, ignored: ignored.args }));
   writeFileSync(
     process.env.UFZ_SUPERVISOR_RECORD_PATH,
-    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor, reused_startup_descriptor: reusedStartupDescriptor })
+    JSON.stringify({ ...ownEvidence, ...modules, logged_pid: logged.pid, ignored_pid: ignored.pid, reused_descriptor: reusedDescriptor, reused_startup_descriptor: reusedStartupDescriptor, smithers_log_dir: process.env.ULTRAFUZZ_SMITHERS_LOG_DIR })
   );
   process.exit(0);
 }
@@ -18178,6 +18181,7 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
         ULTRAFUZZ_CONFIG_PATH: path.join(controllerRoot, "controls", "ultrafuzz.toml"),
         ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath,
         UFZ_LOG_PATH: logPath,
+        UFZ_RUN_LOG_DIR: runLogDir,
         UFZ_LAUNCHER_RECORD_PATH: launcherRecordPath,
         UFZ_SUPERVISOR_RECORD_PATH: supervisorRecordPath,
         UFZ_RESUME_LAUNCH_PATH: resumeLaunchPath,
@@ -18293,6 +18297,8 @@ if (phase === "engine" || phase === "resume-logged" || phase === "resume-ignored
       assert.equal(supervisorEvidence.reused_descriptor, supervisorEvidence.process_descriptor);
       assert.equal(supervisorEvidence.relative_module, "sealed-relative");
       assert.match(String(supervisorEvidence.ambient_error), /outside its sealed snapshot/u);
+      // The sealed supervisor keeps the launch's --log-dir for the relaunch argv (`resume_log_dir`).
+      assert.equal(supervisorEvidence.smithers_log_dir, runLogDir);
       addEvidencePids(pids, supervisorEvidence, "logged_pid", "ignored_pid");
 
       const resumeLaunch = JSON.parse(fs.readFileSync(resumeLaunchPath, "utf8")) as {

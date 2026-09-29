@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 
-import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
+import { BUN_TARGET_CONFIGURATION_GUARD_ARGS } from "../src/smithers-executable-capability.js";
+import { patchedSmithersRunner } from "./patched-smithers-runner.js";
 import { temporaryRoot } from "./temporary-root.js";
-
-// The flags Ultrafuzz runs a controller Bun process with when it has no snapshot startup controls.
-const BUN_GUARD = ["--config=/dev/null", "--no-env-file", "--no-install", "--no-addons"];
 
 interface TaskRecord {
   task: string;
@@ -47,8 +44,9 @@ test("the supervisor relaunch finishes a SIGKILLed engine's run from its launch 
 
   const runner = patchedSmithersRunner(path.join(root, "runner"));
   const runId = `supervisor-relaunch-${process.pid}`;
+  const cli = [...BUN_TARGET_CONFIGURATION_GUARD_ARGS, path.join(runner, "src", "bin", "smithers.js")];
   const smithers = (...args: string[]): string => {
-    const result = spawnSync("bun", [...BUN_GUARD, path.join(runner, "src", "bin", "smithers.js"), ...args], {
+    const result = spawnSync("bun", [...cli, ...args], {
       cwd: target,
       encoding: "utf8",
       env: {
@@ -84,9 +82,10 @@ test("the supervisor relaunch finishes a SIGKILLed engine's run from its launch 
       "--supervise",
       "--supervise-interval",
       "1s",
-      // A relaunch that has not activated within the threshold is claimed again as a second attempt.
+      // Production's threshold (controller_lease_seconds). A relaunch that has not activated within
+      // it is claimed again as a second attempt.
       "--supervise-stale-threshold",
-      "15s",
+      "30s",
       "--supervise-max-concurrent",
       "1"
     );
@@ -133,7 +132,8 @@ test("the supervisor relaunch finishes a SIGKILLed engine's run from its launch 
     assert.equal(fs.existsSync(path.join(target, ".smithers", "executions")), false);
   } finally {
     // The supervisor exits once the run ends; a failed run can leave it and a hung engine behind.
-    spawnSync("pkill", ["-KILL", "-f", runner]);
+    // Both run the copied CLI below `root`, and `pkill -f` takes a regular expression.
+    spawnSync("pkill", ["-KILL", "-f", root.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&")]);
   }
 });
 
@@ -182,41 +182,12 @@ function taskRecords(file: string): TaskRecord[] {
     .map((line) => JSON.parse(line) as TaskRecord);
 }
 
+// Long enough for the supervisor to give up after three relaunches, so a regression reports its events.
 async function waitFor<T>(label: string, probe: () => T | undefined): Promise<T> {
-  for (const deadline = Date.now() + 120_000; Date.now() < deadline;) {
+  for (const deadline = Date.now() + 180_000; Date.now() < deadline;) {
     const value = probe();
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`timed out waiting for ${label}`);
-}
-
-// The pinned runner with every compatibility patch applied, as the operator controller installs it.
-// The pnpm store is shared by every checkout on the machine, so it is never written: the packages
-// that own a patched module are copied, and every other package links back to the store.
-function patchedSmithersRunner(copy: string): string {
-  const runner = path.dirname(path.dirname(fs.realpathSync(createRequire(import.meta.url).resolve("smthrs"))));
-  const store = path.resolve(runner, "..", "..", "..");
-  const applied = new Set<string>();
-  fs.mkdirSync(copy);
-  for (const entry of fs.readdirSync(store)) {
-    const patches = SMITHERS_COMPATIBILITY_PATCHES.filter((patch) =>
-      entry.startsWith(`${patch.packageName.replace("/", "+")}@`)
-    );
-    if (patches.length === 0) {
-      fs.symlinkSync(path.join(store, entry), path.join(copy, entry));
-      continue;
-    }
-    fs.cpSync(path.join(store, entry), path.join(copy, entry), { recursive: true, verbatimSymlinks: true });
-    for (const patch of patches) {
-      const packageRoot = path.join(copy, entry, "node_modules", ...patch.packageName.split("/"));
-      const source = path.join(packageRoot, ...patch.sourceRelativePath.split("/"));
-      const parts = fs.readFileSync(source, "utf8").split(patch.patchable);
-      assert.equal(parts.length, 2, `${patch.id} no longer anchors in ${source}`);
-      fs.writeFileSync(source, parts.join(patch.patched));
-      applied.add(patch.id);
-    }
-  }
-  assert.equal(applied.size, SMITHERS_COMPATIBILITY_PATCHES.length, "a patched package is missing from the store");
-  return path.join(copy, path.relative(store, runner));
 }

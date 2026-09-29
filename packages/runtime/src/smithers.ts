@@ -105,6 +105,7 @@ import {
   assertExecutableOutsideRoot,
   bindOperatorSmithersExecutableCapability,
   bindSmithersExecutableCapability,
+  BUN_TARGET_CONFIGURATION_GUARD_ARGS,
   nativeOperatorSmithersNodePath,
   smithersExecutableCapability,
   type SmithersExecutableAnchor
@@ -184,13 +185,10 @@ const operatorControllerProjects = new Map<string, Promise<OperatorControllerPro
 let operatorControllerCleanupRegistered = false;
 const SMITHERS_BIN_LOCAL_DELEGATION_SOURCE = "if (!delegateToLocalCliIfPresent()) {",
   SMITHERS_BIN_LOCAL_DELEGATION_PATCH = "if (true) { // Ultrafuzz operator controller: never delegate to target code.";
-// Bun reads `bunfig.toml` (and runs its `preload` list) and `.env` from the
-// working directory, which for every controller process is the target
-// repository. A patched spawn that carries no execution-snapshot startup
-// controls passes these flags instead, so target configuration never reaches
-// the engine, the supervisor or a relaunch.
-const SMITHERS_BUN_GUARD_ARGS =
-  '(process.versions.bun ? ["--config=/dev/null", "--no-env-file", "--no-install", "--no-addons"] : [])';
+// A patched spawn that carries no execution-snapshot startup controls passes
+// the Bun guard flags, so target configuration never reaches the engine, the
+// supervisor or a relaunch.
+const SMITHERS_BUN_GUARD_ARGS = `(process.versions.bun ? ${JSON.stringify(BUN_TARGET_CONFIGURATION_GUARD_ARGS)} : [])`;
 // 0.35.0 routes the detached spawn through `smithersRuntimeSpawn`, which only
 // selects the interpreter: under Bun it returns exactly `{command: "bun", args}`,
 // the literal 0.34.0 shape. Upstream still has no equivalent of the fd-3
