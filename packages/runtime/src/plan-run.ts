@@ -250,6 +250,18 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       }
     ]);
   }
+  const referenceIds = graph.nodes.flatMap((node) =>
+    node.kind === "reference" && node.reference !== undefined ? [node.reference] : []
+  );
+  if (referenceIds.length > 0) {
+    // Materialization reads these caches after the run directory exists. Checking them here, before
+    // governance and provider preflight, means a missing or stale cache leaves no run behind.
+    try {
+      verifyReferencesCached(loadReferenceCatalog(projectRoot), referenceIds);
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
+    }
+  }
   let controllerSource: ReturnType<typeof inspectControllerSource>;
   try {
     controllerSource = inspectControllerSource(projectRoot);
@@ -359,18 +371,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     requestedConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
     nodes: stateNodes
   });
-  const referenceIds = graph.nodes.flatMap((node) =>
-    node.kind === "reference" && node.reference !== undefined ? [node.reference] : []
-  );
-  if (referenceIds.length > 0) {
-    // Materialization reads these caches after the run directory exists; check them first so a
-    // missing or stale cache does not leave a run behind that can never launch.
-    try {
-      verifyReferencesCached(loadReferenceCatalog(projectRoot), referenceIds);
-    } catch (error) {
-      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
-    }
-  }
 
   let layout;
   try {
@@ -459,8 +459,9 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
   }
 
-  const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
+  let persistedRenderedPrompts: ReturnType<typeof persistRenderedPromptSnapshots>;
   try {
+    persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
     persistDeferredPromptTemplates(layout, catalog, expandedGraph);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_TEMPLATE_SNAPSHOT_FAILED")]);

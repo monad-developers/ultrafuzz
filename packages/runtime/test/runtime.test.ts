@@ -25952,15 +25952,25 @@ test("planning errors that need no run directory leave none behind", async () =>
   );
   assert.equal(fs.existsSync(path.join(graphProject, ".ultrafuzz", "runs", "no-vulnerability-database")), false);
 
-  // An operator setup error: a pinned reference whose cache was never synced.
+  // An operator setup error: a pinned reference whose cache was never synced. It is reported before
+  // provider preflight, which can create a cloud app.
   const cacheProject = tempProject();
   assert.equal(initProject({ projectRoot: cacheProject, force: true }).ok, true);
   writeReferenceTopology(cacheProject);
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = path.join(cacheProject, "empty-cache");
   let cachePlan: Awaited<ReturnType<typeof planRun>>;
+  let preflights = 0;
   try {
-    cachePlan = await planRun({ projectRoot: cacheProject, runId: "unsynced-reference", env: {} });
+    cachePlan = await planRun(
+      { projectRoot: cacheProject, runId: "unsynced-reference", env: {} },
+      {
+        beforeMaterialize: async () => {
+          preflights += 1;
+          return [];
+        }
+      }
+    );
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;
@@ -25971,7 +25981,22 @@ test("planning errors that need no run directory leave none behind", async () =>
   assert.equal(cachePlan.ok, false);
   assert.equal(cachePlan.diagnostics[0]?.code, "MISSING_CACHE", JSON.stringify(cachePlan.diagnostics));
   assert.match(cachePlan.diagnostics[0]?.message ?? "", /ultrafuzz references sync/u);
+  assert.equal(preflights, 0);
   assert.equal(fs.existsSync(path.join(cacheProject, ".ultrafuzz", "runs", "unsynced-reference")), false);
+});
+
+test("a planning step that fails after the run directory exists returns its failure for the launch to record", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  writeSmallTopology(project);
+  // A file where the rendered-prompt snapshot directory belongs makes the snapshot write fail.
+  const plan = await planRun(
+    { projectRoot: project, runId: "blocked-prompt-snapshots", env: {} },
+    { afterLayoutCreated: (layout) => fs.writeFileSync(path.join(layout.root, "prompt-snapshots"), "") }
+  );
+  assert.equal(plan.ok, false);
+  assert.equal(plan.diagnostics[0]?.source, "prompts", JSON.stringify(plan.diagnostics));
+  assert.match(plan.diagnostics[0]?.message ?? "", /prompt-snapshots/u);
 });
 
 test("incomplete launch is observable without granting execution authority or claiming liveness", async () => {
