@@ -23,14 +23,38 @@ const SKIPPED_BEHIND_PRODUCER = {
   "verify:consumer": "skipped",
   "prepare:downstream": "skipped",
   "node:downstream": "skipped",
-  "verify:downstream": "skipped",
-  independent: "finished"
+  "verify:downstream": "skipped"
+};
+
+// The task each campaign runs beside the triplets.
+const SIDE_TASKS = {
+  // Finished work that a resume must not run again.
+  independent: `<Task id="independent" output={outputs.result} retries={0}>
+      {() => (record("independent"), { value: "independent" })}
+    </Task>`,
+  // Runnable in the same pass that skips the failed agent's verifier, so that
+  // pass also dispatches it. Its first attempt fails retryably, and upstream
+  // answers a retryable failure with a new decision but no render.
+  sibling: `<Task id="sibling" output={outputs.result} dependsOn={["node:producer"]} retries={1}>
+      {() => {
+        record("sibling");
+        if (exists("sibling-failed")) return { value: "sibling" };
+        fs.writeFileSync(path.join(root, "sibling-failed"), "");
+        throw new Error("synthetic transient failure");
+      }}
+    </Task>`
 };
 
 test("a failed agent's skip cascade reaches every descendant without executing one", async () => {
   const campaign = startCampaign("ufz-skip-cascade-");
-  assert.deepEqual(await campaign.waitForTerminalStates(), SKIPPED_BEHIND_PRODUCER);
+  assert.deepEqual(await campaign.waitForTerminalStates(), { ...SKIPPED_BEHIND_PRODUCER, independent: "finished" });
   assert.deepEqual(campaign.executed().sort(), ["independent", "node:producer", "prepare:producer"]);
+});
+
+test("a skip that shares its pass with dispatched work still reaches every descendant", async () => {
+  const campaign = startCampaign("ufz-skip-shared-pass-", "sibling");
+  assert.deepEqual(await campaign.waitForTerminalStates(), { ...SKIPPED_BEHIND_PRODUCER, sibling: "finished" });
+  assert.deepEqual(campaign.executed().sort(), ["node:producer", "prepare:producer", "sibling", "sibling"]);
 });
 
 test("a resumed session reopens skipped descendants only once --retry-failed resets their producer", async () => {
@@ -72,7 +96,7 @@ test("a resumed session reopens skipped descendants only once --retry-failed res
 
 let sharedRunner: string | undefined;
 
-function startCampaign(prefix: string) {
+function startCampaign(prefix: string, sideTask: keyof typeof SIDE_TASKS = "independent") {
   const root = temporaryRoot(prefix);
   const runner = (sharedRunner ??= patchedSmithersRunner(temporaryRoot("ufz-patched-smithers-")));
   const runId = `${path.basename(root)}-${process.pid}`;
@@ -80,7 +104,7 @@ function startCampaign(prefix: string) {
   fs.mkdirSync(path.dirname(workflow), { recursive: true });
   fs.symlinkSync(path.dirname(runner), path.join(root, ".smithers", "node_modules"), "dir");
   execFileSync("git", ["init", "--quiet", "--initial-branch=main"], { cwd: root });
-  fs.writeFileSync(workflow, syntheticWorkflowSource(root));
+  fs.writeFileSync(workflow, syntheticWorkflowSource(root, SIDE_TASKS[sideTask]));
   const smithers = (args: string[]): string =>
     execFileSync("bun", [path.join(runner, "src", "bin", "smithers.js"), ...args, "--format", "json"], {
       cwd: root,
@@ -105,7 +129,7 @@ function startCampaign(prefix: string) {
         if (status === "finished" || status === "failed" || status === "cancelled") {
           assert.equal(status, "finished", JSON.stringify(inspected));
           return Object.fromEntries(
-            Object.keys(SKIPPED_BEHIND_PRODUCER).map((nodeId) => [
+            [...Object.keys(SKIPPED_BEHIND_PRODUCER), sideTask].map((nodeId) => [
               nodeId,
               inspected.steps?.find((step) => (step.id ?? step.nodeId) === nodeId)?.state
             ])
@@ -154,7 +178,7 @@ function patchedSmithersRunner(copy: string): string {
 // triplets, skipped with the generated workflow's own predicates. The
 // producer's agent fails until `producer-may-succeed` exists, and preparation
 // refuses an input that was never verified, as dependency admission does.
-function syntheticWorkflowSource(root: string): string {
+function syntheticWorkflowSource(root: string, sideTask: string): string {
   const template = fs.readFileSync(
     path.join(runtimePackageRoot(), "src", "templates", "smithers", "workflows", "workflow.tsx"),
     "utf8"
@@ -219,9 +243,7 @@ export default smithers((ctx) => {
     {triplet("producer", [])}
     {triplet("consumer", ["producer"])}
     {triplet("downstream", ["consumer"])}
-    <Task id="independent" output={outputs.result} retries={0}>
-      {() => (record("independent"), { value: "independent" })}
-    </Task>
+    ${sideTask}
   </Parallel></Workflow>;
 });
 `;
