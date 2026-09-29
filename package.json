@@ -21,7 +21,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "knip": "pnpm dlx knip@6.33.0 --include files,dependencies,unlisted,unresolved --treat-config-hints-as-errors",
-    "lint": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\"",
+    "lint": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --pass-on-unpruned-suppressions",
     "lint:fix": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --fix",
     "lint:prune": "pnpm -w lint --prune-suppressions",
     "lint:strict": "ULTRAFUZZ_STRICT_LINT=1 eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --max-warnings 0 --pass-on-unpruned-suppressions",

@@ -92,9 +92,10 @@ Violations that predate the budgets are counted per file and rule in
 
 - A change that adds a violation to a file fails lint, because that file's
   count for the rule rises above the recorded count. Fix the new violation.
-- A change that removes violations also fails lint, with "There are
-  suppressions left that do not occur anymore". Run `pnpm -w lint:prune` and
-  commit the smaller `eslint-suppressions.json`.
+- A change that removes violations does not fail lint. Run `pnpm -w lint:prune`
+  to lower the recorded counts and commit the smaller `eslint-suppressions.json`
+  when convenient; stale entries are also pruned periodically on `main`, so
+  parallel pull requests do not all rewrite the same file.
 - Moving code that already exceeds a budget, including renaming its file,
   needs its count moved to the new path in `eslint-suppressions.json`.
 
