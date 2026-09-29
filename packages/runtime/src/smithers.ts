@@ -3287,6 +3287,8 @@ export interface CurrentSmithersInspect {
   nodes: CurrentSmithersInspectNode[];
   failedChildKeys: string[];
   exhaustedLoops: CurrentSmithersExhaustedLoop[];
+  /** The runner's run-level error (for example WORKFLOW_RENDER_FAILED), redacted and capped. Advisory text only. */
+  runError?: { code?: string; message: string };
 }
 
 /**
@@ -6103,7 +6105,41 @@ export function parseCurrentSmithersInspect(
   if (exhaustedLoops.length > 0 && parsedRunState !== "succeeded" && parsedRunState !== "succeeded-with-failures") {
     throw new Error("Smithers inspect data.exhaustedLoops is only valid for a succeeded workflow state");
   }
-  return { runStatus, runState: parsedRunState, nodes, failedChildKeys, exhaustedLoops };
+  const runError = currentSmithersRunError(run.error);
+  return {
+    runStatus,
+    runState: parsedRunState,
+    nodes,
+    failedChildKeys,
+    exhaustedLoops,
+    ...(runError === undefined ? {} : { runError })
+  };
+}
+
+// A run-level failure (for example a render exception) names no task, so the
+// run row's error is the only record of why the run stopped. Read it loosely:
+// an unexpected shape yields nothing and never fails the parse.
+function currentSmithersRunError(value: unknown): CurrentSmithersInspect["runError"] {
+  if (!isObjectRecord(value)) return undefined;
+  const nonBlank = (field: unknown): field is string => typeof field === "string" && field.trim() !== "";
+  // The runner records what was thrown as `cause`. Its `summary` is its own
+  // message before it appends a docs link and raw runner resume commands.
+  const cause = isObjectRecord(value.cause) ? value.cause.message : undefined;
+  const message = [cause, value.summary, value.message].find(nonBlank);
+  if (message === undefined) return undefined;
+  return {
+    ...(nonBlank(value.code) ? { code: runErrorText(value.code, 100) } : {}),
+    message: runErrorText(message, 1_000)
+  };
+}
+
+// Redacted and scrubbed like other runner text, since it is printed. The runner
+// stores error text untruncated and redaction cost grows with the square of one
+// long token, so only a prefix is redacted. For the message, eight times the
+// kept length still holds a whole PEM private key (3,300 characters at RSA-4096)
+// that starts in the kept text, so it is redacted as one block.
+function runErrorText(value: string, limit: number): string {
+  return scrubWorkflowRunnerText(redactSecretsInText(value.slice(0, limit * 8))).slice(0, limit);
 }
 
 function parseCurrentSmithersExhaustedLoops(value: unknown): CurrentSmithersExhaustedLoop[] {
@@ -6300,32 +6336,6 @@ function requiredCurrentInspectEnum<const Values extends readonly string[]>(
     throw new Error(`${label} is not a current supported value`);
   }
   return value as Values[number];
-}
-
-/**
- * Dependency attempt ids whose verified artifacts no longer match their verification marker.
- * The message is emitted by the generated workflow's own `assertVerifiedDependency`, so the shape
- * is stable, and it is the only signal that reaches the resume side: the failure lands on the
- * dependent's `prepare:` task and leaves no failed node behind, so the run row's `error_json` is
- * where it surfaces. Recovery on top of this is tracked separately in #288.
- */
-export function smithersSnapshotUnverifiedDependencies(snapshot: SmithersCommandSnapshot): string[] {
-  const evidence = [
-    snapshot.stdout,
-    snapshot.stderr,
-    snapshot.error ?? "",
-    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
-  ].join("\n");
-  const dependencies = new Set<string>();
-  for (const match of evidence.matchAll(
-    /artifact dependency has not passed verification ([A-Za-z0-9._-]+) for [A-Za-z0-9._-]+/gu
-  )) {
-    const dependency = match[1];
-    if (dependency !== undefined && dependency.trim() !== "" && !dependency.includes("..")) {
-      dependencies.add(dependency);
-    }
-  }
-  return [...dependencies].sort();
 }
 
 function isCompatibleSmithersRunId(value: string): boolean {
