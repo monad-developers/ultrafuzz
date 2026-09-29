@@ -2158,20 +2158,19 @@ function readOpenedRegularFile(exactPath: string, label: string, requireSingleLi
     }
     const completed = fs.fstatSync(descriptor, { bigint: true });
     const current = fs.lstatSync(exactPath, { bigint: true });
+    // Link count and ctime are not compared: a hard link made anywhere on the host (pnpm linking the
+    // same store inode into another node_modules) changes both without changing a byte. A write
+    // updates mtime along with ctime, and sealed bytes are digest-checked when they are verified.
     if (
       !current.isFile() ||
       current.isSymbolicLink() ||
       opened.dev !== completed.dev ||
       opened.ino !== completed.ino ||
       opened.size !== completed.size ||
-      opened.nlink !== completed.nlink ||
-      opened.ctimeNs !== completed.ctimeNs ||
       opened.mtimeNs !== completed.mtimeNs ||
       opened.dev !== current.dev ||
       opened.ino !== current.ino ||
       opened.size !== current.size ||
-      opened.nlink !== current.nlink ||
-      opened.ctimeNs !== current.ctimeNs ||
       opened.mtimeNs !== current.mtimeNs
     ) {
       throw new Error(`${label} changed while reading`);

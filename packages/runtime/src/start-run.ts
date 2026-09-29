@@ -1285,12 +1285,13 @@ async function persistSmithersEvidence(
 
 /**
  * run.json and state.json are republished by atomic rename while a run is live, by its controller and
- * by observe-only synchronization from a concurrent `status`, and every strict reader below reports a
- * replacement it straddled as a mid-read change. An observer holds no control lock, so for it that is
- * a transient race, not evidence of anything: the evidence is derived again (`observationAttempt`
- * counts the derivations), within the bounded observation budget, and only an exhausted budget is
- * reported, as the race and naming the document. Execution callers hold the lock; for them the same
- * detection is a violation and keeps failing closed on the first read.
+ * by observe-only synchronization from a concurrent `status`. The workflow-control reader below
+ * re-checks that the path still names the inode it read, so it reports a replacement it straddled as a
+ * mid-read change. An observer holds no control lock, so for it that is a transient race, not evidence
+ * of anything: the evidence is derived again (`observationAttempt` counts the derivations), within the
+ * bounded observation budget, and only an exhausted budget is reported, as the race and naming the
+ * document. Execution callers hold the lock; for them the same detection is a violation and keeps
+ * failing closed on the first read.
  */
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,
