@@ -242,3 +242,27 @@ test("#323 a listing past Node's 1 MB default is enumerated in full under the te
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("invariant source discovery lists tracked, untracked and gitignored sources under every supported root", () => {
+  // An agent's harness sources are often untracked, and a target may gitignore its test tree; discovery must
+  // still see them, or the durable suite silently loses them.
+  const enumeration = loadEnumeration();
+  const workspace = temporaryRoot("ultrafuzz-invariant-discovery-");
+  const git = (...args: string[]): void => {
+    execFileSync("git", args, { cwd: workspace, stdio: "ignore" });
+  };
+  git("init", "--quiet");
+  for (const relativePath of ["src/Tracked.sol", "contracts/Untracked.sol", "test/Ignored.sol", "tests/Visible.sol"]) {
+    fs.mkdirSync(path.dirname(path.join(workspace, relativePath)), { recursive: true });
+    fs.writeFileSync(path.join(workspace, relativePath), "contract Source {}\n", "utf8");
+  }
+  fs.writeFileSync(path.join(workspace, ".gitignore"), "test/Ignored.sol\n", "utf8");
+  git("add", "--", ".gitignore", "src/Tracked.sol", "tests/Visible.sol");
+
+  assert.deepEqual([...enumeration.invariantWorkspaceSourcePaths(workspace)].sort(), [
+    "contracts/Untracked.sol",
+    "src/Tracked.sol",
+    "test/Ignored.sol",
+    "tests/Visible.sol"
+  ]);
+});

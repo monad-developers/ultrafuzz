@@ -1891,6 +1891,14 @@ test("#213 the protected baseline outranks a sidecar the agent rewrote", () => {
     );
     fs.writeFileSync(sidecarPath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
 
+    // While this process still holds the digest it captured, a rewritten protected copy is refused.
+    fs.writeFileSync(protectedPath, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
+    assert.throws(
+      () => captureInvariantSuiteBaseline(setup, workspaceRoot),
+      /protected invariant suite baseline was modified/u
+    );
+    fs.writeFileSync(protectedPath, captured, "utf8");
+
     // Durable resume: the workflow process restarted, so the in-memory digests
     // that would otherwise catch the edit are gone.
     state.baselineSnapshots.clear();
@@ -2045,6 +2053,46 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
   }
 });
 
+test("retry cleanup clears every task-owned root before it re-prepares the attempt and its authorities", () => {
+  const { runRoot, handlers, state } = createInvariantChain();
+  try {
+    const canonicalRunRoot = fs.realpathSync(runRoot);
+    fs.mkdirSync(path.join(handlers.workspacePath, "tests", "recon"), { recursive: true });
+    handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@3" }];
+    const calls: string[] = [];
+    const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state, {
+      resetTaskArtifactContents: (rootPath: string, _attemptId: string, label: string) =>
+        calls.push(
+          `reset ${label} ${path.join(path.relative(canonicalRunRoot, fs.realpathSync(path.dirname(rootPath))), path.basename(rootPath))}`
+        ),
+      restoreInvariantSuiteWorkspaceSnapshot: () => calls.push("restore invariant suite"),
+      restoreWorkspacePatchPreparation: () => calls.push("restore workspace patch preparation"),
+      prepareArtifactMirror: (_task: unknown, options: unknown) => calls.push(`prepare ${JSON.stringify(options)}`),
+      materializePromptArtifactAuthority: () => calls.push("materialize prompt authority"),
+      materializeFinalReportRunMetadataAuthority: () => calls.push("materialize report run metadata")
+    });
+    assert.ok(helpers.resetTaskArtifactsForRetry);
+    helpers.resetTaskArtifactsForRetry(handlers);
+
+    // A previous attempt's outputs must not survive into the canonical root, the workspace
+    // mirror or either generated-test directory, and the authorities the model reads are
+    // derived again only after the attempt's inputs are prepared.
+    assert.deepEqual(calls, [
+      "reset canonical artifacts/handlers",
+      "restore invariant suite",
+      "reset mirror workspaces/handlers/artifacts/handlers",
+      "reset generated-test workspaces/handlers/tests/foundry/stateful-invariant-handlers",
+      "reset generated-test workspaces/handlers/tests/foundry/handlers",
+      "restore workspace patch preparation",
+      'prepare {"replayWorkspacePatches":false,"evidenceMode":"require"}',
+      "materialize prompt authority",
+      "materialize report run metadata"
+    ]);
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
+});
+
 test("#211 an inherited-only suite source survives a stage that never touches it", () => {
   // `downstream` sees ONLY handlers' artifact directory, so Setup.sol reaches
   // it exclusively through handlers republishing what it inherited. Every other
@@ -2136,6 +2184,8 @@ test("#211 invariant suite provenance is restricted to supported source roots", 
   for (const rejected of [
     "artifacts/workspace-state.json",
     ".envrc",
+    "src/.envrc",
+    "tests/.npmrc",
     ".git/config",
     "src/../.envrc",
     "src/.ultrafuzz/state.json",
