@@ -13,7 +13,6 @@ import {
 import {
   loadReportSnapshot,
   assertReportSnapshotRemainedCurrent,
-  publishBestEffortTerminalReport,
   ReportUnavailableError
 } from "../src/unverified-report.js";
 import { temporaryRoot } from "./temporary-root.js";
@@ -118,7 +117,7 @@ for (const status of ["failed", "pending", "running", "skipped"]) {
 }
 
 /** A failed report task whose failure names `causalTaskId`, with the report left in its workspace mirror. */
-function failReportAttempt(root: string, causalTaskId: string) {
+function failReportAttempt(root: string, causalTaskId: string): string {
   const state = createInitialRunState({
     runId: path.basename(root),
     nodes: [{ id: "final-report", status: "failed" }]
@@ -147,32 +146,11 @@ function failReportAttempt(root: string, causalTaskId: string) {
   fs.mkdirSync(mirror, { recursive: true });
   const file = path.join(mirror, "report.json");
   fs.renameSync(path.join(root, "artifacts", "final-report", "report.json"), file);
-  return { state, file };
+  return file;
 }
 
-test("a report its verifier rejected is still published as an unchecked PARTIAL report", () => {
-  const root = reportRun("verifier-rejected");
-  writeAgentReport(root);
-  const { state, file } = failReportAttempt(root, "verify:final-report");
-  const before = fs.readFileSync(file);
-
-  // The controller's terminal publication, as workflow synchronization runs it.
-  const published = publishBestEffortTerminalReport(root, { workflowRunId: "workflow", workflowState: "failed" });
-  assert.ok(published !== undefined);
-  assert.equal(published.verification, "not-checked");
-  assert.equal(published.artifacts.source, "unverified-runtime-report");
-  const status = writeReportPublicationStatus({ runRoot: root, state, report: published });
-  assert.deepEqual([status.status, status.completion, status.verification], ["available", "partial", "not-checked"]);
-
-  const document = reportSchema.parse(published.json);
-  assert.equal(document.run_metadata.repository, "example/repository");
-  assert.ok(document.verification?.reason_codes.includes("record-invalid"));
-  assert.match(published.markdown, /^# Ultrafuzz report — PARTIAL/u);
-  assert.match(published.markdown, /did not pass the required checks/u);
-  assert.deepEqual(fs.readFileSync(file), before);
-  assertReportSnapshotRemainedCurrent(loadReportSnapshot(root));
-});
-
+// The verifier-rejected report that is published is covered end to end by the
+// syncRun "stopped failures" tests in runtime.test.ts; these pin what stays unavailable.
 for (const causalTaskId of ["node:final-report", "prepare:final-report"]) {
   test(`a report task that failed at ${causalTaskId} does not publish leftover workspace output`, () => {
     const root = reportRun(`failed-at-${causalTaskId.replace(":", "-")}`);
@@ -186,7 +164,7 @@ for (const causalTaskId of ["node:final-report", "prepare:final-report"]) {
 test("a report its verifier rejected stays unavailable when it fails the artifact secret gate", () => {
   const root = reportRun("verifier-rejected-secret");
   writeAgentReport(root);
-  const { file } = failReportAttempt(root, "verify:final-report");
+  const file = failReportAttempt(root, "verify:final-report");
   const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
   report.run_metadata.repository = "example/repository ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fake credential fixture for the redaction tests
   fs.writeFileSync(file, JSON.stringify(report));
