@@ -243,11 +243,15 @@ Every planned JSON output MUST resolve through the checked-in schema registry.
 The planned and expanded graph representations MUST persist the schema filename,
 fragment-free schema ID, schema SHA-256, package schema-bundle SHA-256, and
 validator build identity. Missing or partial bindings MUST fail planning or host
-verification. Hosts MUST validate against the schema content a binding names,
-using the run's sealed schema snapshot when the installed bundle differs, and
-MUST NOT require the recorded validator build or contract digest to equal their
-own. Operators declare the versioned contract in topology; they MUST NOT supply
-these trust identities manually in YAML.
+verification. Host artifact gates and verified reads MUST validate against the
+schema content a binding names, using the run's sealed schema snapshot when the
+installed bundle differs. The recorded validator build and contract digest are
+provenance: graph reads, host artifact gates, verified reads, task preparation,
+dependency admission, and the validator preflight MUST NOT require them to equal
+the reading build's own. Task preparation and the validator preflight MUST still
+require the schema bundle they validate with to be the planned one. Operators
+declare the versioned contract in topology; they MUST NOT supply these trust
+identities manually in YAML.
 
 ## Prompts
 
