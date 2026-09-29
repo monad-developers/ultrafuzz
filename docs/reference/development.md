@@ -73,12 +73,14 @@ pnpm --filter @ultrafuzz/modal test
 
 `pnpm --filter @ultrafuzz/cli test:e2e` runs the end-to-end campaign test in
 `packages/cli/test/e2e/`. It drives `init`, `run`, `resume`, `status`, `stats`,
-`report`, and `events` as separate CLI processes against the pinned Smithers
-engine under Bun, with a stub `codex` executable in place of the model. It
-SIGKILLs the detached controller while one node is running, resumes the run, and
-checks that it succeeds with a verified report and that no finished task started
-again. It needs Linux, Bun, Git, and access to the npm registry, because `run`
-and `resume` install the pinned engine from npm as they do for any campaign.
+`report`, and `events` as separate CLI processes, and the generated workflow
+runs on the pinned Smithers engine under Bun, with a stub `codex` executable in
+place of the model. It SIGKILLs the detached controller while one node is
+running, resumes the run, and checks that it succeeds with a verified report and
+that no finished task started again. It needs Linux, Bun, Git, and access to
+the npm registry, because `run` and `resume` install the pinned engine from npm
+as they do for any campaign. On SIGINT or SIGTERM, the test kills the detached
+campaign and deletes its fixture, about 1 GB, before it exits.
 
 Package-local `typecheck` and `test` scripts may build direct workspace
 dependencies first because package exports point at `dist/**`.
