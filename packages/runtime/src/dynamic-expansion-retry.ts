@@ -269,14 +269,15 @@ function collectAttemptStateMoves(
   // A planned task whose prompt waits on a withdrawn group was rendered from this generation's
   // children. Left in place, a prompt that names them no longer matches the render once the
   // retried source plans other items, and every later render and admission check refuses it as
-  // changed. Moved, it renders again from the new expansion.
+  // changed. Moved, it renders again from the new expansion. Only a prompt that was never rendered
+  // is skipped: `lstat` counts a dangling symlink as present, so the file-type check refuses it.
   const groupIds = new Set(manifests.map((manifest) => manifest.group_node_id));
   for (const task of runtimeBase?.tasks ?? []) {
     if (!(task.deferredPromptGroups ?? []).some((groupId) => groupIds.has(groupId))) continue;
     const relativePath = `artifacts/${task.attemptId}/prompt.rendered.md`;
     const source = path.join(runRoot, relativePath);
     assertNoSymlinkComponents(runRoot, source, `dynamic retry prompt for ${task.attemptId}`);
-    if (!fs.existsSync(source)) continue;
+    if (fs.lstatSync(source, { throwIfNoEntry: false }) === undefined) continue;
     assertRegularFileInside(runRoot, source, `dynamic retry prompt for ${task.attemptId}`);
     moves.push({ source, relativePath });
   }

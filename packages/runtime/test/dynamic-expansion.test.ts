@@ -5,7 +5,13 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { createInitialRunState, createNodeState, readRunState, writeRunState } from "@ultrafuzz/artifacts";
+import {
+  ArtifactPathError,
+  createInitialRunState,
+  createNodeState,
+  readRunState,
+  writeRunState
+} from "@ultrafuzz/artifacts";
 
 import {
   DynamicExpansionError,
@@ -557,6 +563,62 @@ test("explicit source retry re-derives the base runtime controls after archiving
     `${archiveRelative}/artifacts/${generated.attemptId}`,
     `${archiveRelative}/artifacts/join/prompt.rendered.md`
   ]);
+});
+
+test("explicit source retry refuses a withdrawn prompt that is not a regular file before anything moves", () => {
+  // Each case leaves the join's published prompt, which the retry would withdraw, as something other
+  // than a regular file inside the run root. Planning runs before the Smithers reset, so refusing
+  // there keeps the generation published and moves nothing into the history directory.
+  const promptOf = (attemptDir: string): string => path.join(attemptDir, "prompt.rendered.md");
+  const cases: Array<{ name: string; code: string; corrupt: (attemptDir: string, outside: string) => void }> = [
+    {
+      name: "symlink",
+      code: "symlink-escape",
+      corrupt: (attemptDir, outside) => {
+        fs.writeFileSync(outside, "outside\n", "utf8");
+        fs.rmSync(promptOf(attemptDir));
+        fs.symlinkSync(outside, promptOf(attemptDir));
+      }
+    },
+    {
+      // Refused like a live one, not skipped as a prompt that was never rendered.
+      name: "dangling-symlink",
+      code: "symlink-escape",
+      corrupt: (attemptDir, outside) => {
+        fs.rmSync(promptOf(attemptDir));
+        fs.symlinkSync(outside, promptOf(attemptDir));
+      }
+    },
+    {
+      name: "directory",
+      code: "not-file",
+      corrupt: (attemptDir) => {
+        fs.rmSync(promptOf(attemptDir));
+        fs.mkdirSync(promptOf(attemptDir));
+      }
+    },
+    {
+      name: "symlinked-attempt-directory",
+      code: "symlink-escape",
+      corrupt: (attemptDir, outside) => {
+        fs.renameSync(attemptDir, outside);
+        fs.symlinkSync(outside, attemptDir);
+      }
+    }
+  ];
+  for (const { name, code, corrupt } of cases) {
+    const { controls } = sealedDynamicRun(`retry-prompt-${name}`, [item(0)]);
+    const { projectRoot, runRoot } = controls;
+    materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+    corrupt(path.join(runRoot, "artifacts", "join"), path.join(projectRoot, "outside"));
+    assert.throws(
+      () => planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] }),
+      (error: unknown) => error instanceof ArtifactPathError && error.code === code,
+      name
+    );
+    assert.deepEqual(fs.readdirSync(path.join(runRoot, "dynamic-expansions")), ["fanout.json"], name);
+    assert.equal(fs.existsSync(path.join(runRoot, "dynamic-expansion-history")), false, name);
+  }
 });
 
 test("a lock file left by a killed materializer blocks neither expansion nor a source retry", () => {
