@@ -251,6 +251,24 @@ test("stats counts a failed node whose task Smithers cancelled as canceled", () 
     );
   assert.deepEqual(fanOut("cancelled", "cancelled"), ["canceled", 0, 1]);
   assert.deepEqual(fanOut("cancelled", "failed"), ["failed", 1, 0]);
+  // A failed task with no recorded Smithers state is not evidence of a cancel, so it keeps the node failed.
+  const stateless = failed("fan__model_1__attempt_0", "fan", {
+    run_id: WORKFLOW_RUN_ID,
+    task_id: "node:fan__model_1__attempt_0",
+    agent_task_id: "node:fan__model_1__attempt_0",
+    verifier_task_id: "verify:fan__model_1__attempt_0"
+  });
+  assert.deepEqual(
+    status(
+      [
+        failed("fan", "fan", { run_id: WORKFLOW_RUN_ID, aggregate_attempt_statuses: ["failed", "failed"] }),
+        task("fan__model_0__attempt_0", "fan", "cancelled"),
+        stateless
+      ],
+      graphDocument("fan", ["node:fan__model_0__attempt_0", "node:fan__model_1__attempt_0"], ["gpt-test", "gpt-other"])
+    ),
+    ["failed", 1, 0]
+  );
 });
 
 test("stats reports a node's latest attempt outcome in event order, not ledger row order", () => {
