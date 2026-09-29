@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { initProject, validateProject } from "../src/index.js";
+import { diagnoseProject, initProject, validateProject } from "../src/index.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 // Runs use the project copy of a prompt, and `ultrafuzz init` without `--force` keeps it. After an
@@ -37,4 +37,15 @@ test("validate warns about a project prompt that differs from the built-in promp
   const restored = await validateProject({ projectRoot: project, env: {} });
   assert.equal(restored.value?.policy_posture.prompts.status, "pass");
   assert.deepEqual(driftWarnings(restored), []);
+});
+
+test("doctor does not summarize a validation that only warned as a pass", async () => {
+  const project = temporaryRoot("ufz-prompt-drift-doctor-");
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  fs.appendFileSync(path.join(project, ".ultrafuzz", "prompts", "review", "triage.md"), "\nA local edit.\n", "utf8");
+
+  const doctor = await diagnoseProject({ projectRoot: project, env: {}, offline: true });
+  const validation = doctor.value?.checks.find((check) => check.name === "validate");
+  assert.equal(validation?.status, "warning");
+  assert.match(validation?.summary ?? "", /with warnings/u);
 });
