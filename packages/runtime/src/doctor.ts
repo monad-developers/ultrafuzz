@@ -60,7 +60,7 @@ export async function diagnoseProject(input: DoctorInput) {
   const validation = await validateProject({ projectRoot, env, topologyPath: input.topologyPath });
   const resolved = await loadResolvedProject({ projectRoot, env });
   const references = referencesStatus({ projectRoot });
-  const installation = inspectSmithersInstallation(projectRoot);
+  const installation = inspectSmithersInstallation();
   const latest = input.offline === true ? undefined : await latestPublishedSmithersVersion(projectRoot, env);
 
   const checks: DoctorCheck[] = [];
@@ -171,18 +171,25 @@ export async function diagnoseProject(input: DoctorInput) {
     });
   }
 
+  const unappliedPatches = Object.entries(installation.compatibility_patches)
+    .filter(([, posture]) => posture !== "applied")
+    .map(([id]) => id);
   checks.push(
     {
       name: "workflow-engine-install",
-      status: "unknown",
+      status: installation.layout_error === null ? "ok" : "error",
       summary:
-        "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
+        installation.layout_error === null
+          ? `resume runs the installed workflow engine ${String(installation.installed_version)}`
+          : "the installed workflow engine cannot run; see the workflow engine layout detail"
     },
     {
       name: "workflow-engine-patches",
-      status: "unknown",
+      status: unappliedPatches.length === 0 ? "ok" : "error",
       summary:
-        "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
+        unappliedPatches.length === 0
+          ? `the installed runner carries all ${String(Object.keys(installation.compatibility_patches).length)} compatibility patches`
+          : `the installed runner lacks compatibility patches (${unappliedPatches.join(", ")}); reinstall Ultrafuzz with pnpm install --frozen-lockfile`
     }
   );
 
@@ -222,10 +229,10 @@ export async function diagnoseProject(input: DoctorInput) {
 }
 
 /**
- * Launch and resume install the workflow engine controller under the OS
- * temporary directory, and a native resume keeps its install there for the
- * detached engine. Warn when that directory is RAM-backed or nearly full. The
- * controller roots are only reported: a live engine may still be using them.
+ * Launch installs the workflow engine controller it seals into the run under
+ * the OS temporary directory. Warn when that directory is RAM-backed or nearly
+ * full. Leftover controller roots are only reported: before resume used the
+ * installed runner, a native resume kept its controller there for the engine.
  */
 function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagnostics: RuntimeDiagnostic[] } {
   const warning = (message: string) => ({
@@ -259,7 +266,7 @@ function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagn
   return problems.length === 0
     ? { check: { name: "temporary-directory", status: "ok", summary: `${directory}: ${usage}` }, diagnostics: [] }
     : warning(
-        `temporary directory ${directory} ${problems.join(" and ")}; launch and resume install the workflow engine controller there (${usage}). Set TMPDIR to a disk-backed directory with more free space.`
+        `temporary directory ${directory} ${problems.join(" and ")}; launch installs the workflow engine controller there (${usage}). Set TMPDIR to a disk-backed directory with more free space.`
       );
 }
 

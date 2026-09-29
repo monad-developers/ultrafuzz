@@ -214,12 +214,20 @@ the producer and host on the same contract; it does not turn same-UID local
 agent execution into an OS security boundary.
 
 The workflow engine is installed by the controller rather than from the target
-repository. Ultrafuzz verifies the complete closure of its exact npm dependency,
-copies that closure into the target-specific private controller directory, and
-makes every copied directory and file read-only. It checks the closure before
-and after the script-disabled, registry-pinned install and again before cache
-reuse. The runner toolcache npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority;
-the latter remains only the run-owned validator launcher directory.
+repository. At launch, Ultrafuzz verifies the complete closure of its exact npm
+dependency, copies that closure into the target-specific private controller
+directory, and makes every copied directory and file read-only. It checks the
+closure before and after the script-disabled, registry-pinned install and again
+before cache reuse. `resume`, and any command on a run without a sealed runner,
+instead runs the engine from Ultrafuzz's own pnpm install, which pnpm patches at
+install time from the committed `patches/` files. It refuses an install that
+lacks any compatibility patch, and it starts that engine's command process with
+`--config=/dev/null --no-env-file --no-install --no-addons`, so that process
+does not load the target's `bunfig.toml` or `.env`. The compatibility patches
+pass the same flags to the detached engine and supervisor that process spawns,
+and to the supervisor's relaunch of a dead engine. The runner toolcache npm and
+`ULTRAFUZZ_TRUSTED_BIN` are not npm authority; the latter remains only the
+run-owned directory holding the validator launcher and the `smithers` shim.
 
 Workflows that intentionally need additional variables can opt in explicitly:
 

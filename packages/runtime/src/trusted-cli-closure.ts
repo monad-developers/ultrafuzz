@@ -4,6 +4,8 @@ import path from "node:path";
 
 import { isRecord, parseStrictJsonBytes, readRegularFileSnapshot, type RunLayout } from "@ultrafuzz/artifacts";
 
+import { SMITHERS_PACKAGE_NAME } from "./smithers-package.js";
+
 const CLOSURE_SCHEMA_VERSION = "ultrafuzz.trusted-cli-closure.v1" as const;
 const CLOSURES_DIRECTORY = "trusted-cli-closures";
 const MANIFEST_FILE = "manifest.json";
@@ -276,6 +278,9 @@ function collectPackageClosure(cliRoot: string, snapshotModules: ReadonlyMap<str
   for (let index = 0; index < packages.length; index += 1) {
     const issuer = packages[index]!;
     for (const dependency of packageDependencies(issuer.manifest)) {
+      // First-party packages depend on the workflow runner only for lifecycle
+      // commands; the validator launcher never loads it, so it stays out.
+      if (issuer.manifest.name.startsWith("@ultrafuzz/") && dependency.name === SMITHERS_PACKAGE_NAME) continue;
       const preferred = snapshotModules.get(dependency.name);
       const dependencyRoot = preferred ?? resolvePackageDependency(issuer.root, dependency.name);
       if (dependencyRoot === undefined) {

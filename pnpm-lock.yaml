@@ -10,6 +10,7 @@ overrides:
   '@effect/platform-bun': 4.0.0-beta.105
   '@effect/platform-node-shared': 4.0.0-beta.105
   '@effect/sql-sqlite-bun': 4.0.0-beta.105
+  '@smthrs/cli>@toon-format/toon': 2.3.1
 
 patchedDependencies:
   '@smthrs/agents@0.35.0': 6c7e092e67112f48e5901c085270115738882b26d5257d8c6e1c6666e05509f4
@@ -324,6 +325,9 @@ importers:
       smol-toml:
         specifier: 1.7.1
         version: 1.7.1
+      smthrs:
+        specifier: 0.35.0
+        version: 0.35.0(patch_hash=15a6e1dbcb4965e517f85607dc8a86b29a75effab6ea9cb541e73654f4eee1b5)(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)
       typescript:
         specifier: 6.0.3
         version: 6.0.3
@@ -337,9 +341,6 @@ importers:
       '@types/proper-lockfile':
         specifier: ^4.1.4
         version: 4.1.4
-      smthrs:
-        specifier: 0.35.0
-        version: 0.35.0(patch_hash=15a6e1dbcb4965e517f85607dc8a86b29a75effab6ea9cb541e73654f4eee1b5)(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(esbuild@0.28.1)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)
 
   packages/security:
     dependencies:
@@ -2582,9 +2583,6 @@ packages:
 
   '@tanstack/store@0.9.3':
     resolution: {integrity: sha512-8reSzl/qGWGGVKhBoxXPMWzATSbZLZFWhwBAFO9NAyp0TxzfBP0mIrGb8CP8KrQTmvzXlR/vFPPUrHTLBGyFyw==}
-
-  '@toon-format/toon@2.3.0':
-    resolution: {integrity: sha512-/Ew9etdRQKVMnm9fDaCG0JjyAOK/O7T0M97oum1aW4W+UR8ZhVVPBanIV7oWgHBiGlnVxV9M55PWQCHofDV07w==}
 
   '@toon-format/toon@2.3.1':
     resolution: {integrity: sha512-sWqEMeAJGMda9qRrfPKrX3C4c33CO9SJuvJzzrcBEn5sbDB+k6pSLkDsfN0rVnLQwR97MV3sDgVbcxQNsq8xVw==}
@@ -7490,7 +7488,7 @@ snapshots:
       '@smthrs/time-travel': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       '@smthrs/usage': 0.35.0
       '@smthrs/vcs': 0.35.0(@opentelemetry/semantic-conventions@1.43.0)
-      '@toon-format/toon': 2.3.0
+      '@toon-format/toon': 2.3.1
       '@xterm/addon-fit': 0.11.0
       '@xterm/xterm': 6.0.0
       cron-parser: 5.6.2
@@ -8905,8 +8903,6 @@ snapshots:
       react: 19.2.7
 
   '@tanstack/store@0.9.3': {}
-
-  '@toon-format/toon@2.3.0': {}
 
   '@toon-format/toon@2.3.1': {}
 

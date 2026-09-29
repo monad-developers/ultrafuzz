@@ -30,7 +30,12 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
-import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
+import {
+  inspectSmithersInstallation,
+  installedWorkflowRunner,
+  patchedWorkflowRunner,
+  SMITHERS_COMPATIBILITY_PATCHES
+} from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
 import { acquireWorkflowControlLock } from "../src/workflow-integrity.js";
@@ -1403,18 +1408,21 @@ test("getWorkflowNode rejects an unexpected engine response", async () => {
   assert.equal(node.diagnostics[0]?.code, "WORKFLOW_NODE_INVALID");
 });
 
-test("diagnoseProject keeps project-local engine posture informational", async () => {
+test("diagnoseProject reports the installed runner that commands after launch execute", async () => {
   const { project, env } = projectWithFakeRunner();
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
+  // A project-local engine is target-owned and never becomes controller authority.
+  writeFakeInstalledEngine(project, { version: "0.29.0" });
 
   const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
 
   assert.equal(doctor.value?.workflow_engine.installed_version, SMITHERS_VERSION);
   assert.equal(doctor.value?.workflow_engine.required_version, SMITHERS_VERSION);
-  assert.equal(doctor.value?.workflow_engine.installed_bin_target, SMITHERS_BIN_PATH);
+  assert.equal(doctor.value?.workflow_engine.bin_path, installedWorkflowRunner().executable);
   assert.equal(doctor.value?.workflow_engine.layout_status, "ok");
   assert.equal(doctor.value?.workflow_engine.layout_detail, null);
-  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "unknown");
+  for (const name of ["workflow-engine-install", "workflow-engine-patches"]) {
+    assert.equal(doctor.value?.checks.find((check) => check.name === name)?.status, "ok", name);
+  }
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
 });
@@ -1908,8 +1916,8 @@ nodes:
 // The scheduler and engine workarounds are the two that carry durable resume
 // progress, and an unreported posture reads as healthy. Cover every tracked
 // workaround, not just the CLI pair.
-test("diagnoseProject reports a posture for every tracked compatibility patch", async () => {
-  const { project, env } = projectWithFakeRunner();
+test("installation inspection reports a posture for every tracked compatibility patch", async () => {
+  const project = tempProject();
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const nodeModules = path.join(project, ".smithers", "node_modules");
   // Group by source because many workflow-path workarounds patch the same file.
@@ -1962,34 +1970,40 @@ test("diagnoseProject reports a posture for every tracked compatibility patch", 
     expected[required.id] = "applied";
   }
 
-  const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
-
-  const reported = doctor.value?.workflow_engine.compatibility_patches ?? {};
+  const runnerRoot = path.join(nodeModules, "smthrs");
+  const reported = inspectSmithersInstallation(runnerRoot).compatibility_patches;
   assert.deepEqual(reported, expected);
   // Named explicitly: these two were previously omitted from the posture report.
   assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
   assert.ok(Object.hasOwn(reported, "resume_hydration"));
-  // Target-owned dependencies never become controller authority.
-  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "unknown");
+  // Commands never run a runner that lacks a patch.
+  assert.throws(
+    () => patchedWorkflowRunner(runnerRoot),
+    /lacks Ultrafuzz's compatibility patches \(.*\); reinstall Ultrafuzz with pnpm install --frozen-lockfile$/u
+  );
 });
 
-test("diagnoseProject reports a missing install and a version mismatch", async () => {
-  const { project, env } = projectWithFakeRunner();
+test("installation inspection refuses a missing, mismatched or retargeted runner", () => {
+  const project = tempProject();
+  const runnerRoot = path.join(project, ".smithers", "node_modules", "smthrs");
 
-  const missing = await diagnoseProject({ projectRoot: project, env, offline: true });
-  assert.equal(missing.value?.workflow_engine.installed_version, null);
-  assert.equal(missing.value?.workflow_engine.layout_status, "error");
+  const missing = inspectSmithersInstallation(runnerRoot);
+  assert.equal(missing.installed_version, null);
+  assert.notEqual(missing.layout_error, null);
 
   writeFakeInstalledEngine(project, { version: "0.29.0" });
-  const mismatched = await diagnoseProject({ projectRoot: project, env, offline: true });
-  assert.equal(mismatched.value?.workflow_engine.installed_version, "0.29.0");
-  assert.equal(mismatched.value?.workflow_engine.layout_status, "error");
+  const mismatched = inspectSmithersInstallation(runnerRoot);
+  assert.equal(mismatched.installed_version, "0.29.0");
+  assert.match(mismatched.layout_error ?? "", /is not the pinned release 0\.35\.0/u);
+
   writeFakeInstalledEngine(project, { version: SMITHERS_VERSION, binTarget: "dist/other.js" });
-  const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
-  assert.equal(doctor.value?.workflow_engine.installed_bin_target, "dist/other.js");
-  assert.equal(doctor.value?.workflow_engine.layout_status, "error");
-  // The project-local engine is informational: launch installs its own controller.
-  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-install")?.status, "unknown");
+  const retargeted = inspectSmithersInstallation(runnerRoot);
+  assert.equal(retargeted.installed_bin_target, "dist/other.js");
+  assert.match(retargeted.layout_error ?? "", /unexpected workflow runner target/u);
+  assert.throws(
+    () => patchedWorkflowRunner(runnerRoot),
+    /unexpected workflow runner target; reinstall Ultrafuzz with pnpm install --frozen-lockfile$/u
+  );
 });
 
 test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
@@ -2012,17 +2026,6 @@ test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
   assert.equal(doctor.diagnostics.find((entry) => entry.code === "DOCTOR_REGISTRY_UNAVAILABLE")?.severity, "warning");
   // A valid pinned install stays healthy without registry access.
   assert.equal(doctor.value?.workflow_engine.layout_status, "ok");
-});
-
-test("diagnoseProject does not mutate the installed dependency layout", async () => {
-  const { project, env } = projectWithFakeRunner();
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
-  const manifestPath = path.join(project, ".smithers", "node_modules", "smthrs", "package.json");
-  const before = fs.readFileSync(manifestPath, "utf8");
-
-  await diagnoseProject({ projectRoot: project, env, offline: true });
-
-  assert.equal(fs.readFileSync(manifestPath, "utf8"), before);
 });
 
 function writeFakeInstalledEngine(project: string, input: { version: string; binTarget?: string }): void {

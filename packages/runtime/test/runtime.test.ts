@@ -15675,6 +15675,7 @@ test("compatibility patcher rewrites every described workaround", async () => {
   const project = tempProject();
   writeFakeInstalledSmithers(project);
   const nodeModules = path.join(project, ".smithers", "node_modules");
+  const runnerRoot = path.join(nodeModules, "smthrs");
   const installedRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
   assert.ok(SMITHERS_COMPATIBILITY_PATCHES.length > 0, "no compatibility patches were described");
   // Seeded from the descriptions themselves, so a newly described workaround is
@@ -15803,10 +15804,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const current = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(current.split(resumeTransfer.patch.patched).length, 2);
     fs.writeFileSync(resumeTransfer.source, current.replace(resumeTransfer.patch.patched, predecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "applied");
 
     const unscopedHelperPredecessor = resumeTransfer.patch.predecessors?.find((candidate) =>
       candidate.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)")
@@ -15817,15 +15818,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
       current.replace(resumeTransfer.patch.patched, unscopedHelperPredecessor),
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedUnscopedHelper = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(migratedUnscopedHelper.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)"), false);
     assert.equal(migratedUnscopedHelper.includes(resumeTransfer.patch.patched), true);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.equal(
+      inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer,
+      "incompatible"
+    );
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -15836,7 +15840,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
       `${resumeTransfer.patch.patched}\n${resumeTransfer.patch.patchable}\n`,
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.equal(
+      inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer,
+      "incompatible"
+    );
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -15855,37 +15862,37 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(current.split(processAnchor.patch.patched).length, 2);
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, predecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedPredecessor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedPredecessor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedPredecessor.includes(nested), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(
       processAnchor.source,
       current.replace(processAnchor.patch.patched, reusedInheritedDescriptor),
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedReusedInheritedDescriptor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedReusedInheritedDescriptor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedReusedInheritedDescriptor.includes(reusedInheritedDescriptor), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, nested), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedNested = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedNested.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedNested.includes(nested), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
     assert.notEqual(mutatedNested, nested);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /process-owned execution snapshot implementation is incompatible/u
@@ -15894,7 +15901,7 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const unknownPredecessor = predecessor.replace('"--preserve-symlinks"', '"--unregistered-startup-flag"');
     assert.notEqual(unknownPredecessor, predecessor);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, unknownPredecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /process-owned execution snapshot implementation is incompatible/u
@@ -18708,12 +18715,12 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     future_package_manager_field: { retained_by_owner: true }
   };
   fs.writeFileSync(paths.packageJson, `${JSON.stringify(valid)}\n`, "utf8");
-  const validPosture = inspectSmithersInstallation(project);
+  const validPosture = inspectSmithersInstallation(path.dirname(paths.packageJson));
   assert.equal(validPosture.bundled_version, SMITHERS_VERSION);
   assert.equal(validPosture.required_version, SMITHERS_VERSION);
   assert.equal(validPosture.installed_version, SMITHERS_VERSION);
   assert.equal(validPosture.installed_bin_target, SMITHERS_BIN_PATH);
-  assert.equal(validPosture.bin_path, paths.shim);
+  assert.equal(validPosture.bin_path, paths.target);
   assert.equal(validPosture.layout_error, null);
 
   fs.writeFileSync(
@@ -18725,7 +18732,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     )}},"peerDependencies":{"__proto__":"1.0.0"},"peerDependenciesMeta":{"__proto__":{"optional":true}}}\n`,
     "utf8"
   );
-  const prototypeKeyPosture = inspectSmithersInstallation(project);
+  const prototypeKeyPosture = inspectSmithersInstallation(path.dirname(paths.packageJson));
   assert.equal(prototypeKeyPosture.installed_version, SMITHERS_VERSION);
   assert.equal(prototypeKeyPosture.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(prototypeKeyPosture.layout_error, null);
@@ -18755,7 +18762,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
   ];
   for (const fixture of malformed) {
     fs.writeFileSync(paths.packageJson, fixture.bytes);
-    const posture = inspectSmithersInstallation(project);
+    const posture = inspectSmithersInstallation(path.dirname(paths.packageJson));
     assert.equal(posture.installed_version, null, fixture.label);
     assert.match(posture.layout_error ?? "", fixture.expected, fixture.label);
   }

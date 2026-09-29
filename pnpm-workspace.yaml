@@ -11,18 +11,26 @@ packages:
   - "packages/evmbench"
   - "packages/modal"
   - "packages/cli"
-# Mirrors REQUIRED_SMITHERS_OVERRIDES in packages/runtime/src/smithers-package.ts.
-# The generated runner workspace pins these so a cloud run cannot install two
-# Effect builds; pinning them here too means the repository's real Smithers
-# integration test exercises the same Effect tree production installs, instead of
-# whatever the open caret on @effect/platform-node-shared happens to resolve to.
-# A runtime test asserts the two lists stay identical.
+# The Effect entries mirror REQUIRED_SMITHERS_OVERRIDES in
+# packages/runtime/src/smithers-package.ts. Launch's generated controller
+# workspace pins these so its npm install cannot mix two Effect builds; pinning
+# them here too means the installed runner that resume and the other lifecycle
+# commands run, and the repository's real Smithers integration tests, get the
+# same Effect builds as launch, instead of whatever the open caret on
+# @effect/platform-node-shared happens to resolve to. A CI test asserts the two
+# Effect lists stay identical.
+#
+# @smthrs/cli 0.35.0 pins @toon-format/toon 2.3.0 exactly, which has a high
+# prototype-pollution advisory for decoding untrusted TOON (GHSA-p95v-992w-h6c3,
+# fixed in 2.3.1). Ultrafuzz never runs the pack commands that decode TOON, but
+# the pinned runner is a production dependency, so take the patch release.
 overrides:
   effect: "4.0.0-beta.105"
   "@effect/opentelemetry": "4.0.0-beta.105"
   "@effect/platform-bun": "4.0.0-beta.105"
   "@effect/platform-node-shared": "4.0.0-beta.105"
   "@effect/sql-sqlite-bun": "4.0.0-beta.105"
+  "@smthrs/cli>@toon-format/toon": "2.3.1"
 allowBuilds:
   "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false

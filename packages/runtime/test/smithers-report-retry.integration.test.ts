@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { writeTrustedSmithersShim } from "../src/smithers.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 const runtimeRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -144,16 +145,25 @@ export default smithers(() => (
 `;
 }
 
+// The PATH the controller gives the engine: the run's trusted-bin first and no
+// directory with a runner of its own (pnpm puts node_modules/.bin on the test's
+// PATH), so the workflow's bare `smithers` calls reach the run's shim (#1143).
+function controllerPath(root: string): string {
+  if (!fs.existsSync(path.join(root, "trusted-bin", "smithers"))) writeTrustedSmithersShim(root, root);
+  return [
+    path.join(root, "trusted-bin"),
+    ...(process.env.PATH ?? "")
+      .split(path.delimiter)
+      .filter((entry) => entry !== "" && !fs.existsSync(path.join(entry, "smithers")))
+  ].join(path.delimiter);
+}
+
 function cli(root: string, args: string[]): unknown {
   return JSON.parse(
     execFileSync(smithers, [...args, "--format", "json", "--full-output"], {
       cwd: root,
       encoding: "utf8",
-      env: {
-        ...process.env,
-        PATH: `${path.dirname(smithers)}${path.delimiter}${process.env.PATH ?? ""}`,
-        SMITHERS_POST_FAILURE: "0"
-      },
+      env: { ...process.env, PATH: controllerPath(root), SMITHERS_POST_FAILURE: "0" },
       timeout: 30_000,
       maxBuffer: 16 * 1024 * 1024
     })

@@ -352,6 +352,24 @@ adapters in the continued workflow read the run's
 resume cannot prune stale task-worktree registrations, it reports a
 `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
 
+`resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
+the committed compatibility patches (`patches/`) to it at install time, so
+resume makes no package-registry request and leaves nothing in the OS
+temporary directory. It refuses an install that lacks any of those patches,
+such as a plain npm install of the packed packages; reinstall with
+`pnpm install --frozen-lockfile`. Launch, resume, replay, and fork also write
+`<run>/trusted-bin/smithers`, which runs that engine for the workflow's own
+`smithers` calls.
+
+Run long campaigns from a dedicated checkout or worktree, and leave its install
+alone while they run. The resumed engine and its supervisor keep running from
+that install. After a `pnpm install` there that changes a Smithers patch
+(following a pull or a branch switch, for example), pnpm deletes the package
+directory they re-execute from, in that install or a later one: by default it
+clears orphaned package directories during an install once seven days have
+passed since it last did. The supervisor's next relaunch of the engine then
+fails. Run `ultrafuzz resume` again to continue the run from the new install.
+
 A run that ends `failed` with no failed durable node was stopped by something
 no durable node owns: a run-level workflow runner error, such as an exception
 thrown while rendering the workflow, or a failed workflow task outside the
@@ -622,20 +640,21 @@ non-launching configuration contract unchanged. Doctor reports:
   fallbacks, are required; other configured profiles' executables are listed
   as not required;
 - the bundled workflow engine version, the version the generated project
-  requires, and the installed project-local version and bin target;
+  requires, and the version and bin target of the engine Ultrafuzz's own
+  install provides;
 - npm's latest published stable engine version when the registry check is
   available;
-- whether the project-local dependency layout passes Ultrafuzz's exact
-  manifest and path validation, and the posture of each compatibility patch in
-  it. Both are informational: a launch installs, patches, and seals its own
-  operator-owned controller;
-- the OS temporary directory, where launch and resume install that controller:
-  its free space and how many `ultrafuzz-controller-*` directories it holds,
-  with their total size. Sizing them stops after about one second, and the
-  size is then reported as `at least` the bytes counted so far. Doctor warns
-  when the directory is a RAM-backed tmpfs or has less than 2 GiB free, and
-  never removes those directories, because a native resume keeps its
-  controller there for the detached engine.
+- whether that installed engine passes Ultrafuzz's version and path checks,
+  and the posture of each compatibility patch in it. Launch, `resume`,
+  `replay`, and `fork` refuse an engine that fails either check, so each
+  failure is reported as an error;
+- the OS temporary directory, where launch installs the controller it seals
+  into the run: its free space and how many `ultrafuzz-controller-*`
+  directories it holds, with their total size. Sizing them stops after about
+  one second, and the size is then reported as `at least` the bytes counted so
+  far. Doctor warns when the directory is a RAM-backed tmpfs or has less than
+  2 GiB free, and never removes those directories, because a native resume
+  from an earlier release kept its controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies.
