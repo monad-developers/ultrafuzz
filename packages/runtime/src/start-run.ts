@@ -43,6 +43,7 @@ import {
   type PauseRunInput,
   type PauseRunValue,
   type RuntimeDiagnostic,
+  type RuntimeResult,
   type StartRunInput,
   type StartRunValue,
   type WorkflowLifecycleInput,
@@ -474,7 +475,7 @@ function openRouterCredentialPreflightDiagnostics(
   ];
 }
 
-export async function resumeRun(input: WorkflowLifecycleInput) {
+export async function resumeRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
   return submitSmithersContinuation(input);
 }
 
@@ -795,11 +796,11 @@ function resumeWarning(code: string, context: string, error: unknown): RuntimeDi
   return { ...diagnostic, message: `${context}: ${diagnostic.message}`, severity: "warning", source: "runtime" };
 }
 
-export async function replayRun(input: WorkflowLifecycleInput) {
+export async function replayRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
   return submitLifecycleAction(input, "replay");
 }
 
-export async function forkRun(input: WorkflowLifecycleInput) {
+export async function forkRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
   return submitLifecycleAction(input, "fork");
 }
 

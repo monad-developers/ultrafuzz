@@ -28,6 +28,13 @@ const TMPFS_MAGIC = 0x01021994;
 
 const MIN_TEMPORARY_DIRECTORY_FREE_BYTES = 2 * 1024 ** 3;
 
+/**
+ * Sizing leftover controller roots visits every entry under them (about 45,000
+ * per engine install), so doctor stops after this long and reports the bytes
+ * it counted as a lower bound.
+ */
+const CONTROLLER_ROOT_SIZING_BUDGET_MS = 1_000;
+
 /** Local commands every run needs regardless of which agent backend is selected. */
 const REQUIRED_TOOLCHAIN_COMMANDS = ["git", "node", "forge"] as const;
 
@@ -245,8 +252,10 @@ function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagn
     );
   }
   const free = stats.bavail * stats.bsize;
-  const rootBytes = roots.reduce((total, root) => total + regularFileBytes(root), 0);
-  const usage = `${formatBytes(free)} free; ${String(roots.length)} ultrafuzz-controller-* ${roots.length === 1 ? "directory holds" : "directories hold"} ${formatBytes(rootBytes)}`;
+  const deadline = performance.now() + CONTROLLER_ROOT_SIZING_BUDGET_MS;
+  const rootBytes = roots.reduce((total, root) => total + regularFileBytes(root, deadline), 0);
+  const lowerBound = performance.now() >= deadline ? "at least " : "";
+  const usage = `${formatBytes(free)} free; ${String(roots.length)} ultrafuzz-controller-* ${roots.length === 1 ? "directory holds" : "directories hold"} ${lowerBound}${formatBytes(rootBytes)}`;
   const problems = [
     ...(stats.type === TMPFS_MAGIC ? ["is a RAM-backed tmpfs"] : []),
     ...(free < MIN_TEMPORARY_DIRECTORY_FREE_BYTES ? ["has less than 2 GiB free"] : [])
@@ -258,8 +267,13 @@ function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagn
       );
 }
 
-/** Total size of the regular files under a directory, skipping entries that vanish or cannot be read. */
-function regularFileBytes(directory: string): number {
+/**
+ * Total size of the regular files under a directory that the walk reaches
+ * before the deadline, skipping entries that vanish or cannot be read. The
+ * clock is checked before each directory read and each entry.
+ */
+function regularFileBytes(directory: string, deadline: number): number {
+  if (performance.now() >= deadline) return 0;
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -268,8 +282,9 @@ function regularFileBytes(directory: string): number {
   }
   let total = 0;
   for (const entry of entries) {
+    if (performance.now() >= deadline) break;
     const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) total += regularFileBytes(entryPath);
+    if (entry.isDirectory()) total += regularFileBytes(entryPath, deadline);
     else if (entry.isFile()) {
       try {
         total += fs.lstatSync(entryPath).size;

@@ -612,9 +612,11 @@ non-launching configuration contract unchanged. Doctor reports:
   operator-owned controller;
 - the OS temporary directory, where launch and resume install that controller:
   its free space and how many `ultrafuzz-controller-*` directories it holds,
-  with their total size. Doctor warns when the directory is a RAM-backed tmpfs
-  or has less than 2 GiB free, and never removes those directories, because a
-  native resume keeps its controller there for the detached engine.
+  with their total size. Sizing them stops after about one second, and the
+  size is then reported as `at least` the bytes counted so far. Doctor warns
+  when the directory is a RAM-backed tmpfs or has less than 2 GiB free, and
+  never removes those directories, because a native resume keeps its
+  controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies. For cloud execution, checking required commands may create the

@@ -16,11 +16,14 @@ import {
   cancelRun,
   diagnoseProject,
   diagnoseRun,
+  type forkRun,
   getRunTimeline,
   getWorkflowNode,
   initProject,
   listRunSnapshots,
   queryWorkflowEvents,
+  type replayRun,
+  type resumeRun,
   startRun as runtimeStartRun,
   validateProject,
   watchWorkflowEvents,
@@ -468,6 +471,16 @@ test("lifecycle commands reject a missing product run and an unlinked run", asyn
     assert.equal(unlinked.ok, false);
     assert.equal(unlinked.diagnostics[0]?.code, "WORKFLOW_RUN_ID_MISSING");
   }
+});
+
+test("resume, replay and fork declare workflow_run_id on every lifecycle value", () => {
+  // Compile-time check: each reader stops type-checking if the value its
+  // function returns lets workflow_run_id be undefined.
+  const resume = (value: NonNullable<Awaited<ReturnType<typeof resumeRun>>["value"]>): string => value.workflow_run_id;
+  const replay = (value: NonNullable<Awaited<ReturnType<typeof replayRun>>["value"]>): string => value.workflow_run_id;
+  const fork = (value: NonNullable<Awaited<ReturnType<typeof forkRun>>["value"]>): string => value.workflow_run_id;
+  const value = { run_id: "run", workflow_run_id: "ultrafuzz-run", action: "resume", submitted: true } as const;
+  assert.deepEqual([resume(value), replay(value), fork(value)], ["ultrafuzz-run", "ultrafuzz-run", "ultrafuzz-run"]);
 });
 
 test("diagnoseRun adapts the engine diagnosis without engine-branded public text", async () => {
@@ -1588,6 +1601,43 @@ test("diagnoseProject warns when the temporary directory has little free space",
     doctor.diagnostics.find((entry) => entry.code === "DOCTOR_TEMPORARY_DIRECTORY_CONSTRAINED")?.message ?? "",
     /has less than 2 GiB free/u
   );
+});
+
+test("diagnoseProject reports a lower bound once sizing many controller roots runs out of time", async (context) => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const temporary = temporaryRoot("ufz-doctor-many-roots-");
+  for (let index = 0; index < 100; index += 1) {
+    const root = path.join(temporary, `ultrafuzz-controller-${String(index)}`);
+    fs.mkdirSync(root);
+    // A sparse 1 MiB file, so the size is counted without writing the bytes.
+    fs.writeFileSync(path.join(root, "engine.js"), "");
+    fs.truncateSync(path.join(root, "engine.js"), 1024 * 1024);
+  }
+  // A slow filesystem: each clock reading is 100 ms after the previous one, so
+  // sizing all 100 roots would take far longer than doctor's budget.
+  let now = 0;
+  context.mock.method(performance, "now", () => (now += 100));
+  const readdirSync = context.mock.method(fs, "readdirSync");
+
+  const doctor = await withTemporaryDirectory(temporary, () =>
+    diagnoseProject({
+      projectRoot: project,
+      env: { PATH: "/usr/bin" },
+      offline: true,
+      requiredCommandProbe: allAvailable
+    })
+  );
+
+  const summary = doctor.value?.checks.find((check) => check.name === "temporary-directory")?.summary ?? "";
+  const sized = /; 100 ultrafuzz-controller-\* directories hold at least (\d+) MiB/u.exec(summary);
+  assert.ok(sized !== null, summary);
+  assert.ok(Number(sized[1]) < 100, summary);
+  // Each root holds 1 MiB, so every root doctor opens is counted except the
+  // one being read when the budget runs out. No root is opened after that.
+  const opened = readdirSync.mock.calls.filter((call) => path.dirname(String(call.arguments[0])) === temporary);
+  assert.ok(opened.length <= Number(sized[1]) + 1, `${String(opened.length)} roots opened; ${summary}`);
 });
 
 async function allAvailable(names: readonly string[]) {
