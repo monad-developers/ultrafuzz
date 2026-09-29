@@ -1675,7 +1675,7 @@ function frictionLogDirectory(task: (typeof taskSpecs)[number]): string | undefi
   return path.resolve(process.cwd(), task.runRoot, ...frictionLog.entriesPath.split("/"));
 }
 
-/** Best effort: a friction log that cannot be created must never fail the task it serves. */
+/** Best effort: a friction log directory that cannot be created is reported, not a preparation failure. */
 function ensureFrictionLogDirectory(task: (typeof taskSpecs)[number]): void {
   const directory = frictionLogDirectory(task);
   if (directory === undefined) return;
@@ -1687,6 +1687,7 @@ function ensureFrictionLogDirectory(task: (typeof taskSpecs)[number]): void {
     );
   }
 }
+
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
