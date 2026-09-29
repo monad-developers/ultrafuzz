@@ -14,7 +14,7 @@ import { type RunLayout } from "./run-layout.js";
 import { SAFE_ID_PATTERN, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 import {
-  appendStrictJsonlRecordsAfterTail,
+  appendStrictJsonlRecordAfterTail,
   parseStrictJsonlBytes,
   readStrictJsonlSnapshot,
   type StrictJsonlCodec
@@ -1177,18 +1177,27 @@ export function assertEventRecord(value: unknown, recordPath = "$"): EventRecord
 }
 
 export function appendEvent(layout: RunLayout, input: AppendEventInput): EventRecord {
-  const record = createEventRecord(layout, input);
-  // The event ID hashes the timestamp and timestamps never decrease, so only the
-  // trailing records that share this timestamp can repeat the ID. Checking that
-  // window keeps an append from costing a parse of the whole journal.
-  appendStrictJsonlRecordsAfterTail(
+  // The event ID hashes the timestamp and timestamps never decrease, so a new ID
+  // can repeat only among the trailing records that share the final record's
+  // timestamp. Checking that window keeps an append from costing a parse of the
+  // whole journal.
+  return appendStrictJsonlRecordAfterTail(
     layout.eventsPath,
-    [record],
+    (final) => createEventRecord(layout, { ...input, timestamp: input.timestamp ?? eventTimestampAfter(final) }),
     eventRecordCodec(layout.runId),
-    (existing) => existing.timestamp === record.timestamp,
+    (existing, final) => existing.timestamp === final.timestamp,
     layout.root
   );
-  return record;
+}
+
+// After the wall clock steps back behind the final event (an NTP step, a VM
+// snapshot restore), the current time would fail every append until the clock
+// caught up. One millisecond after that event keeps timestamps nondecreasing,
+// and no recorded event shares it, so an identical event still gets a new ID.
+function eventTimestampAfter(final: EventRecord | undefined): string {
+  const now = new Date().toISOString();
+  if (final === undefined || now >= final.timestamp) return now;
+  return new Date(Date.parse(final.timestamp) + 1).toISOString();
 }
 
 export function createEventRecord(layout: Pick<RunLayout, "runId">, input: AppendEventInput): EventRecord {

@@ -6,6 +6,8 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { appendEvent, layoutForRunRoot, replayEvents } from "@ultrafuzz/artifacts";
+
 import { initProject, materializeSelection, planRun } from "../src/index.js";
 
 function tempProject(): string {
@@ -93,6 +95,29 @@ test("materializeSelection copies only explicit outputs, leaves git changes unst
   const audit = fs.readFileSync(result.value!.audit.audit_path, "utf8");
   assert.match(audit, /"unstaged":true/u);
   assert.doesNotMatch(audit, /"mutation_policy"/u);
+});
+
+test("materializeSelection records its event after the host clock steps back behind the run's events", async () => {
+  const project = tempProject();
+  const { runId, runRoot, nodeId } = await plannedRunWithArtifact(project);
+  const layout = layoutForRunRoot(runRoot, runId);
+  // A dry run recorded before the wall clock stepped back by an hour.
+  appendEvent(layout, {
+    eventType: "materialize-selection",
+    status: "dry-run",
+    timestamp: new Date(Date.now() + 3_600_000).toISOString(),
+    payload: { audit_path: "materialize-audit.jsonl", mode: "dry-run", unstaged: true, copies: [], patches: [] }
+  });
+
+  const result = await materializeSelection({
+    projectRoot: project,
+    runId,
+    confirmed: true,
+    copies: [{ source: `artifacts/${nodeId}/stdout.txt`, destination: "test/Generated.t.sol" }]
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(replayEvents(layout).records.at(-1)?.event_id, result.value?.audit.event_id);
 });
 
 test("materializeSelection rejects conflicts, denied destinations, source symlinks, and destination symlink escapes", async () => {

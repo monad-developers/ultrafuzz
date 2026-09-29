@@ -816,6 +816,25 @@ test("an event append refuses a repeated or out-of-order event without changing 
   assert.equal(replayEvents(layout).records.length, 2);
 });
 
+test("event appends keep working after the wall clock steps back behind the journal", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-event-clock-step" });
+  const event = {
+    eventType: "node-synced",
+    nodeId: "node-a",
+    status: "succeeded",
+    payload: { workflow_run_id: "workflow-1", workflow_task_id: "task-1" }
+  } as const;
+  // Recorded before the clock stepped back by an hour.
+  const recorded = appendEvent(layout, { ...event, timestamp: new Date(Date.now() + 3_600_000).toISOString() });
+
+  const first = appendEvent(layout, event);
+  const second = appendEvent(layout, event);
+
+  assert.equal(first.timestamp, new Date(Date.parse(recorded.timestamp) + 1).toISOString());
+  assert.equal(second.timestamp, new Date(Date.parse(recorded.timestamp) + 2).toISOString());
+  assert.deepEqual(replayEvents(layout).records, [recorded, first, second]);
+});
+
 test("event redaction covers token families, AWS keys, URL credentials, and private keys", () => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-artifacts-events-"));
   const layout = createRunLayout({ outputRoot: path.join(root, "runs"), runId: "run-redaction" });

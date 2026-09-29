@@ -164,24 +164,25 @@ export function appendStrictJsonlRecords<RecordType>(
 }
 
 /**
- * Append records after validating them against only the journal's trailing
- * records: the final record, then earlier ones while `inWindow` holds for
- * them. This suits journals whose history rules relate a record only to the
- * records inside that window. It does not count records, so it is for
+ * Append the record `build` returns for the journal's final record, and
+ * return it, after validating it against only the journal's trailing records:
+ * the final record, then earlier ones while `inWindow` holds for them and the
+ * final record. This suits journals whose history rules relate a record only
+ * to the records inside that window. It does not count records, so it is for
  * journals bounded by bytes alone. Readers still validate the whole journal,
  * and the byte length read here still fences the write.
  */
-export function appendStrictJsonlRecordsAfterTail<RecordType>(
+export function appendStrictJsonlRecordAfterTail<RecordType>(
   filePath: string,
-  records: readonly RecordType[],
+  build: (final: RecordType | undefined) => RecordType,
   codec: StrictJsonlCodec<RecordType>,
-  inWindow: (existing: RecordType) => boolean,
+  inWindow: (existing: RecordType, final: RecordType) => boolean,
   trustedRoot?: string
-): void {
-  if (records.length === 0) return;
+): RecordType {
   const bytes = readStrictJsonlBytes(filePath, codec);
   const tail = bytes === undefined ? [] : parseStrictJsonlTail(bytes, codec, inWindow);
-  const canonicalRecords = canonicalStrictJsonlRecords(records, codec, (index) => `$[new ${String(index)}]`);
+  const record = build(tail.at(-1));
+  const canonicalRecords = canonicalStrictJsonlRecords([record], codec, (index) => `$[new ${String(index)}]`);
   validateStrictJsonlHistory([...tail, ...canonicalRecords], codec);
   writeStrictJsonlRecords(
     filePath,
@@ -190,18 +191,20 @@ export function appendStrictJsonlRecordsAfterTail<RecordType>(
     codec,
     trustedRoot
   );
+  return record;
 }
 
 function parseStrictJsonlTail<RecordType>(
   bytes: Buffer,
   codec: StrictJsonlCodec<RecordType>,
-  inWindow: (existing: RecordType) => boolean
+  inWindow: (existing: RecordType, final: RecordType) => boolean
 ): RecordType[] {
   if (bytes.byteLength === 0) return [];
   if (bytes[bytes.byteLength - 1] !== 0x0a) {
     throw new Error(`${codec.label} has a torn or unterminated final record`);
   }
   const tail: RecordType[] = [];
+  let final: RecordType | undefined;
   for (let end = bytes.byteLength - 1; end >= 0;) {
     const start = end === 0 ? 0 : bytes.lastIndexOf(0x0a, end - 1) + 1;
     const lineBytes = bytes.subarray(start, end);
@@ -213,8 +216,9 @@ function parseStrictJsonlTail<RecordType>(
       `$[-${String(fromEnd)}]`,
       codec
     );
+    final ??= record;
     tail.unshift(record);
-    if (!inWindow(record)) break;
+    if (!inWindow(record, final)) break;
     end = start - 1;
   }
   return tail;
