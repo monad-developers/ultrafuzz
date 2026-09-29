@@ -3104,6 +3104,22 @@ test("generated Smithers rejects schema-valid forged timeout evidence before pub
       }
     },
     {
+      // The shared registry gate owns the stateful sequence length, so a
+      // one-step campaign fails here, inside the attempt, not at the host.
+      label: "stateful sequence length",
+      mutate: (plan, result, summary) => {
+        const command = GENERATED_CAMPAIGN_COMMAND.replace("--seq-len 100", "--seq-len 1");
+        record(plan.backend).exact_shell_escaped_command = command;
+        record((plan.command_plan as unknown[])[0]).command = command;
+        result.exact_command = command;
+        record(result.execution).command = command;
+        plan.recon_sequence_length = 1;
+        result.sequence_length = 1;
+        summary.sequence_length = 1;
+      },
+      alsoMatches: /--seq-len 100/u
+    },
+    {
       // #693 surface 3: the wrong-field bug — execution.deadline copied from
       // the plan's fuzzing_deadline_utc instead of final_artifact_deadline_utc.
       // The gate must name the expected final-artifact value next to the
