@@ -215,9 +215,11 @@ reasoning = "xhigh"
 timeout_seconds = 3600
 ```
 
-The profile named `default` is selected implicitly. Do not also define
-`[models] default = "default"`: TOML cannot use `models.default` as both a
-string and a table.
+The profile named `default` is selected implicitly. Setting `[models] default`
+to any other profile ID is rejected: the built-in `[models.default]` profile
+always exists, and TOML cannot use `models.default` as both a string and a
+table. To make another profile primary, list it first in `[retry] agents`, for
+example `agents = ["claude"]`.
 
 Profile IDs must use safe ASCII identifier characters. Each profile supports:
 

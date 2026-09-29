@@ -3266,9 +3266,6 @@ repo = "."
 [run]
 output_dir = ".ultrafuzz/runs"
 
-[models]
-default = "fast"
-
 [models.fast]
 agent = "CodexAgent"
 model = "gpt-test-fast"

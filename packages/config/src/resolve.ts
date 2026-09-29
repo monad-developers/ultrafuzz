@@ -498,6 +498,18 @@ function applyProjectConfigLayer(
   }
   syncDefaultModelProfile(config);
   if (layer.models) {
+    if (layer.models.default !== undefined && layer.models.default !== DEFAULT_MODEL_PROFILE_ID) {
+      // The built-in [models.default] table always exists, so config.resolved.toml
+      // could not also hold `models.default` as a string.
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_DEFAULT_UNSUPPORTED",
+          `[models] default = ${JSON.stringify(layer.models.default)} is not supported because the built-in [models.default] profile always exists; set [retry] agents = [${JSON.stringify(layer.models.default)}] to make it the primary profile`,
+          ["models", "default"],
+          source
+        )
+      );
+    }
     if (layer.models.default !== undefined) {
       config.models.default = layer.models.default;
     }

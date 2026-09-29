@@ -119,7 +119,7 @@ A compatible config MUST support:
 - `[run] output_dir`, `max_parallel_agents`,
   `max_dynamic_nodes`, `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
   `workflow_deadline_seconds`, and `controller_lease_seconds`
-- `[models] default` plus `[models.<id>] agent`, `model`, and
+- `[models.default]` plus `[models.<id>] agent`, `model`, and
   `timeout_seconds`
 - `[retry] same_agent_attempts` plus an optional ordered `agents` list of model
   profile IDs
