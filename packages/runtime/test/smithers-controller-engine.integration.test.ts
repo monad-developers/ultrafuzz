@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -100,6 +100,10 @@ process.exit(0);
   return run;
 }
 
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
 // #1147: each successful attempt-row heartbeat write also appended a TaskHeartbeat
 // event row and stream.ndjson line. This agent is quiet, so only the throttled
 // liveness pulse keeps it live, through the fenced attempt-row write that the
@@ -132,4 +136,52 @@ const workflow = smithers(() =>
     attempt.heartbeat_at_ms !== null && attempt.heartbeat_at_ms - attempt.started_at_ms >= 2_000,
     `the attempt row stopped recording liveness: ${JSON.stringify(attempt)}`
   );
+});
+
+// #1148: Ultrafuzz seeds each <Worktree> from the recorded launch commit, which can
+// exist only locally. Smithers fetched origin before creating a worktree, and when a
+// task re-entered it fetched again (unless a fetch had succeeded in the last minute)
+// and rebased onto `origin/<sha>`, which is never a ref.
+test("controller task worktrees stay on a local-only launch commit without fetching or rebasing", () => {
+  const root = temporaryRoot("ufz-controller-worktree-");
+  git(root, "init", "--quiet", "--initial-branch=main");
+  git(root, "config", "user.name", "Ultrafuzz Synthetic Test");
+  git(root, "config", "user.email", "synthetic@example.invalid");
+  fs.writeFileSync(path.join(root, "source.txt"), "published\n");
+  git(root, "add", "source.txt");
+  git(root, "commit", "--quiet", "-m", "published base");
+  git(root, "init", "--quiet", "--bare", path.join(root, "origin.git"));
+  git(root, "remote", "add", "origin", path.join(root, "origin.git"));
+  git(root, "push", "--quiet", "origin", "main");
+  fs.writeFileSync(path.join(root, "source.txt"), "launch\n");
+  git(root, "commit", "--quiet", "-am", "local-only launch commit");
+  const launch = git(root, "rev-parse", "HEAD");
+  const gitLog = path.join(root, "git.log");
+  const recorder = path.join(root, "git-recorder.sh");
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  fs.writeFileSync(recorder, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${gitLog}'\nexec '${realGit}' "$@"\n`, {
+    mode: 0o755
+  });
+  const workspace = path.join(root, "workspaces", "task-a");
+
+  // Preparation creates the worktree; the verifier re-enters it, as in Ultrafuzz.
+  const run = runOnControllerEngine(
+    root,
+    `const lane = { path: ${JSON.stringify(workspace)}, branch: "ultrafuzz/r1/task-a", baseBranch: ${JSON.stringify(launch)} };
+const workflow = smithers(() =>
+  h(Workflow, { name: "worktree" },
+    h(Worktree, lane,
+      h(Task, { id: "prepare", output: outputs.result, retries: 0 }, () => ({ value: "prepared" })),
+      h(Task, { id: "verify", output: outputs.result, dependsOn: ["prepare"], retries: 0 }, () => ({ value: "verified" })))));`,
+    { SMITHERS_GIT_PATH: recorder, SMITHERS_KEEP_WORKTREES: "1" }
+  );
+
+  assert.equal(run.status, "finished");
+  const synchronization = fs
+    .readFileSync(gitLog, "utf8")
+    .split("\n")
+    .filter((command) => /(?:^| )(?:fetch|rebase)(?: |$)/u.test(command));
+  assert.deepEqual(synchronization, [], "a task worktree fetched origin or rebased onto origin/<commit>");
+  assert.equal(git(workspace, "rev-parse", "HEAD"), launch);
+  assert.equal(git(workspace, "branch", "--show-current"), "ultrafuzz/r1/task-a");
 });
