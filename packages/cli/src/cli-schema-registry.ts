@@ -69,10 +69,10 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 }
 
 export const cliResultJsonSchema = loadSchemaDocument(CLI_RESULT_SCHEMA_FILENAME);
-export const operatorInputJsonSchema = loadSchemaDocument(OPERATOR_INPUT_SCHEMA_FILENAME);
-export const reportBundleManifestJsonSchema = loadSchemaDocument(REPORT_BUNDLE_MANIFEST_SCHEMA_FILENAME);
+const operatorInputJsonSchema = loadSchemaDocument(OPERATOR_INPUT_SCHEMA_FILENAME);
+const reportBundleManifestJsonSchema = loadSchemaDocument(REPORT_BUNDLE_MANIFEST_SCHEMA_FILENAME);
 
-export const CLI_SCHEMA_EXPORTS = Object.freeze({
+const CLI_SCHEMA_EXPORTS = Object.freeze({
   cliResultJsonSchema,
   operatorInputJsonSchema,
   reportBundleManifestJsonSchema
@@ -152,7 +152,7 @@ export function cliOwnedSchemaRegistry(): readonly SchemaRegistryEntry[] {
   return cachedOwnedRegistry;
 }
 
-export function cliSchemaBundleDigest(): string {
+function cliSchemaBundleDigest(): string {
   return schemaRegistryBundleDigest(cliOwnedSchemaRegistry());
 }
 

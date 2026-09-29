@@ -16,13 +16,13 @@ const PAYLOAD_LENGTH_BYTES = 4;
  * Initial payload capacity. The buffer grows on demand up to the maximum, and
  * growth only reserves virtual address space until pages are touched.
  */
-export const SCAN_CHANNEL_INITIAL_BYTES = 1 << 16;
+const SCAN_CHANNEL_INITIAL_BYTES = 1 << 16;
 /**
  * Publication-gate artifacts are capped at 16MB of bytes, which decode to at
  * most 16M UTF-16 code units and re-encode to at most 3 bytes each; 256MB
  * covers any text a caller can realistically hand the redaction API.
  */
-export const SCAN_CHANNEL_MAX_BYTES = 1 << 28;
+const SCAN_CHANNEL_MAX_BYTES = 1 << 28;
 
 const utf8Decoder = new TextDecoder();
 const utf8Encoder = new TextEncoder();

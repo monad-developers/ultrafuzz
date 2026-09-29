@@ -107,7 +107,7 @@ function validateZipEntryNames(entries: readonly AdmZip.IZipEntry[]): ReadonlyMa
   return byName;
 }
 
-export function assertCanonicalRelativePath(value: string): void {
+function assertCanonicalRelativePath(value: string): void {
   if (
     !/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/u.test(value) ||
     value.split("/").some((segment) => segment === "." || segment === "..")

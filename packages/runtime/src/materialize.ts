@@ -172,8 +172,6 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
   });
 }
 
-export const materializeRun = materializeSelection;
-
 function planCopy(
   layout: RunLayout,
   projectRoot: string,

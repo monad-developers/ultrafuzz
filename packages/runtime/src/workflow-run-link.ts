@@ -257,7 +257,7 @@ export function verifyWorkflowRunLinkAuthorization(layout: RunLayout, entry: Wor
   }
 }
 
-export function workflowRunLinkEvent(layout: RunLayout, linkId: string): EventRecord | undefined {
+function workflowRunLinkEvent(layout: RunLayout, linkId: string): EventRecord | undefined {
   const matches = replayAllEvents(layout).filter(
     (event) => event.event_type === "workflow-link-recorded" && eventPayload(event).workflow_link_id === linkId
   );

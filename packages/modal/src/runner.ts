@@ -55,7 +55,7 @@ import {
   MODAL_OVERSEER_POLL_MS,
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_RECOVERY_LEASE_TIMEOUT_MS,
-  MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+  MODAL_SANDBOX_TIMEOUT_MS,
   type ModalLaunchMode,
   type ModalModelSpec,
   type ModelProvider
@@ -2049,7 +2049,7 @@ async function launchModalRecoveryWorker(input: {
       sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
         name,
         command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : input.model.provider)],
-        timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+        timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
         workdir: "/opt/ultrafuzz",
         env: {
           ULTRAFUZZ_MODAL_RUN_ID: input.launchState.logical_run_id,

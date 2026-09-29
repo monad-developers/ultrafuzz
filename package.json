@@ -20,7 +20,7 @@
     "docs:check": "node scripts/audit-profile-docs.mjs --check && node scripts/prompt-catalog-docs.mjs --check && node scripts/docs-check.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "knip": "pnpm dlx knip@6.33.0 --include files,dependencies,unlisted,unresolved --treat-config-hints-as-errors",
+    "knip": "pnpm dlx knip@6.33.0 --include files,dependencies,unlisted,unresolved,exports,types,duplicates --treat-config-hints-as-errors",
     "lint": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\"",
     "lint:fix": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --fix",
     "lint:strict": "ULTRAFUZZ_STRICT_LINT=1 eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --max-warnings 0",

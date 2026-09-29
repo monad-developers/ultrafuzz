@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-export type ManagedConfigDetail = {
+type ManagedConfigDetail = {
   path: string;
   source: string;
   editable: boolean;

@@ -20,7 +20,7 @@ export type EdgeEndpointValidationResult = {
   valid: boolean;
 };
 
-export type TopologyEdgeMutationNode = {
+type TopologyEdgeMutationNode = {
   depends_on?: string[];
   id: string;
 };

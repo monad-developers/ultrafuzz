@@ -341,10 +341,7 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
   return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
 }
 
-export async function buildPairwiseChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
-  const pairs = result.pairComparison;
-  if (pairs.length === 0) throw new Error("No Ultrafuzz/no-fuzz row pairs are available for pairwise analysis");
-
+function pairwisePanels(pairs: PairComparison[]): PairwisePanel[] {
   const creditMaximum = niceAxisMaximum(
     Math.max(
       1,
@@ -359,7 +356,7 @@ export async function buildPairwiseChart(result: AnalysisResult, outputDir: stri
     Math.max(1, ...pairs.flatMap((pair) => [pair.ultrafuzz.totalTokensMillions, pair.noFuzz.totalTokensMillions])),
     4
   );
-  const panels: PairwisePanel[] = [
+  return [
     {
       title: "Ground-truth TP credits",
       note: "Higher is better",
@@ -390,7 +387,79 @@ export async function buildPairwiseChart(result: AnalysisResult, outputDir: stri
       formatTick: (value) => value.toFixed(0)
     }
   ];
+}
 
+interface PairwiseLayout {
+  panelWidth: number;
+  rowTop: number;
+  rowStep: number;
+  axisTop: number;
+  axisBottom: number;
+}
+
+function pairwisePanelParts(
+  panel: PairwisePanel,
+  left: number,
+  pairs: PairComparison[],
+  layout: PairwiseLayout
+): string[] {
+  const { panelWidth, rowTop, rowStep, axisTop, axisBottom } = layout;
+  const parts: string[] = [];
+  const right = left + panelWidth;
+  const xAt = (value: number) => left + (value / panel.maximum) * panelWidth;
+  parts.push(text(left, 172, panel.title, { "font-size": 17, "font-weight": 650 }));
+  parts.push(text(right, 195, panel.note, { "font-size": 12, fill: "#666", "text-anchor": "end" }));
+
+  for (let tick = 0; tick <= panel.divisions; tick += 1) {
+    const value = (panel.maximum * tick) / panel.divisions;
+    const x = xAt(value);
+    parts.push(line(x, axisTop, x, axisBottom, { stroke: tick === 0 ? "#999" : "#e1e1e1" }));
+    parts.push(
+      text(x, axisBottom + 28, panel.formatTick(value), {
+        "font-size": 11,
+        "text-anchor": "middle",
+        fill: "#666"
+      })
+    );
+  }
+
+  pairs.forEach((pair, pairIndex) => {
+    const y = rowTop + pairIndex * rowStep;
+    const ultrafuzz = panel.value(pair, "ultrafuzz");
+    const noFuzz = panel.value(pair, "no-fuzz");
+    if (ultrafuzz === null || noFuzz === null) {
+      parts.push(text((left + right) / 2, y + 5, "NA", { "font-size": 12, "text-anchor": "middle", fill: "#777" }));
+      return;
+    }
+    const ultrafuzzX = xAt(ultrafuzz);
+    const noFuzzX = xAt(noFuzz);
+    parts.push(line(ultrafuzzX, y, noFuzzX, y, { stroke: "#777", "stroke-width": 2 }));
+    parts.push(circle(ultrafuzzX, y, 8, CONDITION_STYLES[0]));
+    parts.push(markerSquare(noFuzzX, y, 8, CONDITION_STYLES[1]));
+    parts.push(
+      text(ultrafuzzX, y - 15, panel.format(ultrafuzz), {
+        "font-size": 11,
+        "font-weight": 600,
+        "text-anchor": "middle"
+      })
+    );
+    parts.push(
+      text(noFuzzX, y + 25, panel.format(noFuzz), {
+        "font-size": 11,
+        "font-weight": 600,
+        "text-anchor": "middle",
+        fill: "#555"
+      })
+    );
+  });
+  return parts;
+}
+
+async function buildPairwiseChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
+  const pairs = result.pairComparison;
+  if (pairs.length === 0) throw new Error("No Ultrafuzz/no-fuzz row pairs are available for pairwise analysis");
+
+  const panels = pairwisePanels(pairs);
   const width = 1600;
   const panelLeft = [145, 655, 1165];
   const panelWidth = 375;
@@ -426,54 +495,8 @@ export async function buildPairwiseChart(result: AnalysisResult, outputDir: stri
   });
 
   panels.forEach((panel, panelIndex) => {
-    const left = panelLeft[panelIndex] ?? 145;
-    const right = left + panelWidth;
-    const xAt = (value: number) => left + (value / panel.maximum) * panelWidth;
-    parts.push(text(left, 172, panel.title, { "font-size": 17, "font-weight": 650 }));
-    parts.push(text(right, 195, panel.note, { "font-size": 12, fill: "#666", "text-anchor": "end" }));
-
-    for (let tick = 0; tick <= panel.divisions; tick += 1) {
-      const value = (panel.maximum * tick) / panel.divisions;
-      const x = xAt(value);
-      parts.push(line(x, axisTop, x, axisBottom, { stroke: tick === 0 ? "#999" : "#e1e1e1" }));
-      parts.push(
-        text(x, axisBottom + 28, panel.formatTick(value), {
-          "font-size": 11,
-          "text-anchor": "middle",
-          fill: "#666"
-        })
-      );
-    }
-
-    pairs.forEach((pair, pairIndex) => {
-      const y = rowTop + pairIndex * rowStep;
-      const ultrafuzz = panel.value(pair, "ultrafuzz");
-      const noFuzz = panel.value(pair, "no-fuzz");
-      if (ultrafuzz === null || noFuzz === null) {
-        parts.push(text((left + right) / 2, y + 5, "NA", { "font-size": 12, "text-anchor": "middle", fill: "#777" }));
-        return;
-      }
-      const ultrafuzzX = xAt(ultrafuzz);
-      const noFuzzX = xAt(noFuzz);
-      parts.push(line(ultrafuzzX, y, noFuzzX, y, { stroke: "#777", "stroke-width": 2 }));
-      parts.push(circle(ultrafuzzX, y, 8, CONDITION_STYLES[0]));
-      parts.push(markerSquare(noFuzzX, y, 8, CONDITION_STYLES[1]));
-      parts.push(
-        text(ultrafuzzX, y - 15, panel.format(ultrafuzz), {
-          "font-size": 11,
-          "font-weight": 600,
-          "text-anchor": "middle"
-        })
-      );
-      parts.push(
-        text(noFuzzX, y + 25, panel.format(noFuzz), {
-          "font-size": 11,
-          "font-weight": 600,
-          "text-anchor": "middle",
-          fill: "#555"
-        })
-      );
-    });
+    const layout = { panelWidth, rowTop, rowStep, axisTop, axisBottom };
+    parts.push(...pairwisePanelParts(panel, panelLeft[panelIndex] ?? 145, pairs, layout));
   });
 
   parts.push(

@@ -2,14 +2,13 @@ export const MODAL_BENCHMARK_SCHEMA_VERSION = "ultrafuzz.modal.benchmark.v3" as 
 export const MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v3" as const;
 export const MODAL_RECOVERY_STATE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-state.v1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_VERSION = "ultrafuzz.modal.worker-lineage.v1" as const;
-export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const MODAL_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 export const MODAL_PUBLIC_SANDBOX_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 // A full public EVMBench pair's derived control envelope is roughly 10.5 hours:
 // two bounded eval waves plus preparation, scoring, cleanup, reporting, and
 // polling grace. Keep that lane below the historical 24-hour default without
 // expiring a worker inside its own accepted command envelope.
 export const MODAL_PUBLIC_FULL_SANDBOX_TIMEOUT_MS = 16 * 60 * 60 * 1000;
-export const MODAL_RECOVERY_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const MODAL_OVERSEER_POLL_MS = 60 * 1000;
 // Consecutive poll ticks in which EVERY supervised job threw before the overseer gives up loudly.
 // A single tick failure is transient (a control-plane blip, a sandbox shutting down mid-read) and must
@@ -22,7 +21,6 @@ export const MODAL_RECOVERY_BACKOFF_BASE_MS = 5 * 60 * 1000;
 export const MODAL_RECOVERY_BACKOFF_MAX_MS = 15 * 60 * 1000;
 export const MODAL_RECOVERY_LEASE_TIMEOUT_MS = 10 * 60 * 1000;
 export const EVAL_POST_WATCH_MARGIN_MS = 2 * 60 * 60 * 1000;
-export const MODAL_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const EVAL_WATCH_TIMEOUT_SECONDS = (MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS) / 1000;
 export const MODAL_PRE_MODEL_RETRY_LIMIT = 3;
 export const MODAL_PRE_MODEL_RETRY_BASE_DELAY_MS = 1_000;

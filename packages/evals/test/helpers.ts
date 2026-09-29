@@ -92,7 +92,7 @@ export function cleanRecoveryEquivalence(overrides: Partial<EvalRecoveryEquivale
   };
 }
 
-export function testRunProvenance(overrides: Partial<EvalRunProvenance> = {}): EvalRunProvenance {
+function testRunProvenance(overrides: Partial<EvalRunProvenance> = {}): EvalRunProvenance {
   return {
     candidate: { label: "test-candidate", commit: TEST_SHA40, dirty: false },
     benchmark: {
@@ -120,7 +120,7 @@ export function testRunProvenance(overrides: Partial<EvalRunProvenance> = {}): E
   };
 }
 
-export function testSummaryProvenance(overrides: Partial<EvalSummaryProvenance> = {}): EvalSummaryProvenance {
+function testSummaryProvenance(overrides: Partial<EvalSummaryProvenance> = {}): EvalSummaryProvenance {
   const run = testRunProvenance();
   return {
     availability: "available",

@@ -36,7 +36,7 @@ const reviewKindLabels: Record<string, string> = {
   "aggregate-test-files": "Test aggregation"
 };
 
-export function nodeCardEyebrow(data: NodeCardDisplayData): string | null {
+function nodeCardEyebrow(data: NodeCardDisplayData): string | null {
   const eyebrow = nodeCardEyebrowLabel(data);
   return displayValueKey(eyebrow) === displayValueKey(data.label) ? null : eyebrow;
 }

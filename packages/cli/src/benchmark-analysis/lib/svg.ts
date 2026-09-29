@@ -4,9 +4,9 @@ import { Resvg } from "@resvg/resvg-js";
 
 import { escapeXml } from "./format.js";
 
-export const FONT = "Inter, Arial, Helvetica, sans-serif";
+const FONT = "Inter, Arial, Helvetica, sans-serif";
 
-export function attrs(values: Record<string, string | number | boolean | null | undefined>): string {
+function attrs(values: Record<string, string | number | boolean | null | undefined>): string {
   return Object.entries(values)
     .filter(([, value]) => value !== null && value !== undefined && value !== false)
     .map(([key, value]) => `${key.replaceAll("_", "-")}="${escapeXml(value === true ? key : value)}"`)
@@ -66,7 +66,7 @@ export function svgDocument(width: number, height: number, content: string): str
   return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img">\n<rect width="100%" height="100%" fill="#fff"/>\n${content}\n</svg>\n`;
 }
 
-export async function writeSvg(svg: string, svgPath: string): Promise<void> {
+async function writeSvg(svg: string, svgPath: string): Promise<void> {
   await writeFile(svgPath, svg, "utf8");
 }
 

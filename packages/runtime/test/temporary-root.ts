@@ -47,8 +47,8 @@ export function registerTemporaryPath(directory: string): string {
   return directory;
 }
 
-/** Remove every registered root. Exposed for fixtures that clean up eagerly. */
-export function removeRegisteredRoots(): void {
+/** Remove every registered root. */
+function removeRegisteredRoots(): void {
   for (let root = registered.pop(); root !== undefined; root = registered.pop()) removeTemporaryRoot(root);
 }
 

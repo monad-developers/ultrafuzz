@@ -1,5 +1,5 @@
 import { Args, Command, Flags } from "@oclif/core";
-import { cleanGenerated } from "@ultrafuzz/runtime";
+import { cleanRun } from "@ultrafuzz/runtime";
 
 import { commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 
@@ -17,7 +17,7 @@ export default class Clean extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Clean);
     const selections = flags.select && flags.select.length > 0 ? flags.select : [`runs/${args.runId}`];
-    const result = await cleanGenerated({
+    const result = await cleanRun({
       projectRoot: projectRoot(flags),
       selections,
       confirmed: flags.yes === true || flags.confirm === true,

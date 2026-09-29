@@ -33,13 +33,13 @@ interface SourcePackage {
   dependencies: Record<string, string>;
 }
 
-export interface TrustedCliClosureFile {
+interface TrustedCliClosureFile {
   path: string;
   sha256: string;
   executable: boolean;
 }
 
-export interface TrustedCliClosurePackage {
+interface TrustedCliClosurePackage {
   id: string;
   name: string;
   version: string;
@@ -48,7 +48,7 @@ export interface TrustedCliClosurePackage {
   files: readonly TrustedCliClosureFile[];
 }
 
-export interface TrustedCliClosureManifest {
+interface TrustedCliClosureManifest {
   schema_version: typeof CLOSURE_SCHEMA_VERSION;
   cli_entrypoint: string;
   module_confinement: TrustedCliClosureFile;

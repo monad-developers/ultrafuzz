@@ -80,7 +80,7 @@ export async function probeCommandsForExecution(
   );
 }
 
-export function resolveExecutable(
+function resolveExecutable(
   name: string,
   env: Record<string, string | undefined>
 ): { available: boolean; path: string | null } {

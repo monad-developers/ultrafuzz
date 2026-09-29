@@ -244,8 +244,6 @@ function readPersistedModalExecution(runRoot: string): ModalExecutionProviderCon
   return modal;
 }
 
-export const cleanGenerated = cleanRun;
-
 function planRemoval(
   generatedRoot: string,
   selection: string,
