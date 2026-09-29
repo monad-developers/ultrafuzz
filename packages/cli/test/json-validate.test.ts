@@ -41,8 +41,8 @@ import {
 import { EVAL_GROUND_TRUTH_SCHEMA_ID, evalSchemaBundleDigest, evalSchemaDirectory } from "@ultrafuzz/evals";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
-  MODAL_NODE_INPUT_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
+  MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
   modalSchemaBundleDigest,
   modalSchemaDirectory
 } from "@ultrafuzz/modal";
@@ -765,30 +765,21 @@ test("json validate recognizes the pinned EVMBench schema and reports the owning
 test("json validate recognizes the pinned Modal schema and reports the owning Modal bundle", async () => {
   const temporary = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-json-modal-"));
   try {
-    const schema = path.join(modalSchemaDirectory(), "modal-node-input.schema.json");
-    const nodeInput = path.join(temporary, "node-input.json");
+    const schema = path.join(modalSchemaDirectory(), "modal-smoke-checkpoint.schema.json");
+    const checkpoint = path.join(temporary, "smoke-checkpoint.json");
     fs.writeFileSync(
-      nodeInput,
+      checkpoint,
       `${JSON.stringify({
-        schema_version: "ultrafuzz.modal.node.v2",
-        run_id: "run-1",
-        task_id: "task-1",
-        attempt_id: "attempt-1",
-        execution_generation: "base",
-        execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",
-        workflow_path: ".ultrafuzz/runs/run-1/workflow.tsx",
-        run_root: ".ultrafuzz/runs/run-1",
-        artifact_dir: ".ultrafuzz/runs/run-1/artifacts/attempt-1",
-        workspace_dir: ".ultrafuzz/runs/run-1/workspaces/attempt-1",
-        dependency_artifact_dirs: [],
-        dependency_verification_authorities: [],
-        resources: { cpu: 1, memory_mib: 1_024, timeout_seconds: 60 },
-        agent_credential_env: ["OPENAI_API_KEY"]
+        schema_version: "ultrafuzz.modal.smoke-checkpoint.v1",
+        non_root: true,
+        durable_storage: true,
+        provider_auth: "openai",
+        completed_units: 1
       })}\n`,
       "utf8"
     );
 
-    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", nodeInput, "--json"]);
+    const validCapture = await capture(["json", "validate", "--schema", schema, "--file", checkpoint, "--json"]);
     assert.equal(validCapture.code, 0);
     const envelope = JSON.parse(validCapture.stdout) as {
       ok: boolean;
@@ -800,12 +791,12 @@ test("json validate recognizes the pinned Modal schema and reports the owning Mo
     assert.equal(envelope.ok, true);
     assert.equal(envelope.data.status, "valid");
     assert.equal(envelope.data.schema.registered, true);
-    assert.equal(envelope.data.schema.id, MODAL_NODE_INPUT_SCHEMA_ID);
+    assert.equal(envelope.data.schema.id, MODAL_SMOKE_CHECKPOINT_SCHEMA_ID);
     assert.equal(envelope.data.schema.bundle_sha256, modalSchemaBundleDigest());
 
-    const tamperedSchema = path.join(temporary, "modal-node-input.schema.json");
+    const tamperedSchema = path.join(temporary, "modal-smoke-checkpoint.schema.json");
     fs.writeFileSync(tamperedSchema, `${fs.readFileSync(schema, "utf8")} `, "utf8");
-    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", nodeInput]);
+    const tamperedCapture = await capture(["json", "validate", "--schema", tamperedSchema, "--file", checkpoint]);
     assert.equal(tamperedCapture.code, 2);
     assert.match(tamperedCapture.stderr, /JSON_SCHEMA_DIGEST_MISMATCH/u);
   } finally {

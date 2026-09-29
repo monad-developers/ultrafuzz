@@ -11,14 +11,7 @@ import {
   MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
-  MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
-  MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
-  MODAL_NODE_CHECKPOINT_SCHEMA_ID,
-  MODAL_NODE_INPUT_SCHEMA_ID,
-  MODAL_NODE_RESTORE_SCHEMA_ID,
-  MODAL_NODE_RESULT_SCHEMA_ID,
-  MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MODAL_PINNED_HOLDOUT_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
@@ -234,86 +227,6 @@ function contractFixtures(): ContractFixtures {
       usage: null,
       diagnostic_code: "worker-live"
     },
-    [MODAL_NODE_INPUT_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node.v2",
-      run_id: "run-1",
-      task_id: "task-1",
-      attempt_id: "attempt-1",
-      execution_generation: "base",
-      execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",
-      workflow_path: ".ultrafuzz/runs/run-1/workflow.tsx",
-      run_root: ".ultrafuzz/runs/run-1",
-      artifact_dir: ".ultrafuzz/runs/run-1/artifacts/attempt-1",
-      workspace_dir: ".ultrafuzz/runs/run-1/workspaces/attempt-1",
-      dependency_artifact_dirs: [],
-      optional_dependency_artifact_dirs: [],
-      dependency_verification_authorities: [],
-      resources: { cpu: 1, memory_mib: 1024, timeout_seconds: 60 },
-      agent_credential_env: ["OPENAI_API_KEY"]
-    },
-    [MODAL_NODE_RESULT_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node-result.v2",
-      status: "succeeded",
-      artifact_archive: "/data/run/artifacts.tgz",
-      artifact_sha256: shaA,
-      storage_lineage: "run-1/attempt-1/base",
-      logical_dispatch_fingerprint: shaB,
-      durable_checkpoint: "/data/run/checkpoints/0003-completed.json",
-      durable_checkpoint_index: "/data/run/checkpoints/index.json"
-    },
-    [MODAL_NODE_CHECKPOINT_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node-checkpoint.v1",
-      checkpoint_id: "0001-prepared",
-      sequence: 1,
-      stage: "prepared",
-      created_at: timestamp,
-      storage_lineage: "run-1/attempt-1/base",
-      logical_dispatch_fingerprint: shaB,
-      workspace_path: "/data/run/workspace",
-      run_root: ".ultrafuzz/runs/run-1",
-      execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",
-      handoff_archive: "/data/run/input/project.tgz",
-      project_archive_sha256: shaA
-    },
-    [MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
-      storage_lineage: "run-1/attempt-1/base",
-      logical_dispatch_fingerprint: shaB,
-      workspace_path: "/data/run/workspace",
-      run_root: ".ultrafuzz/runs/run-1",
-      execution_snapshot_root: ".ultrafuzz/runs/run-1/smithers/execution-snapshots/generation",
-      handoff_archive: "/data/run/input/project.tgz",
-      project_archive_sha256: shaA,
-      checkpoints: [
-        {
-          checkpoint_id: "0001-prepared",
-          sequence: 1,
-          stage: "prepared",
-          created_at: timestamp,
-          manifest: "/data/run/checkpoints/0001-prepared.json"
-        }
-      ]
-    },
-    [MODAL_NODE_RESTORE_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node-restore.v1",
-      source_root: "/data/prior-run"
-    },
-    [MODAL_NODE_WORKER_ERROR_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.modal.node-worker-error.v1",
-      message: "workflow command failed",
-      phase: "workflow",
-      command: "ultrafuzz",
-      exit_code: 1,
-      stderr: "command failed"
-    },
-    [MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID]: {
-      schema_version: "ultrafuzz.workflow-execution-dependencies.v1",
-      modules: [],
-      packages: [],
-      issuers: [{ id: "root", snapshot_path: ".", dependencies: {} }],
-      executable_paths: ["bin/smithers"],
-      smithers_bin: "bin/smithers"
-    },
     [MODAL_PINNED_HOLDOUT_SCHEMA_ID]: {
       schema_version: "ultrafuzz.pinned-holdout.v1",
       source_commit: gitA,
@@ -458,7 +371,7 @@ function writeJsonWithTrailingSpaces(filePath: string, value: unknown, targetByt
 describe("Modal strict JSON contract foundation", () => {
   it("registers and strictly compiles every schema with matching checked-in exports and gates", () => {
     const registry = modalSchemaRegistry();
-    expect(registry).toHaveLength(21);
+    expect(registry).toHaveLength(14);
     expect(registry.map((entry) => entry.filename)).toEqual(Object.keys(MODAL_SCHEMA_METADATA).sort());
     expect(modalSchemaBundleDigest()).toMatch(/^[0-9a-f]{64}$/u);
 
@@ -533,12 +446,12 @@ describe("Modal strict JSON contract foundation", () => {
     expect(serialized.bytes.byteLength).toBeLessThanOrEqual(MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES);
     expect(serialized.snapshot.schema_id).toBe(MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID);
 
-    const ordinary = bytes(contractFixtures()[MODAL_NODE_RESTORE_SCHEMA_ID]);
+    const ordinary = bytes(contractFixtures()[MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]);
     const oversizedOrdinary = Buffer.concat([
       ordinary,
       Buffer.alloc(DEFAULT_MAX_JSON_INSTANCE_BYTES + 1 - ordinary.byteLength, 0x20)
     ]);
-    expect(() => parseModalDocumentBytes(MODAL_NODE_RESTORE_SCHEMA_ID, oversizedOrdinary)).toThrow(
+    expect(() => parseModalDocumentBytes(MODAL_SMOKE_CHECKPOINT_SCHEMA_ID, oversizedOrdinary)).toThrow(
       /67108864-byte limit/u
     );
   }, 120_000);
@@ -546,13 +459,15 @@ describe("Modal strict JSON contract foundation", () => {
   it("rejects duplicate keys, invalid UTF-8, unknown fields, old versions, and numeric coercion", () => {
     expect(() =>
       parseModalDocumentBytes(
-        MODAL_NODE_RESTORE_SCHEMA_ID,
-        Buffer.from('{"schema_version":"ultrafuzz.modal.node-restore.v1","source_root":"/a","source_root":"/b"}')
+        MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+        Buffer.from(
+          '{"schema_version":"ultrafuzz.modal.smoke-checkpoint.v1","non_root":true,"durable_storage":true,"provider_auth":"openai","completed_units":1,"completed_units":2}'
+        )
       )
     ).toThrow(ModalDocumentValidationError);
-    expect(() => parseModalDocumentBytes(MODAL_NODE_RESTORE_SCHEMA_ID, Uint8Array.from([0x7b, 0xff, 0x7d]))).toThrow(
-      ModalDocumentValidationError
-    );
+    expect(() =>
+      parseModalDocumentBytes(MODAL_SMOKE_CHECKPOINT_SCHEMA_ID, Uint8Array.from([0x7b, 0xff, 0x7d]))
+    ).toThrow(ModalDocumentValidationError);
     expect(() =>
       parseModalDocumentBytes(
         MODAL_WORKER_LINEAGE_SCHEMA_ID,
@@ -568,21 +483,10 @@ describe("Modal strict JSON contract foundation", () => {
         })
       )
     ).toThrow(ModalDocumentValidationError);
-    const nodeInput = contractFixtures()[MODAL_NODE_INPUT_SCHEMA_ID];
     expect(() =>
       parseModalDocumentBytes(
-        MODAL_NODE_INPUT_SCHEMA_ID,
-        bytes({ ...nodeInput, schema_version: "ultrafuzz.modal.node.v1" })
-      )
-    ).toThrow(ModalDocumentValidationError);
-    const { dependency_verification_authorities: _authorities, ...nodeInputWithoutAuthorities } = nodeInput;
-    expect(() => parseModalDocumentBytes(MODAL_NODE_INPUT_SCHEMA_ID, bytes(nodeInputWithoutAuthorities))).toThrow(
-      ModalDocumentValidationError
-    );
-    expect(() =>
-      parseModalDocumentBytes(
-        MODAL_NODE_CHECKPOINT_SCHEMA_ID,
-        bytes({ ...contractFixtures()[MODAL_NODE_CHECKPOINT_SCHEMA_ID], sequence: "1" })
+        MODAL_SMOKE_CHECKPOINT_SCHEMA_ID,
+        bytes({ ...contractFixtures()[MODAL_SMOKE_CHECKPOINT_SCHEMA_ID], completed_units: "1" })
       )
     ).toThrow(ModalDocumentValidationError);
   });
@@ -598,22 +502,6 @@ describe("Modal strict JSON contract foundation", () => {
         })
       )
     ).toThrow(ModalDocumentValidationError);
-    expect(() =>
-      parseModalDocumentBytes(
-        MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
-        bytes({
-          ...fixtures[MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID],
-          checkpoints: [
-            {
-              ...fixtures[MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID].checkpoints[0],
-              sequence: 2,
-              checkpoint_id: "0002-prepared"
-            }
-          ]
-        })
-      )
-    ).toThrow(ModalDocumentValidationError);
-
     const pinnedProof = {
       ...fixtures[MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID],
       submodules: {

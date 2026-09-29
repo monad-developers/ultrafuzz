@@ -8,7 +8,6 @@ export * from "./events.js";
 export * from "./artifact-contract-ids.js";
 export * from "./artifact-contracts.js";
 export * from "./artifact-schema-metadata.js";
-export * from "./cloud-selected-task.js";
 export * from "./findings.js";
 export * from "./findings-schema.js";
 export * from "./finding-note-vocabulary.js";

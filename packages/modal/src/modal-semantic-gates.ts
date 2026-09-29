@@ -4,14 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
-  MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
-  MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
-  MODAL_NODE_CHECKPOINT_SCHEMA_ID,
-  MODAL_NODE_INPUT_SCHEMA_ID,
-  MODAL_NODE_RESTORE_SCHEMA_ID,
-  MODAL_NODE_RESULT_SCHEMA_ID,
-  MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MODAL_PINNED_HOLDOUT_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
   MODAL_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_ID,
@@ -26,11 +19,7 @@ import {
   type ModalContractSchemaId,
   type StrictModalBenchmarkConfigDocument,
   type StrictModalBenchmarkControlManifestDocument,
-  type StrictModalExecutionDependencyManifestDocument,
   type StrictModalLaunchStateDocument,
-  type StrictModalNodeCheckpointDocument,
-  type StrictModalNodeCheckpointIndexDocument,
-  type StrictModalNodeResultDocument,
   type StrictModalPinnedHoldoutDocument,
   type StrictModalPinnedSourceProofDocument,
   type StrictModalPublicBenchmarkBundleDocument,
@@ -50,14 +39,9 @@ export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
   "modal-benchmark-config-identity",
   "modal-benchmark-control-manifest-identity",
   "modal-benchmark-control-manifest-uniqueness",
-  "modal-execution-dependency-target-identity",
-  "modal-execution-dependency-issuer-closure",
-  "modal-execution-dependency-canonical-order",
-  "modal-execution-dependency-smithers-executable",
   "modal-launch-attempt-identity",
   "modal-launch-recovery-lineage",
   "modal-launch-active-recovery-uniqueness",
-  "modal-node-checkpoint-index-sequence",
   "modal-pinned-holdout-canonical",
   "modal-pinned-source-holdout-lineage",
   "modal-pinned-source-ref-object-lineage",
@@ -75,25 +59,6 @@ export const IMPLEMENTED_MODAL_SEMANTIC_GATES = Object.freeze([
 ] as const);
 
 export type ModalSemanticGateName = (typeof IMPLEMENTED_MODAL_SEMANTIC_GATES)[number];
-
-export const MODAL_NODE_CHECKPOINT_RESULT_CONTEXT_GATE = "modal-node-checkpoint-result-index-context" as const;
-
-export interface ModalNodeCheckpointResultContext {
-  readonly result: StrictModalNodeResultDocument;
-  readonly checkpoint: StrictModalNodeCheckpointDocument;
-  readonly index: StrictModalNodeCheckpointIndexDocument;
-  readonly expected: {
-    readonly artifactArchive: string;
-    readonly checkpointIndex: string;
-    readonly storageLineage: string;
-    readonly logicalDispatchFingerprint: string;
-    readonly workspacePath: string;
-    readonly runRoot: string;
-    readonly executionSnapshotRoot: string;
-    readonly handoffArchive: string;
-    readonly projectArchiveSha256: string;
-  };
-}
 
 /** The exact gates each document dispatch can invoke; registry metadata imports this table directly. */
 export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
@@ -121,18 +86,6 @@ export const MODAL_SEMANTIC_GATES_BY_SCHEMA_ID = Object.freeze({
     "modal-worker-result-exit-diagnostic",
     "modal-worker-result-pricing-consistency"
   ],
-  [MODAL_NODE_INPUT_SCHEMA_ID]: [],
-  [MODAL_NODE_RESULT_SCHEMA_ID]: [],
-  [MODAL_NODE_CHECKPOINT_SCHEMA_ID]: ["modal-node-checkpoint-index-sequence"],
-  [MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID]: ["modal-node-checkpoint-index-sequence"],
-  [MODAL_NODE_RESTORE_SCHEMA_ID]: [],
-  [MODAL_NODE_WORKER_ERROR_SCHEMA_ID]: [],
-  [MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID]: [
-    "modal-execution-dependency-target-identity",
-    "modal-execution-dependency-issuer-closure",
-    "modal-execution-dependency-canonical-order",
-    "modal-execution-dependency-smithers-executable"
-  ],
   [MODAL_PINNED_HOLDOUT_SCHEMA_ID]: ["modal-pinned-holdout-canonical"],
   [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: [
     "modal-pinned-source-holdout-lineage",
@@ -158,68 +111,6 @@ export class ModalSemanticValidationError extends Error {
   }
 }
 
-/**
- * Join the three independently valid node-completion documents with the
- * trusted paths and lineage known by the host. JSON Schema cannot express
- * these cross-file equalities or select the canonical latest checkpoint.
- */
-export function assertModalNodeCheckpointResultContext(context: ModalNodeCheckpointResultContext): void {
-  const { result, checkpoint, index, expected } = context;
-  const latest = index.checkpoints.at(-1);
-  const checkpointRoot = path.posix.dirname(expected.checkpointIndex);
-  const canonicalManifest = path.posix.join(checkpointRoot, `${checkpoint.checkpoint_id}.json`);
-  const hasOnlyCanonicalManifests = index.checkpoints.every(
-    (entry) => entry.manifest === path.posix.join(checkpointRoot, `${entry.checkpoint_id}.json`)
-  );
-  if (
-    latest === undefined ||
-    !hasOnlyCanonicalManifests ||
-    checkpoint.stage !== "completed" ||
-    latest.stage !== "completed" ||
-    latest.checkpoint_id !== checkpoint.checkpoint_id ||
-    latest.sequence !== checkpoint.sequence ||
-    latest.created_at !== checkpoint.created_at ||
-    latest.manifest !== result.durable_checkpoint ||
-    latest.manifest !== canonicalManifest ||
-    result.durable_checkpoint_index !== expected.checkpointIndex
-  ) {
-    failContext("result must reference the canonical latest completed checkpoint and matching index entry");
-  }
-  if (
-    result.storage_lineage !== expected.storageLineage ||
-    checkpoint.storage_lineage !== expected.storageLineage ||
-    index.storage_lineage !== expected.storageLineage
-  ) {
-    failContext("result, checkpoint, and index storage lineage must match the trusted attempt lineage");
-  }
-  if (
-    result.logical_dispatch_fingerprint !== expected.logicalDispatchFingerprint ||
-    checkpoint.logical_dispatch_fingerprint !== expected.logicalDispatchFingerprint ||
-    index.logical_dispatch_fingerprint !== expected.logicalDispatchFingerprint
-  ) {
-    failContext("result, checkpoint, and index logical dispatch must match the trusted dispatch");
-  }
-  if (
-    result.artifact_archive !== expected.artifactArchive ||
-    checkpoint.workspace_path !== expected.workspacePath ||
-    index.workspace_path !== expected.workspacePath ||
-    checkpoint.run_root !== expected.runRoot ||
-    index.run_root !== expected.runRoot ||
-    checkpoint.execution_snapshot_root !== expected.executionSnapshotRoot ||
-    index.execution_snapshot_root !== expected.executionSnapshotRoot ||
-    checkpoint.handoff_archive !== expected.handoffArchive ||
-    index.handoff_archive !== expected.handoffArchive ||
-    checkpoint.project_archive_sha256 !== expected.projectArchiveSha256 ||
-    index.project_archive_sha256 !== expected.projectArchiveSha256
-  ) {
-    failContext("result, checkpoint, and index paths or archive digest do not match their trusted context");
-  }
-}
-
-function failContext(message: string): never {
-  throw new Error(`${MODAL_NODE_CHECKPOINT_RESULT_CONTEXT_GATE}: ${message}`);
-}
-
 export function assertModalDocumentSemantics<SchemaId extends ModalContractSchemaId>(
   schemaId: SchemaId,
   value: ModalContractForSchemaId<SchemaId>
@@ -242,15 +133,6 @@ export function assertModalDocumentSemantics<SchemaId extends ModalContractSchem
       return;
     case MODAL_WORKER_RESULT_SCHEMA_ID:
       assertWorkerResultSemantics(value as StrictModalWorkerResultDocument);
-      return;
-    case MODAL_NODE_CHECKPOINT_SCHEMA_ID:
-      assertCheckpointSemantics(value as StrictModalNodeCheckpointDocument);
-      return;
-    case MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID:
-      assertCheckpointIndexSemantics(value as StrictModalNodeCheckpointIndexDocument);
-      return;
-    case MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID:
-      assertExecutionDependencyManifestSemantics(value as StrictModalExecutionDependencyManifestDocument);
       return;
     case MODAL_PINNED_HOLDOUT_SCHEMA_ID:
       assertPinnedHoldoutSemantics(value as StrictModalPinnedHoldoutDocument);
@@ -649,117 +531,6 @@ function assertWorkerResultSemantics(result: StrictModalWorkerResultDocument): v
   }
 }
 
-function assertCheckpointSemantics(checkpoint: StrictModalNodeCheckpointDocument): void {
-  const expectedId = `${String(checkpoint.sequence).padStart(4, "0")}-${checkpoint.stage}`;
-  if (checkpoint.checkpoint_id !== expectedId) {
-    fail("modal-node-checkpoint-index-sequence", `checkpoint ID must be ${expectedId}`);
-  }
-}
-
-function assertCheckpointIndexSemantics(index: StrictModalNodeCheckpointIndexDocument): void {
-  const ids = new Set<string>();
-  const manifests = new Set<string>();
-  let priorTime = Number.NEGATIVE_INFINITY;
-  for (const [position, checkpoint] of index.checkpoints.entries()) {
-    const sequence = position + 1;
-    const expectedId = `${String(sequence).padStart(4, "0")}-${checkpoint.stage}`;
-    const timestamp = Date.parse(checkpoint.created_at);
-    if (
-      checkpoint.sequence !== sequence ||
-      checkpoint.checkpoint_id !== expectedId ||
-      ids.has(checkpoint.checkpoint_id) ||
-      manifests.has(checkpoint.manifest) ||
-      timestamp < priorTime
-    ) {
-      fail("modal-node-checkpoint-index-sequence", `invalid checkpoint index entry ${checkpoint.checkpoint_id}`);
-    }
-    ids.add(checkpoint.checkpoint_id);
-    manifests.add(checkpoint.manifest);
-    priorTime = timestamp;
-  }
-}
-
-function assertExecutionDependencyManifestSemantics(manifest: StrictModalExecutionDependencyManifestDocument): void {
-  const targets = [...manifest.modules, ...manifest.packages];
-  const ids = new Set<string>();
-  const paths = new Set<string>();
-  for (const module of manifest.modules) {
-    if (
-      !module.name.startsWith("@ultrafuzz/") ||
-      module.id !== `module:${module.name}` ||
-      module.snapshot_path !== `modules/${module.name}`
-    ) {
-      fail("modal-execution-dependency-target-identity", `invalid module target ${module.id}`);
-    }
-  }
-  for (const [position, packageTarget] of manifest.packages.entries()) {
-    const ordinal = String(position + 1).padStart(6, "0");
-    if (
-      packageTarget.id !== `package:${ordinal}` ||
-      packageTarget.snapshot_path !== `dependencies/packages/${ordinal}`
-    ) {
-      fail("modal-execution-dependency-target-identity", `invalid package target ${packageTarget.id}`);
-    }
-  }
-  for (const target of targets) {
-    if (ids.has(target.id) || paths.has(target.snapshot_path)) {
-      fail("modal-execution-dependency-target-identity", `duplicate dependency target ${target.id}`);
-    }
-    ids.add(target.id);
-    paths.add(target.snapshot_path);
-  }
-
-  if (
-    !isStrictlyOrdered(manifest.modules.map((target) => target.id)) ||
-    !isStrictlyOrdered(manifest.packages.map((target) => target.id)) ||
-    !isStrictlyOrdered(manifest.issuers.map((issuer) => issuer.id)) ||
-    !isStrictlyOrdered(manifest.executable_paths)
-  ) {
-    fail("modal-execution-dependency-canonical-order", "dependency manifest arrays are not canonically ordered");
-  }
-
-  const issuers = new Map(manifest.issuers.map((issuer) => [issuer.id, issuer]));
-  if (issuers.size !== manifest.issuers.length || issuers.size !== targets.length + 1) {
-    fail("modal-execution-dependency-issuer-closure", "dependency issuers do not form an exact closure");
-  }
-  const expectedIssuers = [
-    { id: "root", snapshot_path: "." },
-    ...targets.map((target) => ({ id: target.id, snapshot_path: target.snapshot_path }))
-  ].sort((left, right) => compareStrings(left.id, right.id));
-  if (
-    manifest.issuers.some(
-      (issuer, index) =>
-        issuer.id !== expectedIssuers[index]?.id || issuer.snapshot_path !== expectedIssuers[index]?.snapshot_path
-    )
-  ) {
-    fail("modal-execution-dependency-issuer-closure", "dependency issuer identity does not match its target");
-  }
-  const links = new Set<string>();
-  for (const issuer of manifest.issuers) {
-    const dependencyNames = Object.keys(issuer.dependencies);
-    if (!isStrictlyOrdered(dependencyNames)) {
-      fail("modal-execution-dependency-canonical-order", `issuer ${issuer.id} edges are not canonically ordered`);
-    }
-    const issuerRoot = issuer.id === "root" ? "" : issuer.snapshot_path;
-    for (const [dependencyName, targetId] of Object.entries(issuer.dependencies)) {
-      if (!isDependencyName(dependencyName)) {
-        fail("modal-execution-dependency-issuer-closure", `issuer ${issuer.id} has an invalid dependency name`);
-      }
-      if (!ids.has(targetId)) {
-        fail("modal-execution-dependency-issuer-closure", `issuer ${issuer.id} names unknown target ${targetId}`);
-      }
-      const link = path.posix.join(issuerRoot, "node_modules", dependencyName);
-      if (links.has(link)) {
-        fail("modal-execution-dependency-issuer-closure", `dependency link ${link} is duplicated`);
-      }
-      links.add(link);
-    }
-  }
-  if (!manifest.executable_paths.includes(manifest.smithers_bin)) {
-    fail("modal-execution-dependency-smithers-executable", "smithers_bin is not declared executable");
-  }
-}
-
 function assertPinnedSourceProofSemantics(proof: StrictModalPinnedSourceProofDocument): void {
   const holdout = proof.held_out;
   if (holdout !== null) {
@@ -912,18 +683,6 @@ function assertSmokeResultSemantics(result: StrictModalSmokeResultDocument): voi
   ) {
     fail("modal-smoke-status-check-reconciliation", "cloud failure diagnostics require the canonical failed result");
   }
-}
-
-function isDependencyName(value: string): boolean {
-  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/iu.test(value);
-}
-
-function isStrictlyOrdered(values: readonly string[]): boolean {
-  return values.every((value, index) => index === 0 || compareStrings(values[index - 1]!, value) < 0);
-}
-
-function compareStrings(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function assertOrderedTimestamps(

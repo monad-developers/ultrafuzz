@@ -18961,9 +18961,9 @@ test("both installers of the generated workspace share one resolution cutoff", (
     prefix: "/tmp/local/.smithers",
     registry: "https://registry.npmjs.org"
   });
-  const cloud = smithersDependencyInstallArgs({ prefix: "/tmp/cloud/.smithers" });
+  const ambient = smithersDependencyInstallArgs({ prefix: "/tmp/ambient/.smithers" });
 
-  for (const args of [local, cloud]) {
+  for (const args of [local, ambient]) {
     assert.equal(args.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`), true, args.join(" "));
     // The cutoff makes resolution reproducible; it does not relax the hardening
     // the install already carried, and it must not introduce a lockfile into the
@@ -18971,13 +18971,13 @@ test("both installers of the generated workspace share one resolution cutoff", (
     assert.equal(args.includes("--ignore-scripts"), true, args.join(" "));
     assert.equal(args.includes("--package-lock=false"), true, args.join(" "));
   }
-  // The cloud node worker installs against the sandbox's ambient npm
+  // An install without an explicit registry defers to the ambient npm
   // configuration, so it must not be handed the local path's registry.
   assert.equal(local.includes("--registry=https://registry.npmjs.org"), true, local.join(" "));
   assert.equal(
-    cloud.some((arg) => arg.startsWith("--registry=")),
+    ambient.some((arg) => arg.startsWith("--registry=")),
     false,
-    cloud.join(" ")
+    ambient.join(" ")
   );
 });
 

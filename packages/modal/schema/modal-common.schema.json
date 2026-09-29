@@ -18,12 +18,6 @@
       "maxLength": 16384,
       "pattern": "\\S"
     },
-    "snapshotRelativePath": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 1024,
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!\\.$).+$"
-    },
     "timestamp": {
       "type": "string",
       "format": "date-time"
@@ -57,10 +51,6 @@
     "environmentVariable": {
       "type": "string",
       "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
-    },
-    "dependencyName": {
-      "type": "string",
-      "pattern": "^(?:@[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*|[A-Za-z0-9][A-Za-z0-9._-]*)$"
     },
     "lineageFingerprints": {
       "type": "object",
@@ -673,159 +663,6 @@
         "fetched_at": { "$ref": "#/$defs/timestamp" },
         "resolved_model_count": { "$ref": "#/$defs/nonNegativeInteger" },
         "unresolved_model_count": { "$ref": "#/$defs/nonNegativeInteger" }
-      }
-    },
-    "nodeInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "dependentRequired": {
-        "source_revision": ["source_ref"],
-        "source_ref": ["source_revision"]
-      },
-      "required": [
-        "schema_version",
-        "run_id",
-        "task_id",
-        "attempt_id",
-        "execution_generation",
-        "execution_snapshot_root",
-        "workflow_path",
-        "run_root",
-        "artifact_dir",
-        "workspace_dir",
-        "dependency_artifact_dirs",
-        "dependency_verification_authorities",
-        "resources",
-        "agent_credential_env"
-      ],
-      "properties": {
-        "schema_version": { "const": "ultrafuzz.modal.node.v2" },
-        "run_id": { "$ref": "#/$defs/nonEmptyString" },
-        "task_id": { "$ref": "#/$defs/nonEmptyString" },
-        "attempt_id": { "$ref": "#/$defs/safeId" },
-        "source_revision": { "$ref": "#/$defs/gitObjectId" },
-        "source_ref": {
-          "type": "string",
-          "pattern": "^refs/(?:heads/ultrafuzz-pinned|ultrafuzz/runs/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/source)$"
-        },
-        "execution_generation": { "$ref": "#/$defs/safeId" },
-        "execution_snapshot_root": { "$ref": "#/$defs/boundedPath" },
-        "workflow_path": { "$ref": "#/$defs/boundedPath" },
-        "prompt_path": { "$ref": "#/$defs/boundedPath" },
-        "run_root": { "$ref": "#/$defs/boundedPath" },
-        "artifact_dir": { "$ref": "#/$defs/boundedPath" },
-        "workspace_dir": { "$ref": "#/$defs/boundedPath" },
-        "dependency_artifact_dirs": {
-          "type": "array",
-          "maxItems": 100000,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/boundedPath" }
-        },
-        "reference_artifact_dirs": {
-          "type": "array",
-          "maxItems": 100000,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/boundedPath" }
-        },
-        "vulnerability_database": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["catalogPath", "catalogSha256"],
-          "properties": {
-            "catalogPath": { "$ref": "#/$defs/boundedPath" },
-            "catalogSha256": { "$ref": "#/$defs/sha256" }
-          }
-        },
-        "optional_dependency_artifact_dirs": {
-          "type": "array",
-          "maxItems": 100000,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/boundedPath" }
-        },
-        "dependency_verification_authorities": {
-          "type": "array",
-          "maxItems": 100000,
-          "uniqueItems": true,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["attempt_id", "marker_sha256", "size_bytes"],
-            "properties": {
-              "attempt_id": { "$ref": "#/$defs/safeId" },
-              "marker_sha256": { "$ref": "#/$defs/sha256" },
-              "size_bytes": { "$ref": "#/$defs/nonNegativeInteger" }
-            }
-          }
-        },
-        "selected_task": { "type": "object" },
-        "project_content_sha256": { "$ref": "#/$defs/sha256" },
-        "project_archive_sha256": { "$ref": "#/$defs/sha256" },
-        "resources": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["cpu", "memory_mib", "timeout_seconds"],
-          "properties": {
-            "cpu": { "type": "number", "exclusiveMinimum": 0 },
-            "memory_mib": { "$ref": "#/$defs/positiveInteger" },
-            "timeout_seconds": { "$ref": "#/$defs/positiveInteger" }
-          }
-        },
-        "agent_credential_env": {
-          "type": "array",
-          "maxItems": 256,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/environmentVariable" }
-        },
-        "operator_prompt": { "type": "string", "maxLength": 1000000 }
-      }
-    },
-    "checkpointEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["checkpoint_id", "sequence", "stage", "created_at", "manifest"],
-      "properties": {
-        "checkpoint_id": { "$ref": "#/$defs/safeId" },
-        "sequence": { "$ref": "#/$defs/positiveInteger" },
-        "stage": { "enum": ["prepared", "running", "failed", "completed"] },
-        "created_at": { "$ref": "#/$defs/timestamp" },
-        "manifest": { "$ref": "#/$defs/boundedPath" }
-      }
-    },
-    "executionDependencyTarget": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "name", "snapshot_path"],
-      "properties": {
-        "id": { "$ref": "#/$defs/nonEmptyString" },
-        "name": { "$ref": "#/$defs/dependencyName" },
-        "snapshot_path": { "$ref": "#/$defs/snapshotRelativePath" }
-      }
-    },
-    "executionDependencyPackage": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "name", "version", "snapshot_path"],
-      "properties": {
-        "id": { "$ref": "#/$defs/nonEmptyString" },
-        "name": { "$ref": "#/$defs/dependencyName" },
-        "version": { "$ref": "#/$defs/nonEmptyString" },
-        "snapshot_path": { "$ref": "#/$defs/snapshotRelativePath" }
-      }
-    },
-    "executionDependencyIssuer": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "snapshot_path", "dependencies"],
-      "properties": {
-        "id": { "$ref": "#/$defs/nonEmptyString" },
-        "snapshot_path": {
-          "oneOf": [{ "const": "." }, { "$ref": "#/$defs/snapshotRelativePath" }]
-        },
-        "dependencies": {
-          "type": "object",
-          "propertyNames": { "$ref": "#/$defs/dependencyName" },
-          "additionalProperties": { "$ref": "#/$defs/nonEmptyString" }
-        }
       }
     }
   }

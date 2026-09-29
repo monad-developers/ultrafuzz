@@ -6,7 +6,6 @@ export * from "./modal-contracts.js";
 export * from "./modal-documents.js";
 export * from "./modal-schema-registry.js";
 export * from "./modal-semantic-gates.js";
-export * from "./node-provider.js";
 export * from "./pinned-source.js";
 export * from "./launch-state.js";
 export * from "./public-bundle.js";
