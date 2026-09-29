@@ -487,10 +487,13 @@ function taskWorkflowAgentId(nodeState: NodeState | undefined): string | undefin
 /** Whether Smithers ended every failed task of the node cancelled. */
 function workflowCancelled(states: readonly NodeState[]): boolean {
   const failedTaskStates = states.flatMap((nodeState) => {
+    if (nodeState.status !== "failed") return [];
     const provenance = nodeState.provenance;
-    if (nodeState.status !== "failed" || provenance === undefined || !("workflow" in provenance)) return [];
-    const workflow = provenance.workflow;
-    return workflow !== undefined && "state" in workflow ? [workflow.state] : [];
+    const workflow = provenance !== undefined && "workflow" in provenance ? provenance.workflow : undefined;
+    // A fan-out aggregate records its tasks' statuses, not a Smithers state of its own. Any other failed
+    // record without a Smithers state is a failure nothing shows was cancelled.
+    if (workflow !== undefined && "aggregate_attempt_statuses" in workflow) return [];
+    return [workflow !== undefined && "state" in workflow ? workflow.state : undefined];
   });
   return failedTaskStates.length > 0 && failedTaskStates.every((state) => state === "cancelled");
 }
