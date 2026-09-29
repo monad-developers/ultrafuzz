@@ -131,8 +131,11 @@ export function commandFromRuntime<CommandName extends CliKnownCommand, Source>(
         : project === undefined
           ? (result.value as CliCommandDataMap[CommandName])
           : project(result.value),
+    // A successful result still prints its diagnostics, after the value; a failure leads with them.
     text: result.value
-      ? `${result.ok ? "" : diagnosticsText(result.diagnostics)}${text(result.value)}`
+      ? result.ok
+        ? `${text(result.value)}${diagnosticsText(result.diagnostics)}`
+        : `${diagnosticsText(result.diagnostics)}${text(result.value)}`
       : diagnosticsText(result.diagnostics),
     diagnostics: result.diagnostics
   };

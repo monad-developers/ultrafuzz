@@ -388,6 +388,10 @@ Time on current step: 10 minutes on stateful-invariant-campaign
 Pace: 4 finished in the last 10m
 ```
 
+A poll that succeeds with diagnostics, such as a `WORKFLOW_DEADLINE_CANCEL_FAILED`
+or `WORKFLOW_STATE_SYNC_SKIPPED` warning, prints each one after these lines as
+`<severity>: <code>: <message>`, the same diagnostics `--json` reports.
+
 `--watch` re-polls every `--interval` seconds (default 30) until the run
 reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`),
 needs attention, is paused, or the poll fails. With `--json --watch`, every poll writes one
