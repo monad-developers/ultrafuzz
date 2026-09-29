@@ -17,6 +17,7 @@ import {
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import {
+  TRANSIENT_SYNC_DIAGNOSTIC_CODES,
   describeObservationSynchronizationDeadline,
   observationSynchronizationDeadline,
   runsRootForProject,
@@ -162,17 +163,9 @@ async function loadLocalEvidence(
   const snapshot = readCoherentLocalEvidenceSnapshot(layout);
   const runMetadata = assertRunMetadataDocument(parseLocalJson(snapshot.runMetadata, layout.runMetadataPath), runId);
   if (!synchronized.ok && runMetadata.workflow !== undefined) {
-    const transientCodes = new Set([
-      "WORKFLOW_INSPECT_FAILED",
-      "WORKFLOW_INSPECT_INVALID",
-      "WORKFLOW_EVENTS_FAILED",
-      "WORKFLOW_EVENTS_INVALID",
-      "WORKFLOW_TOKEN_EVENTS_FAILED",
-      "WORKFLOW_TOKEN_EVENTS_INVALID",
-      "WORKFLOW_SYNC_CANCELLED",
-      "WORKFLOW_SYNC_DEADLINE_EXCEEDED"
-    ]);
-    const authorityFailure = synchronized.diagnostics.find((diagnostic) => !transientCodes.has(diagnostic.code));
+    const authorityFailure = synchronized.diagnostics.find(
+      (diagnostic) => !TRANSIENT_SYNC_DIAGNOSTIC_CODES.has(diagnostic.code)
+    );
     if (authorityFailure !== undefined) {
       throw new Error(`linked workflow authority is invalid: ${authorityFailure.message}`);
     }

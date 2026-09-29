@@ -5775,6 +5775,20 @@ export async function assertSmithersControllerRefreshable(input: {
   return { status: "present", snapshot: inspection, inspect };
 }
 
+const DEFAULT_RUNNER_QUERY_TIMEOUT_MS = 120_000;
+const MAX_RUNNER_QUERY_TIMEOUT_MS = 600_000;
+
+/**
+ * Bounds one read-only runner query, so a wedged runner becomes a failed snapshot instead of blocking
+ * `status`, `inspect`, `stats`, or a synchronization pump forever. `ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS`
+ * overrides the default with a positive number of milliseconds, capped at ten minutes.
+ */
+function runnerQueryTimeoutMs(env: Record<string, string | undefined> | undefined): number {
+  const configured = (env ?? process.env).ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS;
+  const parsed = configured !== undefined && /^[1-9]\d*$/u.test(configured) ? Number(configured) : Number.NaN;
+  return Number.isSafeInteger(parsed) ? Math.min(parsed, MAX_RUNNER_QUERY_TIMEOUT_MS) : DEFAULT_RUNNER_QUERY_TIMEOUT_MS;
+}
+
 export async function runSmithersInspectionCommand(input: {
   args: readonly string[];
   projectRoot: string;
@@ -5784,6 +5798,7 @@ export async function runSmithersInspectionCommand(input: {
   timeoutMs?: number;
 }): Promise<SmithersCommandSnapshot> {
   const command = [...input.args];
+  const commandTimeoutMs = runnerQueryTimeoutMs(input.env);
   try {
     const result = await execSmithersCli({
       args: command,
@@ -5791,7 +5806,8 @@ export async function runSmithersInspectionCommand(input: {
       env: input.env,
       environmentVariableNames: input.environmentVariableNames,
       signal: input.signal,
-      timeoutMs: input.timeoutMs
+      timeoutMs: input.timeoutMs,
+      commandTimeoutMs
     });
     return {
       command: result.command,
@@ -5802,16 +5818,24 @@ export async function runSmithersInspectionCommand(input: {
     };
   } catch (error) {
     const record =
-      error && typeof error === "object" ? (error as { stdout?: unknown; stderr?: unknown; message?: unknown }) : {};
+      error && typeof error === "object"
+        ? (error as { stdout?: unknown; stderr?: unknown; message?: unknown; killed?: unknown; signal?: unknown })
+        : {};
     const stdout = typeof record.stdout === "string" ? record.stdout : "";
     const stderr = typeof record.stderr === "string" ? record.stderr : "";
+    // Node reports the kill of its own execution timeout as `killed` with SIGTERM.
+    const timedOut = record.killed === true && record.signal === "SIGTERM";
     return {
       command: smithersDisplayCommand(command),
       ok: false,
       stdout,
       stderr,
       ...jsonField(stdout),
-      error: error instanceof Error ? error.message : String(error)
+      error: timedOut
+        ? `workflow runner query exceeded its time limit and was stopped (ULTRAFUZZ_RUNNER_QUERY_TIMEOUT_MS=${String(commandTimeoutMs)})`
+        : error instanceof Error
+          ? error.message
+          : String(error)
     };
   }
 }
@@ -6384,6 +6408,8 @@ async function execSmithersCli(input: {
   acceptedExitCodes?: readonly number[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Bounds only the runner process, never executable preparation. */
+  commandTimeoutMs?: number;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
@@ -6391,8 +6417,10 @@ async function execSmithersCli(input: {
     signal: input.signal,
     timeoutMs: input.timeoutMs
   });
-  const commandTimeoutMs =
+  const remainingMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
+  const commandTimeoutMs =
+    remainingMs === undefined ? input.commandTimeoutMs : Math.min(remainingMs, input.commandTimeoutMs ?? remainingMs);
   const { anchored, snapshotAnchor, executableAnchor } = acquireAnchoredSmithersController(command, commandEnvironment);
   try {
     const { stdout, stderr } = await execFileAsync(
