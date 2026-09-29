@@ -32,6 +32,10 @@ function laneGates(lanes: ReadonlyArray<{ gates: string }>): string[] {
   return lanes.flatMap((lane) => lane.gates.split(","));
 }
 
+function gatedByEvent(condition: string | undefined): boolean {
+  return /event_name|pull_request/u.test(condition ?? "");
+}
+
 function workflowJobs(): Record<string, WorkflowJob> {
   const workflow = parse(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8")) as {
     jobs: Record<string, WorkflowJob>;
@@ -53,12 +57,14 @@ describe("release validation lanes", () => {
     // regressions merged with all checks green.
     const jobs = workflowJobs();
     const releaseValidation = jobs["release-validation"];
-    expect(releaseValidation?.if).toBeUndefined();
+    expect(gatedByEvent(releaseValidation?.if)).toBe(false);
+    expect(releaseValidation?.steps.filter((step) => gatedByEvent(step.if)).map((step) => step.name)).toEqual([]);
     expect(releaseValidation?.strategy?.matrix?.include).toBe(
       "${{ fromJSON(needs.release-validation-lanes.outputs.lanes) }}"
     );
     const requirement = jobs["release-gates"]?.steps.find((step) => step.name === "Require release validation lanes");
-    expect(requirement?.if).toBe("always() && needs.release-validation.result != 'success'");
+    expect(requirement?.if).toContain("needs.release-validation.result != 'success'");
+    expect(gatedByEvent(requirement?.if)).toBe(false);
   });
 
   it("are printed as the workflow matrix", () => {
