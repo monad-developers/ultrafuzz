@@ -22311,6 +22311,92 @@ for (const markerAuthority of ["malformed leaf", "dangling leaf", "symlinked roo
   });
 }
 
+// `resume --retry-failed` reruns a failed optional producer while consumers that were already
+// admitted without it keep running. Only a producer that verified before the admission began
+// shows the admission lost a success.
+for (const retryVerified of ["after", "before"] as const) {
+  test(`syncRun ${retryVerified === "after" ? "keeps" : "rejects"} a consumer admitted without an optional prerequisite whose retry verified ${retryVerified} the admission`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeOptionalSpecialistTopology(project);
+    const workflowRunId = `ultrafuzz-sync-optional-retry-${retryVerified}`;
+    const runId = `sync-optional-retry-${retryVerified}`;
+    const failedEvents = [
+      { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 1 },
+      { type: "NodeFailed", nodeId: "node:optional-specialist", attempt: 1 }
+    ];
+    const failedEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        steps: [
+          { id: "node:direct-strategy", state: "finished", attempt: 1 },
+          { id: "node:optional-specialist", state: "failed", attempt: 1 },
+          { id: "node:final-report", state: "pending", attempt: 0 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, failedEvents)
+    });
+    const run = await startRun({ projectRoot: project, runId, env: failedEnv });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    writeRequiredArtifactSet(runRoot, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
+    const nodeStatus = (nodeId: string) =>
+      (
+        JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+          nodes: Record<string, { status?: string }>;
+        }
+      ).nodes[nodeId]?.status;
+    assert.equal(nodeStatus("optional-specialist"), "failed");
+
+    // The report's verifier records an admission made while the specialist had no marker.
+    writeRequiredArtifactSet(runRoot, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    writeRequiredArtifactSet(runRoot, "optional-specialist", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    const admission = [{ type: "NodeStarted", nodeId: "prepare:final-report", attempt: 1 }];
+    const retry = [
+      { type: "NodeStarted", nodeId: "node:optional-specialist", attempt: 2 },
+      { type: "NodeFinished", nodeId: "node:optional-specialist", attempt: 2 },
+      { type: "NodeFinished", nodeId: "verify:optional-specialist", attempt: 1 }
+    ];
+    const finalEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [
+          { id: "node:direct-strategy", state: "finished", attempt: 1 },
+          { id: "node:optional-specialist", state: "finished", attempt: 2 },
+          { id: "node:final-report", state: "finished", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        ...failedEvents,
+        ...(retryVerified === "after" ? [...admission, ...retry] : [...retry, ...admission]),
+        { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const sync = await syncRun({ projectRoot: project, runId, env: finalEnv });
+
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(nodeStatus("optional-specialist"), "succeeded");
+    if (retryVerified === "after") {
+      assert.equal(nodeStatus("final-report"), "succeeded", JSON.stringify(sync.diagnostics));
+      assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+    } else {
+      assert.equal(nodeStatus("final-report"), "failed");
+      assert.ok(
+        sync.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code === "ARTIFACT_VERIFICATION_AUTHORITY_INVALID" &&
+            diagnostic.message.includes("finalized optional dependency is missing from verifier admission")
+        ),
+        JSON.stringify(sync.diagnostics)
+      );
+    }
+  });
+}
+
 test("syncRun binds an optional prerequisite digest before a final-boundary manifest swap", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
