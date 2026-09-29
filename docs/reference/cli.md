@@ -389,8 +389,10 @@ Pace: 4 finished in the last 10m
 ```
 
 A poll that succeeds with diagnostics, such as a `WORKFLOW_DEADLINE_CANCEL_FAILED`
-or `WORKFLOW_STATE_SYNC_SKIPPED` warning, prints each one after these lines as
-`<severity>: <code>: <message>`, the same diagnostics `--json` reports.
+or `WORKFLOW_STATE_SYNC_SKIPPED` warning, prints each one on stdout after these
+lines as `<severity>: <code>: <message>`, where a message can span several
+lines. The warnings do not change the exit status, so scripts should read them
+from the `diagnostics` array of `--json` output.
 
 `--watch` re-polls every `--interval` seconds (default 30) until the run
 reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`),

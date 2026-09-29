@@ -159,8 +159,9 @@ next synchronization requests cancellation again; a synchronization that fails
 or is skipped (for example `WORKFLOW_STATE_SYNC_SKIPPED` or
 `WORKFLOW_SYNC_IN_PROGRESS`) does not check the deadline at all. A run that
 finished first keeps its terminal outcome, with no timeout record. To bound an
-unattended run, run `ultrafuzz status <run-id>` periodically (for example from
-cron) and act on its warnings, or cancel it with `ultrafuzz cancel <run-id>`.
+unattended run, run `ultrafuzz status <run-id> --json` periodically (for example
+from cron) and act on the warnings in its `diagnostics` (plain `status` prints
+them on stdout), or cancel it with `ultrafuzz cancel <run-id>`.
 Workflow-side enforcement is tracked in
 [#1110](https://github.com/monad-developers/ultrafuzz/issues/1110).
 
