@@ -1972,7 +1972,8 @@ function publicRecoveryText(value: string, runId: string, runFailed: boolean): s
  * rebuilt from the Ultrafuzz run ID rather than renamed. On a failed run a plain resume leaves every
  * failed node failed, so resuming or retrying a task there becomes `--retry-failed`, which also retries
  * a failed artifact verifier from its producer. Undefined when `ultrafuzz` has no such command, as for
- * approving or signalling, which generated workflows never wait on.
+ * approving or signalling, which generated workflows never wait on, or for an `up` that starts a new
+ * run instead of resuming this one.
  */
 function ultrafuzzRecoveryCommand(runnerCommand: string, runId: string, runFailed: boolean): string | undefined {
   const [runner, command, ...args] = runnerCommand.trim().split(/\s+/u);
@@ -1981,8 +1982,9 @@ function ultrafuzzRecoveryCommand(runnerCommand: string, runId: string, runFaile
   switch (command) {
     case "up":
     case "retry-task": {
-      const node = command === "retry-task" ? option("--node-id") : undefined;
+      if (command === "up" && !args.includes("--resume")) return undefined;
       if (runFailed) return `ultrafuzz resume ${runId} --retry-failed`;
+      const node = option("--node-id");
       return node === undefined ? `ultrafuzz resume ${runId}` : `ultrafuzz resume ${runId} --reset-node ${node}`;
     }
     case "replay": {

@@ -554,13 +554,17 @@ blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,
 evidence first, matching single-run `status`, and `status` recommends it as the
 next step.
 
-Recovery commands in `unblocker` and the notes are `ultrafuzz` commands for the
-run, rebuilt from the workflow runner's suggestions without its workflow path or
-run ID. Replaying from a checkpoint becomes `ultrafuzz fork <run-id> --frame <n>`.
-On a failed run, resuming or retrying a task becomes
+The workflow runner's resume, task-retry, checkpoint-replay, log, and inspect
+suggestions in `unblocker`, the notes, and the summary are rebuilt as
+`ultrafuzz` commands for the run, without the runner's workflow path or run ID.
+Replaying from a checkpoint becomes `ultrafuzz fork <run-id> --frame <n>`. On a
+failed run, resuming or retrying a task becomes
 `ultrafuzz resume <run-id> --retry-failed`, because a plain resume leaves a
 failed node failed; on a live run, retrying one task becomes
-`ultrafuzz resume <run-id> --reset-node <node-id>`.
+`ultrafuzz resume <run-id> --reset-node <node-id>`. A suggestion with no
+`ultrafuzz` equivalent, such as approving or signalling a task, stays in the
+runner's words with the runner called `workflow runner`; generated workflows
+never wait on either.
 
 `timeline` is read-only and returns `frames` with `frame`, `created_at`,
 `content_hash`, and fork points. Pass a listed frame number to

@@ -578,7 +578,7 @@ test("diagnoseRun names the ultrafuzz command for each recovery the runner sugge
     status: string,
     summary: string,
     blockers: Array<{ kind: string; unblocker: string; nodeId?: string; iteration?: null }>,
-    information: string[] = []
+    notes: { warnings?: string[]; information?: string[] } = {}
   ) => {
     const data = {
       runId: workflowRunId,
@@ -586,8 +586,8 @@ test("diagnoseRun names the ultrafuzz command for each recovery the runner sugge
       summary,
       generatedAtMs: 1_700_000_000_000,
       currentNodeId: null,
-      warnings: [],
-      information,
+      warnings: notes.warnings ?? [],
+      information: notes.information ?? [],
       blockers: blockers.map((row) => ({
         nodeId: "node:project-discovery",
         iteration: 0,
@@ -611,9 +611,11 @@ test("diagnoseRun names the ultrafuzz command for each recovery the runner sugge
       { kind: "retries-exhausted", nodeId: "verify:project-discovery", unblocker: resume },
       { kind: "stalled", unblocker: retryTask }
     ],
-    [
-      `Last good checkpoint: frame 29. Resume in place with \`${resume}\` or replay from the checkpoint with \`smithers replay ${workflow} --run-id ${workflowRunId} --frame 29\`.`
-    ]
+    {
+      information: [
+        `Last good checkpoint: frame 29. Resume in place with \`${resume}\` or replay from the checkpoint with \`smithers replay ${workflow} --run-id ${workflowRunId} --frame 29\`.`
+      ]
+    }
   );
   assert.deepEqual(
     failed.blockers.map((blocker) => blocker.unblocker),
@@ -623,16 +625,25 @@ test("diagnoseRun names the ultrafuzz command for each recovery the runner sugge
     "Last good checkpoint: frame 29. Resume in place with `ultrafuzz resume smithers-probe --retry-failed` or replay from the checkpoint with `ultrafuzz fork smithers-probe --frame 29`."
   ]);
 
-  const running = await diagnose("running", `Run ${workflowRunId} is running`, [
+  const running = await diagnose(
+    "running",
+    `Run ${workflowRunId} is running`,
+    [
+      {
+        kind: "side-effect-boundary-crossed",
+        nodeId: "(run-level)",
+        iteration: null,
+        unblocker: `smithers inspect ${workflowRunId}`
+      },
+      { kind: "stale-task-heartbeat", unblocker: `${retryTask} --force true` },
+      { kind: "engine-busy", nodeId: "(run-level)", iteration: null, unblocker: `smithers logs ${workflowRunId}` }
+    ],
     {
-      kind: "side-effect-boundary-crossed",
-      nodeId: "(run-level)",
-      iteration: null,
-      unblocker: `smithers inspect ${workflowRunId}`
-    },
-    { kind: "stale-task-heartbeat", unblocker: `${retryTask} --force true` },
-    { kind: "engine-busy", nodeId: "(run-level)", iteration: null, unblocker: `smithers logs ${workflowRunId}` }
-  ]);
+      warnings: [
+        "Concurrency ceiling saturated: requested demand 8, effective cap 4. Remediation: `smithers up --max-concurrency 8`."
+      ]
+    }
+  );
   assert.deepEqual(
     running.blockers.map((blocker) => blocker.unblocker),
     [
@@ -641,6 +652,11 @@ test("diagnoseRun names the ultrafuzz command for each recovery the runner sugge
       "ultrafuzz events smithers-probe --watch"
     ]
   );
+  // An `up` without `--resume` starts a run rather than resuming this one, so it is not rebuilt and
+  // keeps the limit it raises.
+  assert.deepEqual(running.notes, [
+    "Concurrency ceiling saturated: requested demand 8, effective cap 4. Remediation: `workflow runner up --max-concurrency 8`."
+  ]);
 
   const paused = await diagnose("paused", "Run was gracefully paused; resume with `smithers up --resume <runId>`.", []);
   assert.equal(paused.summary, "Run was gracefully paused; resume with `ultrafuzz resume smithers-probe`.");
