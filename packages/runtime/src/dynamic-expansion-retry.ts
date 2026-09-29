@@ -127,7 +127,8 @@ export function planDynamicExpansionRetryArchive(input: {
   }
   // Validate the attempt-owned entries and the run state now; the move and the
   // prune themselves wait for the reset.
-  collectAttemptStateMoves(runRoot, manifests);
+  const runtimeBase = readDynamicRuntimeBase(runRoot);
+  collectAttemptStateMoves(runRoot, manifests, runtimeBase);
   readArchivableRunState(runRoot);
   return {
     projectRoot,
@@ -136,7 +137,7 @@ export function planDynamicExpansionRetryArchive(input: {
     manifestDirMode: manifestStat.mode & 0o777,
     sourceNodeIds: [...new Set(input.sourceNodeIds)].sort(),
     manifests,
-    runtimeBase: readDynamicRuntimeBase(runRoot)
+    runtimeBase
   };
 }
 
@@ -146,7 +147,8 @@ export function planDynamicExpansionRetryArchive(input: {
  * The whole manifest directory is renamed in one step, so the old generation
  * stays durable and no partially rewritten manifest set can be observed. The
  * generation's attempt-owned artifacts move with it, so a regenerated attempt
- * with a stable storage ID never meets a stale rendered prompt. The mutable
+ * with a stable storage ID never meets a stale rendered prompt, and so does the
+ * published prompt of each planned task that waits on the generation. The mutable
  * runtime graph and task plan are then re-derived from the sealed base with no
  * ready group, exactly as the next render would publish them, so the control
  * admission check re-derives cleanly before that render happens. Finally the
@@ -164,7 +166,7 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
   fs.mkdirSync(archiveDir, { mode: 0o700 });
   fs.renameSync(plan.manifestDir, path.join(archiveDir, "manifests"));
   fs.mkdirSync(plan.manifestDir, { mode: plan.manifestDirMode });
-  const archivedAttemptPaths = collectAttemptStateMoves(plan.runRoot, plan.manifests).map((move) => {
+  const archivedAttemptPaths = collectAttemptStateMoves(plan.runRoot, plan.manifests, plan.runtimeBase).map((move) => {
     const destination = path.join(archiveDir, move.relativePath);
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
     fs.renameSync(move.source, destination);
@@ -235,7 +237,8 @@ function readArchivableRunState(runRoot: string): { statePath: string; document:
 
 function collectAttemptStateMoves(
   runRoot: string,
-  manifests: readonly DynamicExpansionManifest[]
+  manifests: readonly DynamicExpansionManifest[],
+  runtimeBase: DynamicRuntimeBase | undefined
 ): Array<{ source: string; relativePath: string }> {
   const ownsAttempt = generationOwnsAttempt(manifests);
   const moves: Array<{ source: string; relativePath: string }> = [];
@@ -261,6 +264,19 @@ function collectAttemptStateMoves(
       }
       moves.push({ source: path.join(sourceRoot, entry.name), relativePath: `${root.name}/${entry.name}` });
     }
+  }
+  // A planned task whose prompt waits on a withdrawn group was rendered from this generation's
+  // children. Left in place, it would be kept as published and name withdrawn attempts; moved, it
+  // renders again from the new expansion.
+  const groupIds = new Set(manifests.map((manifest) => manifest.group_node_id));
+  for (const task of runtimeBase?.tasks ?? []) {
+    if (!(task.deferredPromptGroups ?? []).some((groupId) => groupIds.has(groupId))) continue;
+    const relativePath = `artifacts/${task.attemptId}/prompt.rendered.md`;
+    const source = path.join(runRoot, relativePath);
+    assertNoSymlinkComponents(runRoot, source, `dynamic retry prompt for ${task.attemptId}`);
+    if (!fs.existsSync(source)) continue;
+    assertRegularFileInside(runRoot, source, `dynamic retry prompt for ${task.attemptId}`);
+    moves.push({ source, relativePath });
   }
   return moves;
 }

@@ -87,7 +87,10 @@ function item(index: number): Record<string, unknown> {
   };
 }
 
-/** A run whose sealed runtime controls fan `goals` from `planner` out into `fanout`, joined by `join`. */
+/**
+ * A run whose sealed runtime controls fan `goals` from `planner` out into `fanout`, joined by `join`.
+ * Like the stock final report, the join's prompt waits on the group, and it names the children.
+ */
 function sealedDynamicRun(
   runId: string,
   goals: Array<Record<string, unknown>>,
@@ -97,6 +100,7 @@ function sealedDynamicRun(
   const runRoot = path.join(projectRoot, "runs", runId);
   const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
   const templatePath = path.join(runRoot, "templates", "worker.md");
+  const joinTemplatePath = path.join(runRoot, "templates", "join.md");
   const graphPath = path.join(runRoot, "graph.json");
   const tasksPath = path.join(runRoot, "smithers", "tasks.json");
   const baseGraphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
@@ -106,8 +110,12 @@ function sealedDynamicRun(
   fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
   fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals })}\n`, "utf8");
   fs.writeFileSync(templatePath, template, "utf8");
+  fs.writeFileSync(joinTemplatePath, "Join {{artifact_path:fanout}}.\n", "utf8");
   const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
-  const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
+  const joinTask = {
+    ...compiledTask(projectRoot, runRoot, "join", "join", joinTemplatePath, ["fanout"]),
+    deferredPromptGroups: ["fanout"]
+  };
   const group: CompiledSmithersDynamicGroup = {
     groupNodeId: "fanout",
     logicalNodeId: "fanout",
@@ -472,13 +480,15 @@ test("explicit source retry archives a complete expansion generation and rejects
 });
 
 test("explicit source retry re-derives the base runtime controls after archiving an expansion", () => {
-  const { controls } = sealedDynamicRun("retry-rematerialize", [item(0)]);
+  const { sourceArtifactPath, controls } = sealedDynamicRun("retry-rematerialize", [item(0)]);
   const { runId, projectRoot, runRoot } = controls;
   const expanded = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
   assert.deepEqual(expanded.expandedGroupIds, ["fanout"]);
   const generated = expanded.tasks.find((task) => task.metadata.node.dynamic !== undefined);
   assert.ok(generated?.renderedPromptPath);
   assert.equal(fs.existsSync(generated.renderedPromptPath), true);
+  const joinPromptPath = path.join(runRoot, "artifacts", "join", "prompt.rendered.md");
+  assert.ok(fs.readFileSync(joinPromptPath, "utf8").includes(generated.artifactDir));
   assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"]);
 
   // The synchronizer keys a generated graph node by its storage ID and each generated attempt by
@@ -516,6 +526,9 @@ test("explicit source retry re-derives the base runtime controls after archiving
     fs.existsSync(path.join(archived.archive_path, "artifacts", generated.attemptId, "prompt.rendered.md")),
     true
   );
+  // The join's prompt was rendered from the withdrawn children, so it is withdrawn with them.
+  assert.equal(fs.existsSync(joinPromptPath), false);
+  assert.equal(fs.existsSync(path.join(archived.archive_path, "artifacts", "join", "prompt.rendered.md")), true);
   // The admission check must re-derive the withdrawn controls from the sealed base with no ready
   // group, before any render republishes them.
   const verified = verifyDynamicRuntimeMaterialization(controls);
@@ -529,6 +542,19 @@ test("explicit source retry re-derives the base runtime controls after archiving
     verified.graph.nodes.map((node) => node.id),
     ["planner", "fanout", "join"]
   );
+
+  // The retried source plans another item. The join renders again from the new generation instead
+  // of keeping a prompt that names the withdrawn child.
+  fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(1)] })}\n`, "utf8");
+  const reexpanded = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  const regenerated = reexpanded.tasks.find((task) => task.metadata.node.dynamic !== undefined);
+  assert.ok(regenerated);
+  assert.notEqual(regenerated.artifactDir, generated.artifactDir);
+  assert.deepEqual(reexpanded.promptDriftAttemptIds, []);
+  const joinPrompt = fs.readFileSync(joinPromptPath, "utf8");
+  assert.ok(joinPrompt.includes(regenerated.artifactDir), joinPrompt);
+  assert.ok(!joinPrompt.includes(generated.artifactDir), joinPrompt);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).promptDriftAttemptIds, []);
 });
 
 test("a lock file left by a killed materializer blocks neither expansion nor a source retry", () => {

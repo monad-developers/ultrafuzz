@@ -1392,6 +1392,17 @@ test("explicit source retry prunes the withdrawn generation from run state and k
   };
   assert.deepEqual(retryRecord.group_node_ids, ["fanout"]);
   assert.deepEqual(retryRecord.pruned_state_node_ids, generationStateIds);
+  // The join's prompt waits on the group, so it was rendered from the withdrawn generation and is
+  // withdrawn with it.
+  const joinPromptPath = fixture.joinTask.renderedPromptPath;
+  assert.ok(joinPromptPath);
+  assert.equal(fs.existsSync(joinPromptPath), false);
+  assert.equal(
+    fs.existsSync(
+      path.join(historyRoot, archiveName, "artifacts", fixture.joinTask.attemptId, path.basename(joinPromptPath))
+    ),
+    true
+  );
   const pruned = readState(fixture);
   for (const nodeId of generationStateIds) assert.equal(pruned.nodes[nodeId], undefined, nodeId);
   for (const nodeId of [fixture.plannerTask.attemptId, "fanout", fixture.joinTask.attemptId]) {
@@ -1413,6 +1424,7 @@ test("explicit source retry prunes the withdrawn generation from run state and k
   // shadow the new one anywhere, and every observer stays admitted.
   const regenerated = republishRetriedExpansion(fixture);
   assert.equal(regenerated.length, 2);
+  assert.equal(fs.existsSync(joinPromptPath), true);
   const regeneratedStorageId = regenerated[0]?.metadata.node.storageId;
   assert.ok(regeneratedStorageId);
   assert.notEqual(regeneratedStorageId, fixture.storageId);
