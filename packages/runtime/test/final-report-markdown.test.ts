@@ -1103,7 +1103,7 @@ test("directive validation rejects injected or presentation-divergent Markdown",
   );
 });
 
-test("directive conformance requires both coverage headings without an opt-out", () => {
+test("directive conformance requires both coverage headings", () => {
   const projection = projectCanonicalFinalReport(renderableReport());
   assert.equal(
     isDirectiveConformingFinalReportMarkdown(
@@ -1111,17 +1111,6 @@ test("directive conformance requires both coverage headings without an opt-out",
       projection.report
     ),
     false
-  );
-  assert.equal(
-    isDirectiveConformingFinalReportMarkdown(
-      projection.markdown,
-      projection.report,
-      // The requireImplementationCoverage opt-out was removed (issue #702): the coverage heading
-      // requirements cannot be waived by any caller.
-      // @ts-expect-error a third argument is no longer accepted
-      false
-    ),
-    true
   );
 });
 

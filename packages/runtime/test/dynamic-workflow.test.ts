@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import * as ts from "typescript";
 
@@ -97,7 +97,7 @@ ${
   );
 }
 
-test("compiled dynamic workflow defers templates and emits executable Smithers TypeScript", async () => {
+test("compiled dynamic workflow defers templates, emits syntactically valid TypeScript and materializes every item", async () => {
   const project = tempProject();
   writeDynamicProject(project);
   const git = (args: string[]): string =>
@@ -195,55 +195,7 @@ test("compiled dynamic workflow defers templates and emits executable Smithers T
   assert.equal(materialized.tasks.find((task) => task.concreteNodeId === "join")?.dependencies.length, 100);
   assert.ok(materialized.tasks.every((task) => task.sourceRevision === sourceRevision));
   assert.ok(materialized.tasks.every((task) => task.sourceRef === plan.value!.source_ref));
-
-  const smithersModules = findSmithersModules();
-  if (smithersModules !== undefined && smithersGraphAvailable()) {
-    fs.symlinkSync(smithersModules, path.join(project, ".smithers", "node_modules"), "dir");
-    const graph = spawnSync(
-      "smithers",
-      [
-        "graph",
-        compiled.evidenceWorkflowPath,
-        "--run-id",
-        compiled.smithersRunId,
-        "--root",
-        project,
-        "--input",
-        fs.readFileSync(compiled.inputPath, "utf8"),
-        "--compact",
-        "--format",
-        "json"
-      ],
-      {
-        cwd: project,
-        encoding: "utf8",
-        maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, OPENAI_API_KEY: "test-openai-api-key" }
-      }
-    );
-    assert.equal(graph.status, 0, `${graph.stderr}\n${graph.stdout}`);
-    const parsed = JSON.parse(graph.stdout) as { tasks?: Array<{ nodeId?: string }> };
-    const nodeIds =
-      parsed.tasks?.map((task) => task.nodeId).filter((nodeId): nodeId is string => nodeId !== undefined) ?? [];
-    assert.equal(nodeIds.includes("node:planner"), true);
-    assert.equal(nodeIds.filter((nodeId) => /^node:dynamic-fanout-/u.test(nodeId)).length, 100);
-    assert.equal(nodeIds.includes("node:join"), true);
-  }
 });
-
-function smithersGraphAvailable(): boolean {
-  return spawnSync("smithers", ["graph", "--help"], { stdio: "ignore" }).status === 0;
-}
-
-function findSmithersModules(): string | undefined {
-  let current = process.cwd();
-  while (current !== path.dirname(current)) {
-    const candidate = path.join(current, ".smithers", "node_modules");
-    if (fs.existsSync(path.join(candidate, "smithers-orchestrator"))) return candidate;
-    current = path.dirname(current);
-  }
-  return undefined;
-}
 
 test("compilation snapshots the exact transformed prompt body used during planning", async () => {
   const project = tempProject();

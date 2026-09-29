@@ -27,11 +27,6 @@ test("every runtime test name belongs to exactly one deterministic shard", () =>
     const first = runtimeTestShardForName(name, 4);
     assert.equal(first >= 1 && first <= 4, true, name);
     assert.equal(runtimeTestShardForName(name, 4), first, name);
-    assert.deepEqual(
-      [1, 2, 3, 4].filter((candidate) => candidate === runtimeTestShardForName(name, 4)),
-      [first],
-      name
-    );
   }
 });
 
