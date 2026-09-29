@@ -91,6 +91,13 @@ nodes:
 Agentic nodes run through the configured workflow adapter. Topology does not
 define arbitrary shell runners.
 
+`ultrafuzz init` also keeps an existing `.ultrafuzz/topology.yml`, so after an
+upgrade it still has the topology of the release that scaffolded it. If you
+have not customized it,
+`ultrafuzz topology copy default .ultrafuzz/topology.yml --force` replaces it
+with the current packaged default and leaves `ultrafuzz.toml` and the prompts
+alone; otherwise, merge the release's topology changes by hand.
+
 ## Declare Durable Handoffs
 
 Use `outputs` for files a node must write under its artifact directory. Every
