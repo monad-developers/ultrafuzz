@@ -45,9 +45,11 @@ const ROUTE_PROXY_ENV = [
   "no_proxy"
 ] as const;
 // Claude Code reads cloud-provider settings only for the platform a
-// CLAUDE_CODE_USE_* flag selects (the flags Claude Code 2.1.284 checks).
-// Without one an ambient AWS_PROFILE or GOOGLE_CLOUD_PROJECT routes nothing,
-// yet pinning it made the acknowledged route depend on which shell resumed.
+// CLAUDE_CODE_USE_* flag selects (the flags Claude Code 2.1.284 checks; it
+// reads each as set only for 1, true, yes, or on, in any case). Without one an
+// ambient AWS_PROFILE or GOOGLE_CLOUD_PROJECT routes nothing, yet pinning it
+// made the acknowledged route depend on which shell resumed.
+const CLAUDE_PLATFORM_FLAG_SET = /^(?:1|true|yes|on)$/iu;
 const CLAUDE_CLOUD_ROUTE_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   CLAUDE_CODE_USE_ANTHROPIC_AWS: ["AWS_"],
   CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: ["CLOUD_ML_", "GOOGLE_"],
@@ -336,11 +338,11 @@ export function modelDestination(agent: string, config: ResolvedConfig, env: Nod
 }
 /**
  * The data destination an agent's model traffic reaches. Plan-time disclosure
- * acknowledgement calls this, and every generated adapter re-verifies its
- * invocation with this same function (loaded through the runtime module), so
- * there is no second implementation to keep in step. Only route-bearing input
- * participates: proxies, unused cloud-provider settings, and a provider CLI's
- * rewrites of unrelated config sections change nothing.
+ * acknowledgement calls this, and the generated Claude, Codex, DeepSeek, Kimi,
+ * and OpenRouter adapters re-verify each invocation with this same function
+ * (loaded through the runtime module), so there is no second implementation to
+ * keep in step. Proxies, cloud-provider variables for an unselected platform,
+ * and a provider CLI's rewrites of unrelated config sections do not count.
  */
 export function providerRouteDestination(
   agent: string,
@@ -400,7 +402,7 @@ function routeBearingEnvironment(
 ): Array<[string, string]> {
   const selected = new Set(
       Object.entries(CLAUDE_CLOUD_ROUTE_PREFIXES).flatMap(([flag, prefixes]) =>
-        selectors.some((source) => source[flag]?.trim()) ? prefixes : []
+        selectors.some((source) => CLAUDE_PLATFORM_FLAG_SET.test(source[flag]?.trim() ?? "")) ? prefixes : []
       )
     ),
     inactivePrefixes =
@@ -419,7 +421,8 @@ function routeBearingEnvironment(
  * these files themselves (Codex refreshes marketplace timestamps and project
  * trust levels, #908), so only these fields participate:
  * - Codex `config.toml`: the selected `model_provider` (a `profile` may select
- *   it) and that provider's `base_url`, `wire_api`, and `env_key`;
+ *   it), that provider's `base_url`, `wire_api`, and `env_key`, and the
+ *   top-level `openai_base_url`;
  * - Claude `settings.json`: credential/process helper keys and routing `env`;
  * - Kimi `config.toml`: the whole file.
  * A file these readers cannot parse routes by its exact bytes, as before.
@@ -444,7 +447,9 @@ function codexRouteConfig(bytes: Uint8Array): unknown {
     model_provider: selected,
     base_url: provider.base_url ?? null,
     wire_api: provider.wire_api ?? null,
-    env_key: provider.env_key ?? null
+    env_key: provider.env_key ?? null,
+    // Redirects the built-in openai provider when that is the one selected.
+    openai_base_url: config.openai_base_url ?? null
   };
 }
 function claudeRouteConfig(bytes: Uint8Array, env: Record<string, string | undefined>): unknown {

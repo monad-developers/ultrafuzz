@@ -541,6 +541,11 @@ test("a Claude platform flag in settings pins that platform's process variables"
   // Without a platform flag anywhere, the same variable routes nothing.
   fs.writeFileSync(settingsPath, "{}");
   assert.equal(modelDestination("ClaudeAgent", config, { HOME: homes, AWS_REGION: "us-east-1" }), "model:anthropic");
+  // Claude Code treats a flag as set only for 1, true, yes, or on.
+  const region = (flag: string, AWS_REGION: string) =>
+    modelDestination("ClaudeAgent", config, { HOME: homes, CLAUDE_CODE_USE_BEDROCK: flag, AWS_REGION });
+  assert.equal(region("0", "us-east-1"), region("0", "eu-west-1"));
+  assert.notEqual(region(" Yes ", "us-east-1"), region(" Yes ", "eu-west-1"));
 });
 
 test("Codex CLI bookkeeping in config.toml does not change the acknowledged route", () => {
@@ -606,4 +611,7 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
     ])}`
   ])
     assert.notEqual(route(drift), pinned, drift);
+  // Codex's endpoint override for its built-in provider pins as well.
+  const builtIn = (url: string) => route(`model_provider = "openai"\nopenai_base_url = "${url}"\n`);
+  assert.notEqual(builtIn("https://gateway.example/v1"), builtIn("https://other.example/v1"));
 });
