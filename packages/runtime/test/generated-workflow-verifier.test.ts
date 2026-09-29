@@ -6702,9 +6702,6 @@ test("generated Smithers workflow binds every planned output to the preflighted 
   );
   assert.match(binding, /for \(const output of task\.outputs\)/u);
   assert.match(binding, /artifactContractSchemaBinding\(/u);
-  for (const field of ["schemaFile", "schemaId", "schemaSha256", "schemaBundleSha256"]) {
-    assert.match(binding, new RegExp(`output\\.${field}`, "u"));
-  }
   assert.match(source.slice(artifactsImportStart, artifactsImportEnd), /parseJsonValidatorPreflightSuccessEnvelope/u);
   assert.match(source, /parseJsonValidatorPreflightSuccessEnvelope\(Buffer\.from\(stdout, "utf8"\)\)/u);
   assert.doesNotMatch(
@@ -6746,8 +6743,15 @@ test("generated task preparation binds output schema content but not the validat
   // use are still the planned ones, so preparation proceeds.
   current = { ...planned, validator_build: `ultrafuzz-json-validator.v1:${"9".repeat(64)}` };
   assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
-  current = { ...planned, schema_sha256: "0".repeat(64) };
-  assert.throws(() => assertTaskOutputSchemaBindings(task), /planned schema binding changed for findings\.json/u);
+  // The installed schema content, including the whole bundle, must still be the planned one.
+  for (const field of ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"] as const) {
+    current = { ...planned, [field]: `changed-${field}` };
+    assert.throws(
+      () => assertTaskOutputSchemaBindings(task),
+      /planned schema binding changed for findings\.json/u,
+      field
+    );
+  }
 });
 
 test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
@@ -10199,8 +10203,9 @@ test("generated Smithers dependency verification fails closed before descendant 
   );
   assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
   // #921: a rebuilt validator or an unrelated schema edit changes the running build's bundle digest
-  // and validator build, and a refreshed controller may declare them too. Both are provenance; the
-  // marker must still name the declared schema content, and its bytes stay pinned by sha256.
+  // and validator build, and a refreshed controller rebinds the declared bundle digest (#982). Neither
+  // is compared here: the marker must still name the declared schema content, and its bytes stay
+  // pinned by sha256.
   currentSchemaBinding = {
     ...markerSchemaBinding,
     schema_bundle_sha256: "f".repeat(64),

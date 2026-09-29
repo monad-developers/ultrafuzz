@@ -12879,6 +12879,50 @@ test("listRuns, observers and status re-read live run documents replaced while t
   );
 });
 
+test("a sealed planned graph that fails graph semantics leaves status readable", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const runId = "diverged-graph-semantics-status";
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const runRoot = run.value?.run_root;
+  assert.ok(runRoot);
+
+  // Planning and reading apply the same internal-consistency rules, so only a rewritten graph, or a
+  // later build with stricter rules, fails them. A second primary output is still schema-valid.
+  const graphPath = path.join(runRoot, "graph.json");
+  const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as { nodes: { outputs: { primary: boolean }[] }[] };
+  const node = graph.nodes.find((candidate) => candidate.outputs.length > 1);
+  assert.ok(node, "fixture has no node with a secondary output");
+  for (const output of node.outputs) output.primary = true;
+  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
+
+  const strict = await readLinkedWorkflowEvidence(project, runId);
+  assert.equal(strict.ok, false);
+  const observed = await readLinkedWorkflowEvidence(project, runId, { tolerateControlDivergence: true });
+  assert.equal(observed.ok, true, JSON.stringify(observed.ok ? [] : observed.diagnostics));
+  const semantics = /^sealed planned graph fails this build's planned-graph semantics: .*exactly one primary output/u;
+  if (observed.ok) {
+    assert.ok(
+      observed.verifiedControl.divergences.some((divergence) => semantics.test(divergence)),
+      JSON.stringify(observed.verifiedControl.divergences)
+    );
+  }
+  const health = await getRunHealth({ projectRoot: project, runId, env });
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.ok(
+    health.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "WORKFLOW_CONTROL_EVIDENCE_DIVERGED" &&
+        diagnostic.severity === "warning" &&
+        /planned-graph semantics/u.test(diagnostic.message)
+    ),
+    JSON.stringify(health.diagnostics)
+  );
+});
+
 test("getRunStatus uses only validated current runState and validates the events envelope", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

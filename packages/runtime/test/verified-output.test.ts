@@ -702,7 +702,9 @@ test("verified final-report reader binds immutable current bytes to verifier and
 test("verified reads and the terminal report accept outputs planned by another validator build", () => {
   // #921: `validator_build` and `contract_digest` record the build that planned the run. After a
   // rebuild changes them, verified reads validate the same schema content and the terminal report is
-  // still published; both used to refuse with "current JSON Schema binding changed".
+  // still published. They used to refuse at the graph read ("planned graph output contract digest
+  // changed"), and past it at "current contract digest changed" and "terminal report found
+  // schema/control drift".
   const rebuilt = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
   const outputs = finalReportOutputs().map((output) => ({
     ...output,
