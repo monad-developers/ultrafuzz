@@ -275,19 +275,13 @@ export interface PropertyCampaignArtifact {
   failures: PropertyCampaignFailure[];
 }
 
-export type FindingFuzzerBackendProvenance =
+type FindingFuzzerBackendProvenance =
   | { present: false; valid: true; backends: readonly [] }
   | { present: true; valid: false; backends: readonly [] }
   | { present: true; valid: true; backends: readonly string[] };
 
-/**
- * Read backend provenance owned by a deduplicated campaign finding. Keeping
- * this parser beside the campaign artifact contract gives the runtime gate and
- * final-report verification one interpretation of the singular/plural fields.
- */
-export function findingFuzzerBackendProvenance(
-  finding: Readonly<Record<string, unknown>>
-): FindingFuzzerBackendProvenance {
+/** Read backend provenance owned by a deduplicated campaign finding: its singular or plural field. */
+function findingFuzzerBackendProvenance(finding: Readonly<Record<string, unknown>>): FindingFuzzerBackendProvenance {
   const hasBackend = Object.prototype.hasOwnProperty.call(finding, "fuzzer_backend");
   const hasBackends = Object.prototype.hasOwnProperty.call(finding, "fuzzer_backends");
   if (!hasBackend && !hasBackends) {

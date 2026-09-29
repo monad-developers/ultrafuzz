@@ -2685,7 +2685,7 @@ test("every contextual registration executes real positive and negative checks",
     const campaignEvidenceDigest = crypto.createHash("sha256").update(campaignEvidenceBytes).digest("hex");
     const campaignTimeoutCommand =
       "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
-      "--timeout 60 --test-limit 18446744073709551615";
+      "--timeout 60 --test-limit 18446744073709551615 --seq-len 100";
     const campaignTimeoutPlan = {
       configured_fuzzer_timeout_seconds: 60,
       recon_internal_timeout_seconds: 60,
@@ -2695,6 +2695,7 @@ test("every contextual registration executes real positive and negative checks",
       finalization_reserve_seconds: 100,
       configured_budget_seconds: 460,
       recon_test_limit: "18446744073709551615",
+      recon_sequence_length: 100,
       backend_started_at: "2026-01-01T00:00:00.000Z",
       fuzzing_deadline_utc: "2026-01-01T00:01:00.000Z",
       force_kill_deadline_utc: "2026-01-01T00:06:00.000Z",
@@ -3047,7 +3048,7 @@ test("every contextual registration executes real positive and negative checks",
         context: {
           artifactSet: {
             campaignPlan: campaignTimeoutPlan,
-            campaignSummary: { outcome: "complete" }
+            campaignSummary: { outcome: "complete", sequence_length: 100 }
           },
           propertyCampaignTimeout: {
             configuredFuzzerTimeoutSeconds: 60,
@@ -6445,30 +6446,43 @@ test("campaign evidence-file closure names duplicated, missing, and unreferenced
   );
 });
 
-test("campaign timeout evidence reports the expected final artifact deadline next to a forged execution deadline", () => {
-  const command =
-    "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
-    "--timeout 60 --test-limit 18446744073709551615";
-  const plan = {
-    configured_fuzzer_timeout_seconds: 60,
-    recon_internal_timeout_seconds: 60,
-    host_soft_timeout_seconds: 60,
-    host_force_kill_grace_seconds: 300,
-    artifact_finalization_reserve_seconds: 100,
-    finalization_reserve_seconds: 100,
-    configured_budget_seconds: 460,
-    recon_test_limit: "18446744073709551615",
-    backend_started_at: "2026-01-01T00:00:00.000Z",
-    fuzzing_deadline_utc: "2026-01-01T00:01:00.000Z",
-    force_kill_deadline_utc: "2026-01-01T00:06:00.000Z",
-    final_artifact_deadline_utc: "2026-01-01T00:07:40.000Z",
-    deadline: "2026-01-01T00:07:40.000Z",
-    backend: { exact_shell_escaped_command: command },
-    command_plan: [{ phase: "campaign", command }]
-  };
-  const result = executeSemanticGate("property-campaign-timeout-evidence", {
+const CAMPAIGN_TIMEOUT_EVIDENCE_COMMAND =
+  "timeout --preserve-status --signal=INT --kill-after=300s 60s recon fuzz . --workers 1 " +
+  "--timeout 60 --test-limit 18446744073709551615 --seq-len 100";
+
+interface CampaignTimeoutEvidenceFields {
+  plan: Record<string, unknown>;
+  document: Record<string, unknown>;
+  summary: Record<string, unknown>;
+}
+
+/** property-campaign-timeout-evidence issues for a consistent 60-second Recon campaign after `mutate`. */
+function campaignTimeoutEvidenceIssues(
+  mutate: (fields: CampaignTimeoutEvidenceFields) => void = () => undefined
+): { path: string; message: string }[] {
+  const command = CAMPAIGN_TIMEOUT_EVIDENCE_COMMAND;
+  const fields: CampaignTimeoutEvidenceFields = {
+    plan: {
+      configured_fuzzer_timeout_seconds: 60,
+      recon_internal_timeout_seconds: 60,
+      host_soft_timeout_seconds: 60,
+      host_force_kill_grace_seconds: 300,
+      artifact_finalization_reserve_seconds: 100,
+      finalization_reserve_seconds: 100,
+      configured_budget_seconds: 460,
+      recon_test_limit: "18446744073709551615",
+      recon_sequence_length: 100,
+      backend_started_at: "2026-01-01T00:00:00.000Z",
+      fuzzing_deadline_utc: "2026-01-01T00:01:00.000Z",
+      force_kill_deadline_utc: "2026-01-01T00:06:00.000Z",
+      final_artifact_deadline_utc: "2026-01-01T00:07:40.000Z",
+      deadline: "2026-01-01T00:07:40.000Z",
+      backend: { exact_shell_escaped_command: command },
+      command_plan: [{ phase: "campaign", command }]
+    },
     document: {
       configured_timeout_seconds: 60,
+      sequence_length: 100,
       exact_command: command,
       start_timestamp: "2026-01-01T00:00:00.000Z",
       end_timestamp: "2026-01-01T00:01:00.000Z",
@@ -6480,13 +6494,16 @@ test("campaign timeout evidence reports the expected final artifact deadline nex
         usable_results: true,
         started_at: "2026-01-01T00:00:00.000Z",
         finished_at: "2026-01-01T00:01:00.000Z",
-        // The incident's wrong-field bug: copied from the plan's
-        // fuzzing_deadline_utc instead of final_artifact_deadline_utc.
-        deadline: "2026-01-01T00:01:00.000Z"
+        deadline: "2026-01-01T00:07:40.000Z"
       }
     },
+    summary: { outcome: "complete", sequence_length: 100 }
+  };
+  mutate(fields);
+  const result = executeSemanticGate("property-campaign-timeout-evidence", {
+    document: fields.document,
     context: {
-      artifactSet: { campaignPlan: plan, campaignSummary: { outcome: "complete" } },
+      artifactSet: { campaignPlan: fields.plan, campaignSummary: fields.summary },
       propertyCampaignTimeout: {
         configuredFuzzerTimeoutSeconds: 60,
         plannedTimeoutSeconds: 600,
@@ -6494,11 +6511,17 @@ test("campaign timeout evidence reports the expected final artifact deadline nex
       }
     }
   });
+  assert.notEqual(result.status, "requires-context");
+  return result.status === "failed" ? result.issues.map((entry) => ({ path: entry.path, message: entry.message })) : [];
+}
 
-  assert.equal(result.status, "failed");
-  const issues = result.status === "failed" ? result.issues : [];
+test("campaign timeout evidence reports the expected final artifact deadline next to a forged execution deadline", () => {
   assert.deepEqual(
-    issues.map((entry) => ({ path: entry.path, message: entry.message })),
+    campaignTimeoutEvidenceIssues(({ document }) => {
+      // The incident's wrong-field bug: copied from the plan's
+      // fuzzing_deadline_utc instead of final_artifact_deadline_utc.
+      (document.execution as Record<string, unknown>).deadline = "2026-01-01T00:01:00.000Z";
+    }),
     [
       {
         path: "$.execution.deadline",
@@ -6508,6 +6531,56 @@ test("campaign timeout evidence reports the expected final artifact deadline nex
       }
     ]
   );
+});
+
+test("campaign timeout evidence requires the stateful Recon sequence length wherever it is recorded", () => {
+  const issuePaths = (mutate?: (fields: CampaignTimeoutEvidenceFields) => void) =>
+    campaignTimeoutEvidenceIssues(mutate).map((entry) => entry.path);
+  const withCommand = ({ plan, document }: CampaignTimeoutEvidenceFields, next: string) => {
+    plan.backend = { exact_shell_escaped_command: next };
+    plan.command_plan = [{ phase: "campaign", command: next }];
+    document.exact_command = next;
+    (document.execution as Record<string, unknown>).command = next;
+  };
+
+  assert.deepEqual(issuePaths(), []);
+  // The result record's sequence_length is optional in its schema.
+  assert.deepEqual(
+    issuePaths(({ document }) => {
+      delete document.sequence_length;
+    }),
+    []
+  );
+  assert.deepEqual(
+    issuePaths(({ plan }) => {
+      plan.recon_sequence_length = 1;
+    }),
+    ["$.campaign_plan_ref#recon_sequence_length"]
+  );
+  assert.deepEqual(
+    issuePaths(({ summary }) => {
+      summary.sequence_length = 1;
+    }),
+    ["$.campaign_summary_ref#sequence_length"]
+  );
+  assert.deepEqual(
+    issuePaths(({ document }) => {
+      document.sequence_length = 1;
+    }),
+    ["$.sequence_length"]
+  );
+  const command = CAMPAIGN_TIMEOUT_EVIDENCE_COMMAND;
+  for (const next of [
+    command.replace("--seq-len 100", "--seq-len 1"),
+    command.replace(" --seq-len 100", ""),
+    `${command} --seq-len 100`
+  ]) {
+    assert.deepEqual(
+      issuePaths((fields) => withCommand(fields, next)),
+      ["$.exact_command"],
+      next
+    );
+  }
 });
 
 test("campaign context joins report the expected bare declared path next to a node-dir reference", () => {

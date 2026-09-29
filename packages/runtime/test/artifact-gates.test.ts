@@ -543,8 +543,36 @@ function verifyRequiredArtifactsForAttempt(
   if (existingIndex === -1) graph.nodes.push(planned);
   else graph.nodes[existingIndex] = planned;
   fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
-  writeSealedFixtureTaskAuthority(layout, graph.nodes, attemptAuthority?.tasks);
-  return verifyRuntimeRequiredArtifactsForAttempt(layout, planned, attemptId, attemptAuthority, authenticated);
+  const tasks = writeSealedFixtureTaskAuthority(layout, graph.nodes, attemptAuthority?.tasks);
+  return verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    planned,
+    attemptId,
+    attemptAuthority ?? fixtureAttemptAuthority(tasks, attemptId),
+    authenticated
+  );
+}
+
+/**
+ * The sealed task set production passes, taken from the fixture's written task
+ * manifest. Verifier-admitted dependency attempt IDs are not modeled.
+ */
+function fixtureAttemptAuthority(
+  tasks: readonly SmithersTaskManifestTask[],
+  attemptId: string
+): ArtifactGateAttemptAuthority {
+  const task = tasks.find((candidate) => candidate.attemptId === attemptId);
+  if (task === undefined) throw new Error(`fixture has no sealed task for attempt ${attemptId}`);
+  return { task, tasks };
+}
+
+/** Seal the planned graph exactly as written, without the wrapper's inferred dependencies. */
+function sealedFixtureAuthority(
+  layout: ReturnType<typeof createRunLayout>,
+  attemptId: string
+): ArtifactGateAttemptAuthority {
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as { nodes: PlannedGraphNode[] };
+  return fixtureAttemptAuthority(writeSealedFixtureTaskAuthority(layout, graph.nodes), attemptId);
 }
 
 function fixtureAttemptIds(node: PlannedGraphNode): string[] {
@@ -615,7 +643,7 @@ function writeSealedFixtureTaskAuthority(
   layout: ReturnType<typeof createRunLayout>,
   nodes: readonly PlannedGraphNode[],
   suppliedTasks?: readonly SmithersTaskManifestTask[]
-): void {
+): readonly SmithersTaskManifestTask[] {
   const sealedNodes = nodes.map((node) => {
     if (node.kind !== "agentic" || node.workflow !== undefined || node.dynamic !== undefined) return node;
     const attempts = fixtureAttemptIds(node);
@@ -679,6 +707,7 @@ function writeSealedFixtureTaskAuthority(
         .sort()
     }
   });
+  return tasks;
 }
 
 function boundOutput(
@@ -4474,7 +4503,12 @@ test("sealed planned graph ignores unrelated producers but rejects a missing pla
   writePlannedGraph(outsideLayout, [outsideCatalogNode, reportNode]);
   writeArtifact(outsideLayout, reportNode.id, "report.md", "# Report\n");
   writeArtifact(outsideLayout, reportNode.id, "report.json", JSON.stringify(currentReport(outsideLayout.runId)));
-  const outside = verifyRuntimeRequiredArtifactsForAttempt(outsideLayout, reportNode, reportNode.id);
+  const outside = verifyRuntimeRequiredArtifactsForAttempt(
+    outsideLayout,
+    reportNode,
+    reportNode.id,
+    sealedFixtureAuthority(outsideLayout, reportNode.id)
+  );
   assert.equal(outside.ok, true, JSON.stringify(outside.diagnostics));
 
   const missingLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-missing-property-producer" });
@@ -5239,6 +5273,29 @@ test("project discovery gate rejects an empty ledger that does not justify the a
   );
   const justified = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(justified.ok, true, JSON.stringify(justified.diagnostics));
+
+  // The ledger schema is the only check for the remaining incomplete shapes.
+  const justifiedLedger = JSON.parse(ledger("The target states no invariant.")) as Record<string, unknown>;
+  for (const [label, document] of [
+    ["missing inventory_rows", { ...justifiedLedger, inventory_rows: undefined }],
+    ["missing scan_probes", { ...justifiedLedger, scan_probes: undefined }],
+    ["empty ledger without scan probes", { ...justifiedLedger, scan_probes: [] }],
+    [
+      "empty ledger with inventory rows",
+      {
+        ...justifiedLedger,
+        inventory_rows: [{ id: "inventory-1", description: "Solvency", ledger_ids: ["evidence-1"] }]
+      }
+    ]
+  ] as const) {
+    writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", JSON.stringify(document));
+    const incomplete = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+    assert.equal(incomplete.ok, false, label);
+    assert.ok(
+      incomplete.diagnostics.some((diagnostic) => diagnostic.code === "JSON_SCHEMA_VIOLATION"),
+      `${label}: ${JSON.stringify(incomplete.diagnostics)}`
+    );
+  }
 
   // A justification on a ledger that DOES carry entries is contradictory, so the schema refuses it
   // rather than letting both readings of the artifact coexist.
@@ -6808,12 +6865,16 @@ for (const [label, undeclaredPath] of [
   ["conventional", "properties/recon.json"],
   ["arbitrary sibling", "properties/other.json"]
 ] as const) {
-  test(`property fan-in ignores ${label} lens JSON without a state declaration`, () => {
+  test(`property fan-in ignores ${label} lens JSON without a sealed lens declaration`, () => {
     const layout = createRunLayout({
       projectRoot: tempProject(),
       runId: `run-undeclared-lens-${label.replaceAll(" ", "-")}`
     });
     const node = writeMinimalPropertyFaninFixture(layout);
+    // The catalog source's planned (and therefore sealed) outputs declare no property lens.
+    registerArtifactNode(layout, "property-specification-recon", [
+      boundOutput("notes.md", "ultrafuzz/nonempty-markdown@1", true)
+    ]);
     const lensPath = writeArtifact(
       layout,
       "property-specification-recon",
@@ -7241,8 +7302,8 @@ test("property fan-in selects a declared lens contract without relying on the pr
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
-test("property fan-in cannot hide a planned lens by omitting its state declaration and catalog rows", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-planned-lens-state-omission" });
+test("property fan-in cannot hide a planned lens by omitting its catalog rows", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-planned-lens-catalog-omission" });
   const node = writeMinimalPropertyFaninFixture(layout, {
     sourceNodeId: "project-discovery",
     sourcePropertyId: "evidence-1",
@@ -7264,15 +7325,13 @@ test("property fan-in cannot hide a planned lens by omitting its state declarati
       ]
     })
   );
-  const state = readRunState(layout);
-  delete state.nodes["property-specification-recon"]!.outputs;
-  writeRunState(layout, state);
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
 
   assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_DECLARATION_MISSING"),
+  assert.deepEqual(
+    gateIssuePaths(result, "property-source-join"),
+    ["$.properties"],
     JSON.stringify(result.diagnostics)
   );
 });
@@ -7428,16 +7487,10 @@ test("property fan-in rejects ambiguous property-lens declarations", () => {
   );
 });
 
-test("property fan-in rejects a stale property-lens schema binding", () => {
+test("property fan-in rejects a sealed lens declaration whose schema binding differs from the plan", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-stale-declared-lens" });
   const node = writeMinimalPropertyFaninFixture(layout);
-  registerArtifactNode(layout, "property-specification-recon", [
-    {
-      ...boundOutput("custom/recon.json", "ultrafuzz/property-lens@2"),
-      schema_sha256: "0".repeat(64)
-    }
-  ]);
-  writeArtifact(
+  writeDeclaredPropertyLens(
     layout,
     "property-specification-recon",
     "custom/recon.json",
@@ -7453,12 +7506,35 @@ test("property fan-in rejects a stale property-lens schema binding", () => {
       ]
     })
   );
+  const current = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(current.ok, true, JSON.stringify(current.diagnostics));
 
-  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  const sealed = JSON.parse(
+    fs.readFileSync(path.join(layout.root, "smithers", "tasks.json"), "utf8")
+  ) as SmithersTaskManifestDocument;
+  const staleTasks = sealed.tasks.map((task) =>
+    task.attemptId !== "property-specification-recon"
+      ? task
+      : {
+          ...task,
+          metadata: {
+            ...task.metadata,
+            artifacts: {
+              ...task.metadata.artifacts,
+              outputs: task.metadata.artifacts.outputs.map((output) => ({ ...output, schemaSha256: "0".repeat(64) }))
+            }
+          }
+        }
+  );
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id, fixtureAttemptAuthority(staleTasks, node.id));
 
   assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
   assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_SCHEMA_BINDING_INVALID"),
+    result.diagnostics.some((diagnostic) =>
+      diagnostic.message.includes(
+        "sealed Smithers attempt does not match its planned node and outputs: property-specification-recon"
+      )
+    ),
     JSON.stringify(result.diagnostics)
   );
 });
@@ -8430,12 +8506,11 @@ test("property consumers reject a finalized catalog whose typed Markdown compani
   );
 });
 
-test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
-  const layout = createRunLayout({
-    projectRoot: tempProject(),
-    runId: "run-producer-free-implementation",
-    resolvedConfigToml: '[invariants]\nproperty_priority_threshold = "high"\n'
-  });
+function producerFreeImplementationGate(
+  runId: string,
+  resolvedConfigToml: string
+): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId, resolvedConfigToml });
   const output = boundOutput("handoffs/implementation-v3.json", "ultrafuzz/implemented-properties@3", true);
   const node: PlannedGraphNode = {
     ...plannedNode([]),
@@ -8454,10 +8529,30 @@ test("property implementation accepts an intentional producer-free empty catalog
     })
   });
   writePlannedGraph(layout, [node]);
+  return verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id, sealedFixtureAuthority(layout, node.id));
+}
 
-  const result = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
-
+test("property implementation accepts an intentional producer-free empty catalog through the full host gate", () => {
+  const result = producerFreeImplementationGate(
+    "run-producer-free-implementation",
+    '[invariants]\nproperty_priority_threshold = "high"\n'
+  );
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+// The gate reads config.resolved.toml with the project config parser, so any
+// valid TOML spelling of the setting counts, not only one line shape.
+test("property implementation reads the resolved priority threshold as TOML", () => {
+  for (const [label, resolvedConfigToml] of [
+    ["trailing comment", '[invariants]\nproperty_priority_threshold = "high" # operator note\n'],
+    ["inline table", 'invariants = { property_priority_threshold = "high" }\n']
+  ] as const) {
+    const result = producerFreeImplementationGate(
+      `run-priority-toml-${label.replaceAll(" ", "-")}`,
+      resolvedConfigToml
+    );
+    assert.equal(result.ok, true, `${label}: ${JSON.stringify(result.diagnostics)}`);
+  }
 });
 
 test("property implementation gate enforces declared selection coverage and actionable blockers", () => {
@@ -8874,6 +8969,19 @@ test("property implementation gate rejects an unknown finding property reference
   );
 });
 
+/** A registry gate's failures in a host gate result, by in-document path. */
+function gateIssuePaths(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>, gate: string): string[] {
+  return result.diagnostics
+    .filter((diagnostic) => diagnostic.details?.gate === gate)
+    .map((diagnostic) => diagnostic.path?.slice(diagnostic.path.indexOf("#") + 1) ?? "");
+}
+
+function campaignJoinIssues(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>): string[] {
+  return result.diagnostics
+    .filter((diagnostic) => diagnostic.details?.gate === "property-campaign-context-joins")
+    .map((diagnostic) => `${diagnostic.path?.slice(diagnostic.path.indexOf("#") + 1)}: ${diagnostic.message}`);
+}
+
 test("campaign gate accepts non-property findings and validates property-derived failures", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign" });
   writeArtifact(
@@ -8948,7 +9056,10 @@ test("campaign gate accepts non-property findings and validates property-derived
   );
   const dropped = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(dropped.ok, false);
-  assert.ok(dropped.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
+  assert.ok(
+    gateIssuePaths(dropped, "property-campaign-context-joins").includes("$.findings_ref#0.property_ids"),
+    JSON.stringify(dropped.diagnostics)
+  );
 
   writeArtifact(
     layout,
@@ -8970,7 +9081,10 @@ test("campaign gate accepts non-property findings and validates property-derived
   );
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
-  assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+  assert.ok(
+    gateIssuePaths(unknown, "property-campaign-context-joins").includes("$.failures[0].property_ids[0]"),
+    JSON.stringify(unknown.diagnostics)
+  );
 
   writeArtifact(
     layout,
@@ -9136,7 +9250,10 @@ test("campaign gate still applies to project-owned split recon campaign nodes", 
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+  assert.ok(
+    gateIssuePaths(result, "property-campaign-context-joins").includes("$.failures[0].property_ids[0]"),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("campaign gates select custom declared paths and ignore undeclared conventional files", () => {
@@ -9257,7 +9374,12 @@ test("producer-free final reports require the exact not-planned implementation c
   });
   writePlannedGraph(layout, [node]);
 
-  const valid = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const valid = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
   for (const [prose, code] of [
@@ -9277,7 +9399,12 @@ test("producer-free final reports require the exact not-planned implementation c
     "deliverables/report.md": "# Ultrafuzz report\n\nrecon-selected-declaration-completeness: `1/1`\n",
     "deliverables/report.json": JSON.stringify(currentReport(layout.runId))
   });
-  const inventedCoverage = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const inventedCoverage = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
   assert.equal(inventedCoverage.ok, false, JSON.stringify(inventedCoverage.diagnostics));
   assert.ok(
     inventedCoverage.diagnostics.some((diagnostic) => diagnostic.code === "REPORT_COVERAGE_EVIDENCE_UNPLANNED"),
@@ -9292,7 +9419,12 @@ test("producer-free final reports require the exact not-planned implementation c
       })
     )
   });
-  const mismatched = verifyRuntimeRequiredArtifactsForAttempt(layout, node, node.id);
+  const mismatched = verifyRuntimeRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    sealedFixtureAuthority(layout, node.id)
+  );
   assert.equal(mismatched.ok, false, JSON.stringify(mismatched.diagnostics));
   assert.ok(
     mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_IMPLEMENTATION_COVERAGE_MISMATCH"),
@@ -10616,7 +10748,7 @@ interface CampaignTimeoutResultFixture extends Record<string, unknown> {
   schema_version: "ultrafuzz.property-campaign.v3";
   fuzzer_backend: "recon";
   configured_timeout_seconds: number;
-  sequence_length: number;
+  sequence_length?: number;
   exact_command: string;
   start_timestamp: string;
   end_timestamp: string;
@@ -10772,8 +10904,6 @@ function runCampaignTimeoutGate(
     topologyTimeoutSeconds?: number | null;
     modelTimeoutSeconds?: number | null;
     logicalNodeId?: string;
-    outputCounts?: Partial<Record<"plan" | "result" | "findings" | "summary", number>>;
-    nonRecordDocument?: "result" | "summary";
     declaredPaths?: {
       plan: string;
       result: string;
@@ -10790,15 +10920,6 @@ function runCampaignTimeoutGate(
     findings: "findings.json",
     summary: "campaign-summary.json"
   };
-  const outputCounts = {
-    plan: 1,
-    result: 1,
-    findings: 1,
-    summary: 1,
-    ...options.outputCounts
-  };
-  const rolePath = (role: keyof typeof outputCounts, index: number): string =>
-    index === 0 ? declaredPaths[role] : `${declaredPaths[role]}.duplicate-${index}`;
   const layout = createRunLayout({
     projectRoot: tempProject(),
     runId: "run-campaign-timeout",
@@ -10825,7 +10946,7 @@ function runCampaignTimeoutGate(
     layout,
     campaignId,
     declaredPaths.result,
-    JSON.stringify(options.nonRecordDocument === "result" ? [] : fixture.backend),
+    JSON.stringify(fixture.backend),
     "ultrafuzz/property-campaign@3"
   );
   writeArtifact(layout, campaignId, declaredPaths.findings, "[]", "ultrafuzz/findings@2");
@@ -10833,60 +10954,15 @@ function runCampaignTimeoutGate(
     layout,
     campaignId,
     declaredPaths.summary,
-    JSON.stringify(options.nonRecordDocument === "summary" ? [] : fixture.summary),
+    JSON.stringify(fixture.summary),
     "ultrafuzz/campaign-summary@2"
   );
-  for (let index = 1; index < outputCounts.plan; index += 1) {
-    writeArtifact(
-      layout,
-      campaignId,
-      rolePath("plan", index),
-      JSON.stringify(fixture.plan),
-      "ultrafuzz/invariant-campaign-plan@2"
-    );
-  }
-  for (let index = 1; index < outputCounts.result; index += 1) {
-    writeArtifact(
-      layout,
-      campaignId,
-      rolePath("result", index),
-      JSON.stringify(fixture.backend),
-      "ultrafuzz/property-campaign@3"
-    );
-  }
-  for (let index = 1; index < outputCounts.findings; index += 1) {
-    writeArtifact(layout, campaignId, rolePath("findings", index), "[]", "ultrafuzz/findings@2");
-  }
-  for (let index = 1; index < outputCounts.summary; index += 1) {
-    writeArtifact(
-      layout,
-      campaignId,
-      rolePath("summary", index),
-      JSON.stringify(fixture.summary),
-      "ultrafuzz/campaign-summary@2"
-    );
-  }
   const base = currentCampaignNode([
     "campaign-plan.json",
     "recon-fuzzer-results.json",
     "findings.json",
     "campaign-summary.json"
   ]);
-  const outputs = [
-    ...Array.from({ length: outputCounts.plan }, (_, index) =>
-      boundOutput(rolePath("plan", index), "ultrafuzz/invariant-campaign-plan@2", index === 0)
-    ),
-    ...Array.from({ length: outputCounts.result }, (_, index) =>
-      boundOutput(rolePath("result", index), "ultrafuzz/property-campaign@3", false)
-    ),
-    ...Array.from({ length: outputCounts.findings }, (_, index) =>
-      boundOutput(rolePath("findings", index), "ultrafuzz/findings@2", false)
-    ),
-    ...Array.from({ length: outputCounts.summary }, (_, index) =>
-      boundOutput(rolePath("summary", index), "ultrafuzz/campaign-summary@2", false)
-    )
-  ];
-  if (outputs.length > 0 && !outputs.some((output) => output.primary)) outputs[0] = { ...outputs[0]!, primary: true };
   const node: PlannedGraphNode = {
     ...base,
     id: campaignId,
@@ -10907,19 +10983,35 @@ function runCampaignTimeoutGate(
             }
           ]
         }),
-    outputs
+    outputs: [
+      boundOutput(declaredPaths.plan, "ultrafuzz/invariant-campaign-plan@2", true),
+      boundOutput(declaredPaths.result, "ultrafuzz/property-campaign@3"),
+      boundOutput(declaredPaths.findings, "ultrafuzz/findings@2"),
+      boundOutput(declaredPaths.summary, "ultrafuzz/campaign-summary@2")
+    ]
   };
   if (topologyTimeoutSeconds === null) delete node.timeout_seconds;
   return verifyRequiredArtifactsForAttempt(layout, node, campaignId);
 }
 
+/**
+ * Registry gate property-campaign-timeout-evidence failures, by in-document
+ * path. The host runs the same gate the generated verifier runs; there is no
+ * separate host implementation of these rules.
+ */
+function timeoutEvidenceIssuePaths(result: ReturnType<typeof verifyRequiredArtifactsForAttempt>): string[] {
+  return gateIssuePaths(result, "property-campaign-timeout-evidence");
+}
+
+function withCampaignCommand(fixture: CampaignTimeoutFixture, command: string): void {
+  fixture.backend.exact_command = command;
+  fixture.plan.backend.exact_shell_escaped_command = command;
+  fixture.plan.command_plan = [{ phase: "campaign", command }];
+}
+
 test("current campaign timeout gate accepts exact configured Recon timeout evidence", () => {
   const result = runCampaignTimeoutGate();
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
-    []
-  );
 });
 
 test("current campaign timeout gate resolves custom artifact paths from sealed contract declarations", () => {
@@ -10941,58 +11033,24 @@ test("current campaign timeout gate resolves custom artifact paths from sealed c
   assert.ok(
     result.diagnostics.some(
       (diagnostic) =>
-        diagnostic.code === "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH" &&
-        diagnostic.path?.endsWith("custom/campaign-plan.json#$.configured_fuzzer_timeout_seconds")
+        diagnostic.details?.gate === "property-campaign-timeout-evidence" &&
+        diagnostic.path?.endsWith("custom/recon-results.json#$.campaign_plan_ref#configured_fuzzer_timeout_seconds")
     ),
     JSON.stringify(result.diagnostics)
   );
 });
 
-test("current campaign timeout gate requires exactly one declaration for every tuple member", () => {
-  const tupleMembers = [
-    ["plan", "ultrafuzz/invariant-campaign-plan@2"],
-    ["result", "ultrafuzz/property-campaign@3"],
-    ["summary", "ultrafuzz/campaign-summary@2"],
-    ["findings", "ultrafuzz/findings@2"]
-  ] as const;
-  for (const [role, contract] of tupleMembers) {
-    for (const count of [0, 2] as const) {
-      const result = runCampaignTimeoutGate(() => undefined, {
-        logicalNodeId: "project-owned-recon-campaign",
-        outputCounts: { [role]: count }
-      });
-      assert.equal(result.ok, false, `${role}:${count}`);
-      assert.ok(
-        result.diagnostics.some(
-          (diagnostic) =>
-            diagnostic.code === "CAMPAIGN_TIMEOUT_OUTPUT_DECLARATION_INVALID" &&
-            diagnostic.message.includes(contract) &&
-            diagnostic.message.endsWith(`found ${count}`)
-        ),
-        `${role}:${count}: ${JSON.stringify(result.diagnostics)}`
-      );
-    }
-  }
-});
-
-test("current campaign timeout gate explicitly rejects non-object result and summary documents", () => {
-  for (const role of ["result", "summary"] as const) {
-    const result = runCampaignTimeoutGate(() => undefined, { nonRecordDocument: role });
-    assert.equal(result.ok, false, role);
-    assert.ok(
-      result.diagnostics.some(
-        (diagnostic) =>
-          diagnostic.code === "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID" && diagnostic.message.includes("must be an object")
-      ),
-      `${role}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
 test("current campaign timeout gate requires the sealed topology node budget", () => {
   const result = runCampaignTimeoutGate(() => undefined, { topologyTimeoutSeconds: null });
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_PLAN_BUDGET_MISSING"));
+  assert.ok(
+    result.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE" &&
+        diagnostic.details?.gate === "property-campaign-timeout-evidence"
+    ),
+    JSON.stringify(result.diagnostics)
+  );
 });
 
 test("current campaign timeout gate accepts a sealed model-profile or run-default budget", () => {
@@ -11000,412 +11058,224 @@ test("current campaign timeout gate accepts a sealed model-profile or run-defaul
     topologyTimeoutSeconds: null,
     modelTimeoutSeconds: 7200
   });
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "campaign-timeout-evidence"),
-    [],
-    JSON.stringify(result.diagnostics)
-  );
+  assert.deepEqual(timeoutEvidenceIssuePaths(result), [], JSON.stringify(result.diagnostics));
 });
 
-test("current campaign timeout gate rejects reserve subtraction and ambiguous Recon command flags", () => {
-  const cases: Array<{
-    name: string;
-    code: string;
-    mutate: (fixture: CampaignTimeoutFixture) => void;
-  }> = [
-    {
-      name: "plan configured timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.configured_fuzzer_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "Recon internal timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.recon_internal_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "host soft timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.host_soft_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "backend configured timeout",
-      code: "CAMPAIGN_TIMEOUT_CONFIG_MISMATCH",
-      mutate: (fixture) => {
-        fixture.backend.configured_timeout_seconds = 3300;
-      }
-    },
-    {
-      name: "reserve-subtracted command timeout",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--timeout 3600", "--timeout 3300");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "duplicate timeout flag",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `${fixture.backend.exact_command} --timeout 3600`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "missing timeout flag",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--timeout 3600 ", "");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "missing GNU timeout wrapper",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(
-          "timeout --preserve-status --signal=INT --kill-after=300s 3600s ",
-          ""
-        );
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "wrong GNU timeout soft deadline",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("300s 3600s recon", "300s 3300s recon");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "wrong host force-kill grace",
-      code: "CAMPAIGN_TIMEOUT_HOST_GRACE_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.host_force_kill_grace_seconds = 30;
-        const command = fixture.backend.exact_command.replace("--kill-after=300s", "--kill-after=30s");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "foreground wrapper",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--preserve-status", "--preserve-status --foreground");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "bounded default test limit",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(
-          `--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`,
-          "--test-limit 50000"
-        );
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "one-step stateful sequence in plan",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.recon_sequence_length = 1;
-      }
-    },
-    {
-      name: "one-step stateful sequence in result",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
-      mutate: (fixture) => {
-        fixture.backend.sequence_length = 1;
-      }
-    },
-    {
-      name: "one-step stateful sequence in summary",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_MISMATCH",
-      mutate: (fixture) => {
-        fixture.summary.sequence_length = 1;
-      }
-    },
-    {
-      name: "one-step stateful sequence command",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--seq-len 100", "--seq-len 1");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "missing stateful sequence command flag",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(" --seq-len 100", "");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "stateful sequence flag before a compound Recon command",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `echo --seq-len 100 >/dev/null && ${fixture.backend.exact_command.replace(" --seq-len 100", "")}`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    ...["&&", "||", ";", "|", "&"].map((operator) => ({
-      name: `attached ${operator} compound command`,
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture: CampaignTimeoutFixture) => {
-        const command = `${fixture.backend.exact_command}${operator}recon fuzz . --config smoke.yaml`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    })),
-    {
-      name: "newline-delimited evidence command",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `${fixture.backend.exact_command.replace(" --seq-len 100", "")}\necho --seq-len 100`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "non-executed Recon text passed to another command",
-      code: "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID",
-      mutate: (fixture) => {
-        const command = `echo ${fixture.backend.exact_command}`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "commented stateful sequence flag",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace(" --seq-len 100", " # --seq-len 100");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "quoted stateful sequence text",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--seq-len 100", "'--seq-len 100'");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "duplicate stateful sequence flags",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = `${fixture.backend.exact_command} --seq-len 100`;
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "stateful sequence flag after the option terminator",
-      code: "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      mutate: (fixture) => {
-        const command = fixture.backend.exact_command.replace("--seq-len 100", "-- --seq-len 100");
-        fixture.backend.exact_command = command;
-        fixture.plan.backend.exact_shell_escaped_command = command;
-      }
-    },
-    {
-      name: "plan test limit",
-      code: "CAMPAIGN_TIMEOUT_TEST_LIMIT_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.recon_test_limit = "50000";
-      }
-    },
-    {
-      name: "non-positive host force-kill grace",
-      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
-      mutate: (fixture) => {
-        fixture.plan.host_force_kill_grace_seconds = 0;
-      }
-    },
-    {
-      name: "non-positive artifact finalization reserve",
-      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
-      mutate: (fixture) => {
-        fixture.plan.artifact_finalization_reserve_seconds = 0;
-      }
-    },
-    {
-      name: "positive but forged artifact finalization reserve",
-      code: "CAMPAIGN_TIMEOUT_FINALIZATION_RESERVE_MISMATCH",
-      mutate: (fixture) => {
-        fixture.plan.artifact_finalization_reserve_seconds = 299;
-      }
-    },
-    {
-      name: "backend command differs from plan",
-      code: "CAMPAIGN_TIMEOUT_COMMAND_MISMATCH",
-      mutate: (fixture) => {
-        fixture.backend.exact_command = `${fixture.backend.exact_command} --quiet`;
-      }
-    },
-    {
-      name: "backend start differs from plan",
-      code: "CAMPAIGN_TIMEOUT_START_MISMATCH",
-      mutate: (fixture) => {
-        fixture.backend.start_timestamp = "2026-08-11T00:00:01.000Z";
-      }
-    },
-    {
-      name: "unknown termination reason",
-      code: "CAMPAIGN_TIMEOUT_EVIDENCE_INVALID",
-      mutate: (fixture) => {
-        fixture.backend.termination_reason = "unknown";
-      }
+const withReplacedCampaignCommand = (search: string, replacement: string) => (fixture: CampaignTimeoutFixture) =>
+  withCampaignCommand(fixture, fixture.backend.exact_command.replace(search, replacement));
+const forgedCampaignTimeoutCases: Array<{
+  name: string;
+  path: string;
+  mutate: (fixture: CampaignTimeoutFixture) => void;
+}> = [
+  {
+    name: "plan configured timeout",
+    path: "$.campaign_plan_ref#configured_fuzzer_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.plan.configured_fuzzer_timeout_seconds = 3300;
     }
-  ];
+  },
+  {
+    name: "Recon internal timeout",
+    path: "$.campaign_plan_ref#recon_internal_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.plan.recon_internal_timeout_seconds = 3300;
+    }
+  },
+  {
+    name: "host soft timeout",
+    path: "$.campaign_plan_ref#host_soft_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.plan.host_soft_timeout_seconds = 3300;
+    }
+  },
+  {
+    name: "backend configured timeout",
+    path: "$.configured_timeout_seconds",
+    mutate: (fixture) => {
+      fixture.backend.configured_timeout_seconds = 3300;
+    }
+  },
+  {
+    name: "wrong host force-kill grace",
+    path: "$.campaign_plan_ref#host_force_kill_grace_seconds",
+    mutate: (fixture) => {
+      fixture.plan.host_force_kill_grace_seconds = 30;
+    }
+  },
+  {
+    name: "forged artifact finalization reserve",
+    path: "$.campaign_plan_ref#artifact_finalization_reserve_seconds",
+    mutate: (fixture) => {
+      fixture.plan.artifact_finalization_reserve_seconds = 299;
+    }
+  },
+  {
+    name: "plan test limit",
+    path: "$.campaign_plan_ref#recon_test_limit",
+    mutate: (fixture) => {
+      fixture.plan.recon_test_limit = "50000";
+    }
+  },
+  {
+    name: "reserve-subtracted command timeout",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--timeout 3600", "--timeout 3300")
+  },
+  {
+    name: "duplicate timeout flag",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--timeout 3600", "--timeout 3600 --timeout 3600")
+  },
+  { name: "missing timeout flag", path: "$.exact_command", mutate: withReplacedCampaignCommand("--timeout 3600 ", "") },
+  {
+    name: "missing GNU timeout wrapper",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("timeout --preserve-status --signal=INT --kill-after=300s 3600s ", "")
+  },
+  {
+    name: "wrong GNU timeout soft deadline",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("300s 3600s recon", "300s 3300s recon")
+  },
+  {
+    name: "foreground wrapper",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--preserve-status", "--preserve-status --foreground")
+  },
+  {
+    name: "bounded default test limit",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand(`--test-limit ${RECON_TIMEOUT_TEST_LIMIT}`, "--test-limit 50000")
+  },
+  {
+    name: "one-step stateful sequence command",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--seq-len 100", "--seq-len 1")
+  },
+  {
+    name: "missing stateful sequence command flag",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand(" --seq-len 100", "")
+  },
+  {
+    name: "duplicate stateful sequence flags",
+    path: "$.exact_command",
+    mutate: withReplacedCampaignCommand("--seq-len 100", "--seq-len 100 --seq-len 100")
+  },
+  {
+    name: "one-step stateful sequence in plan",
+    path: "$.campaign_plan_ref#recon_sequence_length",
+    mutate: (fixture) => {
+      fixture.plan.recon_sequence_length = 1;
+    }
+  },
+  {
+    name: "one-step stateful sequence in result",
+    path: "$.sequence_length",
+    mutate: (fixture) => {
+      fixture.backend.sequence_length = 1;
+    }
+  },
+  {
+    name: "one-step stateful sequence in summary",
+    path: "$.campaign_summary_ref#sequence_length",
+    mutate: (fixture) => {
+      fixture.summary.sequence_length = 1;
+    }
+  },
+  {
+    name: "backend command differs from plan",
+    path: "$.exact_command",
+    mutate: (fixture) => {
+      fixture.backend.exact_command = `${fixture.backend.exact_command} --quiet`;
+    }
+  },
+  {
+    name: "backend start differs from plan",
+    path: "$.start_timestamp",
+    mutate: (fixture) => {
+      fixture.backend.start_timestamp = "2026-08-11T00:00:01.000Z";
+    }
+  },
+  ...(["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const).map((field) => ({
+    name: `deadline arithmetic ${field}`,
+    path: `$.campaign_plan_ref#${field}`,
+    mutate: (fixture: CampaignTimeoutFixture) => {
+      fixture.plan[field] = "2026-08-11T01:00:02.000Z";
+    }
+  })),
+  {
+    name: "summary outcome",
+    path: "$.campaign_summary_ref#outcome",
+    mutate: (fixture) => {
+      fixture.summary.outcome = "partial";
+    }
+  }
+];
 
-  for (const entry of cases) {
+test("current campaign timeout gate rejects forged budgets, Recon flags, and sequence lengths", () => {
+  for (const entry of forgedCampaignTimeoutCases) {
     const result = runCampaignTimeoutGate(entry.mutate);
     assert.equal(result.ok, false, entry.name);
     assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === entry.code),
+      timeoutEvidenceIssuePaths(result).includes(entry.path),
       `${entry.name}: ${JSON.stringify(result.diagnostics)}`
     );
   }
 });
 
-test("current campaign timeout gate accepts safe output redirections", () => {
-  for (const redirection of ["> /tmp/recon.log 2>&1", ">> /tmp/recon.log", "1> /tmp/recon.log", "&> /tmp/recon.log"]) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      const command = `${fixture.backend.exact_command} ${redirection}`;
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-      fixture.plan.command_plan[0]!.command = command;
-    });
-    assert.equal(result.ok, true, `${redirection}: ${JSON.stringify(result.diagnostics)}`);
+// The recorded command is evidence the host compares, never a string it runs.
+// The host used to re-tokenize it with its own shell grammar and reject framing
+// the verifier accepted, after the whole fuzzing budget had been spent.
+test("current campaign timeout gate accepts ordinary shell framing around the recorded Recon command", () => {
+  const templateCommand =
+    "timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . --contract CryticTester " +
+    `--test-mode assertion --workers 8 --test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100 --timeout 3600 ` +
+    "--corpus-dir echidna --recon-corpus-dir recon-corpus";
+  for (const command of [
+    `cd /workspace && ${templateCommand}`,
+    `${templateCommand} 2>&1 | tee backends/recon-fuzzer/run.log`,
+    `${templateCommand}; echo "exit=$?"`,
+    // The #582 shape: environment assignment before the wrapper and a redirected log.
+    `FOUNDRY_CACHE_PATH=/tmp/foundry-cache ${templateCommand} > /tmp/recon-fuzzer-attempt2.log 2>&1`,
+    ...["> /tmp/recon.log 2>&1", ">> /tmp/recon.log", "1> /tmp/recon.log", "&> /tmp/recon.log"].map(
+      (redirection) => `${templateCommand} ${redirection}`
+    )
+  ]) {
+    const result = runCampaignTimeoutGate((fixture) => withCampaignCommand(fixture, command));
+    assert.equal(result.ok, true, `${command}: ${JSON.stringify(result.diagnostics)}`);
   }
 });
 
-test("current campaign timeout gate preserves the specific missing-flag diagnostic with output redirection", () => {
+// The result schema makes sequence_length optional and the campaign prompt does
+// not ask for it; the deleted host copy required it after the budget was spent.
+test("current campaign timeout gate accepts a result that omits the optional sequence_length", () => {
   const result = runCampaignTimeoutGate((fixture) => {
-    const command = `${fixture.backend.exact_command.replace(" --timeout 3600", "")} > /tmp/recon.log 2>&1`;
-    fixture.backend.exact_command = command;
-    fixture.plan.backend.exact_shell_escaped_command = command;
-    fixture.plan.command_plan[0]!.command = command;
+    delete fixture.backend.sequence_length;
   });
-  const commandDiagnostics = result.diagnostics.filter((diagnostic) =>
-    [
-      "CAMPAIGN_TIMEOUT_COMMAND_INVALID",
-      "CAMPAIGN_SEQUENCE_LENGTH_COMMAND_INVALID",
-      "CAMPAIGN_TIMEOUT_HOST_WRAPPER_INVALID"
-    ].includes(diagnostic.code)
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("current campaign timeout gate names only the missing flag when the command also redirects output", () => {
+  const result = runCampaignTimeoutGate((fixture) =>
+    withCampaignCommand(
+      fixture,
+      `${fixture.backend.exact_command.replace(" --timeout 3600", "")} > /tmp/recon.log 2>&1`
+    )
   );
   assert.deepEqual(
-    commandDiagnostics.map((diagnostic) => [diagnostic.code, diagnostic.message]),
-    [["CAMPAIGN_TIMEOUT_COMMAND_INVALID", "Recon command must contain exactly one --timeout 3600 flag"]]
-  );
-});
-
-test("current campaign timeout gate does not treat non-shell whitespace as an argument boundary", () => {
-  for (const whitespace of ["\f", "\v", "\u00a0"]) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      const command = fixture.backend.exact_command.replace("--timeout 3600", `--timeout${whitespace}3600`);
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-      fixture.plan.command_plan[0]!.command = command;
-    });
-    assert.equal(result.ok, false, JSON.stringify(result.diagnostics));
-    assert.ok(
-      result.diagnostics.some(
+    result.diagnostics
+      .filter(
         (diagnostic) =>
-          diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID" && diagnostic.message.includes("--timeout 3600")
-      ),
-      JSON.stringify(result.diagnostics)
-    );
-  }
-});
-
-test("current campaign timeout gate rejects shell operators after output redirection", () => {
-  for (const operator of [";", "|", "&&", "&", "`", "$(echo unsafe)", "<"]) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      const command = `${fixture.backend.exact_command} > /tmp/recon.log 2>&1${operator} echo unsafe`;
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-    });
-    assert.equal(result.ok, false, operator);
-    assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
-      `${operator}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
-test("current campaign timeout gate accepts the reported #582 command shape and rejects hostile redirect operands", () => {
-  const reportedCommand =
-    "FOUNDRY_CACHE_PATH=/tmp/foundry-cache timeout --preserve-status --signal=INT --kill-after=300s 3600s recon fuzz . " +
-    "--contract CryticTester --test-mode assertion --workers 32 " +
-    `--test-limit ${RECON_TIMEOUT_TEST_LIMIT} --seq-len 100 --timeout 3600 ` +
-    "--corpus-dir /tmp/corpus --recon-corpus-dir /tmp/recon-corpus --repro /tmp/repro.t.sol > /tmp/recon-fuzzer-attempt2.log 2>&1";
-  const withCommand = (command: string) => {
-    const result = runCampaignTimeoutGate((fixture) => {
-      fixture.backend.exact_command = command;
-      fixture.plan.backend.exact_shell_escaped_command = command;
-      fixture.plan.command_plan[0]!.command = command;
-    });
-    return result;
-  };
-
-  assert.equal(withCommand(reportedCommand).ok, true);
-  for (const redirect of [
-    '> "$(touch /tmp/recon-pwned)"',
-    '> "`touch /tmp/recon-pwned`"',
-    "> \"${X:=$'$(touch /tmp/recon-pwned)'}\"",
-    "> \"$'\\x24\\x28touch /tmp/recon-pwned\\x29'\"",
-    '> "$RECON_REDIRECT_TARGET"',
-    ">(touch /tmp/recon-pwned)",
-    "2&> /tmp/recon-pwned",
-    "2>&1foo"
-  ]) {
-    const result = withCommand(`${reportedCommand.slice(0, reportedCommand.indexOf(" > "))} ${redirect}`);
-    assert.equal(result.ok, false, redirect);
-    assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_COMMAND_INVALID"),
-      `${redirect}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
-});
-
-test("current campaign timeout gate verifies deadline arithmetic", () => {
-  for (const field of ["fuzzing_deadline_utc", "force_kill_deadline_utc", "final_artifact_deadline_utc"] as const) {
-    const result = runCampaignTimeoutGate((fixture) => {
-      fixture.plan[field] = "2026-08-11T01:00:02.000Z";
-    });
-    assert.equal(result.ok, false, field);
-    assert.ok(
-      result.diagnostics.some(
-        (diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_DEADLINE_MISMATCH" && diagnostic.path?.endsWith(field)
-      ),
-      `${field}: ${JSON.stringify(result.diagnostics)}`
-    );
-  }
+          diagnostic.details?.gate === "property-campaign-timeout-evidence" &&
+          diagnostic.path?.endsWith("#$.exact_command")
+      )
+      .map((diagnostic) => diagnostic.message),
+    [
+      "Semantic gate property-campaign-timeout-evidence failed: Recon command must contain exactly one --timeout 3600 flag"
+    ]
+  );
 });
 
 test("current campaign timeout gate derives early-exit outcome from recorded duration and usability", () => {
@@ -11421,10 +11291,10 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     fixture.backend.end_timestamp = "2026-08-11T00:30:00.000Z";
   });
   assert.equal(falseComplete.ok, false);
-  for (const code of ["CAMPAIGN_TIMEOUT_DURATION_MISMATCH", "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH"]) {
+  for (const issuePath of ["$.end_timestamp", "$.campaign_outcome"]) {
     assert.ok(
-      falseComplete.diagnostics.some((diagnostic) => diagnostic.code === code),
-      `${code}: ${JSON.stringify(falseComplete.diagnostics)}`
+      timeoutEvidenceIssuePaths(falseComplete).includes(issuePath),
+      `${issuePath}: ${JSON.stringify(falseComplete.diagnostics)}`
     );
   }
 
@@ -11434,26 +11304,20 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     fixture.summary.outcome = "partial";
   });
   assert.equal(earlyConfiguredPartial.ok, false);
-  assert.ok(
-    earlyConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_DURATION_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(earlyConfiguredPartial).includes("$.end_timestamp"));
 
   const fullConfiguredPartial = runCampaignTimeoutGate((fixture) => {
     fixture.backend.campaign_outcome = "partial";
     fixture.summary.outcome = "partial";
   });
   assert.equal(fullConfiguredPartial.ok, false);
-  assert.ok(
-    fullConfiguredPartial.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(fullConfiguredPartial).includes("$.campaign_outcome"));
 
   const fullDurationProcessExit = runCampaignTimeoutGate((fixture) => {
     fixture.backend.termination_reason = "process-exit";
   });
   assert.equal(fullDurationProcessExit.ok, false);
-  assert.ok(
-    fullDurationProcessExit.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(fullDurationProcessExit).includes("$.campaign_outcome"));
 
   const falsePartialWithoutResults = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
@@ -11463,9 +11327,7 @@ test("current campaign timeout gate derives early-exit outcome from recorded dur
     fixture.summary.outcome = "partial";
   });
   assert.equal(falsePartialWithoutResults.ok, false);
-  assert.ok(
-    falsePartialWithoutResults.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_OUTCOME_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(falsePartialWithoutResults).includes("$.campaign_outcome"));
 
   const truthfulBlocked = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T00:00:01.000Z";
@@ -11484,15 +11346,13 @@ test("current campaign timeout gate classifies termination after the force-kill 
     fixture.summary.outcome = "partial";
   });
   assert.equal(prematureForceKill.ok, false);
-  assert.ok(
-    prematureForceKill.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH")
-  );
+  assert.ok(timeoutEvidenceIssuePaths(prematureForceKill).includes("$.termination_reason"));
 
   const falseComplete = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
   });
   assert.equal(falseComplete.ok, false);
-  assert.ok(falseComplete.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_FORCE_KILL_MISMATCH"));
+  assert.ok(timeoutEvidenceIssuePaths(falseComplete).includes("$.termination_reason"));
 
   const truthfulPartial = runCampaignTimeoutGate((fixture) => {
     fixture.backend.end_timestamp = "2026-08-11T01:05:06.000Z";
@@ -11510,14 +11370,6 @@ test("current campaign timeout gate classifies termination after the force-kill 
     fixture.summary.outcome = "blocked";
   });
   assert.equal(truthfulBlocked.ok, true, JSON.stringify(truthfulBlocked.diagnostics));
-});
-
-test("current campaign timeout gate cross-checks backend and summary outcomes", () => {
-  const result = runCampaignTimeoutGate((fixture) => {
-    fixture.summary.outcome = "partial";
-  });
-  assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "CAMPAIGN_TIMEOUT_SUMMARY_MISMATCH"));
 });
 
 test("campaign gate accepts many counterexamples of one property deduplicated into one finding", () => {
@@ -11552,11 +11404,7 @@ test("campaign gate accepts many counterexamples of one property deduplicated in
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
-    []
-  );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("current campaign gate accepts the exact R55 partition: 29 counterexamples, two findings", () => {
@@ -11600,11 +11448,7 @@ test("current campaign gate accepts the exact R55 partition: 29 counterexamples,
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
-    []
-  );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("current campaign gate requires partition metadata and accepts an explicit complete partition", () => {
@@ -11635,16 +11479,9 @@ test("current campaign gate requires partition metadata and accepts an explicit 
   };
   const current = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(current.ok, false);
-  assert.ok(current.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REQUIRED"));
-  assert.equal(
-    current.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED").length,
-    2
-  );
-  assert.ok(
-    current.diagnostics
-      .filter((diagnostic) => diagnostic.code.startsWith("PROPERTY_CAMPAIGN_PARTITION_"))
-      .every((diagnostic) => diagnostic.severity === "error")
-  );
+  const currentPaths = gateIssuePaths(current, "property-campaign-context-joins");
+  assert.ok(currentPaths.includes("$.findings_ref#0"), JSON.stringify(current.diagnostics));
+  assert.equal(currentPaths.filter((issuePath) => issuePath === "$.failures").length, 2);
 
   const completePartition = accountedCampaignFinding("failure-1", ["property-1"], ["failure-1", "failure-2"]);
   writeArtifact(layout, campaignId, "findings.json", JSON.stringify([completePartition]));
@@ -11677,14 +11514,14 @@ test("campaign partition rejects unknown contributions and per-finding count mis
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  for (const code of [
-    "PROPERTY_CAMPAIGN_PARTITION_REFERENCE_UNKNOWN",
-    "PROPERTY_CAMPAIGN_PARTITION_COUNT_MISMATCH",
-    "PROPERTY_CAMPAIGN_PARTITION_UNCLAIMED"
+  for (const issuePath of [
+    "$.findings_ref#0.contributing_backend_failures[0]",
+    "$.findings_ref#0.deduplication.pre_dedup_count",
+    "$.failures"
   ]) {
     assert.ok(
-      result.diagnostics.some((diagnostic) => diagnostic.code === code),
-      code
+      gateIssuePaths(result, "property-campaign-context-joins").includes(issuePath),
+      `${issuePath}: ${JSON.stringify(result.diagnostics)}`
     );
   }
 });
@@ -11725,9 +11562,14 @@ test("campaign partition rejects duplicate claims and property subset mismatches
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_DUPLICATE"));
+  const issues = campaignJoinIssues(result);
   assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
+    issues.some((entry) => entry.includes('"failure-2" must be claimed by exactly one finding')),
+    JSON.stringify(issues)
+  );
+  assert.ok(
+    issues.some((entry) => entry.startsWith("$.findings_ref#0.property_ids:")),
+    JSON.stringify(issues)
   );
 });
 
@@ -11767,10 +11609,9 @@ test("campaign partition requires each finding ID to represent one of its contri
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.equal(
-    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_REPRESENTATIVE_MISMATCH")
-      .length,
-    2
+  assert.deepEqual(
+    gateIssuePaths(result, "property-campaign-context-joins").filter((issuePath) => issuePath.endsWith(".id")),
+    ["$.findings_ref#0.id", "$.findings_ref#1.id"]
   );
 });
 
@@ -11810,10 +11651,11 @@ test("campaign partition requires a finding's properties to equal its contributi
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.equal(
-    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_PROPERTY_MISMATCH")
-      .length,
-    1
+  assert.deepEqual(
+    gateIssuePaths(result, "property-campaign-context-joins").filter((issuePath) =>
+      issuePath.endsWith(".property_ids")
+    ),
+    ["$.findings_ref#0.property_ids"]
   );
 });
 
@@ -11856,9 +11698,7 @@ test("campaign partition binds finding backend provenance to its exact contribut
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_BACKEND_MISMATCH")
-  );
+  assert.deepEqual(gateIssuePaths(result, "findings-campaign-provenance-coherence"), ["$[0]"]);
 });
 
 test("campaign contributions bind raw_result_ref to the authenticated campaign artifact", () => {
@@ -11898,16 +11738,74 @@ test("campaign contributions bind raw_result_ref to the authenticated campaign a
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PARTITION_RAW_RESULT_MISMATCH")
+  assert.deepEqual(gateIssuePaths(result, "property-campaign-context-joins"), [
+    "$.findings_ref#0.contributing_backend_failures[0].raw_result_ref"
+  ]);
+});
+
+// The registry gate requires raw_result_ref to be the declared relative path;
+// the deleted host copy required its basename, so no value satisfied both.
+test("campaign contributions name a nested campaign result by its declared relative path", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-nested-campaign-raw-result-ref",
+    resolvedConfigToml: '[invariants]\ninvariant_testing_fuzzer_timeout = "1h"\n'
+  });
+  campaignPropertyCatalog(layout, ["property-1"]);
+  const campaignId = "custom-fuzz-stage";
+  const campaignOutput = boundOutput("custom/results.json", "ultrafuzz/property-campaign@3", true);
+  const findingsOutput = boundOutput("custom/candidates.json", "ultrafuzz/findings@2");
+  const campaignPlanOutput = boundOutput("custom/plan.json", "ultrafuzz/invariant-campaign-plan@2");
+  const campaignSummaryOutput = boundOutput("custom/summary.json", "ultrafuzz/campaign-summary@2");
+  const campaign = {
+    ...currentCampaign(["property-1"], [{ id: "failure-1", property_ids: ["property-1"] }]),
+    campaign_plan_ref: campaignPlanOutput.path,
+    findings_ref: findingsOutput.path,
+    campaign_summary_ref: campaignSummaryOutput.path
+  };
+  writeDeclaredArtifactNode(
+    layout,
+    campaignId,
+    [campaignOutput, findingsOutput, campaignPlanOutput, campaignSummaryOutput],
+    {
+      [campaignOutput.path]: JSON.stringify(campaign),
+      [findingsOutput.path]: JSON.stringify([
+        accountedCampaignFinding(
+          "failure-1",
+          ["property-1"],
+          [{ fuzzer_backend: "recon", failure_id: "failure-1", raw_result_ref: campaignOutput.path }]
+        )
+      ]),
+      [campaignPlanOutput.path]: JSON.stringify(currentCampaignPlan()),
+      [campaignSummaryOutput.path]: JSON.stringify({
+        schema_version: "ultrafuzz.campaign-summary.v2",
+        outcome: "partial",
+        sequence_length: 100,
+        implemented_property_suite_refs: ["implemented-properties.json"],
+        campaign_plan_ref: campaignPlanOutput.path,
+        backend_results: [{ fuzzer_backend: "recon", status: "partial", result_ref: campaignOutput.path }],
+        finding_refs: ["failure-1"],
+        reproducer_refs: [
+          { finding_id: "failure-1", path: `${campaignFixturePaths.reproducers}/failure-1.t.sol`, blocker: null }
+        ],
+        failure_counts: { pre_deduplication: 1, post_deduplication: 1 }
+      })
+    }
   );
-  assert.ok(
-    result.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
-        diagnostic.details?.gate === "property-campaign-context-joins"
-    )
-  );
+  const node: PlannedGraphNode = {
+    ...plannedNode([]),
+    id: campaignId,
+    logical_id: campaignId,
+    display_name: campaignId,
+    artifact_dir: `artifacts/${campaignId}`,
+    depends_on: ["stateful-invariant-implement-properties"],
+    timeout_seconds: 7200,
+    outputs: [campaignOutput, findingsOutput, campaignPlanOutput, campaignSummaryOutput]
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("campaign failures and findings cannot name selected but non-implemented properties", () => {
@@ -11957,17 +11855,10 @@ test("campaign failures and findings cannot name selected but non-implemented pr
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  assert.ok(
-    result.diagnostics.filter((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID").length >=
-      2
-  );
-  assert.ok(
-    result.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_FAILED" &&
-        diagnostic.details?.gate === "property-campaign-context-joins"
-    )
-  );
+  const issuePaths = gateIssuePaths(result, "property-campaign-context-joins");
+  for (const issuePath of ["$.failures[0].property_ids[0]", "$.findings_ref#0.property_ids[0]"]) {
+    assert.ok(issuePaths.includes(issuePath), `${issuePath}: ${JSON.stringify(result.diagnostics)}`);
+  }
 });
 
 test("campaign contract rejects v2 bytes without converting or rewriting them", () => {
@@ -12047,12 +11938,10 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
         diagnostic.details?.gate === "campaign-summary-count-coupling"
     )
   );
-  assert.deepEqual(
-    mismatched.diagnostics
-      .filter((diagnostic) => diagnostic.code === "CAMPAIGN_SUMMARY_FAILURE_COUNT_MISMATCH")
-      .map((diagnostic) => diagnostic.path?.split(".").at(-1)),
-    ["pre_deduplication", "post_deduplication"]
-  );
+  assert.deepEqual(gateIssuePaths(mismatched, "campaign-summary-count-coupling"), [
+    "$.failure_counts.pre_deduplication",
+    "$.failure_counts.post_deduplication"
+  ]);
 
   const legacyPath = writeArtifact(layout, campaignId, "campaign-summary.json", JSON.stringify({ outcome: "partial" }));
   const legacyBytes = fs.readFileSync(legacyPath);
@@ -12083,151 +11972,6 @@ test("campaign gate conditionally reconciles the R55 summary failure counts with
   assert.deepEqual(fs.readFileSync(incompletePath), incompleteBytes);
 });
 
-test("campaign gate still rejects a property-derived failure no finding covers", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-uncovered" });
-  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(
-      currentCampaign(
-        ["property-1", "property-2"],
-        [
-          { id: "failure-1", property_ids: ["property-1"] },
-          { id: "failure-2", property_ids: ["property-2"] }
-        ]
-      )
-    )
-  );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
-  writeCampaignSummary(layout, campaignId, 2, 1);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(result.ok, false);
-  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
-  assert.ok(missing);
-  assert.match(missing?.path ?? "", /failures\[1\]/u);
-});
-
-test("campaign gate does not let an unrelated finding cover a campaign failure", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-unrelated-coverage" });
-  campaignPropertyCatalog(layout, ["property-1"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(currentCampaign(["property-1"], [{ id: "failure-1", property_ids: ["property-1"] }]))
-  );
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("unrelated-finding", ["property-1"])])
-  );
-  writeCampaignSummary(layout, campaignId, 1, 1);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(result.ok, false);
-  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING"));
-});
-
-test("campaign gate names only the genuinely uncovered property of a partially covered failure", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-partial" });
-  campaignPropertyCatalog(layout, ["property-1", "property-2"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(
-      currentCampaign(
-        ["property-1", "property-2"],
-        [
-          { id: "failure-1", property_ids: ["property-1", "property-2"] },
-          { id: "failure-2", property_ids: ["property-1"] }
-        ]
-      )
-    )
-  );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-2", ["property-1"])]));
-  writeCampaignSummary(layout, campaignId, 2, 1);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-
-  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(result.ok, false);
-  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
-  assert.ok(missing);
-  assert.match(missing?.message ?? "", /property-2/u);
-  // property-1 is covered by the finding, so naming it would send the retry
-  // after an artifact that is already correct.
-  assert.doesNotMatch(missing?.message ?? "", /property-1/u);
-});
-
-test("campaign gate keeps flagging ambiguous and mismatched same-ID findings", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-ambiguous" });
-  campaignPropertyCatalog(layout, ["property-1"]);
-  const campaignId = "stateful-invariant-campaign";
-  writeArtifact(
-    layout,
-    campaignId,
-    "recon-fuzzer-results.json",
-    JSON.stringify(
-      currentCampaign(
-        ["property-1"],
-        [
-          { id: "failure-1", property_ids: ["property-1"] },
-          { id: "failure-2", property_ids: ["property-1"] }
-        ]
-      )
-    )
-  );
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-1", ["property-1"])])
-  );
-  writeCampaignSummary(layout, campaignId, 2, 2);
-  const node = {
-    ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
-    id: campaignId,
-    logical_id: campaignId
-  };
-  const ambiguous = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(ambiguous.ok, false);
-  assert.ok(ambiguous.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_AMBIGUOUS"));
-
-  // A finding that claims a failure's ID must still carry that failure's properties,
-  // even though other failures may now be covered by a different finding.
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("failure-1", []), campaignFinding("failure-2", ["property-1"])])
-  );
-  writeCampaignSummary(layout, campaignId, 2, 2);
-  const mismatched = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.equal(mismatched.ok, false);
-  assert.ok(mismatched.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISMATCH"));
-});
-
 test("campaign gate rejects a failure whose property combination no single finding claims", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign-combination" });
   campaignPropertyCatalog(layout, ["property-1", "property-2"]);
@@ -12249,12 +11993,11 @@ test("campaign gate rejects a failure whose property combination no single findi
       )
     )
   );
-  writeArtifact(
-    layout,
-    campaignId,
-    "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1"]), campaignFinding("failure-2", ["property-2"])])
-  );
+  const singlePropertyFindings = [
+    accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"]),
+    accountedCampaignFinding("failure-2", ["property-2"], ["failure-2"])
+  ];
+  writeArtifact(layout, campaignId, "findings.json", JSON.stringify(singlePropertyFindings));
   writeCampaignSummary(layout, campaignId, 3, 2);
   const node = {
     ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
@@ -12264,9 +12007,22 @@ test("campaign gate rejects a failure whose property combination no single findi
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const missing = result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_FINDING_REFERENCE_MISSING");
-  assert.ok(missing);
-  assert.match(missing?.message ?? "", /failure-3/u);
+  assert.deepEqual(campaignJoinIssues(result), [
+    '$.failures: Semantic gate property-campaign-context-joins failed: Property-derived campaign failure "failure-3" must be claimed by exactly one finding'
+  ]);
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      ...singlePropertyFindings,
+      accountedCampaignFinding("failure-3", ["property-1", "property-2"], ["failure-3"])
+    ])
+  );
+  writeCampaignSummary(layout, campaignId, 3, 3);
+  const claimed = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(claimed.ok, true, JSON.stringify(claimed.diagnostics));
 });
 
 test("campaign gate accepts a deduplicated finding that unions the properties of the failures it covers", () => {
@@ -12304,11 +12060,7 @@ test("campaign gate accepts a deduplicated finding that unions the properties of
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
-  assert.deepEqual(
-    result.diagnostics.filter((diagnostic) => diagnostic.source === "property-provenance"),
-    []
-  );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("campaign gate rejects a finding that claims a property no failure ever reported", () => {
@@ -12327,7 +12079,7 @@ test("campaign gate rejects a finding that claims a property no failure ever rep
     layout,
     campaignId,
     "findings.json",
-    JSON.stringify([campaignFinding("failure-1", ["property-1", "property-2"])])
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1", "property-2"], ["failure-1"])])
   );
   writeCampaignSummary(layout, campaignId, 1, 1);
   const node = {
@@ -12338,12 +12090,7 @@ test("campaign gate rejects a finding that claims a property no failure ever rep
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
-  const unobserved = result.diagnostics.find(
-    (diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"
-  );
-  assert.ok(unobserved);
-  assert.match(unobserved?.message ?? "", /property-2/u);
-  assert.doesNotMatch(unobserved?.message ?? "", /property-1/u);
+  assert.deepEqual(gateIssuePaths(result, "property-campaign-context-joins"), ["$.findings_ref#0.property_ids"]);
 });
 
 test("campaign gate rejects a property claim anchored to a failure that reported no property", () => {
@@ -12358,7 +12105,12 @@ test("campaign gate rejects a property claim anchored to a failure that reported
     "recon-fuzzer-results.json",
     JSON.stringify(currentCampaign(["property-1"], [{ id: "failure-1", property_ids: [] }]))
   );
-  writeArtifact(layout, campaignId, "findings.json", JSON.stringify([campaignFinding("failure-1", ["property-1"])]));
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([accountedCampaignFinding("failure-1", ["property-1"], ["failure-1"])])
+  );
   writeCampaignSummary(layout, campaignId, 1, 1);
   const node = {
     ...currentCampaignNode(["recon-fuzzer-results.json", "findings.json"]),
@@ -12369,8 +12121,10 @@ test("campaign gate rejects a property claim anchored to a failure that reported
   const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(result.ok, false);
   assert.ok(
-    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_PROPERTY_UNOBSERVED"),
-    `expected an unobserved-property diagnostic, got ${JSON.stringify(result.diagnostics.map((d) => d.code))}`
+    gateIssuePaths(result, "property-campaign-context-joins").includes(
+      "$.findings_ref#0.contributing_backend_failures[0]"
+    ),
+    JSON.stringify(result.diagnostics)
   );
 });
 

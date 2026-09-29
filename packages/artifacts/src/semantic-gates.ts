@@ -6549,10 +6549,11 @@ function propertyCampaignDocumentIssues(document: unknown): SemanticGateIssue[] 
 }
 
 const RECON_MAX_TEST_LIMIT = "18446744073709551615";
+const RECON_STATEFUL_SEQUENCE_LENGTH = 100;
 const CAMPAIGN_HOST_FORCE_KILL_GRACE_SECONDS = 300;
 const CAMPAIGN_DURATION_TOLERANCE_MS = 5_000;
 
-function campaignTimeoutFlagValues(command: string, flag: "--timeout" | "--test-limit"): string[] {
+function campaignTimeoutFlagValues(command: string, flag: "--timeout" | "--test-limit" | "--seq-len"): string[] {
   const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   const pattern = new RegExp(`(?:^|\\s)${escapedFlag}(?:(?:=|\\s+)(\\S+))?`, "gu");
   return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
@@ -6685,6 +6686,27 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
     RECON_MAX_TEST_LIMIT,
     "recon_test_limit must use the nonbinding maximum"
   );
+  compare(
+    `${planPath}#recon_sequence_length`,
+    numberField(plan, "recon_sequence_length"),
+    RECON_STATEFUL_SEQUENCE_LENGTH,
+    "recon_sequence_length must be the stateful campaign sequence length"
+  );
+  compare(
+    `${summaryPath}#sequence_length`,
+    numberField(summary, "sequence_length"),
+    RECON_STATEFUL_SEQUENCE_LENGTH,
+    "Campaign summary sequence_length must be the stateful campaign sequence length"
+  );
+  // Optional in the result schema, so it is checked only when recorded.
+  if (isRecord(document) && document.sequence_length !== undefined) {
+    compare(
+      "$.sequence_length",
+      numberField(document, "sequence_length"),
+      RECON_STATEFUL_SEQUENCE_LENGTH,
+      "sequence_length must be the stateful campaign sequence length"
+    );
+  }
 
   const backend = at(plan, ["backend"]);
   const campaignCommands = arrayAt(plan, ["command_plan"]).filter((row) => stringField(row, "phase") === "campaign");
@@ -6715,6 +6737,7 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
   if (resultCommand !== undefined) {
     const timeoutValues = campaignTimeoutFlagValues(resultCommand, "--timeout");
     const testLimitValues = campaignTimeoutFlagValues(resultCommand, "--test-limit");
+    const sequenceLengthValues = campaignTimeoutFlagValues(resultCommand, "--seq-len");
     if (timeoutValues.length !== 1 || timeoutValues[0] !== String(configuredTimeoutSeconds)) {
       issues.push(
         issue("$.exact_command", `Recon command must contain exactly one --timeout ${configuredTimeoutSeconds} flag`)
@@ -6724,6 +6747,10 @@ function propertyCampaignTimeoutEvidenceIssues(document: unknown, context: Seman
       issues.push(
         issue("$.exact_command", `Recon command must contain exactly one --test-limit ${RECON_MAX_TEST_LIMIT} flag`)
       );
+    }
+    const sequenceLength = String(RECON_STATEFUL_SEQUENCE_LENGTH);
+    if (sequenceLengthValues.length !== 1 || sequenceLengthValues[0] !== sequenceLength) {
+      issues.push(issue("$.exact_command", `Recon command must contain exactly one --seq-len ${sequenceLength} flag`));
     }
     if (!hasExactCampaignHostTimeoutWrapper(resultCommand, configuredTimeoutSeconds)) {
       issues.push(

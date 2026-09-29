@@ -71,8 +71,8 @@ export const invariantLedgerSchema = z
     schema_version: z.literal(INVARIANT_LEDGER_SCHEMA_VERSION),
     entries: z.array(invariantLedgerEntrySchema),
     inventory_rows: z.array(invariantInventoryRowSchema).optional(),
-    // Present only on a ledger that records no invariant at all. The gate requires it there
-    // (issue #292): an empty ledger is otherwise indistinguishable from an agent that did not
+    // Present only on a ledger that records no invariant at all. The refinement below requires it
+    // there (issue #292): an empty ledger is otherwise indistinguishable from an agent that did not
     // look, and nothing reads `scan_probes[].result`, so probe text alone cannot carry that claim.
     no_invariants_justification: nonEmptyString.optional(),
     scan_probes: z
