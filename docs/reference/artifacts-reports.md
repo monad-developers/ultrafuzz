@@ -227,7 +227,16 @@ status changes afterwards. Finished, failed, timed-out, and cancelled attempts
 are recorded; a cancellation has outcome and category `canceled` and the
 Smithers cancellation reason as its message. A terminal event with no started
 attempt in the same Smithers activation, or stamped before that attempt
-started, is skipped. A finished attempt whose node then fails, for example
+started, is skipped. An attempt that was still running when its controller
+stopped, for example because the controller was killed, has no terminal event:
+when the run resumes, Smithers marks it cancelled without emitting one. Like a
+failure, it is recorded unless it stopped before Smithers selected a rung: as
+`canceled`, with the message `abandoned: the controller stopped during this
+attempt, and the resumed run cancelled it`, and it counts toward the node's
+`retry_count`. Its terminal is the next event of the same task, normally the
+replacement attempt's start, because one resume can abandon several attempts;
+it is not recorded before the task has such an event. A finished attempt whose
+node then fails, for example
 because the verifier or artifact gates reject its output, is recorded as failed
 with category `invalid-output` for findings validation and
 `artifact-validation` otherwise.

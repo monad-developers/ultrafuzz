@@ -204,6 +204,7 @@ interface StatsValue {
     status: string;
     attempt_count: number | null;
     executed_attempt_count: number | null;
+    failure_categories: string[] | null;
   }>;
   totals: { node_count: number; status_counts: Record<string, number> };
 }
@@ -498,21 +499,16 @@ test(
       assert.equal(stats.totals.node_count, AGENT_NODES.length);
       assert.equal(stats.totals.status_counts.succeeded, AGENT_NODES.length);
       assert.equal(stats.nodes.find((node) => node.node_id === "project-discovery")?.executed_attempt_count, 1);
-      // status counts every agent invocation, including the one the kill interrupted.
+      // status and stats count every agent invocation, including the one the kill interrupted, which
+      // stats records as canceled.
       const statusAttempts = health.model_mix.reduce((total, entry) => total + entry.attempts, 0);
       assert.equal(statusAttempts, starts.length);
-      mark("checks done");
-
-      await t.test(
-        "stats counts the agent attempt the controller crash interrupted",
-        {
-          todo: "Smithers emits no terminal event for the attempt it abandons when the resumed run starts, so attempts.jsonl never records it (#1187)"
-        },
-        () => {
-          const statsAttempts = stats.nodes.reduce((total, node) => total + (node.attempt_count ?? 0), 0);
-          assert.equal(statsAttempts, statusAttempts);
-        }
+      assert.equal(
+        stats.nodes.reduce((total, node) => total + (node.attempt_count ?? 0), 0),
+        statusAttempts
       );
+      assert.deepEqual(stats.nodes.find((node) => node.node_id === INTERRUPTED_NODE)?.failure_categories, ["canceled"]);
+      mark("checks done");
     } finally {
       process.removeListener("SIGINT", interrupted);
       process.removeListener("SIGTERM", interrupted);

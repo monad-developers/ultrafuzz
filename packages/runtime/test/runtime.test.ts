@@ -24191,7 +24191,10 @@ test("syncRun tolerates duplicate active starts for one attempt identity", async
   assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
 });
 
-test("syncRun abandons an unterminated occurrence at a later run activation boundary", async () => {
+const ABANDONED_ATTEMPT_MESSAGE =
+  "abandoned: the controller stopped during this attempt, and the resumed run cancelled it";
+
+test("syncRun records an attempt abandoned at a run activation boundary even when a reset reuses its number", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -24214,11 +24217,100 @@ test("syncRun abandons an unterminated occurrence at a later run activation boun
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   const sync = await syncRun({ projectRoot: project, runId, env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "running");
+  // The replacement reuses attempt number 1, as after `resume --reset-node`, so
+  // Smithers' attempt row describes it and the abandoned attempt has no agent.
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root).map((entry) => [
+      entry.started_event_sequence,
+      entry.source_event_sequence,
+      entry.outcome,
+      entry.failure_category,
+      entry.failure_message,
+      entry.agent
+    ]),
+    [[1, 3, "canceled", "canceled", ABANDONED_ATTEMPT_MESSAGE, undefined]]
+  );
+});
+
+test("syncRun records each attempt that a killed controller abandoned as canceled", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOptionalSpecialistTopology(project);
+  const runId = "sync-crash-abandoned-attempts";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const tasks = ["direct-strategy", "optional-specialist"];
+  // Resume marks each attempt the dead controller left in progress cancelled,
+  // emits no event for it, and restarts the task with the next attempt number.
+  const nodeDetails = Object.fromEntries(
+    tasks.map((task) => {
+      const nodeId = `node:${task}`;
+      const meta = { agentChainIndex: 0, agentId: `ultrafuzz-agent:${task}:0:default`, agentModel: "gpt-5.5" };
+      const attempts = [
+        { nodeId, attempt: 1, state: "cancelled", meta },
+        { nodeId, attempt: 2, state: "in-progress", meta }
+      ];
+      return [nodeId, { node: { nodeId, lastAttempt: 2 }, attempts }];
+    })
+  );
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: tasks.map((task) => ({ id: `node:${task}`, state: "in-progress" as const, attempt: 2 }))
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:direct-strategy", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:optional-specialist", attempt: 1 },
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:optional-specialist", attempt: 2 },
+      { type: "NodeStarted", nodeId: "node:direct-strategy", attempt: 2 }
+    ]),
+    nodeDetails
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+
+  for (let observation = 0; observation < 2; observation += 1) {
+    const sync = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(sync.value?.status, "running");
+    assert.deepEqual(sync.diagnostics, []);
+  }
+
+  // One RunStarted abandoned both attempts, so each ends at its own task's
+  // replacement start; a repeated synchronization appends nothing.
+  assert.deepEqual(
+    attemptLedgerRows(run.value.run_root)
+      .map((entry) => [
+        entry.node_id,
+        entry.attempt,
+        entry.started_event_sequence,
+        entry.source_event_sequence,
+        entry.outcome,
+        entry.failure_message,
+        (entry.reuse as { status?: string }).status,
+        (entry.agent as { profile_id?: string } | undefined)?.profile_id
+      ])
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    [
+      ["direct-strategy", 1, 1, 5, "canceled", ABANDONED_ATTEMPT_MESSAGE, "executed", "default"],
+      ["optional-specialist", 1, 2, 4, "canceled", ABANDONED_ATTEMPT_MESSAGE, "executed", "default"]
+    ]
+  );
+  const nodes = readRunState(layoutForRunRoot(run.value.run_root, runId)).nodes;
+  assert.deepEqual(
+    tasks.map((task) => nodes[task]?.retry_count),
+    [1, 1]
+  );
 });
 
 test("syncRun records external wait reasons from workflow events", async () => {
