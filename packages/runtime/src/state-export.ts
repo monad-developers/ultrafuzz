@@ -357,9 +357,9 @@ export async function getRunHealth(input: {
 
 /**
  * Observe-only synchronization makes strict reads outside any retry of their own, including of the
- * event journal and node-attempt ledger, which writers append to in place, so a read can straddle a
- * write. The whole pass is then retried within the same bounded budget, and a retry reads the run's
- * evidence again rather than reusing the caller's.
+ * event journal, which writers append to in place, so a read can straddle a write. The whole pass is
+ * then retried within the same bounded budget, and a retry reads the run's evidence again rather than
+ * reusing the caller's.
  *
  * Health below comes from the direct runner query, so a refresh never hides it. A thrown refresh
  * error, an exhausted race budget, and the transient codes `stats` also tolerates (a failed or

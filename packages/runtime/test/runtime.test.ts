@@ -12858,9 +12858,11 @@ test("listRuns, observers and status survive live run documents replaced while t
     recovered.value.diagnostics.filter((diagnostic) => diagnostic.code === "WORKFLOW_STATE_SYNC_RACED"),
     []
   );
-  // A write in place under one of those reads is still a race the strict reader rejects. `status`
-  // retries the whole synchronization within the same budget, and once that is spent it still reports
-  // the run and says its local state may be stale, instead of failing.
+  // A write in place under one of those reads is still a race the strict reader rejects. It stands in
+  // for an event-journal append: this pass reads the journal only when it records an event or sees a
+  // stopped workflow, and its attempt-ledger reads degrade to warnings instead of reaching this retry.
+  // `status` retries the whole synchronization within the same budget, and once that is spent it still
+  // reports the run and says its local state may be stale, instead of failing.
   const raced = await observeWhileReplacingRunDocument(
     { documentPath: statePath, replacements: 3, append: true, onlyWhen: synchronizationOwnRead },
     () => getRunHealth({ projectRoot: project, runId, env })
