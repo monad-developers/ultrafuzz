@@ -4775,7 +4775,7 @@ function immutableTerminalFinalization(previous: NodeState | undefined, evidence
   if (NODE_RECOVERED_STATUSES.has(previous.status)) return true;
   // An invalid-output verdict seals the occurrence it judged, not the task: a
   // rerun by `resume --retry-failed` or `--reset-node` is judged on its output.
-  if (startedAfterRecordedFinish(previous, evidence)) return false;
+  if (startedAfterRecordedOccurrence(previous, evidence)) return false;
   const disposition = recordField(previous.provenance, "terminal_disposition");
   if (disposition === undefined) return false;
   try {
@@ -4787,17 +4787,16 @@ function immutableTerminalFinalization(previous: NodeState | undefined, evidence
 
 /**
  * Whether the evidence comes from a Smithers occurrence that started after the
- * recorded one finished. A reset reruns a task from attempt 1, so the attempt
- * number cannot tell the rerun from the recorded occurrence, but its start can.
- * A later terminal event of the recorded occurrence, such as a trailing
- * `NodeCancelled`, keeps that occurrence's start.
+ * recorded one. A reset reruns a task from attempt 1, so the attempt number
+ * cannot tell the rerun from the recorded occurrence, but its start can. The
+ * recorded occurrence's own later terminal events keep its start: a trailing
+ * `NodeCancelled`, or a run cancellation that Smithers stamped before that
+ * start, which is why the bound includes the recorded start.
  */
-function startedAfterRecordedFinish(previous: NodeState | undefined, evidence: NodeWorkflowEvidence): boolean {
-  return (
-    previous?.finished_at !== undefined &&
-    evidence.startedAt !== undefined &&
-    Date.parse(evidence.startedAt) > Date.parse(previous.finished_at)
-  );
+function startedAfterRecordedOccurrence(previous: NodeState | undefined, evidence: NodeWorkflowEvidence): boolean {
+  if (previous?.finished_at === undefined || evidence.startedAt === undefined) return false;
+  const recorded = Math.max(Date.parse(previous.finished_at), Date.parse(previous.started_at ?? previous.finished_at));
+  return Date.parse(evidence.startedAt) > recorded;
 }
 
 function workflowEvidenceSupersedesPrevious(
@@ -4806,7 +4805,7 @@ function workflowEvidenceSupersedesPrevious(
   evidence: NodeWorkflowEvidence
 ): boolean {
   if (previous === undefined || previous.status !== evidence.status) return true;
-  if (startedAfterRecordedFinish(previous, evidence)) return true;
+  if (startedAfterRecordedOccurrence(previous, evidence)) return true;
   const workflow = recordField(previous.provenance, "workflow");
   return stringField(workflow, "task_id") !== taskId || numberField(workflow, "attempt") !== evidence.attempt;
 }
