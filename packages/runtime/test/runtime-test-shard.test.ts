@@ -25,7 +25,9 @@ test("every runtime test name belongs to exactly one deterministic shard", () =>
   ];
   for (const name of names) {
     const first = runtimeTestShardForName(name, 4);
-    assert.equal(first >= 1 && first <= 4, true, name);
+    // Membership, not just the range: the shard wrapper runs a test only when this number equals the
+    // selected index, so a fractional shard would make every lane skip every test and still pass.
+    assert.ok([1, 2, 3, 4].includes(first), `${name} -> ${first}`);
     assert.equal(runtimeTestShardForName(name, 4), first, name);
   }
 });

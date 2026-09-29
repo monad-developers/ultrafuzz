@@ -346,17 +346,49 @@ async function launchedProject(
   return { project, env, runRoot: run.value!.run_root };
 }
 
-let sharedInspectedRun: ReturnType<typeof launchedProject> | undefined;
+/** The run documents a lifecycle command writes: metadata, status, the event log and the engine link. */
+const SHARED_RUN_DOCUMENTS = [
+  "run.json",
+  "state.json",
+  "events.jsonl",
+  path.join("smithers", "workflow-run-link-journal.json")
+] as const;
+
+function readRunDocuments(runRoot: string): Record<string, string | null> {
+  return Object.fromEntries(
+    SHARED_RUN_DOCUMENTS.map((document) => {
+      const documentPath = path.join(runRoot, document);
+      return [document, fs.existsSync(documentPath) ? fs.readFileSync(documentPath, "utf8") : null];
+    })
+  );
+}
+
+let sharedInspectedRun:
+  | Promise<Awaited<ReturnType<typeof launchedProject>> & { launchedDocuments: Record<string, string | null> }>
+  | undefined;
 
 /**
  * Launching a run is the slow part of these tests. Tests whose commands leave
  * the run's files unchanged share one run, and each call only resets the
  * runner's answers. A test whose cancel succeeds, or that rewrites run
- * metadata, launches its own run with `launchedProject`.
+ * metadata, launches its own run with `launchedProject`; each call checks that
+ * no earlier test broke that rule.
  */
 async function inspectedRun(fixtures: FakeInspectionFixtures): ReturnType<typeof launchedProject> {
-  sharedInspectedRun ??= launchedProject({});
-  const launched = await sharedInspectedRun;
+  // A failed launch stays cached, so every later caller reports it as the shared launch failing, not
+  // as its own regression.
+  sharedInspectedRun ??= launchedProject({}).then(
+    (launched) => ({ ...launched, launchedDocuments: readRunDocuments(launched.runRoot) }),
+    (error: unknown) => {
+      throw new Error("the shared inspection run failed to launch, so this test did not run", { cause: error });
+    }
+  );
+  const { launchedDocuments, ...launched } = await sharedInspectedRun;
+  assert.deepEqual(
+    readRunDocuments(launched.runRoot),
+    launchedDocuments,
+    "an earlier test changed the shared inspection run; a test that changes run state must launch its own run with launchedProject"
+  );
   writeInspectionFixtures(launched.project, fixtures);
   return launched;
 }

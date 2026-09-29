@@ -62,7 +62,10 @@ import {
   type PromptArtifactAuthorityDocument,
   type PromptArtifactAuthoritySelector
 } from "../src/prompt-artifact-authority.js";
-import { declaredAncestorOutputsByContract } from "../src/semantic-artifact-context.js";
+import {
+  declaredAncestorOutputsByContract,
+  declaredSiblingOutputsByContract
+} from "../src/semantic-artifact-context.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -817,6 +820,18 @@ function loadTaskPromptPathForArtifactReset(): (
   >;
 }
 
+/** The runtime-owned evidence files a canonical retry reset keeps, as the template names them. */
+function canonicalRetryResetPreservedFiles(): string[] {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  return ["INVARIANT_SUITE_BASELINE_FILE", "WORKSPACE_PATCH_BASELINE_FILE", "WORKSPACE_PATCH_PREPARATION_FILE"].map(
+    (name) => {
+      const declared = new RegExp(`\\nconst ${name} = ("[^"\\n]+");`, "u").exec(source)?.[1];
+      assert.ok(declared !== undefined, `the template does not declare ${name}`);
+      return JSON.parse(declared) as string;
+    }
+  );
+}
+
 function loadCanonicalTaskArtifactRetryReset(): (
   artifactDir: string,
   attemptId: string,
@@ -864,9 +879,7 @@ function loadCanonicalTaskArtifactRetryReset(): (
     assertRegularFileInside,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
-    "invariant-suite-baseline.json",
-    "workspace-patch-baseline.json",
-    "workspace-patch-preparation.json"
+    ...canonicalRetryResetPreservedFiles()
   ) as ReturnType<typeof loadCanonicalTaskArtifactRetryReset>;
 }
 
@@ -1301,7 +1314,9 @@ function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) =>
   ) as (root: string, candidate: string) => string;
 }
 
-function loadPreservePinnedSourceProof(): (task: {
+function loadPreservePinnedSourceProof(
+  usesPinnedSource = true
+): (task: {
   attemptId: string;
   workspacePath: string;
   metadata: { artifacts: { dir: string } };
@@ -1348,7 +1363,7 @@ function loadPreservePinnedSourceProof(): (task: {
     Buffer,
     publishFileDurableExclusive,
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
-    true,
+    usesPinnedSource,
     "refs/heads/ultrafuzz-pinned",
     command
   ) as (task: {
@@ -1875,6 +1890,7 @@ type VerifyArtifactsTask = {
     plannedTimeoutSeconds: number;
     finalizationReserveSeconds: number;
   } | null;
+  execution?: { agentCredentialEnv?: string[]; modal?: { credentialEnv?: string[] } };
   metadata: {
     run: { ultrafuzzRunId: string };
     artifacts: { dir: string };
@@ -1901,6 +1917,8 @@ function loadVerifyArtifactsHarness(
     onSemanticGate?: () => void;
     onPublishArtifacts?: () => void;
     generatedTestFiles?: (artifactRoot: string, manifest: unknown) => Array<{ path: string; contents: Buffer }>;
+    /** Scan the real process environment before publication; off by default so host variables cannot leak in. */
+    scanProcessEnvironment?: boolean;
   } = {}
 ): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
@@ -2188,7 +2206,7 @@ function loadVerifyArtifactsHarness(
     () => undefined,
     createHash,
     assertArtifactPublicationsContainNoSecrets,
-    () => [],
+    options.scanProcessEnvironment === true ? sensitiveEnvironmentValues : () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -2732,6 +2750,53 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers verifier refuses to publish the value of any credential the task is configured with", () => {
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-configured-secret-output-"));
+  // A cloud task carries the credential names its agents and its Modal sandbox are configured with.
+  // Neither name below looks like a credential to the environment-name heuristic, and neither value
+  // has a vendor format, so only those configured lists can keep the values out of an artifact.
+  const credentials: Array<[string, string, NonNullable<VerifyArtifactsTask["execution"]>]> = [
+    [
+      "ULTRAFUZZ_TEST_GATEWAY_KEY",
+      "q7Vx2Lm9Rt4Wz8Kp3Nb6Hc1Jd5Fg0Sa",
+      { agentCredentialEnv: ["ULTRAFUZZ_TEST_GATEWAY_KEY"] }
+    ],
+    [
+      "ULTRAFUZZ_TEST_SANDBOX_KEY",
+      "Zr5Pw1Mx8Qn3Lc6Vb9Kt2Hj7Gf4Ds0Ae",
+      { modal: { credentialEnv: ["ULTRAFUZZ_TEST_SANDBOX_KEY"] } }
+    ]
+  ];
+  const previous = credentials.map(([name]) => [name, process.env[name]] as const);
+  try {
+    for (const [name, value, execution] of credentials) {
+      process.env[name] = value;
+      fs.writeFileSync(path.join(root, "result.json"), `analysis ${value}\n`, "utf8");
+
+      const unconfigured = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+      const control = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
+      control.verifyArtifacts(unconfigured, control.captureTaskOutputs(unconfigured));
+      assert.equal(control.publications.size, 1, `${name} is published when the task does not name it`);
+
+      const configured = { ...singleOutputVerificationTask(root, "ultrafuzz/text@1"), execution };
+      const harness = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
+      assert.throws(
+        () => harness.verifyArtifacts(configured, harness.captureTaskOutputs(configured)),
+        /contains sensitive data/u,
+        name
+      );
+      assert.equal(harness.publications.size, 0, name);
+      assert.equal(harness.markerWrites.length, 0, name);
+    }
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = value;
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -4517,6 +4582,198 @@ test("generated semantic contexts match host semantics when property producers a
   assert.deepEqual(implementation.artifactSet, {
     propertyCatalog: { schema_version: PROPERTIES_SCHEMA_VERSION, properties: [] }
   });
+});
+
+type DifferentialHarnessTask = {
+  attemptId: string;
+  runRoot: string;
+  artifactDir: string;
+  dependencyArtifactDirs: string[];
+  outputs: Array<{ path: string; contract: string; schemaFile: string }>;
+  metadata: {
+    run: { ultrafuzzRunId: string };
+    node: { logicalNodeId: string };
+    loop: { attemptIndex: number };
+    dependencies: { attemptIds: string[] };
+  };
+};
+
+/**
+ * The template's semantic context for one verified output, with its real declaration-based sibling
+ * and ancestor lookups. Only reading an ancestor's verified document is replaced.
+ */
+function loadDifferentialSemanticContextHarness(
+  taskSpecs: readonly DifferentialHarnessTask[]
+): (
+  task: DifferentialHarnessTask,
+  output: DifferentialHarnessTask["outputs"][number],
+  verifiedOutputs: ReadonlyMap<string, { artifactRoot: string; value: unknown }>
+) => SemanticGateContext {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const markers: Array<[string, string]> = [
+    ["function semanticArtifactTaskDeclarations", "\n\nfunction declaredInvariantLedgerProducerPair"],
+    ["function declaredAncestorContractOutputs", "\n\nfunction verifiedSingletonAncestorJsonArtifact"],
+    ["type DifferentialSemanticArtifactBinding", "\n\nfunction verifiedAncestorPropertyLenses"],
+    ["function semanticGateContextForVerifiedOutput", "\n\nfunction verifyOutputSemanticGates"]
+  ];
+  const slices = markers.map(([startMarker, endMarker]) => {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    assert.ok(start >= 0 && end > start, `${startMarker} is not followed by ${endMarker}`);
+    return source.slice(start, end);
+  });
+  const emitted = ts.transpileModule(slices.join("\n\n"), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "path",
+    "taskSpecs",
+    "declaredAncestorOutputsByContract",
+    "declaredSiblingOutputsByContract",
+    "admittedDependencyArtifactDirs",
+    "verifiedDependencyJsonArtifact",
+    `${emitted}; return semanticGateContextForVerifiedOutput;`
+  )(
+    path,
+    taskSpecs,
+    declaredAncestorOutputsByContract,
+    declaredSiblingOutputsByContract,
+    () => {
+      throw new Error("no fixture dependency is optional");
+    },
+    (_task: unknown, artifactDir: string, producer: DifferentialHarnessTask, relativePath: string) => ({
+      path: path.join(artifactDir, relativePath),
+      value: { producer: producer.attemptId, path: relativePath }
+    })
+  ) as ReturnType<typeof loadDifferentialSemanticContextHarness>;
+}
+
+test("generated differential verification gives each lane schema its exact declared siblings and ancestors", () => {
+  // The differential chain of config/topologies/exhaustive.yml. Each node's artifact ancestry is the full
+  // chain before it, so a lookup that reads ancestors where it should read siblings finds other artifacts.
+  const runRoot = path.resolve("/ultrafuzz-differential-run");
+  const at = (node: string, file: string) => `artifacts/${node}/${file}`;
+  const chain: Array<[string, Array<[string, string, string]>]> = [
+    ["differential-oracle-planner", [["differential-plan.json", "differential-plan@1", "differential-plan"]]],
+    ["reference-harness-author", [["reference-harness.json", "reference-harness@1", "reference-harness"]]],
+    [
+      "reference-and-lane-auditor",
+      [["audited-differential-lanes.json", "audited-differential-lanes@1", "audited-differential-lanes"]]
+    ],
+    [
+      "differential-lane-author",
+      [
+        ["lane-result.json", "differential-lane-result@1", "differential-lane-result"],
+        ["findings.json", "findings@2", "findings"]
+      ]
+    ],
+    [
+      "differential-red-triage",
+      [
+        ["semantic-red-registry.json", "semantic-red-registry@1", "semantic-red-registry"],
+        ["triage-a.json", "differential-red-triage@1", "differential-red-triage"],
+        ["triage-b.json", "differential-red-triage@1", "differential-red-triage"]
+      ]
+    ],
+    [
+      "differential-repair-and-report-review",
+      [
+        ["repair-summary.json", "differential-repair-summary@1", "differential-repair-summary"],
+        ["gap-review.json", "differential-gap-review@1", "differential-gap-review"],
+        ["differential-report-review.json", "differential-report-review@1", "differential-report-review"],
+        ["findings.json", "findings@2", "findings"]
+      ]
+    ]
+  ];
+  const taskSpecs: DifferentialHarnessTask[] = chain.map(([node, outputs], index) => ({
+    attemptId: node,
+    runRoot,
+    artifactDir: path.join(runRoot, "artifacts", node),
+    dependencyArtifactDirs: chain.slice(0, index).map(([ancestor]) => path.join(runRoot, "artifacts", ancestor)),
+    outputs: outputs.map(([file, contract, schema]) => ({
+      path: file,
+      contract: `ultrafuzz/${contract}`,
+      schemaFile: `${schema}.schema.json`
+    })),
+    metadata: {
+      run: { ultrafuzzRunId: "differential-run" },
+      node: { logicalNodeId: node },
+      loop: { attemptIndex: 0 },
+      dependencies: { attemptIds: chain.slice(Math.max(0, index - 1), index).map(([direct]) => direct) }
+    }
+  }));
+  const plan = at("differential-oracle-planner", "differential-plan.json");
+  const harness = at("reference-harness-author", "reference-harness.json");
+  const audited = at("reference-and-lane-auditor", "audited-differential-lanes.json");
+  const lane = at("differential-lane-author", "lane-result.json");
+  const registry = at("differential-red-triage", "semantic-red-registry.json");
+  const triageA = at("differential-red-triage", "triage-a.json");
+  const triageB = at("differential-red-triage", "triage-b.json");
+  const triages = [triageA, triageB];
+  const review = (file: string) => at("differential-repair-and-report-review", file);
+  const expected = new Map<string, Record<string, string | string[]>>([
+    [harness, { current: harness, plans: [plan] }],
+    [audited, { current: audited, plans: [plan], harnesses: [harness] }],
+    [lane, { current: lane, auditedLanes: [audited] }],
+    [registry, { laneResults: [lane] }],
+    [triageA, { current: triageA, registries: [registry] }],
+    [triageB, { current: triageB, registries: [registry] }],
+    [review("repair-summary.json"), { registries: [registry], triages }],
+    [review("gap-review.json"), { auditedLanes: [audited], laneResults: [lane] }],
+    [
+      review("differential-report-review.json"),
+      {
+        registries: [registry],
+        triages,
+        repairSummaries: [review("repair-summary.json")],
+        gapReviews: [review("gap-review.json")],
+        findings: [review("findings.json")]
+      }
+    ]
+  ]);
+
+  const contextFor = loadDifferentialSemanticContextHarness(taskSpecs);
+  const checked: string[] = [];
+  for (const task of taskSpecs) {
+    const verifiedOutputs = new Map(
+      task.outputs.map((output) => [
+        output.path,
+        { artifactRoot: task.artifactDir, value: { producer: task.attemptId, path: output.path } }
+      ])
+    );
+    for (const output of task.outputs) {
+      const artifact = at(task.attemptId, output.path);
+      const bindings = expected.get(artifact);
+      if (bindings === undefined) continue;
+      checked.push(artifact);
+      const context = contextFor(task, output, verifiedOutputs);
+      const differential = context.artifactSet?.differentialArtifacts ?? {};
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(differential).map(([key, value]) => [
+            key,
+            Array.isArray(value)
+              ? value.map((binding: { path: string }) => binding.path)
+              : (value as { path: string }).path
+          ])
+        ),
+        bindings,
+        artifact
+      );
+
+      // Every contextual gate of the schema runs against that context, and it is the differential
+      // context that satisfies them: without it at least one gate would only report what it lacks.
+      const schemaFile = output.schemaFile as Parameters<typeof executeSchemaSemanticGates>[0];
+      const document = verifiedOutputs.get(output.path)?.value;
+      const unsatisfied = (gateContext: SemanticGateContext) =>
+        executeSchemaSemanticGates(schemaFile, { document, context: gateContext })
+          .filter((result) => result.status === "requires-context")
+          .map((result) => result.gate);
+      assert.deepEqual(unsatisfied(context), [], artifact);
+      assert.notDeepEqual(unsatisfied({ ...context, artifactSet: {} }), [], artifact);
+    }
+  }
+  assert.deepEqual(checked, [...expected.keys()]);
 });
 
 function loadVerifiedAncestorPropertyLensesHarness(
@@ -7798,6 +8055,18 @@ test("generated Smithers pinned source proof rejects any previously published by
     const pinnedCommit = git(["rev-parse", "HEAD"]);
     git(["branch", "ultrafuzz/test-run/actors-flows", pinnedCommit]);
 
+    // With a remote the agent could fetch upstream history, read it and prune it again; the ref and
+    // object-count checks only see what is left. The pinned proof refuses it before recording anything,
+    // and an unpinned run keeps no proof at all.
+    git(["remote", "add", "origin", root]);
+    assert.throws(
+      () => preservePinnedSourceProof(task),
+      /source-isolation failure: final worktree property-specification-certora is not pinned/u
+    );
+    loadPreservePinnedSourceProof(false)(task);
+    assert.equal(fs.existsSync(proofPath), false);
+    git(["remote", "remove", "origin"]);
+
     preservePinnedSourceProof(task);
     const canonicalProof = JSON.parse(fs.readFileSync(proofPath, "utf8")) as {
       schema_version: unknown;
@@ -9033,6 +9302,32 @@ test("retry cleanup preserves only a task-owned prompt and accepts a sealed snap
       /unsafe canonical task input final-report/u
     );
     assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+    fs.unlinkSync(linkedPrompt);
+
+    // The reset runs before every attempt's first generation, attempt 1 included, and the preparation
+    // after it requires this evidence: without the patch baseline every patch-publishing task would fail
+    // before its model ran.
+    const preservedFiles = canonicalRetryResetPreservedFiles();
+    for (const name of preservedFiles) fs.writeFileSync(path.join(artifactDir, name), `${name}\n`);
+    fs.writeFileSync(path.join(artifactDir, "stale-report.json"), "{}\n");
+    resetCanonicalArtifacts(artifactDir, "final-report", undefined);
+    assert.deepEqual(fs.readdirSync(artifactDir).sort(), [...preservedFiles].sort());
+    for (const name of preservedFiles) {
+      assert.equal(fs.readFileSync(path.join(artifactDir, name), "utf8"), `${name}\n`, name);
+    }
+
+    // A reset root replaced by a symlink is refused, not followed: the reset would otherwise empty
+    // whatever directory the link names.
+    const outside = path.join(root, "run", "outside-the-task");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep.txt"), "not task-owned\n");
+    fs.rmSync(artifactDir, { recursive: true, force: true });
+    fs.symlinkSync(outside, artifactDir);
+    assert.throws(
+      () => resetCanonicalArtifacts(artifactDir, "final-report", undefined),
+      /unsafe canonical task artifact root final-report/u
+    );
+    assert.deepEqual(fs.readdirSync(outside), ["keep.txt"]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
