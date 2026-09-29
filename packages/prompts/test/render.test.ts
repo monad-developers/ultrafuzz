@@ -1316,6 +1316,21 @@ describe("prompt rendering", () => {
     });
   });
 
+  it("orders compact path authority selectors by code unit, not locale collation", () => {
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "{{ancestor_artifact_path_authority:reports/a.json,reports/B.json}}";
+    const paths = ["reports/B.json", "reports/a.json"];
+
+    expect(renderPrompt(input).artifactReferences).toContainEqual({
+      kind: "ancestor_artifact_path_authority",
+      logicalIds: [],
+      selectorId: promptArtifactAuthorityPathSelectorId(paths),
+      relativePaths: paths
+    });
+  });
+
   it("rejects unknown contracts in compact ancestor authority selectors", () => {
     expect(() =>
       validatePromptVariables("{{ancestor_contract_artifact_authority:ultrafuzz/not-a-registered-contract@1}}")

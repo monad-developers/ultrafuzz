@@ -3,7 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 
 import { isArtifactContractId } from "./artifact-contract-ids.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
-import { promptArtifactAuthorityPathSelectorId } from "./prompt-artifact-authority-selectors.js";
+import {
+  isCanonicalSelectorOrder,
+  promptArtifactAuthorityPathSelectorId
+} from "./prompt-artifact-authority-selectors.js";
 import { writeJsonDurable } from "./safe-paths.js";
 import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -372,9 +375,7 @@ export function assertRunPlanDocument(value: unknown, expectedRunId?: string): R
       }
       if (reference.kind !== "ancestor_artifact_path_authority") continue;
       if (
-        reference.relativePaths.some(
-          (selectedPath, index) => index > 0 && reference.relativePaths[index - 1]!.localeCompare(selectedPath) >= 0
-        ) ||
+        !isCanonicalSelectorOrder(reference.relativePaths) ||
         reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)
       ) {
         throw new Error(

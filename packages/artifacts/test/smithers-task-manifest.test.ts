@@ -244,7 +244,8 @@ test("strictly validates retained dynamic group templates and prompt context", (
 });
 
 test("accepts canonical prompt artifact authority selectors and rejects duplicate or unordered selectors", () => {
-  const paths = ["reports/alpha.json", "reports/zeta.json"];
+  // Canonical order is code-unit order, whatever the host locale: "Z" sorts before "a".
+  const paths = ["reports/Zeta.json", "reports/alpha.json"];
   const pathSelector = { kind: "path" as const, id: promptArtifactAuthorityPathSelectorId(paths), paths };
   const selected = task({
     promptArtifactAuthoritySelectors: [

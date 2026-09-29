@@ -274,7 +274,8 @@ test("run plans round-trip compact selector groups and reject mismatched path ID
     logicalIds: [],
     contract: "ultrafuzz/findings@2"
   };
-  const paths = ["optional/context.md", "reports/final.json"];
+  // Canonical order is code-unit order, whatever the host locale: "F" sorts before "c".
+  const paths = ["reports/Final.json", "reports/context.md"];
   const pathReference = {
     kind: "ancestor_artifact_path_authority" as const,
     logicalIds: [],

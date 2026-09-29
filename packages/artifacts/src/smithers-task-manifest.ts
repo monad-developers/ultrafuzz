@@ -9,6 +9,7 @@ import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
 import {
+  isCanonicalSelectorOrder,
   MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
   MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
   promptArtifactAuthorityPathSelectorId
@@ -1255,10 +1256,7 @@ function assertPromptArtifactAuthoritySelectors(task: SmithersTaskManifestTask):
     }
     if (
       selector.paths.some((selectedPath) => !CANONICAL_ARTIFACT_RELATIVE_PATH.test(selectedPath)) ||
-      new Set(selector.paths).size !== selector.paths.length ||
-      selector.paths.some(
-        (selectedPath, index) => index > 0 && selector.paths[index - 1]!.localeCompare(selectedPath) >= 0
-      )
+      !isCanonicalSelectorOrder(selector.paths)
     ) {
       throw new Error(
         `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority paths are not unique and canonically ordered`
@@ -1271,10 +1269,7 @@ function assertPromptArtifactAuthoritySelectors(task: SmithersTaskManifestTask):
     }
     return `path\u0000${selector.id}`;
   });
-  if (
-    new Set(keys).size !== keys.length ||
-    keys.some((key, index) => index > 0 && keys[index - 1]!.localeCompare(key) >= 0)
-  ) {
+  if (!isCanonicalSelectorOrder(keys)) {
     throw new Error(
       `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors are not unique and canonically ordered`
     );

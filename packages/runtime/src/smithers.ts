@@ -18,6 +18,7 @@ import {
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   isArtifactContractId,
+  isCanonicalSelectorOrder,
   MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
@@ -8130,7 +8131,7 @@ function promptArtifactAuthoritySelectorsFor(
     if (
       paths.length === 0 ||
       reference.selectorId !== promptArtifactAuthorityPathSelectorId(paths) ||
-      paths.some((selectedPath, index) => index > 0 && paths[index - 1]!.localeCompare(selectedPath) >= 0)
+      !isCanonicalSelectorOrder(paths)
     ) {
       throw new Error(
         `rendered prompt ${JSON.stringify(renderedPrompt.attempt_id)} uses an invalid prompt artifact authority path selector group`
@@ -8140,9 +8141,7 @@ function promptArtifactAuthoritySelectorsFor(
     selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
   }
   if (selectors.size === 0) return undefined;
-  return [...selectors.values()].sort((left, right) =>
-    promptArtifactAuthoritySelectorKey(left).localeCompare(promptArtifactAuthoritySelectorKey(right))
-  );
+  return [...selectors].sort(([left], [right]) => (left < right ? -1 : 1)).map(([, selector]) => selector);
 }
 
 function promptArtifactAuthoritySelectorKey(selector: SmithersTaskManifestPromptArtifactAuthoritySelector): string {

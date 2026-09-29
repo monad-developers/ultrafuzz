@@ -4,6 +4,7 @@ import {
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   isArtifactContractId,
+  isCanonicalSelectorOrder,
   MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
   MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
   parseSmithersTaskManifestBytes,
@@ -230,7 +231,7 @@ export function derivePromptArtifactAuthority(
   );
   const selectedPaths = new Set(selectors.flatMap((selector) => (selector.kind === "path" ? selector.paths : [])));
   const producers: PromptArtifactAuthorityProducer[] = [];
-  for (const relativeDirectory of [...admittedDependencies].sort(localeCompare)) {
+  for (const relativeDirectory of [...admittedDependencies].sort(compareCodeUnits)) {
     const sourceDirectory = declaredDependencies.get(relativeDirectory)!;
     const producer = tasksBySourceArtifactDir.get(sourceDirectory);
     // Reference ancestors have artifact roots but no agentic task declaration.
@@ -246,7 +247,7 @@ export function derivePromptArtifactAuthority(
   }
   producers.sort(
     (left, right) =>
-      localeCompare(left.artifact_dir, right.artifact_dir) || localeCompare(left.attempt_id, right.attempt_id)
+      compareCodeUnits(left.artifact_dir, right.artifact_dir) || compareCodeUnits(left.attempt_id, right.attempt_id)
   );
 
   const document: PromptArtifactAuthorityDocument = {
@@ -365,7 +366,7 @@ export function assertValidPromptArtifactAuthority(value: unknown): asserts valu
       throw new Error("prompt artifact authority includes the current task as its own producer");
     }
     const producerKey = `${artifactDirectory}\u0000${String(producer.attempt_id)}`;
-    if (priorProducerKey !== undefined && localeCompare(priorProducerKey, producerKey) >= 0) {
+    if (priorProducerKey !== undefined && compareCodeUnits(priorProducerKey, producerKey) >= 0) {
       throw new Error("prompt artifact authority producers are not canonically ordered");
     }
     priorProducerKey = producerKey;
@@ -406,7 +407,7 @@ export function assertValidPromptArtifactAuthority(value: unknown): asserts valu
       }
       outputPaths.add(outputPath);
       const outputKey = `${outputPath}\u0000${output.contract}`;
-      if (priorOutputKey !== undefined && localeCompare(priorOutputKey, outputKey) >= 0) {
+      if (priorOutputKey !== undefined && compareCodeUnits(priorOutputKey, outputKey) >= 0) {
         throw new Error(`prompt artifact authority producer ${producerIndex} outputs are not canonically ordered`);
       }
       priorOutputKey = outputKey;
@@ -507,7 +508,9 @@ function selectedProducerOutputs(
     if (!selectedContracts.has(output.contract) && !selectedPaths.has(outputPath)) continue;
     selected.push({ path: outputPath, contract: output.contract });
   }
-  selected.sort((left, right) => localeCompare(left.path, right.path) || localeCompare(left.contract, right.contract));
+  selected.sort(
+    (left, right) => compareCodeUnits(left.path, right.path) || compareCodeUnits(left.contract, right.contract)
+  );
   return selected;
 }
 
@@ -529,7 +532,7 @@ function normalizeSelectors(selectors: readonly PromptArtifactAuthoritySelector[
     }
     seen.add(key);
   }
-  return normalized.sort((left, right) => localeCompare(selectorKey(left), selectorKey(right)));
+  return normalized.sort((left, right) => compareCodeUnits(selectorKey(left), selectorKey(right)));
 }
 
 function validateSelector(value: unknown, label: string): PromptArtifactAuthoritySelector {
@@ -566,8 +569,8 @@ function selectorKey(selector: PromptArtifactAuthoritySelector): string {
 
 function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
   if (!isPlainRecord(value)) throw new Error(`${label} must be a JSON object`);
-  const actual = Object.keys(value).sort(localeCompare);
-  const expected = [...keys].sort(localeCompare);
+  const actual = Object.keys(value).sort(compareCodeUnits);
+  const expected = [...keys].sort(compareCodeUnits);
   if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
     throw new Error(`${label} has unexpected or missing fields`);
   }
@@ -628,13 +631,12 @@ function assertExactArtifactDirectory(value: string, attemptId: string, label: s
 }
 
 function assertCanonicalUniqueOrder(values: readonly string[], label: string): void {
-  for (let index = 1; index < values.length; index += 1) {
-    if (localeCompare(values[index - 1]!, values[index]!) >= 0) {
-      throw new Error(`${label} are duplicated or not canonically ordered`);
-    }
-  }
+  if (!isCanonicalSelectorOrder(values)) throw new Error(`${label} are duplicated or not canonically ordered`);
 }
 
-function localeCompare(left: string, right: string): number {
-  return left.localeCompare(right);
+// Code-unit order, not localeCompare: collation depends on the host locale, and
+// it ignores the NUL separator in producer keys, so it rejected the order this
+// module derives for attempt IDs such as `x-1` and `x-10`.
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
