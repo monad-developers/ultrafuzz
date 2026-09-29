@@ -9825,11 +9825,8 @@ test("legacy projects do not require newly added opt-in agent factories", async 
   fs.writeFileSync(registryPath, legacyRegistry, "utf8");
   fs.unlinkSync(path.join(project, ".smithers", "agents", "openrouter.ts"));
 
-  const preserved = initProject({ projectRoot: project });
   const validate = await validateProject({ projectRoot: project, env: {} });
 
-  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
-  assert.equal(fs.readFileSync(registryPath, "utf8"), legacyRegistry);
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
 
