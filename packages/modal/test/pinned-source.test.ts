@@ -191,6 +191,9 @@ describe("pinned benchmark source", () => {
     expect(invocations).toContain(
       [...GITHUB_HTTPS_SUBMODULE_CONFIG, "submodule", "update", "--init", "--recursive", "--depth", "1"].join(" ")
     );
+    // Source proof inspection ran under the probe, and counted revisions without enumerating every object.
+    expect(invocations).toContain("rev-list --all --count");
+    expect(invocations.filter((line) => line.includes("--batch-all-objects"))).toEqual([]);
     expect(proof).toMatchObject({ commit: fixture.pinned, revision_count: 1, remotes: [] });
     expect(proof.schema_version).toBe("ultrafuzz.pinned-source-proof.v2");
     expect(proof.submodules).toMatchObject({

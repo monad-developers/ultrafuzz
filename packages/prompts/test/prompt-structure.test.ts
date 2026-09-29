@@ -5,12 +5,90 @@ import { describe, expect, it } from "vitest";
 
 import { artifactSchemaRegistry } from "@ultrafuzz/artifacts";
 
-import { extractPromptVariables, loadBuiltInPromptAssets } from "../src/index.js";
+import { extractPromptVariables, loadBuiltInPromptAssets, type PromptVariableReference } from "../src/index.js";
 
 // Prompt wording is deliberately not pinned here: the output contract and the artifact gates decide
 // what a prompt's artifacts must contain. These tests cover what neither the prompt catalog loader,
-// the renderer, nor topology validation checks: how shipped prompts bind producers and schemas, and
-// the reference docs' copy of a shared output-contract partial.
+// the renderer, nor topology validation checks: how shipped prompts bind producers, schemas and
+// runtime-owned values, and the reference docs' copy of a shared output-contract partial.
+
+// Template variables a shipped prompt must keep. The catalog loader, the renderer and topology
+// validation only check the references a prompt makes, so a prompt without one of these still loads.
+// Each binds something the runtime relies on after the agent finishes:
+// - a gate compares the node's output with it: the coverage-evidence partial
+//   (COVERAGE_EVIDENCE_MARKDOWN_MISMATCH, REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING), the report's
+//   coverage evidence (REPORT_COVERAGE_EVIDENCE_MISMATCH) and goal-search census (the verified
+//   report must equal its census-aware projection), the property selection settings
+//   (PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH) and the dynamic enumerator policy;
+// - the runtime reserves it in the invariant campaign's node window: the smoke and fuzzer budgets;
+// - it is the node's only view of runtime-sealed evidence: its ancestors' outputs selected by
+//   contract or path (`ancestor_*_authority`), or the goal-search census.
+// `ancestor_artifact_path_authority:<path>` is kept when any path selector in the prompt lists <path>.
+const REQUIRED_PROMPT_VARIABLES: Readonly<Record<string, readonly string[]>> = {
+  "properties/property-specification-fanin.md": ["ancestor_contract_artifact_authority:ultrafuzz/property-lens@2"],
+  "review/aggregate-test-files.md": ["ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3"],
+  "review/dedupe-findings.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/findings@2",
+    "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3",
+    "goal_search_coverage_path"
+  ],
+  "review/final-report.md": [
+    "ancestor_artifact_path_authority:coverage-evidence.json",
+    "coverage_evidence_markdown_projection",
+    "goal_search_coverage_path"
+  ],
+  "strategies/differential/differential-lane-author.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1"
+  ],
+  "strategies/differential/differential-red-triage.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1"
+  ],
+  "strategies/differential/differential-repair-and-report-review.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1",
+    "ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1",
+    "ancestor_contract_artifact_authority:ultrafuzz/differential-red-triage@1",
+    "ancestor_contract_artifact_authority:ultrafuzz/semantic-red-registry@1"
+  ],
+  "strategies/differential/reference-and-lane-auditor.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/differential-plan@1",
+    "ancestor_contract_artifact_authority:ultrafuzz/reference-harness@1"
+  ],
+  "strategies/differential/reference-harness-author.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/differential-plan@1"
+  ],
+  "strategies/dynamic-strategy-generator.md": [
+    "ancestor_contract_artifact_authority:ultrafuzz/boundary-recipes@1",
+    "ancestor_contract_artifact_authority:ultrafuzz/findings@2",
+    "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3",
+    "dynamic_strategies_enumerator"
+  ],
+  "strategies/invariants/coverage.md": ["coverage_evidence_markdown_projection", "invariant_testing_smoke_timeout"],
+  "strategies/invariants/handlers.md": ["invariant_testing_smoke_timeout"],
+  "strategies/invariants/implement-properties.md": [
+    "ancestor_artifact_path_authority:coverage-report.md",
+    "invariant_property_priorities",
+    "invariant_property_priority_threshold",
+    "invariant_reference_expectation_selection",
+    "invariant_testing_smoke_timeout"
+  ],
+  "strategies/invariants/invariant-testing-campaign.md": [
+    "ancestor_artifact_path_authority:coverage-report.md",
+    "invariant_testing_fuzzer_timeout",
+    "invariant_testing_smoke_timeout"
+  ],
+  "strategies/invariants/setup.md": ["invariant_testing_smoke_timeout"]
+};
+
+// The gates accept exactly one canonical scoped-coverage section, so the prompt carries one copy.
+const EXACTLY_ONCE_PROMPT_VARIABLES = new Set(["coverage_evidence_markdown_projection"]);
+
+function requirementKeys(reference: PromptVariableReference): string[] {
+  if (reference.argument === undefined) return [reference.name];
+  if (reference.name === "ancestor_artifact_path_authority") {
+    return reference.argument.split(",").map((relativePath) => `${reference.name}:${relativePath}`);
+  }
+  return [`${reference.name}:${reference.argument}`];
+}
 
 interface ShippedTopologyNode {
   id: string;
@@ -107,12 +185,33 @@ describe("shipped prompt structure", () => {
     let references = 0;
     for (const asset of loadBuiltInPromptAssets()) {
       expect(asset.markdown, asset.relativePath).not.toContain("packages/artifacts/schema/");
-      for (const [reference, filename = ""] of asset.markdown.matchAll(/\{\{schema_path\}\}\/([\w.-]+)/gu)) {
+      // Dots only between name segments, so a sentence-final period is not part of the filename.
+      for (const [reference, filename = ""] of asset.markdown.matchAll(
+        /\{\{schema_path\}\}\/([\w-]+(?:\.[\w-]+)*)/gu
+      )) {
         references += 1;
         expect(shipped.has(filename), `${asset.relativePath}: ${reference}`).toBe(true);
       }
     }
     expect(references).toBeGreaterThan(0);
+  });
+
+  it("keeps the template variables that gates, budgets and sealed authorities depend on", () => {
+    const assetsByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset]));
+
+    for (const [promptPath, variables] of Object.entries(REQUIRED_PROMPT_VARIABLES)) {
+      const asset = assetsByPath.get(promptPath);
+      expect(asset, promptPath).toBeDefined();
+      const counts = new Map<string, number>();
+      for (const reference of extractPromptVariables(asset?.markdown ?? "", { allowDynamicItemVariables: true })) {
+        for (const key of requirementKeys(reference)) counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      for (const variable of variables) {
+        const count = counts.get(variable) ?? 0;
+        if (EXACTLY_ONCE_PROMPT_VARIABLES.has(variable)) expect(count, `${promptPath}: {{${variable}}}`).toBe(1);
+        else expect(count, `${promptPath}: {{${variable}}}`).toBeGreaterThan(0);
+      }
+    }
   });
 
   it("keeps the reference docs' copy of the coverage-evidence Markdown partial verbatim", () => {
