@@ -107,10 +107,6 @@ function truncateUtf8(value: string, maxBytes: number, marker: string): string {
   return `${value.slice(0, end)}${marker}`;
 }
 
-export function warningDiagnostic(code: string, message: string): RuntimeDiagnostic {
-  return { code, message, severity: "warning", source: "evals" };
-}
-
 export function assertSafeEvalId(value: string, label: string): string {
   try {
     return validateSafeId(value, label);
@@ -388,36 +384,6 @@ export function mean(values: number[]): number {
     return 0;
   }
   return roundMetric(values.reduce((sum, value) => sum + value, 0) / values.length);
-}
-
-/** Deterministic RFC-4122-shaped UUID derived from stable parts (for provider run/span ids). */
-export function deterministicUuid(parts: string[]): string {
-  const digest = crypto.createHash("sha256").update(parts.join("\u0000")).digest("hex");
-  return [
-    digest.slice(0, 8),
-    digest.slice(8, 12),
-    `4${digest.slice(13, 16)}`,
-    `8${digest.slice(17, 20)}`,
-    digest.slice(20, 32)
-  ].join("-");
-}
-
-export function contentTypeForArtifact(relativePath: string): string {
-  const extension = path.extname(relativePath).toLowerCase();
-  switch (extension) {
-    case ".md":
-      return "text/markdown";
-    case ".json":
-      return "application/json";
-    case ".txt":
-    case ".log":
-      return "text/plain";
-    case ".yml":
-    case ".yaml":
-      return "application/yaml";
-    default:
-      return "application/octet-stream";
-  }
 }
 
 function resolveGitRef(targetPath: string, ref: string): string | undefined {

@@ -1,5 +1,4 @@
 import path from "node:path";
-import { isDeepStrictEqual } from "node:util";
 
 import { readRunState, sha256Bytes, type RunState } from "@ultrafuzz/artifacts";
 import {
@@ -101,21 +100,6 @@ export function loadBoundEvalReportAuthority(
       validator_build: report.validator_build
     }
   };
-}
-
-/** Require a persisted score authority to remain the exact current report authority. */
-export function assertEvalReportAuthorityRemainedCurrent(
-  record: EvalRunRecord,
-  expected: EvalReportAuthority
-): BoundEvalReportAuthority {
-  const current = loadBoundEvalReportAuthority(record);
-  if (!isDeepStrictEqual(current.authority, expected)) {
-    throw invalidReportAuthority(record, "persisted score authority does not match the current verified report", {
-      expected,
-      current: current.authority
-    });
-  }
-  return current;
 }
 
 function exactSnapshotOutput(

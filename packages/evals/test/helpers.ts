@@ -31,15 +31,6 @@ import {
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION, projectCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import type {
-  EvalArtifactUpload,
-  EvalNodeEventEnvelope,
-  EvalPlan,
-  EvalReporter,
-  EvalRowGraph,
-  EvalRowResult,
-  EvalSummary
-} from "../src/reporter.js";
-import type {
   EvalMatrixRow,
   EvalRunProvenance,
   EvalRecoveryEquivalence,
@@ -186,7 +177,7 @@ export function recoveryEquivalenceSummary(
   };
 }
 
-export function testReportingPolicy(overrides: Partial<EvalReportingPolicy> = {}): EvalReportingPolicy {
+function testReportingPolicy(overrides: Partial<EvalReportingPolicy> = {}): EvalReportingPolicy {
   return {
     node_telemetry: true,
     heartbeat_interval_seconds: 60,
@@ -1139,69 +1130,6 @@ function verifiedFinalReportOutputs(reportJsonRelativePath = "report.json"): Art
       primary: false
     }
   ];
-}
-
-export interface RecordedCall {
-  method: string;
-  args: unknown[];
-}
-
-/** In-memory reporter that records every callback for exact-sequence assertions. */
-export class RecordingReporter implements EvalReporter {
-  readonly name: string;
-  readonly calls: RecordedCall[] = [];
-  failOn: Set<string> = new Set();
-
-  constructor(name = "recording") {
-    this.name = name;
-  }
-
-  envelopes(): EvalNodeEventEnvelope[] {
-    return this.calls
-      .filter((call) => call.method === "onNodeEvent")
-      .map((call) => call.args[0] as EvalNodeEventEnvelope);
-  }
-
-  artifacts(): EvalArtifactUpload[] {
-    return this.calls.filter((call) => call.method === "onArtifact").map((call) => call.args[0] as EvalArtifactUpload);
-  }
-
-  private record(method: string, args: unknown[]): Promise<void> {
-    if (this.failOn.has(method)) {
-      return Promise.reject(new Error(`${method} forced failure`));
-    }
-    this.calls.push({ method, args });
-    return Promise.resolve();
-  }
-
-  onPlan(plan: EvalPlan): Promise<void> {
-    return this.record("onPlan", [plan]);
-  }
-
-  onRowStart(row: EvalMatrixRow, graph: EvalRowGraph): Promise<void> {
-    return this.record("onRowStart", [row, graph]);
-  }
-
-  onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void> {
-    return this.record("onNodeEvent", [envelope]);
-  }
-
-  onArtifact(artifact: EvalArtifactUpload): Promise<void> {
-    return this.record("onArtifact", [artifact]);
-  }
-
-  onRowFinish(row: EvalMatrixRow, result: EvalRowResult): Promise<void> {
-    return this.record("onRowFinish", [row, result]);
-  }
-
-  onScores(scores: EvalRowScore[], summary: EvalSummary): Promise<void> {
-    return this.record("onScores", [scores, summary]);
-  }
-
-  async finalize(summary: EvalSummary): Promise<{ url?: string }> {
-    await this.record("finalize", [summary]);
-    return { url: "https://example.com/experiment" };
-  }
 }
 
 type JournalEventInputFor<RecordType> = RecordType extends EventRecord

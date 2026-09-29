@@ -47,10 +47,6 @@ export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.o
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json"] as const;
 const MAX_EVAL_HISTORY_BYTES = 64 * 1024 * 1024;
-const MILLISECONDS_PER_DAY = 86_400_000;
-// The rendered age must carry more precision than the rendered maximum, so an age
-// barely over the budget cannot print as the budget itself.
-const EVAL_HISTORY_AGE_FRACTION_DIGITS = 4;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = BenchmarkLaneName;
@@ -261,20 +257,6 @@ export const evalHistoryZodSchema = z.strictObject({
   observations: z.array(observationSchema).max(100_000)
 });
 
-export const EVAL_HISTORY_CHARTS = [
-  { file: "precision.svg", metric: "precision", title: "Precision", ratio: true },
-  { file: "recall.svg", metric: "recall", title: "Recall", ratio: true },
-  { file: "f1.svg", metric: "f1", title: "F1", ratio: true },
-  {
-    file: "cumulative-unique-true-positives.svg",
-    metric: "cumulative_unique_true_positives",
-    title: "Cumulative unique true positives",
-    ratio: false
-  },
-  { file: "wall-clock-time.svg", metric: "wall_clock_seconds", title: "Wall-clock time (seconds)", ratio: false },
-  { file: "cost.svg", metric: "cost_usd", title: "Cost (USD)", ratio: false }
-] as const;
-
 export const EVAL_HISTORY_OVERVIEW_FILES = ["latest-summary.svg", "quality.svg", "performance-cost.svg"] as const;
 
 // Luna's repository history has a non-overlapping cost regime beginning with
@@ -284,8 +266,6 @@ export const EVAL_HISTORY_OVERVIEW_FILES = ["latest-summary.svg", "quality.svg",
 export const EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS: Readonly<Record<string, string>> = {
   "gpt-5.6-luna": "2026-07-31T14:52:13.635Z"
 };
-
-type ChartMetric = (typeof EVAL_HISTORY_CHARTS)[number]["metric"];
 
 export function emptyEvalHistory(): EvalHistory {
   return { schema_version: EVAL_HISTORY_SCHEMA_VERSION, supersessions: [], observations: [] };
@@ -579,53 +559,6 @@ function assertCompletenessValue(value: number | null, completeness: EvalHistory
   }
   if (value !== null || completeness.reasons.length === 0) {
     throw new EvalError("EVAL_HISTORY_INVALID", `${field} must be null with at least one reason when unavailable`);
-  }
-}
-
-export function assertEvalHistoryRecency(input: { history: EvalHistory; maxAgeDays: number; now: Date }): void {
-  if (!Number.isFinite(input.maxAgeDays) || input.maxAgeDays <= 0) {
-    throw new EvalError("EVAL_HISTORY_RECENCY_INVALID", "maximum eval history age must be a positive number of days", {
-      max_age_days: input.maxAgeDays
-    });
-  }
-  const now = input.now.getTime();
-  if (!Number.isFinite(now)) {
-    throw new EvalError("EVAL_HISTORY_RECENCY_INVALID", "maximum eval history age requires a valid current instant");
-  }
-  let newest: { timestamp: string; milliseconds: number } | undefined;
-  for (const observation of input.history.observations) {
-    if (!isValidTimestamp(observation.run_timestamp)) {
-      throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} has an invalid run timestamp`);
-    }
-    const milliseconds = Date.parse(observation.run_timestamp);
-    if (newest === undefined || milliseconds > newest.milliseconds) {
-      newest = { timestamp: observation.run_timestamp, milliseconds };
-    }
-  }
-  if (newest === undefined) {
-    throw new EvalError(
-      "EVAL_HISTORY_EMPTY",
-      `eval history has no observation to age against the requested ${format(input.maxAgeDays)} day maximum`,
-      { max_age_days: input.maxAgeDays }
-    );
-  }
-  // A future-dated observation would otherwise yield a negative age that passes every
-  // maximum, so one bad producer clock would silence this assertion permanently.
-  if (newest.milliseconds > now) {
-    const nowTimestamp = new Date(now).toISOString();
-    throw new EvalError(
-      "EVAL_HISTORY_FUTURE_DATED",
-      `newest eval history observation ran at ${newest.timestamp}, which is in the future at ${nowTimestamp}, so its age cannot be measured against the requested ${format(input.maxAgeDays)} day maximum`,
-      { newest_run_timestamp: newest.timestamp, now: nowTimestamp, max_age_days: input.maxAgeDays }
-    );
-  }
-  const ageDays = (now - newest.milliseconds) / MILLISECONDS_PER_DAY;
-  if (ageDays > input.maxAgeDays) {
-    throw new EvalError(
-      "EVAL_HISTORY_STALE",
-      `newest eval history observation ran at ${newest.timestamp}, ${format(ageDays, EVAL_HISTORY_AGE_FRACTION_DIGITS)} days ago, exceeding the requested ${format(input.maxAgeDays)} day maximum`,
-      { newest_run_timestamp: newest.timestamp, age_days: ageDays, max_age_days: input.maxAgeDays }
-    );
   }
 }
 
@@ -2298,10 +2231,7 @@ export function renderEvalHistoryCharts(history: EvalHistory): Map<string, strin
   return new Map([
     [EVAL_HISTORY_OVERVIEW_FILES[0], renderLatestEvalSummary(aggregates)],
     [EVAL_HISTORY_OVERVIEW_FILES[1], renderEvalQualityChart(aggregates)],
-    [EVAL_HISTORY_OVERVIEW_FILES[2], renderEvalPerformanceCostChart(aggregates)],
-    ...EVAL_HISTORY_CHARTS.map(
-      (chart) => [chart.file, renderChart(observations, chart.metric, chart.title, chart.ratio)] as const
-    )
+    [EVAL_HISTORY_OVERVIEW_FILES[2], renderEvalPerformanceCostChart(aggregates)]
   ]);
 }
 
@@ -2337,343 +2267,8 @@ export function formatEvalHistoryJson(history: EvalHistory): string {
   return `${JSON.stringify(history, null, 2).replace(SINGLE_ITEM_JSON_PRIMITIVE_ARRAY, "[$1]")}\n`;
 }
 
-// Ordered series-identity fields. Benchmark lineage fields such as cohort and
-// execution policy are intentionally excluded from line identity: those changes
-// are rendered as vertical markers, while the metric lines keep tracking the
-// same benchmark target/model over time.
-const SERIES_CONTEXT_FIELDS = ["benchmark", "lane", "model", "reasoning"] as const;
-
-interface SeriesFields {
-  benchmark: string;
-  lane: string;
-  model: string;
-  reasoning: string;
-  cohort: string;
-  policy: string;
-  target: string;
-}
-
-interface ChartPoint {
-  seriesKey: string;
-  fields: SeriesFields;
-  timestamp: string;
-  commit: string;
-  repositoryUrl: string;
-  value: number | null;
-  completeness: EvalHistoryCompleteness;
-  availableCount: number;
-  expectedCount: number;
-}
-
-interface ChartColumn {
-  key: string;
-  timestamp: string;
-  commit: string;
-  repositoryUrl: string;
-}
-
-interface LineageMarker {
-  columnKey: string;
-  label: string;
-  title: string;
-}
-
-function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric): ChartPoint[] {
-  const groups = new Map<string, EvalHistoryObservation[]>();
-  for (const observation of observations) {
-    const key = [
-      observation.benchmark,
-      observation.lane,
-      observation.model,
-      observation.reasoning_effort,
-      observation.cohort_fingerprint,
-      observation.execution_policy_fingerprint,
-      observation.target,
-      observation.run_timestamp,
-      observation.candidate_commit
-    ].join("\u0000");
-    groups.set(key, [...(groups.get(key) ?? []), observation]);
-  }
-  return [...groups.values()]
-    .map((group) => {
-      const first = group[0]!;
-      const fields: SeriesFields = {
-        benchmark: first.benchmark,
-        lane: first.lane,
-        model: first.model,
-        reasoning: first.reasoning_effort,
-        cohort: `cohort-${shortFingerprint(first.cohort_fingerprint)}`,
-        policy: `policy-${shortFingerprint(first.execution_policy_fingerprint)}`,
-        target: first.target
-      };
-      const metricValue = aggregateChartMetric(group, metric);
-      return {
-        seriesKey: [...SERIES_CONTEXT_FIELDS.map((field) => fields[field]), fields.target].join(" "),
-        fields,
-        timestamp: first.run_timestamp,
-        commit: first.candidate_commit,
-        repositoryUrl: first.candidate_repository_url,
-        ...metricValue
-      };
-    })
-    .sort(
-      (left, right) =>
-        compareText(left.seriesKey, right.seriesKey) ||
-        compareText(left.timestamp, right.timestamp) ||
-        compareText(left.commit, right.commit)
-    );
-}
-
-function chartColumnKey(point: Pick<ChartPoint, "timestamp" | "commit">): string {
-  return [point.timestamp, point.commit].join("\u0000");
-}
-
-function chartColumns(points: ChartPoint[]): ChartColumn[] {
-  const byKey = new Map<string, ChartColumn>();
-  for (const point of points) {
-    const key = chartColumnKey(point);
-    if (byKey.has(key)) continue;
-    byKey.set(key, {
-      key,
-      timestamp: point.timestamp,
-      commit: point.commit,
-      repositoryUrl: point.repositoryUrl
-    });
-  }
-  return [...byKey.values()].sort(
-    (left, right) => compareText(left.timestamp, right.timestamp) || compareText(left.commit, right.commit)
-  );
-}
-
-function chartLineageMarkers(points: ChartPoint[]): LineageMarker[] {
-  const earliestByLineage = new Map<string, ChartPoint>();
-  for (const point of [...points].sort(
-    (left, right) => compareText(left.timestamp, right.timestamp) || compareText(left.commit, right.commit)
-  )) {
-    const lineageKey = [point.fields.benchmark, point.fields.lane, point.fields.cohort, point.fields.policy].join(
-      "\u0000"
-    );
-    if (!earliestByLineage.has(lineageKey)) earliestByLineage.set(lineageKey, point);
-  }
-  return [...earliestByLineage.values()].map((point) => ({
-    columnKey: chartColumnKey(point),
-    label: point.fields.cohort,
-    title: `${point.fields.benchmark} ${point.fields.lane} ${point.fields.cohort} ${point.fields.policy}`
-  }));
-}
-
 function shortFingerprint(value: string): string {
   return value.replace(/^sha256:/u, "").slice(0, 8);
-}
-
-function aggregateChartMetric(
-  observations: EvalHistoryObservation[],
-  metric: ChartMetric
-): {
-  value: number | null;
-  completeness: EvalHistoryCompleteness;
-  availableCount: number;
-  expectedCount: number;
-} {
-  if (metric === "cumulative_unique_true_positives") {
-    const perTarget = new Map<string, number>();
-    for (const observation of observations) {
-      perTarget.set(
-        observation.target,
-        Math.max(perTarget.get(observation.target) ?? 0, observation.cumulative_unique_true_positives)
-      );
-    }
-    return {
-      value: [...perTarget.values()].reduce((sum, value) => sum + value, 0),
-      completeness: { status: "complete", reasons: [] },
-      availableCount: observations.length,
-      expectedCount: observations.length
-    };
-  }
-  if (metric === "wall_clock_seconds" || metric === "cost_usd") {
-    const completenessField = metric === "wall_clock_seconds" ? "wall_clock_completeness" : "cost_completeness";
-    return aggregateCompletenessValues(
-      observations.map((observation) => ({
-        value: observation[metric],
-        completeness: observation[completenessField]
-      })),
-      (values) => round(values.reduce((sum, value) => sum + value, 0)),
-      { preservePartialWithoutValue: true }
-    );
-  }
-  return {
-    value: mean(observations.map((observation) => observation[metric])),
-    completeness: { status: "complete", reasons: [] },
-    availableCount: observations.length,
-    expectedCount: observations.length
-  };
-}
-
-function renderChart(
-  observations: EvalHistoryObservation[],
-  metric: ChartMetric,
-  title: string,
-  ratioMetric: boolean
-): string {
-  // Sized to be read at (or near) the README's full content width, one chart
-  // per row — a two-up layout would halve this and shrink the text again.
-  const width = 960;
-  const left = 70;
-  const right = 30;
-  const top = 104;
-  const plotWidth = width - left - right;
-  const plotHeight = 300;
-  const plotBottom = top + plotHeight;
-  const dateLabelBottom = plotBottom + 116;
-  const legendTop = dateLabelBottom + 34;
-  const points = chartPoints(observations, metric);
-  const columns = chartColumns(points);
-  const columnIndex = new Map(columns.map((column, index) => [column.key, index]));
-
-  const seriesKeys = [...new Set(points.map((point) => point.seriesKey))];
-  const height = legendTop + seriesKeys.length * 22 + 12;
-  const palette = ["#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c", "#4f46e5"];
-  const color = new Map(seriesKeys.map((name, index) => [name, palette[index % palette.length]!]));
-  const seriesFieldsByKey = new Map(
-    seriesKeys.map((key) => [key, points.find((point) => point.seriesKey === key)!.fields])
-  );
-
-  // Split shared context (rendered once as a subtitle) from the fields that
-  // distinguish the plotted series (rendered in each legend row).
-  const constantContext: string[] = [];
-  const varyingFields: Array<(typeof SERIES_CONTEXT_FIELDS)[number]> = [];
-  for (const field of SERIES_CONTEXT_FIELDS) {
-    const values = new Set([...seriesFieldsByKey.values()].map((fields) => fields[field]));
-    const sample = [...seriesFieldsByKey.values()][0];
-    if (values.size <= 1) {
-      if (sample !== undefined) constantContext.push(sample[field]);
-    } else {
-      varyingFields.push(field);
-    }
-  }
-  const seriesLabel = (fields: SeriesFields): string =>
-    [...varyingFields.map((field) => fields[field]), fields.target].join(" ");
-
-  const available = points.map((point) => point.value).filter((value): value is number => value !== null);
-  const maxValue = ratioMetric ? 1 : Math.max(1, ...available);
-  const columnX = (column: ChartColumn): number => {
-    if (columns.length <= 1) return left + plotWidth / 2;
-    const index = columnIndex.get(column.key) ?? 0;
-    const pad = 44;
-    return left + pad + (index / (columns.length - 1)) * (plotWidth - 2 * pad);
-  };
-  const x = (point: ChartPoint): number => {
-    const column = columns[columnIndex.get(chartColumnKey(point)) ?? 0];
-    return column === undefined ? left + plotWidth / 2 : columnX(column);
-  };
-  const y = (value: number): number => top + plotHeight - (value / maxValue) * plotHeight;
-
-  const lines: string[] = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
-    `<title id="title">${xml(title)}</title>`,
-    `<desc id="desc">${xml(`${title} by candidate commit and benchmark target${metric === "wall_clock_seconds" || metric === "cost_usd" ? "; partial values use hollow dashed markers, legacy partial values without a number use a dashed ring and partial n/a label, and unavailable values use an n/a cross" : ""}`)}</desc>`,
-    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
-    `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">${xml(title)}</text>`
-  ];
-  if (constantContext.length > 0) {
-    lines.push(
-      `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(constantContext.join(" · "))}</text>`
-    );
-  }
-  lines.push(
-    `<text x="${left}" y="86" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml("Each line tracks one benchmark target across evenly spaced candidate-run columns.")}</text>`,
-    `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
-    `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
-  );
-  for (let tick = 0; tick <= 4; tick += 1) {
-    const value = (maxValue * tick) / 4;
-    const tickY = y(value);
-    lines.push(
-      `<line x1="${left}" y1="${format(tickY)}" x2="${left + plotWidth}" y2="${format(tickY)}" stroke="#e5e7eb"/>`,
-      `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">${xml(formatMetric(value, ratioMetric))}</text>`
-    );
-  }
-  if (points.length === 0) {
-    lines.push(
-      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No published observations</text>`
-    );
-  } else {
-    for (const marker of chartLineageMarkers(points)) {
-      const column = columns[columnIndex.get(marker.columnKey) ?? 0];
-      if (column === undefined) continue;
-      const markerX = columnX(column);
-      lines.push(
-        `<g data-lineage-marker="${xml(marker.label)}"><title>${xml(marker.title)}</title>`,
-        `<line x1="${format(markerX)}" y1="${top}" x2="${format(markerX)}" y2="${plotBottom}" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>`,
-        `<text transform="translate(${format(markerX + 7)},${format(top + 8)}) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">${xml(marker.label)}</text></g>`
-      );
-    }
-    const bySeries = new Map<string, ChartPoint[]>();
-    for (const point of points) bySeries.set(point.seriesKey, [...(bySeries.get(point.seriesKey) ?? []), point]);
-    for (const [name, values] of bySeries) {
-      const stroke = color.get(name)!;
-      const availableValues = values.filter((point): point is ChartPoint & { value: number } => point.value !== null);
-      if (availableValues.length > 1) {
-        lines.push(
-          `<polyline fill="none" stroke="${stroke}" stroke-width="2.5" points="${availableValues
-            .map((point) => `${format(x(point))},${format(y(point.value))}`)
-            .join(" ")}"/>`
-        );
-      }
-      for (const point of values) {
-        const pointX = x(point);
-        const commitUrl = `${point.repositoryUrl.replace(/\/$/u, "")}/commit/${point.commit}`;
-        const shortCommit = point.commit.slice(0, 7);
-        const label = seriesLabel(point.fields);
-        if (point.value === null) {
-          const pointY = plotBottom - 8;
-          const partialWithoutValue = point.completeness.status === "partial";
-          const status = partialWithoutValue ? "partial (value unavailable)" : "unavailable";
-          lines.push(
-            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="${point.completeness.status}" data-available-count="${point.availableCount}" data-expected-count="${point.expectedCount}"><title>${xml(`${label} ${shortCommit}: ${status}${point.completeness.reasons.length === 0 ? "" : ` (${point.completeness.reasons.join(", ")})`}`)}</title>`
-          );
-          if (partialWithoutValue) {
-            lines.push(
-              `<circle data-completeness-marker="partial-null" cx="${format(pointX)}" cy="${format(pointY)}" r="8" fill="none" stroke="${stroke}" stroke-width="2" stroke-dasharray="2 2"/>`
-            );
-          }
-          lines.push(
-            `<line x1="${format(pointX - 5)}" y1="${format(pointY - 5)}" x2="${format(pointX + 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
-            `<line x1="${format(pointX + 5)}" y1="${format(pointY - 5)}" x2="${format(pointX - 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
-            `<text x="${format(pointX)}" y="${format(pointY - 10)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">${partialWithoutValue ? "partial n/a" : "n/a"} ${shortCommit}</text></a>`
-          );
-          continue;
-        }
-        const pointY = y(point.value);
-        const partial = point.completeness.status === "partial";
-        lines.push(
-          `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="${point.completeness.status}" data-available-count="${point.availableCount}" data-expected-count="${point.expectedCount}"><title>${xml(`${label} ${shortCommit}: ${formatMetric(point.value, ratioMetric)}${partial ? ` partial (${point.completeness.reasons.join(", ")})` : ""}`)}</title>`,
-          partial
-            ? `<circle data-completeness-marker="partial" cx="${format(pointX)}" cy="${format(pointY)}" r="6" fill="#ffffff" stroke="${stroke}" stroke-width="3" stroke-dasharray="2 2"/>`
-            : `<circle cx="${format(pointX)}" cy="${format(pointY)}" r="5" fill="${stroke}"/>`,
-          "</a>"
-        );
-      }
-    }
-    for (const column of columns) {
-      const labelX = columnX(column);
-      lines.push(
-        `<text x="${format(labelX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">${xml(column.commit.slice(0, 7))}</text>`,
-        `<text transform="translate(${format(labelX)},${dateLabelBottom}) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.timestamp.slice(0, 10))}</text>`
-      );
-    }
-  }
-  seriesKeys.forEach((name, index) => {
-    const fields = seriesFieldsByKey.get(name)!;
-    const rowY = legendTop + index * 22;
-    lines.push(
-      `<rect x="${left}" y="${rowY - 11}" width="12" height="12" fill="${color.get(name)}"/>`,
-      `<text x="${left + 18}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(seriesLabel(fields))}</text>`
-    );
-  });
-  lines.push("</svg>");
-  return `${lines.join("\n")}\n`;
 }
 
 function installHistoryPublication(
@@ -2833,10 +2428,6 @@ function formatCost(value: number): string {
 
 function formatCostTick(value: number): string {
   return `$${Number(value.toFixed(2)).toLocaleString("en-US", { useGrouping: false })}`;
-}
-
-function formatMetric(value: number, ratioMetric: boolean): string {
-  return ratioMetric ? value.toFixed(2) : Number(value.toFixed(2)).toLocaleString("en-US", { useGrouping: false });
 }
 
 function xml(value: string): string {

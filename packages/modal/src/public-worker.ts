@@ -150,10 +150,8 @@ type PublicDiagnosticSecretValues = readonly string[] | (() => Promise<readonly 
 /**
  * Run artifacts retained per row when the topology produced them.
  *
- * `reporting.artifacts.include` cannot deliver these. It is read only by
- * `uploadsForManifest` (`packages/evals/src/node-telemetry.ts`), whose output
- * goes only to `this.input.reporters`; the public worker runs
- * `eval run --provider none` with an empty reporter list. Nothing else recovers them either:
+ * `reporting.artifacts.include` cannot deliver these: nothing in the eval
+ * runner reads it. Nothing else recovers them either:
  * `MODAL_COLLECT_RESULT_FILES` does not list them, and the run root under
  * `PUBLIC_WORKSPACE_ROOT` is removed with the sandbox. The bundle is the only
  * surviving channel, so retention has to happen here.
