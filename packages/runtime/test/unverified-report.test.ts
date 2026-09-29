@@ -3,7 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { createInitialRunState, reportSchema } from "@ultrafuzz/artifacts";
+import {
+  artifactContractDefinition,
+  createInitialRunState,
+  reportSchema,
+  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+  type SmithersTaskManifestTask
+} from "@ultrafuzz/artifacts";
 import {
   readReportPublicationStatus,
   writeReportPublicationStatus,
@@ -115,6 +122,225 @@ for (const status of ["failed", "pending", "running", "skipped"]) {
     assert.equal(fs.existsSync(path.join(root, "review")), false);
   });
 }
+
+/** A failed report task whose failure names `causalTaskId`, with the report left in its workspace mirror. */
+function failReportAttempt(root: string, causalTaskId: string): string {
+  const state = createInitialRunState({
+    runId: path.basename(root),
+    nodes: [{ id: "final-report", status: "failed" }]
+  });
+  state.status = "failed";
+  const node = state.nodes["final-report"];
+  assert.ok(node !== undefined);
+  node.provenance = {
+    workflow: {
+      run_id: "workflow",
+      task_id: causalTaskId,
+      agent_task_id: "node:final-report",
+      verifier_task_id: "verify:final-report",
+      state: "failed",
+      attempt: 1
+    },
+    failure: {
+      category: causalTaskId === "node:final-report" ? "agent-failure" : "artifact-contract",
+      causal_task_id: causalTaskId,
+      causal_failure_category: causalTaskId === "node:final-report" ? "agent-failure" : "artifact-contract",
+      dependent_task_ids: []
+    }
+  };
+  fs.writeFileSync(path.join(root, "state.json"), JSON.stringify(state));
+  const mirror = path.join(root, "workspaces", "final-report", "artifacts", "final-report");
+  fs.mkdirSync(mirror, { recursive: true });
+  const file = path.join(mirror, "report.json");
+  fs.renameSync(path.join(root, "artifacts", "final-report", "report.json"), file);
+  return file;
+}
+
+/** A task manifest whose one task is the report attempt, run in the cloud with these explicit credential names. */
+function writeReportTaskManifest(root: string, agentCredentialEnv: string[], modalCredentialEnv: string[]): void {
+  const runId = path.basename(root);
+  const artifactDir = path.join(root, "artifacts", "final-report");
+  const workspacePath = path.join(root, "workspaces", "final-report");
+  const agentChain = [{ profileId: "default", agentRef: "CodexAgent", role: "primary" as const }];
+  const resources = { cpu: 2, memoryMiB: 1024, timeoutSeconds: 60 };
+  const task: SmithersTaskManifestTask = {
+    attemptId: "final-report",
+    concreteNodeId: "final-report",
+    logicalNodeId: "final-report",
+    preparationSmithersNodeId: "prepare:final-report",
+    smithersNodeId: "node:final-report",
+    verifierSmithersNodeId: "verify:final-report",
+    agentRef: "CodexAgent",
+    agentChain,
+    dependencies: [],
+    dependencySmithersNodeIds: [],
+    timeoutMs: 60_000,
+    heartbeatTimeoutMs: 60_000,
+    retries: 0,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1000 },
+    workspacePath,
+    artifactDir,
+    dependencyArtifactDirs: [],
+    execution: {
+      mode: "cloud",
+      provider: "modal",
+      resources,
+      modal: { app: "ultrafuzz", image: "ultrafuzz-node", credentialEnv: modalCredentialEnv },
+      agentCredentialEnv
+    },
+    metadata: {
+      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
+      run: { ultrafuzzRunId: runId, smithersWorkflowName: "workflow", graphVersion: "4", topologyVersion: 2 },
+      node: {
+        concreteNodeId: "final-report",
+        logicalNodeId: "final-report",
+        attemptId: "final-report",
+        label: "Final report",
+        kind: "agentic"
+      },
+      dependencies: { concreteNodeIds: [], attemptIds: [], smithersNodeIds: [] },
+      loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
+      model: { profileId: "default", agentRef: "CodexAgent", modelIndex: 0, attemptIndex: 0, agentChain },
+      workspace: { primitive: "worktree", path: workspacePath, repoPath: root, trustModel: "skip-permissions" },
+      artifacts: {
+        dir: artifactDir,
+        outputs: [
+          {
+            path: "report.md",
+            contract: "ultrafuzz/nonempty-markdown@1",
+            contractDigest: artifactContractDefinition("ultrafuzz/nonempty-markdown@1").digest,
+            primary: true
+          }
+        ],
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      },
+      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
+      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
+      execution: { mode: "cloud", provider: "modal", resources }
+    }
+  };
+  fs.mkdirSync(path.join(root, "smithers"));
+  fs.writeFileSync(
+    path.join(root, "smithers", "tasks.json"),
+    JSON.stringify({
+      schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
+      run_id: runId,
+      smithers_run_id: "workflow",
+      workflow_name: "workflow",
+      pinned_submodules: null,
+      tasks: [task]
+    })
+  );
+}
+
+// The verifier-rejected report that is published is covered end to end by the
+// syncRun "stopped failures" tests in runtime.test.ts; these pin what stays unavailable.
+for (const causalTaskId of ["node:final-report", "prepare:final-report"]) {
+  test(`a report task that failed at ${causalTaskId} does not publish leftover workspace output`, () => {
+    const root = reportRun(`failed-at-${causalTaskId.replace(":", "-")}`);
+    writeAgentReport(root);
+    failReportAttempt(root, causalTaskId);
+    assert.throws(() => loadReportSnapshot(root), /Report unavailable: no unique successful report-agent attempt/u);
+    assert.equal(fs.existsSync(path.join(root, "review")), false);
+  });
+}
+
+test("a report its verifier rejected stays unavailable when it fails the artifact secret gate", () => {
+  const root = reportRun("verifier-rejected-secret");
+  writeAgentReport(root);
+  const file = failReportAttempt(root, "verify:final-report");
+  const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+  report.run_metadata.repository = "example/repository ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fake credential fixture for the redaction tests
+  fs.writeFileSync(file, JSON.stringify(report));
+  assert.throws(() => loadReportSnapshot(root), /Report unavailable: .* did not pass the artifact secret gate/u);
+  assert.equal(fs.existsSync(path.join(root, "review")), false);
+});
+
+// Cloud tasks name their agent and Modal credentials explicitly, and the
+// verifier refuses those values whatever the variable is called.
+test("a report its verifier rejected stays unavailable when it holds a credential its task names", () => {
+  const name = "ULTRAFUZZ_TEST_REPORT_PLAIN_CRED";
+  const credential = "opaque value of a plainly named credential";
+  process.env.ULTRAFUZZ_TEST_REPORT_PLAIN_CRED = credential;
+  try {
+    for (const named of ["nowhere", "agent", "modal"] as const) {
+      const root = reportRun(`verifier-rejected-credential-named-${named}`);
+      writeAgentReport(root);
+      const file = failReportAttempt(root, "verify:final-report");
+      writeReportTaskManifest(root, named === "agent" ? [name] : [], named === "modal" ? [name] : []);
+      const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+      report.run_metadata.repository = `example/repository ${credential}`;
+      fs.writeFileSync(file, JSON.stringify(report));
+      if (named === "nowhere") {
+        // Nothing else marks the value as a secret, so only the task's names can hide the report.
+        assert.equal(loadReportSnapshot(root).verification, "not-checked");
+      } else {
+        assert.throws(() => loadReportSnapshot(root), /Report unavailable: .* did not pass the artifact secret gate/u);
+        assert.equal(fs.existsSync(path.join(root, "review")), false);
+      }
+    }
+  } finally {
+    delete process.env.ULTRAFUZZ_TEST_REPORT_PLAIN_CRED;
+  }
+});
+
+// JSON escapes a quote, a backslash and a control character, so the report's
+// JSON text never holds such a credential verbatim.
+test("a report its verifier rejected stays unavailable when it holds a credential that JSON escapes", () => {
+  const credentials = ['quoted "opaque" password', "back\\slashed opaque password", "tabbed\topaque password"];
+  for (const [index, credential] of credentials.entries()) {
+    for (const configured of [false, true]) {
+      const root = reportRun(`verifier-rejected-escaped-credential-${String(index)}-${String(configured)}`);
+      writeAgentReport(root);
+      const file = failReportAttempt(root, "verify:final-report");
+      const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+      report.run_metadata.repository = `example/repository ${credential}`;
+      fs.writeFileSync(file, JSON.stringify(report));
+      if (configured) process.env.ULTRAFUZZ_TEST_REPORT_PASSWORD = credential;
+      try {
+        if (!configured) {
+          // Nothing else marks the value as a secret, so only the configured value can hide the report.
+          assert.equal(loadReportSnapshot(root).verification, "not-checked");
+        } else {
+          assert.throws(
+            () => loadReportSnapshot(root),
+            /Report unavailable: .* did not pass the artifact secret gate/u
+          );
+          assert.equal(fs.existsSync(path.join(root, "review")), false);
+        }
+      } finally {
+        delete process.env.ULTRAFUZZ_TEST_REPORT_PASSWORD;
+      }
+    }
+  }
+});
+
+// JSON writes each line break of this recovery phrase as `\n`, which is not
+// whitespace, so only the decoded report holds the phrase.
+test("a report its verifier rejected stays unavailable when it holds a line-broken recovery phrase", () => {
+  const root = reportRun("verifier-rejected-line-broken-phrase");
+  writeAgentReport(root);
+  const file = failReportAttempt(root, "verify:final-report");
+  const report = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { repository: string } };
+  report.run_metadata.repository = `example/repository\n${[...Array<string>(11).fill("abandon"), "about"].join("\n")}`;
+  fs.writeFileSync(file, JSON.stringify(report));
+  assert.throws(() => loadReportSnapshot(root), /Report unavailable: .* did not pass the artifact secret gate/u);
+  assert.equal(fs.existsSync(path.join(root, "review")), false);
+});
+
+test("a report its verifier rejected is published when only adjacent fields together form a recovery phrase", () => {
+  const root = reportRun("verifier-rejected-adjacent-fields");
+  writeAgentReport(root);
+  const file = failReportAttempt(root, "verify:final-report");
+  const report = JSON.parse(fs.readFileSync(file, "utf8")) as {
+    run_metadata: { repository: string; elapsed_time: string };
+  };
+  // Eleven "abandon" and one "about" are a valid phrase, but here they span two separate fields.
+  report.run_metadata.repository = `example/repository ${Array<string>(6).fill("abandon").join(" ")}`;
+  report.run_metadata.elapsed_time = `${[...Array<string>(5).fill("abandon"), "about"].join(" ")} 1m`;
+  fs.writeFileSync(file, JSON.stringify(report));
+  assert.equal(loadReportSnapshot(root).verification, "not-checked");
+});
 
 test("unchecked agent reports disclose saved failures without inventing planned counts", () => {
   const root = reportRun("failed-records");

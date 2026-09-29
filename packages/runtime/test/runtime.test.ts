@@ -20348,6 +20348,19 @@ for (const variant of ["failed-verifier", "changed-output", "exhausted-loop"] as
     assert.ok(run.value);
     const runRoot = run.value.run_root;
     writeEmptyFinalReportArtifactSet(runRoot, runId);
+    // The agent writes into its workspace output mirror; only an accepted
+    // verification publishes into artifacts/. For failed-verifier, the copy in
+    // artifacts/ stands in for a leftover from an earlier attempt.
+    const mirroredReportPath = path.join(
+      runRoot,
+      "workspaces",
+      "final-report",
+      "artifacts",
+      "final-report",
+      "report.json"
+    );
+    fs.mkdirSync(path.dirname(mirroredReportPath), { recursive: true });
+    fs.copyFileSync(path.join(runRoot, "artifacts", "final-report", "report.json"), mirroredReportPath);
     const authoredMarkdownPath = path.join(runRoot, "artifacts", "final-report", "report.md");
     if (variant === "changed-output") fs.appendFileSync(authoredMarkdownPath, "\nUnverified appended text.\n");
     const authoredMarkdownBefore = fs.readFileSync(authoredMarkdownPath);
@@ -20368,18 +20381,29 @@ for (const variant of ["failed-verifier", "changed-output", "exhausted-loop"] as
         JSON.stringify(sync.diagnostics)
       );
     }
-    if (variant === "exhausted-loop") {
-      const report = loadReportSnapshot(runRoot);
-      assert.equal(report.artifacts.source, "unverified-runtime-report");
-      assert.equal(report.terminal, true);
-      assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
-      assert.equal(report.verification, "not-checked");
-      assert.equal(report.observed_completion?.outcome, "partial");
-    } else {
-      assert.throws(() => loadReportSnapshot(runRoot), /Report unavailable/u);
-      assert.equal(fs.existsSync(path.join(runRoot, "review", "unverified-report")), false);
-    }
     const state = readRunState(path.join(runRoot, "state.json"));
+    // A report rejected at verification (failed-verifier), or whose verified
+    // publication then changed (changed-output), is still the agent's report:
+    // syncRun publishes it unchecked from the workspace mirror.
+    const published = readReportPublicationStatus(runRoot, state);
+    assert.deepEqual(
+      [published.status, published.completion, published.verification],
+      ["available", "partial", "not-checked"]
+    );
+    const report = loadReportSnapshot(runRoot);
+    assert.equal(report.artifacts.source, "unverified-runtime-report");
+    assert.equal(report.terminal, true);
+    assert.match(report.markdown, /^# Ultrafuzz report — PARTIAL/u);
+    assert.doesNotMatch(report.markdown, /Unverified appended text/u);
+    assert.equal(report.verification, "not-checked");
+    assert.equal(report.observed_completion?.outcome, "partial");
+    const reasons = (report.json as { verification: { reason_codes: string[] } }).verification.reason_codes;
+    assert.equal(reasons.includes("record-invalid"), variant !== "exhausted-loop", JSON.stringify(reasons));
+    if (variant !== "exhausted-loop") {
+      // #1120: a rejected attempt's artifacts/ copy is never read.
+      fs.rmSync(mirroredReportPath);
+      assert.throws(() => loadReportSnapshot(runRoot), /Report unavailable/u);
+    }
     assert.equal(state.status, "failed");
     assert.equal(state.nodes["final-report"]?.status, variant === "exhausted-loop" ? "succeeded" : "failed");
     assert.deepEqual(fs.readFileSync(authoredMarkdownPath), authoredMarkdownBefore);

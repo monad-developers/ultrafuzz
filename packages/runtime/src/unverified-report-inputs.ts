@@ -2,16 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  assertArtifactPublicationsContainNoSecrets,
   assertNoSymlinkComponents,
   NODE_REFERENCE_PATTERN,
   parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
   readSinglyLinkedRegularFileSnapshotInside,
   safeResolveInside,
+  sensitiveEnvironmentValues,
   sha256Bytes,
   type ObservedReportCompletion,
   reportSchema,
-  type ReportVerification
+  type ReportVerification,
+  type SmithersTaskManifestExecution,
+  type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadGoalSearchCoverageSnapshot } from "./final-report-markdown.js";
 import { ReportUnavailableError } from "./report-unavailable.js";
@@ -215,7 +219,7 @@ function unexpandedScopes(graph: JsonRecord | undefined): string[] | undefined {
   return scopes;
 }
 
-/** Locate the current successful report task. Never promote raw strategy results into a report. */
+/** Locate the current report-agent output. Never promote raw strategy results into a report. */
 function readAgentReport(
   reader: ReportInputReader,
   state: JsonRecord | undefined,
@@ -237,14 +241,19 @@ function readAgentReport(
   const producer = producers[0];
   if (typeof producer.id !== "string" || !NODE_REFERENCE_PATTERN.test(producer.id))
     throw new ReportUnavailableError("the current report-agent task ID is invalid");
-  const attempt = successfulReportAttempt(producer.id, nodes, state?.run_id, manifestBytes);
+  const attempt = currentReportAttempt(producer.id, nodes, state?.run_id, manifestBytes);
   const outputs = (producer.outputs as unknown[])
     .map(asRecord)
     .filter((output) => output?.contract === "ultrafuzz/report@3");
   const outputPath = outputs.length === 1 ? outputs[0]?.path : undefined;
   if (typeof outputPath !== "string" || !safeReportPath(outputPath))
     throw new ReportUnavailableError("the declared report output path is invalid");
-  const value = reader.record(`artifacts/${attempt}/${outputPath}`, false, MAX_REPORT_BYTES);
+  // A rejected attempt has no trusted artifacts/ copy: the verifier publishes
+  // only output it accepts, and the controller rejects a publication that then
+  // changed. The agent's own output is still in the workspace mirror.
+  if (attempt.rejected) reader.reasons.add("record-invalid");
+  const directory = attempt.rejected ? `workspaces/${attempt.id}/artifacts/${attempt.id}` : `artifacts/${attempt.id}`;
+  const value = reader.record(`${directory}/${outputPath}`, false, MAX_REPORT_BYTES);
   const parsed = reportSchema.safeParse(value);
   if (!parsed.success || parsed.data.run_metadata.run_id !== path.basename(reader.root))
     throw new ReportUnavailableError("the report-agent JSON is missing, unreadable, or invalid");
@@ -256,30 +265,89 @@ function readAgentReport(
     parsed.data.observed_completion !== undefined
   )
     throw new ReportUnavailableError("the agent report contains runtime-owned completion metadata");
+  if (attempt.rejected) assertRejectedReportHasNoSecrets(outputPath, parsed.data, attempt.execution);
   return parsed.data;
 }
 
-function successfulReportAttempt(
+/**
+ * The verifier runs its secret gate just before it publishes, so a report it
+ * rejected may never have passed that gate. Scan the parsed report, which holds
+ * all agent-written presentation content, for the values the verifier refuses,
+ * including those its task names as credentials, and keep it unavailable on a
+ * hit rather than rewrite agent content. JSON escapes a quote, a backslash and
+ * a control character, so the decoded strings are scanned beside the JSON text.
+ * They are joined by NUL, which no pattern treats as a word gap, so words that
+ * end one field and start the next never read as one phrase.
+ */
+function assertRejectedReportHasNoSecrets(
+  outputPath: string,
+  report: unknown,
+  execution: SmithersTaskManifestExecution | undefined
+): void {
+  const strings: string[] = [];
+  const json = JSON.stringify(report, (_key, value: unknown) => {
+    if (typeof value === "string") strings.push(value);
+    return value;
+  });
+  try {
+    assertArtifactPublicationsContainNoSecrets(
+      new Map([
+        [outputPath, Buffer.from(json, "utf8")],
+        [`${outputPath} strings`, Buffer.from(strings.join("\0"), "utf8")]
+      ]),
+      sensitiveEnvironmentValues(process.env, [
+        ...(execution?.agentCredentialEnv ?? []),
+        ...(execution?.modal?.credentialEnv ?? [])
+      ])
+    );
+  } catch {
+    throw new ReportUnavailableError("the rejected report-agent JSON did not pass the artifact secret gate");
+  }
+}
+
+/** A unique successful attempt, else a unique attempt whose agent finished but whose output was rejected. */
+function currentReportAttempt(
   producerId: string,
   nodes: JsonRecord,
   runId: unknown,
   manifestBytes: Buffer | undefined
-): string {
+): { id: string; rejected: boolean; execution: SmithersTaskManifestExecution | undefined } {
+  let tasks: SmithersTaskManifestTask[] = [];
   let attempts = [producerId];
   if (manifestBytes !== undefined) {
     try {
       const manifest = parseSmithersTaskManifestBytes(manifestBytes);
       if (manifest.run_id !== runId) throw new Error("task manifest belongs to another run");
-      attempts = manifest.tasks.filter((task) => task.concreteNodeId === producerId).map((task) => task.attemptId);
+      tasks = manifest.tasks.filter((task) => task.concreteNodeId === producerId);
+      attempts = tasks.map((task) => task.attemptId);
     } catch {
       throw new ReportUnavailableError("the current report-agent attempt cannot be identified from the task manifest");
     }
   }
   const successful = attempts.filter((id) => asRecord(nodes[id])?.status === "succeeded");
-  const attempt = successful[0];
-  if (successful.length !== 1 || attempt === undefined)
+  const candidates = successful.length > 0 ? successful : attempts.filter((id) => verifierRejected(nodes[id]));
+  const attempt = candidates[0];
+  if (candidates.length !== 1 || attempt === undefined)
     throw new ReportUnavailableError("no unique successful report-agent attempt is recorded");
-  return attempt;
+  // Without a readable manifest no explicit names are known; local tasks never carry any.
+  const execution = tasks.find((task) => task.attemptId === attempt)?.execution;
+  return { id: attempt, rejected: successful.length === 0, execution };
+}
+
+/**
+ * Synchronization names the verifier as the cause only after the agent task
+ * itself succeeded: the verifier failed, or the controller rejected the
+ * verifier's publication.
+ */
+function verifierRejected(value: unknown): boolean {
+  const node = asRecord(value);
+  const provenance = asRecord(node?.provenance);
+  const verifier = asRecord(provenance?.workflow)?.verifier_task_id;
+  return (
+    node?.status === "failed" &&
+    typeof verifier === "string" &&
+    asRecord(provenance?.failure)?.causal_task_id === verifier
+  );
 }
 
 function safeReportPath(relative: string): boolean {
