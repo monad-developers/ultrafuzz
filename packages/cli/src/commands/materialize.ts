@@ -1,5 +1,5 @@
 import { Args, Command, Flags } from "@oclif/core";
-import { materializeRun } from "@ultrafuzz/runtime";
+import { materializeSelection } from "@ultrafuzz/runtime";
 
 import { commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 
@@ -24,7 +24,7 @@ export default class Materialize extends Command {
         destination: separator === -1 ? entry : entry.slice(separator + 1)
       };
     });
-    const result = await materializeRun({
+    const result = await materializeSelection({
       projectRoot: projectRoot(flags),
       runId: args.runId,
       copies,

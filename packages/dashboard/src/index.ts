@@ -43,12 +43,12 @@ import {
   SUPPORTED_TEMPLATE_VARIABLES
 } from "@ultrafuzz/prompts";
 import {
-  cleanGenerated,
+  cleanRun,
   assertVerifiedRunOutputAuthorityRemainedCurrent,
   forkRun,
   getRunStatus,
   listRuns,
-  materializeRun,
+  materializeSelection,
   referencesStatus,
   referencesSync,
   referencesUpdate,
@@ -1545,7 +1545,7 @@ class DashboardApp {
         result = referencesUpdate({ projectRoot: this.projectRoot, latest: body.latest !== false });
         break;
       case "materialize":
-        result = await materializeRun({
+        result = await materializeSelection({
           projectRoot: this.projectRoot,
           runId: runId!,
           copies: copySelections(body),
@@ -1555,7 +1555,7 @@ class DashboardApp {
         });
         break;
       case "clean":
-        result = await cleanGenerated({
+        result = await cleanRun({
           projectRoot: this.projectRoot,
           selections:
             stringArrayField(body, "select").length > 0 ? stringArrayField(body, "select") : [`runs/${runId}`],

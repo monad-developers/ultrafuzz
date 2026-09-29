@@ -8,7 +8,6 @@ import {
   MAX_FINDING_NESTED_ITEMS,
   findingLifecycleSchema,
   findingLifecycleStageSchema,
-  findingNoteSchema,
   findingReportBoundTextSchema,
   findingSchema,
   findingStrategyHitSchema,
@@ -170,7 +169,7 @@ export const strategyDetectionsSchema = withDocumentMetadata(
 const triagedFindingSchema = findingSchema
   .safeExtend({
     triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
-    notes: z.array(findingNoteSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
+    notes: z.array(findingReportBoundTextSchema).min(1).max(MAX_FINDING_NESTED_ITEMS)
   })
   .meta({
     allOf: [
@@ -243,7 +242,7 @@ const severityClassifiedFindingSchema = findingSchema
     // Severity review must preserve the already-validated triage notes byte for
     // byte, but the copied values remain inside the report-vocabulary trust
     // boundary and are therefore validated again at this contract boundary.
-    notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+    notes: z.array(findingReportBoundTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
     severity: z.enum(FINDING_SEVERITIES).optional(),
     impact: z.enum(FINDING_SEVERITIES).optional(),
     likelihood: z.enum(FINDING_SEVERITIES).optional(),
@@ -1613,7 +1612,7 @@ const reportCoverageUnavailableSchema = z.strictObject({
 });
 
 const reportIssueSchema = findingSchema.safeExtend({
-  notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+  notes: z.array(findingReportBoundTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   description: nonEmptyString,
   severity: z.enum(FINDING_SEVERITIES),
   likelihood: z.enum(FINDING_SEVERITIES),
@@ -1630,7 +1629,7 @@ const reportIssueSchema = findingSchema.safeExtend({
 });
 
 const reportNonProductionOutcomeSchema = findingSchema.safeExtend({
-  notes: z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
+  notes: z.array(findingReportBoundTextSchema).max(MAX_FINDING_NESTED_ITEMS).optional(),
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS),
   recommended_next_action: nonEmptyString,
   lifecycle: findingLifecycleSchema

@@ -732,8 +732,7 @@ export const findingReportBoundTextSchema = nonEmptyString
     if (issue !== undefined) context.addIssue({ code: "custom", message: issue.message });
   })
   .meta({ id: "findingReportBoundText", allOf: findingNoteJsonSchemaConstraints });
-export const findingNoteSchema = findingReportBoundTextSchema;
-const findingNotesSchema = z.array(findingNoteSchema).max(MAX_FINDING_NESTED_ITEMS);
+const findingNotesSchema = z.array(findingReportBoundTextSchema).max(MAX_FINDING_NESTED_ITEMS);
 const uniqueNonEmptyStrings = z
   .array(nonEmptyString)
   .max(MAX_FINDING_NESTED_ITEMS)
