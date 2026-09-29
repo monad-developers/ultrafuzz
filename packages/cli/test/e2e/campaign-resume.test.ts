@@ -358,7 +358,24 @@ function assertNoFinishedTaskRestarted(events: WorkflowEvent[]): void {
   assert.ok(finished.size > 0, "the workflow event stream has no finished tasks");
 }
 
-/** Launches the campaign and SIGKILLs its detached controller while `INTERRUPTED_NODE` runs. */
+/** Waits for the stub to hold `INTERRUPTED_NODE` in a process other than the `earlier` ones. */
+async function heldCall(campaign: Campaign, workflowRunId: string, label: string, earlier: number[] = []) {
+  return waitFor(label, 15 * MINUTE, () => {
+    const calls = agentCalls(campaign);
+    const call = calls.find(
+      (entry) => entry.node === INTERRUPTED_NODE && entry.event === "held" && !earlier.includes(entry.pid)
+    );
+    if (call === undefined && processesMentioning(workflowRunId).length === 0) {
+      assert.fail(`the workflow stopped while waiting for ${label}; agent calls: ${JSON.stringify(calls)}`);
+    }
+    return call;
+  });
+}
+
+/**
+ * Launches the campaign and SIGKILLs its detached engine while `INTERRUPTED_NODE` runs. Once the
+ * supervisor has relaunched the engine and the node runs again, SIGKILLs the whole controller.
+ */
 async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void): Promise<void> {
   await ultrafuzz(campaign, ["init"], 2 * MINUTE);
   const configPath = path.join(campaign.project, "ultrafuzz.toml");
@@ -383,14 +400,19 @@ async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void
   const [workflowRunId] = launched.workflow_ids;
   assert.ok(workflowRunId !== undefined, "run did not report its workflow run ID");
 
-  const held = await waitFor(`${INTERRUPTED_NODE} to start`, 15 * MINUTE, () => {
-    const calls = agentCalls(campaign);
-    const call = calls.find((entry) => entry.node === INTERRUPTED_NODE && entry.event === "held");
-    if (call === undefined && processesMentioning(workflowRunId).length === 0) {
-      assert.fail(`the workflow stopped before ${INTERRUPTED_NODE} started; agent calls: ${JSON.stringify(calls)}`);
-    }
-    return call;
+  const first = await heldCall(campaign, workflowRunId, `${INTERRUPTED_NODE} to start`);
+  // An engine killed on its own, as by the OOM killer, leaves its supervisor running. The supervisor
+  // relaunches it from the run's sealed execution snapshot with no `ultrafuzz` command.
+  const engines = processesMentioning(workflowRunId).filter((pid) => {
+    const argv = commandLine(pid) ?? "";
+    return argv.includes("\0up\0") && !argv.includes("\0supervise\0");
   });
+  assert.ok(engines.length > 0, "no detached engine process is running the workflow");
+  for (const pid of engines) kill(pid);
+  const held = await heldCall(campaign, workflowRunId, `the relaunched engine to rerun ${INTERRUPTED_NODE}`, [
+    first.pid
+  ]);
+  mark("engine relaunched");
   // A host crash takes down the detached engine and the supervisor that would otherwise restart it.
   const controller = processesMentioning(workflowRunId);
   assert.ok(controller.length > 0, "no detached controller process is running the workflow");
@@ -403,7 +425,7 @@ async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void
 }
 
 test(
-  "a campaign whose controller is SIGKILLed mid-node resumes on the pinned engine without re-running finished nodes",
+  "a campaign whose engine and then whole controller are SIGKILLed mid-node resumes on the pinned engine without re-running finished nodes",
   { timeout: 45 * MINUTE, skip: process.platform === "linux" ? false : "finds the detached controller through /proc" },
   async (t) => {
     const campaign = prepareCampaign();
@@ -452,14 +474,19 @@ test(
         "RunFinished",
         `agent calls: ${JSON.stringify(calls)}`
       );
-      // Every agent ran once, except the node the kill interrupted, which ran again after resume.
+      // Every agent ran once, except the node the kills interrupted, which ran again in the relaunched
+      // engine and after resume.
       const starts = calls.filter((call) => call.event === "started");
       assert.deepEqual(
         AGENT_NODES.map((node) => [node, starts.filter((call) => call.node === node).length]),
-        AGENT_NODES.map((node) => [node, node === INTERRUPTED_NODE ? 2 : 1])
+        AGENT_NODES.map((node) => [node, node === INTERRUPTED_NODE ? 3 : 1])
       );
       assert.equal(events.truncated, false);
-      assert.equal(events.events.filter((event) => event.category === "RunStarted").length, 2);
+      assert.equal(events.events.filter((event) => event.category === "RunStarted").length, 3);
+      assert.ok(
+        events.events.some((event) => event.category === "RunAutoResumed"),
+        "no supervisor relaunch event"
+      );
       assertNoFinishedTaskRestarted(events.events);
 
       const health = await ultrafuzz<HealthValue>(campaign, ["status", runId]);
