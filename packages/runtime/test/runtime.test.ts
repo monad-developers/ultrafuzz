@@ -24451,6 +24451,100 @@ test("syncRun synchronizes a model fan-out run again after recording its attempt
   assert.equal(second.value?.status, "running");
 });
 
+test("syncRun lets a model fan-out aggregate follow its reopened skipped attempts to success", async () => {
+  const project = tempProject();
+  writeFanoutProject(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-fanout-reopened";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const discoveryFast = "node:project-discovery__model_0__attempt_0";
+  const discoveryDeep = "node:project-discovery__model_1__attempt_1";
+  // Each analysis attempt consumes both discovery attempts, so one failed discovery skips both.
+  const analysisFast = "node:signal-analysis__model_0__attempt_0";
+  const analysisDeep = "node:signal-analysis__model_1__attempt_1";
+  const fast = { chainIndex: 0, profileId: "fast", model: "gpt-test-fast" };
+  const deep = { chainIndex: 0, profileId: "deep", model: "gpt-test-deep" };
+  const attemptSelections = {
+    [discoveryFast]: { 1: fast },
+    [discoveryDeep]: { 1: deep, 2: deep },
+    [analysisFast]: { 1: fast },
+    [analysisDeep]: { 1: deep }
+  };
+  const failedEvents = [
+    { type: "NodeStarted", nodeId: discoveryFast, attempt: 1 },
+    { type: "NodeFinished", nodeId: discoveryFast, attempt: 1 },
+    { type: "NodeStarted", nodeId: discoveryDeep, attempt: 1 },
+    { type: "NodeFailed", nodeId: discoveryDeep, attempt: 1, error: { message: "model failed" } },
+    { type: "NodeSkipped", nodeId: analysisFast, attempt: 1 },
+    { type: "NodeSkipped", nodeId: analysisDeep, attempt: 1 }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: discoveryFast, state: "finished", attempt: 1 },
+        { id: discoveryDeep, state: "failed", attempt: 1 },
+        { id: analysisFast, state: "skipped", attempt: 1 },
+        { id: analysisDeep, state: "skipped", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, failedEvents),
+    attemptSelections
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  const statePath = path.join(runRoot, "state.json");
+  const writeAttemptArtifacts = (taskId: string): void => {
+    const attemptId = taskId.slice("node:".length);
+    const primary = attemptId.startsWith("project-discovery") ? GENERIC_RUNTIME_MARKDOWN_PATH : "signal-analysis.md";
+    writeRequiredArtifactSet(runRoot, attemptId, [primary, "findings.json"]);
+  };
+  writeAttemptArtifacts(discoveryFast);
+
+  const failed = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
+  assert.equal(failed.value?.status, "failed");
+  assert.equal(readRunState(statePath).nodes["project-discovery"]?.status, "failed");
+  assert.equal(readRunState(statePath).nodes["signal-analysis"]?.status, "skipped");
+
+  // The runner now reports what `resume --retry-failed` produces: the failed discovery attempt ran
+  // again, and both analysis attempts skipped behind it reopened and finished.
+  const recoveredEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: discoveryFast, state: "finished", attempt: 1 },
+        { id: discoveryDeep, state: "finished", attempt: 2 },
+        { id: analysisFast, state: "finished", attempt: 1 },
+        { id: analysisDeep, state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...failedEvents,
+      { type: "NodeStarted", nodeId: discoveryDeep, attempt: 2 },
+      { type: "NodeFinished", nodeId: discoveryDeep, attempt: 2 },
+      { type: "NodeStarted", nodeId: analysisFast, attempt: 1 },
+      { type: "NodeFinished", nodeId: analysisFast, attempt: 1 },
+      { type: "NodeStarted", nodeId: analysisDeep, attempt: 1 },
+      { type: "NodeFinished", nodeId: analysisDeep, attempt: 1 }
+    ]),
+    attemptSelections
+  });
+  for (const taskId of [discoveryDeep, analysisFast, analysisDeep]) writeAttemptArtifacts(taskId);
+
+  const recovered = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
+  assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+  const nodes = readRunState(statePath).nodes;
+  assert.equal(nodes["signal-analysis__model_0__attempt_0"]?.status, "succeeded");
+  assert.equal(nodes["signal-analysis__model_1__attempt_1"]?.status, "succeeded");
+  assert.equal(nodes["project-discovery"]?.status, "succeeded");
+  assert.equal(nodes["signal-analysis"]?.status, "succeeded");
+  assert.equal(recovered.value?.status, "succeeded", JSON.stringify(recovered.diagnostics));
+});
+
 test("controller refresh selects current source without rewriting historical evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
