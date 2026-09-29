@@ -3916,6 +3916,20 @@ test("host aggregation intake skips a failed optional generated-tests producer t
     omitted.diagnostics.some((diagnostic) => diagnostic.message.includes("omits authenticated source bundle")),
     JSON.stringify(omitted.diagnostics)
   );
+
+  // An admitted producer is read only once the controller finalized it.
+  writeAggregationManifestCopying(layout, aggregationNode, [source]);
+  fs.unlinkSync(path.join(layout.root, ".ultrafuzz-verification", `${verifiedTask.attemptId}.json`));
+  const unfinalized = verifyAggregationAttempt(layout, aggregationTask, tasks, [verifiedTask.attemptId]);
+  assert.equal(unfinalized.ok, false);
+  assert.ok(
+    unfinalized.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "REQUIRED_ARTIFACT_INVALID" &&
+        diagnostic.message.includes(`authority is invalid for ${verifiedTask.attemptId}`)
+    ),
+    JSON.stringify(unfinalized.diagnostics)
+  );
 });
 
 test("host aggregation intake keys a directly consumed dynamic producer by its storage attempt ID", () => {
@@ -14768,6 +14782,12 @@ test("final report preserves typed coverage evidence and its canonical Markdown 
   ]) {
     writeArtifact(layout, reportNode.id, "report.md", `${scopedMarkdown}\n## Notes\n\n${implicitlyVisibleScore}\n`);
     const visibleAfterImplicitClose = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    // Only the stylesheet cases fail; the prose score itself stays advisory.
+    assert.equal(
+      visibleAfterImplicitClose.ok,
+      !implicitlyVisibleScore.startsWith("<style>"),
+      `${implicitlyVisibleScore}: ${JSON.stringify(visibleAfterImplicitClose.diagnostics)}`
+    );
     assertAdvisoryCoverageScore(visibleAfterImplicitClose, "UNSCOPED_COVERAGE_PERCENTAGE", implicitlyVisibleScore);
   }
 
