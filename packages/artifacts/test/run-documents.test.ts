@@ -15,6 +15,7 @@ import {
   readSourceRunDocument,
   promptArtifactAuthorityPathSelectorId,
   StrictJsonError,
+  updateRunMetadataDocument,
   writeConfigRedactionsDocument,
   writeRunMetadataDocument,
   writeRunPlanDocument,
@@ -373,6 +374,30 @@ test("run-bound documents reject an unexpected run identity", (t) => {
   assert.throws(() => readSourceRunDocument(sourcePath, "run-other"), /identity does not match run/u);
   assert.throws(() => readRunPlanDocument(planPath, "run-other"), /identity does not match run/u);
   assert.throws(() => readRunMetadataDocument(metadataPath, "run-other"), /identity does not match run/u);
+});
+
+test("run metadata updates apply to the document as it is when they write, under its lock", (t) => {
+  const root = temporaryDirectory();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const metadataPath = path.join(root, "run.json");
+  const launched = canonicalRunMetadata();
+  writeRunMetadataDocument(metadataPath, launched);
+  // Another process's write after this one would have read the document.
+  const { accounting: _accounting, ...withoutAccounting } = launched;
+  writeRunMetadataDocument(metadataPath, withoutAccounting);
+  let lockHeld = false;
+
+  updateRunMetadataDocument(metadataPath, launched.run_id, (current) => {
+    lockHeld = fs.existsSync(`${metadataPath}.lock`);
+    return { ...current, forge_guard: { ...launched.forge_guard, active: false } };
+  });
+
+  assert.equal(lockHeld, true);
+  assert.equal(fs.existsSync(`${metadataPath}.lock`), false);
+  assert.deepEqual(readRunMetadataDocument(metadataPath, launched.run_id), {
+    ...withoutAccounting,
+    forge_guard: { ...launched.forge_guard, active: false }
+  });
 });
 
 test("source links cannot point to the run itself", () => {

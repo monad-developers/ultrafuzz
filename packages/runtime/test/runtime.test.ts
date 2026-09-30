@@ -14248,33 +14248,69 @@ test("startRun records the Forge guard inactive and warns when the engine PATH d
   );
 });
 
-test("resume records the Forge guard of the controller it starts", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "resume-forge-guard";
-  const env = controllerRefreshTerminalEnv(project, runId);
-  writeForgeBesideFakeRunner(env);
+test(
+  "resume records the Forge guard of the controller it starts",
+  { skip: process.getuid?.() === 0 ? "root can remove the entry that makes the guard inactive" : false },
+  async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = "resume-forge-guard";
+    const env = controllerRefreshTerminalEnv(project, runId);
+    writeForgeBesideFakeRunner(env);
+    const launched = await startRun({ projectRoot: project, runId, env });
+    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+    assert.ok(launched.value);
+    const runRoot = launched.value.run_root;
+    assert.equal(recordedForgeGuard(runRoot)?.active, true);
+    // An entry beside the wrapper that resume cannot remove, so the engine
+    // PATH no longer admits the directory.
+    const stuck = path.join(runRoot, "safe-bin", "stuck");
+    fs.mkdirSync(stuck);
+    fs.writeFileSync(path.join(stuck, "entry"), "");
+    fs.chmodSync(stuck, 0o500);
+    let resumed: Awaited<ReturnType<typeof resumeRun>>;
+    try {
+      resumed = await resumeRun({ projectRoot: project, runId, env });
+    } finally {
+      fs.chmodSync(stuck, 0o700);
+    }
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.equal(resumed.value?.submitted, true);
+    assert.equal(recordedForgeGuard(runRoot)?.active, false);
+    assert.deepEqual(
+      resumed.diagnostics
+        .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+        .map((diagnostic) => diagnostic.severity),
+      ["warning"]
+    );
+  }
+);
+
+test("resume warns about an inactive Forge guard only when it starts a controller", async () => {
+  const { project, env } = forgeGuardLaunchFixture([['output_dir = ".ultrafuzz/runs"', 'output_dir = "audit-runs"']]);
+  const runId = "resume-forge-guard-warning";
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-  assert.ok(launched.value);
-  const runRoot = launched.value.run_root;
-  assert.equal(recordedForgeGuard(runRoot)?.active, true);
-  // What an interrupted durable write leaves beside the wrapper; the engine
-  // PATH no longer admits the directory.
-  fs.writeFileSync(path.join(runRoot, "safe-bin", ".forge.tmp-1-2-3"), "");
-
-  const resumed = await resumeRun({ projectRoot: project, runId, env });
-
-  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.submitted, true);
-  assert.equal(recordedForgeGuard(runRoot)?.active, false);
-  assert.deepEqual(
-    resumed.diagnostics
+  const forgeGuardWarnings = (diagnostics: ReadonlyArray<{ code: string; severity: string }>): string[] =>
+    diagnostics
       .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
-      .map((diagnostic) => diagnostic.severity),
-    ["warning"]
-  );
+      .map((diagnostic) => diagnostic.severity);
+
+  // The fake runner reports the run live, so this resume only attaches.
+  const attached = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(attached.ok, true, JSON.stringify(attached.diagnostics));
+  assert.equal(attached.value?.submitted, false);
+  assert.deepEqual(forgeGuardWarnings(attached.diagnostics), []);
+
+  setFakeSmithersInspectState(project, "failed");
+  const relaunched = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(relaunched.ok, true, JSON.stringify(relaunched.diagnostics));
+  assert.equal(relaunched.value?.submitted, true);
+  assert.deepEqual(forgeGuardWarnings(relaunched.diagnostics), ["warning"]);
 });
 
 test("startRun forwards configured and explicitly allowed environment variables only", async () => {
@@ -28247,6 +28283,68 @@ test("syncRun settles a model the fetched pricing catalog does not list instead 
   };
   assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
   assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["unlisted-model"]);
+});
+
+test("syncRun writes its accounting into run.json as a lifecycle command rewrote it during the pass", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "accounting-beside-lifecycle-write";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          costUsd: undefined,
+          model: "listed-model",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    test: { models: { "listed-model": { cost: { input: 1, output: 1 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const launchedGuard = recordedForgeGuard(runRoot);
+  assert.ok(launchedGuard);
+  const resumedGuard = { ...launchedGuard, active: !launchedGuard.active };
+  // The pass awaits the pricing catalog after reading run.json. A resume that
+  // records its controller's Forge guard then must keep that record.
+  const fetchDuringResume: typeof fetch = (input, init) => {
+    const metadataPath = path.join(runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, forge_guard: resumedGuard }, null, 2)}\n`);
+    return testPricingFetch(input, init);
+  };
+
+  const sync = await runtimeSyncRun(
+    { projectRoot: project, runId, env },
+    { pricingFetch: fetchDuringResume, pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }] }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  assert.deepEqual(recordedForgeGuard(runRoot), resumedGuard);
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as { accounting?: unknown };
+  assert.notEqual(metadata.accounting, undefined, "the pass wrote no accounting");
 });
 
 test("syncRun warns that a Smithers event stream at the CLI event limit may be truncated", async () => {

@@ -51,9 +51,23 @@ export function prepareForgeGuardEnvironment(input: {
   // default 0002 the directory fails the engine PATH admission below. chmod
   // does not apply it, and also repairs a directory an earlier launch created.
   fs.chmodSync(safeBinRoot, 0o700);
+  // The admission also wants the wrapper alone in the directory. Anything else
+  // there, such as the temporary file of an interrupted write, would drop the
+  // guard for every later command of the run, so remove it.
+  for (const name of fs.readdirSync(safeBinRoot)) {
+    if (name === "forge") continue;
+    try {
+      fs.rmSync(path.join(safeBinRoot, name), { recursive: true, force: true });
+    } catch {
+      // An entry that stays fails the admission below, which reports it.
+    }
+  }
   const wrapperPath = path.join(safeBinRoot, "forge");
   assertNoSymlinkComponents(input.layout.root, wrapperPath, "Forge guard wrapper");
-  writeFileDurable(wrapperPath, forgeGuardWrapper());
+  // Created executable: resume and replay replace the wrapper while tasks may
+  // be running, and a PATH lookup that met it without its execute bit would
+  // run the real Forge.
+  writeFileDurable(wrapperPath, forgeGuardWrapper(), { mode: 0o700 });
   fs.chmodSync(wrapperPath, 0o700);
   // The engine PATH drops every target-local entry that fails this check, so a
   // wrapper that fails it would never run: report the guard inactive rather
@@ -66,7 +80,7 @@ export function prepareForgeGuardEnvironment(input: {
       diagnostics: [
         {
           code: "FORGE_GUARD_INACTIVE",
-          message: `run.forge_guard_enabled is set, but the workflow engine does not admit ${safeBinRoot} to PATH (it admits only <project>/.ultrafuzz/runs/<run-id>/safe-bin, holding just the wrapper and not writable by group or others), so tasks run ${realForge} without the configured memory and thread limits`,
+          message: `run.forge_guard_enabled is set, but the workflow engine does not admit ${safeBinRoot} to PATH (it admits only <project>/.ultrafuzz/runs/<run-id>/safe-bin on a path without symbolic links, holding just the wrapper and not writable by group or others), so tasks run ${realForge} without the configured memory and thread limits`,
           severity: "warning",
           source: "runtime",
           path: "run.forge_guard_enabled"

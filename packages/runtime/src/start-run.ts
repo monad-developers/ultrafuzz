@@ -20,6 +20,7 @@ import {
   replayEvents,
   safeResolveInside,
   sensitiveEnvironmentValues,
+  updateRunMetadataDocument,
   updateRunStatus,
   validatePlannedGraph,
   validateSafeId,
@@ -573,7 +574,6 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     }
     const tasks = taskDocument?.tasks ?? [];
     const forgeGuard = prepareForgeGuardEnvironment({ layout, projectRoot, config, env: input.env });
-    diagnostics.push(...forgeGuard.diagnostics);
     const controllerEnvironment = {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
@@ -682,9 +682,11 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       )
     });
     // An attach to a run Smithers still reports active started no controller,
-    // so it must not re-record status, lease or deadline; the resume that
-    // starts the next controller does.
+    // so it must not re-record status, lease, deadline or Forge guard, or warn
+    // about a guard no controller runs with; the resume that starts the next
+    // controller does.
     if (result.alreadyRunning !== true) {
+      diagnostics.push(...forgeGuard.diagnostics);
       recordNativeContinuationState({
         layout,
         config,
@@ -1900,11 +1902,12 @@ function linkedWorkflowAgentRefs(taskContents: Buffer): string[] {
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
-  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
-  writeRunMetadataDocument(layout.runMetadataPath, {
+  // Under run.json's lock, like synchronization's accounting write: an
+  // observer's pass in progress must not write the previous guard back.
+  updateRunMetadataDocument(layout.runMetadataPath, layout.runId, (metadata) => ({
     ...metadata,
     forge_guard: forgeGuardMetadata(config, active)
-  });
+  }));
 }
 
 function mergeEnvironmentVariableNames(...groups: readonly (readonly string[])[]): string[] {

@@ -23,7 +23,7 @@ function resolvedConfig(run: Partial<ResolvedConfig["run"]> = {}): ResolvedConfi
 // because that is the only place the engine PATH admits the wrapper from.
 function fixture(
   runId: string,
-  outputRoot?: string
+  options: { outputRoot?: string; throughSymlink?: boolean } = {}
 ): {
   root: string;
   bin: string;
@@ -31,7 +31,13 @@ function fixture(
   pathValue: string;
   layout: ReturnType<typeof createRunLayout>;
 } {
-  const root = temporaryRoot("ultrafuzz-forge-guard-");
+  let root = temporaryRoot("ultrafuzz-forge-guard-");
+  if (options.throughSymlink === true) {
+    // Every path below a symlinked parent differs from its real path.
+    fs.mkdirSync(path.join(root, "real", "project"), { recursive: true });
+    fs.symlinkSync(path.join(root, "real"), path.join(root, "alias"), "dir");
+    root = path.join(root, "alias", "project");
+  }
   const bin = path.join(root, "bin");
   const forge = path.join(bin, "forge");
   fs.mkdirSync(bin);
@@ -48,7 +54,7 @@ function fixture(
     pathValue: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
     layout: createRunLayout({
       projectRoot: root,
-      ...(outputRoot === undefined ? {} : { outputRoot: path.join(root, outputRoot) }),
+      ...(options.outputRoot === undefined ? {} : { outputRoot: path.join(root, options.outputRoot) }),
       runId
     })
   };
@@ -121,14 +127,31 @@ test("Forge guard repairs a group-writable wrapper directory an earlier launch c
   assert.equal(enginePath(input.root, prepared.env)[0], safeBin);
 });
 
-test("Forge guard reports itself inactive when the engine PATH would drop its wrapper", () => {
-  const strayFile = fixture("stray-file");
-  fs.mkdirSync(path.join(strayFile.layout.root, "safe-bin"));
+test("Forge guard clears anything but the wrapper from its directory, which the engine PATH requires", () => {
+  const input = fixture("stray-entries");
+  const safeBin = path.join(input.layout.root, "safe-bin");
+  fs.mkdirSync(path.join(safeBin, "stray-directory"), { recursive: true });
   // What an interrupted durable write leaves beside the wrapper.
-  fs.writeFileSync(path.join(strayFile.layout.root, "safe-bin", ".forge.tmp-1-2-3"), "");
-  const customOutputDir = fixture("custom-output-dir", "audit-runs");
+  fs.writeFileSync(path.join(safeBin, ".forge.tmp-1-2-3"), "");
 
-  for (const input of [strayFile, customOutputDir]) {
+  const prepared = prepareForgeGuardEnvironment({
+    layout: input.layout,
+    projectRoot: input.root,
+    config: resolvedConfig(),
+    env: { PATH: input.pathValue }
+  });
+
+  assert.equal(prepared.active, true);
+  assert.deepEqual(prepared.diagnostics, []);
+  assert.deepEqual(fs.readdirSync(safeBin), ["forge"]);
+  assert.equal(enginePath(input.root, prepared.env)[0], safeBin);
+});
+
+test("Forge guard reports itself inactive when the engine PATH would drop its wrapper", () => {
+  const throughSymlink = fixture("symlinked-parent", { throughSymlink: true });
+  const customOutputDir = fixture("custom-output-dir", { outputRoot: "audit-runs" });
+
+  for (const input of [throughSymlink, customOutputDir]) {
     const prepared = prepareForgeGuardEnvironment({
       layout: input.layout,
       projectRoot: input.root,
@@ -144,7 +167,10 @@ test("Forge guard reports itself inactive when the engine PATH would drop its wr
       prepared.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
       [["FORGE_GUARD_INACTIVE", "warning"]]
     );
-    assert.match(prepared.diagnostics[0]?.message ?? "", /without the configured memory and thread limits/u);
+    assert.match(
+      prepared.diagnostics[0]?.message ?? "",
+      /on a path without symbolic links, holding just the wrapper .* without the configured memory and thread limits/u
+    );
     assert.equal(enginePath(input.root, prepared.env).includes(path.join(input.layout.root, "safe-bin")), false);
   }
 });
