@@ -288,9 +288,14 @@ directory, outside the agent's worktree and artifact roots. The workflow
 verifier compares the report field with controller memory or, after a
 controller restart, with that record before accepting the report, so downstream
 evals can detect mixed-model runs without trusting the task-local copy the
-agent was given. The record is host evidence, not a sandbox boundary: an agent
-running unsandboxed as the same user could edit it, as it could edit the
-Smithers database.
+agent was given. `failed_attempts` is inexact in two cases: it omits attempts
+that ran before `resume --refresh-controller` replaced an earlier release's
+workflow, and after a reset that reuses attempt numbers it can list an attempt
+from before the reset. The record is host evidence, not a sandbox boundary: an
+agent running unsandboxed as the same user could edit it, as it could edit the
+Smithers database, and so could a Codex agent in its `workspace-write` sandbox
+when the project lives under `/tmp` or `$TMPDIR`, which that sandbox leaves
+writable.
 
 The runtime does not serialize `agent_execution` or
 `property_implementation_coverage` into the model prompt. Immediately before a

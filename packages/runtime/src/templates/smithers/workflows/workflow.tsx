@@ -2177,14 +2177,23 @@ function finalReportSelectionsPath(task: (typeof taskSpecs)[number]): string {
   return path.join(realpathSync(task.runRoot), "smithers", "final-report-selections", `${task.attemptId}.json`);
 }
 
+// `--reset-node` resets the producer and its dependents, here its verifier;
+// `--retry-failed` would also rerun every other failed task. The refresh reruns
+// them with this workflow, which writes the record, even on a run launched by
+// an earlier release.
+function finalReportProducerRerunHint(task: (typeof taskSpecs)[number]): string {
+  return `run \`ultrafuzz resume <run-id> --refresh-controller --reset-node ${task.smithersNodeId}\` to rerun the producer`;
+}
+
 function readFinalReportSelections(task: (typeof taskSpecs)[number]): FinalReportObservedAgentSelection[] {
   const recordPath = finalReportSelectionsPath(task);
   if (!pathEntryExists(recordPath)) return [];
+  const malformed = `artifact-contract failure: recorded report-producer selections are malformed; delete \`smithers/final-report-selections/${task.attemptId}.json\` in the run directory, then ${finalReportProducerRerunHint(task)}`;
   let value: unknown;
   try {
     value = parseStrictJsonBytes(readRegularFileSnapshot(recordPath, 1024 * 1024));
   } catch (error) {
-    throw new Error("artifact-contract failure: recorded report-producer selections are malformed", { cause: error });
+    throw new Error(malformed, { cause: error });
   }
   if (
     !Array.isArray(value) ||
@@ -2195,7 +2204,7 @@ function readFinalReportSelections(task: (typeof taskSpecs)[number]): FinalRepor
         Number.isSafeInteger(selection.chainIndex)
     )
   ) {
-    throw new Error("artifact-contract failure: recorded report-producer selections are malformed");
+    throw new Error(malformed);
   }
   // finalReportAgentExecution validates attempt order and chain bounds.
   return value.map((selection) => ({ attempt: Number(selection.attempt), chainIndex: Number(selection.chainIndex) }));
@@ -2242,7 +2251,7 @@ function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]
   const producer = selections.at(-1);
   if (producer === undefined) {
     throw new Error(
-      "artifact-contract failure: report producer selection was never recorded; run `ultrafuzz resume <run-id> --refresh-controller --retry-failed` to rerun the producer"
+      `artifact-contract failure: report producer selection was never recorded; ${finalReportProducerRerunHint(task)}`
     );
   }
   const execution = finalReportAgentExecution(task, producer.chainIndex, selections);

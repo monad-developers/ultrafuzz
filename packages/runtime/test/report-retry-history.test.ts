@@ -14,6 +14,7 @@ type Execution = {
   producer: { attempt: number; profile_id: string };
 };
 type Task = {
+  smithersNodeId: string;
   attemptId: string;
   runRoot: string;
   agentChain: Array<{ profileId: string; agentRef: string; modelName: string; role: "primary" | "fallback" }>;
@@ -22,6 +23,7 @@ type Task = {
 function taskFixture(options: { singleRung?: boolean } = {}): Task {
   const profiles = ["primary", "fallback-a", "fallback-b"];
   return {
+    smithersNodeId: "node:report",
     attemptId: "report",
     runRoot: temporaryRoot("ultrafuzz-report-history-"),
     agentChain: profiles.slice(0, options.singleRung === true ? 1 : 3).map((profileId, index) => ({
@@ -181,7 +183,15 @@ test("ordinary report retries keep their in-process history and reject an attemp
 
 test("a missing or malformed selection record fails the report instead of inventing a producer", () => {
   const task = taskFixture();
-  assert.throws(() => loadAuthority().read(task), /report producer selection was never recorded/u);
+  // Both errors name a recovery that resets the producer and its verifier, not
+  // every failed task, and reruns them with this workflow.
+  const rerun = "run `ultrafuzz resume <run-id> --refresh-controller --reset-node node:report` to rerun the producer";
+  assert.throws(() => loadAuthority().read(task), {
+    message: `artifact-contract failure: report producer selection was never recorded; ${rerun}`
+  });
+  const malformedRecord = {
+    message: `artifact-contract failure: recorded report-producer selections are malformed; delete \`smithers/final-report-selections/report.json\` in the run directory, then ${rerun}`
+  };
   fs.mkdirSync(path.dirname(recordPath(task)), { recursive: true });
   for (const malformed of [
     "not json",
@@ -192,8 +202,12 @@ test("a missing or malformed selection record fails the report instead of invent
     '[{"attempt":1.5,"chainIndex":0}]'
   ]) {
     fs.writeFileSync(recordPath(task), malformed);
-    assert.throws(() => loadAuthority().selections(task, 2, 1), /selections are malformed/u, malformed);
-    assert.throws(() => loadAuthority().read(task), /selections are malformed/u, malformed);
+    assert.throws(() => loadAuthority().selections(task, 2, 1), malformedRecord, malformed);
+    assert.throws(() => loadAuthority().read(task), malformedRecord, malformed);
+    // A first attempt starts a new history, so it replaces the record instead
+    // of failing on it.
+    assert.deepEqual(loadAuthority().selections(task, 1, 0), [{ attempt: 1, chainIndex: 0 }], malformed);
+    assert.deepEqual(JSON.parse(fs.readFileSync(recordPath(task), "utf8")), [{ attempt: 1, chainIndex: 0 }], malformed);
   }
   for (const inconsistent of [
     [

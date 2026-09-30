@@ -142,11 +142,10 @@ export default smithers(() => (
 `;
 }
 
-// composeSmithersCommandPath never adds the runner's bin directory to the
-// controller PATH, so a bare `smithers` resolves to whatever the operator's PATH
-// holds, if anything; `pnpm test` prepends node_modules/.bin. A failing stub
-// first on the detached engine's PATH makes a bare call fail even on a host
-// that has its own `smithers`.
+// The report path must spawn no workflow runner. A failing stub first on the
+// detached engine's PATH makes any bare `smithers` call fail this test, even
+// though `pnpm test` puts node_modules/.bin on PATH and a host may have its own
+// `smithers`.
 const poisonBin = temporaryRoot("ultrafuzz-poison-smithers-");
 const poisonSmithers = "#!/bin/sh\necho 'bare smithers resolved from PATH' >&2\nexit 97\n";
 fs.writeFileSync(path.join(poisonBin, "smithers"), poisonSmithers, { mode: 0o755 });
