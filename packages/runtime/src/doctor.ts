@@ -6,7 +6,9 @@ import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
 import {
+  bindInstalledWorkflowRunner,
   inspectSmithersInstallation,
+  type SmithersInstallationPosture,
   unappliedCompatibilityPatches,
   WORKFLOW_RUNNER_REINSTALL_HINT
 } from "./smithers.js";
@@ -175,26 +177,8 @@ export async function diagnoseProject(input: DoctorInput) {
     });
   }
 
-  const unappliedPatches = unappliedCompatibilityPatches(installation);
-  const patchCount = Object.keys(installation.compatibility_patches).length;
-  checks.push(
-    {
-      name: "workflow-engine-install",
-      status: installation.layout_error === null ? "ok" : "error",
-      summary:
-        installation.layout_error === null
-          ? `resume, ps and each run's smithers shim run the installed workflow engine ${String(installation.installed_version)}`
-          : `the installed workflow engine cannot run (see the workflow engine layout detail); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
-    },
-    {
-      name: "workflow-engine-patches",
-      status: unappliedPatches.length === 0 ? "ok" : "error",
-      summary:
-        unappliedPatches.length === 0
-          ? `the installed runner carries all ${String(patchCount)} compatibility patches`
-          : `the installed runner lacks ${String(unappliedPatches.length)} of ${String(patchCount)} compatibility patches (${unappliedPatches.join(", ")}); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
-    }
-  );
+  const engine = workflowEngineChecks(installation, projectRoot);
+  checks.push(...engine.checks);
 
   const latestCheck = registryCheck(latest);
   checks.push(latestCheck.check);
@@ -221,14 +205,64 @@ export async function diagnoseProject(input: DoctorInput) {
       bin_path: installation.bin_path,
       latest_published_version: latest !== undefined && "version" in latest ? latest.version : "unknown",
       layout_status:
-        installation.installed_version === installation.required_version && installation.layout_error === null
+        installation.installed_version === installation.required_version && engine.layoutDetail === null
           ? "ok"
           : "error",
-      layout_detail: installation.layout_error,
+      layout_detail: engine.layoutDetail,
       compatibility_patches: installation.compatibility_patches
     }
   };
   return runtimeResult<DoctorValue>(value.ok, value, diagnostics);
+}
+
+/**
+ * The install and patch checks of the runner Ultrafuzz's install provides.
+ * Launch, `resume`, `replay` and `fork` bind that runner for the target project
+ * before they write its shim, and refuse one inside the project or one whose
+ * Bun cannot be resolved, so a runner that passes both checks is bound here the
+ * same way. A missing patch is left to the patches check.
+ */
+function workflowEngineChecks(
+  installation: SmithersInstallationPosture,
+  projectRoot: string
+): { checks: DoctorCheck[]; layoutDetail: string | null } {
+  const unappliedPatches = unappliedCompatibilityPatches(installation);
+  const patchCount = Object.keys(installation.compatibility_patches).length;
+  const refusal =
+    installation.layout_error === null && unappliedPatches.length === 0 ? installedRunnerRefusal(projectRoot) : null;
+  const installSummary =
+    installation.layout_error !== null
+      ? `the installed workflow engine cannot run (see the workflow engine layout detail); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
+      : refusal !== null
+        ? `launch, resume, replay and fork refuse the installed workflow engine for this project: ${refusal}`
+        : `resume, ps and each run's smithers shim run the installed workflow engine ${String(installation.installed_version)}`;
+  return {
+    layoutDetail: installation.layout_error ?? refusal,
+    checks: [
+      {
+        name: "workflow-engine-install",
+        status: installation.layout_error === null && refusal === null ? "ok" : "error",
+        summary: installSummary
+      },
+      {
+        name: "workflow-engine-patches",
+        status: unappliedPatches.length === 0 ? "ok" : "error",
+        summary:
+          unappliedPatches.length === 0
+            ? `the installed runner carries all ${String(patchCount)} compatibility patches`
+            : `the installed runner lacks ${String(unappliedPatches.length)} of ${String(patchCount)} compatibility patches (${unappliedPatches.join(", ")}); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
+      }
+    ]
+  };
+}
+
+function installedRunnerRefusal(projectRoot: string): string | null {
+  try {
+    bindInstalledWorkflowRunner({}, projectRoot);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 /**

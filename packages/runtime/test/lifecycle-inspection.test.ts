@@ -3,6 +3,7 @@ import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   artifactSchemaBundleDigest,
@@ -31,6 +32,7 @@ import {
   type WorkflowLifecycleEvent
 } from "../src/index.js";
 import {
+  bindInstalledWorkflowRunner,
   inspectSmithersInstallation,
   installedWorkflowRunner,
   patchedWorkflowRunner,
@@ -1425,6 +1427,39 @@ test("diagnoseProject reports the installed runner that commands after launch ex
   }
   assert.equal(typeof doctor.value?.validation.policy_posture.config?.status, "string");
   assert.ok(doctor.value?.toolchain.some((entry) => entry.name === "forge"));
+});
+
+test("diagnoseProject reports an installed runner inside the target project as refused, as launch and resume do", async () => {
+  // Ultrafuzz's own checkout audited as the target: its installed runner lies
+  // inside the project, so launch, resume, replay and fork refuse to bind it.
+  const checkout = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.."));
+  assert.ok(
+    installedWorkflowRunner().executable.startsWith(`${checkout}${path.sep}`),
+    "the runner is in this checkout"
+  );
+  const refusal = "workflow runner cannot be inside the target project";
+  assert.throws(() => bindInstalledWorkflowRunner({}, checkout), { message: refusal });
+
+  const doctor = await diagnoseProject({
+    projectRoot: checkout,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: allAvailable
+  });
+
+  assert.deepEqual(
+    doctor.value?.checks.find((check) => check.name === "workflow-engine-install"),
+    {
+      name: "workflow-engine-install",
+      status: "error",
+      summary: `launch, resume, replay and fork refuse the installed workflow engine for this project: ${refusal}`
+    }
+  );
+  assert.equal(doctor.value?.workflow_engine.layout_status, "error");
+  assert.equal(doctor.value?.workflow_engine.layout_detail, refusal);
+  // Only its location is refused: the runner carries every patch.
+  assert.equal(doctor.value?.checks.find((check) => check.name === "workflow-engine-patches")?.status, "ok");
+  assert.equal(doctor.value?.ok, false);
 });
 
 test("diagnoseProject reports a missing credential for a selected OpenRouter profile", async () => {

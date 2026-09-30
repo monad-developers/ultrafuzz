@@ -660,7 +660,10 @@ non-launching configuration contract unchanged. Doctor reports:
 - whether that installed engine passes Ultrafuzz's version and path checks,
   and the posture of each compatibility patch in it. Launch, `resume`,
   `replay`, and `fork` refuse an engine that fails either check, so each
-  failure is reported as an error;
+  failure is reported as an error. Doctor then binds an engine that passes
+  both for the project the way those commands do, and reports it as refused
+  when it lies inside the project (for example, when the Ultrafuzz checkout is
+  under `--project`) or when `bun` is not on `PATH`;
 - the OS temporary directory, where launch installs the controller it seals
   into the run: its free space and how many `ultrafuzz-controller-*`
   directories it holds, with their total size. Sizing them stops after about
