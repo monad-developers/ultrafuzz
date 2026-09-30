@@ -23,6 +23,24 @@ ultrafuzz clean <run-id> --project /path/to/target-protocol --confirm
 
 `--yes` is accepted as an alias for `--confirm`.
 
+## Remove Modal Storage Of Per-Node Cloud Runs
+
+An earlier release could plan a run for per-node Modal execution
+(`[execution] mode = "cloud"`). That run's Modal volume and any of its
+sandboxes still running outlive the run directory, and `clean` no longer
+removes them. For such a run, the preview and the removal both report a
+`CLEAN_CLOUD_STORAGE_RETAINED` warning. It names the Modal app, the volume and
+the sandboxes' `run` tag, read from the run's `plan.json`, which the removal
+deletes. The removal still deletes the run. Delete the volume with the command
+the warning prints, for example:
+
+```bash
+modal volume delete ultrafuzz-node-ultrafuzz-<run-id>-<hash>
+```
+
+Then stop any sandbox tagged `purpose=ultrafuzz-node` with that `run` tag that
+is still running in the named app.
+
 ## Clean A Generated Subpath
 
 Selections are relative to `.ultrafuzz/` and must name generated run,

@@ -41,14 +41,13 @@ nodes:
   );
 }
 
-async function plannedRunWithArtifact(project: string): Promise<{ runId: string; runRoot: string; nodeId: string }> {
+async function plannedRunWithArtifact(
+  project: string,
+  runId = `clean-${crypto.randomBytes(4).toString("hex")}`
+): Promise<{ runId: string; runRoot: string; nodeId: string }> {
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const plan = await planRun({
-    projectRoot: project,
-    runId: `clean-${crypto.randomBytes(4).toString("hex")}`,
-    env: {}
-  });
+  const plan = await planRun({ projectRoot: project, runId, env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const nodeId = plan.value!.graph.nodes[0]!.id;
   assert.ok(nodeId);
@@ -88,14 +87,15 @@ test("cleanRun can remove a selected run root after confirmation without deletin
     selections: [`runs/${first.runId}`]
   });
   assert.equal(cleaned.ok, true, JSON.stringify(cleaned.diagnostics));
+  assert.deepEqual(cleaned.diagnostics, []);
   assert.equal(fs.existsSync(first.runRoot), false);
   assert.equal(fs.existsSync(second.runRoot), true);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "clean-audit.jsonl")), true);
 });
 
-test("cleanRun removes a run planned for removed cloud execution without provider credentials", async () => {
+test("cleanRun names the Modal storage of a run planned for removed cloud execution and still removes it", async () => {
   const project = tempProject();
-  const { runId, runRoot } = await plannedRunWithArtifact(project);
+  const { runId, runRoot } = await plannedRunWithArtifact(project, "clean-cloud-run");
   // The execution block a run planned with `execution.mode = "cloud"` recorded before that mode was removed.
   const planPath = path.join(runRoot, "plan.json");
   const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as { execution: Record<string, unknown> };
@@ -104,16 +104,35 @@ test("cleanRun removes a run planned for removed cloud execution without provide
     mode: "cloud",
     provider: "modal",
     providers: {
-      modal: { app: "ultrafuzz", image: "ultrafuzz", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
+      modal: { app: "audit-nodes", image: "ultrafuzz", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
     }
   };
   fs.writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  // The names the removed Modal node provider derived from the Smithers run ID
+  // `ultrafuzz-clean-cloud-run`, which `ultrafuzz clean` used to remove.
+  const volume = "ultrafuzz-node-ultrafuzz-clean-cloud-run-5cfd4e4f066b";
+  const sandboxTag = "run=ultrafuzz-clean-cloud-run-5cfd4e4f066b";
+
+  // A preview shows the warning while the plan that names the storage exists.
+  const preview = await cleanRun({ projectRoot: project, dryRun: true, selections: [`runs/${runId}`] });
+
+  assert.equal(preview.ok, true, JSON.stringify(preview.diagnostics));
+  assert.deepEqual(
+    preview.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity, diagnostic.path]),
+    [["CLEAN_CLOUD_STORAGE_RETAINED", "warning", `runs/${runId}`]]
+  );
+  const message = preview.diagnostics[0]?.message ?? "";
+  for (const expected of [`\`modal volume delete ${volume}\``, "Modal app audit-nodes", sandboxTag]) {
+    assert.ok(message.includes(expected), `${expected} missing from: ${message}`);
+  }
+  assert.equal(fs.existsSync(runRoot), true);
 
   const cleaned = await cleanRun({ projectRoot: project, confirmed: true, selections: [`runs/${runId}`] });
 
   assert.equal(cleaned.ok, true, JSON.stringify(cleaned.diagnostics));
   assert.deepEqual(cleaned.value?.removed, [`runs/${runId}`]);
   assert.equal(fs.existsSync(runRoot), false);
+  assert.deepEqual(cleaned.diagnostics, preview.diagnostics);
 });
 
 test("cleanRun rejects missing confirmation, non-generated paths, state files, missing selections, and symlinks", async () => {

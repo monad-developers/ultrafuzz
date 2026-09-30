@@ -68,6 +68,9 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
     ]);
   }
 
+  // Read before anything is removed: deleting a run deletes the plan that
+  // names its Modal storage. Every result below carries these warnings.
+  const retainedStorage = retainedCloudStorageWarnings(planned);
   if (input.dryRun !== true) {
     let sources: RunSourceRevision[];
     try {
@@ -79,7 +82,8 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
           "run source revision cleanup could not be prepared; local evidence was preserved",
           "clean",
           ".ultrafuzz/runs"
-        )
+        ),
+        ...retainedStorage
       ]);
     }
     try {
@@ -94,7 +98,8 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
           "generated artifact cleanup failed; run source refs were preserved",
           "clean",
           ".ultrafuzz"
-        )
+        ),
+        ...retainedStorage
       ]);
     }
     try {
@@ -106,7 +111,8 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
           "local evidence was removed, but run source ref cleanup failed; retained refs remain safe",
           "clean",
           ".ultrafuzz/runs"
-        )
+        ),
+        ...retainedStorage
       ]);
     }
   }
@@ -125,16 +131,73 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
   };
   appendCleanAuditRecord(auditPath, auditRecord, path.resolve(input.projectRoot));
 
-  return runtimeResult(true, {
-    dry_run: input.dryRun === true,
-    removed: planned.map((removal) => removal.selection),
-    audit: {
-      schema_version: CLEAN_AUDIT_SCHEMA_VERSION,
-      audit_id: auditRecord.audit_id,
-      audit_path: auditPath,
-      selections: planned.map((removal) => removal.selection)
+  return runtimeResult(
+    true,
+    {
+      dry_run: input.dryRun === true,
+      removed: planned.map((removal) => removal.selection),
+      audit: {
+        schema_version: CLEAN_AUDIT_SCHEMA_VERSION,
+        audit_id: auditRecord.audit_id,
+        audit_path: auditPath,
+        selections: planned.map((removal) => removal.selection)
+      }
+    },
+    retainedStorage
+  );
+}
+
+/**
+ * An earlier release could plan a run for per-node Modal execution (#134).
+ * Its sandboxes and Modal volume outlive the run directory, and the code that
+ * removed them with the run went with that execution mode (#1197), so name
+ * what is left to remove by hand. The run's plan records the mode and the app
+ * from its resolved config. An unreadable plan yields no warning here and
+ * stops runSourceRefsForCleanup before anything is removed.
+ */
+function retainedCloudStorageWarnings(planned: PlannedRemoval[]): RuntimeDiagnostic[] {
+  let runRoots: string[];
+  try {
+    runRoots = runRootsForCleanup(planned);
+  } catch {
+    return [];
+  }
+  return runRoots.flatMap((root): RuntimeDiagnostic[] => {
+    const runId = path.basename(root);
+    let app: string | undefined;
+    try {
+      const planPath = path.join(root, "plan.json");
+      if (!fs.existsSync(planPath)) return [];
+      assertNoSymlinkComponents(root, planPath, "cloud storage cleanup plan");
+      const execution = readRunPlanDocument(planPath, runId).execution;
+      if (execution.mode !== "cloud") return [];
+      app = execution.providers.modal?.app;
+    } catch {
+      return [];
     }
+    // The removed provider keyed both by the run's Smithers run ID.
+    const identity = modalNodeRunIdentity(`ultrafuzz-${runId}`);
+    const volume = `ultrafuzz-node-${identity}`;
+    return [
+      {
+        code: "CLEAN_CLOUD_STORAGE_RETAINED",
+        message: `run ${runId} was planned by an earlier release for per-node Modal execution, and clean no longer removes that storage, which may still be billed: delete its Modal volume with \`modal volume delete ${volume}\`, and stop any of its sandboxes still running in ${app === undefined ? "its Modal app" : `Modal app ${app}`} (tagged purpose=ultrafuzz-node and run=${identity})`,
+        severity: "warning",
+        source: "clean",
+        path: `runs/${runId}`
+      }
+    ];
   });
+}
+
+/** The removed Modal node provider's bounded identity: its volume suffix and sandbox `run` tag. */
+function modalNodeRunIdentity(smithersRunId: string): string {
+  const normalized =
+    smithersRunId
+      .replace(/[^A-Za-z0-9_-]+/gu, "-")
+      .replace(/^-+|-+$/gu, "")
+      .slice(0, 32) || "run";
+  return `${normalized}-${crypto.createHash("sha256").update(smithersRunId).digest("hex").slice(0, 12)}`;
 }
 
 function runSourceRefsForCleanup(projectRoot: string, planned: PlannedRemoval[]): RunSourceRevision[] {
