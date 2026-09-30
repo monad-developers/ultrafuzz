@@ -94,12 +94,10 @@ const {
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   hasPendingWorkspacePreparationReplacement,
-  inspectSmithersAttemptAgentSelection,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
-  reconcileSmithersAttemptAgentSelection,
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
@@ -2169,90 +2167,38 @@ function rememberFinalReportAgentExecutionAuthority(
 }
 
 /**
- * How long `smithers node` may take to hand back the report-producer authority.
- *
- * This runs on the finalizer path of a multi-rung chain, concurrently with every other agent's
- * build work, and a CLI start that is well under a second on an idle box stretches by more than an
- * order of magnitude once a dozen of them contend for the same cores -- the contention that made a
- * 15 s budget fatal to the validator preflight in #1026. Bounded apart from that preflight because
- * this call also serializes the node's whole attempt history (`--full-output`, up to 64 MiB), and
- * still an order of magnitude under this lane's 1800 s `node_timeout_seconds`.
+ * The run's record of the chain rung each executed report-producer attempt used. It is written
+ * before the agent runs, so a restarted controller (resume, quota park, supervisor relaunch) can
+ * rebuild `agent_execution` without the lost process-local maps above. It lives outside the agent's
+ * worktree and declared artifact roots; like the Smithers database, it is host evidence rather than
+ * a same-UID sandbox boundary.
  */
-const SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS = 180_000;
-
-function readFinalReportSmithersAuthority(task: (typeof taskSpecs)[number]) {
-  let stdout: string;
-  const startedAt = Date.now();
-  try {
-    stdout = execFileSync(
-      "smithers",
-      ["node", task.id, "-r", task.smithersRunId, "--format", "json", "--full-output"],
-      {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS,
-        windowsHide: true
-      }
-    );
-  } catch (error) {
-    throw new Error(
-      `artifact-contract failure: Smithers report-producer authority is unavailable after ${Date.now() - startedAt}ms against a ${SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS}ms budget`,
-      { cause: error }
-    );
-  }
-  let detail: unknown;
-  try {
-    detail = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
-  } catch (error) {
-    throw new Error("artifact-contract failure: Smithers report-producer authority is malformed", { cause: error });
-  }
-  const authorityDetail =
-    isPlainJsonRecord(detail) && detail.ok === true && isPlainJsonRecord(detail.data) ? detail.data : detail;
-  const node =
-    isPlainJsonRecord(authorityDetail) && isPlainJsonRecord(authorityDetail.node) ? authorityDetail.node : undefined;
-  if (node?.nodeId !== task.smithersNodeId) {
-    throw new Error("artifact-contract failure: Smithers report-producer node does not match the sealed task");
-  }
-  const lastAttempt = node?.lastAttempt;
-  if (!Number.isSafeInteger(lastAttempt) || Number(lastAttempt) <= 0) {
-    throw new Error("artifact-contract failure: Smithers report-producer attempt is unavailable");
-  }
-  const attempts =
-    isPlainJsonRecord(authorityDetail) && Array.isArray(authorityDetail.attempts)
-      ? authorityDetail.attempts
-      : undefined;
-  if (attempts === undefined) {
-    throw new Error("artifact-contract failure: Smithers report-producer attempts are unavailable");
-  }
-  const attemptNumbers = attempts.map((attempt) => {
-    if (!isPlainJsonRecord(attempt) || !Number.isSafeInteger(attempt.attempt) || Number(attempt.attempt) <= 0) {
-      throw new Error("artifact-contract failure: Smithers report-producer attempt is malformed");
-    }
-    return Number(attempt.attempt);
-  });
-  if (
-    new Set(attemptNumbers).size !== attemptNumbers.length ||
-    !attemptNumbers.includes(Number(lastAttempt)) ||
-    attemptNumbers.some((attempt) => attempt > Number(lastAttempt))
-  ) {
-    throw new Error("artifact-contract failure: Smithers report-producer attempt history is inconsistent");
-  }
-  return { authorityDetail, lastAttempt: Number(lastAttempt), attemptNumbers: attemptNumbers.sort((a, b) => a - b) };
+function finalReportSelectionsPath(task: (typeof taskSpecs)[number]): string {
+  return path.join(realpathSync(task.runRoot), "smithers", "final-report-selections", `${task.attemptId}.json`);
 }
 
-function priorFinalReportAgentSelections(
-  task: (typeof taskSpecs)[number],
-  authority: ReturnType<typeof readFinalReportSmithersAuthority>,
-  currentAttempt: number
-): FinalReportObservedAgentSelection[] {
-  return authority.attemptNumbers
-    .filter((attempt) => attempt < currentAttempt)
-    .flatMap((attempt) => {
-      // A failed preflight has no executed model selection. The same strict
-      // reconciler rejects nonterminal, ambiguous, or contradictory history.
-      const selection = inspectSmithersAttemptAgentSelection(task, authority.authorityDetail, attempt);
-      return selection === undefined ? [] : [{ attempt, chainIndex: selection.chainIndex }];
-    });
+function readFinalReportSelections(task: (typeof taskSpecs)[number]): FinalReportObservedAgentSelection[] {
+  const recordPath = finalReportSelectionsPath(task);
+  if (!pathEntryExists(recordPath)) return [];
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(readRegularFileSnapshot(recordPath, 1024 * 1024));
+  } catch (error) {
+    throw new Error("artifact-contract failure: recorded report-producer selections are malformed", { cause: error });
+  }
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (selection) =>
+        isPlainJsonRecord(selection) &&
+        Number.isSafeInteger(selection.attempt) &&
+        Number.isSafeInteger(selection.chainIndex)
+    )
+  ) {
+    throw new Error("artifact-contract failure: recorded report-producer selections are malformed");
+  }
+  // finalReportAgentExecution validates attempt order and chain bounds.
+  return value.map((selection) => ({ attempt: Number(selection.attempt), chainIndex: Number(selection.chainIndex) }));
 }
 
 function finalReportAgentSelectionsForAttempt(
@@ -2271,18 +2217,14 @@ function finalReportAgentSelectionsForAttempt(
   if (cached !== undefined && cached.some((selection) => selection.attempt >= attempt)) {
     throw new Error("artifact-contract failure: report producer attempt moved behind its observed history");
   }
-  let previous = cached ?? [];
-  // After a controller restart, seed the lost process-local history from
-  // durable attempts before authoring the prompt. An existing cache already
-  // contains all locally observed selections.
-  if (cached === undefined && attempt > 1) {
-    const authority = readFinalReportSmithersAuthority(task);
-    if (authority.lastAttempt !== attempt) {
-      throw new Error("artifact-contract failure: report retry does not match the current Smithers attempt");
-    }
-    previous = priorFinalReportAgentSelections(task, authority, attempt);
-  }
+  // After a controller restart, seed the lost process-local history from the
+  // record earlier attempts wrote. An attempt number Smithers dispatches again
+  // replaces its own earlier entry. A failed preflight never reaches generate,
+  // so it is not an executed selection.
+  const previous =
+    cached ?? (attempt > 1 ? readFinalReportSelections(task).filter((selection) => selection.attempt < attempt) : []);
   const selections = [...previous, { attempt, chainIndex }];
+  writeFileDurable(finalReportSelectionsPath(task), `${JSON.stringify(selections)}\n`);
   finalReportAgentSelectionAuthority.set(task.attemptId, selections);
   return selections;
 }
@@ -2291,14 +2233,15 @@ function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]
   const current = finalReportAgentExecutionAuthority.get(task.attemptId);
   if (current !== undefined) return current;
   // Single-rung chains can still have quota-exempt physical retries and must
-  // recover their actual attempt IDs.
-  const authority = readFinalReportSmithersAuthority(task);
-  const producer = reconcileSmithersAttemptAgentSelection(task, authority.authorityDetail, authority.lastAttempt);
-  const observedSelections = [
-    ...priorFinalReportAgentSelections(task, authority, authority.lastAttempt),
-    { attempt: authority.lastAttempt, chainIndex: producer.chainIndex }
-  ];
-  const execution = finalReportAgentExecution(task, producer.chainIndex, observedSelections);
+  // recover their actual attempt IDs. The verifier runs after the producer
+  // succeeded, so the producing attempt is the last selection the producer
+  // recorded.
+  const selections = readFinalReportSelections(task);
+  const producer = selections.at(-1);
+  if (producer === undefined) {
+    throw new Error("artifact-contract failure: report producer selection was never recorded");
+  }
+  const execution = finalReportAgentExecution(task, producer.chainIndex, selections);
   finalReportAgentExecutionAuthority.set(task.attemptId, execution);
   return execution;
 }
@@ -2316,7 +2259,7 @@ function baseAgentForProfile(
     ...(profile.modelName === undefined ? {} : { model: profile.modelName }),
     ...(profile.reasoningEffort === undefined ? {} : { reasoningEffort: profile.reasoningEffort }),
     // Agents receive only their declared artifact roots; final-report producer
-    // authority remains in controller memory or Smithers' durable attempt data.
+    // authority remains in controller memory or the run's selection record.
     // Dependency roots are admitted only after preparation has authenticated
     // their verifier markers. The metadata-only instance created while the
     // workflow is rendered receives no dependency access.

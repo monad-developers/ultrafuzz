@@ -5,7 +5,6 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { writeTrustedSmithersShim } from "../src/smithers.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 const runtimeRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -20,7 +19,7 @@ function productionReportSource(): string {
     ["function artifactAwareAgent", "\nfunction isStrictlyInsideDirectory"],
     ["function isStrictlyInsideDirectory", "\nfunction isPlainRecord"],
     ["function prepareTaskLocalAuthorityPath", "\n/**\n * Derive the least-authority"],
-    ["function isMissingPathError", "\nfunction pathEntryExists"],
+    ["function isMissingPathError", "\nfunction compareCanonicalRuntimeStrings"],
     ["function resolveRegularArtifactFile", "\nfunction resolveNonEmptyRegularArtifactFile"],
     ["function readBoundedRegularArtifactSnapshot", "\nfunction decodeStrictUtf8Snapshot"],
     ["function parseStrictJsonSnapshot", "\nfunction captureTaskOutputs"],
@@ -55,8 +54,7 @@ import { z } from "zod/v4";
 const { assertRegularFileInside, normalizeNodeAttemptFailureMessage, parseStrictJsonBytes,
   prepareSafeFilePath, readRegularFileSnapshot, sensitiveEnvironmentValues,
   validateArtifactContractBytes, writeFileDurable } = await import(${JSON.stringify(artifactsModule)});
-const { inspectSmithersAttemptAgentSelection, reconcileSmithersAttemptAgentSelection,
-  smithersTaskAgentId, projectCanonicalFinalReport } = await import(${JSON.stringify(runtimeModule)});
+const { smithersTaskAgentId, projectCanonicalFinalReport } = await import(${JSON.stringify(runtimeModule)});
 const root = ${JSON.stringify(root)};
 const quotaRetry = ${JSON.stringify(quotaRetry)};
 const baseReport = ${JSON.stringify(report)};
@@ -66,7 +64,6 @@ const evidencePath = path.join(root, "executions.jsonl");
 const task = {
   id: "node:report", smithersNodeId: "node:report", logicalNodeId: "report", attemptId: "report",
   smithersRunId: ${JSON.stringify(runId)}, runRoot: root, workspacePath: root,
-  execution: { mode: "local" },
   outputs: [{path: "report.json", contract: "ultrafuzz/report@3"},
     {path: "report.md", contract: "ultrafuzz/nonempty-markdown@1"}],
   agentChain: ${JSON.stringify(quotaRetry ? ["primary"] : ["primary", "fallback-a", "fallback-b"])}.map((profileId, index) => ({
@@ -80,8 +77,8 @@ const originalPrompt = untrustedContentBoundary + "\\n\\nCopy the supplied repor
 const isPlainJsonRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 // This fixture isolates report provenance: source/dependency and run-metric
 // authorities are fixed synthetic inputs. Prompt materialization, tamper
-// checks, agent retry handling, durable selection reconciliation, report
-// schema validation, Markdown projection, and canonical verification are real.
+// checks, agent retry handling, the durable selection record, report schema
+// validation, Markdown projection, and canonical verification are real.
 const assertWorkspaceSourceRevision = () => {};
 const resetTaskArtifactsForRetry = async () => {};
 const finalReportTaskRuntimeFromAgentArgs = () => undefined;
@@ -106,7 +103,7 @@ const agents = task.agentChain.map((_profile, chainIndex) => artifactAwareAgent(
     // Quota failure parks the controller itself. A simultaneous graceful-pause
     // request races that waiting-quota transition and is not needed for restart.
     if (!quotaRetry || attempt > 1) {
-      execFileSync("smithers", ["pause", task.smithersRunId, "--format", "json"], {cwd: root, timeout: 30_000});
+      execFileSync(${JSON.stringify(smithers)}, ["pause", task.smithersRunId, "--format", "json"], {cwd: root, timeout: 30_000});
     }
     if (attempt === 1) {
       const error = new Error("synthetic first producer failure");
@@ -145,25 +142,20 @@ export default smithers(() => (
 `;
 }
 
-// The PATH the controller gives the engine: the run's trusted-bin first and no
-// directory with a runner of its own (pnpm puts node_modules/.bin on the test's
-// PATH), so the workflow's bare `smithers` calls reach the run's shim (#1143).
-function controllerPath(root: string): string {
-  if (!fs.existsSync(path.join(root, "trusted-bin", "smithers"))) writeTrustedSmithersShim(root, root);
-  return [
-    path.join(root, "trusted-bin"),
-    ...(process.env.PATH ?? "")
-      .split(path.delimiter)
-      .filter((entry) => entry !== "" && !fs.existsSync(path.join(entry, "smithers")))
-  ].join(path.delimiter);
-}
+// A production controller PATH never contains the runner's bin directory
+// (composeSmithersCommandPath), and `pnpm test` prepends node_modules/.bin, so
+// drop every entry that would resolve a bare `smithers` for the detached engine.
+const productionPath = (process.env.PATH ?? "")
+  .split(path.delimiter)
+  .filter((entry) => entry.length > 0 && !fs.existsSync(path.join(entry, path.basename(smithers))))
+  .join(path.delimiter);
 
 function cli(root: string, args: string[]): unknown {
   return JSON.parse(
     execFileSync(smithers, [...args, "--format", "json", "--full-output"], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, PATH: controllerPath(root), SMITHERS_POST_FAILURE: "0" },
+      env: { ...process.env, PATH: productionPath, SMITHERS_POST_FAILURE: "0" },
       timeout: 30_000,
       maxBuffer: 16 * 1024 * 1024
     })
