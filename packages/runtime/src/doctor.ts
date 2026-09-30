@@ -125,21 +125,20 @@ export async function diagnoseProject(input: DoctorInput) {
   }
   const commandRequirements = [...requiredByName].map(([name, required]) => ({ name, required }));
   let probeFailure: string | undefined;
-  const probes =
-    resolved.config === undefined
-      ? []
-      : await (
-          input.requiredCommandProbe === undefined
-            ? probeCommandsForExecution(
-                commandRequirements.map((entry) => entry.name),
-                env,
-                { includeVersions: true, cwd: projectRoot }
-              )
-            : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
-        ).catch((error: unknown) => {
-          probeFailure = error instanceof Error ? error.message : String(error);
-          return [];
-        });
+  // Commands are always probed on the local PATH, so a config that fails to resolve still gets a
+  // truthful toolchain report.
+  const probes = await (
+    input.requiredCommandProbe === undefined
+      ? probeCommandsForExecution(
+          commandRequirements.map((entry) => entry.name),
+          env,
+          { includeVersions: true, cwd: projectRoot }
+        )
+      : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
+  ).catch((error: unknown) => {
+    probeFailure = error instanceof Error ? error.message : String(error);
+    return [];
+  });
   const probeByName = new Map(probes.map((probe) => [probe.name, probe]));
   const toolchain = commandRequirements.map((requirement) => ({
     ...requirement,

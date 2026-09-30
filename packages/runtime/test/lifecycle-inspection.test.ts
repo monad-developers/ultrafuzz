@@ -1780,6 +1780,34 @@ test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in
   }
 });
 
+test("diagnoseProject still probes the local toolchain when the project config does not resolve", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const scaffold = fs.readFileSync(configPath, "utf8");
+  assert.ok(scaffold.includes('[execution]\nmode = "local"'), scaffold);
+  fs.writeFileSync(configPath, scaffold.replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"'), "utf8");
+  let probed: readonly string[] = [];
+
+  const doctor = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: async (names) => {
+      probed = names;
+      return allAvailable(names);
+    }
+  });
+
+  assert.ok(doctor.diagnostics.some((entry) => entry.code === "CONFIG_EXECUTION_CLOUD_REMOVED"));
+  for (const name of ["git", "node", "forge"]) assert.ok(probed.includes(name), `${name} probed: ${probed.join(",")}`);
+  assert.equal(doctor.value?.checks.find((check) => check.name === "toolchain")?.status, "ok");
+  assert.equal(
+    doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING"),
+    false
+  );
+});
+
 test("diagnoseProject never executes a target-local required-command shim", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
