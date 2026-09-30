@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -151,6 +152,7 @@ test("native continuation keeps a finished producer and runs only a newly render
       })}\n`,
       "utf8"
     );
+    writeLocalResolvedConfig(runRoot);
     fs.writeFileSync(
       workflowPath,
       nativeContinuationWorkflowSource({ executionLog, producerArtifact, downstreamArtifact, withDownstream: true }),

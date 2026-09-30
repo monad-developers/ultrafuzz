@@ -129,6 +129,7 @@ import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-c
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
+import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import {
   shippedReferenceCatalog,
   writeShippedDocumentReferenceCaches,
@@ -24348,31 +24349,94 @@ test("resume refuses a run planned for removed per-node cloud execution before i
   assert.ok(fakeLog);
   const launched = await startRun({ projectRoot: project, runId, env });
   assert.ok(launched.ok && launched.value !== undefined, JSON.stringify(launched.diagnostics));
-  // Record the task manifest the pre-removal compiler wrote for `[execution] mode = "cloud"`.
+  // Record what the pre-removal launch wrote for `[execution] mode = "cloud"`: the resolved config
+  // and every task in the task manifest carry the cloud mode and the Modal provider settings.
+  const modal = {
+    app: "ultrafuzz-test",
+    image: "ultrafuzz-test",
+    credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+  };
+  const configPath = path.join(launched.value.run_root, "smithers", "resolved-config.json");
+  const config = parseResolvedConfigJsonBytes(fs.readFileSync(configPath));
+  fs.writeFileSync(
+    configPath,
+    serializeResolvedConfigJsonBytes({
+      ...config,
+      execution: { ...config.execution, mode: "cloud", provider: "modal", providers: { modal } }
+    })
+  );
   const tasksPath = path.join(launched.value.run_root, "smithers", "tasks.json");
   const tasks = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as SmithersTaskManifestDocument;
   for (const task of tasks.tasks) {
-    task.execution = {
-      ...task.execution,
-      mode: "cloud",
-      provider: "modal",
-      modal: { app: "ultrafuzz-test", image: "ultrafuzz-test", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
-    };
+    task.execution = { ...task.execution, mode: "cloud", provider: "modal", modal };
     task.metadata.execution = { ...task.metadata.execution, mode: "cloud", provider: "modal" };
   }
   fs.writeFileSync(tasksPath, `${JSON.stringify(tasks, null, 2)}\n`, "utf8");
 
-  for (const refreshController of [false, true]) {
-    fs.writeFileSync(fakeLog, "", "utf8");
-    const resumed = await resumeRun({ projectRoot: project, runId, refreshController, env });
-    assert.equal(resumed.ok, false, `refreshController=${String(refreshController)}`);
-    assert.deepEqual(
-      resumed.diagnostics.map((diagnostic) => diagnostic.code),
-      ["WORKFLOW_CLOUD_EXECUTION_REMOVED"],
-      JSON.stringify(resumed.diagnostics)
-    );
-    assert.equal(fs.readFileSync(fakeLog, "utf8"), "", "no Smithers command runs");
+  const assertRefused = async (manifest: string) => {
+    for (const refreshController of [false, true]) {
+      fs.writeFileSync(fakeLog, "", "utf8");
+      const resumed = await resumeRun({ projectRoot: project, runId, refreshController, env });
+      const label = `${manifest} task manifest, refreshController=${String(refreshController)}`;
+      assert.equal(resumed.ok, false, label);
+      assert.deepEqual(
+        resumed.diagnostics.map((diagnostic) => diagnostic.code),
+        ["WORKFLOW_CLOUD_EXECUTION_REMOVED"],
+        `${label}: ${JSON.stringify(resumed.diagnostics)}`
+      );
+      assert.equal(fs.readFileSync(fakeLog, "utf8"), "", `${label}: no Smithers command runs`);
+    }
+  };
+  await assertRefused("cloud");
+  // The config decides, so a task manifest that cannot be read does not let the run through.
+  fs.writeFileSync(tasksPath, "{", "utf8");
+  await assertRefused("malformed");
+  fs.rmSync(tasksPath);
+  await assertRefused("missing");
+});
+
+test("resume refuses a run whose resolved config cannot be read instead of continuing it locally", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "unreadable-config-resume";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const fakeLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(fakeLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.ok(launched.ok && launched.value !== undefined, JSON.stringify(launched.diagnostics));
+  const configPath = path.join(launched.value.run_root, "smithers", "resolved-config.json");
+  const localConfig = fs.readFileSync(configPath);
+
+  // The task manifest still records a local run; without the config resume cannot confirm it.
+  for (const [label, damage] of [
+    ["malformed", () => fs.writeFileSync(configPath, "{", "utf8")],
+    ["missing", () => fs.rmSync(configPath)]
+  ] as const) {
+    damage();
+    for (const refreshController of [false, true]) {
+      fs.writeFileSync(fakeLog, "", "utf8");
+      const resumed = await resumeRun({ projectRoot: project, runId, refreshController, env });
+      const context = `${label} config, refreshController=${String(refreshController)}`;
+      assert.equal(resumed.ok, false, context);
+      assert.deepEqual(
+        resumed.diagnostics.map((diagnostic) => diagnostic.code),
+        ["WORKFLOW_LIFECYCLE_FAILED"],
+        `${context}: ${JSON.stringify(resumed.diagnostics)}`
+      );
+      assert.match(
+        resumed.diagnostics[0]?.message ?? "",
+        new RegExp(`^run ${runId} cannot be resumed without its resolved config, which records whether`, "u"),
+        context
+      );
+      assert.equal(fs.readFileSync(fakeLog, "utf8"), "", `${context}: no Smithers command runs`);
+    }
   }
+
+  fs.writeFileSync(configPath, localConfig);
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.match(fs.readFileSync(fakeLog, "utf8"), /--resume ultrafuzz-unreadable-config-resume /u);
 });
 
 testWhen(runningUnderBun)(
@@ -25760,6 +25824,7 @@ test("native continuation preserves unsealed legacy launch without synthesizing 
   fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
   fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
   fs.writeFileSync(workflowPath, "export default {};\n");
+  writeLocalResolvedConfig(runRoot);
   fs.writeFileSync(
     path.join(runRoot, "run.json"),
     JSON.stringify({

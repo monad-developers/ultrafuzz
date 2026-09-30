@@ -342,13 +342,15 @@ schema bindings, and metadata projections remain provenance for inspection;
 they are not resume authorization. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
-fork completed work. When the run's `smithers/resolved-config.json` parses as
-the current resolved-config schema, agent adapters in the continued workflow
-read the run's `smithers/execution-config.toml` (launch gave them a copy of the
-same file); for a run whose resolved config does not parse, resume sets no
-`ULTRAFUZZ_CONFIG_PATH`. If resume cannot prune stale task-worktree
-registrations, it reports a `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and
-continues.
+fork completed work. The run's `smithers/resolved-config.json` records the
+execution mode its tasks were planned with, so before starting Smithers
+`resume` fails with `WORKFLOW_LIFECYCLE_FAILED` when that file is missing or
+does not parse as the current resolved-config schema, and with
+`WORKFLOW_CLOUD_EXECUTION_REMOVED` when it records `mode = "cloud"`. Agent
+adapters in the continued workflow read the run's
+`smithers/execution-config.toml` (launch gave them a copy of the same file). If
+resume cannot prune stale task-worktree registrations, it reports a
+`WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
 
 A run that ends `failed` with no failed durable node was stopped by something
 no durable node owns: a run-level workflow runner error, such as an exception

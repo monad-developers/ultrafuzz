@@ -531,8 +531,13 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // they find no agent tables and fall back to default auth. Launch writes
     // the same config as TOML beside it and hands adapters a copy of that file.
     const agentConfigPath = safeResolveInside(smithersRoot, "execution-config.toml", "workflow agent config");
+    // The compiler gave every task the execution mode this config records, and the current
+    // controller renders every task as a local worktree task, so continuing a run planned for
+    // Modal sandboxes would run its remaining attempts on this host instead. The mode comes from
+    // the config, not the optional task manifest, and a run whose config cannot be read is refused.
+    const config = readContinuationResolvedConfig(layout.root, configPath, runId);
+    if (config.execution.mode === "cloud") return cloudExecutionRemovedFailure(runId);
     let taskDocument: SmithersTaskManifestDocument | undefined;
-    let config: ResolvedConfig | undefined;
     if (fs.existsSync(tasksPath)) {
       assertRegularFileInside(layout.root, tasksPath, "workflow task manifest");
       try {
@@ -541,29 +546,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         if (input.refreshController === true) throw error;
       }
     }
-    // The current controller renders every task as a local worktree task, so continuing a run
-    // planned for Modal sandboxes would run its remaining attempts on this host instead.
-    if (taskDocument?.tasks.some((task) => task.execution.mode === "cloud") === true) {
-      return runtimeFailure<WorkflowLifecycleValue>([
-        {
-          code: "WORKFLOW_CLOUD_EXECUTION_REMOVED",
-          message: `run ${runId} was planned for per-node cloud execution, which was removed; it cannot be resumed, so start a new run`,
-          severity: "error",
-          source: "runtime"
-        }
-      ]);
-    }
-    if (fs.existsSync(configPath)) {
-      assertRegularFileInside(layout.root, configPath, "workflow config");
-      try {
-        config = parseContinuationResolvedConfigBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
-      } catch (error) {
-        if (input.refreshController === true) throw error;
-      }
-    }
     if (input.refreshController === true) {
-      if (taskDocument === undefined || config === undefined) {
-        throw new Error("current controller rendering requires the persisted workflow task manifest and config");
+      if (taskDocument === undefined) {
+        throw new Error("current controller rendering requires the persisted workflow task manifest");
       }
       refreshInspection = await assertSmithersControllerRefreshable({
         smithersRunId,
@@ -580,15 +565,12 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       });
     }
     const tasks = taskDocument?.tasks ?? [];
-    const forgeGuard =
-      config === undefined
-        ? { env: { ...(input.env ?? {}) }, environmentVariableNames: [] as readonly string[], active: false }
-        : prepareForgeGuardEnvironment({ layout, config, env: input.env });
+    const forgeGuard = prepareForgeGuardEnvironment({ layout, config, env: input.env });
     const controllerEnvironment = {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: import.meta.resolve("@ultrafuzz/runtime"),
-      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: agentConfigPath }),
+      ULTRAFUZZ_CONFIG_PATH: agentConfigPath,
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
     };
     let trustedCli: TrustedCliEnvironment = {
@@ -597,7 +579,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       environmentVariableNames: []
     };
     for (const name of TRUSTED_CLI_ENVIRONMENT_VARIABLES) trustedCli.env[name] = undefined;
-    if (taskDocument !== undefined && config !== undefined) {
+    if (taskDocument !== undefined) {
       try {
         const prepared = prepareTrustedCliEnvironment({
           layout,
@@ -634,8 +616,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       }
     }
     const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
-    const providerCredentialNames =
-      config === undefined ? [] : agentCredentialEnvironmentVariableNames(config, agentRefs);
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(config, agentRefs);
     const continuedEnvironment =
       input.refreshController === true ? trustedCli.env : withoutSensitiveAllowlistedEnvironment(trustedCli.env);
     const lifecycleEnvironment = {
@@ -658,7 +639,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       smithersRunId,
       workflowPath,
       projectRoot,
-      maxConcurrency: input.maxConcurrency ?? config?.run.maxParallelAgents,
+      maxConcurrency: input.maxConcurrency ?? config.run.maxParallelAgents,
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
@@ -667,8 +648,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         runRoot: layout.root,
         logsDir: path.join(smithersRoot, "logs")
       },
-      keepWorkspaces: config?.run.keepWorkspaces ?? false,
-      controllerLeaseSeconds: config?.run.controllerLeaseSeconds ?? 60,
+      keepWorkspaces: config.run.keepWorkspaces,
+      controllerLeaseSeconds: config.run.controllerLeaseSeconds,
       env: nativeSmithersContinuationEnvironment(lifecycleEnvironment),
       prepareContinuationEnvironment: () => {
         const claimsSealedControl =
@@ -686,7 +667,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         });
       },
       environmentVariableNames: mergeEnvironmentVariableNames(
-        config === undefined ? [] : agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
+        agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
@@ -716,6 +697,30 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
   } finally {
     await releaseLifecycleLock?.();
   }
+}
+
+// A missing or unreadable config fails the resume: without it the run's execution mode is unknown.
+function readContinuationResolvedConfig(runRoot: string, configPath: string, runId: string): ResolvedConfig {
+  try {
+    assertRegularFileInside(runRoot, configPath, "workflow config");
+    return parseContinuationResolvedConfigBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
+  } catch (error) {
+    throw new Error(
+      `run ${runId} cannot be resumed without its resolved config, which records whether it was planned for the removed per-node cloud execution: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+}
+
+function cloudExecutionRemovedFailure(runId: string): RuntimeResult<WorkflowLifecycleValue> {
+  return runtimeFailure<WorkflowLifecycleValue>([
+    {
+      code: "WORKFLOW_CLOUD_EXECUTION_REMOVED",
+      message: `run ${runId} was planned for per-node cloud execution, which was removed; it cannot be resumed, so start a new run`,
+      severity: "error",
+      source: "runtime"
+    }
+  ]);
 }
 
 function parseContinuationResolvedConfigBytes(bytes: Uint8Array): ResolvedConfig {
@@ -753,7 +758,7 @@ function readContinuationExpandedGraph(layout: RunLayout): unknown {
 
 function recordNativeContinuationState(input: {
   layout: RunLayout;
-  config: ResolvedConfig | undefined;
+  config: ResolvedConfig;
   requestedConcurrency: number | undefined;
 }): void {
   try {
@@ -764,8 +769,7 @@ function recordNativeContinuationState(input: {
     state.status = "running";
     state.started_at ??= submittedAt;
     delete state.finished_at;
-    const leaseDurationMs =
-      (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
+    const leaseDurationMs = input.config.run.controllerLeaseSeconds * 1_000;
     state.controller_lease = {
       ...state.controller_lease,
       status: "active",
@@ -773,18 +777,10 @@ function recordNativeContinuationState(input: {
       renewed_at: submittedAt,
       expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
     };
-    state.concurrency.requested_concurrency =
-      input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
-    if (input.config !== undefined) {
-      state.workflow_deadline_at = new Date(
-        submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
-      ).toISOString();
-    } else if (state.workflow_deadline_at !== undefined && Date.parse(state.workflow_deadline_at) <= submittedAtMs) {
-      // A legacy run without readable config cannot supply a fresh duration.
-      // Do not let its already-expired historical deadline cancel the Smithers
-      // continuation that was just accepted.
-      delete state.workflow_deadline_at;
-    }
+    state.concurrency.requested_concurrency = input.requestedConcurrency ?? input.config.run.maxParallelAgents;
+    state.workflow_deadline_at = new Date(
+      submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
+    ).toISOString();
     writeRunState(input.layout, state);
   } catch {
     // Mutable Ultrafuzz projection is best effort after Smithers accepts the
