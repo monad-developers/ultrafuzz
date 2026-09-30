@@ -2063,7 +2063,7 @@ function flowNodeType(node: TopologyNode): string {
   if (node.group === "setup") {
     return "projectDiscovery";
   }
-  if (node.group === "properties") {
+  if (node.group === "properties" || node.group === "property-catalog") {
     return "propertySpecification";
   }
   return "agentAttempt";
