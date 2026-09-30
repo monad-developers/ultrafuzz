@@ -5259,8 +5259,8 @@ test("host artifact validation gives a run's sealed schema bundle the deadline i
   const artifact = Buffer.from("[]\n", "utf8");
 
   // A bundle other than this build's has no long-lived validator isolate: each validation starts a worker
-  // that compiles the whole bundle, and under load that can outlast the validator's default deadline.
-  const byDefault = afterSlowSchemaCompile(() =>
+  // that compiles the whole bundle, and under load that can outlast the validator's 5 s default deadline.
+  const byDefault = afterSlowSchemaCompile(10_000, () =>
     validateRegisteredJsonBytesSync({
       schemaPath: path.join(bundle.directory, binding.schema_file),
       instanceBytes: artifact,
@@ -5276,29 +5276,30 @@ test("host artifact validation gives a run's sealed schema bundle the deadline i
     schemaId: binding.schema_id,
     schemaSha256: binding.schema_sha256
   };
-  const verifier = afterSlowSchemaCompile(() =>
+  const verifier = afterSlowSchemaCompile(10_000, () =>
     validateArtifactContractBytes("ultrafuzz/findings@2", artifact, artifactPath, planned)
   );
   assert.equal(verifier.ok, true, JSON.stringify(verifier.issues));
-  assert.deepEqual(
-    afterSlowSchemaCompile(() => verifyRequiredArtifactSchemaBinding(layout, artifactPath, output, artifact)),
-    []
-  );
+  const hostGate = () => verifyRequiredArtifactSchemaBinding(layout, artifactPath, output, artifact);
+  assert.deepEqual(afterSlowSchemaCompile(10_000, hostGate), []);
+  // A compile past the validator's 30 s cap fails the host gate. This also shows that the simulated compile
+  // is the gate's wait for its own worker, after the validator set its deadline: had an earlier wait on the
+  // gate's path moved the clock first, the deadline would count from the moved clock and the gate would pass.
+  assert.equal(afterSlowSchemaCompile(40_000, hostGate)[0]?.code, "JSON_VALIDATION_TIMEOUT");
 });
 
 /**
- * Run `validate` as if the first validator worker it waits for took 10 s to compile its schemas: past the
- * validator's 5 s default deadline, within the 30 s it allows at most. The validator waits for a worker in
- * `Atomics.wait` slices against a `Date.now` deadline, so the clock runs 10 s ahead from the first slice
- * until `validate` returns.
+ * Run `validate` as if the first validator worker it waits for took `compileMs` to compile its schemas. The
+ * validator waits for a worker in `Atomics.wait` slices against a `Date.now` deadline, so the clock runs
+ * `compileMs` ahead from the first slice until `validate` returns.
  */
-function afterSlowSchemaCompile<T>(validate: () => T): T {
+function afterSlowSchemaCompile<T>(compileMs: number, validate: () => T): T {
   const now = Date.now;
   const wait = Atomics.wait;
   let ahead = 0;
   Date.now = () => now() + ahead;
   Atomics.wait = ((typedArray: Int32Array, index: number, value: number, timeout?: number) => {
-    ahead = 10_000;
+    ahead = compileMs;
     return wait(typedArray, index, value, timeout);
   }) as typeof Atomics.wait;
   try {
