@@ -27294,6 +27294,24 @@ test("resume --retry-failed applies edited prompts to the finished producer of a
   assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
 });
 
+/**
+ * Runs `body` with XDG_CACHE_HOME at a cache seeded with every reference the shipped catalog pins. A
+ * stock launch materializes them, so without it the launch reads the host's reference cache.
+ */
+async function withShippedReferenceCache<T>(project: string, body: () => Promise<T>): Promise<T> {
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    return await body();
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+}
+
 test("resume of a stock run renders its prompts as launch did and refreshes an unexpanded group's template copy", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -27301,7 +27319,7 @@ test("resume of a stock run renders its prompts as launch did and refreshes an u
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, status: "failed", state: "failed", steps: [] })
   });
-  const launched = await startRun({ projectRoot: project, runId, env });
+  const launched = await withShippedReferenceCache(project, () => startRun({ projectRoot: project, runId, env }));
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
   assert.ok(launched.value);
   const runRoot = launched.value.run_root;
@@ -27347,7 +27365,7 @@ test("resume applies an edited stock review prompt that names artifact authoriti
       steps: [{ id: "node:goal-plan", state: "finished", attempt: 1 }]
     })
   });
-  const launched = await startRun({ projectRoot: project, runId, env });
+  const launched = await withShippedReferenceCache(project, () => startRun({ projectRoot: project, runId, env }));
   assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
   assert.ok(launched.value);
   const runRoot = launched.value.run_root;
