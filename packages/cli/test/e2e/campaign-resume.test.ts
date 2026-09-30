@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 
 // One campaign through the shipped product path: `init`, `run`, `resume`, `status`, `stats`,
 // `report`, and `events` each run as their own `ultrafuzz` process, and the generated workflow runs
-// on the pinned Smithers engine that `run` and `resume` install from npm and start under Bun. Only
-// the model is fake: a stub `codex` executable on PATH. Other runtime and CLI tests drive a fake
-// `smithers` shell script, or run the engine on hand-written workflows.
+// on the pinned Smithers engine under Bun: `run` installs it from npm into the run's execution
+// snapshot, and `resume` runs the copy pnpm patched into Ultrafuzz's own install. Only the model is
+// fake: a stub `codex` executable on PATH. Other runtime and CLI tests drive a fake `smithers` shell
+// script, or run the engine on hand-written workflows.
 
 const CLI_ENTRYPOINT = fileURLToPath(new URL("../../../dist/index.js", import.meta.url));
 const MINUTE = 60_000;

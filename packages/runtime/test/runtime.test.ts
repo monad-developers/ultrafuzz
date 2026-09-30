@@ -700,10 +700,8 @@ function loadOpenRouterPatchedSmithersUrl(): Promise<string> {
     fs.cpSync(pinnedRoot, isolatedRoot, { recursive: true });
     fs.rmSync(path.join(isolatedRoot, "node_modules"), { recursive: true, force: true });
     fs.symlinkSync(path.dirname(path.dirname(pinnedRoot)), path.join(isolatedRoot, "node_modules"), "dir");
-    const sourcePath = path.join(isolatedRoot, patch.sourceRelativePath);
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.equal(source.split(patch.patchable).length, 2, "ordered stdout must uniquely anchor in pinned Smithers");
-    fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched));
+    const source = fs.readFileSync(path.join(isolatedRoot, patch.sourceRelativePath), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, "the pinned Smithers agents do not carry ordered stdout");
     // Keep the real diagnostic checks, but replace their transport in this
     // isolated dependency copy. A live /models probe otherwise competes with
     // the caller deadline and can prevent the retry fixture from resuming.
@@ -7173,13 +7171,19 @@ bunAdapterTest(
 
     const result = (await agent.generate({ prompt: "Telemetry", rootDir: project })) as {
       text?: string;
-      usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number } };
+      usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: Record<string, number> };
     };
 
     assert.equal(result.text, "done");
-    assert.equal(result.usage?.inputTokens, 120);
+    // The pinned agents carry Ultrafuzz's usage patches, which count cache reads
+    // and writes inside inputTokens and report each component.
+    assert.equal(result.usage?.inputTokens, 527);
+    assert.deepEqual(result.usage?.inputTokenDetails, {
+      noCacheTokens: 120,
+      cacheReadTokens: 400,
+      cacheWriteTokens: 7
+    });
     assert.equal(result.usage?.outputTokens, 30);
-    assert.equal(result.usage?.inputTokenDetails?.cacheReadTokens, 400);
   }
 );
 
@@ -15671,7 +15675,8 @@ test("compatibility patcher rewrites every described workaround", async () => {
   const project = tempProject();
   writeFakeInstalledSmithers(project);
   const nodeModules = path.join(project, ".smithers", "node_modules");
-  const stockRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
+  const runnerRoot = path.join(nodeModules, "smthrs");
+  const installedRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
   assert.ok(SMITHERS_COMPATIBILITY_PATCHES.length > 0, "no compatibility patches were described");
   // Seeded from the descriptions themselves, so a newly described workaround is
   // covered here without a second edit and cannot land reported-but-never-applied.
@@ -15709,7 +15714,8 @@ test("compatibility patcher rewrites every described workaround", async () => {
   for (const [source, anchors] of bySource) {
     fs.mkdirSync(path.dirname(source), { recursive: true });
     if (source.endsWith(SMITHERS_BIN_PATH)) {
-      fs.cpSync(path.dirname(stockRunner), path.dirname(source), { recursive: true });
+      fs.cpSync(path.dirname(installedRunner), path.dirname(source), { recursive: true });
+      fs.writeFileSync(source, await pristineSmithersSource("smthrs", installedRunner), "utf8");
       continue;
     }
     fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
@@ -15769,8 +15775,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
       ["AgentTraceSummary"],
       "the observability compatibility patch must expose only the bounded trace summary event"
     );
+    const upstreamRunner = sources.find(({ patch }) => patch.id === "local_delegation");
+    assert.ok(upstreamRunner);
     assert.throws(
-      () => bindSmithersExecutableCapability({}, stockRunner),
+      () => bindSmithersExecutableCapability({}, upstreamRunner.source),
       /delegate controller authority to target code/u
     );
   }
@@ -15796,10 +15804,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const current = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(current.split(resumeTransfer.patch.patched).length, 2);
     fs.writeFileSync(resumeTransfer.source, current.replace(resumeTransfer.patch.patched, predecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "applied");
 
     const unscopedHelperPredecessor = resumeTransfer.patch.predecessors?.find((candidate) =>
       candidate.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)")
@@ -15810,15 +15818,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
       current.replace(resumeTransfer.patch.patched, unscopedHelperPredecessor),
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedUnscopedHelper = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(migratedUnscopedHelper.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)"), false);
     assert.equal(migratedUnscopedHelper.includes(resumeTransfer.patch.patched), true);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.equal(
+      inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer,
+      "incompatible"
+    );
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -15829,7 +15840,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
       `${resumeTransfer.patch.patched}\n${resumeTransfer.patch.patchable}\n`,
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.equal(
+      inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer,
+      "incompatible"
+    );
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -15848,37 +15862,37 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(current.split(processAnchor.patch.patched).length, 2);
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, predecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedPredecessor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedPredecessor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedPredecessor.includes(nested), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(
       processAnchor.source,
       current.replace(processAnchor.patch.patched, reusedInheritedDescriptor),
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedReusedInheritedDescriptor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedReusedInheritedDescriptor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedReusedInheritedDescriptor.includes(reusedInheritedDescriptor), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, nested), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedNested = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedNested.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedNested.includes(nested), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
     assert.notEqual(mutatedNested, nested);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /process-owned execution snapshot implementation is incompatible/u
@@ -15887,7 +15901,7 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const unknownPredecessor = predecessor.replace('"--preserve-symlinks"', '"--unregistered-startup-flag"');
     assert.notEqual(unknownPredecessor, predecessor);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, unknownPredecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /process-owned execution snapshot implementation is incompatible/u
@@ -16385,24 +16399,21 @@ async function patchedSmithersAgentUsageModules(): Promise<{
   fs.rmSync(path.join(isolatedAgentsRoot, "node_modules"), { recursive: true, force: true });
   fs.symlinkSync(path.dirname(path.dirname(pinnedAgentsRoot)), path.join(isolatedAgentsRoot, "node_modules"), "dir");
 
-  const sourceContents = new Map<string, string>();
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
     (candidate) => candidate.packageName === "@smthrs/agents"
   )) {
-    const sourcePath = path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/"));
-    const current = sourceContents.get(sourcePath) ?? fs.readFileSync(sourcePath, "utf8");
-    assert.equal(current.split(patch.patchable).length, 2, `${patch.id} does not uniquely anchor in pinned agents`);
-    sourceContents.set(sourcePath, current.replace(patch.patchable, patch.patched));
+    const source = fs.readFileSync(path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/")), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned agents`);
   }
+  // The copy only has to export a helper the installed agents keep private.
   const baseCliSourcePath = path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js");
-  const baseCliSource = sourceContents.get(baseCliSourcePath);
-  assert.ok(baseCliSource);
+  const baseCliSource = fs.readFileSync(baseCliSourcePath, "utf8");
   assert.equal(baseCliSource.split("function usageFromCompletedEvent(").length, 2);
-  sourceContents.set(
+  fs.writeFileSync(
     baseCliSourcePath,
-    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent(")
+    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent("),
+    "utf8"
   );
-  for (const [sourcePath, contents] of sourceContents) fs.writeFileSync(sourcePath, contents, "utf8");
 
   const baseCli = (await import(
     pathToFileURL(path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js")).href
@@ -16668,8 +16679,7 @@ async function loadPatchedCostEngineInternals() {
   const sourcePath = path.join(isolatedEngineRoot, "src", "engine.js");
   let source = fs.readFileSync(sourcePath, "utf8");
   for (const patch of [normalization, pricing]) {
-    assert.equal(source.split(patch.patchable).length, 2, `${patch.id} does not uniquely anchor in the pinned engine`);
-    source = source.replace(patch.patchable, patch.patched);
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned engine`);
   }
   const internalsAnchor = "export const __engineInternals = {";
   assert.equal(source.split(internalsAnchor).length, 2);
@@ -16837,26 +16847,14 @@ test("patched engine admits authenticated controller path changes without accept
   );
   const pinnedEngineSource = resolveFromPinnedRunner.resolve("@smthrs/engine/engine");
   const pinnedEngineRoot = path.dirname(path.dirname(pinnedEngineSource));
-  const isolatedEngineRoot = path.join(tempProject(), "node_modules", "@smthrs", "engine");
-  fs.mkdirSync(path.dirname(isolatedEngineRoot), { recursive: true });
-  fs.cpSync(pinnedEngineRoot, isolatedEngineRoot, { recursive: true });
-  fs.rmSync(path.join(isolatedEngineRoot, "node_modules"), { recursive: true, force: true });
-  fs.symlinkSync(path.dirname(path.dirname(pinnedEngineRoot)), path.join(isolatedEngineRoot, "node_modules"), "dir");
-
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
     (candidate) => candidate.packageName === "@smthrs/engine"
   )) {
-    const sourcePath = path.join(isolatedEngineRoot, ...patch.sourceRelativePath.split("/"));
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.equal(
-      source.split(patch.patchable).length,
-      2,
-      `${patch.id} does not uniquely anchor in the isolated pinned engine`
-    );
-    fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched), "utf8");
+    const source = fs.readFileSync(path.join(pinnedEngineRoot, ...patch.sourceRelativePath.split("/")), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned engine`);
   }
 
-  const patchedEngine = (await import(pathToFileURL(path.join(isolatedEngineRoot, "src", "engine.js")).href)) as {
+  const patchedEngine = (await import(pathToFileURL(path.join(pinnedEngineRoot, "src", "engine.js")).href)) as {
     __engineInternals: {
       assertResumeDurabilityMetadata: (
         existingRun: Record<string, unknown>,
@@ -17795,7 +17793,7 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
     ).version;
     assert.equal(packageVersion, SMITHERS_VERSION, `${label} belongs to an unpinned release`);
 
-    const contents = fs.readFileSync(sourcePath, "utf8");
+    const contents = await pristineSmithersSource(patch.packageName, sourcePath);
     sourceByPatchId.set(patch.id, contents);
     assert.equal(
       contents.includes(patch.patched),
@@ -17917,6 +17915,30 @@ function pinnedRunnerSourceDir(packageName: string, probeSubpath: string): strin
     .version;
   assert.equal(version, SMITHERS_VERSION, `${packageName} belongs to an unpinned release`);
   return path.join(packageRoot, "src");
+}
+
+// The repository install carries Ultrafuzz's compatibility patches (pnpm
+// patchedDependencies generated from the registry), so a test that inspects
+// upstream's own shape first undoes them. Each replacement must occur exactly
+// once, and re-applying the registry must reproduce the installed bytes.
+async function pristineSmithersSource(packageName: string, sourcePath: string): Promise<string> {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const installed = fs.readFileSync(sourcePath, "utf8");
+  const patches = SMITHERS_COMPATIBILITY_PATCHES.filter(
+    (patch) =>
+      patch.packageName === packageName && sourcePath.endsWith(path.join(...patch.sourceRelativePath.split("/")))
+  );
+  let pristine = installed;
+  for (const patch of [...patches].reverse()) {
+    assert.equal(pristine.split(patch.patched).length, 2, `${patch.id} is not installed exactly once`);
+    pristine = pristine.replace(patch.patched, () => patch.patchable);
+  }
+  assert.equal(
+    patches.reduce((source, patch) => source.replace(patch.patchable, patch.patched), pristine),
+    installed,
+    `${sourcePath} does not round-trip through its compatibility patches`
+  );
+  return pristine;
 }
 
 function pinnedRunnerUnionMembers(source: string, typeName: string): string[] {
@@ -18155,9 +18177,9 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
   // diff surfaces it at the pin bump instead. The failure-path emitter splices
   // its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own return
   // shape is unioned in rather than read off the emitter literal.
-  const engineSource = fs.readFileSync(
-    path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js"),
-    "utf8"
+  const engineSource = await pristineSmithersSource(
+    "@smthrs/engine",
+    path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js")
   );
   const emittedTokenKeys = new Set<string>();
   for (let cursor = engineSource.indexOf('type: "TokenUsageReported"'); cursor !== -1;) {
@@ -18690,12 +18712,12 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     future_package_manager_field: { retained_by_owner: true }
   };
   fs.writeFileSync(paths.packageJson, `${JSON.stringify(valid)}\n`, "utf8");
-  const validPosture = inspectSmithersInstallation(project);
+  const validPosture = inspectSmithersInstallation(path.dirname(paths.packageJson));
   assert.equal(validPosture.bundled_version, SMITHERS_VERSION);
   assert.equal(validPosture.required_version, SMITHERS_VERSION);
   assert.equal(validPosture.installed_version, SMITHERS_VERSION);
   assert.equal(validPosture.installed_bin_target, SMITHERS_BIN_PATH);
-  assert.equal(validPosture.bin_path, paths.shim);
+  assert.equal(validPosture.bin_path, paths.target);
   assert.equal(validPosture.layout_error, null);
 
   fs.writeFileSync(
@@ -18707,7 +18729,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     )}},"peerDependencies":{"__proto__":"1.0.0"},"peerDependenciesMeta":{"__proto__":{"optional":true}}}\n`,
     "utf8"
   );
-  const prototypeKeyPosture = inspectSmithersInstallation(project);
+  const prototypeKeyPosture = inspectSmithersInstallation(path.dirname(paths.packageJson));
   assert.equal(prototypeKeyPosture.installed_version, SMITHERS_VERSION);
   assert.equal(prototypeKeyPosture.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(prototypeKeyPosture.layout_error, null);
@@ -18737,7 +18759,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
   ];
   for (const fixture of malformed) {
     fs.writeFileSync(paths.packageJson, fixture.bytes);
-    const posture = inspectSmithersInstallation(project);
+    const posture = inspectSmithersInstallation(path.dirname(paths.packageJson));
     assert.equal(posture.installed_version, null, fixture.label);
     assert.match(posture.layout_error ?? "", fixture.expected, fixture.label);
   }
@@ -18799,6 +18821,15 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
   assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").includes(project), false);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
   assert.equal(fs.existsSync(injectedMarker), false);
+  // `@ultrafuzz/runtime` depends on the runner only for host commands, which run
+  // the installed one; following that edge would seal a second engine closure.
+  assert.ok(run.value);
+  const dependencyMap = JSON.parse(
+    fs.readFileSync(path.join(run.value.run_root, "smithers", "execution-dependencies.json"), "utf8")
+  ) as { issuers: Array<{ id: string; dependencies: Record<string, string> }> };
+  const runtimeIssuer = dependencyMap.issuers.find((issuer) => issuer.id === "module:@ultrafuzz/runtime");
+  assert.ok(runtimeIssuer, JSON.stringify(dependencyMap.issuers.map((issuer) => issuer.id)));
+  assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "smthrs"), false);
   {
     const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
       missing = await startRun({

@@ -1,0 +1,38 @@
+diff --git a/src/makeWorkflowSession.js b/src/makeWorkflowSession.js
+index c1455842c32d35f2bd1af6f93cf521f5d54891db..8ebbacbae64ffc6da203496af39756bc9b683bc1 100644
+--- a/src/makeWorkflowSession.js
++++ b/src/makeWorkflowSession.js
+@@ -1135,6 +1135,10 @@ export function makeWorkflowSession(options = {}) {
+     if (!state.graph) {
+       return { _tag: "Wait", reason: { _tag: "ExternalTrigger" } };
+     }
++    if (state.skipPredicatesStale) {
++      state.skipPredicatesStale = false;
++      return { _tag: "ReRender", context: renderContext(state, undefined, { reason: "skip-check" }) };
++    }
+     // A terminal failure with a declared repair remains executable after a
+     // crash. Hydration normally makes exhausted failures fail immediately,
+     // but the engine still has one durable recovery phase to run (or resume)
+@@ -1181,6 +1185,7 @@ export function makeWorkflowSession(options = {}) {
+       const key = stateKeyFor(task);
+       if (task.skipIf) {
+         state.states.set(key, "skipped");
++        state.skipPredicatesStale = true;
+         changed = true;
+         continue;
+       }
+@@ -1605,6 +1610,14 @@ export function makeWorkflowSession(options = {}) {
+         }
+         return finishedResult("cancelled");
+       }),
++    restoreTerminalTaskStates: (tasks) =>
++      Effect.sync(() => {
++        for (const task of tasks) {
++          if (task.state !== "finished") continue;
++          state.states.set(stateKeyFor(task), task.state);
++        }
++        state.skipPredicatesStale = true;
++      }),
+     getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),
+     getSchedule: () => Effect.sync(() => state.schedule),
+     getCurrentGraph: () => Effect.sync(() => state.graph),

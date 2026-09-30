@@ -214,12 +214,32 @@ the producer and host on the same contract; it does not turn same-UID local
 agent execution into an OS security boundary.
 
 The workflow engine is installed by the controller rather than from the target
-repository. Ultrafuzz verifies the complete closure of its exact npm dependency,
-copies that closure into the target-specific private controller directory, and
-makes every copied directory and file read-only. It checks the closure before
-and after the script-disabled, registry-pinned install and again before cache
-reuse. The runner toolcache npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority;
-the latter remains only the run-owned validator launcher directory.
+repository. At launch, Ultrafuzz verifies the complete closure of its exact npm
+dependency, copies that closure into the target-specific private controller
+directory, and makes every copied directory and file read-only. It checks the
+closure before and after the script-disabled, registry-pinned install and again
+before cache reuse. `resume`, `ps`, the `--refresh-controller` ownership
+inspection, commands on a run without a sealed runner, and each run's
+`trusted-bin/smithers` shim instead run the engine from Ultrafuzz's own pnpm
+install, which pnpm patches at install time from the committed `patches/`
+files. That engine is not sealed. For each command Ultrafuzz runs, only its
+entrypoint and the Bun that runs it are digest-anchored, and the
+`trusted-bin/smithers` shim checks neither again: it executes the two paths it
+recorded when it was written. The engine's package closure is not hashed, and
+it runs without the Bun module confinement a sealed runner has. Ultrafuzz refuses
+it when it lacks any compatibility patch or lies inside the target project. It
+starts the engine's command process with
+`--config=/dev/null --no-env-file --no-install --no-addons`, so that process
+does not load the target's `bunfig.toml` or `.env`, and the compatibility
+patches pass the same flags to the detached engine and supervisor that process
+spawns, and to the supervisor's relaunch of a dead engine. Every engine process
+also gets `SMITHERS_BACKEND=sqlite`, which stops Smithers from importing the
+target's `.smithers/smithers.config.ts` to choose a store. The runner toolcache
+npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority; the latter remains only
+the run-owned directory holding the validator launcher and the `smithers` shim.
+Tasks inherit that directory first on `PATH`, so an agent can also drive its
+own run through `smithers` (for example `ps`, `cancel`, or `signal`); a
+same-UID agent could already run the engine by its path.
 
 Workflows that intentionally need additional variables can opt in explicitly:
 

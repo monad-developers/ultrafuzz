@@ -70,6 +70,9 @@ jobs:
       - name: Build
         run: pnpm -w build
 
+      - name: Check Smithers patch files against the compatibility patch registry
+        run: node scripts/smithers-patches.mjs --check
+
       - name: Lint changed code strictly
         env:
           ESLINT_PLUGIN_DIFF_COMMIT: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}

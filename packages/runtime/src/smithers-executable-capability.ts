@@ -8,7 +8,8 @@ const TARGET_LOCAL_DELEGATION_ANCHOR = "if (!delegateToLocalCliIfPresent()) {";
  * Bun reads `bunfig.toml` (and runs its `preload` list) and `.env` from its
  * working directory, which for every controller process is the target
  * repository. A controller Bun process without execution-snapshot startup
- * controls runs with these flags, so target configuration never reaches it.
+ * controls runs with these flags, so Bun itself loads neither file. They do not
+ * confine what the runner imports: that process has no module confinement.
  */
 export const BUN_TARGET_CONFIGURATION_GUARD_ARGS: readonly string[] = [
   "--config=/dev/null",
@@ -29,7 +30,7 @@ interface SmithersExecutableIdentity {
   runner: FileIdentity;
   interpreter: FileIdentity & { runtime: "bun" | "other" };
   bunStartup?: Readonly<{ confinement: FileIdentity; config: FileIdentity; environment: FileIdentity }>;
-  operatorController?: Readonly<{ root: string; assertCurrent: () => void; nativeContinuation: boolean }>;
+  operatorController?: Readonly<{ root: string }>;
 }
 type Forbidden = Readonly<{ lexical: string; real: string }>;
 
@@ -70,29 +71,28 @@ export function bindSmithersExecutableCapability<T extends Record<string, string
   return bindSmithersExecutableCapabilityInternal(env, executable, forbiddenRoot);
 }
 
+/**
+ * Binds Ultrafuzz's own installed runner. `operatorRoot` is the directory that
+ * holds the runner package and its dependencies, which bare imports in a
+ * continued workflow resolve through (see `operatorSmithersNodePath`). Like an
+ * explicit `SMITHERS_BIN`, the runner is refused inside `forbiddenRoot`.
+ */
 export function bindOperatorSmithersExecutableCapability<T extends Record<string, string | undefined>>(
   env: T,
   executable: string,
   operatorRoot: string,
-  assertCurrent: () => void,
-  forbiddenRoot?: string,
-  nativeContinuation = false
+  forbiddenRoot?: string
 ): T {
+  if (forbiddenRoot !== undefined) assertExecutableOutsideRoot(executable, forbiddenRoot);
   const root = fs.realpathSync(path.resolve(operatorRoot));
-  assertCurrent();
   if (!pathInside(root, path.resolve(executable)) || !pathInside(root, fs.realpathSync(executable))) {
     throw new Error("operator workflow runner must be inside its controller root");
   }
-  const bound = bindSmithersExecutableCapabilityInternal(env, executable, forbiddenRoot, {
-    root,
-    assertCurrent,
-    nativeContinuation
-  });
+  const bound = bindSmithersExecutableCapabilityInternal(env, executable, forbiddenRoot, { root });
   const capability = smithersExecutableCapability(bound)!;
   if (!pathInside(root, capability.runner.path)) {
     throw new Error("operator workflow runner must be inside its controller root");
   }
-  assertCurrent();
   return bound;
 }
 
@@ -100,7 +100,7 @@ function bindSmithersExecutableCapabilityInternal<T extends Record<string, strin
   env: T,
   executable: string,
   forbiddenRoot?: string,
-  operatorController?: Readonly<{ root: string; assertCurrent: () => void; nativeContinuation: boolean }>
+  operatorController?: Readonly<{ root: string }>
 ): T {
   const forbidden =
     forbiddenRoot === undefined
@@ -145,27 +145,13 @@ export function smithersExecutableCapability(
 }
 
 /**
- * Returns the package-resolution root privately bound to an operator-owned
- * native continuation. Caller-provided NODE_PATH never contributes to this
- * value: the controller capability supplies and revalidates the root.
+ * Returns the package-resolution root privately bound to Ultrafuzz's installed
+ * runner: the directory holding `smthrs` and its dependencies. A continued
+ * workflow is loaded from the target tree, which has no controller packages, so
+ * its bare imports resolve here. Caller-provided NODE_PATH never contributes.
  */
-export function nativeOperatorSmithersNodePath(
-  env: Record<string, string | undefined> | undefined
-): string | undefined {
-  const operator = smithersExecutableCapability(env)?.operatorController;
-  if (operator?.nativeContinuation !== true) return undefined;
-  operator.assertCurrent();
-  const nodeModules = path.join(operator.root, ".smithers", "node_modules");
-  const lexical = path.resolve(nodeModules);
-  const physical = fs.realpathSync(lexical);
-  if (
-    !pathInside(operator.root, lexical) ||
-    !pathInside(operator.root, physical) ||
-    !fs.statSync(physical).isDirectory()
-  ) {
-    throw new Error("operator workflow runner dependency root must remain inside its controller root");
-  }
-  return lexical;
+export function operatorSmithersNodePath(env: Record<string, string | undefined> | undefined): string | undefined {
+  return smithersExecutableCapability(env)?.operatorController?.root;
 }
 
 /**
@@ -180,7 +166,6 @@ export function acquireSmithersExecutableAnchor(
 ): SmithersExecutableAnchor | undefined {
   const capability = smithersExecutableCapability(env);
   if (capability === undefined) return undefined;
-  capability.operatorController?.assertCurrent();
   const dependencies = { ...DEFAULT_ANCHOR_DEPENDENCIES, ...dependencyOverrides };
   const requested = env?.SMITHERS_BIN?.trim() || capability.runner.path;
   const runnerDescriptor = openRegularFileNoFollow(requested);
@@ -209,19 +194,16 @@ export function acquireSmithersExecutableAnchor(
     const useDescriptorPaths = runnerDescriptorPath !== undefined && interpreterDescriptorPath !== undefined;
     const snapshotRunner = requested !== capability.runner.path;
     const bunModuleConfinement = env?.ULTRAFUZZ_BUN_MODULE_CONFINEMENT?.trim();
-    const directOperatorRunner =
+    // Ultrafuzz's installed runner is unsealed: it runs with
+    // BUN_TARGET_CONFIGURATION_GUARD_ARGS instead of a snapshot's startup controls.
+    const installedRunner =
       !snapshotRunner &&
       capability.operatorController !== undefined &&
-      pathInside(capability.operatorController.root, capability.runner.path) &&
-      (capability.operatorController.nativeContinuation ||
-        (capability.bunStartup !== undefined &&
-          path.dirname(path.dirname(capability.bunStartup.confinement.path)) === capability.operatorController.root));
-    const unsealedNativeContinuation =
-      directOperatorRunner && capability.operatorController?.nativeContinuation === true;
+      pathInside(capability.operatorController.root, capability.runner.path);
     if (
       capability.interpreter.runtime === "bun" &&
-      !unsealedNativeContinuation &&
-      ((!snapshotRunner && !directOperatorRunner) || !bunModuleConfinement || capability.bunStartup === undefined)
+      !installedRunner &&
+      (!snapshotRunner || !bunModuleConfinement || capability.bunStartup === undefined)
     ) {
       throw new Error("Bun workflow runner execution requires a sealed snapshot path");
     }
@@ -236,8 +218,8 @@ export function acquireSmithersExecutableAnchor(
     if (bunControls !== undefined)
       for (const [name, identity] of Object.entries(capability.bunStartup!))
         assertPathIdentity(bunControls[name as keyof typeof bunControls], identity, `Bun workflow runner ${name}`);
-    // An unsealed native continuation has no startup controls but still runs
-    // in the target repository.
+    // The unsealed installed runner has no startup controls but still runs in
+    // the target repository.
     const interpreterArguments =
       capability.interpreter.runtime !== "bun"
         ? []
@@ -255,7 +237,6 @@ export function acquireSmithersExecutableAnchor(
     let closed = false;
     const assertCurrent = (): void => {
       if (closed) throw new Error("workflow runner executable anchor is already closed");
-      capability.operatorController?.assertCurrent();
       assertDescriptorIdentity(runnerDescriptor, capability.runner, "workflow runner");
       assertDescriptorIdentity(interpreterDescriptor!, capability.interpreter, "workflow runner interpreter");
       assertPathIdentity(requested, capability.runner, "workflow runner");

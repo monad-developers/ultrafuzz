@@ -68,7 +68,6 @@ import { controllerOwnedGovernancePaths, targetIdentity } from "./data-governanc
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
-  nativeSmithersContinuationEnvironment,
   renderCurrentSmithersController,
   requestSmithersPause,
   runSmithersLifecycleCommand,
@@ -77,6 +76,8 @@ import {
   smithersExecutionControlFiles,
   smithersDiagnostic,
   submitSmithersWorkflow,
+  bindInstalledWorkflowRunner,
+  writeTrustedSmithersShim,
   type CompiledSmithersWorkflow
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
@@ -190,8 +191,14 @@ export async function startRun(input: StartRunInput) {
   let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
     enforceDataGovernance: true,
-    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph),
+    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
+      // Launch writes the run's `smithers` shim for the installed runner only
+      // after installing its own controller, so refuse a runner it cannot bind
+      // (an unpatched install, a missing Bun, an engine inside the target)
+      // before creating the run.
+      bindInstalledWorkflowRunner({}, input.projectRoot);
+      return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);
+    },
     afterLayoutCreated: (layout) => {
       createdLayout = layout;
     }
@@ -277,6 +284,10 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
+    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(
+      plan.layout.root,
+      plan.validation.project_root
+    );
     assertCurrentDataGovernanceTarget(
       plan.validation.project_root,
       prepared.verifiedControl.executionFiles,
@@ -594,16 +605,17 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli = prepared;
       } catch (error) {
         // Historical validator identity is task setup provenance, not authority
-        // to prevent Smithers from continuing the workflow. Keep the run-owned
-        // launcher first on PATH anyway: it re-verifies its closure on every
-        // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
+        // to prevent Smithers from continuing the workflow. trusted-bin, which
+        // also holds the `smithers` shim written below, leads the engine PATH on
+        // every resume, so a kept launcher stays first: it re-verifies its
+        // closure on every call, while dropping it lets tasks run whatever
+        // `ultrafuzz` is on PATH.
         const launcher = path.join(
           layout.root,
           "trusted-bin",
           process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz"
         );
         const launcherKept = fs.existsSync(launcher);
-        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = path.dirname(launcher);
         diagnostics.push(
           resumeWarning(
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
@@ -615,6 +627,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         );
       }
     }
+    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(layout.root, projectRoot);
     const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(config, agentRefs);
     const continuedEnvironment =
@@ -650,21 +663,21 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       },
       keepWorkspaces: config.run.keepWorkspaces,
       controllerLeaseSeconds: config.run.controllerLeaseSeconds,
-      env: nativeSmithersContinuationEnvironment(lifecycleEnvironment),
+      env: lifecycleEnvironment,
       prepareContinuationEnvironment: () => {
         const claimsSealedControl =
           workflow.control_generation !== undefined || workflow.control_integrity_path !== undefined;
         if (!claimsSealedControl && pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)) {
-          return nativeSmithersContinuationEnvironment(lifecycleEnvironment);
+          return lifecycleEnvironment;
         }
-        return nativeSmithersContinuationEnvironment({
+        return {
           ...lifecycleEnvironment,
           ULTRAFUZZ_DATA_GOVERNANCE_PATH: authenticatedContinuationGovernancePath(
             projectRoot,
             layout,
             workflow.control_generation
           )
-        });
+        };
       },
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
@@ -972,6 +985,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
+    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(evidence.layout.root, input.projectRoot);
     const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleEnvironment = {

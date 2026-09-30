@@ -1,0 +1,13 @@
+diff --git a/src/bin/smithers.js b/src/bin/smithers.js
+index 208cb55a5d9c9ae6e035416bb3c523ee2ce604a6..e43a055c8ee50acdc5bd2a5e71318e729c8ddf0a 100755
+--- a/src/bin/smithers.js
++++ b/src/bin/smithers.js
+@@ -58,7 +58,7 @@ function delegateToLocalCliIfPresent() {
+   return true;
+ }
+ 
+-if (!delegateToLocalCliIfPresent()) {
++if (true) { // Ultrafuzz operator controller: never delegate to target code.
+   try {
+     // The CLI, the packages it imports, and user workflow files are authored in
+     // TypeScript and JSX. Bun transpiles those on import; Node does not, and its

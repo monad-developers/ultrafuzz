@@ -1,0 +1,556 @@
+diff --git a/src/index.js b/src/index.js
+index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..25e8fe9c14792d527400adc40a6893d2039d535d 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -21,10 +21,12 @@ import { resolve, dirname, basename, relative, join, isAbsolute } from "node:pat
+ import { fileURLToPath, pathToFileURL } from "node:url";
+ import {
+   closeSync,
++  fstatSync,
+   readFileSync,
+   existsSync,
+   mkdirSync,
+   openSync,
++  realpathSync,
+   statSync,
+   watch,
+   writeFileSync,
+@@ -370,6 +372,214 @@ async function loadWorkflowAsync(path) {
+ // always run the exact code that launched them, instead of depending on
+ // `@smthrs/cli` being resolvable from the pack's node_modules.
+ process.env.SMITHERS_CLI_SRC_DIR ??= dirname(fileURLToPath(import.meta.url));
++// Linux addresses an open directory descriptor as /proc/<pid>/fd/<n>. macOS has
++// no /proc, and its /dev/fd/<n> entry for a directory cannot be traversed, so it
++// uses volfs instead: /.vol/<dev>/<ino> is rooted at an inode rather than a name,
++// which is the same swap-immunity /proc/self/fd provides here. A volfs path is
++// process-independent, so the same string is valid in the child; the descriptor
++// is still inherited as fd 3 and still pins the inode against reuse.
++const ultrafuzzVolfsRoot = (descriptor) => {
++  const opened = fstatSync(descriptor);
++  return "/.vol/" + opened.dev + "/" + opened.ino;
++};
++const ultrafuzzDescriptorRootPath = (descriptor) =>
++  process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/" + process.pid + "/fd/" + descriptor;
++const ultrafuzzInheritedRootPath = (descriptor) =>
++  process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/" + descriptor;
++// The path the child will use for the directory it receives as fd 3.
++const ultrafuzzChildRootPath = (descriptor) =>
++  process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/3";
++// volfs paths have no realpath(3) resolution, so identity is compared by inode.
++const ultrafuzzSameDirectory = (left, right) => {
++  const a = statSync(left);
++  const b = statSync(right);
++  return a.isDirectory() && b.isDirectory() && a.dev === b.dev && a.ino === b.ino;
++};
++// Keep Linux's canonical-path comparison unchanged. Darwin volfs paths cannot
++// be realpathed, so compare the verified file identities they name instead.
++const ultrafuzzSameWorkflowFile = (left, right) => {
++  if (process.platform !== "darwin") return realpathSync(left) === realpathSync(right);
++  const a = statSync(left);
++  const b = statSync(right);
++  return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino;
++};
++const ultrafuzzBunStartupArgsFor = (root) => process.versions.bun ? ["--config=" + root + "/controls/bunfig.toml", "--env-file=" + root + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + root + "/controls/bun-module-confinement.js"] : [];
++
++// Ultrafuzz invokes this process through a descriptor held by its controller.
++// Each detached descendant receives that directory atomically as fd 3, opens a
++// process-owned anchor, and passes the capability the same way to its children.
++// This avoids every parent-exit race around /proc/<parent>/fd/<n> pathnames.
++const ultrafuzzInheritedSnapshotDescriptorEnv = "ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR";
++const ultrafuzzProcessSnapshotDescriptorEnv = "ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR";
++const ultrafuzzSnapshotSourceRootEnv = "ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT";
++const ultrafuzzProcessSnapshotRootEnv = "ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT";
++const ultrafuzzPersistedSnapshotRootEnv = "ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT";
++
++function ultrafuzzPersistedExecutionSnapshotRoot(persistedWorkflowValue) {
++  const persistedWorkflowPath = resolve(process.cwd(), persistedWorkflowValue);
++  const persistedWorkflowsDirectory = dirname(persistedWorkflowPath);
++  const persistedSmithersDirectory = dirname(persistedWorkflowsDirectory);
++  if (
++    basename(persistedWorkflowsDirectory) !== "workflows" ||
++    basename(persistedSmithersDirectory) !== ".smithers"
++  ) {
++    throw new Error("persisted workflow path is outside an execution snapshot");
++  }
++  return { persistedWorkflowPath, persistedRoot: dirname(persistedSmithersDirectory) };
++}
++
++function rewriteUltrafuzzExecutionSnapshotValue(value, sourceRoots, destinationRoot) {
++  let candidate = value;
++  let fileUrl = false;
++  if (value.startsWith("file:")) {
++    try {
++      candidate = fileURLToPath(value);
++      fileUrl = true;
++    } catch {
++      return value;
++    }
++  }
++  if (resolve(candidate) !== candidate) return value;
++  for (const sourceRoot of sourceRoots) {
++    const relativePath = relative(sourceRoot, candidate);
++    if (
++      relativePath === ".." ||
++      relativePath.startsWith("../") ||
++      relativePath.startsWith("..\\") ||
++      resolve(sourceRoot, relativePath) !== candidate
++    ) {
++      continue;
++    }
++    const rewritten = resolve(destinationRoot, relativePath);
++    return fileUrl ? pathToFileURL(rewritten).href : rewritten;
++  }
++  return value;
++}
++
++function ultrafuzzSnapshotDescriptor(value) {
++  if (!/^[0-9]+$/u.test(value)) return undefined;
++  const descriptor = Number(value);
++  return Number.isSafeInteger(descriptor) && descriptor >= 0 ? descriptor : undefined;
++}
++
++function ultrafuzzExecutionSnapshotChildTransfer(args) {
++  const descriptorValue = process.env[ultrafuzzProcessSnapshotDescriptorEnv]?.trim();
++  const sourceRoot = process.env[ultrafuzzSnapshotSourceRootEnv]?.trim();
++  const processRoot = process.env[ultrafuzzProcessSnapshotRootEnv]?.trim();
++  const persistedRoot = process.env[ultrafuzzPersistedSnapshotRootEnv]?.trim();
++  const transferDeclared =
++    descriptorValue !== undefined || sourceRoot !== undefined || processRoot !== undefined || persistedRoot !== undefined;
++  if (!transferDeclared) return undefined;
++
++  const descriptor = ultrafuzzSnapshotDescriptor(descriptorValue ?? "");
++  if (descriptor === undefined || !sourceRoot || !processRoot || !persistedRoot) {
++    throw new Error("process execution snapshot transfer capability is incomplete or invalid");
++  }
++
++  const expectedProcessRoot = ultrafuzzDescriptorRootPath(descriptor);
++  const childRoot = ultrafuzzChildRootPath(descriptor);
++  if (
++    processRoot !== expectedProcessRoot ||
++    !statSync(sourceRoot).isDirectory() ||
++    !statSync(processRoot).isDirectory() ||
++    !ultrafuzzSameDirectory(sourceRoot, persistedRoot) ||
++    !ultrafuzzSameDirectory(processRoot, persistedRoot)
++  ) {
++    throw new Error("process execution snapshot transfer capability is no longer current");
++  }
++  return {
++    descriptor,
++    root: childRoot,
++    args: args.map((value) =>
++      rewriteUltrafuzzExecutionSnapshotValue(value, [sourceRoot, processRoot, persistedRoot], childRoot)
++    ),
++    env: { [ultrafuzzInheritedSnapshotDescriptorEnv]: "3" },
++  };
++}
++
++function anchorUltrafuzzExecutionSnapshotForProcess() {
++  const inheritedDescriptorValue = process.env[ultrafuzzInheritedSnapshotDescriptorEnv]?.trim();
++  delete process.env[ultrafuzzInheritedSnapshotDescriptorEnv];
++  delete process.env[ultrafuzzProcessSnapshotDescriptorEnv];
++  delete process.env[ultrafuzzSnapshotSourceRootEnv];
++  delete process.env[ultrafuzzProcessSnapshotRootEnv];
++  delete process.env[ultrafuzzPersistedSnapshotRootEnv];
++
++  const configValue = process.env.ULTRAFUZZ_CONFIG_PATH?.trim();
++  const persistedWorkflowValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
++  if (!configValue || !persistedWorkflowValue) {
++    if (inheritedDescriptorValue !== undefined) {
++      throw new Error("inherited execution snapshot is missing its persisted controls");
++    }
++    return;
++  }
++
++  let configPath;
++  try {
++    configPath = configValue.startsWith("file:") ? fileURLToPath(configValue) : configValue;
++  } catch {
++    if (inheritedDescriptorValue !== undefined) {
++      throw new Error("inherited execution snapshot has an invalid config path");
++    }
++    return;
++  }
++  const configuredSourceRoot = dirname(dirname(configPath));
++  if (inheritedDescriptorValue !== undefined && inheritedDescriptorValue !== "3") {
++    throw new Error("inherited execution snapshot descriptor must be fixed fd 3");
++  }
++  const inheritedDescriptor = inheritedDescriptorValue === undefined ? undefined : 3;
++  if (inheritedDescriptor === undefined && !/^(?:\/proc\/[0-9]+\/fd\/[0-9]+|\/\.vol\/[0-9]+\/[0-9]+)$/u.test(configuredSourceRoot)) return;
++
++  const { persistedWorkflowPath, persistedRoot } =
++    ultrafuzzPersistedExecutionSnapshotRoot(persistedWorkflowValue);
++  const sourceRoot =
++    inheritedDescriptor === undefined ? configuredSourceRoot : ultrafuzzInheritedRootPath(inheritedDescriptor);
++  const acquisitionRoot = sourceRoot;
++  let descriptor;
++  try {
++    descriptor = openSync(acquisitionRoot, "r");
++    const processRoot = ultrafuzzDescriptorRootPath(descriptor);
++    const processStat = statSync(processRoot);
++    if (!processStat.isDirectory() || !ultrafuzzSameDirectory(processRoot, persistedRoot)) {
++      throw new Error("process execution snapshot descriptor changed during acquisition");
++    }
++
++    for (const [name, value] of Object.entries(process.env)) {
++      if (value !== undefined && name !== "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH") {
++        process.env[name] = rewriteUltrafuzzExecutionSnapshotValue(
++          value,
++          [configuredSourceRoot, sourceRoot, persistedRoot],
++          processRoot,
++        );
++      }
++    }
++    for (let index = 0; index < process.argv.length; index += 1) {
++      process.argv[index] = rewriteUltrafuzzExecutionSnapshotValue(
++        process.argv[index],
++        [configuredSourceRoot, sourceRoot, persistedRoot],
++        processRoot,
++      );
++    }
++    const loadedWorkflow = process.argv.find((value) => value.includes("/.smithers/workflows/"));
++    if (loadedWorkflow && !ultrafuzzSameWorkflowFile(loadedWorkflow, persistedWorkflowPath)) {
++      throw new Error("process-owned workflow path does not match its persisted generation");
++    }
++
++    process.env[ultrafuzzProcessSnapshotDescriptorEnv] = String(descriptor);
++    process.env[ultrafuzzSnapshotSourceRootEnv] = inheritedDescriptor === undefined ? sourceRoot : processRoot;
++    process.env[ultrafuzzProcessSnapshotRootEnv] = processRoot;
++    process.env[ultrafuzzPersistedSnapshotRootEnv] = persistedRoot;
++    process.env.SMITHERS_MONITOR_SUPPRESS = "1";
++    process.env.SMITHERS_POST_FAILURE = "0";
++  } catch (error) {
++    if (descriptor !== undefined) closeSync(descriptor);
++    throw error;
++  }
++  // This descriptor is the process-scoped execution capability. The kernel
++  // closes it when this CLI, detached engine, or supervisor exits.
++}
++
++anchorUltrafuzzExecutionSnapshotForProcess();
+ 
+ /**
+  * @param {string} path
+@@ -4119,6 +4329,17 @@ async function executeUpCommand(c, workflowPath, options, fail, launchConfig = {
+       throw err;
+     }
+     const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
++    const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
++    const persistedWorkflowPath = persistedWorkflowPathValue
++      ? resolve(process.cwd(), persistedWorkflowPathValue)
++      : resolvedWorkflowPath;
++    if (!ultrafuzzSameWorkflowFile(resolvedWorkflowPath, persistedWorkflowPath)) {
++      return fail({
++        code: "INVALID_WORKFLOW_PATH",
++        message: "Controller workflow path does not match its persisted workflow path",
++        exitCode: 4,
++      });
++    }
+     const { resume, resumeRunId } = normalizeResumeOption(options.resume);
+     const runId = options.runId ?? resumeRunId;
+     const detachedMonitor = normalizeMonitorOption(options.monitor);
+@@ -4231,14 +4452,21 @@ async function executeUpCommand(c, workflowPath, options, fail, launchConfig = {
+       const fd = openSync(logFile, "a");
+       let child;
+       try {
+-        const detachedSpawn = smithersRuntimeSpawn([cliPath, ...childArgs]);
+-        child = spawn(detachedSpawn.command, detachedSpawn.args, {
++        const childSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer([
++          cliPath,
++          ...childArgs,
++        ]);
++        child = spawn(process.execPath, [...(childSnapshotTransfer === undefined ? (process.versions.bun ? ["--config=/dev/null","--no-env-file","--no-install","--no-addons"] : []) : ultrafuzzBunStartupArgsFor(childSnapshotTransfer.root)), ...(childSnapshotTransfer?.args ?? [cliPath, ...childArgs])], {
+           detached: true,
+-          stdio: ["ignore", fd, fd],
++          stdio:
++            childSnapshotTransfer === undefined
++              ? ["ignore", fd, fd]
++              : ["ignore", fd, fd, childSnapshotTransfer.descriptor],
+           env: {
+             ...process.env,
+             [DETACHED_RUN_LOG_FILE_ENV]: logFile,
+             [DETACHED_ADMISSION_NONCE_ENV]: admissionNonce,
++            ...(childSnapshotTransfer?.env ?? {}),
+           },
+         });
+       } finally {
+@@ -4266,12 +4494,25 @@ async function executeUpCommand(c, workflowPath, options, fail, launchConfig = {
+           supervisorArgs.push("--stale-threshold", options.superviseStaleThreshold);
+         if (options.superviseMaxConcurrent !== 3)
+           supervisorArgs.push("--max-concurrent", String(options.superviseMaxConcurrent));
+-        const supervisorSpawn = smithersRuntimeSpawn(supervisorArgs);
+-        const supervisor = spawn(supervisorSpawn.command, supervisorSpawn.args, {
+-          detached: true,
+-          stdio: ["ignore", fd, fd],
+-          env: process.env,
+-        });
++        const supervisorSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(supervisorArgs);
++        const supervisorFd = openSync(logFile, "a");
++        let supervisor;
++        try {
++          supervisor = spawn(process.execPath, [...(supervisorSnapshotTransfer === undefined ? (process.versions.bun ? ["--config=/dev/null","--no-env-file","--no-install","--no-addons"] : []) : ultrafuzzBunStartupArgsFor(supervisorSnapshotTransfer.root)), ...(supervisorSnapshotTransfer?.args ?? supervisorArgs)], {
++            detached: true,
++            stdio:
++              supervisorSnapshotTransfer === undefined
++                ? ["ignore", supervisorFd, supervisorFd]
++                : ["ignore", supervisorFd, supervisorFd, supervisorSnapshotTransfer.descriptor],
++            env: {
++              ...process.env,
++              ...(options.logDir ? { ULTRAFUZZ_SMITHERS_LOG_DIR: options.logDir } : {}),
++              ...(supervisorSnapshotTransfer?.env ?? {}),
++            },
++          });
++        } finally {
++          closeSync(supervisorFd);
++        }
+         supervisor.unref();
+         supervisorPid = supervisor.pid;
+       }
+@@ -4789,7 +5030,7 @@ async function executeUpCommand(c, workflowPath, options, fail, launchConfig = {
+           if (cause === "task-error") {
+             launchPostFailureAutopsy({
+               failedRunId: result.runId,
+-              workflowPath: resolvedWorkflowPath,
++              workflowPath: persistedWorkflowPath,
+               enabled: true,
+             });
+           } else {
+@@ -12556,6 +12797,18 @@ const cli = Cli.create({
+           const inputOverrides = parsedOverrides.value;
+           const resetNodes = parseResetNodeList(c.options.node);
+           const resolvedReplayWorkflowPath = resolve(c.args.workflow);
++          const persistedReplayWorkflowPathValue =
++            process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
++          const persistedReplayWorkflowPath = persistedReplayWorkflowPathValue
++            ? resolve(persistedReplayWorkflowPathValue)
++            : resolvedReplayWorkflowPath;
++          if (!ultrafuzzSameWorkflowFile(resolvedReplayWorkflowPath, persistedReplayWorkflowPath)) {
++            return fail({
++              code: "INVALID_WORKFLOW_PATH",
++              message: "Controller replay workflow path does not match its persisted workflow path",
++              exitCode: 4,
++            });
++          }
+           const result = await replayFromCheckpoint(adapter, {
+             parentRunId: c.options.runId,
+             frameNo: c.options.frame,
+@@ -12566,8 +12819,11 @@ const cli = Cli.create({
+             // Re-bless durable metadata to the workflow being replayed so a
+             // replay that carries an edited workflow resumes (mirrors `fork`);
+             // otherwise the resume guard rejects it with RESUME_METADATA_MISMATCH.
+-            workflowPath: resolvedReplayWorkflowPath,
+-            workflowHash: await readWorkflowGraphHash(resolvedReplayWorkflowPath),
++            workflowPath: persistedReplayWorkflowPath,
++            workflowHash: await readWorkflowGraphHash(
++              resolvedReplayWorkflowPath,
++              persistedReplayWorkflowPath,
++            ),
+             entryWorkflowHash: await readWorkflowEntryHash(resolvedReplayWorkflowPath),
+             force: c.options.force,
+           });
+@@ -12846,14 +13102,29 @@ const cli = Cli.create({
+           const inputOverrides = parsedOverrides.value;
+           const resetNodes = parseResetNodeList(c.options.resetNode);
+           const resolvedForkWorkflowPath = resolve(c.args.workflow);
++          const persistedForkWorkflowPathValue =
++            process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
++          const persistedForkWorkflowPath = persistedForkWorkflowPathValue
++            ? resolve(persistedForkWorkflowPathValue)
++            : resolvedForkWorkflowPath;
++          if (!ultrafuzzSameWorkflowFile(resolvedForkWorkflowPath, persistedForkWorkflowPath)) {
++            return fail({
++              code: "INVALID_WORKFLOW_PATH",
++              message: "Controller fork workflow path does not match its persisted workflow path",
++              exitCode: 4,
++            });
++          }
+           const result = await forkRun(adapter, {
+             parentRunId: c.options.runId,
+             frameNo: c.options.frame,
+             inputOverrides,
+             resetNodes,
+             branchLabel: c.options.label,
+-            workflowPath: resolvedForkWorkflowPath,
+-            workflowHash: await readWorkflowGraphHash(resolvedForkWorkflowPath),
++            workflowPath: persistedForkWorkflowPath,
++            workflowHash: await readWorkflowGraphHash(
++              resolvedForkWorkflowPath,
++              persistedForkWorkflowPath,
++            ),
+             entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),
+             force: c.options.force,
+             autoRun: c.options.run,
+@@ -14166,16 +14437,16 @@ async function relaunchForConflictedWorkspaceManifest() {
+   // preserving pid/signal semantics for a long-running gateway, this avoids
+   // letting the original Bun process perform another lazy resolution from
+   // the conflicted cwd while it waits for a child.
+-  if (typeof process.execve === "function") {
++  const relaunchArgs = [cliEntry, ...process.argv.slice(2)];
++  const relaunchSnapshotTransfer = ultrafuzzExecutionSnapshotChildTransfer(relaunchArgs);
++  if (relaunchSnapshotTransfer === undefined && typeof process.execve === "function") {
+     process.chdir(cliPackageDir);
+-    const runtime = smithersRuntimeReentry([cliEntry, ...process.argv.slice(2)]);
+-    process.execve(runtime.command, [runtime.command, ...runtime.args], childEnv);
++    process.execve(process.execPath, [process.execPath, ...relaunchArgs], childEnv);
+   }
+   process.chdir(cliPackageDir);
+-  const runtime = smithersRuntimeReentry([cliEntry, ...process.argv.slice(2)]);
+-  const child = spawn(runtime.command, runtime.args, {
+-    env: childEnv,
+-    stdio: "inherit",
++  const child = spawn(process.execPath, [...(relaunchSnapshotTransfer === undefined ? [] : ultrafuzzBunStartupArgsFor(relaunchSnapshotTransfer.root)), ...(relaunchSnapshotTransfer?.args ?? relaunchArgs)], {
++    env: { ...childEnv, ...(relaunchSnapshotTransfer?.env ?? {}) },
++    stdio: relaunchSnapshotTransfer === undefined ? "inherit" : ["inherit", "inherit", "inherit", relaunchSnapshotTransfer.descriptor],
+   });
+   const exitCode = await new Promise((resolvePromise, reject) => {
+     child.once("error", reject);
+diff --git a/src/observability-helpers.js b/src/observability-helpers.js
+index 015175be880b4a8b9b602a7f8bf9101acce3d9ff..a1a13ad56ef2c7819bb979827a6eb34c8f73127c 100644
+--- a/src/observability-helpers.js
++++ b/src/observability-helpers.js
+@@ -19,6 +19,7 @@ export const DEFAULT_LIFECYCLE_EVENT_TYPES = [
+   "RunAutoResumed",
+   "RunAutoResumeSkipped",
+   "RunForked",
++  "AgentTraceSummary",
+   "NodePending",
+   "NodeStarted",
+   "NodeFinished",
+diff --git a/src/resume-detached.js b/src/resume-detached.js
+index 89f4976c5d17f35e831a455fe4902650a0772c32..f9e959da65e69d5c249fd0333b1be16bff529c12 100644
+--- a/src/resume-detached.js
++++ b/src/resume-detached.js
+@@ -37,7 +37,7 @@ export function buildResumeArgs(target, runId) {
+   if (target.kind === "builtin") {
+     return buildBuiltinRelaunch(target, { runId, resume: true }).args;
+   }
+-  return ["up", target.workflowPath, "--resume", "--run-id", runId, "-d", "--force"];
++  return ["up", target.workflowPath, "--resume", "--run-id", runId, "-d", "--force", ...(process.env.ULTRAFUZZ_SMITHERS_LOG_DIR ? ["--log-dir", process.env.ULTRAFUZZ_SMITHERS_LOG_DIR] : [])];
+ }
+ 
+ /**
+@@ -88,11 +88,97 @@ export function resumeRunDetached(targetOrWorkflowPath, runId, claim, options =
+     throw new Error(`Cannot resume run ${runId}: detached log is unavailable at ${logFile}`, { cause });
+   }
+   try {
+-    const runtime = options.executable ? { command: options.executable, args } : smithersRuntimeSpawn(args);
+-    const child = spawn(runtime.command, runtime.args, {
++    // resume-detached.js is its own module: the descriptor-root helpers patched
++    // into src/index.js are out of scope here, so their Linux /proc and darwin
++    // volfs spellings are restated locally.
++    const ultrafuzzVolfsRoot = (descriptor) => {
++      const opened = process.getBuiltinModule("node:fs").fstatSync(descriptor);
++      return "/.vol/" + opened.dev + "/" + opened.ino;
++    };
++    const ultrafuzzDescriptorRootPath = (descriptor) =>
++      process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/" + process.pid + "/fd/" + descriptor;
++    const ultrafuzzChildRootPath = (descriptor) =>
++      process.platform === "darwin" ? ultrafuzzVolfsRoot(descriptor) : "/proc/self/fd/3";
++    const snapshotDescriptorValue =
++      process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_DESCRIPTOR?.trim();
++    const snapshotSourceRoot = process.env.ULTRAFUZZ_SNAPSHOT_SOURCE_ROOT?.trim();
++    const snapshotProcessRoot = process.env.ULTRAFUZZ_SNAPSHOT_PROCESS_ROOT?.trim();
++    const snapshotPersistedRoot = process.env.ULTRAFUZZ_SNAPSHOT_PERSISTED_ROOT?.trim();
++    const snapshotTransferDeclared =
++      snapshotDescriptorValue !== undefined ||
++      snapshotSourceRoot !== undefined ||
++      snapshotProcessRoot !== undefined ||
++      snapshotPersistedRoot !== undefined;
++    const parsedSnapshotDescriptor = Number(snapshotDescriptorValue ?? "");
++    const snapshotDescriptor =
++      /^[0-9]+$/u.test(snapshotDescriptorValue ?? "") &&
++      Number.isSafeInteger(parsedSnapshotDescriptor) &&
++      parsedSnapshotDescriptor >= 0
++        ? parsedSnapshotDescriptor
++        : undefined;
++    if (snapshotTransferDeclared) {
++      const expectedProcessRoot =
++        snapshotDescriptor === undefined ? undefined : ultrafuzzDescriptorRootPath(snapshotDescriptor);
++      const processStat =
++        snapshotDescriptor === undefined || !snapshotProcessRoot
++          ? undefined
++          : statSync(snapshotProcessRoot);
++      const sourceStat =
++        snapshotDescriptor === undefined || !snapshotSourceRoot
++          ? undefined
++          : statSync(snapshotSourceRoot);
++      const persistedStat =
++        snapshotDescriptor === undefined || !snapshotPersistedRoot
++          ? undefined
++          : statSync(snapshotPersistedRoot);
++      if (
++        snapshotDescriptor === undefined ||
++        processStat === undefined ||
++        sourceStat === undefined ||
++        persistedStat === undefined ||
++        snapshotProcessRoot !== expectedProcessRoot ||
++        !processStat.isDirectory() ||
++        !sourceStat.isDirectory() ||
++        !persistedStat.isDirectory() ||
++        processStat.dev !== persistedStat.dev ||
++        processStat.ino !== persistedStat.ino ||
++        sourceStat.dev !== persistedStat.dev ||
++        sourceStat.ino !== persistedStat.ino
++      ) {
++        throw new Error("detached resume execution snapshot transfer capability is no longer current");
++      }
++    }
++    const snapshotRoots = [snapshotSourceRoot, snapshotProcessRoot, snapshotPersistedRoot].filter(
++      (value) => value !== undefined && value.length > 1,
++    );
++    const snapshotChildRoot =
++      snapshotDescriptor === undefined ? "/proc/self/fd/3" : ultrafuzzChildRootPath(snapshotDescriptor);
++    const rewriteSnapshotArgument = (value) => {
++      if (snapshotDescriptor === undefined) return value;
++      for (const root of snapshotRoots) {
++        if (value === root || value.startsWith(root + "/")) {
++          return snapshotChildRoot + value.slice(root.length);
++        }
++      }
++      return value;
++    };
++    // `options.executable` is deliberately ignored. `process.execPath` here is the
++    // interpreter bound and verified by Ultrafuzz's executable capability;
++    // honouring a caller-supplied executable string would be a capability escape.
++    // `logFd` is always an open descriptor in the pinned runner, which throws when
++    // it cannot open the detached log, so there is no "ignore" fallback to keep.
++    const child = spawn(process.execPath, [...(snapshotDescriptor === undefined ? (process.versions.bun ? ["--config=/dev/null","--no-env-file","--no-install","--no-addons"] : []) : process.versions.bun ? ["--config=" + snapshotChildRoot + "/controls/bunfig.toml", "--env-file=" + snapshotChildRoot + "/controls/bun-empty.env", "--no-env-file", "--no-install", "--no-addons", "--preserve-symlinks-main", "--preload=" + snapshotChildRoot + "/controls/bun-module-confinement.js"] : []), ...args.map(rewriteSnapshotArgument)], {
+       cwd,
+-      stdio: ["ignore", logFd, logFd],
+-      env: process.env,
++      stdio:
++        snapshotDescriptor === undefined
++          ? ["ignore", logFd, logFd]
++          : ["ignore", logFd, logFd, snapshotDescriptor],
++      env: {
++        ...process.env,
++        ...(snapshotDescriptor === undefined
++          ? {}
++          : { ULTRAFUZZ_SNAPSHOT_INHERITED_DESCRIPTOR: "3" }),
++      },
+       detached: true,
+     });
+     // Node reports failures such as ENOENT asynchronously even though pid is
+diff --git a/src/supervisor.js b/src/supervisor.js
+index 484b3e38e9b2d0768a65b0d74b01525059d4daf3..09a33d91138f8e9cf94f5223157cb78040fa2252 100644
+--- a/src/supervisor.js
++++ b/src/supervisor.js
+@@ -186,6 +186,19 @@ function normalizeSupervisorOptions(options) {
+ function resolveResumeTargetEffect(options, run) {
+   return Effect.gen(function* () {
+     const direct = resolveResumeTarget(run, { workflowExists: options.deps.workflowExists });
++    if (direct?.kind === "workflow-file") {
++      const persisted =
++        run.configJson !== undefined
++          ? run
++          : yield* Effect.promise(() => Promise.resolve(options.adapter.getRun(run.runId))).pipe(
++              Effect.catchDefect(() => Effect.succeed(null)),
++            );
++      let rootDir;
++      try {
++        rootDir = JSON.parse(persisted?.configJson ?? "null")?.rootDir;
++      } catch {}
++      return typeof rootDir === "string" && rootDir.length > 0 ? { ...direct, cwd: rootDir } : direct;
++    }
+     if (direct) return direct;
+     if (run.configJson !== undefined) return null;
+     const full = yield* Effect.promise(() => Promise.resolve(options.adapter.getRun(run.runId))).pipe(

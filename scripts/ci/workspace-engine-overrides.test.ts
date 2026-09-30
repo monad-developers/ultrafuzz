@@ -22,6 +22,9 @@ describe("workspace workflow-engine overrides", () => {
       overrides?: Record<string, string>;
     }
   ).overrides;
+  const workspaceEffectOverrides = Object.fromEntries(
+    Object.entries(workspaceOverrides ?? {}).filter(([name]) => name === "effect" || name.startsWith("@effect/"))
+  );
 
   const runnerOverrides = (() => {
     const source = fs.readFileSync(path.join(repoRoot, "packages", "runtime", "src", "smithers-package.ts"), "utf8");
@@ -35,11 +38,11 @@ describe("workspace workflow-engine overrides", () => {
   })();
 
   it("pins the same Effect versions the generated runner manifest pins", () => {
-    expect(workspaceOverrides).toEqual(runnerOverrides);
+    expect(workspaceEffectOverrides).toEqual(runnerOverrides);
   });
 
   it("pins every Effect package onto a single version", () => {
-    const versions = new Set(Object.values(workspaceOverrides ?? {}));
+    const versions = new Set(Object.values(workspaceEffectOverrides));
     expect(versions.size).toBe(1);
   });
 
