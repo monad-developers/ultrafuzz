@@ -13,6 +13,8 @@ type AdapterPolicy = {
   purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "strict-input" | "toml";
   responsibilities: readonly OrchestratorResponsibility[];
   upstreamIssues: readonly string[];
+  /** Absolute paths of the system tools the source runs. Their argument lists are not agent command lines. */
+  systemTools?: readonly string[];
 };
 
 type SourceUnit = {
@@ -27,6 +29,7 @@ type ImportBinding = {
 
 const FILESYSTEM_MODULES = new Set(["fs", "fs/promises", "node:fs", "node:fs/promises"]);
 const FILESYSTEM_WALKING_APIS = new Set(["glob", "globSync", "opendir", "opendirSync", "readdir", "readdirSync"]);
+const PROCESS_RUNNERS = new Set(["execFile", "execFileSync", "spawn", "spawnSync"]);
 const OUTPUT_INTERPRETATION_SIGNALS = new Set(["createOutputInterpreter", "onStderrLine", "onStdoutLine"]);
 const OUTPUT_TEXT_SIGNALS = new Set([
   "line",
@@ -122,13 +125,18 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
       "https://github.com/smithersai/smithers/issues/1629"
     ]
   },
-  "provider-home.tsx": { purpose: "provider-home", responsibilities: [], upstreamIssues: [] },
+  // ls shows whether a group-writable provider-home ancestor has an ACL.
+  "provider-home.tsx": { purpose: "provider-home", responsibilities: [], upstreamIssues: [], systemTools: ["/bin/ls"] },
   "strict-json.tsx": { purpose: "strict-input", responsibilities: [], upstreamIssues: [] },
   "toml.tsx": { purpose: "toml", responsibilities: [], upstreamIssues: [] }
 };
 
-function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<OrchestratorResponsibility> {
+function detectedOrchestratorResponsibilities(
+  source: SourceUnit,
+  systemTools: readonly string[] = []
+): ReadonlySet<OrchestratorResponsibility> {
   const detected = new Set<OrchestratorResponsibility>();
+  const constants = topLevelConstBindings(source.ast);
   const filesystemWalkingBindings = new Set<string>();
   const filesystemNamespaces = new Set<string>();
   for (const statement of source.ast.statements) {
@@ -215,7 +223,8 @@ function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<O
     if (
       ts.isArrayLiteralExpression(node) &&
       isCliArgumentArray(node) &&
-      reviewedAdapterFactoryConstructorOption(node) === undefined
+      reviewedAdapterFactoryConstructorOption(node) === undefined &&
+      !runsSystemTool(node, systemTools, constants)
     ) {
       detected.add("argv-construction");
     }
@@ -269,9 +278,9 @@ function detectedOrchestratorResponsibilities(source: SourceUnit): ReadonlySet<O
 function assertDetectedResponsibilitiesDeclared(
   relativePath: string,
   source: SourceUnit,
-  policy: Pick<AdapterPolicy, "responsibilities">
+  policy: Pick<AdapterPolicy, "responsibilities" | "systemTools">
 ): readonly OrchestratorResponsibility[] {
-  const detected = [...detectedOrchestratorResponsibilities(source)].sort();
+  const detected = [...detectedOrchestratorResponsibilities(source, policy.systemTools)].sort();
   const undeclared = detected.filter((responsibility) => !policy.responsibilities.includes(responsibility));
   assert.deepEqual(
     undeclared,
@@ -281,9 +290,13 @@ function assertDetectedResponsibilitiesDeclared(
   return detected;
 }
 
-function assertNonAdapterSourceHasNoOrchestrationSignals(relativePath: string, source: SourceUnit): void {
+function assertNonAdapterSourceHasNoOrchestrationSignals(
+  relativePath: string,
+  source: SourceUnit,
+  systemTools: readonly string[] = []
+): void {
   assert.deepEqual(
-    [...detectedOrchestratorResponsibilities(source)].sort(),
+    [...detectedOrchestratorResponsibilities(source, systemTools)].sort(),
     [],
     `${relativePath} is a non-adapter helper with orchestrator-responsibility signals; keep the logic in an owned adapter or add explicit helper ownership`
   );
@@ -419,6 +432,33 @@ function isCliArgumentArray(node: ts.ArrayLiteralExpression): boolean {
     const current = unwrapExpression(element);
     return (ts.isStringLiteral(current) || ts.isNoSubstitutionTemplateLiteral(current)) && current.text.startsWith("-");
   });
+}
+
+/**
+ * Whether `node` is the argument list that a call passes to one of
+ * `systemTools`, named by a string literal or a top-level const. A system
+ * tool, such as /bin/ls, is not an agent CLI, so its arguments are not agent
+ * argv construction.
+ */
+function runsSystemTool(
+  node: ts.ArrayLiteralExpression,
+  systemTools: readonly string[],
+  constants: ReadonlyMap<string, ts.Expression>
+): boolean {
+  const call = node.parent;
+  if (!ts.isCallExpression(call) || call.arguments[1] !== node) return false;
+  const runner = unwrapExpression(call.expression);
+  if (!ts.isIdentifier(runner) || !PROCESS_RUNNERS.has(runner.text)) return false;
+  let command = call.arguments[0] === undefined ? undefined : unwrapExpression(call.arguments[0]);
+  if (command !== undefined && ts.isIdentifier(command)) {
+    const initializer = constants.get(command.text);
+    command = initializer === undefined ? undefined : unwrapExpression(initializer);
+  }
+  return (
+    command !== undefined &&
+    (ts.isStringLiteral(command) || ts.isNoSubstitutionTemplateLiteral(command)) &&
+    systemTools.includes(command.text)
+  );
 }
 
 function isOutputParsingCall(node: ts.CallExpression): boolean {
@@ -817,6 +857,28 @@ test("static lower-bound signals ignore types, prose, thin constructor mappings,
   }
 });
 
+test("only a declared system tool's argument list is exempt from argv construction", () => {
+  const helper = parseSource(
+    "helper.ts",
+    'import { spawnSync } from "node:child_process";\n' +
+      'const LS = "/bin/ls";\n' +
+      'export const version = () => spawnSync(LS, ["--version"]);\n' +
+      'export const listing = (directory: string) => spawnSync("/bin/ls", ["-ld", "--", directory]);\n'
+  );
+  assert.deepEqual([...detectedOrchestratorResponsibilities(helper, ["/bin/ls"])], []);
+  assert.deepEqual([...detectedOrchestratorResponsibilities(helper)], ["argv-construction"]);
+  for (const undeclared of [
+    'import { spawnSync } from "node:child_process"; export const run = () => spawnSync("/bin/sh", ["-c", "ls"]);\n',
+    'const LS = "/bin/ls"; export const launch = (prompt: string) => [LS, "--resume", prompt];\n',
+    'const LS = "/bin/ls"; export const launch = (run: (...args: unknown[]) => unknown) => run(LS, ["--resume"]);\n'
+  ])
+    assert.deepEqual(
+      [...detectedOrchestratorResponsibilities(parseSource("helper.ts", undeclared), ["/bin/ls"])],
+      ["argv-construction"],
+      undeclared
+    );
+});
+
 test("non-adapter helpers cannot hide orchestrator responsibilities", () => {
   const helper = parseSource(
     "helper.ts",
@@ -865,7 +927,7 @@ test("main agent registry and recursive sources stay inside reviewed adapter bou
         [],
         `${relativePath} is not a registered adapter and cannot own adapter debt`
       );
-      assertNonAdapterSourceHasNoOrchestrationSignals(relativePath, source);
+      assertNonAdapterSourceHasNoOrchestrationSignals(relativePath, source, policy.systemTools);
     }
   }
 

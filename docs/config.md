@@ -92,16 +92,36 @@ Without `ULTRAFUZZ_PROVIDER_HOME_ROOT`, that root is
 `~/.local/state/ultrafuzz/provider-homes` when `XDG_STATE_HOME` is unset.
 `OpenRouterAgent` and `DeepSeekAgent`, which have no canonical home, keep their
 provider homes under the root, as do `ClaudeAgent`, `CodexAgent` and
-`KimiAgent` when they set `config_dir`. An adapter refuses a provider home when
-a directory above it lets another account write to it. A world-writable
-directory must be sticky, as `/tmp` is. A group-writable directory must be
-sticky, or be owned by you and by your user-private group: your primary group,
-with no member other than you in `/etc/group` and no other `/etc/passwd`
-account that has it as its primary group. This is how Ubuntu's default umask,
-`0002`, leaves `~/.local`. A group those two files cannot show to be yours
-alone, such as one that comes from LDAP, counts as shared. The error names the
-directory: remove its group or world write access (`chmod g-w` or
-`chmod o-w`), or set `ULTRAFUZZ_PROVIDER_HOME_ROOT` to a directory outside it.
+`KimiAgent` when they set `config_dir`.
+
+An adapter also checks every directory above a provider home. Each must be
+owned by root or by you, since a directory's owner can always change its
+permissions. A world-writable one must be sticky, as `/tmp` is. A
+group-writable one must be sticky, or be writable only by you through your
+user-private group, which is how Ubuntu's default umask, `0002`, leaves
+`~/.local`:
+
+- You own it, and its group is your primary group.
+- `/etc/group` lists no member of that group but you, and no other
+  `/etc/passwd` account has it as its primary group.
+- `/etc/nsswitch.conf` takes `passwd`, `group` and `initgroups` only from
+  `files`, `compat` or `systemd`. Another source, such as LDAP or SSSD, could
+  give the group to accounts those two files do not show.
+- It has no ACL. With one, the group permission bits are the ACL mask, so a
+  named user or group may be the one allowed to write. The adapter asks
+  `/bin/ls -ld`, which marks an ACL with `+`. GNU's `ls` must show no mark or
+  only `.`, for a security context such as SELinux's. The uutils `ls` that
+  Ubuntu 26.04 uses must show no mark at all, since it marks any extended
+  attribute with `+` and prints `.` in its place when there is a security
+  context. With any other `ls`, such as BusyBox's or a uutils release before
+  0.1.0, group-writable directories are refused.
+
+The check cannot see the group granted in ways that bypass those files, all of
+which only root can set up: a systemd unit's `SupplementaryGroups=`, a systemd
+user record, or a group password in `/etc/gshadow`. The error names the
+directory and the problem. Remove its group or world write access
+(`chmod g-w` or `chmod o-w`), or set `ULTRAFUZZ_PROVIDER_HOME_ROOT` to a
+directory outside it, the only fix for a directory another account owns.
 
 ## OpenRouter through Codex
 

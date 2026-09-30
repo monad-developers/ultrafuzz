@@ -128,7 +128,14 @@ import { loadRuntimeTemplate } from "../src/runtime-template.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
-import { type AccountFiles, readingAccountFiles, writeAccountFiles } from "./account-files.js";
+import {
+  type ProviderHomeHost,
+  groupWritableAncestors,
+  lsCalls,
+  providerHomeHost,
+  readingHost,
+  writeHost
+} from "./provider-home-host.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import { underGroupWritableUmask } from "./process-umask.js";
@@ -753,8 +760,8 @@ async function loadGeneratedOpenRouterAgent(
     acknowledgeProvisionalRateLimit?: boolean;
     acknowledgeTerminalRateLimit?: boolean;
     expireRetryDeadlineBeforeReplacementBuild?: number;
-    /** Read by the provider-home module instead of the host's account files. */
-    accountFiles?: AccountFiles;
+    /** Read by the provider-home module instead of the host's own files. */
+    providerHomeHost?: ProviderHomeHost;
   }
 ): Promise<{
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
@@ -967,9 +974,9 @@ ${deadlineFrom}`
   fs.writeFileSync(
     path.join(fixture, "provider-home.mjs"),
     transpile(
-      testInstrumentation?.accountFiles === undefined
+      testInstrumentation?.providerHomeHost === undefined
         ? providerHomeSource
-        : readingAccountFiles(providerHomeSource, testInstrumentation.accountFiles)
+        : readingHost(providerHomeSource, testInstrumentation.providerHomeHost)
     ),
     "utf8"
   );
@@ -4621,10 +4628,10 @@ bunAdapterTest(
     // Bun's os.homedir() does not follow a HOME set while it runs.
     const operator = temporaryRoot("ufz-openrouter-operator-"),
       stateHome = path.join(operator, "home", ".local", "state"),
-      accountFiles = { passwd: path.join(operator, "passwd"), group: path.join(operator, "group") };
+      host = providerHomeHost(operator);
     fs.mkdirSync(stateHome, { recursive: true });
     assert.equal(fs.statSync(path.dirname(stateHome)).mode & 0o777, 0o775);
-    writeAccountFiles(accountFiles);
+    writeHost(host);
     const codexHome = path.join(stateHome, "ultrafuzz", "provider-homes", "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
@@ -4636,7 +4643,9 @@ bunAdapterTest(
         ),
       "utf8"
     );
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, undefined, { accountFiles });
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, undefined, {
+      providerHomeHost: host
+    });
     const model = "~vendor/model.latest:free+preview@2026";
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -4681,6 +4690,11 @@ bunAdapterTest(
       assert.equal(command.env?.OPENAI_BASE_URL, "https://openrouter.ai/api/v1");
       assert.equal(command.env?.ANTHROPIC_API_KEY, "");
       assert.equal(command.env?.CODEX_HOME, codexHome);
+      // Under Bun, too, the adapter asks ls whether each group-writable ancestor has an ACL.
+      assert.deepEqual(
+        [...new Set(lsCalls(host).filter((call) => call.startsWith("C unset -ld -- ")))],
+        groupWritableAncestors(stateHome).map((directory) => `C unset -ld -- ${directory}`)
+      );
       await command.cleanup?.();
 
       const providerConfig = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");

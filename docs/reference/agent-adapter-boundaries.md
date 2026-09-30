@@ -34,12 +34,14 @@ declarations may include additional inherited or semantically reviewed
 responsibilities that the detector cannot infer. Type-only declarations,
 comments, strings outside argument arrays, and simple values or literal option
 arrays passed by a `create*Agent` factory into its returned `*Agent`
-constructor, named config-file reads, and empty diagnostic argv are deliberately
-excluded.
+constructor, named config-file reads, empty diagnostic argv, and the argument
+lists passed to a system tool that a source's policy declares are deliberately
+excluded. A system tool is not an agent CLI: `provider-home.tsx` declares
+`/bin/ls`, which it runs to read whether a group-writable directory has an ACL.
 
 Every `.ts` and `.tsx` source under the adapter tree has one policy record: its
-reviewed purpose, its declared responsibilities, and the upstream links that
-justify them. The gate does not pin source bytes, line counts, or syntax-node
+reviewed purpose, its declared responsibilities, the upstream links that
+justify them, and any system tools it runs. The gate does not pin source bytes, line counts, or syntax-node
 counts, so a comment edit or a one-line fix needs no policy change; a change
 that adds a detected responsibility still fails until the policy declares it.
 This is a conservative static lower bound, not a claim that CI can infer every
