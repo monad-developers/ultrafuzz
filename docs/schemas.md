@@ -234,7 +234,6 @@ Writes validate the complete proposed value before durable publication.
 - `ultrafuzz.workflow-control-integrity.v2`
 - `ultrafuzz.workflow-execution-dependencies.v1`
 - `ultrafuzz.workflow-run-link-journal.v1`
-- `ultrafuzz.cloud.execution-generation.v1`
 - `ultrafuzz.smithers.submission.v1`
 - `ultrafuzz.smithers.reset-node.v1`
 

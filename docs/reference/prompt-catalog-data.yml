@@ -48,7 +48,7 @@ prompts:
     description: Derives target invariants and liveness properties using the Crytic reference.
   - path: properties/property-specification-fanin.md
     category: Property consolidation
-    description: Validates, merges, and deduplicates every property lens into one canonical property catalog.
+    description: Validates, merges, and deduplicates every verified property lens into one canonical property catalog.
   - path: properties/property-specification-runtime-verification.md
     category: Property design
     description: Derives target invariants using the Runtime Verification reference.

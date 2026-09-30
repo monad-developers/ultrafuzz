@@ -151,7 +151,7 @@ export interface DerivePromptArtifactAuthorityInput {
   /** Exact bytes read from the sealed execution snapshot's `controls/tasks.json`. */
   sealedTaskManifestBytes: Uint8Array;
   currentAttemptId: string;
-  /** Absolute run root after local/cloud execution relocation. */
+  /** Absolute run root after execution relocation. */
   relocatedRunRoot: string;
   /**
    * Exact relocated ancestor directories admitted after dependency

@@ -174,7 +174,7 @@ export interface PlanRunValue {
   rendered_prompts: RenderedPromptPlan[];
   /**
    * The run-root-relative materialized vulnerability-database planner catalog, when the run has one.
-   * Storing it relative keeps it correct after a workspace relocation or a cloud-root remap.
+   * Storing it relative keeps it correct after a workspace relocation.
    */
   vulnerability_database?: { relative_path: string; sha256: string };
 }

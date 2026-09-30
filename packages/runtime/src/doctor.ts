@@ -5,7 +5,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
-import { inspectSmithersInstallation } from "./smithers.js";
+import {
+  bindInstalledWorkflowRunner,
+  inspectSmithersInstallation,
+  type SmithersInstallationPosture,
+  unappliedCompatibilityPatches,
+  WORKFLOW_RUNNER_REINSTALL_HINT
+} from "./smithers.js";
 import { SMITHERS_PACKAGE_NAME, SMITHERS_VERSION } from "./smithers-package.js";
 import type {
   DoctorCheck,
@@ -53,8 +59,6 @@ const AGENT_EXECUTABLES: Record<string, string> = {
  * Operational superset of `validate`: reports configuration posture plus the
  * local toolchain and pinned workflow-engine install posture. It never changes
  * project or run state and never installs, upgrades, or repairs dependencies.
- * Cloud toolchain checks may create the configured provider app on first use
- * and always use a transient sandbox so they inspect the launch image itself.
  */
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -62,7 +66,7 @@ export async function diagnoseProject(input: DoctorInput) {
   const validation = await validateProject({ projectRoot, env, topologyPath: input.topologyPath });
   const resolved = await loadResolvedProject({ projectRoot, env });
   const references = referencesStatus({ projectRoot });
-  const installation = inspectSmithersInstallation(projectRoot);
+  const installation = inspectSmithersInstallation();
   const latest = input.offline === true ? undefined : await latestPublishedSmithersVersion(projectRoot, env);
 
   const checks: DoctorCheck[] = [];
@@ -127,22 +131,20 @@ export async function diagnoseProject(input: DoctorInput) {
   }
   const commandRequirements = [...requiredByName].map(([name, required]) => ({ name, required }));
   let probeFailure: string | undefined;
-  const probes =
-    resolved.config === undefined
-      ? []
-      : await (
-          input.requiredCommandProbe === undefined
-            ? probeCommandsForExecution(
-                resolved.config,
-                commandRequirements.map((entry) => entry.name),
-                env,
-                { includeVersions: true, cwd: projectRoot, createProviderAppIfMissing: true }
-              )
-            : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
-        ).catch((error: unknown) => {
-          probeFailure = error instanceof Error ? error.message : String(error);
-          return [];
-        });
+  // Commands are always probed on the local PATH, so a config that fails to resolve still gets a
+  // truthful toolchain report.
+  const probes = await (
+    input.requiredCommandProbe === undefined
+      ? probeCommandsForExecution(
+          commandRequirements.map((entry) => entry.name),
+          env,
+          { includeVersions: true, cwd: projectRoot }
+        )
+      : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
+  ).catch((error: unknown) => {
+    probeFailure = error instanceof Error ? error.message : String(error);
+    return [];
+  });
   const probeByName = new Map(probes.map((probe) => [probe.name, probe]));
   const toolchain = commandRequirements.map((requirement) => ({
     ...requirement,
@@ -175,20 +177,8 @@ export async function diagnoseProject(input: DoctorInput) {
     });
   }
 
-  checks.push(
-    {
-      name: "workflow-engine-install",
-      status: "unknown",
-      summary:
-        "project-local workflow engine posture is informational and ignored; the pinned operator-owned controller is installed, patched, and sealed at launch"
-    },
-    {
-      name: "workflow-engine-patches",
-      status: "unknown",
-      summary:
-        "project-local compatibility-patch posture is informational and ignored; operator-owned controller patches are sealed at launch"
-    }
-  );
+  const engine = workflowEngineChecks(installation, projectRoot);
+  checks.push(...engine.checks);
 
   const latestCheck = registryCheck(latest);
   checks.push(latestCheck.check);
@@ -215,10 +205,10 @@ export async function diagnoseProject(input: DoctorInput) {
       bin_path: installation.bin_path,
       latest_published_version: latest !== undefined && "version" in latest ? latest.version : "unknown",
       layout_status:
-        installation.installed_version === installation.required_version && installation.layout_error === null
+        installation.installed_version === installation.required_version && engine.layoutDetail === null
           ? "ok"
           : "error",
-      layout_detail: installation.layout_error,
+      layout_detail: engine.layoutDetail,
       compatibility_patches: installation.compatibility_patches
     }
   };
@@ -226,10 +216,60 @@ export async function diagnoseProject(input: DoctorInput) {
 }
 
 /**
- * Launch and resume install the workflow engine controller under the OS
- * temporary directory, and a native resume keeps its install there for the
- * detached engine. Warn when that directory is RAM-backed or nearly full. The
- * controller roots are only reported: a live engine may still be using them.
+ * The install and patch checks of the runner Ultrafuzz's install provides.
+ * Launch, `resume`, `replay` and `fork` bind that runner for the target project
+ * before they write its shim, and refuse one inside the project or one whose
+ * Bun cannot be resolved, so a runner that passes both checks is bound here the
+ * same way. A missing patch is left to the patches check.
+ */
+function workflowEngineChecks(
+  installation: SmithersInstallationPosture,
+  projectRoot: string
+): { checks: DoctorCheck[]; layoutDetail: string | null } {
+  const unappliedPatches = unappliedCompatibilityPatches(installation);
+  const patchCount = Object.keys(installation.compatibility_patches).length;
+  const refusal =
+    installation.layout_error === null && unappliedPatches.length === 0 ? installedRunnerRefusal(projectRoot) : null;
+  const installSummary =
+    installation.layout_error !== null
+      ? `the installed workflow engine cannot run (see the workflow engine layout detail); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
+      : refusal !== null
+        ? `launch, resume, replay and fork refuse the installed workflow engine for this project: ${refusal}`
+        : `resume, ps and each run's smithers shim run the installed workflow engine ${String(installation.installed_version)}`;
+  return {
+    layoutDetail: installation.layout_error ?? refusal,
+    checks: [
+      {
+        name: "workflow-engine-install",
+        status: installation.layout_error === null && refusal === null ? "ok" : "error",
+        summary: installSummary
+      },
+      {
+        name: "workflow-engine-patches",
+        status: unappliedPatches.length === 0 ? "ok" : "error",
+        summary:
+          unappliedPatches.length === 0
+            ? `the installed runner carries all ${String(patchCount)} compatibility patches`
+            : `the installed runner lacks ${String(unappliedPatches.length)} of ${String(patchCount)} compatibility patches (${unappliedPatches.join(", ")}); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
+      }
+    ]
+  };
+}
+
+function installedRunnerRefusal(projectRoot: string): string | null {
+  try {
+    bindInstalledWorkflowRunner({}, projectRoot);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+/**
+ * Launch installs the workflow engine controller it seals into the run under
+ * the OS temporary directory. Warn when that directory is RAM-backed or nearly
+ * full. Leftover controller roots are only reported: before resume used the
+ * installed runner, a native resume kept its controller there for the engine.
  */
 function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagnostics: RuntimeDiagnostic[] } {
   const warning = (message: string) => ({
@@ -263,7 +303,7 @@ function temporaryDirectoryCheck(directory: string): { check: DoctorCheck; diagn
   return problems.length === 0
     ? { check: { name: "temporary-directory", status: "ok", summary: `${directory}: ${usage}` }, diagnostics: [] }
     : warning(
-        `temporary directory ${directory} ${problems.join(" and ")}; launch and resume install the workflow engine controller there (${usage}). Set TMPDIR to a disk-backed directory with more free space.`
+        `temporary directory ${directory} ${problems.join(" and ")}; launch installs the workflow engine controller there (${usage}). Set TMPDIR to a disk-backed directory with more free space.`
       );
 }
 

@@ -16,7 +16,7 @@ function reconstructTaskIdentity(matchingStaticTask: boolean) {
     "utf8"
   );
   const start = template.indexOf("function compiledTaskSourceIdentity");
-  const end = template.indexOf("\nfunction projectRelativePath", start);
+  const end = template.indexOf("\n/** Validates the dispatch document", start);
   assert.ok(start >= 0 && end > start);
   const compiled = ts.transpileModule(template.slice(start, end), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
@@ -25,7 +25,6 @@ function reconstructTaskIdentity(matchingStaticTask: boolean) {
     smithersNodeId: "node:report-attempt",
     logicalNodeId: "report",
     attemptId: "report-attempt",
-    execution: { mode: "local" },
     workspacePath: "workspaces/report-attempt",
     artifactDir: "artifacts/report-attempt",
     dependencyArtifactDirs: [],
@@ -43,7 +42,7 @@ function reconstructTaskIdentity(matchingStaticTask: boolean) {
     ],
     admittedWorkflowControls: {},
     taskWorkflowControlPaths: () => ({}),
-    dynamicExecutionPath: (_task: unknown, value: string) => value,
+    currentProjectPath: (value: string) => value,
     compiledBaseTasks: [task],
     dynamicGroupSpecs: [],
     topologyRuntimeContextForTimeout: () => ({}),
@@ -77,7 +76,7 @@ test("generated tasks inherit the sealed workflow run identity without a static 
   assert.equal(task.smithersRunId, "ultrafuzz-shared-run");
 });
 
-async function compileStaticTask(mode: "local" | "cloud") {
+async function compileStaticTask() {
   const projectRoot = temporaryRoot("ultrafuzz-static-task-identity-");
   initProject({ projectRoot, force: true });
   fs.writeFileSync(
@@ -96,7 +95,7 @@ nodes:
     depends_on: []
   - id: report
     kind: agentic
-    max_attempts: ${mode === "cloud" ? 1 : 3}
+    max_attempts: 3
     prompt: identity.md
     depends_on: [__start__]
     outputs:
@@ -112,15 +111,6 @@ nodes:
   const plan = await planRun({ projectRoot, runId: "static-identity", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
-  plan.value.resolved_config.execution.mode = mode;
-  if (mode === "cloud") {
-    plan.value.resolved_config.execution.provider = "modal";
-    plan.value.resolved_config.execution.providers.modal = {
-      app: "ultrafuzz-test",
-      image: "ultrafuzz-test",
-      credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-    };
-  }
   const compiled = compileSmithersWorkflow({
     projectRoot,
     config: plan.value.resolved_config,
@@ -158,38 +148,35 @@ function hydrateSerializedTask(source: string) {
   ) as SmithersTaskManifestTask & { id: string; smithersRunId: string };
 }
 
-for (const mode of ["local", "cloud"] as const) {
-  test(`serialized ${mode} tasks retain identities through hydration and durable attempt reconciliation`, async () => {
-    const compiled = await compileStaticTask(mode);
-    const task = hydrateSerializedTask(fs.readFileSync(compiled.workflowPath, "utf8"));
-    const sealed = compiled.tasks[0];
-    assert.ok(sealed);
-    const profile = sealed.agentChain[0];
-    assert.ok(profile);
-    assert.equal(task.execution.mode, mode);
-    assert.equal(task.smithersRunId, compiled.smithersRunId);
-    assert.equal(task.smithersNodeId, sealed.smithersNodeId);
-    assert.equal(task.id, task.smithersNodeId);
-    assert.equal(task.logicalNodeId, sealed.logicalNodeId);
-    const detail = {
-      node: { nodeId: sealed.smithersNodeId, lastAttempt: 2 },
-      attempts: [
-        {
-          nodeId: sealed.smithersNodeId,
-          attempt: 2,
-          state: "finished",
-          meta: {
-            agentChainIndex: 0,
-            agentId: smithersTaskAgentId(sealed, 0),
-            agentModel: profile.modelName ?? null
-          }
+test("serialized tasks retain identities through hydration and durable attempt reconciliation", async () => {
+  const compiled = await compileStaticTask();
+  const task = hydrateSerializedTask(fs.readFileSync(compiled.workflowPath, "utf8"));
+  const sealed = compiled.tasks[0];
+  assert.ok(sealed);
+  const profile = sealed.agentChain[0];
+  assert.ok(profile);
+  assert.equal(task.smithersRunId, compiled.smithersRunId);
+  assert.equal(task.smithersNodeId, sealed.smithersNodeId);
+  assert.equal(task.id, task.smithersNodeId);
+  assert.equal(task.logicalNodeId, sealed.logicalNodeId);
+  const detail = {
+    node: { nodeId: sealed.smithersNodeId, lastAttempt: 2 },
+    attempts: [
+      {
+        nodeId: sealed.smithersNodeId,
+        attempt: 2,
+        state: "finished",
+        meta: {
+          agentChainIndex: 0,
+          agentId: smithersTaskAgentId(sealed, 0),
+          agentModel: profile.modelName ?? null
         }
-      ]
-    };
-    assert.equal(reconcileSmithersAttemptAgentSelection(task, detail, 2).chainIndex, 0);
-    assert.throws(
-      () => reconcileSmithersAttemptAgentSelection({ ...task, smithersNodeId: "node:wrong" }, detail, 2),
-      /does not match sealed task/u
-    );
-  });
-}
+      }
+    ]
+  };
+  assert.equal(reconcileSmithersAttemptAgentSelection(task, detail, 2).chainIndex, 0);
+  assert.throws(
+    () => reconcileSmithersAttemptAgentSelection({ ...task, smithersNodeId: "node:wrong" }, detail, 2),
+    /does not match sealed task/u
+  );
+});

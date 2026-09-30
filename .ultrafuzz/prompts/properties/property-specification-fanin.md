@@ -26,13 +26,14 @@ Base test setup:
 
 ## 1. Consolidate
 
-Consolidate properties from every topology-required lens JSON into a single
+Consolidate properties from every lens JSON selected below into a single
 catalog. Each lens emits one `ultrafuzz/property-lens@2` output. Read and
 validate every selected lens JSON; it is the machine-readable source of truth.
 Use `{{schema_path}}/property-lens.schema.json` to validate each source catalog
 and assign every retained priority as `high`, `medium`, or `low`.
 
-Sealed JSON authority for every declared ancestor property-lens artifact:
+Sealed JSON authority for every ancestor property-lens artifact that passed
+verification:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/property-lens@2}}
 
@@ -40,7 +41,10 @@ Read the manifest definition instead of expecting an expanded lens path or
 source array in this prompt. Use each selected producer task's exact
 `logical_node_id` as `source_node_id`, and retain the selector's required
 run-relative `localeCompare` order. Do not infer a source from a Markdown
-companion, hard-coded lens list, or same-named workspace file.
+companion, hard-coded lens list, or same-named workspace file. A lens that did
+not pass verification is absent from this authority: consolidate the lenses it
+selects, and do not recreate a missing lens's properties from its reference
+material or from memory.
 
 Deduplicate equivalent properties across artifacts. When in doubt, err on the side of retaining multiple similar properties rather than risk removing one that represents a distinct concept or carries different meaning.
 
@@ -66,11 +70,11 @@ property with every distinct contributing source in `sources`. Never keep only
 the first source. Canonical IDs only need to remain stable within this run, but
 all downstream artifacts must use them unchanged.
 
-Coverage of the lens artifacts is total and machine-checked. Every property ID
-in every lens artifact must appear exactly once across the whole catalog as a
-source-node/property-ID pair in some canonical property's `sources`: the runtime rejects a lens ID that
-appears in no canonical property and rejects the same pair listed on two
-canonical properties. Deduplicating two rows therefore means listing both source
+Coverage of the selected lens artifacts is total and machine-checked. Every
+property ID in every selected lens artifact must appear exactly once across the
+whole catalog as a source-node/property-ID pair in some canonical property's
+`sources`: the runtime rejects a lens ID that appears in no canonical property
+and rejects the same pair listed on two canonical properties. Deduplicating two rows therefore means listing both source
 pairs on the one merged canonical property, never dropping one. You may not drop
 a lens row because it duplicates wording inside its own lens, reads as
 non-testable, or looks out of scope; merge it into the canonical property it

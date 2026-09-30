@@ -1,0 +1,261 @@
+diff --git a/src/adapter.js b/src/adapter.js
+index f435758d92c377015e91438b38a8c094cfcd66f6..60db09a5c7d5e5e405fd6e6fa96e920abc3279a9 100644
+--- a/src/adapter.js
++++ b/src/adapter.js
+@@ -4892,6 +4892,244 @@ export class SmithersDb {
+       this.internalStorage.queryAll(`SELECT * FROM _smithers_agent_processes ORDER BY started_at_ms ASC`),
+     );
+   }
++  /**
++   * Atomically replace one live attempt's cumulative usage only while the
++   * caller still owns the run and no known cumulative component regresses.
++   * @param {{
++   *   runId: string;
++   *   nodeId: string;
++   *   iteration: number;
++   *   attempt: number;
++   *   runtimeOwnerId: string | null;
++   *   model?: string | null;
++   *   agent?: string | null;
++   *   inputTokens?: number | null;
++   *   freshInputTokens?: number | null;
++   *   outputTokens?: number | null;
++   *   cacheReadTokens?: number | null;
++   *   cacheWriteTokens?: number | null;
++   *   reasoningTokens?: number | null;
++   *   costUsd?: number | null;
++   *   updatedAtMs: number;
++   *   event: Record<string, unknown>;
++   * }} row
++   * @returns {RunnableEffect<boolean, SmithersError>}
++   */
++  recordRunTokenUsageOwned(row) {
++    const self = this;
++    return this.withTransactionEffect(
++      `record owned run token usage ${row.runId}/${row.nodeId}#${row.attempt}`,
++      Effect.tryPromise({
++        try: async () => {
++          const usageEvent = row.event;
++          if (
++            !usageEvent ||
++            usageEvent.type !== "TokenUsageReported" ||
++            usageEvent.runId !== row.runId ||
++            usageEvent.nodeId !== row.nodeId ||
++            Number(usageEvent.iteration ?? 0) !== row.iteration ||
++            Number(usageEvent.attempt ?? 0) !== row.attempt ||
++            usageEvent.timestampMs !== row.updatedAtMs
++          ) {
++            throw new Error("owned run token usage requires its exact TokenUsageReported event");
++          }
++          if (this.internalStorage.dialect === POSTGRES) {
++            const ownedRun = await this.internalStorage.queryOne(
++              `SELECT 1 AS owned
++               FROM _smithers_runs
++               WHERE run_id = ?
++                 AND status = 'running'
++                 AND cancel_requested_at_ms IS NULL
++                 AND ((runtime_owner_id IS NULL AND CAST(? AS TEXT) IS NULL) OR runtime_owner_id = ?)
++               LIMIT 1 FOR UPDATE`,
++              [row.runId, row.runtimeOwnerId, row.runtimeOwnerId],
++            );
++            if (!ownedRun) return false;
++            const activeAttempt = await this.internalStorage.queryOne(
++              `SELECT 1 AS active
++               FROM _smithers_attempts
++               WHERE run_id = ? AND node_id = ? AND iteration = ? AND attempt = ? AND state = 'in-progress'
++               LIMIT 1 FOR UPDATE`,
++              [row.runId, row.nodeId, row.iteration, row.attempt],
++            );
++            if (!activeAttempt) return false;
++          } else {
++            const fence = await this.internalStorage.queryOne(
++              `SELECT 1 AS owned
++               FROM _smithers_runs r
++               JOIN _smithers_attempts a
++                 ON a.run_id = r.run_id
++                AND a.node_id = ?
++                AND a.iteration = ?
++                AND a.attempt = ?
++               WHERE r.run_id = ?
++                 AND r.status = 'running'
++                 AND r.cancel_requested_at_ms IS NULL
++                 AND ((r.runtime_owner_id IS NULL AND CAST(? AS TEXT) IS NULL) OR r.runtime_owner_id = ?)
++                 AND a.state = 'in-progress'
++               LIMIT 1`,
++              [row.nodeId, row.iteration, row.attempt, row.runId, row.runtimeOwnerId, row.runtimeOwnerId],
++            );
++            if (!fence) return false;
++          }
++          const count = (value) =>
++            typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
++          const optionalCount = (value) => (value == null ? null : count(value));
++          const inputTokens = count(row.inputTokens);
++          const freshInputTokens = optionalCount(row.freshInputTokens);
++          const outputTokens = count(row.outputTokens);
++          let cacheReadTokens = optionalCount(row.cacheReadTokens);
++          let cacheWriteTokens = optionalCount(row.cacheWriteTokens);
++          let reasoningTokens = optionalCount(row.reasoningTokens);
++          const costUsd =
++            typeof row.costUsd === "number" && Number.isFinite(row.costUsd) && row.costUsd >= 0
++              ? row.costUsd
++              : null;
++          const hasEventField = (field) => Object.prototype.hasOwnProperty.call(usageEvent, field);
++          const exactEventCount = (field, expected, reported = true) => {
++            if (!reported) return !hasEventField(field);
++            const value = usageEvent[field];
++            return Number.isSafeInteger(value) && value >= 0 && value === expected;
++          };
++          const exactEventCost =
++            costUsd === null
++              ? !hasEventField("costUsd")
++              : hasEventField("costUsd") && usageEvent.costUsd === costUsd;
++          if (
++            usageEvent.model !== (row.model ?? null) ||
++            usageEvent.agent !== (row.agent ?? null) ||
++            !exactEventCount("inputTokens", inputTokens) ||
++            !exactEventCount("freshInputTokens", freshInputTokens, freshInputTokens !== null) ||
++            !exactEventCount("outputTokens", outputTokens) ||
++            !exactEventCount("cacheReadTokens", cacheReadTokens, cacheReadTokens !== null) ||
++            !exactEventCount("cacheWriteTokens", cacheWriteTokens, cacheWriteTokens !== null) ||
++            !exactEventCount("reasoningTokens", reasoningTokens, reasoningTokens !== null) ||
++            !exactEventCost
++          ) {
++            throw new Error("owned run token usage event does not match its normalized usage snapshot");
++          }
++          const existing = await this.internalStorage.queryOne(
++            `SELECT model, agent, input_tokens, fresh_input_tokens, output_tokens,
++                    cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd
++             FROM _smithers_run_usage
++             WHERE run_id = ? AND node_id = ? AND iteration = ? AND attempt = ?
++             LIMIT 1`,
++            [row.runId, row.nodeId, row.iteration, row.attempt],
++          );
++          if (existing) {
++            const oldInputTokens = count(existing.input_tokens ?? existing.inputTokens);
++            const oldFreshInputTokens = optionalCount(existing.fresh_input_tokens ?? existing.freshInputTokens);
++            const oldOutputTokens = count(existing.output_tokens ?? existing.outputTokens);
++            const oldCacheReadTokens = count(existing.cache_read_tokens ?? existing.cacheReadTokens);
++            const oldCacheWriteTokens = count(existing.cache_write_tokens ?? existing.cacheWriteTokens);
++            const oldReasoningTokens = count(existing.reasoning_tokens ?? existing.reasoningTokens);
++            const oldCostUsd =
++              typeof (existing.cost_usd ?? existing.costUsd) === "number" &&
++              Number.isFinite(existing.cost_usd ?? existing.costUsd) &&
++              (existing.cost_usd ?? existing.costUsd) >= 0
++                ? (existing.cost_usd ?? existing.costUsd)
++                : null;
++            // Missing optional breakdowns mean "unknown for the new
++            // invocation", not that an earlier known subtotal regressed.
++            cacheReadTokens ??= oldCacheReadTokens;
++            cacheWriteTokens ??= oldCacheWriteTokens;
++            reasoningTokens ??= oldReasoningTokens;
++            const primaryUsageAdvanced = inputTokens > oldInputTokens || outputTokens > oldOutputTokens;
++            const usageAdvanced =
++              primaryUsageAdvanced ||
++              cacheReadTokens > oldCacheReadTokens ||
++              cacheWriteTokens > oldCacheWriteTokens ||
++              reasoningTokens > oldReasoningTokens;
++            // A later invocation can add primary tokens without an explicit
++            // fresh/cache split. Permit the breakdown to become unknown only
++            // alongside that forward progress, never on an equal stale row.
++            const freshInputDominates =
++              oldFreshInputTokens === null ||
++              (freshInputTokens !== null && freshInputTokens >= oldFreshInputTokens) ||
++              (freshInputTokens === null && primaryUsageAdvanced);
++            // A later invocation can add tokens whose price is unavailable.
++            // In that case the cumulative price legitimately becomes unknown;
++            // require token progress so an equal stale snapshot cannot erase a
++            // previously complete cost.
++            const costDominates =
++              oldCostUsd === null ||
++              (costUsd !== null && costUsd >= oldCostUsd) ||
++              (costUsd === null && usageAdvanced);
++            if (
++              inputTokens < oldInputTokens ||
++              outputTokens < oldOutputTokens ||
++              cacheReadTokens < oldCacheReadTokens ||
++              cacheWriteTokens < oldCacheWriteTokens ||
++              reasoningTokens < oldReasoningTokens ||
++              !freshInputDominates ||
++              !costDominates
++            ) {
++              return false;
++            }
++          }
++          cacheReadTokens ??= 0;
++          cacheWriteTokens ??= 0;
++          reasoningTokens ??= 0;
++          const values = [
++            row.runId,
++            row.nodeId,
++            row.iteration,
++            row.attempt,
++            row.model ?? null,
++            row.agent ?? null,
++            inputTokens,
++            freshInputTokens,
++            outputTokens,
++            cacheReadTokens,
++            cacheWriteTokens,
++            reasoningTokens,
++            costUsd,
++            row.updatedAtMs,
++          ];
++          const columns = `(run_id, node_id, iteration, attempt, model, agent, input_tokens, fresh_input_tokens,
++                output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, cost_usd, updated_at_ms)`;
++          const update = `model = excluded.model, agent = excluded.agent,
++                            input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
++                            fresh_input_tokens = excluded.fresh_input_tokens,
++                            cache_read_tokens = excluded.cache_read_tokens,
++                            cache_write_tokens = excluded.cache_write_tokens,
++                            reasoning_tokens = excluded.reasoning_tokens,
++                            cost_usd = excluded.cost_usd,
++                            updated_at_ms = excluded.updated_at_ms`;
++          await self.internalStorage.execute(
++            `INSERT INTO _smithers_run_usage ${columns}
++             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++             ON CONFLICT(run_id, node_id, iteration, attempt)
++             DO UPDATE SET ${update}`,
++            values,
++          );
++          const eventRow = {
++            runId: row.runId,
++            timestampMs: row.updatedAtMs,
++            type: "TokenUsageReported",
++            payloadJson: JSON.stringify(usageEvent),
++          };
++          if (self.internalStorage.dialect === POSTGRES) {
++            await self.internalStorage.insertEventWithNextSeqPostgres(eventRow);
++          } else {
++            const existingEvent = await self.internalStorage.queryOne(
++              `SELECT seq
++               FROM _smithers_events
++               WHERE run_id = ? AND timestamp_ms = ? AND type = ? AND payload_json = ?
++               ORDER BY seq DESC LIMIT 1`,
++              [eventRow.runId, eventRow.timestampMs, eventRow.type, eventRow.payloadJson],
++            );
++            if (existingEvent?.seq === undefined) {
++              const lastSeq = (await self.internalStorage.getLastEventSeq(eventRow.runId)) ?? -1;
++              await self.internalStorage.insertIgnore("_smithers_events", { ...eventRow, seq: lastSeq + 1 });
++            }
++          }
++          return true;
++        },
++        catch: (cause) => toSmithersError(cause, "record owned run token usage"),
++      }),
++    );
++  }
+   /**
+    * Persist one attempt's token usage so a run total is a single SUM instead of
+    * a replay of every `TokenUsageReported` payload in the event log (#1464
+diff --git a/src/schema-migrations.js b/src/schema-migrations.js
+index 2c30df9b3aa46235dbb3e36c4ba0f998bd7a86e0..7991e9c4504bdd20426f55291b0d550c12c17f66 100644
+--- a/src/schema-migrations.js
++++ b/src/schema-migrations.js
+@@ -225,6 +225,7 @@ const LEGACY_COLUMN_MIGRATIONS = [
+ ];
+ 
+ const EXTRA_INDEX_STATEMENTS = [
++  `CREATE INDEX IF NOT EXISTS _smithers_events_insert_probe_v2_idx ON _smithers_events (run_id, timestamp_ms, type, seq, payload_json)`,
+   `CREATE INDEX IF NOT EXISTS _smithers_runs_parent_idx ON _smithers_runs (parent_run_id)`,
+   `CREATE INDEX IF NOT EXISTS _smithers_alerts_fingerprint_idx ON _smithers_alerts (fingerprint)`,
+   `CREATE INDEX IF NOT EXISTS _smithers_alerts_run_status_idx ON _smithers_alerts (run_id, status)`,

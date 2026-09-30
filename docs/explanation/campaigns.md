@@ -39,7 +39,8 @@ phase; they are evidence to inspect, not an automatic security submission.
 The default scaffold is the direct bug-finding workflow:
 
 - Eight property-discovery lenses produce the shared property catalog and may
-  publish concrete findings discovered while deriving properties.
+  publish concrete findings discovered while deriving properties. A lens that
+  fails is left out of the catalog; the campaign continues with the others.
 - Twenty direct strategies investigate boundary, accounting, input,
   round-trip, workflow, time, state-machine, dependency, parity, lifecycle, and
   coverage-expansion hypotheses.

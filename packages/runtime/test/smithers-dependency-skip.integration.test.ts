@@ -5,6 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { loadReferenceCatalog } from "@ultrafuzz/references";
+
+import { initProject, planRun } from "../src/index.js";
+import { compileSmithersWorkflow, type CompiledSmithersWorkflow } from "../src/smithers.js";
+import { writeShippedDocumentReferenceCaches, writeShippedVulnerabilityDatabaseCache } from "./reference-fixtures.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 interface Inspection {
@@ -44,6 +49,123 @@ test("a dependency admission failure fails its preparation once while a transien
     "transient"
   ]);
 });
+
+// One failed property lens used to halt the whole default campaign: the lenses shared a halting
+// group with the fan-in, and only the review group could consume a continuing producer's output.
+test("a failed property lens leaves the packaged default fan-in, strategies and review to finish", async () => {
+  const compiled = await compilePackagedDefaultTopology();
+  const lenses = compiled.tasks.filter((task) =>
+    task.metadata.artifacts.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2")
+  );
+  const lensDirs = new Set(lenses.map((task) => task.artifactDir));
+  assert.equal(lenses.length, 8);
+  for (const task of compiled.tasks) {
+    const optional = task.optionalDependencyArtifactDirs ?? [];
+    // No attempt requires a lens's output, so a failed lens fails no downstream input admission.
+    assert.deepEqual(
+      task.dependencyArtifactDirs.filter((directory) => lensDirs.has(directory) && !optional.includes(directory)),
+      [],
+      task.attemptId
+    );
+    // Outside review nothing else became optional: the strategies still require the fan-in, and
+    // each stateful stage still requires the one before it.
+    if (task.metadata.node.group !== "review") {
+      assert.deepEqual(
+        optional.filter((directory) => !lensDirs.has(directory)),
+        [],
+        task.attemptId
+      );
+    }
+  }
+
+  const failing = "property-specification-a16z";
+  assert.ok(lenses.some((task) => task.attemptId === failing));
+  const { state } = await runSyntheticWorkflow("lens-failure", (root, template) =>
+    compiledSchedulingWorkflowSource(root, template, compiled, failing)
+  );
+  assert.equal(state(`verify:${failing}`), "failed");
+  for (const task of compiled.tasks) {
+    if (task.attemptId !== failing) assert.equal(state(task.verifierSmithersNodeId), "finished", task.attemptId);
+  }
+});
+
+async function compilePackagedDefaultTopology(): Promise<CompiledSmithersWorkflow> {
+  const project = temporaryRoot("ufz-lens-failure-project-");
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const runId = "lens-failure";
+    const plan = await planRun({ projectRoot: project, runId, env: {}, runtimeOverrides: { auditProfile: "default" } });
+    assert.ok(plan.ok && plan.value, JSON.stringify(plan.diagnostics));
+    return compileSmithersWorkflow({
+      projectRoot: project,
+      config: plan.value.resolved_config,
+      graph: plan.value.expanded_graph,
+      runLayout: plan.value.layout,
+      workflowName: `ultrafuzz-${runId}`,
+      renderedPrompts: plan.value.rendered_prompts
+    });
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+}
+
+/**
+ * Each compiled attempt becomes one engine task with the generated workflow's scheduling inputs: its
+ * verifier ID, its producers' verifier IDs, continue-on-failure for non-blocking attempts, and the
+ * template's own skip decision over required producers. Only `failing` throws.
+ */
+function compiledSchedulingWorkflowSource(
+  root: string,
+  template: string,
+  compiled: CompiledSmithersWorkflow,
+  failing: string
+): string {
+  const compiledBaseTasks = compiled.tasks.map((task) => ({
+    attemptId: task.attemptId,
+    verifierId: task.verifierSmithersNodeId,
+    dependsOn: task.dependencySmithersNodeIds,
+    dependencyArtifactDirs: task.dependencyArtifactDirs,
+    optionalDependencyArtifactDirs: task.optionalDependencyArtifactDirs ?? [],
+    metadata: { dependencies: task.metadata.dependencies }
+  }));
+  return `/** @jsxImportSource smthrs */
+import fs from "node:fs";
+import path from "node:path";
+import { createSmithers } from "smthrs";
+import { z } from "zod/v4";
+${templateSlice(template, "type WorkflowTaskStateContext =", "const agentPromptTemplate =")}
+const compiledBaseTasks = ${JSON.stringify(compiledBaseTasks)};
+${templateSlice(template, "function dependencyVerificationProducersFromCompiledTask", "\n\nfunction dynamicExecutionMetadata")}
+const nonBlocking = new Set(${JSON.stringify(compiled.nonBlockingAttemptIds)});
+const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
+const { Workflow, Parallel, Task, smithers, outputs } = createSmithers({
+  input: z.object({}),
+  result: z.object({ value: z.string() })
+});
+const record = (value: string) => { fs.appendFileSync(evidence, value + "\\n"); return { value }; };
+export default smithers((ctx) => <Workflow name="lens-failure"><Parallel>
+  {compiledBaseTasks.map((task) => {
+    const required = dependencyVerificationProducersFromCompiledTask(task)
+      .filter((producer) => !producer.optional)
+      .map((producer) => producer.verifierId);
+    return <Task key={task.verifierId} id={task.verifierId} output={outputs.result} dependsOn={task.dependsOn}
+      skipIf={shouldSkipWorkflowTask(ctx, task.verifierId, failedWorkflowPrerequisites(ctx, required))}
+      continueOnFail={nonBlocking.has(task.attemptId)} retries={0}>
+      {() => {
+        if (task.attemptId === ${JSON.stringify(failing)}) throw new Error("synthetic lens failure");
+        return record(task.attemptId);
+      }}
+    </Task>;
+  })}
+</Parallel></Workflow>);
+`;
+}
 
 async function runSyntheticWorkflow(
   name: string,
@@ -98,7 +220,7 @@ function nonRetryableWorkflowSource(root: string, template: string): string {
 import fs from "node:fs";
 import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
-${templateSlice(template, "type WorkflowTaskStateContext =", "type DependencyVerificationProducer =")}
+${templateSlice(template, "type WorkflowTaskStateContext =", "const agentPromptTemplate =")}
 ${templateSlice(template, "function preparationStep", "\n\nfunction prepareArtifactMirror")}
 ${templateSlice(template, "function nonRetryableFailure", "\n\nfunction assertVerifiedDependency")}
 const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
@@ -141,7 +263,7 @@ function syntheticWorkflowSource(root: string, template: string): string {
 import fs from "node:fs";
 import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
-${templateSlice(template, "type WorkflowTaskStateContext =", "type DependencyVerificationProducer =")}
+${templateSlice(template, "type WorkflowTaskStateContext =", "const agentPromptTemplate =")}
 const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
 const { Workflow, Parallel, Task, smithers, outputs } = createSmithers({
   input: z.object({}),

@@ -78,6 +78,14 @@ try {
     )}\n`,
     "utf8"
   );
+  // Launch, resume, replay and fork refuse a workflow engine without Ultrafuzz's
+  // compatibility patches, so the consumer gets the same patches, Effect pins,
+  // and build allowlist.
+  const smithersPatches = Object.entries(pnpmWorkspace.patchedDependencies ?? {}).filter(([name]) =>
+    /^(?:smthrs|@smthrs\/)/u.test(name)
+  );
+  fs.mkdirSync(path.join(consumerRoot, "patches"));
+  for (const [, file] of smithersPatches) fs.copyFileSync(path.join(root, file), path.join(consumerRoot, file));
   fs.writeFileSync(
     path.join(consumerRoot, "pnpm-workspace.yaml"),
     [
@@ -85,10 +93,11 @@ try {
       '  - "."',
       "overrides:",
       ...[...tarballs].map(([name, tarballPath]) => `  "${name}": "file:${tarballPath.split(path.sep).join("/")}"`),
+      ...Object.entries(pnpmWorkspace.overrides ?? {}).map(([name, version]) => `  "${name}": "${version}"`),
+      "patchedDependencies:",
+      ...smithersPatches.map(([name, file]) => `  "${name}": ${file}`),
       "allowBuilds:",
-      "  cbor-extract: true",
-      "  msgpackr-extract: false",
-      "  protobufjs: true",
+      ...Object.entries(pnpmWorkspace.allowBuilds ?? {}).map(([name, allowed]) => `  "${name}": ${allowed}`),
       ""
     ].join("\n"),
     "utf8"
@@ -121,6 +130,18 @@ try {
     "packed init"
   );
   run("pnpm", ["exec", "ultrafuzz", "validate", "--project", projectRoot, "--json"], consumerRoot, "packed validate");
+  // Doctor exits nonzero for unrelated toolchain gaps; only the engine checks matter here.
+  const doctor = spawnSync("pnpm", ["exec", "ultrafuzz", "doctor", "--project", projectRoot, "--json"], {
+    cwd: consumerRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024
+  });
+  const engineChecks = (JSON.parse(doctor.stdout).data?.checks ?? []).filter((check) =>
+    ["workflow-engine-install", "workflow-engine-patches"].includes(check.name)
+  );
+  if (engineChecks.length !== 2 || engineChecks.some((check) => check.status !== "ok")) {
+    throw new Error(`packed install does not provide a patched workflow engine: ${JSON.stringify(engineChecks)}`);
+  }
 
   const installedConfigRoot = path.join(consumerRoot, "node_modules", "@ultrafuzz", "config", "dist");
   assertMatchingTree(

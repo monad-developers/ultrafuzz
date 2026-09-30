@@ -55,7 +55,6 @@ import {
   SMITHERS_RUN_STATUSES
 } from "@ultrafuzz/artifacts";
 import {
-  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
   loadAuditProfileCatalog,
   parseProjectConfigToml,
   parseResolvedConfigJsonBytes,
@@ -130,6 +129,7 @@ import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-c
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
+import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import {
   shippedReferenceCatalog,
   writeShippedDocumentReferenceCaches,
@@ -144,8 +144,6 @@ const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_0
 if (runningUnderBun) process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/index.js", import.meta.url).href;
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
-  "SMITHERS_FAKE_CLOUD_ENV_LOG",
-  "SMITHERS_FAKE_CLOUD_SELECTOR_LOG",
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
@@ -702,10 +700,8 @@ function loadOpenRouterPatchedSmithersUrl(): Promise<string> {
     fs.cpSync(pinnedRoot, isolatedRoot, { recursive: true });
     fs.rmSync(path.join(isolatedRoot, "node_modules"), { recursive: true, force: true });
     fs.symlinkSync(path.dirname(path.dirname(pinnedRoot)), path.join(isolatedRoot, "node_modules"), "dir");
-    const sourcePath = path.join(isolatedRoot, patch.sourceRelativePath);
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.equal(source.split(patch.patchable).length, 2, "ordered stdout must uniquely anchor in pinned Smithers");
-    fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched));
+    const source = fs.readFileSync(path.join(isolatedRoot, patch.sourceRelativePath), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, "the pinned Smithers agents do not carry ordered stdout");
     // Keep the real diagnostic checks, but replace their transport in this
     // isolated dependency copy. A live /models probe otherwise competes with
     // the caller deadline and can prevent the retry fixture from resuming.
@@ -1877,9 +1873,6 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_GOVERNANCE_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$1" "$ULTRAFUZZ_DATA_GOVERNANCE_PATH" >> "$SMITHERS_FAKE_GOVERNANCE_LOG"',
       "fi",
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
-      '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
-      "fi",
       'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$KIMI_CODE_HOME" "$KIMI_SHARE_DIR" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
       "fi",
@@ -2918,14 +2911,10 @@ async function compileInvariantCampaignBudgetFixture(input: {
   smokeTimeoutSeconds: number;
   fuzzerTimeoutSeconds: number;
   runId: string;
-  cloud?: { globalTimeoutSeconds?: number; nodeTimeoutSeconds?: number };
 }) {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  if (input.cloud !== undefined) {
-    fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
-  }
   const plan = await planRun({ projectRoot: project, runId: input.runId, env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const node = plan.value!.expanded_graph.nodes.find((candidate) => candidate.id === "project-discovery");
@@ -2948,24 +2937,6 @@ async function compileInvariantCampaignBudgetFixture(input: {
   });
   plan.value!.resolved_config.invariants.invariantTestingSmokeTimeoutSeconds = input.smokeTimeoutSeconds;
   plan.value!.resolved_config.invariants.invariantTestingFuzzerTimeoutSeconds = input.fuzzerTimeoutSeconds;
-  if (input.cloud !== undefined) {
-    const execution = plan.value?.resolved_config.execution;
-    if (execution === undefined) throw new Error("missing cloud fixture config");
-    execution.mode = "cloud";
-    execution.provider = "modal";
-    execution.providers.modal = {
-      app: "offline-campaign-budget-test",
-      image: "offline-test-image",
-      credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-    };
-    if (input.cloud.globalTimeoutSeconds !== undefined) {
-      execution.resources.timeoutSeconds = input.cloud.globalTimeoutSeconds;
-      execution.resourceTimeoutOrigin = "project-config";
-    }
-    if (input.cloud.nodeTimeoutSeconds !== undefined) {
-      execution.nodes[input.logicalNodeId] = { resources: { timeoutSeconds: input.cloud.nodeTimeoutSeconds } };
-    }
-  }
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   return compileSmithersWorkflow({
     projectRoot: project,
@@ -7254,13 +7225,19 @@ bunAdapterTest(
 
     const result = (await agent.generate({ prompt: "Telemetry", rootDir: project })) as {
       text?: string;
-      usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: { cacheReadTokens?: number } };
+      usage?: { inputTokens?: number; outputTokens?: number; inputTokenDetails?: Record<string, number> };
     };
 
     assert.equal(result.text, "done");
-    assert.equal(result.usage?.inputTokens, 120);
+    // The pinned agents carry Ultrafuzz's usage patches, which count cache reads
+    // and writes inside inputTokens and report each component.
+    assert.equal(result.usage?.inputTokens, 527);
+    assert.deepEqual(result.usage?.inputTokenDetails, {
+      noCacheTokens: 120,
+      cacheReadTokens: 400,
+      cacheWriteTokens: 7
+    });
     assert.equal(result.usage?.outputTokens, 30);
-    assert.equal(result.usage?.inputTokenDetails?.cacheReadTokens, 400);
   }
 );
 
@@ -11229,7 +11206,7 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
     { attemptId: "direct-strategy", verifierId: "verify:direct-strategy", optional: false },
     { attemptId: "optional-specialist", verifierId: "verify:optional-specialist", optional: true }
   ]);
-  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 5);
+  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
 });
 
 test("current-controller rendering preserves prompts idempotently and continue policy for a leaf task", async () => {
@@ -11489,261 +11466,6 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
     }
   ];
   assert.throws(() => compileSmithersWorkflow(compileInput), /invalid prompt artifact authority path selector group/u);
-});
-
-test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
-  const project = tempProject();
-  writeFanoutProject(project);
-  fs.appendFileSync(path.join(project, "ultrafuzz.toml"), "\n[retry]\nsame_agent_attempts = 1\n", "utf8");
-  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
-  fs.writeFileSync(
-    topologyPath,
-    fs.readFileSync(topologyPath, "utf8").replace(
-      `  - id: __finish__
-    kind: meta
-    role: finish
-    depends_on:
-      - signal-analysis
-`,
-      `  - id: cloud-consumer
-    kind: agentic
-    prompt: setup/project-discovery.md
-    depends_on:
-      - signal-analysis
-    outputs:
-      - path: setup/project-discovery.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@2
-  - id: __finish__
-    kind: meta
-    role: finish
-    depends_on:
-      - cloud-consumer
-`
-    ),
-    "utf8"
-  );
-  const promptMarker = "CLOUD_PROMPT_ONLY_PRIVATE_MARKER";
-  fs.appendFileSync(
-    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
-    `\n${promptMarker}\n`,
-    "utf8"
-  );
-
-  const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  plan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: {
-      cpu: 4,
-      memoryMiB: 8192,
-      timeoutSeconds: 7200
-    },
-    nodes: {
-      "project-discovery": {
-        resources: {
-          cpu: 8,
-          memoryMiB: 16384
-        }
-      }
-    },
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-      }
-    }
-  };
-  const { assertCurrentCloudAgentCredentialEnvironment, compileSmithersWorkflow } = await import("../src/smithers.js");
-  const cloudEnv = {
-    ULTRAFUZZ_AGENT_ENV_ALLOWLIST:
-      "claude_code_use_bedrock,AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SESSION_TOKEN,aws_case_token,CUSTOM_SHARED_TOKEN,MAINNET_RPC_URL,PRIVATE_RPC_URL",
-    CLAUDE_CODE_USE_BEDROCK: "1",
-    AWS_ACCESS_KEY_ID: "AKIA0123456789ABCDEF", // gitleaks:allow -- fake credential fixture for the redaction tests
-    AWS_REGION: "us-east-1",
-    AWS_SESSION_TOKEN: "secret",
-    aws_case_token: "case-variant-claude-token",
-    CUSTOM_SHARED_TOKEN: "must-not-cross-provider-boundaries",
-    MAINNET_RPC_URL: "https://rpc.invalid",
-    PRIVATE_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"a".repeat(32)}`
-  };
-  const compiled = compileSmithersWorkflow({
-    projectRoot: project,
-    config: plan.value!.resolved_config,
-    env: cloudEnv,
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
-    workflowName: "ultrafuzz-cloud-nodes",
-    renderedPrompts: plan.value!.rendered_prompts
-  });
-
-  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
-  assert.ok(discovery);
-  assert.equal(discovery.retries, 0);
-  assert.deepEqual(discovery.execution.resources, {
-    cpu: 8,
-    memoryMiB: 16384,
-    timeoutSeconds: 7200
-  });
-  assert.deepEqual(discovery.execution.agentCredentialEnv, [
-    "AWS_REGION",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "MAINNET_RPC_URL",
-    "OPENAI_API_KEY",
-    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST"
-  ]);
-  assert.deepEqual(compiled.tasks.find((task) => task.agentRef === "ClaudeAgent")?.execution.agentCredentialEnv, [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_REGION",
-    "AWS_SESSION_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "MAINNET_RPC_URL",
-    "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
-    "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES",
-    "aws_case_token"
-  ]);
-  assert.doesNotThrow(() =>
-    assertCurrentCloudAgentCredentialEnvironment(
-      plan.value!.resolved_config,
-      compiled.tasks,
-      Object.fromEntries(Object.entries(cloudEnv).reverse())
-    )
-  );
-  assert.throws(
-    () =>
-      assertCurrentCloudAgentCredentialEnvironment(plan.value!.resolved_config, compiled.tasks, {
-        ...cloudEnv,
-        MAINNET_RPC_URL: `https://eth-mainnet.g.alchemy.com/v2/${"b".repeat(32)}`
-      }),
-    /cloud agent credential classification changed after workflow compilation/u
-  );
-  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  assert.match(workflowSource, /<Sandbox/);
-  assert.match(workflowSource, /<Sandbox[\s\S]*?retries=\{0\}/u);
-  assert.match(
-    workflowSource,
-    /timeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
-  );
-  assert.match(
-    workflowSource,
-    /heartbeatTimeoutMs=\{modalModule\.modalNodeLifecycleTimeoutMs\(task\.execution\.resources\.timeoutSeconds\)\}/u
-  );
-  assert.match(workflowSource, /timeout_seconds: task\.execution\.resources\.timeoutSeconds/u);
-  assert.match(workflowSource, /timeoutMs=\{task\.timeoutMs\}/u);
-  assert.match(
-    workflowSource,
-    /<Task[\s\S]*?agent=\{skipAgent \? undefined : agentForTask\(task, fullTaskPrompt\)\}[\s\S]*?retries=\{task\.retries\}/u
-  );
-  assert.match(workflowSource, /createModalNodeSandboxProvider/);
-  assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v2"/);
-  assert.match(workflowSource, /run_id: "cloud-nodes"/u);
-  assert.doesNotMatch(workflowSource, /run_id: cloud-nodes/u);
-  assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
-  assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
-  assert.match(workflowSource, /"prompt": ""/u);
-  assert.doesNotMatch(workflowSource, new RegExp(promptMarker, "u"));
-  assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
-  assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
-  assert.match(workflowSource, /"dependencyArtifactDirs": \[/u);
-  const fanIn = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "signal-analysis");
-  assert.equal(fanIn?.dependencyArtifactDirs.length, 2);
-  assert.ok(
-    fanIn?.dependencyArtifactDirs.every((directory) =>
-      directory.startsWith(path.join(project, ".ultrafuzz", "runs", "cloud-nodes", "artifacts"))
-    )
-  );
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    dependencyVerificationProducers: Array<{
-      attemptId: string;
-      verifierId: string;
-      optional: boolean;
-    }>;
-  }>;
-  const consumer = specs.find((task) => task.attemptId === "cloud-consumer");
-  assert.deepEqual(consumer?.dependencyVerificationProducers, [
-    {
-      attemptId: "project-discovery__model_0__attempt_0",
-      verifierId: "verify:project-discovery__model_0__attempt_0",
-      optional: false
-    },
-    {
-      attemptId: "project-discovery__model_1__attempt_1",
-      verifierId: "verify:project-discovery__model_1__attempt_1",
-      optional: false
-    },
-    {
-      attemptId: "signal-analysis__model_0__attempt_0",
-      verifierId: "verify:signal-analysis__model_0__attempt_0",
-      optional: false
-    },
-    {
-      attemptId: "signal-analysis__model_1__attempt_1",
-      verifierId: "verify:signal-analysis__model_1__attempt_1",
-      optional: false
-    }
-  ]);
-  assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
-  assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
-});
-
-test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fallback credentials", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs
-      .readFileSync(configPath, "utf8")
-      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")
-      .replace(
-        '[agents.KimiAgent]\nauth = "subscription"',
-        '[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"'
-      ),
-    "utf8"
-  );
-
-  const plan = await planRun({ projectRoot: project, runId: "cloud-kimi-nodes", agent: "KimiAgent", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  plan.value!.resolved_config.execution = {
-    mode: "cloud",
-    provider: "modal",
-    retentionDays: 30,
-    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 7200 },
-    nodes: {},
-    providers: {
-      modal: {
-        app: "ultrafuzz-test",
-        image: "ultrafuzz-test",
-        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-      }
-    }
-  };
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
-  const compiled = compileSmithersWorkflow({
-    projectRoot: project,
-    config: plan.value!.resolved_config,
-    env: { KIMI_BASE_URL: "https://kimi.example.invalid/v1" },
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
-    workflowName: "ultrafuzz-cloud-kimi-nodes",
-    renderedPrompts: plan.value!.rendered_prompts
-  });
-
-  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
-  assert.ok(discovery);
-  assert.equal(discovery.agentRef, "KimiAgent");
-  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "KIMI_BASE_URL", "MOONSHOT_API_KEY"]);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -12017,22 +11739,21 @@ test("planRun rejects an oversized topology retry override before creating the r
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
 });
 
-test("planRun rejects cloud retry chains before creating the run directory", async () => {
+test("planRun rejects removed cloud execution before creating the run directory", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const configPath = path.join(project, "ultrafuzz.toml");
   const config = fs
     .readFileSync(configPath, "utf8")
-    .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
-    .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 2\n\n[agents.CodexAgent]");
+    .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"');
   fs.writeFileSync(
     configPath,
     `${config}\n[execution.providers.modal]\napp = "ultrafuzz-test"\nimage = "ultrafuzz-test"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]\n`,
     "utf8"
   );
 
-  const runId = "cloud-retry-chain-rejected";
+  const runId = "cloud-execution-removed";
   const result = await planRun({
     projectRoot: project,
     runId,
@@ -12040,7 +11761,10 @@ test("planRun rejects cloud retry chains before creating the run directory", asy
   });
 
   assert.equal(result.ok, false);
-  assert.match(result.diagnostics[0]?.message ?? "", /cloud execution currently requires one model attempt/u);
+  assert.deepEqual(
+    result.diagnostics.filter((entry) => entry.code === "CONFIG_EXECUTION_CLOUD_REMOVED").map((entry) => entry.path),
+    ["execution.mode", "execution.provider", "execution.providers.modal"]
+  );
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
 });
 
@@ -12186,52 +11910,6 @@ test("four-hour invariant campaign reserves smoke, shutdown and finalization out
       runId: "campaign-four-hours-too-short"
     }),
     /required_seconds=15600/u
-  );
-});
-
-test("cloud campaign inherits its full task envelope and preserves explicit global and node caps", async () => {
-  const fixture = {
-    logicalNodeId: "stateful-invariant-campaign",
-    nodeTimeoutSeconds: 16200,
-    smokeTimeoutSeconds: 600,
-    fuzzerTimeoutSeconds: 14400
-  };
-  const compiled = await compileInvariantCampaignBudgetFixture({
-    ...fixture,
-    runId: "cloud-campaign-inherited",
-    cloud: {}
-  });
-  const campaign = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === fixture.logicalNodeId);
-  assert.equal(campaign?.execution.resources.timeoutSeconds, 16200);
-  assert.equal((campaign?.execution.resources.timeoutSeconds ?? 0) + MODAL_NODE_LIFECYCLE_RESERVE_SECONDS, 18000);
-  for (const [label, cloud, setting] of [
-    ["global", { globalTimeoutSeconds: 15000 }, /execution\.resources\.timeout_seconds/u],
-    [
-      "node",
-      { globalTimeoutSeconds: 18000, nodeTimeoutSeconds: 15000 },
-      /execution\.nodes\.stateful-invariant-campaign\.resources\.timeout_seconds/u
-    ]
-  ] as const) {
-    await assert.rejects(
-      compileInvariantCampaignBudgetFixture({ ...fixture, runId: `cloud-campaign-${label}-too-short`, cloud }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED/u);
-        assert.match(error.message, /15000s.*16200s/u);
-        assert.match(error.message, setting);
-        return true;
-      }
-    );
-  }
-  const explicit = await compileInvariantCampaignBudgetFixture({
-    ...fixture,
-    runId: "cloud-campaign-explicit-node",
-    cloud: { globalTimeoutSeconds: 15000, nodeTimeoutSeconds: 17000 }
-  });
-  assert.equal(
-    explicit.tasks.find((task) => task.metadata.node.logicalNodeId === fixture.logicalNodeId)?.execution.resources
-      .timeoutSeconds,
-    17000
   );
 });
 
@@ -12471,7 +12149,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   );
   const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
   assert.match(workflowSource, /smthrs/);
-  for (const moduleName of ["artifacts", "runtime", "modal"] as const) {
+  for (const moduleName of ["artifacts", "runtime"] as const) {
     const sealedRelativeEntry = `../../modules/@ultrafuzz/${moduleName}/dist/index.js`;
     assert.equal(
       workflowSource.includes(`new URL(${JSON.stringify(sealedRelativeEntry)}, import.meta.url).href`),
@@ -12483,16 +12161,14 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
       false,
       `${moduleName} fallback must not capture the operator checkout`
     );
-    if (moduleName !== "modal") {
-      const sealedWorkflowUrl = pathToFileURL(
-        path.join(localExecutionSnapshot, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")
-      );
-      assert.equal(
-        fs.statSync(fileURLToPath(new URL(sealedRelativeEntry, sealedWorkflowUrl))).isFile(),
-        true,
-        `${moduleName} fallback must identify a sealed snapshot module`
-      );
-    }
+    const sealedWorkflowUrl = pathToFileURL(
+      path.join(localExecutionSnapshot, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")
+    );
+    assert.equal(
+      fs.statSync(fileURLToPath(new URL(sealedRelativeEntry, sealedWorkflowUrl))).isFile(),
+      true,
+      `${moduleName} fallback must identify a sealed snapshot module`
+    );
   }
   assert.match(workflowSource, /const agentProcessOutput = z\.strictObject\(\{[\s\S]*?completed: z\.literal\(true\)/u);
   assert.doesNotMatch(workflowSource, /const taskOutput|summary: z\.string\(\)\.min\(1\)/u);
@@ -14911,275 +14587,6 @@ test("startRun rejects noncanonical built-in credential environment names", asyn
   assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
 });
 
-test("startRun forwards cloud provider credentials through the Smithers environment filter", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    `${fs
-      .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
-      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
-
-[execution.providers.modal]
-app = "ultrafuzz-test"
-image = "ultrafuzz-test"
-credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-`,
-    "utf8"
-  );
-  const cloudEnvironmentLog = path.join(project, "smithers-cloud-environment.log");
-  const pinnedRunner = writeFakeInstalledSmithers(project);
-  fs.writeFileSync(
-    pinnedRunner.target,
-    [
-      "#!/bin/sh",
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi',
-      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "printf '%s\\n' '{\"ok\":true}'",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(pinnedRunner.target, 0o755);
-  const controllerEnvironment = fakeSmithersEnv(project);
-  const installer = writeFakeNpmInstaller(project);
-  const requireFromTest = createRequire(import.meta.url);
-  const requireFromSmithers = createRequire(requireFromTest.resolve("smthrs"));
-  const realReactRoot = path.dirname(requireFromSmithers.resolve("react"));
-  const realZodRoot = path.dirname(path.dirname(requireFromTest.resolve("zod/v4")));
-  const npmFixture = path.join(installer.binDir, "npm");
-  fs.chmodSync(npmFixture, 0o700);
-  fs.appendFileSync(
-    npmFixture,
-    `
-const reactRoot = path.join(prefix, "node_modules", "react");
-const zodRoot = path.join(prefix, "node_modules", "zod");
-fs.rmSync(reactRoot, { recursive: true, force: true });
-fs.rmSync(zodRoot, { recursive: true, force: true });
-fs.cpSync(${JSON.stringify(realReactRoot)}, reactRoot, { recursive: true });
-fs.cpSync(${JSON.stringify(realZodRoot)}, zodRoot, { recursive: true });
-const smthrsRoot = path.join(prefix, "node_modules", "smthrs");
-const smthrsManifest = JSON.parse(fs.readFileSync(path.join(smthrsRoot, "package.json"), "utf8"));
-smthrsManifest.type = "module";
-smthrsManifest.exports = {
-  ".": "./index.js",
-  "./jsx-runtime": "./jsx-runtime.js",
-  "./jsx-dev-runtime": "./jsx-runtime.js"
-};
-fs.writeFileSync(path.join(smthrsRoot, "package.json"), JSON.stringify(smthrsManifest) + "\\n");
-fs.writeFileSync(
-  path.join(smthrsRoot, "index.js"),
-  ${JSON.stringify(`
-class Agent {
-  constructor(options = {}) { this.opts = options; }
-  async preflight() {}
-  async buildCommand() { return { args: [], env: {} }; }
-  async generate() { return {}; }
-}
-export class SmithersErrorInstance extends Error {}
-export class ClaudeCodeAgent extends Agent {}
-export class CodexAgent extends Agent {}
-export class KimiAgent extends Agent {}
-export class OpenCodeAgent extends Agent {}
-export class PiAgent extends Agent {}
-const component = () => null;
-export function createSmithers() {
-  return {
-    Workflow: component,
-    Task: component,
-    Worktree: component,
-    Parallel: component,
-    Sandbox: component,
-    smithers: (factory) => ({ factory }),
-    outputs: { task: {}, preparation: {}, verification: {} }
-  };
-}
-`)}
-);
-fs.writeFileSync(
-  path.join(smthrsRoot, "jsx-runtime.js"),
-  ${JSON.stringify(`
-export const Fragment = Symbol.for("ultrafuzz.test.fragment");
-export const jsx = (type, props, key) => ({ type, props, key });
-export const jsxs = jsx;
-export const jsxDEV = jsx;
-`)}
-);
-`
-  );
-  fs.chmodSync(npmFixture, 0o500);
-  const env = {
-    ...controllerEnvironment,
-    SMITHERS_BIN: undefined,
-    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
-    OPENAI_API_KEY: "configured-agent-key",
-    MODAL_TOKEN_ID: "provider-one",
-    MODAL_TOKEN_SECRET: "provider-two"
-  };
-
-  const run = await startRun({ projectRoot: project, runId: "cloud-environment", env });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    workflow?: { execution_snapshot_path?: string };
-  };
-  const executionSnapshot = path.join(run.value!.run_root, metadata.workflow?.execution_snapshot_path ?? "");
-  const dependencyManifest = JSON.parse(
-    fs.readFileSync(path.join(executionSnapshot, "dependencies", "manifest.json"), "utf8")
-  ) as { smithers_bin?: unknown };
-  assert.equal(typeof dependencyManifest.smithers_bin, "string");
-  assert.notEqual(dependencyManifest.smithers_bin, "");
-  assert.notEqual(
-    path.resolve(executionSnapshot, String(dependencyManifest.smithers_bin)),
-    fs.realpathSync(controllerEnvironment.SMITHERS_BIN!),
-    "cloud execution must use the sealed pinned runner rather than a host-only controller override"
-  );
-  const sealedCloudRunner = path.join(executionSnapshot, ...String(dependencyManifest.smithers_bin).split("/"));
-  assert.equal(fs.statSync(sealedCloudRunner).isFile(), true);
-  assert.notEqual(fs.statSync(sealedCloudRunner).mode & 0o111, 0);
-  assert.deepEqual(fs.readFileSync(sealedCloudRunner), fs.readFileSync(pinnedRunner.target));
-
-  const outsideModule = path.join(project, "outside-snapshot.mjs");
-  fs.writeFileSync(outsideModule, 'export default "outside";\n', "utf8");
-  const snapshotDescriptor = fs.openSync(
-    executionSnapshot,
-    fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
-  );
-  try {
-    const descriptorRoot = "/proc/self/fd/3";
-    const workflowPath = path.join(descriptorRoot, ".smithers", "workflows", "ultrafuzz-cloud-environment.tsx");
-    const persistedWorkflowPath = path.join(
-      executionSnapshot,
-      ".smithers",
-      "workflows",
-      "ultrafuzz-cloud-environment.tsx"
-    );
-    const descriptorEnvironment: NodeJS.ProcessEnv = {
-      ...process.env,
-      MODAL_TOKEN_ID: "test-token-id",
-      MODAL_TOKEN_SECRET: "test-token-secret",
-      OPENAI_API_KEY: "configured-agent-key",
-      ULTRAFUZZ_CONFIG_PATH: path.join(descriptorRoot, "controls", "ultrafuzz.toml"),
-      ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(descriptorRoot, "controls", "data-governance.json"),
-      ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: persistedWorkflowPath,
-      UFZ_DESCRIPTOR_WORKFLOW_MODULE: pathToFileURL(workflowPath).href,
-      UFZ_OUTSIDE_WORKFLOW_MODULE: pathToFileURL(outsideModule).href
-    };
-    for (const name of ["ULTRAFUZZ_ARTIFACTS_MODULE", "ULTRAFUZZ_MODAL_MODULE", "ULTRAFUZZ_RUNTIME_MODULE"]) {
-      delete descriptorEnvironment[name];
-    }
-    const detachedPreflight = spawnSync(
-      "bun",
-      [
-        `--config=${path.join(descriptorRoot, "controls", "bunfig.toml")}`,
-        `--env-file=${path.join(descriptorRoot, "controls", "bun-empty.env")}`,
-        "--no-env-file",
-        "--no-install",
-        "--no-addons",
-        "--preserve-symlinks-main",
-        `--preload=${path.join(descriptorRoot, "controls", "bun-module-confinement.js")}`,
-        "--eval",
-        `const workflow = await import(process.env.UFZ_DESCRIPTOR_WORKFLOW_MODULE); if (workflow.default === undefined) throw new Error("generated workflow has no default export"); let rejected; try { await import(process.env.UFZ_OUTSIDE_WORKFLOW_MODULE); } catch (error) { rejected = String(error); } if (!rejected?.includes("outside its sealed snapshot")) throw new Error("outside module was not rejected"); process.stdout.write("descriptor-preflight-ok");`
-      ],
-      {
-        cwd: project,
-        encoding: "utf8",
-        timeout: 30_000,
-        stdio: ["ignore", "pipe", "pipe", snapshotDescriptor],
-        env: descriptorEnvironment
-      }
-    );
-    assert.equal(detachedPreflight.status, 0, detachedPreflight.stderr);
-    assert.equal(detachedPreflight.stdout, "descriptor-preflight-ok");
-  } finally {
-    fs.closeSync(snapshotDescriptor);
-  }
-});
-
-test("startRun forwards Modal credentials and SDK selectors through the workflow environment filter", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    `${fs
-      .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
-      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
-
-[execution.providers.modal]
-app = "ultrafuzz-test"
-image = "ultrafuzz-test"
-credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-`,
-    "utf8"
-  );
-  const cloudEnvironmentLog = path.join(project, "smithers-cloud-environment.log");
-  const cloudSelectorLog = path.join(project, "smithers-cloud-selectors.log");
-  const pinnedRunner = writeFakeInstalledSmithers(project);
-  const pinnedRunnerSource = [
-    "#!/bin/sh",
-    'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
-    '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
-    "fi",
-    'if [ -n "$SMITHERS_FAKE_CLOUD_SELECTOR_LOG" ] && [ "$1" = "up" ]; then',
-    '  printf \'%s|%s|%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" "$MODAL_ENVIRONMENT" "$MODAL_PROFILE" > "$SMITHERS_FAKE_CLOUD_SELECTOR_LOG"',
-    "fi",
-    "printf '%s\\n' '{\"ok\":true}'",
-    ""
-  ].join("\n");
-  fs.writeFileSync(pinnedRunner.target, pinnedRunnerSource, "utf8");
-  fs.chmodSync(pinnedRunner.target, 0o755);
-  const controllerEnvironment = fakeSmithersEnv(project);
-  writeFakeNpmInstaller(project, { count: 0, stderr: [], runnerSource: pinnedRunnerSource });
-  const env = {
-    ...controllerEnvironment,
-    SMITHERS_BIN: undefined,
-    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
-    SMITHERS_FAKE_CLOUD_SELECTOR_LOG: cloudSelectorLog,
-    OPENAI_API_KEY: "configured-agent-key",
-    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "UFZ_PROVIDER_ONE,UFZ_PROVIDER_TWO",
-    UFZ_PROVIDER_ONE: "provider-one",
-    UFZ_PROVIDER_TWO: "provider-two",
-    MODAL_ENVIRONMENT: "selected-environment",
-    MODAL_PROFILE: "selected-profile",
-    MODAL_TOKEN_ID: "test-token-id",
-    MODAL_TOKEN_SECRET: "test-token-secret"
-  };
-
-  const run = await startRun({ projectRoot: project, runId: "cloud-environment", env });
-
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "test-token-id|test-token-secret\n");
-  assert.equal(
-    fs.readFileSync(cloudSelectorLog, "utf8"),
-    "provider-one|provider-two|selected-environment|selected-profile\n"
-  );
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    workflow?: { execution_snapshot_path?: string };
-  };
-  const executionSnapshot = path.join(run.value!.run_root, metadata.workflow?.execution_snapshot_path ?? "");
-  const dependencyManifest = JSON.parse(
-    fs.readFileSync(path.join(executionSnapshot, "dependencies", "manifest.json"), "utf8")
-  ) as { smithers_bin?: unknown };
-  assert.equal(typeof dependencyManifest.smithers_bin, "string");
-  assert.notEqual(dependencyManifest.smithers_bin, "");
-  assert.notEqual(
-    path.resolve(executionSnapshot, String(dependencyManifest.smithers_bin)),
-    fs.realpathSync(controllerEnvironment.SMITHERS_BIN!),
-    "cloud execution must use the sealed pinned runner rather than a host-only controller override"
-  );
-  const sealedCloudRunner = path.join(executionSnapshot, ...String(dependencyManifest.smithers_bin).split("/"));
-  assert.equal(fs.statSync(sealedCloudRunner).isFile(), true);
-  assert.notEqual(fs.statSync(sealedCloudRunner).mode & 0o111, 0);
-  assert.deepEqual(fs.readFileSync(sealedCloudRunner), fs.readFileSync(pinnedRunner.target));
-});
-
 test("startRun forwards Kimi-specific runtime environment without exposing unrelated secrets", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -16322,7 +15729,8 @@ test("compatibility patcher rewrites every described workaround", async () => {
   const project = tempProject();
   writeFakeInstalledSmithers(project);
   const nodeModules = path.join(project, ".smithers", "node_modules");
-  const stockRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
+  const runnerRoot = path.join(nodeModules, "smthrs");
+  const installedRunner = createRequire(import.meta.url).resolve("smthrs/bin/smithers");
   assert.ok(SMITHERS_COMPATIBILITY_PATCHES.length > 0, "no compatibility patches were described");
   // Seeded from the descriptions themselves, so a newly described workaround is
   // covered here without a second edit and cannot land reported-but-never-applied.
@@ -16360,7 +15768,8 @@ test("compatibility patcher rewrites every described workaround", async () => {
   for (const [source, anchors] of bySource) {
     fs.mkdirSync(path.dirname(source), { recursive: true });
     if (source.endsWith(SMITHERS_BIN_PATH)) {
-      fs.cpSync(path.dirname(stockRunner), path.dirname(source), { recursive: true });
+      fs.cpSync(path.dirname(installedRunner), path.dirname(source), { recursive: true });
+      fs.writeFileSync(source, await pristineSmithersSource("smthrs", installedRunner), "utf8");
       continue;
     }
     fs.writeFileSync(source, `${anchors.join("\n")}\n`, "utf8");
@@ -16420,8 +15829,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
       ["AgentTraceSummary"],
       "the observability compatibility patch must expose only the bounded trace summary event"
     );
+    const upstreamRunner = sources.find(({ patch }) => patch.id === "local_delegation");
+    assert.ok(upstreamRunner);
     assert.throws(
-      () => bindSmithersExecutableCapability({}, stockRunner),
+      () => bindSmithersExecutableCapability({}, upstreamRunner.source),
       /delegate controller authority to target code/u
     );
   }
@@ -16447,10 +15858,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const current = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(current.split(resumeTransfer.patch.patched).length, 2);
     fs.writeFileSync(resumeTransfer.source, current.replace(resumeTransfer.patch.patched, predecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     assert.equal(fs.readFileSync(resumeTransfer.source, "utf8").includes(resumeTransfer.patch.patched), true);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "applied");
 
     const unscopedHelperPredecessor = resumeTransfer.patch.predecessors?.find((candidate) =>
       candidate.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)")
@@ -16461,15 +15872,18 @@ test("compatibility patcher rewrites every described workaround", async () => {
       current.replace(resumeTransfer.patch.patched, unscopedHelperPredecessor),
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedUnscopedHelper = fs.readFileSync(resumeTransfer.source, "utf8");
     assert.equal(migratedUnscopedHelper.includes("ultrafuzzBunStartupArgsFor(snapshotChildRoot)"), false);
     assert.equal(migratedUnscopedHelper.includes(resumeTransfer.patch.patched), true);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer, "applied");
 
     fs.writeFileSync(resumeTransfer.source, `${predecessor}\n${predecessor}\n`, "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.equal(
+      inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer,
+      "incompatible"
+    );
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -16480,7 +15894,10 @@ test("compatibility patcher rewrites every described workaround", async () => {
       `${resumeTransfer.patch.patched}\n${resumeTransfer.patch.patchable}\n`,
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.resume_snapshot_transfer, "incompatible");
+    assert.equal(
+      inspectSmithersInstallation(runnerRoot).compatibility_patches.resume_snapshot_transfer,
+      "incompatible"
+    );
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /detached resume execution snapshot transfer implementation is incompatible/u
@@ -16499,37 +15916,37 @@ test("compatibility patcher rewrites every described workaround", async () => {
     assert.equal(current.split(processAnchor.patch.patched).length, 2);
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, predecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedPredecessor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedPredecessor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedPredecessor.includes(nested), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(
       processAnchor.source,
       current.replace(processAnchor.patch.patched, reusedInheritedDescriptor),
       "utf8"
     );
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedReusedInheritedDescriptor = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedReusedInheritedDescriptor.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedReusedInheritedDescriptor.includes(reusedInheritedDescriptor), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, nested), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "missing");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "missing");
     applySmithersCompatibilityPatches(project);
     const migratedNested = fs.readFileSync(processAnchor.source, "utf8");
     assert.equal(migratedNested.split(processAnchor.patch.patched).length, 2);
     assert.equal(migratedNested.includes(nested), false);
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "applied");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "applied");
 
     const mutatedNested = nested.replace('"--preserve-symlinks"', '"--mutated-outer-startup-flag"');
     assert.notEqual(mutatedNested, nested);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, mutatedNested), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /process-owned execution snapshot implementation is incompatible/u
@@ -16538,7 +15955,7 @@ test("compatibility patcher rewrites every described workaround", async () => {
     const unknownPredecessor = predecessor.replace('"--preserve-symlinks"', '"--unregistered-startup-flag"');
     assert.notEqual(unknownPredecessor, predecessor);
     fs.writeFileSync(processAnchor.source, current.replace(processAnchor.patch.patched, unknownPredecessor), "utf8");
-    assert.equal(inspectSmithersInstallation(project).compatibility_patches.process_snapshot_anchor, "incompatible");
+    assert.equal(inspectSmithersInstallation(runnerRoot).compatibility_patches.process_snapshot_anchor, "incompatible");
     assert.throws(
       () => applySmithersCompatibilityPatches(project),
       /process-owned execution snapshot implementation is incompatible/u
@@ -17036,24 +16453,21 @@ async function patchedSmithersAgentUsageModules(): Promise<{
   fs.rmSync(path.join(isolatedAgentsRoot, "node_modules"), { recursive: true, force: true });
   fs.symlinkSync(path.dirname(path.dirname(pinnedAgentsRoot)), path.join(isolatedAgentsRoot, "node_modules"), "dir");
 
-  const sourceContents = new Map<string, string>();
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
     (candidate) => candidate.packageName === "@smthrs/agents"
   )) {
-    const sourcePath = path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/"));
-    const current = sourceContents.get(sourcePath) ?? fs.readFileSync(sourcePath, "utf8");
-    assert.equal(current.split(patch.patchable).length, 2, `${patch.id} does not uniquely anchor in pinned agents`);
-    sourceContents.set(sourcePath, current.replace(patch.patchable, patch.patched));
+    const source = fs.readFileSync(path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/")), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned agents`);
   }
+  // The copy only has to export a helper the installed agents keep private.
   const baseCliSourcePath = path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js");
-  const baseCliSource = sourceContents.get(baseCliSourcePath);
-  assert.ok(baseCliSource);
+  const baseCliSource = fs.readFileSync(baseCliSourcePath, "utf8");
   assert.equal(baseCliSource.split("function usageFromCompletedEvent(").length, 2);
-  sourceContents.set(
+  fs.writeFileSync(
     baseCliSourcePath,
-    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent(")
+    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent("),
+    "utf8"
   );
-  for (const [sourcePath, contents] of sourceContents) fs.writeFileSync(sourcePath, contents, "utf8");
 
   const baseCli = (await import(
     pathToFileURL(path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js")).href
@@ -17319,8 +16733,7 @@ async function loadPatchedCostEngineInternals() {
   const sourcePath = path.join(isolatedEngineRoot, "src", "engine.js");
   let source = fs.readFileSync(sourcePath, "utf8");
   for (const patch of [normalization, pricing]) {
-    assert.equal(source.split(patch.patchable).length, 2, `${patch.id} does not uniquely anchor in the pinned engine`);
-    source = source.replace(patch.patchable, patch.patched);
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned engine`);
   }
   const internalsAnchor = "export const __engineInternals = {";
   assert.equal(source.split(internalsAnchor).length, 2);
@@ -17488,26 +16901,14 @@ test("patched engine admits authenticated controller path changes without accept
   );
   const pinnedEngineSource = resolveFromPinnedRunner.resolve("@smthrs/engine/engine");
   const pinnedEngineRoot = path.dirname(path.dirname(pinnedEngineSource));
-  const isolatedEngineRoot = path.join(tempProject(), "node_modules", "@smthrs", "engine");
-  fs.mkdirSync(path.dirname(isolatedEngineRoot), { recursive: true });
-  fs.cpSync(pinnedEngineRoot, isolatedEngineRoot, { recursive: true });
-  fs.rmSync(path.join(isolatedEngineRoot, "node_modules"), { recursive: true, force: true });
-  fs.symlinkSync(path.dirname(path.dirname(pinnedEngineRoot)), path.join(isolatedEngineRoot, "node_modules"), "dir");
-
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
     (candidate) => candidate.packageName === "@smthrs/engine"
   )) {
-    const sourcePath = path.join(isolatedEngineRoot, ...patch.sourceRelativePath.split("/"));
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.equal(
-      source.split(patch.patchable).length,
-      2,
-      `${patch.id} does not uniquely anchor in the isolated pinned engine`
-    );
-    fs.writeFileSync(sourcePath, source.replace(patch.patchable, patch.patched), "utf8");
+    const source = fs.readFileSync(path.join(pinnedEngineRoot, ...patch.sourceRelativePath.split("/")), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned engine`);
   }
 
-  const patchedEngine = (await import(pathToFileURL(path.join(isolatedEngineRoot, "src", "engine.js")).href)) as {
+  const patchedEngine = (await import(pathToFileURL(path.join(pinnedEngineRoot, "src", "engine.js")).href)) as {
     __engineInternals: {
       assertResumeDurabilityMetadata: (
         existingRun: Record<string, unknown>,
@@ -18446,7 +17847,7 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
     ).version;
     assert.equal(packageVersion, SMITHERS_VERSION, `${label} belongs to an unpinned release`);
 
-    const contents = fs.readFileSync(sourcePath, "utf8");
+    const contents = await pristineSmithersSource(patch.packageName, sourcePath);
     sourceByPatchId.set(patch.id, contents);
     assert.equal(
       contents.includes(patch.patched),
@@ -18568,6 +17969,30 @@ function pinnedRunnerSourceDir(packageName: string, probeSubpath: string): strin
     .version;
   assert.equal(version, SMITHERS_VERSION, `${packageName} belongs to an unpinned release`);
   return path.join(packageRoot, "src");
+}
+
+// The repository install carries Ultrafuzz's compatibility patches (pnpm
+// patchedDependencies generated from the registry), so a test that inspects
+// upstream's own shape first undoes them. Each replacement must occur exactly
+// once, and re-applying the registry must reproduce the installed bytes.
+async function pristineSmithersSource(packageName: string, sourcePath: string): Promise<string> {
+  const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+  const installed = fs.readFileSync(sourcePath, "utf8");
+  const patches = SMITHERS_COMPATIBILITY_PATCHES.filter(
+    (patch) =>
+      patch.packageName === packageName && sourcePath.endsWith(path.join(...patch.sourceRelativePath.split("/")))
+  );
+  let pristine = installed;
+  for (const patch of [...patches].reverse()) {
+    assert.equal(pristine.split(patch.patched).length, 2, `${patch.id} is not installed exactly once`);
+    pristine = pristine.replace(patch.patched, () => patch.patchable);
+  }
+  assert.equal(
+    patches.reduce((source, patch) => source.replace(patch.patchable, patch.patched), pristine),
+    installed,
+    `${sourcePath} does not round-trip through its compatibility patches`
+  );
+  return pristine;
 }
 
 function pinnedRunnerUnionMembers(source: string, typeName: string): string[] {
@@ -18806,9 +18231,9 @@ test("pinned runner state and envelope contracts match Ultrafuzz's mirrors", asy
   // diff surfaces it at the pin bump instead. The failure-path emitter splices
   // its counts in with `...failedUsage`, so `normalizeTokenUsage`'s own return
   // shape is unioned in rather than read off the emitter literal.
-  const engineSource = fs.readFileSync(
-    path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js"),
-    "utf8"
+  const engineSource = await pristineSmithersSource(
+    "@smthrs/engine",
+    path.join(pinnedRunnerSourceDir("@smthrs/engine", "engine"), "engine.js")
   );
   const emittedTokenKeys = new Set<string>();
   for (let cursor = engineSource.indexOf('type: "TokenUsageReported"'); cursor !== -1;) {
@@ -19341,12 +18766,12 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     future_package_manager_field: { retained_by_owner: true }
   };
   fs.writeFileSync(paths.packageJson, `${JSON.stringify(valid)}\n`, "utf8");
-  const validPosture = inspectSmithersInstallation(project);
+  const validPosture = inspectSmithersInstallation(path.dirname(paths.packageJson));
   assert.equal(validPosture.bundled_version, SMITHERS_VERSION);
   assert.equal(validPosture.required_version, SMITHERS_VERSION);
   assert.equal(validPosture.installed_version, SMITHERS_VERSION);
   assert.equal(validPosture.installed_bin_target, SMITHERS_BIN_PATH);
-  assert.equal(validPosture.bin_path, paths.shim);
+  assert.equal(validPosture.bin_path, paths.target);
   assert.equal(validPosture.layout_error, null);
 
   fs.writeFileSync(
@@ -19358,7 +18783,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
     )}},"peerDependencies":{"__proto__":"1.0.0"},"peerDependenciesMeta":{"__proto__":{"optional":true}}}\n`,
     "utf8"
   );
-  const prototypeKeyPosture = inspectSmithersInstallation(project);
+  const prototypeKeyPosture = inspectSmithersInstallation(path.dirname(paths.packageJson));
   assert.equal(prototypeKeyPosture.installed_version, SMITHERS_VERSION);
   assert.equal(prototypeKeyPosture.installed_bin_target, SMITHERS_BIN_PATH);
   assert.equal(prototypeKeyPosture.layout_error, null);
@@ -19388,7 +18813,7 @@ test("package-manager-owned Smithers manifests use bounded strict parsing and na
   ];
   for (const fixture of malformed) {
     fs.writeFileSync(paths.packageJson, fixture.bytes);
-    const posture = inspectSmithersInstallation(project);
+    const posture = inspectSmithersInstallation(path.dirname(paths.packageJson));
     assert.equal(posture.installed_version, null, fixture.label);
     assert.match(posture.layout_error ?? "", fixture.expected, fixture.label);
   }
@@ -19450,6 +18875,15 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
   assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").includes(project), false);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
   assert.equal(fs.existsSync(injectedMarker), false);
+  // `@ultrafuzz/runtime` depends on the runner only for host commands, which run
+  // the installed one; following that edge would seal a second engine closure.
+  assert.ok(run.value);
+  const dependencyMap = JSON.parse(
+    fs.readFileSync(path.join(run.value.run_root, "smithers", "execution-dependencies.json"), "utf8")
+  ) as { issuers: Array<{ id: string; dependencies: Record<string, string> }> };
+  const runtimeIssuer = dependencyMap.issuers.find((issuer) => issuer.id === "module:@ultrafuzz/runtime");
+  assert.ok(runtimeIssuer, JSON.stringify(dependencyMap.issuers.map((issuer) => issuer.id)));
+  assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "smthrs"), false);
   {
     const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
       missing = await startRun({
@@ -19608,9 +19042,9 @@ test("both installers of the generated workspace share one resolution cutoff", (
     prefix: "/tmp/local/.smithers",
     registry: "https://registry.npmjs.org"
   });
-  const cloud = smithersDependencyInstallArgs({ prefix: "/tmp/cloud/.smithers" });
+  const ambient = smithersDependencyInstallArgs({ prefix: "/tmp/ambient/.smithers" });
 
-  for (const args of [local, cloud]) {
+  for (const args of [local, ambient]) {
     assert.equal(args.includes(`--before=${SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF}`), true, args.join(" "));
     // The cutoff makes resolution reproducible; it does not relax the hardening
     // the install already carried, and it must not introduce a lockfile into the
@@ -19618,13 +19052,13 @@ test("both installers of the generated workspace share one resolution cutoff", (
     assert.equal(args.includes("--ignore-scripts"), true, args.join(" "));
     assert.equal(args.includes("--package-lock=false"), true, args.join(" "));
   }
-  // The cloud node worker installs against the sandbox's ambient npm
+  // An install without an explicit registry defers to the ambient npm
   // configuration, so it must not be handed the local path's registry.
   assert.equal(local.includes("--registry=https://registry.npmjs.org"), true, local.join(" "));
   assert.equal(
-    cloud.some((arg) => arg.startsWith("--registry=")),
+    ambient.some((arg) => arg.startsWith("--registry=")),
     false,
-    cloud.join(" ")
+    ambient.join(" ")
   );
 });
 
@@ -19707,8 +19141,8 @@ test("generated workflow dependencies require exact runner pins while allowing t
     /must retain Ultrafuzz's exact runner versions/u
   );
   // Pinning Effect itself but leaving the `@effect/*` packages layered on it
-  // floating is what lets two cloud containers install different Effect trees for
-  // the same run, so an incomplete override block must be rejected too.
+  // floating is what lets a run's launch and a later resume install different
+  // Effect trees, so an incomplete override block must be rejected too.
   assert.throws(
     () =>
       assertSmithersPackageManifest({
@@ -22931,6 +22365,274 @@ for (const markerAuthority of ["malformed leaf", "dangling leaf", "symlinked roo
   });
 }
 
+// `resume --retry-failed` reruns a failed optional producer while consumers that were already
+// admitted without it keep running. Only a producer that verified before the admission began
+// shows the admission lost a success.
+for (const retryVerified of ["after", "before"] as const) {
+  test(`syncRun ${retryVerified === "after" ? "keeps" : "rejects"} a consumer admitted without an optional prerequisite whose retry verified ${retryVerified} the admission`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeOptionalSpecialistTopology(project);
+    const workflowRunId = `ultrafuzz-sync-optional-retry-${retryVerified}`;
+    const runId = `sync-optional-retry-${retryVerified}`;
+    const failedEvents = [
+      { type: "NodeFinished", nodeId: "node:direct-strategy", attempt: 1 },
+      { type: "NodeFailed", nodeId: "node:optional-specialist", attempt: 1 }
+    ];
+    const failedEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "running",
+        steps: [
+          { id: "node:direct-strategy", state: "finished", attempt: 1 },
+          { id: "node:optional-specialist", state: "failed", attempt: 1 },
+          { id: "node:final-report", state: "pending", attempt: 0 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, failedEvents)
+    });
+    const run = await startRun({ projectRoot: project, runId, env: failedEnv });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    writeRequiredArtifactSet(runRoot, "direct-strategy", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
+    const nodeStatus = (nodeId: string) =>
+      (
+        JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+          nodes: Record<string, { status?: string }>;
+        }
+      ).nodes[nodeId]?.status;
+    assert.equal(nodeStatus("optional-specialist"), "failed");
+
+    // The report's verifier records an admission made while the specialist had no marker.
+    writeRequiredArtifactSet(runRoot, "final-report", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    writeRequiredArtifactSet(runRoot, "optional-specialist", [GENERIC_RUNTIME_MARKDOWN_PATH]);
+    const admission = [{ type: "NodeStarted", nodeId: "prepare:final-report", attempt: 1 }];
+    const retry = [
+      { type: "NodeStarted", nodeId: "node:optional-specialist", attempt: 2 },
+      { type: "NodeFinished", nodeId: "node:optional-specialist", attempt: 2 },
+      { type: "NodeFinished", nodeId: "verify:optional-specialist", attempt: 1 }
+    ];
+    const finalEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [
+          { id: "node:direct-strategy", state: "finished", attempt: 1 },
+          { id: "node:optional-specialist", state: "finished", attempt: 2 },
+          { id: "node:final-report", state: "finished", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        ...failedEvents,
+        ...(retryVerified === "after" ? [...admission, ...retry] : [...retry, ...admission]),
+        { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const sync = await syncRun({ projectRoot: project, runId, env: finalEnv });
+
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(nodeStatus("optional-specialist"), "succeeded");
+    if (retryVerified === "after") {
+      assert.equal(nodeStatus("final-report"), "succeeded", JSON.stringify(sync.diagnostics));
+      assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+    } else {
+      assert.equal(nodeStatus("final-report"), "failed");
+      assert.ok(
+        sync.diagnostics.some(
+          (diagnostic) =>
+            diagnostic.code === "ARTIFACT_VERIFICATION_AUTHORITY_INVALID" &&
+            diagnostic.message.includes("finalized optional dependency is missing from verifier admission")
+        ),
+        JSON.stringify(sync.diagnostics)
+      );
+    }
+  });
+}
+
+/** A continuing lens, the halting catalog after it, and two review stages whose host gates chain. */
+function writeRetriedLensReviewProject(): string {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const markdownOutput = `
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true`;
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  properties:
+    label: Properties
+    defaults:
+      failure_policy: continue
+  property-catalog:
+    label: Property catalog
+  review:
+    label: Review
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: lens
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: properties
+    depends_on: [__start__]
+    outputs:${markdownOutput}
+  - id: catalog
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: property-catalog
+    depends_on: [lens]
+    outputs:${markdownOutput}
+  - id: dedupe
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: review
+    depends_on: [catalog]
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
+      - path: finding-lifecycle-ledger.json
+        contract: ultrafuzz/finding-lifecycle-ledger@1
+  - id: triage
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: review
+    depends_on: [dedupe]
+    outputs:
+      - path: triaged-findings.json
+        contract: ultrafuzz/triaged-findings@1
+        primary: true
+      - path: finding-lifecycle-ledger.json
+        contract: ultrafuzz/finding-lifecycle-ledger@1
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [triage]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "runtime-fixture.md"),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+  return project;
+}
+
+// A sync pass can run while `resume --retry-failed` still reruns a failed optional producer, as
+// Modal's `ultrafuzz inspect` poll does. A consumer that ran without the producer must finalize in
+// that pass too: while it reads failed, the host gate of a dependent that reads its outputs fails,
+// and that output-validation failure is final.
+test("syncRun finalizes consumers admitted without an optional prerequisite whose retry is still running", async () => {
+  const project = writeRetriedLensReviewProject();
+  const workflowRunId = "ultrafuzz-sync-optional-retry-running";
+  const runId = "sync-optional-retry-running";
+  const failedEvents = [
+    { type: "NodeFailed", nodeId: "node:lens", attempt: 1 },
+    { type: "NodeStarted", nodeId: "prepare:catalog", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:catalog", attempt: 1 }
+  ];
+  const failedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      steps: [
+        { id: "node:lens", state: "failed", attempt: 1 },
+        { id: "node:catalog", state: "finished", attempt: 1 },
+        { id: "node:dedupe", state: "pending", attempt: 0 },
+        { id: "node:triage", state: "pending", attempt: 0 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, failedEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId, env: failedEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  const writeArtifacts = (attemptId: string, files: Record<string, string>) => {
+    for (const [relative, contents] of Object.entries(files)) {
+      const filePath = path.join(runRoot, "artifacts", attemptId, ...relative.split("/"));
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, contents, "utf8");
+    }
+    writeCurrentArtifactVerificationMarker(runRoot, attemptId);
+  };
+  const emptyLedger = JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [] });
+  const nodeStatus = (nodeId: string) =>
+    (
+      JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+        nodes: Record<string, { status?: string }>;
+      }
+    ).nodes[nodeId]?.status;
+  writeArtifacts("catalog", { [GENERIC_RUNTIME_MARKDOWN_PATH]: "catalog without the lens\n" });
+  assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
+  assert.equal(nodeStatus("lens"), "failed");
+  assert.equal(nodeStatus("catalog"), "succeeded");
+
+  // The retried lens is still running when dedupe and triage finish without it.
+  writeArtifacts("dedupe", { "findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
+  writeArtifacts("triage", { "triaged-findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
+  const retryEvents = [
+    ...failedEvents,
+    { type: "NodeStarted", nodeId: "node:lens", attempt: 2 },
+    { type: "NodeStarted", nodeId: "prepare:dedupe", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:dedupe", attempt: 1 },
+    { type: "NodeStarted", nodeId: "prepare:triage", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:triage", attempt: 1 }
+  ];
+  const retryEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      steps: [
+        { id: "node:lens", state: "in-progress", attempt: 2 },
+        { id: "node:catalog", state: "finished", attempt: 1 },
+        { id: "node:dedupe", state: "finished", attempt: 1 },
+        { id: "node:triage", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, retryEvents)
+  });
+  const retrySync = await syncRun({ projectRoot: project, runId, env: retryEnv });
+  assert.equal(retrySync.ok, true, JSON.stringify(retrySync.diagnostics));
+  assert.equal(nodeStatus("dedupe"), "succeeded", JSON.stringify(retrySync.diagnostics));
+
+  writeArtifacts("lens", { [GENERIC_RUNTIME_MARKDOWN_PATH]: "lens retried\n" });
+  const finalEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:lens", state: "finished", attempt: 2 },
+        { id: "node:catalog", state: "finished", attempt: 1 },
+        { id: "node:dedupe", state: "finished", attempt: 1 },
+        { id: "node:triage", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...retryEvents,
+      { type: "NodeFinished", nodeId: "node:lens", attempt: 2 },
+      { type: "NodeFinished", nodeId: "verify:lens", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const sync = await syncRun({ projectRoot: project, runId, env: finalEnv });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  for (const nodeId of ["lens", "catalog", "dedupe", "triage"]) {
+    assert.equal(nodeStatus(nodeId), "succeeded", `${nodeId}: ${JSON.stringify(sync.diagnostics)}`);
+  }
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+});
+
 test("syncRun binds an optional prerequisite digest before a final-boundary manifest swap", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -25041,6 +24743,106 @@ test("a refresh resume reuses its own ownership inspection instead of inspecting
   );
 });
 
+test("resume refuses a run planned for removed per-node cloud execution before invoking Smithers", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "removed-cloud-execution-resume";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const fakeLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(fakeLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.ok(launched.ok && launched.value !== undefined, JSON.stringify(launched.diagnostics));
+  // Record what the pre-removal launch wrote for `[execution] mode = "cloud"`: the resolved config
+  // and every task in the task manifest carry the cloud mode and the Modal provider settings.
+  const modal = {
+    app: "ultrafuzz-test",
+    image: "ultrafuzz-test",
+    credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+  };
+  const configPath = path.join(launched.value.run_root, "smithers", "resolved-config.json");
+  const config = parseResolvedConfigJsonBytes(fs.readFileSync(configPath));
+  fs.writeFileSync(
+    configPath,
+    serializeResolvedConfigJsonBytes({
+      ...config,
+      execution: { ...config.execution, mode: "cloud", provider: "modal", providers: { modal } }
+    })
+  );
+  const tasksPath = path.join(launched.value.run_root, "smithers", "tasks.json");
+  const tasks = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as SmithersTaskManifestDocument;
+  for (const task of tasks.tasks) {
+    task.execution = { ...task.execution, mode: "cloud", provider: "modal", modal };
+    task.metadata.execution = { ...task.metadata.execution, mode: "cloud", provider: "modal" };
+  }
+  fs.writeFileSync(tasksPath, `${JSON.stringify(tasks, null, 2)}\n`, "utf8");
+
+  const assertRefused = async (manifest: string) => {
+    for (const refreshController of [false, true]) {
+      fs.writeFileSync(fakeLog, "", "utf8");
+      const resumed = await resumeRun({ projectRoot: project, runId, refreshController, env });
+      const label = `${manifest} task manifest, refreshController=${String(refreshController)}`;
+      assert.equal(resumed.ok, false, label);
+      assert.deepEqual(
+        resumed.diagnostics.map((diagnostic) => diagnostic.code),
+        ["WORKFLOW_CLOUD_EXECUTION_REMOVED"],
+        `${label}: ${JSON.stringify(resumed.diagnostics)}`
+      );
+      assert.equal(fs.readFileSync(fakeLog, "utf8"), "", `${label}: no Smithers command runs`);
+    }
+  };
+  await assertRefused("cloud");
+  // The config decides, so a task manifest that cannot be read does not let the run through.
+  fs.writeFileSync(tasksPath, "{", "utf8");
+  await assertRefused("malformed");
+  fs.rmSync(tasksPath);
+  await assertRefused("missing");
+});
+
+test("resume refuses a run whose resolved config cannot be read instead of continuing it locally", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "unreadable-config-resume";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const fakeLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(fakeLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.ok(launched.ok && launched.value !== undefined, JSON.stringify(launched.diagnostics));
+  const configPath = path.join(launched.value.run_root, "smithers", "resolved-config.json");
+  const localConfig = fs.readFileSync(configPath);
+
+  // The task manifest still records a local run; without the config resume cannot confirm it.
+  for (const [label, damage] of [
+    ["malformed", () => fs.writeFileSync(configPath, "{", "utf8")],
+    ["missing", () => fs.rmSync(configPath)]
+  ] as const) {
+    damage();
+    for (const refreshController of [false, true]) {
+      fs.writeFileSync(fakeLog, "", "utf8");
+      const resumed = await resumeRun({ projectRoot: project, runId, refreshController, env });
+      const context = `${label} config, refreshController=${String(refreshController)}`;
+      assert.equal(resumed.ok, false, context);
+      assert.deepEqual(
+        resumed.diagnostics.map((diagnostic) => diagnostic.code),
+        ["WORKFLOW_LIFECYCLE_FAILED"],
+        `${context}: ${JSON.stringify(resumed.diagnostics)}`
+      );
+      assert.match(
+        resumed.diagnostics[0]?.message ?? "",
+        new RegExp(`^run ${runId} cannot be resumed without its resolved config, which records whether`, "u"),
+        context
+      );
+      assert.equal(fs.readFileSync(fakeLog, "utf8"), "", `${context}: no Smithers command runs`);
+    }
+  }
+
+  fs.writeFileSync(configPath, localConfig);
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.match(fs.readFileSync(fakeLog, "utf8"), /--resume ultrafuzz-unreadable-config-resume /u);
+});
+
 testWhen(runningUnderBun)(
   "engine-owned task runtime crosses sealed issuer aliases under production Bun symlink flags",
   () => {
@@ -25714,11 +25516,6 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   });
   assert.equal(resetResumed.ok, true, JSON.stringify(resetResumed.diagnostics));
   assert.equal(resetResumed.value?.submitted, true);
-  const cloudGeneration = JSON.parse(
-    fs.readFileSync(path.join(run.value!.run_root, "smithers", "cloud-execution-generation.json"), "utf8")
-  ) as { generation?: string; reset_node?: string };
-  assert.match(cloudGeneration.generation ?? "", /^[0-9a-f-]{36}$/u);
-  assert.equal(cloudGeneration.reset_node, "node:project-discovery");
 
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
@@ -26095,7 +25892,7 @@ test("planning errors that need no run directory leave none behind", async () =>
   assert.equal(fs.existsSync(path.join(graphProject, ".ultrafuzz", "runs", "no-vulnerability-database")), false);
 
   // An operator setup error: a pinned reference whose cache was never synced. It is reported before
-  // provider preflight, which can create a cloud app.
+  // provider preflight.
   const cacheProject = tempProject();
   assert.equal(initProject({ projectRoot: cacheProject, force: true }).ok, true);
   writeReferenceTopology(cacheProject);
@@ -26431,6 +26228,7 @@ test("native continuation preserves unsealed legacy launch without synthesizing 
   fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
   fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
   fs.writeFileSync(workflowPath, "export default {};\n");
+  writeLocalResolvedConfig(runRoot);
   fs.writeFileSync(
     path.join(runRoot, "run.json"),
     JSON.stringify({

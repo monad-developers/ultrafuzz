@@ -10,8 +10,8 @@ import { bundledOperatorNpmClosureForValidation, resolveOperatorNpmAuthority } f
 
 test("the release-pinned operator npm closure is complete and reproducible", () => {
   assert.deepEqual(bundledOperatorNpmClosureForValidation(), {
-    bytes: 12_223_470,
-    digest: "21e3d464bd4418f10c34d70ac8fa19a0d64bcd9c52c932221517bd586b005d7b",
+    bytes: 12_230_966,
+    digest: "4852a49e930ed235c056f19f9cfa6214f5d84dd4a0942f9403714e4603ef13e6",
     directories: 460,
     files: 1_943
   });
@@ -28,10 +28,10 @@ test("the operator npm backports retain their security behavior", () => {
       ])
     ),
     {
-      "brace-expansion": "5.0.9",
+      "brace-expansion": "5.0.12",
       "ip-address": "10.5.0",
       tar: "7.5.22",
-      undici: "6.28.0"
+      undici: "6.28.1"
     }
   );
   const braceExpansion = require(path.join(npmRoot, "node_modules", "brace-expansion")) as {
@@ -40,6 +40,8 @@ test("the operator npm backports retain their security behavior", () => {
   const chained = braceExpansion.expand("{a,b}".repeat(200), { max: 64, maxLength: 1_024 });
   assert.ok(chained.length > 0);
   assert.ok(chained.reduce((total, value) => total + value.length, 0) <= 1_024);
+  // GHSA-6j4f-fj2g-mc7p: 5.0.9 exhausts the stack parsing this many comma parts.
+  assert.equal(braceExpansion.expand(`{${"{a},".repeat(10_000)}}`, { max: 64, maxLength: 1_024 }).length, 64);
 
   const { Address4 } = require(path.join(npmRoot, "node_modules", "ip-address")) as {
     Address4: new (address: string) => { isPrivate: () => boolean };

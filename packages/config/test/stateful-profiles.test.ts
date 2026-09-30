@@ -97,7 +97,7 @@ describe("stateful audit profile defaults", () => {
   });
 
   it.each([undefined, 3600, 18000])(
-    "preserves cloud timeout inheritance and explicit caps through TOML snapshots: %s",
+    "preserves the resource timeout origin and explicit caps through TOML snapshots: %s",
     (timeoutSeconds) => {
       const resolved = resolveConfig({
         env: {},

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseCurrentSmithersInspect, type CurrentSmithersInspect } from "../src/smithers.js";
 import { resumeRun } from "../src/start-run.js";
+import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 // #272: the pinned runner can end a run `failed` with no failed task (a run-level error such as
@@ -52,6 +53,7 @@ test("a run-level render failure resumes under the same id once its cause is gon
       workflow: { run_id: runId, path: path.relative(root, workflowPath) }
     })}\n`
   );
+  writeLocalResolvedConfig(runRoot);
 
   const refused = await resume(root, runId);
   assert.equal(refused.ok, false);

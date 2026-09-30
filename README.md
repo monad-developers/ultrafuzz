@@ -58,16 +58,6 @@ If you need to install any dependencies, ask for my approval first.
 - [Contributing](docs/contributing.md)
 - [Code of Conduct](docs/CODE_OF_CONDUCT.md)
 
-## Evals
-
-Longitudinal results from the public benchmark suite. See [Eval Suites](docs/reference/evals.md) for methodology.
-
-![UltrafuzzBench quality over time](docs/assets/eval-history/quality.svg)
-
-![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)
-
-![UltrafuzzBench model performance versus cost](docs/assets/eval-history/performance-cost.svg)
-
 ## License
 
 Ultrafuzz is licensed under the [MIT License](LICENSE.md).

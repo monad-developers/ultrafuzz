@@ -19,7 +19,6 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smthrs";
 import { z } from "zod/v4";
 import type { ArtifactValidationWarning } from "@ultrafuzz/artifacts";
@@ -41,22 +40,17 @@ const {
   artifactContractSchemaBinding,
   artifactSchemaRegistry,
   artifactValidatorSmokeFixturePath,
-  assertCloudSelectedTaskMatchesCanonical,
   assertArtifactPublicationsContainNoSecrets,
   assertRunMetadataDocument,
   assertValidInvariantSuiteManifest,
   assertArtifactVerificationMarkerSemantics,
   assertRegularFileInside,
-  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
-  CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME,
-  CLOUD_SELECTED_TASK_SCHEMA_VERSION,
   checkInvariantSourcePinned,
   derivePropertyImplementationCoverage,
   executeSchemaSemanticGates,
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   invariantPinnedSourceRefExists,
-  isCloudExecutionGeneration,
   materializeCanonicalThreatModelMarkdown,
   materializePromptSchemas,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -69,7 +63,6 @@ const {
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
   parseInvariantSuiteManifestBytes,
-  parseCloudSelectedTask,
   parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
   prepareSafeFilePath,
@@ -96,18 +89,15 @@ const {
   declaredSiblingOutputsByContract,
   derivePromptArtifactAuthority,
   deriveWorkspacePatchGitFacts,
-  dynamicStorageId,
   deriveCurrentTaskWorkflowMetrics,
   GOAL_SEARCH_COVERAGE_FILE,
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   hasPendingWorkspacePreparationReplacement,
-  inspectSmithersAttemptAgentSelection,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
-  reconcileSmithersAttemptAgentSelection,
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
@@ -125,7 +115,6 @@ const {
   serializePromptArtifactAuthority,
   workspacePreparationAuthorityPath,
   writeWorkspacePreparationAuthority,
-  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_SCHEMA_VERSION,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
@@ -209,35 +198,16 @@ const operatorInputSchema = boundedJsonValueSchema(0).superRefine((value, ctx) =
   }
 });
 
-const LOCAL_WORKFLOW_INPUT_KEYS = ["schema_version", "ultrafuzz_run_id", "operator_input"] as const;
-const CLOUD_WORKER_INPUT_KEYS = [
-  "cloud_worker",
-  "task_id",
-  "attempt_id",
-  "execution_generation",
-  "selected_task"
-] as const;
-
 /**
- * Every envelope key is nullish rather than optional. The same input-table
- * projection that forces one flat object also materializes a column for every
- * key in `shape`, and a column the submission never set reads back as SQL
- * `null`, not as `undefined`. `.optional()` accepts only `undefined`, so a
- * local dispatch -- which leaves all five cloud-worker keys unset -- came back
- * carrying explicit nulls and failed its own re-validation before the first
- * task ever rendered. Absence is therefore `undefined` *or* `null` everywhere
- * below, including in the envelope-discrimination filters.
+ * Every envelope key is nullish rather than optional. The input-table
+ * projection materializes a column for every key in `shape`, and a column the
+ * submission never set reads back as SQL `null`, not as `undefined`, so
+ * absence is `undefined` *or* `null`. One closed object rather than a union:
+ * the workflow runner projects this schema into its input table by walking
+ * `shape`, and a union exposes no shape to walk.
  */
 const isAbsent = (value: unknown): boolean => value === undefined || value === null;
 
-/**
- * One closed object rather than a union of the local and cloud-worker envelopes.
- * The workflow runner projects this schema into its input table by walking
- * `shape`, and a union exposes no shape to walk, so a union fails every detached
- * submission during preflight. Exactly one envelope is still required, unknown
- * properties are still rejected, and neither envelope may borrow the other's
- * keys.
- */
 const inputSchema = z
   .strictObject({
     schema_version: z.literal("ultrafuzz.smithers.workflow.v4").nullish(),
@@ -245,40 +215,10 @@ const inputSchema = z
     // identity, and a colliding field corrupts its input primary key.
     ultrafuzz_run_id: z.literal(__ULTRAFUZZ_RUN_ID_LITERAL__).nullish(),
     tasks: z.array(inputTaskSchema).max(MAX_WORKFLOW_INPUT_TASKS).nullish(),
-    cloud_worker: z.literal(true).nullish(),
-    task_id: z.string().min(1).max(4_096).nullish(),
-    attempt_id: z.string().min(1).max(4_096).nullish(),
-    execution_generation: z
-      .string()
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)
-      .nullish(),
-    selected_task: z.json().nullish(),
     operator_prompt: z.string().nullish(),
     operator_input: operatorInputSchema.nullish()
   })
   .superRefine((value, ctx) => {
-    const localKeys = LOCAL_WORKFLOW_INPUT_KEYS.filter((key) => !isAbsent(value[key]));
-    const cloudKeys = CLOUD_WORKER_INPUT_KEYS.filter((key) => !isAbsent(value[key]));
-    if (cloudKeys.length > 0) {
-      if (localKeys.length > 0) {
-        ctx.addIssue({
-          code: "custom",
-          message: `cloud worker input must not carry local workflow keys: ${localKeys.join(", ")}`
-        });
-        return;
-      }
-      if (cloudKeys.length !== CLOUD_WORKER_INPUT_KEYS.length) {
-        ctx.addIssue({
-          code: "custom",
-          message:
-            "cloud worker input requires cloud_worker, task_id, attempt_id, execution_generation, and selected_task"
-        });
-      }
-      if (!isAbsent(value.tasks) && (value.tasks?.length ?? 0) > 0) {
-        ctx.addIssue({ code: "custom", message: "cloud worker input must not carry outer task entries" });
-      }
-      return;
-    }
     if (isAbsent(value.schema_version) || isAbsent(value.ultrafuzz_run_id) || isAbsent(value.tasks)) {
       ctx.addIssue({
         code: "custom",
@@ -338,7 +278,7 @@ const PROMPT_ARTIFACT_AUTHORITY_DIRECTORY = ".ultrafuzz/authorities";
 const unreachableCommitCountCommand =
   'set -euo pipefail; git fsck --connectivity-only --unreachable --no-reflogs --no-progress 2>&1 | awk \'$1 == "unreachable" && $2 == "commit" { count++ } END { print count + 0 }\'';
 
-const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
+const { Workflow, Task, Worktree, Parallel, smithers, outputs } = createSmithers({
   input: inputSchema,
   agentProcess: agentProcessOutput,
   preparation: preparationOutput,
@@ -359,17 +299,10 @@ const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
 const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
-const admittedWorkflowRelativePath =
-  admittedWorkflowControls.persistedWorkflowPath === undefined
-    ? __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__
-    : cloudSnapshotRelativePath(admittedWorkflowControls.persistedWorkflowPath, "persisted workflow path");
 const dynamicBaseGraphPath = sealedRuntimeControlPath("runtime-base-graph.json", admittedWorkflowControls);
 const dynamicBaseTasksPath = sealedRuntimeControlPath("runtime-base-tasks.json", admittedWorkflowControls);
 function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
-  const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
-  const dependencyArtifactRelativeDirs = [...task.dependencyArtifactDirs];
-  const optionalDependencyArtifactRelativeDirs = [...task.optionalDependencyArtifactDirs];
-  const referenceArtifactRelativeDirs = [...task.referenceArtifactDirs];
+  const controlPaths = taskWorkflowControlPaths(admittedWorkflowControls);
   const taskManifestPath =
     controlPaths.executionSnapshotRoot === undefined
       ? path.resolve(process.cwd(), task.sourceTaskManifestPath)
@@ -382,31 +315,19 @@ function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
   return {
     ...task,
     promptPath,
-    promptRelativePath:
-      promptPath === undefined
-        ? undefined
-        : task.execution.mode === "cloud" && controlPaths.executionSnapshotRoot !== undefined
-          ? cloudSnapshotRelativePath(promptPath, "rendered prompt path")
-          : task.promptPath,
     workflowPath: controlPaths.workflowPath ?? path.resolve(process.cwd(), task.workflowPath),
     executionSnapshotRoot: controlPaths.executionSnapshotRoot,
     taskManifestPath,
-    workspaceRelativePath: task.workspacePath,
     workspacePath: path.resolve(process.cwd(), task.workspacePath),
-    artifactRelativeDir: task.artifactDir,
     artifactDir: path.resolve(process.cwd(), task.artifactDir),
-    dependencyArtifactRelativeDirs,
     dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
-    optionalDependencyArtifactRelativeDirs,
     optionalDependencyArtifactDirs: task.optionalDependencyArtifactDirs.map((directory) =>
       path.resolve(process.cwd(), directory)
     ),
-    referenceArtifactRelativeDirs,
     referenceArtifactDirs: task.referenceArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
     ...(task.vulnerabilityDatabase === undefined
       ? {}
       : {
-          vulnerabilityDatabaseRelative: task.vulnerabilityDatabase,
           vulnerabilityDatabase: {
             ...task.vulnerabilityDatabase,
             catalogPath: path.resolve(process.cwd(), task.vulnerabilityDatabase.catalogPath)
@@ -444,25 +365,17 @@ function dependencyVerificationProducersFromCompiledTask(task: (typeof compiledB
   });
 }
 
-function dynamicExecutionPath(task: (typeof compiledBaseTasks)[number], value: string, label: string): string {
-  const relative = path.relative(sourceProjectRoot, path.resolve(value));
-  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`${label} must be a project child path`);
-  }
-  return task.execution.mode === "cloud" ? relative.split(path.sep).join("/") : path.resolve(process.cwd(), relative);
-}
-
 function dynamicExecutionMetadata(task: (typeof compiledBaseTasks)[number]) {
   return {
     ...task.metadata,
     workspace: {
       ...task.metadata.workspace,
-      path: dynamicExecutionPath(task, task.metadata.workspace.path, "workspace metadata path")
+      path: currentProjectPath(task.metadata.workspace.path, "workspace metadata path")
     },
     artifacts: {
       ...task.metadata.artifacts,
-      dir: dynamicExecutionPath(task, task.metadata.artifacts.dir, "artifact metadata directory"),
-      manifestPath: dynamicExecutionPath(task, task.metadata.artifacts.manifestPath, "artifact manifest path")
+      dir: currentProjectPath(task.metadata.artifacts.dir, "artifact metadata directory"),
+      manifestPath: currentProjectPath(task.metadata.artifacts.manifestPath, "artifact manifest path")
     }
   };
 }
@@ -479,21 +392,20 @@ function compiledTaskSourceIdentity(task: (typeof compiledBaseTasks)[number]) {
 function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
   const compiledById = new Map(serializedTaskSpecs.map((candidate) => [candidate.id, candidate]));
   return tasks.map((task) => {
-    const controlPaths = taskWorkflowControlPaths(task.execution.mode, admittedWorkflowControls);
+    const controlPaths = taskWorkflowControlPaths(admittedWorkflowControls);
     const compiled = compiledById.get(task.smithersNodeId);
     const runtimePromptPath =
       task.renderedPromptPath === undefined
         ? undefined
-        : path.resolve(process.cwd(), dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"));
+        : currentProjectPath(task.renderedPromptPath, "rendered prompt");
     const compiledPromptPath =
       compiled?.promptPath === undefined ? undefined : path.resolve(process.cwd(), compiled.promptPath);
     const retainedPromptPath =
       compiledPromptPath !== undefined && compiledPromptPath !== runtimePromptPath ? compiledPromptPath : undefined;
     // A static compiled prompt exists in the initial execution seal. A deferred or generated prompt
-    // cannot exist there, so it stays in the run root and is bound by selected_task plus the handoff
-    // content digest instead. A continuation may rebind a static prompt to its authenticated retained
-    // snapshot after the cleanup-owned launch path is gone; that execution-only binding takes
-    // precedence without changing the sealed dynamic-runtime task manifest.
+    // cannot exist there, so it is read from the run root instead. A continuation may rebind a static
+    // prompt to its authenticated retained snapshot after the cleanup-owned launch path is gone; that
+    // execution-only binding takes precedence without changing the sealed dynamic-runtime task manifest.
     const promptPath =
       compiled?.promptPath === undefined
         ? runtimePromptPath
@@ -516,64 +428,29 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       reasoningEffort: task.reasoningEffort ?? null,
       prompt: "",
       promptPath,
-      promptRelativePath:
-        promptPath === undefined
-          ? undefined
-          : task.execution.mode === "cloud" && controlPaths.executionSnapshotRoot !== undefined
-            ? cloudSnapshotRelativePath(promptPath, "rendered prompt path")
-            : projectRelativePath(retainedPromptPath ?? task.renderedPromptPath!, "rendered prompt"),
-      workspaceRelativePath: dynamicExecutionPath(task, task.workspacePath, "task workspace"),
-      workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
-      artifactRelativeDir: dynamicExecutionPath(task, task.artifactDir, "task artifact directory"),
-      artifactDir: path.resolve(process.cwd(), dynamicExecutionPath(task, task.artifactDir, "task artifact directory")),
-      dependencyArtifactRelativeDirs: task.dependencyArtifactDirs.map((directory) =>
-        dynamicExecutionPath(task, directory, "dependency artifact directory")
-      ),
+      workspacePath: currentProjectPath(task.workspacePath, "task workspace"),
+      artifactDir: currentProjectPath(task.artifactDir, "task artifact directory"),
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
-        path.resolve(process.cwd(), dynamicExecutionPath(task, directory, "dependency artifact directory"))
-      ),
-      optionalDependencyArtifactRelativeDirs: (task.optionalDependencyArtifactDirs ?? []).map((directory) =>
-        dynamicExecutionPath(task, directory, "optional dependency artifact directory")
+        currentProjectPath(directory, "dependency artifact directory")
       ),
       optionalDependencyArtifactDirs: (task.optionalDependencyArtifactDirs ?? []).map((directory) =>
-        path.resolve(process.cwd(), dynamicExecutionPath(task, directory, "optional dependency artifact directory"))
-      ),
-      referenceArtifactRelativeDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
-        dynamicExecutionPath(task, directory, "reference artifact directory")
+        currentProjectPath(directory, "optional dependency artifact directory")
       ),
       referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
-        path.resolve(process.cwd(), dynamicExecutionPath(task, directory, "reference artifact directory"))
+        currentProjectPath(directory, "reference artifact directory")
       ),
       ...(task.vulnerabilityDatabaseCatalog === undefined
         ? {}
         : {
             vulnerabilityDatabase: {
-              catalogPath: path.resolve(
-                process.cwd(),
-                dynamicExecutionPath(task, task.vulnerabilityDatabaseCatalog.path, "vulnerability database catalog")
-              ),
-              catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
-            },
-            vulnerabilityDatabaseRelative: {
-              catalogPath: dynamicExecutionPath(
-                task,
-                task.vulnerabilityDatabaseCatalog.path,
-                "vulnerability database catalog"
-              ),
+              catalogPath: currentProjectPath(task.vulnerabilityDatabaseCatalog.path, "vulnerability database catalog"),
               catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
             }
           }),
-      runRoot: dynamicExecutionPath(task, path.resolve(task.artifactDir, "..", ".."), "run root"),
+      runRoot: currentProjectPath(path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath:
         controlPaths.workflowPath ??
-        path.resolve(
-          process.cwd(),
-          dynamicExecutionPath(
-            task,
-            path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__),
-            "workflow path"
-          )
-        ),
+        currentProjectPath(path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__), "workflow path"),
       executionSnapshotRoot: controlPaths.executionSnapshotRoot,
       taskManifestPath:
         controlPaths.executionSnapshotRoot === undefined
@@ -613,7 +490,6 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
         1,
       metadata: dynamicExecutionMetadata(task),
       outputs: task.metadata.artifacts.outputs,
-      execution: task.execution,
       pinnedSubmodules: compiled?.pinnedSubmodules ?? serializedTaskSpecs[0]?.pinnedSubmodules ?? null,
       productionSourceRoots: compiled?.productionSourceRoots ??
         serializedTaskSpecs[0]?.productionSourceRoots ?? ["src", "contracts"]
@@ -621,634 +497,7 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
   });
 }
 
-function projectRelativePath(value: string, label: string): string {
-  const relative = path.relative(sourceProjectRoot, path.resolve(value));
-  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`${label} must be a project child path`);
-  }
-  return relative.split(path.sep).join("/");
-}
-
-/**
- * Restates one task's metadata as the exact handoff metadata DTO.
- *
- * Every member is named explicitly instead of spread, so a field that only exists after hydration --
- * or a future compiled-task field -- can never silently cross the trust boundary.
- */
-function cloudSelectedTaskMetadata(metadata: (typeof taskSpecs)[number]["metadata"]) {
-  const node = metadata.node as Record<string, undefined | string | Record<string, string>>;
-  const model = metadata.model as Record<string, undefined | string | number> | undefined;
-  const dynamic = node.dynamic as Record<string, string> | undefined;
-  return {
-    schemaVersion: metadata.schemaVersion,
-    run: {
-      ultrafuzzRunId: metadata.run.ultrafuzzRunId,
-      smithersWorkflowName: metadata.run.smithersWorkflowName,
-      graphVersion: metadata.run.graphVersion,
-      topologyVersion: metadata.run.topologyVersion
-    },
-    node: {
-      concreteNodeId: node.concreteNodeId,
-      logicalNodeId: node.logicalNodeId,
-      attemptId: node.attemptId,
-      label: node.label,
-      kind: node.kind,
-      ...(node.role === undefined ? {} : { role: node.role }),
-      ...(node.promptPath === undefined ? {} : { promptPath: node.promptPath }),
-      ...(node.group === undefined ? {} : { group: node.group }),
-      ...(node.producerNodeId === undefined ? {} : { producerNodeId: node.producerNodeId }),
-      ...(node.storageId === undefined ? {} : { storageId: node.storageId }),
-      ...(dynamic === undefined
-        ? {}
-        : {
-            dynamic: {
-              groupNodeId: dynamic.groupNodeId,
-              sourceNodeId: dynamic.sourceNodeId,
-              sourceAttemptId: dynamic.sourceAttemptId,
-              sourceDigest: dynamic.sourceDigest,
-              expansionKey: dynamic.expansionKey,
-              itemDigest: dynamic.itemDigest,
-              manifestPath: dynamic.manifestPath
-            }
-          })
-    },
-    dependencies: {
-      concreteNodeIds: [...metadata.dependencies.concreteNodeIds],
-      attemptIds: [...metadata.dependencies.attemptIds],
-      smithersNodeIds: [...metadata.dependencies.smithersNodeIds]
-    },
-    loop: {
-      index: metadata.loop.index,
-      count: metadata.loop.count,
-      mode: metadata.loop.mode,
-      attemptIndex: metadata.loop.attemptIndex
-    },
-    ...(model === undefined
-      ? {}
-      : {
-          model: {
-            profileId: model.profileId,
-            agentRef: model.agentRef,
-            ...(model.modelName === undefined ? {} : { modelName: model.modelName }),
-            ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
-            modelIndex: model.modelIndex,
-            attemptIndex: model.attemptIndex,
-            agentChain: metadata.model!.agentChain.map((entry) => ({
-              profileId: entry.profileId,
-              agentRef: entry.agentRef,
-              ...(entry.modelName === undefined ? {} : { modelName: entry.modelName }),
-              ...(entry.reasoningEffort === undefined ? {} : { reasoningEffort: entry.reasoningEffort }),
-              role: entry.role
-            }))
-          }
-        }),
-    // `repoPath` is deliberately dropped: it is controller-only provenance the worker never reads and
-    // cannot resolve in its relocated root, so the shared contract refuses it as an unknown key.
-    workspace: {
-      primitive: metadata.workspace.primitive,
-      path: metadata.workspace.path,
-      trustModel: metadata.workspace.trustModel
-    },
-    artifacts: {
-      dir: metadata.artifacts.dir,
-      outputs: metadata.artifacts.outputs.map((output) => ({
-        path: output.path,
-        contract: output.contract,
-        contractDigest: output.contractDigest,
-        ...(output.schemaFile === undefined ? {} : { schemaFile: output.schemaFile }),
-        ...(output.schemaId === undefined ? {} : { schemaId: output.schemaId }),
-        ...(output.schemaSha256 === undefined ? {} : { schemaSha256: output.schemaSha256 }),
-        ...(output.schemaBundleSha256 === undefined ? {} : { schemaBundleSha256: output.schemaBundleSha256 }),
-        ...(output.validatorBuild === undefined ? {} : { validatorBuild: output.validatorBuild }),
-        primary: output.primary
-      })),
-      manifestPath: metadata.artifacts.manifestPath
-    },
-    retryPolicy: {
-      maxAttempts: metadata.retryPolicy.maxAttempts,
-      smithersRetries: metadata.retryPolicy.smithersRetries
-    },
-    timeout: {
-      milliseconds: metadata.timeout.milliseconds,
-      seconds: metadata.timeout.seconds,
-      heartbeatTimeoutMs: metadata.timeout.heartbeatTimeoutMs
-    },
-    execution: {
-      mode: metadata.execution.mode,
-      ...(metadata.execution.provider === undefined ? {} : { provider: metadata.execution.provider }),
-      resources: {
-        cpu: metadata.execution.resources.cpu,
-        memoryMiB: metadata.execution.resources.memoryMiB,
-        timeoutSeconds: metadata.execution.resources.timeoutSeconds
-      }
-    }
-  };
-}
-
-/**
- * The explicit controller-to-worker handoff DTO for one already-materialized concrete attempt.
- *
- * A cloud worker must never rematerialize controller-global dynamic state: it receives no graph, task
- * plan, expansion manifest, or template snapshot. Only the fields required to execute this attempt
- * are constructed -- never a spread of a hydrated spec -- and every path is project-relative so the
- * spec stays valid in the relocated worker root. The worker derives the inline prompt body, the
- * dependency edges, the runtime context, the outputs list, and the hydration path aliases itself.
- */
-function buildCloudSelectedTaskHandoff(
-  task: {
-    id: string;
-    attemptId: string;
-    preparationId: string;
-    verifierId: string;
-    agentRef: string;
-    modelName: string | null;
-    reasoningEffort: string | null;
-    branch: string;
-    runRoot: string;
-    workflowPath: string;
-    sourceProjectRoot: string;
-    dependencyArtifactDirs: readonly string[];
-    dependencyArtifactRelativeDirs?: readonly string[];
-    referenceArtifactDirs?: readonly string[];
-    referenceArtifactRelativeDirs?: readonly string[];
-    vulnerabilityDatabase?: { catalogPath: string; catalogSha256: string };
-    vulnerabilityDatabaseRelative?: { catalogPath: string; catalogSha256: string };
-    timeoutMs: number;
-    heartbeatTimeoutMs: number;
-    retries: number;
-    retryPolicy: { backoff: "exponential"; initialDelayMs: number };
-    metadata: (typeof taskSpecs)[number]["metadata"];
-    execution: { mode: "local" | "cloud" };
-  },
-  relative: { promptPath: string; workspacePath: string; artifactDir: string },
-  executionGeneration: string
-) {
-  return {
-    schema_version: CLOUD_SELECTED_TASK_SCHEMA_VERSION,
-    id: task.id,
-    attemptId: task.attemptId,
-    preparationId: task.preparationId,
-    verifierId: task.verifierId,
-    agentRef: task.agentRef,
-    modelName: task.modelName ?? null,
-    reasoningEffort: task.reasoningEffort ?? null,
-    branch: task.branch,
-    promptPath: relative.promptPath,
-    workspacePath: relative.workspacePath,
-    artifactDir: relative.artifactDir,
-    runRoot: task.runRoot,
-    workflowPath: cloudSnapshotRelativePath(task.workflowPath, "workflow path"),
-    sourceProjectRoot: task.sourceProjectRoot,
-    dependencyArtifactDirs: [...(task.dependencyArtifactRelativeDirs ?? task.dependencyArtifactDirs)],
-    referenceArtifactDirs: [...(task.referenceArtifactRelativeDirs ?? task.referenceArtifactDirs ?? [])],
-    ...((task.vulnerabilityDatabaseRelative ?? task.vulnerabilityDatabase) === undefined
-      ? {}
-      : {
-          vulnerabilityDatabase: {
-            catalogPath: (task.vulnerabilityDatabaseRelative ?? task.vulnerabilityDatabase)!.catalogPath,
-            catalogSha256: (task.vulnerabilityDatabaseRelative ?? task.vulnerabilityDatabase)!.catalogSha256
-          }
-        }),
-    timeoutMs: task.timeoutMs,
-    heartbeatTimeoutMs: task.heartbeatTimeoutMs,
-    retries: task.retries,
-    retryPolicy: {
-      backoff: task.retryPolicy.backoff,
-      initialDelayMs: task.retryPolicy.initialDelayMs
-    },
-    metadata: cloudSelectedTaskMetadata(task.metadata),
-    execution: { mode: task.execution.mode, generation: executionGeneration }
-  };
-}
-
-/** The DTO the controller dispatches, built from the hydrated spec's project-relative locations. */
-function cloudSelectedTaskHandoff(task: (typeof taskSpecs)[number]) {
-  return buildCloudSelectedTaskHandoff(
-    {
-      ...task,
-      dependencyArtifactDirs: task.dependencyArtifactRelativeDirs,
-      referenceArtifactDirs: task.referenceArtifactRelativeDirs,
-      ...(task.vulnerabilityDatabaseRelative === undefined
-        ? {}
-        : { vulnerabilityDatabase: task.vulnerabilityDatabaseRelative })
-    },
-    {
-      promptPath: task.promptRelativePath as string,
-      workspacePath: task.workspaceRelativePath,
-      artifactDir: task.artifactRelativeDir
-    },
-    cloudExecutionGeneration
-  );
-}
-
-/**
- * The canonical DTO a compiled attempt must produce.
- *
- * A compiled spec already stores cloud locations project-relative. When its prompt rendering was
- * deferred to runtime expansion, the canonical prompt is the attempt's own rendered prompt inside its
- * own artifact directory -- the one location runtime materialization is allowed to supply.
- */
-function compiledCanonicalSelectedTask(compiled: (typeof serializedTaskSpecs)[number], executionGeneration: string) {
-  const hydrated = hydrateTaskSpec(compiled);
-  return buildCloudSelectedTaskHandoff(
-    hydrated,
-    {
-      promptPath:
-        hydrated.promptRelativePath ??
-        `${compiled.artifactDir}/${CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string}`,
-      workspacePath: compiled.workspacePath,
-      artifactDir: compiled.artifactDir
-    },
-    executionGeneration
-  );
-}
-
-/**
- * Every attempt ID one declared dynamic group could materialize for a generated concrete node ID.
- *
- * A group's storage identity is a pure function of the group node ID and the generated node ID, and
- * the per-template attempt suffix comes from the group's own compiled model fan-out, so the whole set
- * is derivable from compile-time constants inside a relocated worker -- no expansion manifest needed.
- */
-function generatedAttemptIdsFor(group: (typeof dynamicGroupSpecs)[number], generatedNodeId: string): string[] {
-  const storageId = dynamicStorageId(group.groupNodeId, generatedNodeId) as string;
-  if (group.taskTemplates.length <= 1) return [storageId];
-  return group.taskTemplates.map((template, index) => {
-    const model = template.metadata.model;
-    return `${storageId}__model_${model?.modelIndex ?? index}__attempt_${model?.attemptIndex ?? index}`;
-  });
-}
-
-/**
- * Correlated runtime-materialization evidence for the dynamic groups one compiled task declared.
- *
- * A handoff may only gain a dependency that one of those groups could actually have produced: a
- * generated child's own attempt, or -- when a group expanded to no items -- the group's compiled
- * source attempt, which is the single fallback runtime lowering substitutes.
- */
-function runtimeDependencyEvidence(groupNodeIds: readonly string[]) {
-  const groups = groupNodeIds.map((groupNodeId) => {
-    const group = dynamicGroupSpecs.find((candidate) => candidate.groupNodeId === groupNodeId);
-    if (group === undefined) {
-      throw new Error(`cloud worker task declares unknown dynamic group ${groupNodeId}`);
-    }
-    return group;
-  });
-  return {
-    replacedConcreteNodeIds: groups.map((group) => group.groupNodeId),
-    admissibleAttemptIds(concreteNodeId: string): string[] {
-      return groups.flatMap((group) => [
-        ...generatedAttemptIdsFor(group, concreteNodeId),
-        ...(group.source.concreteNodeId === concreteNodeId ? [group.source.attemptId] : [])
-      ]);
-    },
-    requiredVerifierSmithersNodeId(concreteNodeId: string, attemptId: string): string | undefined {
-      for (const group of groups) {
-        if (group.source.concreteNodeId === concreteNodeId && group.source.attemptId === attemptId) {
-          return group.source.verifierSmithersNodeId;
-        }
-        if (generatedAttemptIdsFor(group, concreteNodeId).includes(attemptId)) {
-          return `verify:${attemptId}`;
-        }
-      }
-      return undefined;
-    }
-  };
-}
-
-/**
- * Resolves the declared dynamic group and template that could have produced one dispatched attempt.
- *
- * The group is never taken from the handoff: it is the group whose compile-time storage derivation
- * actually yields the dispatched attempt ID from the claimed generated node ID. Group, storage
- * identity, and attempt identity therefore form one mutually consistent claim instead of three
- * independent ones a runtime-generated attempt could each choose freely.
- */
-function generatingGroupFor(
-  concreteNodeId: string,
-  attemptId: string
-): { group: (typeof dynamicGroupSpecs)[number]; template: (typeof compiledBaseTasks)[number] } | undefined {
-  for (const group of dynamicGroupSpecs) {
-    const index = generatedAttemptIdsFor(group, concreteNodeId).indexOf(attemptId);
-    const template = index < 0 ? undefined : group.taskTemplates[index];
-    if (template !== undefined) return { group, template: template as (typeof compiledBaseTasks)[number] };
-  }
-  return undefined;
-}
-
-/**
- * Placeholder for the three values only the expansion itself produced.
- *
- * These are never compared: the shared contract relaxes exactly the expansion key and the two runtime
- * digests. The placeholder exists so the reconstructed canonical DTO stays structurally complete,
- * which is what makes an *absent* dynamic provenance block a mismatch rather than a silent omission.
- */
-const GENERATED_EXPANSION_PLACEHOLDER = "<runtime-expansion-value>";
-
-/**
- * The canonical DTO a runtime-generated child of one declared dynamic group must produce.
- *
- * A generated attempt has no compiled spec of its own, so without this every constant it inherits
- * would be attacker-chosen. Everything its group's compiled template fixes is reconstructed here from
- * compile-time constants -- the run root and every path derived from it, the snapshotted prompt
- * template's rendered location, the agent and model profile, the execution mode/provider/resources,
- * the artifact output contracts, the pinned planner catalog, and the reference trees -- so only the
- * three expansion-only values above remain runtime-supplied.
- */
-function generatedCanonicalTaskSpec(
-  group: (typeof dynamicGroupSpecs)[number],
-  template: (typeof compiledBaseTasks)[number],
-  concreteNodeId: string,
-  attemptId: string,
-  expansionKey: string
-) {
-  const runRoot = path.resolve(sourceProjectRoot, __ULTRAFUZZ_RUN_ROOT_RELATIVE__);
-  const artifactDir = path.join(runRoot, "artifacts", attemptId);
-  const workspacePath = path.join(runRoot, "workspaces", attemptId);
-  const generated = {
-    ...template,
-    attemptId,
-    concreteNodeId,
-    smithersNodeId: `node:${attemptId}`,
-    verifierSmithersNodeId: `verify:${attemptId}`,
-    workspacePath,
-    artifactDir,
-    renderedPromptPath: path.join(artifactDir, CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string),
-    metadata: {
-      ...template.metadata,
-      node: {
-        ...template.metadata.node,
-        concreteNodeId,
-        attemptId,
-        // The label is the template's compiled label composed with the claimed expansion key, so it
-        // stays bound to a compile-time constant even though the key itself is runtime data.
-        label: `${template.metadata.node.label}: ${expansionKey}`,
-        producerNodeId: concreteNodeId,
-        storageId: dynamicStorageId(group.groupNodeId, concreteNodeId) as string,
-        dynamic: {
-          groupNodeId: group.groupNodeId,
-          sourceNodeId: group.source.concreteNodeId,
-          sourceAttemptId: group.source.attemptId,
-          sourceDigest: GENERATED_EXPANSION_PLACEHOLDER,
-          expansionKey: GENERATED_EXPANSION_PLACEHOLDER,
-          itemDigest: GENERATED_EXPANSION_PLACEHOLDER,
-          manifestPath: `dynamic-expansions/${group.groupNodeId}.json`
-        }
-      },
-      workspace: { ...template.metadata.workspace, path: workspacePath },
-      artifacts: {
-        ...template.metadata.artifacts,
-        dir: artifactDir,
-        manifestPath: path.join(artifactDir, "artifact-manifest.json")
-      }
-    }
-  };
-  return taskSpecsFromCompiled([generated] as unknown as typeof compiledBaseTasks)[0]!;
-}
-
-function generatedCanonicalSelectedTask(
-  group: (typeof dynamicGroupSpecs)[number],
-  template: (typeof compiledBaseTasks)[number],
-  concreteNodeId: string,
-  attemptId: string,
-  expansionKey: string,
-  executionGeneration: string
-) {
-  const task = generatedCanonicalTaskSpec(group, template, concreteNodeId, attemptId, expansionKey);
-  return buildCloudSelectedTaskHandoff(
-    task,
-    {
-      promptPath: task.promptRelativePath as string,
-      workspacePath: task.workspaceRelativePath,
-      artifactDir: task.artifactRelativeDir
-    },
-    executionGeneration
-  );
-}
-
-/** Resolves one validated project-relative handoff path inside the relocated worker root. */
-function relocatedHandoffPath(value: string, label: string): string {
-  const workerRoot = path.resolve(process.cwd());
-  const resolved = path.resolve(workerRoot, value);
-  if (resolved === workerRoot || !resolved.startsWith(`${workerRoot}${path.sep}`)) {
-    throw new Error(`cloud worker selected_task ${label} must stay inside the relocated project root`);
-  }
-  return resolved;
-}
-
-/**
- * Re-verifies the relocated vulnerability-database catalog against its declared digest.
- *
- * The worker never inherits the controller's verification: the catalog travels inside the handoff
- * archive and is then extracted into a durable volume workspace that survives retries, so absence, an
- * irregular entry, and tampered bytes are each distinct, explicit failures rather than a silently
- * different planner catalog feeding threat-model and goal-plan postprocessing.
- */
-function assertRelocatedVulnerabilityDatabaseCatalog(catalogPath: string, expectedSha256: string): void {
-  if (!existsSync(catalogPath)) {
-    throw new Error("cloud worker selected_task vulnerabilityDatabase catalog is absent from the relocated project");
-  }
-  let bytes: Buffer;
-  try {
-    // Lexical containment is insufficient here: a relocated durable workspace may contain a
-    // symlinked parent component. Reuse the artifact boundary's realpath and symlink checks before
-    // reading so matching bytes outside the relocated root cannot satisfy the digest binding.
-    assertRegularFileInside(process.cwd(), catalogPath, "cloud worker vulnerability database catalog");
-    bytes = readFileSync(catalogPath);
-  } catch (error) {
-    throw new Error("cloud worker selected_task vulnerabilityDatabase catalog is unreadable in the relocated project", {
-      cause: error
-    });
-  }
-  const actual = createHash("sha256").update(bytes).digest("hex");
-  if (actual !== expectedSha256) {
-    throw new Error(
-      "cloud worker selected_task vulnerabilityDatabase catalog does not match its declared catalogSha256"
-    );
-  }
-}
-
-/**
- * Hydrates one validated handoff into exactly one runnable task spec.
- *
- * Fields the handoff deliberately omits are derived here rather than trusted: the empty inline prompt
- * body, the dropped dependency edges, the timeout-derived runtime context, and the outputs list the
- * attempt's own metadata already declares.
- */
-function selectedTaskDependencyVerificationProducers(
-  spec: ReturnType<typeof cloudSelectedTaskHandoff>,
-  canonical: (typeof taskSpecs)[number]
-) {
-  const optionalDirs = new Set(canonical.optionalDependencyArtifactRelativeDirs);
-  const dependencyAttemptIds = new Set(spec.metadata.dependencies.attemptIds);
-  const dependencyVerifierIds = new Set(spec.metadata.dependencies.smithersNodeIds);
-  return spec.dependencyArtifactDirs.flatMap((directory) => {
-    const attemptId = path.posix.basename(directory);
-    const verifierId = `verify:${attemptId}`;
-    if (!dependencyAttemptIds.has(attemptId) || !dependencyVerifierIds.has(verifierId)) return [];
-    return [{ attemptId, verifierId, optional: optionalDirs.has(directory) }];
-  });
-}
-
-function hydrateSelectedTaskHandoff(
-  spec: ReturnType<typeof cloudSelectedTaskHandoff>,
-  canonical: (typeof taskSpecs)[number]
-): (typeof taskSpecs)[number] {
-  if (spec.vulnerabilityDatabase !== undefined) {
-    // The controller verified the catalog bytes it archived, but the bytes this worker will actually
-    // read are the relocated ones. Re-hashing them here -- before any spec exists to hydrate and long
-    // before a postprocessor consumes the catalog -- is what makes the declared digest binding.
-    assertRelocatedVulnerabilityDatabaseCatalog(
-      relocatedHandoffPath(spec.vulnerabilityDatabase.catalogPath, "vulnerability database catalog"),
-      spec.vulnerabilityDatabase.catalogSha256
-    );
-  }
-  for (const [label, candidates] of [
-    ["dependency artifact directory", spec.dependencyArtifactDirs],
-    ["reference artifact directory", spec.referenceArtifactDirs],
-    ["run root", [spec.runRoot]],
-    ["workflow path", [spec.workflowPath]],
-    [
-      "vulnerability database catalog",
-      spec.vulnerabilityDatabase === undefined ? [] : [spec.vulnerabilityDatabase.catalogPath]
-    ],
-    ["artifact metadata directory", [spec.metadata.artifacts.dir, spec.metadata.artifacts.manifestPath]],
-    ["workspace metadata path", [spec.metadata.workspace.path]]
-  ] as Array<[string, readonly string[]]>) {
-    for (const candidate of candidates) relocatedHandoffPath(candidate, label);
-  }
-  return {
-    ...canonical,
-    id: spec.id,
-    preparationId: spec.preparationId,
-    verifierId: spec.verifierId,
-    attemptId: spec.attemptId,
-    dependsOn: [] as string[],
-    dynamicDependencies: [] as string[],
-    agentRef: spec.agentRef,
-    agentChain: spec.metadata.model?.agentChain ?? [],
-    modelName: spec.modelName,
-    reasoningEffort: spec.reasoningEffort,
-    prompt: "",
-    promptRelativePath: spec.promptPath,
-    promptPath: relocatedHandoffPath(spec.promptPath, "rendered prompt"),
-    workspaceRelativePath: spec.workspacePath,
-    workspacePath: relocatedHandoffPath(spec.workspacePath, "task workspace"),
-    artifactRelativeDir: spec.artifactDir,
-    artifactDir: relocatedHandoffPath(spec.artifactDir, "task artifact directory"),
-    dependencyArtifactRelativeDirs: spec.dependencyArtifactDirs,
-    dependencyArtifactDirs: spec.dependencyArtifactDirs.map((directory) =>
-      relocatedHandoffPath(directory, "dependency artifact directory")
-    ),
-    referenceArtifactRelativeDirs: spec.referenceArtifactDirs,
-    referenceArtifactDirs: spec.referenceArtifactDirs.map((directory) =>
-      relocatedHandoffPath(directory, "reference artifact directory")
-    ),
-    ...(spec.vulnerabilityDatabase === undefined
-      ? {}
-      : {
-          vulnerabilityDatabase: {
-            ...spec.vulnerabilityDatabase,
-            catalogPath: relocatedHandoffPath(spec.vulnerabilityDatabase.catalogPath, "vulnerability database catalog")
-          },
-          vulnerabilityDatabaseRelative: spec.vulnerabilityDatabase
-        }),
-    runRoot: relocatedHandoffPath(spec.runRoot, "run root"),
-    workflowPath: relocatedHandoffPath(spec.workflowPath, "workflow path"),
-    sourceProjectRoot: spec.sourceProjectRoot,
-    branch: spec.branch,
-    timeoutMs: spec.timeoutMs,
-    runtimeContext: topologyRuntimeContextForTimeout(spec.timeoutMs),
-    heartbeatTimeoutMs: spec.heartbeatTimeoutMs,
-    retries: spec.retries,
-    retryPolicy: spec.retryPolicy,
-    dependencyVerificationProducers: selectedTaskDependencyVerificationProducers(spec, canonical),
-    metadata: {
-      ...spec.metadata,
-      retryPolicy: { ...canonical.metadata.retryPolicy, ...spec.metadata.retryPolicy }
-    },
-    outputs: spec.metadata.artifacts.outputs,
-    execution: { ...canonical.execution, ...spec.execution }
-  } as unknown as (typeof taskSpecs)[number];
-}
-
-/**
- * Reconstructs read-only specs for runtime-generated dependencies from this workflow's compiled
- * dynamic-group templates.
- *
- * The selected-task DTO already proves each runtime-added attempt belongs to a declared group, but
- * the initial serialized spec list cannot contain children that did not exist at compile time. The
- * worker still needs each child's compiled output contracts and logical producer identity to verify
- * its artifact marker and to resolve downstream findings/invariant provenance. Rebuilding those
- * constants here closes that gap without transporting controller-owned task plans or trusting a
- * second handoff DTO. Empty-group fallbacks are compiled source attempts and are excluded by
- * `compiledAttemptIds`; the shared correlation contract has already enforced their exact verifier
- * requirement, while every remaining generated dependency must retain its verifier here as well.
- */
-function generatedDependencyTaskSpecs(
-  selected: ReturnType<typeof cloudSelectedTaskHandoff>,
-  executionGeneration: string
-): typeof taskSpecs {
-  const compiledAttemptIds = new Set(serializedTaskSpecs.map((task) => task.attemptId));
-  const declaredDependencyAttemptIds = new Set(selected.metadata.dependencies.attemptIds);
-  const declaredVerifierIds = new Set(selected.metadata.dependencies.smithersNodeIds);
-  const referenceArtifactDirs = new Set(selected.referenceArtifactDirs);
-  const reconstructed: typeof taskSpecs = [];
-  for (const dependencyArtifactDir of selected.dependencyArtifactDirs) {
-    const dependencyAttemptId = path.posix.basename(dependencyArtifactDir);
-    // The artifact closure can carry transitive baseline inputs that are not direct task
-    // dependencies. Only an exact declared dependency attempt can be a runtime-generated task.
-    if (!declaredDependencyAttemptIds.has(dependencyAttemptId)) continue;
-    // Static references participate in artifact ancestry but are not executable attempts, so they
-    // have neither a serialized task spec nor a verifier to reconstruct on the worker.
-    if (referenceArtifactDirs.has(dependencyArtifactDir)) continue;
-    if (compiledAttemptIds.has(dependencyAttemptId)) continue;
-    if (!declaredVerifierIds.has(`verify:${dependencyAttemptId}`)) {
-      throw new Error(`cloud worker selected_task dependency ${dependencyAttemptId} is missing its verifier`);
-    }
-
-    const candidates = selected.metadata.dependencies.concreteNodeIds.flatMap((concreteNodeId) => {
-      const generating = generatingGroupFor(concreteNodeId, dependencyAttemptId);
-      return generating === undefined ? [] : [{ concreteNodeId, ...generating }];
-    });
-    if (candidates.length !== 1) {
-      throw new Error(
-        `cloud worker selected_task dependency ${dependencyAttemptId} does not resolve to exactly one compiled dynamic template`
-      );
-    }
-    const candidate = candidates[0]!;
-    const runtimeCanonical = generatedCanonicalTaskSpec(
-      candidate.group,
-      candidate.template,
-      candidate.concreteNodeId,
-      dependencyAttemptId,
-      GENERATED_EXPANSION_PLACEHOLDER
-    );
-    const canonical = generatedCanonicalSelectedTask(
-      candidate.group,
-      candidate.template,
-      candidate.concreteNodeId,
-      dependencyAttemptId,
-      GENERATED_EXPANSION_PLACEHOLDER,
-      executionGeneration
-    );
-    if (canonical.artifactDir !== dependencyArtifactDir) {
-      throw new Error(
-        `cloud worker selected_task dependency ${dependencyAttemptId} disagrees with its compiled artifact directory`
-      );
-    }
-    reconstructed.push(hydrateSelectedTaskHandoff(canonical, runtimeCanonical));
-  }
-  return reconstructed;
-}
-
-/**
- * Validates one dispatch document against the exact outer input contract.
- *
- * Smithers already parses the declared input schema, but the relocated worker is launched from an
- * untrusted request document, so the workflow refuses unknown or aliased dispatch keys itself instead
- * of depending on where the document happened to enter the system.
- */
+/** Validates the dispatch document against the exact outer input contract. */
 function parseWorkflowInput(value: unknown): z.infer<typeof inputSchema> {
   const parsed = inputSchema.safeParse(value);
   if (!parsed.success) {
@@ -1258,108 +507,6 @@ function parseWorkflowInput(value: unknown): z.infer<typeof inputSchema> {
     throw new Error(`ultrafuzz workflow input is invalid: ${detail}`);
   }
   return parsed.data;
-}
-
-/** Validates the handoff contract and hydrates one runnable spec plus read-only generated dependencies. */
-function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs {
-  const taskId = input.task_id;
-  const attemptId = input.attempt_id;
-  if (typeof taskId !== "string" || taskId === "") {
-    throw new Error("cloud worker input must identify one task_id");
-  }
-  const compiled = serializedTaskSpecs.find((task) => task.id === taskId);
-  const selected = input.selected_task;
-  // Every cloud dispatch carries the controller's already-materialized handoff. There is no
-  // no-handoff fallback: hydrating a compiled spec instead would silently substitute a *different*
-  // attempt whenever the dispatch and the bundle disagree, which is exactly the disagreement the
-  // handoff exists to make impossible.
-  if (selected === undefined) {
-    throw new Error(`cloud worker task ${taskId} requires an explicit selected_task handoff`);
-  }
-  // The dispatch always carries the attempt identity, so the handoff is bound to it unconditionally:
-  // a runtime-generated dynamic attempt has no compiled spec to cross-check against.
-  if (typeof attemptId !== "string" || attemptId === "") {
-    throw new Error("cloud worker input must identify one attempt_id alongside selected_task");
-  }
-  // The generation names the sandbox, the durable attempt root, and the storage lineage this worker
-  // publishes under. A relocated worker cannot rederive it, so the dispatch must state it exactly.
-  if (!isCloudExecutionGeneration(input.execution_generation)) {
-    throw new Error("cloud worker input must identify one bounded execution_generation alongside selected_task");
-  }
-  try {
-    // A runtime-generated dynamic attempt has no compiled spec, so it is bound to this workflow's own
-    // compiled constants and to the identities its dispatched attempt ID determines.
-    const spec = parseCloudSelectedTask(selected, {
-      taskId,
-      attemptId,
-      executionGeneration: input.execution_generation,
-      // A relocated worker only ever executes a cloud attempt, so a self-consistent local handoff --
-      // the shape a runtime-generated attempt with no compiled peer could smuggle -- is refused.
-      ...CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
-      sourceProjectRoot,
-      runId: __ULTRAFUZZ_RUN_ID_LITERAL__,
-      workflowName: __ULTRAFUZZ_WORKFLOW_NAME__,
-      workflowPath: admittedWorkflowRelativePath,
-      preparationId: `prepare:${attemptId}`,
-      verifierId: `verify:${attemptId}`,
-      branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${attemptId}`
-    });
-    // When this workflow already compiled the attempt, the handoff must reproduce its entire
-    // canonical DTO. Only runtime expansion of a declared dynamic dependency may extend it, and only
-    // with correlated evidence of the materialization behind each added entry.
-    let canonicalRuntimeTask: (typeof taskSpecs)[number];
-    if (compiled !== undefined) {
-      const compiledBase = compiledBaseTasks.find((candidate) => candidate.smithersNodeId === taskId);
-      const declaredGroups = compiledBase?.dynamicDependencies ?? [];
-      assertCloudSelectedTaskMatchesCanonical(
-        spec,
-        compiledCanonicalSelectedTask(compiled, input.execution_generation),
-        {
-          ...(declaredGroups.length === 0 ? {} : { runtimeDependencies: runtimeDependencyEvidence(declaredGroups) }),
-          allowsRuntimeRenderedPrompt: compiled.promptPath === undefined
-        }
-      );
-      canonicalRuntimeTask = hydrateTaskSpec(compiled);
-    } else {
-      // A runtime-generated child of a declared dynamic group. It has no compiled spec, so it is
-      // bound to the whole canonical DTO its group's compiled template determines; only the three
-      // expansion-only values the shared contract enumerates stay runtime-supplied.
-      const generating = generatingGroupFor(spec.metadata.node.concreteNodeId, attemptId);
-      if (generating === undefined || spec.metadata.node.dynamic?.groupNodeId !== generating.group.groupNodeId) {
-        throw new Error(
-          `cloud worker selected_task ${attemptId} is not a generated attempt of any dynamic group this workflow compiled`
-        );
-      }
-      assertCloudSelectedTaskMatchesCanonical(
-        spec,
-        generatedCanonicalSelectedTask(
-          generating.group,
-          generating.template,
-          spec.metadata.node.concreteNodeId,
-          attemptId,
-          spec.metadata.node.dynamic.expansionKey,
-          input.execution_generation
-        ),
-        { allowsGeneratedExpansionValues: true }
-      );
-      canonicalRuntimeTask = generatedCanonicalTaskSpec(
-        generating.group,
-        generating.template,
-        spec.metadata.node.concreteNodeId,
-        attemptId,
-        spec.metadata.node.dynamic.expansionKey
-      );
-    }
-    return [
-      hydrateSelectedTaskHandoff(spec, canonicalRuntimeTask),
-      ...generatedDependencyTaskSpecs(spec, input.execution_generation)
-    ];
-  } catch (error) {
-    const message = (error as Error).message;
-    throw message.startsWith("cloud worker")
-      ? (error as Error)
-      : new Error(`cloud worker ${message}`, { cause: error });
-  }
 }
 
 function currentProjectPath(value: string, label: string): string {
@@ -1477,10 +624,7 @@ function admitWorkflowControls(loadedPath: string, persistedPath: string | undef
   };
 }
 
-function taskWorkflowControlPaths(
-  executionMode: "local" | "cloud",
-  controls: AdmittedWorkflowControls
-): {
+function taskWorkflowControlPaths(controls: AdmittedWorkflowControls): {
   promptExecutionSnapshotRoot: string | undefined;
   workflowPath: string | undefined;
   executionSnapshotRoot: string | undefined;
@@ -1492,22 +636,6 @@ function taskWorkflowControlPaths(
       workflowPath: undefined,
       executionSnapshotRoot: undefined
     };
-  }
-  if (executionMode === "cloud") {
-    return controls.persistedExecutionSnapshotRoot === undefined
-      ? {
-          // Preserve direct cloud-workflow admission behavior: the loaded
-          // generation can supply sealed prompt/module bytes, but cloud handoff
-          // still requires the explicit persisted generation binding.
-          promptExecutionSnapshotRoot: controls.loadedExecutionSnapshotRoot,
-          workflowPath: controls.loadedWorkflowPath,
-          executionSnapshotRoot: undefined
-        }
-      : {
-          promptExecutionSnapshotRoot: controls.persistedExecutionSnapshotRoot,
-          workflowPath: controls.persistedWorkflowPath!,
-          executionSnapshotRoot: controls.persistedExecutionSnapshotRoot
-        };
   }
   const persistedSnapshotRoot = controls.persistedExecutionSnapshotRoot ?? controls.loadedExecutionSnapshotRoot;
   return {
@@ -1549,14 +677,6 @@ function sealedRuntimeControlPath(name: string, controls: AdmittedWorkflowContro
   if (snapshotRoot === undefined) return undefined;
   const candidate = path.join(snapshotRoot, "controls", name);
   return existsSync(candidate) ? candidate : undefined;
-}
-
-function cloudSnapshotRelativePath(value: string, label: string): string {
-  const relative = path.relative(process.cwd(), value);
-  if (relative === "" || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error(`${label} must stay inside the cloud handoff project`);
-  }
-  return relative.split(path.sep).join("/");
 }
 
 type WorkflowTaskStateContext = {
@@ -1602,62 +722,6 @@ function shouldSkipWorkflowTask(
   return state === undefined || state === "pending" || state === "skipped";
 }
 
-type DependencyVerificationProducer = (typeof taskSpecs)[number]["dependencyVerificationProducers"][number];
-
-type DependencyVerificationAuthority = {
-  attempt_id: string;
-  marker_sha256: string;
-  size_bytes: number;
-};
-
-// Verifier outputs become durable only after the marker itself is durably
-// published. Reading those rows on each workflow render gives cloud handoff a
-// controller-authenticated authority before the later run-state/artifact-
-// manifest synchronization phase, without reopening mutable marker bytes as
-// its source of authority.
-function dependencyVerificationAuthoritiesForTask(
-  task: (typeof taskSpecs)[number],
-  outputForProducer: (producer: DependencyVerificationProducer) => z.infer<typeof verificationOutput> | undefined
-): DependencyVerificationAuthority[] | undefined {
-  const authorities: DependencyVerificationAuthority[] = [];
-  for (const producer of task.dependencyVerificationProducers) {
-    const verification = outputForProducer(producer);
-    if (verification === undefined) {
-      if (producer.optional) continue;
-      return undefined;
-    }
-    authorities.push({
-      attempt_id: producer.attemptId,
-      marker_sha256: verification.verification_marker_sha256,
-      size_bytes: verification.verification_marker_size_bytes
-    });
-  }
-  return authorities;
-}
-const usesCloudExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].some(
-  (task) => task.execution.mode === "cloud"
-);
-const isCloudWorkerProcess = process.env.ULTRAFUZZ_CLOUD_WORKER === "1";
-const modalModule =
-  usesCloudExecution && !isCloudWorkerProcess
-    ? await import(
-        process.env.ULTRAFUZZ_MODAL_MODULE ??
-          new URL("../../modules/@ultrafuzz/modal/dist/index.js", import.meta.url).href
-      )
-    : undefined;
-const modalExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].find(
-  (task) => task.execution.mode === "cloud"
-)?.execution.modal;
-const cloudProvider =
-  modalModule === undefined || modalExecution === undefined
-    ? undefined
-    : modalModule.createModalNodeSandboxProvider({
-        app: modalExecution.app,
-        image: modalExecution.image,
-        ...(modalExecution.region === undefined ? {} : { region: modalExecution.region }),
-        credentialEnv: modalExecution.credentialEnv
-      });
-const cloudExecutionGeneration = readCloudExecutionGeneration();
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
@@ -1711,7 +775,7 @@ function readGovernedSource(): { commit: string; tree: string } | undefined {
   return undefined;
 }
 function assertGovernedWorkspaceSource(task: (typeof taskSpecs)[number]): void {
-  if (governedSource === undefined || task.execution.mode !== "local") return;
+  if (governedSource === undefined) return;
   if (targetIdentity(task.workspacePath).commit !== governedSource.commit)
     throw new Error("task workspace is not the acknowledged source commit");
 }
@@ -1740,22 +804,9 @@ function worktreeBaseBranch(task: (typeof taskSpecs)[number]): string | undefine
   }
   if (usesPinnedSource) return pinnedSourceBranch;
   if (task.sourceRevision !== null) return task.sourceRevision;
-  if (task.execution.mode === "local" && governedSource !== undefined) return governedSource.commit;
+  if (governedSource !== undefined) return governedSource.commit;
   return undefined;
 }
-function readCloudExecutionGeneration(): string {
-  const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
-  if (runRoot === undefined) return "base";
-  const generationPath = path.resolve(process.cwd(), runRoot, "smithers", "cloud-execution-generation.json");
-  if (!pathEntryExists(generationPath)) return "base";
-  const parsed = parseRuntimeDocumentBytes(
-    CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
-    readRegularFileSnapshot(generationPath, 64 * 1024),
-    "cloud execution generation evidence"
-  );
-  return parsed.generation;
-}
-
 function promptForTask(
   task: (typeof taskSpecs)[number],
   inputTask?: { prompt?: string; prompt_path?: string }
@@ -3116,90 +2167,47 @@ function rememberFinalReportAgentExecutionAuthority(
 }
 
 /**
- * How long `smithers node` may take to hand back the report-producer authority.
- *
- * This runs on the finalizer path of a multi-rung chain, concurrently with every other agent's
- * build work, and a CLI start that is well under a second on an idle box stretches by more than an
- * order of magnitude once a dozen of them contend for the same cores -- the contention that made a
- * 15 s budget fatal to the validator preflight in #1026. Bounded apart from that preflight because
- * this call also serializes the node's whole attempt history (`--full-output`, up to 64 MiB), and
- * still an order of magnitude under this lane's 1800 s `node_timeout_seconds`.
+ * The run's record of the chain rung each executed report-producer attempt used. It is written
+ * before the agent runs, so a restarted controller (resume, quota park, supervisor relaunch) can
+ * rebuild `agent_execution` without the lost process-local maps above. It lives outside the agent's
+ * worktree and declared artifact roots; like the Smithers database, it is host evidence rather than
+ * a same-UID sandbox boundary.
  */
-const SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS = 180_000;
-
-function readFinalReportSmithersAuthority(task: (typeof taskSpecs)[number]) {
-  let stdout: string;
-  const startedAt = Date.now();
-  try {
-    stdout = execFileSync(
-      "smithers",
-      ["node", task.id, "-r", task.smithersRunId, "--format", "json", "--full-output"],
-      {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS,
-        windowsHide: true
-      }
-    );
-  } catch (error) {
-    throw new Error(
-      `artifact-contract failure: Smithers report-producer authority is unavailable after ${Date.now() - startedAt}ms against a ${SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS}ms budget`,
-      { cause: error }
-    );
-  }
-  let detail: unknown;
-  try {
-    detail = parseStrictJsonBytes(Buffer.from(stdout, "utf8"));
-  } catch (error) {
-    throw new Error("artifact-contract failure: Smithers report-producer authority is malformed", { cause: error });
-  }
-  const authorityDetail =
-    isPlainJsonRecord(detail) && detail.ok === true && isPlainJsonRecord(detail.data) ? detail.data : detail;
-  const node =
-    isPlainJsonRecord(authorityDetail) && isPlainJsonRecord(authorityDetail.node) ? authorityDetail.node : undefined;
-  if (node?.nodeId !== task.smithersNodeId) {
-    throw new Error("artifact-contract failure: Smithers report-producer node does not match the sealed task");
-  }
-  const lastAttempt = node?.lastAttempt;
-  if (!Number.isSafeInteger(lastAttempt) || Number(lastAttempt) <= 0) {
-    throw new Error("artifact-contract failure: Smithers report-producer attempt is unavailable");
-  }
-  const attempts =
-    isPlainJsonRecord(authorityDetail) && Array.isArray(authorityDetail.attempts)
-      ? authorityDetail.attempts
-      : undefined;
-  if (attempts === undefined) {
-    throw new Error("artifact-contract failure: Smithers report-producer attempts are unavailable");
-  }
-  const attemptNumbers = attempts.map((attempt) => {
-    if (!isPlainJsonRecord(attempt) || !Number.isSafeInteger(attempt.attempt) || Number(attempt.attempt) <= 0) {
-      throw new Error("artifact-contract failure: Smithers report-producer attempt is malformed");
-    }
-    return Number(attempt.attempt);
-  });
-  if (
-    new Set(attemptNumbers).size !== attemptNumbers.length ||
-    !attemptNumbers.includes(Number(lastAttempt)) ||
-    attemptNumbers.some((attempt) => attempt > Number(lastAttempt))
-  ) {
-    throw new Error("artifact-contract failure: Smithers report-producer attempt history is inconsistent");
-  }
-  return { authorityDetail, lastAttempt: Number(lastAttempt), attemptNumbers: attemptNumbers.sort((a, b) => a - b) };
+function finalReportSelectionsPath(task: (typeof taskSpecs)[number]): string {
+  return path.join(realpathSync(task.runRoot), "smithers", "final-report-selections", `${task.attemptId}.json`);
 }
 
-function priorFinalReportAgentSelections(
-  task: (typeof taskSpecs)[number],
-  authority: ReturnType<typeof readFinalReportSmithersAuthority>,
-  currentAttempt: number
-): FinalReportObservedAgentSelection[] {
-  return authority.attemptNumbers
-    .filter((attempt) => attempt < currentAttempt)
-    .flatMap((attempt) => {
-      // A failed preflight has no executed model selection. The same strict
-      // reconciler rejects nonterminal, ambiguous, or contradictory history.
-      const selection = inspectSmithersAttemptAgentSelection(task, authority.authorityDetail, attempt);
-      return selection === undefined ? [] : [{ attempt, chainIndex: selection.chainIndex }];
-    });
+// `--reset-node` resets the producer and its dependents, here its verifier;
+// `--retry-failed` would also rerun every other failed task. The refresh reruns
+// them with this workflow, which writes the record, even on a run launched by
+// an earlier release.
+function finalReportProducerRerunHint(task: (typeof taskSpecs)[number]): string {
+  return `run \`ultrafuzz resume <run-id> --refresh-controller --reset-node ${task.smithersNodeId}\` to rerun the producer`;
+}
+
+function readFinalReportSelections(task: (typeof taskSpecs)[number]): FinalReportObservedAgentSelection[] {
+  const recordPath = finalReportSelectionsPath(task);
+  if (!pathEntryExists(recordPath)) return [];
+  const malformed = `artifact-contract failure: recorded report-producer selections are malformed; delete \`smithers/final-report-selections/${task.attemptId}.json\` in the run directory, then ${finalReportProducerRerunHint(task)}`;
+  let value: unknown;
+  try {
+    value = parseStrictJsonBytes(readRegularFileSnapshot(recordPath, 1024 * 1024));
+  } catch (error) {
+    throw new Error(malformed, { cause: error });
+  }
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (selection) =>
+        isPlainJsonRecord(selection) &&
+        Number.isSafeInteger(selection.attempt) &&
+        Number.isSafeInteger(selection.chainIndex)
+    )
+  ) {
+    throw new Error(malformed);
+  }
+  // finalReportAgentExecution validates attempt order and chain bounds.
+  return value.map((selection) => ({ attempt: Number(selection.attempt), chainIndex: Number(selection.chainIndex) }));
 }
 
 function finalReportAgentSelectionsForAttempt(
@@ -3218,20 +2226,16 @@ function finalReportAgentSelectionsForAttempt(
   if (cached !== undefined && cached.some((selection) => selection.attempt >= attempt)) {
     throw new Error("artifact-contract failure: report producer attempt moved behind its observed history");
   }
-  let previous = cached ?? [];
-  // Cloud currently admits a single-rung, single-attempt worker. Its local
-  // Smithers identity is distinct from the controller's; do not query that
-  // controller from inside the worker. After a local controller restart, seed
-  // the lost process-local history from durable attempts before authoring the
-  // prompt. An existing cache already contains all locally observed selections.
-  if (cached === undefined && attempt > 1 && task.execution.mode !== "cloud") {
-    const authority = readFinalReportSmithersAuthority(task);
-    if (authority.lastAttempt !== attempt) {
-      throw new Error("artifact-contract failure: report retry does not match the current Smithers attempt");
-    }
-    previous = priorFinalReportAgentSelections(task, authority, attempt);
-  }
+  // After a controller restart, seed the lost process-local history from the
+  // record earlier attempts wrote. An attempt number Smithers dispatches again
+  // replaces its own earlier entry. A failed preflight never reaches generate,
+  // so it is not an executed selection. After a reset reuses attempt numbers,
+  // a new-round attempt that fails before getting here leaves the old round's
+  // entry for its number, and later attempts report it.
+  const previous =
+    cached ?? (attempt > 1 ? readFinalReportSelections(task).filter((selection) => selection.attempt < attempt) : []);
   const selections = [...previous, { attempt, chainIndex }];
+  writeFileDurable(finalReportSelectionsPath(task), `${JSON.stringify(selections)}\n`);
   finalReportAgentSelectionAuthority.set(task.attemptId, selections);
   return selections;
 }
@@ -3239,17 +2243,18 @@ function finalReportAgentSelectionsForAttempt(
 function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]): FinalReportAgentExecution {
   const current = finalReportAgentExecutionAuthority.get(task.attemptId);
   if (current !== undefined) return current;
-  // Cloud workers currently execute exactly one model attempt, independently
-  // of the controller's Smithers run. Local single-rung chains can still have
-  // quota-exempt physical retries and must recover their actual attempt IDs.
-  if (task.execution.mode === "cloud" && task.agentChain.length === 1) return finalReportAgentExecution(task, 0);
-  const authority = readFinalReportSmithersAuthority(task);
-  const producer = reconcileSmithersAttemptAgentSelection(task, authority.authorityDetail, authority.lastAttempt);
-  const observedSelections = [
-    ...priorFinalReportAgentSelections(task, authority, authority.lastAttempt),
-    { attempt: authority.lastAttempt, chainIndex: producer.chainIndex }
-  ];
-  const execution = finalReportAgentExecution(task, producer.chainIndex, observedSelections);
+  // Single-rung chains can still have quota-exempt physical retries and must
+  // recover their actual attempt IDs. The verifier runs after the producer
+  // succeeded, so the producing attempt is the last selection the producer
+  // recorded.
+  const selections = readFinalReportSelections(task);
+  const producer = selections.at(-1);
+  if (producer === undefined) {
+    throw new Error(
+      `artifact-contract failure: report producer selection was never recorded; ${finalReportProducerRerunHint(task)}`
+    );
+  }
+  const execution = finalReportAgentExecution(task, producer.chainIndex, selections);
   finalReportAgentExecutionAuthority.set(task.attemptId, execution);
   return execution;
 }
@@ -3267,7 +2272,7 @@ function baseAgentForProfile(
     ...(profile.modelName === undefined ? {} : { model: profile.modelName }),
     ...(profile.reasoningEffort === undefined ? {} : { reasoningEffort: profile.reasoningEffort }),
     // Agents receive only their declared artifact roots; final-report producer
-    // authority remains in controller memory or Smithers' durable attempt data.
+    // authority remains in controller memory or the run's selection record.
     // Dependency roots are admitted only after preparation has authenticated
     // their verifier markers. The metadata-only instance created while the
     // workflow is rendered receives no dependency access.
@@ -3329,14 +2334,10 @@ function artifactAwareAgent(
   let executionAgent: AgentLike | undefined;
   const continuationAgent = agent as SmithersContinuationAgent;
   const configuredModel = task.agentChain[chainIndex]?.modelName;
-  const credentialEnvironmentNames = [
-    ...(task.execution?.agentCredentialEnv ?? []),
-    ...(task.execution?.modal?.credentialEnv ?? [])
-  ];
   const freshNormalizedAgentFailure = (error: unknown): Error => {
     const fallback = "agent execution failed";
     // Snapshot credentials before hostile getters can mutate the environment.
-    const forbiddenSecretValues = sensitiveEnvironmentValues(process.env, credentialEnvironmentNames);
+    const forbiddenSecretValues = sensitiveEnvironmentValues(process.env);
     const safeSmithersControlCodes = new Set([
       "AGENT_QUOTA_EXCEEDED",
       "AGENT_CONFIG_INVALID",
@@ -6538,7 +5539,7 @@ function invariantSuiteHandoffRecordPath(task: (typeof taskSpecs)[number]): stri
  * Fingerprint every ancestor artifact this stage may select from, by the digest
  * of its published invariant-suite manifest. The handoff record binds itself to
  * these, so a legitimately re-executed ancestor (operator `retry-task`,
- * `timetravel`, or a new Modal execution generation republishing the directory)
+ * or `timetravel` republishing the directory)
  * is recognisable as "this record describes a superseded handoff" rather than
  * as tampering. Without this the record could never go stale, and a `retries=0`
  * preparation node would fail closed forever on a recovery flow.
@@ -9344,13 +8345,7 @@ function verifyArtifacts(
     if (primary === undefined) {
       throw new Error("artifact-contract failure: primary artifact is missing");
     }
-    assertArtifactPublicationsContainNoSecrets(
-      publications,
-      sensitiveEnvironmentValues(process.env, [
-        ...(task.execution?.agentCredentialEnv ?? []),
-        ...(task.execution?.modal?.credentialEnv ?? [])
-      ])
-    );
+    assertArtifactPublicationsContainNoSecrets(publications, sensitiveEnvironmentValues(process.env));
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
     const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings);
@@ -9955,23 +8950,14 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
 
 export default smithers((ctx) => {
   const dispatch = parseWorkflowInput(ctx.input);
-  const cloudWorker = dispatch.cloud_worker === true;
-  const inputTasks = new Map((cloudWorker ? [] : (dispatch.tasks ?? [])).map((task) => [task.id, task]));
+  const inputTasks = new Map((dispatch.tasks ?? []).map((task) => [task.id, task]));
   const operatorPromptInput =
     typeof dispatch.operator_prompt === "string" && dispatch.operator_prompt.length > 0
       ? dispatch.operator_prompt
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   let availableTaskSpecs = taskSpecs;
-  if (cloudWorker) {
-    const hydratedTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
-    const hydratedIds = new Set(hydratedTaskSpecs.map((task) => task.id));
-    taskSpecs = reconcileTaskSpecIdentities(taskSpecs, [
-      ...taskSpecs.filter((task) => !hydratedIds.has(task.id)),
-      ...hydratedTaskSpecs
-    ]);
-    availableTaskSpecs = taskSpecs.filter((task) => hydratedIds.has(task.id));
-  } else if (dynamicGroupSpecs.length > 0) {
+  if (dynamicGroupSpecs.length > 0) {
     const readyGroupIds = dynamicGroupSpecs
       .filter((group) => {
         if (group.source.verifierSmithersNodeId === undefined) {
@@ -9998,27 +8984,19 @@ export default smithers((ctx) => {
     );
     availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
   }
-  if (!cloudWorker) {
-    recordGoalSearchCoverage(
-      taskSpecs,
-      (nodeId) => ctx.outputMaybe(outputs.agentProcess, { nodeId }) !== undefined,
-      (nodeId) => ctx.outputMaybe(outputs.verification, { nodeId }) !== undefined
-    );
-  }
-  const selectedTaskSpecs = cloudWorker
-    ? availableTaskSpecs.filter((task) => task.id === dispatch.task_id)
-    : availableTaskSpecs;
-  if (cloudWorker && selectedTaskSpecs.length !== 1) {
-    throw new Error("cloud worker task selection must identify exactly one concrete attempt");
-  }
+  recordGoalSearchCoverage(
+    taskSpecs,
+    (nodeId) => ctx.outputMaybe(outputs.agentProcess, { nodeId }) !== undefined,
+    (nodeId) => ctx.outputMaybe(outputs.verification, { nodeId }) !== undefined
+  );
   return (
     <Workflow name={__ULTRAFUZZ_WORKFLOW_NAME__}>
       <Parallel id="ultrafuzz-agent-tasks">
-        {selectedTaskSpecs.map((task) => {
+        {availableTaskSpecs.map((task) => {
           const requiredProducerIds = task.dependencyVerificationProducers
             .filter((producer) => !producer.optional)
             .map((producer) => producer.verifierId);
-          const failedDependencies = cloudWorker ? [] : failedWorkflowPrerequisites(ctx, requiredProducerIds);
+          const failedDependencies = failedWorkflowPrerequisites(ctx, requiredProducerIds);
           const skipPreparation = shouldSkipWorkflowTask(ctx, task.preparationId, failedDependencies);
           const failedPreparation = failedWorkflowPrerequisites(ctx, [task.preparationId]);
           const skipAgent = shouldSkipWorkflowTask(ctx, task.id, [...failedDependencies, ...failedPreparation]);
@@ -10033,92 +9011,6 @@ export default smithers((ctx) => {
             operatorPrompt,
             taskPrompt: promptForTask(task, inputTask)
           });
-          if (task.execution.mode === "cloud" && !cloudWorker) {
-            const dependencyVerificationAuthorities = dependencyVerificationAuthoritiesForTask(task, (producer) =>
-              ctx.outputMaybe(outputs.verification, { nodeId: producer.verifierId })
-            );
-            if (dependencyVerificationAuthorities === undefined && !skipAgent) return null;
-            if (cloudProvider === undefined || modalModule === undefined || task.execution.provider !== "modal") {
-              throw new Error("cloud execution provider is unavailable");
-            }
-            if (task.executionSnapshotRoot === undefined) {
-              throw new Error("cloud execution requires a sealed workflow execution snapshot");
-            }
-            return (
-              <Fragment key={task.id}>
-                <Sandbox
-                  id={task.id}
-                  provider={cloudProvider}
-                  input={{
-                    schema_version: "ultrafuzz.modal.node.v2",
-                    run_id: __ULTRAFUZZ_RUN_ID_LITERAL__,
-                    task_id: task.id,
-                    attempt_id: task.attemptId,
-                    ...(task.sourceRevision === null
-                      ? {}
-                      : { source_revision: task.sourceRevision, source_ref: task.sourceRef }),
-                    execution_generation: cloudExecutionGeneration,
-                    execution_snapshot_root: cloudSnapshotRelativePath(
-                      task.executionSnapshotRoot,
-                      "workflow execution snapshot"
-                    ),
-                    workflow_path: cloudSnapshotRelativePath(task.workflowPath, "workflow path"),
-                    ...(task.promptPath === undefined
-                      ? {}
-                      : { prompt_path: cloudSnapshotRelativePath(task.promptPath, "rendered prompt path") }),
-                    run_root: task.runRoot,
-                    artifact_dir: task.artifactRelativeDir,
-                    workspace_dir: task.workspaceRelativePath,
-                    dependency_artifact_dirs: task.dependencyArtifactRelativeDirs,
-                    optional_dependency_artifact_dirs: task.optionalDependencyArtifactRelativeDirs,
-                    reference_artifact_dirs: task.referenceArtifactRelativeDirs,
-                    ...(task.vulnerabilityDatabaseRelative === undefined
-                      ? {}
-                      : { vulnerability_database: task.vulnerabilityDatabaseRelative }),
-                    selected_task: cloudSelectedTaskHandoff(task),
-                    dependency_verification_authorities: dependencyVerificationAuthorities ?? [],
-                    resources: {
-                      cpu: task.execution.resources.cpu,
-                      memory_mib: task.execution.resources.memoryMiB,
-                      timeout_seconds: task.execution.resources.timeoutSeconds
-                    },
-                    agent_credential_env: task.execution.agentCredentialEnv,
-                    ...(operatorPromptInput === undefined ? {} : { operator_prompt: operatorPromptInput })
-                  }}
-                  output={outputs.agentProcess}
-                  dependsOn={task.dependsOn}
-                  skipIf={skipAgent}
-                  continueOnFail={task.continueOnFail}
-                  allowNetwork
-                  reviewDiffs={false}
-                  timeoutMs={modalModule.modalNodeLifecycleTimeoutMs(task.execution.resources.timeoutSeconds)}
-                  heartbeatTimeoutMs={modalModule.modalNodeLifecycleTimeoutMs(task.execution.resources.timeoutSeconds)}
-                  retries={0}
-                  retryPolicy={task.retryPolicy}
-                  meta={task.metadata}
-                />
-                <Task
-                  id={task.verifierId}
-                  output={outputs.verification}
-                  dependsOn={[task.id]}
-                  skipIf={skipVerifier}
-                  needs={{ agent: task.id }}
-                  deps={{ agent: outputs.agentProcess }}
-                  depsOptional
-                  continueOnFail={task.continueOnFail}
-                  retries={0}
-                  metadata={{
-                    category: "artifact-contract",
-                    agentTaskId: task.id,
-                    attemptId: task.attemptId,
-                    executionMode: "cloud"
-                  }}
-                >
-                  {(deps) => finalizeAndVerifyArtifacts(task, deps.agent)}
-                </Task>
-              </Fragment>
-            );
-          }
           const baseBranch = worktreeBaseBranch(task);
           return (
             <Worktree
@@ -10130,7 +9022,7 @@ export default smithers((ctx) => {
               <Task
                 id={task.preparationId}
                 output={outputs.preparation}
-                dependsOn={cloudWorker ? [] : task.dependsOn}
+                dependsOn={task.dependsOn}
                 skipIf={skipPreparation}
                 continueOnFail={task.continueOnFail}
                 retries={Math.max(task.retries, 1)}

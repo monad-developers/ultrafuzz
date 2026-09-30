@@ -14,7 +14,7 @@ const laneScript = path.join(repoRoot, "scripts", "ci", "release-validation-lane
 interface WorkflowJob {
   if?: string;
   strategy?: { matrix?: { include?: string } };
-  steps: Array<{ name?: string; if?: string }>;
+  steps: Array<{ name?: string; if?: string; run?: string }>;
 }
 
 function declaredGateIds(): string[] {
@@ -65,6 +65,25 @@ describe("release validation lanes", () => {
     const requirement = jobs["release-gates"]?.steps.find((step) => step.name === "Require release validation lanes");
     expect(requirement?.if).toContain("needs.release-validation.result != 'success'");
     expect(gatedByEvent(requirement?.if)).toBe(false);
+  });
+
+  it("build every package validate-release.mjs imports before any lane runs it", () => {
+    // A lane that skips this build dies with ERR_MODULE_NOT_FOUND before it selects a gate. Behind
+    // a per-lane flag, the runtime lanes lost the build when they stopped building modal.
+    const source = fs.readFileSync(path.join(repoRoot, "scripts", "validate-release.mjs"), "utf8");
+    const imported = new Set(
+      [...source.matchAll(/from "\.\.\/packages\/([a-z0-9-]+)\/dist\//gu)].map((match) => match[1])
+    );
+    expect(imported.size).toBeGreaterThan(0);
+    const steps = workflowJobs()["release-validation"]?.steps ?? [];
+    const validate = steps.findIndex((step) => step.run?.includes("pnpm -w validate:release") === true);
+    expect(validate).toBeGreaterThan(0);
+    for (const name of imported) {
+      const build = steps.findIndex((step) => step.run?.trim() === `pnpm --filter @ultrafuzz/${name}... build`);
+      expect(build).toBeGreaterThanOrEqual(0);
+      expect(build).toBeLessThan(validate);
+      expect(steps[build]?.if).toBeUndefined();
+    }
   });
 
   it("are printed as the workflow matrix", () => {

@@ -913,7 +913,7 @@ export interface SmithersTaskManifestTask {
   vulnerabilityDatabaseCatalog?: { path: string; sha256: string };
   /** Stable byte authorities for every transitive reference ancestor's outer artifact manifest. */
   referenceArtifactManifestAuthorities?: SmithersTaskManifestReferenceArtifactManifestAuthority[];
-  /** Exact subset whose producer group uses failure_policy=continue. */
+  /** Subset whose producer group uses failure_policy=continue and differs from this task's group. */
   optionalDependencyArtifactDirs?: string[];
   /** Canonical union of compact ancestor-output selectors used by the rendered prompt. */
   promptArtifactAuthoritySelectors?: SmithersTaskManifestPromptArtifactAuthoritySelector[];
@@ -1309,14 +1309,6 @@ function assertReferenceArtifactManifestAuthorities(task: SmithersTaskManifestTa
       );
     }
   }
-}
-
-/** Locate a sealed reference outer-manifest authority by its exact dependency artifact directory. */
-export function referenceArtifactManifestAuthorityForArtifactDir(
-  task: SmithersTaskManifestTask,
-  artifactDir: string
-): SmithersTaskManifestReferenceArtifactManifestAuthority | undefined {
-  return task.referenceArtifactManifestAuthorities?.find((authority) => authority.artifactDir === artifactDir);
 }
 
 function assertPinnedSubmodulePath(value: string): void {

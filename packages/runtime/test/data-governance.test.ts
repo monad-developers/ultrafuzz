@@ -289,7 +289,7 @@ test("governance semantic gates reject projected duplicates, incomplete coverage
     DATA_DISCLOSURE_ACKNOWLEDGEMENTS_SEMANTIC_GATES
   );
 });
-test("policy pins explicit and home routes, Modal, and OpenRouter models", () => {
+test("policy pins explicit and home routes and OpenRouter models", () => {
   const root = repository(),
     homes = temporaryRoot("ufz-provider-routes-");
   const routed = {
@@ -341,17 +341,9 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
     modelDestination("KimiAgent", kimiApiKey, { HOME: homes, KIMI_BASE_URL: "https://gateway.example/v1" }),
     /^model:kimi-route-/u
   );
-  const cloud = {
-    ...config,
-    execution: { mode: "cloud", provider: "modal", resources: {}, nodes: {}, providers: {} }
-  } as unknown as ResolvedConfig;
-  assert.throws(
-    () => modelDestination("CodexAgent", cloud, { HOME: homes }),
-    /cloud execution cannot use host provider-home routing/u
-  );
   const claudeSettings = path.join(homes, ".claude", "settings.json");
   fs.writeFileSync(claudeSettings, '{"theme":"dark","permissions":{"allow":["Bash(*)"]},"hooks":{}}');
-  assert.equal(modelDestination("ClaudeAgent", cloud, { HOME: homes }), "model:anthropic");
+  assert.equal(modelDestination("ClaudeAgent", config, { HOME: homes }), "model:anthropic");
   for (const value of [
     { apiKeyHelper: "/operator/helper" },
     { processWrapper: "/operator/wrapper" },
@@ -359,14 +351,11 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
     { env: { ANTHROPIC_BASE_URL: "https://home-route" } }
   ]) {
     fs.writeFileSync(claudeSettings, JSON.stringify(value));
-    assert.throws(
-      () => modelDestination("ClaudeAgent", cloud, { HOME: homes }),
-      /cloud execution cannot use host provider-home routing/u
-    );
+    assert.match(modelDestination("ClaudeAgent", config, { HOME: homes }), /^model:claude-route-/u);
   }
   // A proxy does not select a destination, in settings or in the environment.
   fs.writeFileSync(claudeSettings, JSON.stringify({ env: { HTTPS_PROXY: "https://proxy.example" } }));
-  assert.equal(modelDestination("ClaudeAgent", cloud, { HOME: homes }), "model:anthropic");
+  assert.equal(modelDestination("ClaudeAgent", config, { HOME: homes }), "model:anthropic");
   assert.equal(
     modelDestination("ClaudeAgent", routed, { HOME: homes, HTTPS_PROXY: "https://proxy.example" }),
     "model:anthropic"
@@ -377,7 +366,7 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
     govern = (value: string) =>
       prepareDataGovernance({
         projectRoot: root,
-        config: cloud,
+        config,
         graph: mixedGraph,
         graphFingerprint: "a".repeat(64),
         configFingerprint: "b".repeat(64),
@@ -386,11 +375,11 @@ test("policy pins explicit and home routes, Modal, and OpenRouter models", () =>
       }),
     destinations = {
       sensitivity: "public" as const,
-      source: ["cloud:modal", "model:openrouter"],
-      artifact: ["cloud:modal"]
+      source: ["model:openrouter"],
+      artifact: []
     },
     denied = govern(policy(destinations));
-  assert.deepEqual(denied.provenance.required_artifact_destinations, ["cloud:modal"]);
+  assert.deepEqual(denied.provenance.required_artifact_destinations, []);
   assert.ok(denied.diagnostics.some(({ code }) => code === "DATA_GOVERNANCE_OPENROUTER_MODEL_NOT_ALLOWED"));
   assert.deepEqual(govern(policy({ ...destinations, openRouterModels: ["vendor/review-model"] })).diagnostics, []);
 });

@@ -783,6 +783,39 @@ test("trusted CLI confines ESM, CommonJS, ancestor, and preload module resolutio
   assert.equal(fs.existsSync(source.nodePathSentinel), false);
 });
 
+// @ultrafuzz/runtime depends on the workflow runner so lifecycle commands can run
+// the installed one. The validator launcher never loads it, and copying the
+// engine's closure into every run would dwarf the CLI's own.
+test("the trusted CLI closure leaves out the workflow runner a first-party package depends on", () => {
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
+  const layout = createRunLayout({ projectRoot: root, runId: "runner-dependency" });
+  const source = fakeTransitiveCli(root, JSON.stringify(preflightEnvelope()));
+  const cliRoot = path.dirname(path.dirname(source.entrypoint));
+  const cliManifestPath = path.join(cliRoot, "package.json");
+  const cliManifest = JSON.parse(fs.readFileSync(cliManifestPath, "utf8")) as { dependencies: Record<string, string> };
+  fs.writeFileSync(
+    cliManifestPath,
+    `${JSON.stringify({ ...cliManifest, name: "@ultrafuzz/fake-cli", dependencies: { ...cliManifest.dependencies, smthrs: "0.35.0" } })}\n`
+  );
+  const runnerRoot = path.join(cliRoot, "node_modules", "smthrs");
+  fs.mkdirSync(runnerRoot, { recursive: true });
+  fs.writeFileSync(path.join(runnerRoot, "package.json"), `${JSON.stringify({ name: "smthrs", version: "0.35.0" })}\n`);
+
+  prepareTrustedCliEnvironment({ layout, cliEntrypoint: source.entrypoint });
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(layout.root, "trusted-cli.json"), "utf8")) as {
+    cli_entrypoint: string;
+  };
+  const closureRoot = path.dirname(path.dirname(path.dirname(path.dirname(metadata.cli_entrypoint))));
+  const manifest = JSON.parse(fs.readFileSync(path.join(closureRoot, "manifest.json"), "utf8")) as {
+    packages: Array<{ name: string }>;
+  };
+  assert.deepEqual(
+    manifest.packages.map((entry) => entry.name),
+    ["@ultrafuzz/fake-cli", "transitive-validator-build"]
+  );
+});
+
 test("trusted CLI rejects transitive closure, path-set, and manifest digest tampering", () => {
   for (const tamper of ["transitive-file", "unexpected-file", "manifest-digest"] as const) {
     const root = temporaryRoot("ultrafuzz-trusted-cli-");

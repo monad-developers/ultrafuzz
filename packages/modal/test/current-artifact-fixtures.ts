@@ -240,7 +240,7 @@ export function currentArtifactBinding<C extends ArtifactContractId>(contract: C
   };
 }
 
-export function currentTaskOutputBinding<C extends ArtifactContractId>(contract: C) {
+function currentTaskOutputBinding<C extends ArtifactContractId>(contract: C) {
   const binding = artifactContractSchemaBinding(contract);
   return {
     contract,

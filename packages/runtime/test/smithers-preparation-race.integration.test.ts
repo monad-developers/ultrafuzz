@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import { temporaryRoot } from "./temporary-root.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net, { type AddressInfo } from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const PARALLEL_LANES = 6;
 
@@ -109,6 +112,7 @@ test("native continuation keeps a finished producer and runs only a newly render
     `${JSON.stringify({ run_id: "historical-embedded-run-id", value: "original" })}\n`,
     "utf8"
   );
+  let registry: net.Server | undefined;
 
   try {
     fs.mkdirSync(workflowDir, { recursive: true });
@@ -138,8 +142,8 @@ test("native continuation keeps a finished producer and runs only a newly render
     const historicalProducerAttempt = smithersNodeAttempt(root, runId, "producer");
     // Production launches from the immutable execution snapshot and never
     // install controller packages into the target. Keep the symlink only for
-    // this fixture's direct initial `smithers up`; native continuation must use
-    // its privately attested operator closure instead (#973).
+    // this fixture's direct initial `smithers up`; native continuation must
+    // resolve them from Ultrafuzz's own installed runner instead (#973).
     fs.unlinkSync(path.join(root, ".smithers", "node_modules"));
 
     fs.writeFileSync(
@@ -151,6 +155,7 @@ test("native continuation keeps a finished producer and runs only a newly render
       })}\n`,
       "utf8"
     );
+    writeLocalResolvedConfig(runRoot);
     fs.writeFileSync(
       workflowPath,
       nativeContinuationWorkflowSource({ executionLog, producerArtifact, downstreamArtifact, withDownstream: true }),
@@ -158,28 +163,60 @@ test("native continuation keeps a finished producer and runs only a newly render
     );
 
     const runtimeModule = pathToFileURL(path.join(runtimePackageRoot(), "dist", "start-run.js")).href;
+    // Resume must neither reach a package registry nor leave a controller
+    // install behind in TMPDIR. Every proxy and the registry point at a local
+    // listener that counts each connection and drops it.
+    const resumeTmpdir = temporaryRoot("ultrafuzz-resume-tmpdir-");
+    let registryConnections = 0;
+    const listener = net.createServer((socket) => {
+      registryConnections += 1;
+      socket.destroy();
+    });
+    registry = listener;
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const registryUrl = `http://127.0.0.1:${(listener.address() as AddressInfo).port}`;
+    const offline = Object.fromEntries(
+      ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "npm_config_registry"].map((name) => [
+        name,
+        registryUrl
+      ])
+    );
     const resumed = JSON.parse(
-      execFileSync(
-        "node",
-        [
-          "--input-type=module",
-          "--eval",
-          `import { resumeRun } from ${JSON.stringify(runtimeModule)};
+      (
+        await promisify(execFile)(
+          "node",
+          [
+            "--input-type=module",
+            "--eval",
+            `import { resumeRun } from ${JSON.stringify(runtimeModule)};
 const result = await resumeRun({
   projectRoot: ${JSON.stringify(root)},
   runId: ${JSON.stringify(runId)},
   env: { PATH: process.env.PATH, SMITHERS_POST_FAILURE: "0" }
 });
 process.stdout.write(JSON.stringify(result));`
-        ],
-        { cwd: root, encoding: "utf8", env: { ...process.env, SMITHERS_POST_FAILURE: "0" } }
-      )
+          ],
+          {
+            cwd: root,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              ...offline,
+              NO_PROXY: "",
+              no_proxy: "",
+              TMPDIR: resumeTmpdir,
+              SMITHERS_POST_FAILURE: "0"
+            }
+          }
+        )
+      ).stdout
     ) as {
       ok: boolean;
       diagnostics?: unknown;
       value?: { run_id?: string; workflow_run_id?: string };
     };
 
+    assert.equal(registryConnections, 0, "resume reached the package registry");
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
     assert.equal(resumed.value?.run_id, runId);
     assert.equal(resumed.value?.workflow_run_id, runId);
@@ -211,17 +248,25 @@ process.stdout.write(JSON.stringify(result));`
     const downstream = JSON.parse(fs.readFileSync(downstreamArtifact, "utf8")) as {
       producer_run_id: string;
       controller_node_path: string;
+      controller_path: string;
     };
     assert.equal(downstream.producer_run_id, "historical-embedded-run-id");
-    assert.equal(path.basename(downstream.controller_node_path), "node_modules");
-    assert.equal(
-      fs.readFileSync(
-        path.join(path.dirname(path.dirname(downstream.controller_node_path)), ".ultrafuzz-native-continuation"),
-        "utf8"
-      ),
-      "retained\n"
-    );
+    assert.equal(downstream.controller_node_path, path.dirname(smithersPackageRoot));
+    assert.deepEqual(fs.readdirSync(resumeTmpdir), []);
+    // The workflow's bare `smithers` calls (#1143) find the run's shim first.
+    const trustedBin = path.join(runRoot, "trusted-bin");
+    assert.equal(downstream.controller_path.split(path.delimiter)[0], trustedBin);
+    const viaShim = JSON.parse(
+      execFileSync(path.join(trustedBin, "smithers"), ["inspect", runId, "--format", "json"], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, ...offline }
+      })
+    ) as { run?: { status?: string }; status?: string };
+    assert.equal(viaShim.run?.status ?? viaShim.status, "finished");
+    assert.equal(registryConnections, 0, "the resumed run reached the package registry");
   } finally {
+    registry?.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -455,7 +500,8 @@ export default smithers((ctx) => (
         fs.appendFileSync(executionLog, "downstream\\n", "utf8");
         fs.writeFileSync(downstreamArtifact, JSON.stringify({
           producer_run_id: producer.embedded_run_id,
-          controller_node_path: process.env.NODE_PATH
+          controller_node_path: process.env.NODE_PATH,
+          controller_path: process.env.PATH
         }) + "\\n", "utf8");
         return { producer_run_id: producer.embedded_run_id };
       }}
