@@ -1880,6 +1880,51 @@ test("ps text prefers linked workflow terminal status over a stale local running
   assert.equal(jsonData.runs[0]?.workflow_status, "failed");
 });
 
+test("clean prints the Modal storage an old cloud run leaves behind once, before it removes the run", async (t) => {
+  const project = tempProject(t);
+  assert.equal((await cli(project, ["init", "--json"])).code, 0);
+  writeSmallTopology(project);
+  const runId = "cli-old-cloud-run";
+  const plan = await planRun({ projectRoot: project, runId, env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  // The execution block a run planned with `execution.mode = "cloud"` recorded before that mode was removed.
+  const planPath = path.join(plan.value.run_root, "plan.json");
+  const document = JSON.parse(fs.readFileSync(planPath, "utf8")) as { execution: Record<string, unknown> };
+  document.execution = {
+    ...document.execution,
+    mode: "cloud",
+    provider: "modal",
+    providers: {
+      modal: { app: "audit-nodes", image: "ultrafuzz", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
+    }
+  };
+  fs.writeFileSync(planPath, `${JSON.stringify(document, null, 2)}\n`);
+  const warning =
+    /^warning: CLEAN_CLOUD_STORAGE_RETAINED: .*`modal volume delete ultrafuzz-node-ultrafuzz-cli-old-cloud-run-[0-9a-f]{12}`/u;
+
+  const preview = await cli(project, ["clean", runId, "--dry-run", "--json"]);
+  assert.equal(preview.code, 0, preview.stderr);
+  const previewDiagnostics = parseJson(preview).diagnostics as Array<{ code: string; message: string }>;
+  assert.deepEqual(
+    previewDiagnostics.map((diagnostic) => diagnostic.code),
+    ["CLEAN_CLOUD_STORAGE_RETAINED"]
+  );
+
+  let planPresentWhenWarned: boolean | undefined;
+  const clean = await cli(project, ["clean", runId, "--yes"], {}, (stdout) => {
+    planPresentWhenWarned ??= stdout.includes("CLEAN_CLOUD_STORAGE_RETAINED") ? fs.existsSync(planPath) : undefined;
+  });
+
+  assert.equal(clean.code, 0, clean.stderr);
+  assert.equal(fs.existsSync(plan.value.run_root), false);
+  assert.equal(planPresentWhenWarned, true);
+  const lines = clean.stdout.trimEnd().split("\n");
+  assert.equal(lines.length, 2, clean.stdout);
+  assert.match(lines[0] ?? "", warning);
+  assert.equal(lines[1], `Removed: runs/${runId}`);
+});
+
 test("status observes an incomplete launch with a successful CLI envelope and unknown liveness", async (t) => {
   const project = tempProject(t);
   const env = fakeSmithersEnv(project);

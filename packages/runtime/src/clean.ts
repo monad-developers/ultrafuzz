@@ -86,6 +86,7 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
         ...retainedStorage
       ]);
     }
+    if (retainedStorage.length > 0) input.onRetainedStorage?.(retainedStorage);
     try {
       for (const removal of planned) {
         restoreRemovableDirectoryPermissions(removal.absolutePath);
@@ -129,7 +130,19 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
       existed: removal.existed
     }))
   };
-  appendCleanAuditRecord(auditPath, auditRecord, path.resolve(input.projectRoot));
+  try {
+    appendCleanAuditRecord(auditPath, auditRecord, path.resolve(input.projectRoot));
+  } catch (error) {
+    return runtimeFailure([
+      runtimeError(
+        "CLEAN_AUDIT_FAILED",
+        `${input.dryRun === true ? "nothing was removed" : "the selections were removed"}, but the clean audit record could not be appended: ${error instanceof Error ? error.message : String(error)}`,
+        "clean",
+        ".ultrafuzz/clean-audit.jsonl"
+      ),
+      ...retainedStorage
+    ]);
+  }
 
   return runtimeResult(
     true,

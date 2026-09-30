@@ -29,17 +29,22 @@ An earlier release could plan a run for per-node Modal execution
 (`[execution] mode = "cloud"`). That run's Modal volume and any of its
 sandboxes still running outlive the run directory, and `clean` no longer
 removes them. For such a run, the preview and the removal both report a
-`CLEAN_CLOUD_STORAGE_RETAINED` warning. It names the Modal app, the volume and
+`CLEAN_CLOUD_STORAGE_RETAINED` warning, and without `--json` the removal
+prints it before it deletes anything. It names the Modal app, the volume and
 the sandboxes' `run` tag, read from the run's `plan.json`, which the removal
 deletes. The removal still deletes the run. Delete the volume with the command
 the warning prints, for example:
 
 ```bash
-modal volume delete ultrafuzz-node-ultrafuzz-<run-id>-<hash>
+modal volume delete ultrafuzz-node-ultrafuzz-run-20260930t161149123-d99772718708
 ```
 
-Then stop any sandbox tagged `purpose=ultrafuzz-node` with that `run` tag that
-is still running in the named app.
+Copy the volume name from the warning, or find it with `modal volume list`,
+rather than writing it from the run ID: the removed provider kept at most 32
+characters of `ultrafuzz-<run-id>`, which cuts a generated run ID short, and
+appended 12 hex digits of its SHA-256. Then stop any sandbox tagged
+`purpose=ultrafuzz-node` with the warning's `run` tag that is still running in
+the named app.
 
 ## Clean A Generated Subpath
 

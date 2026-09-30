@@ -746,10 +746,11 @@ Without `--select`, `clean` selects `runs/<run-id>`. Selections are relative to
 `.ultrafuzz/` and must name generated run, artifact, or workspace directories.
 For a selected run that an earlier release planned for per-node Modal
 execution, `clean`, including `--dry-run`, reports a
-`CLEAN_CLOUD_STORAGE_RETAINED` warning. The warning names the run's Modal app,
-the volume and sandbox `run` tag the removed provider derived from its run ID,
-and the `modal volume delete` command. `clean` no longer removes that storage,
-and still deletes the run.
+`CLEAN_CLOUD_STORAGE_RETAINED` warning, which text output prints before
+anything is removed. The warning names the run's Modal app, the volume and
+sandbox `run` tag the removed provider derived from its run ID, and the
+`modal volume delete` command. `clean` no longer removes that storage, and
+still deletes the run.
 
 ## Dashboard
 
