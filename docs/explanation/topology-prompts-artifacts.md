@@ -38,8 +38,10 @@ Prompt frontmatter does not own loops, enabled state, model profiles, or
 timeouts. Unknown frontmatter fields and unknown template variables fail
 validation because wrong prompt context can produce misleading artifacts.
 
-Rendered prompts are stored as run artifacts before the linked workflow starts.
-Artifact handoff helpers can reference only ancestor nodes, and producers must
+Static prompts are rendered and stored as run artifacts before the linked
+workflow starts; a prompt that waits on a dynamic group is rendered when the
+group expands. From then on each attempt's `prompt.rendered.md` is its prompt,
+used as it is and never compared again. Artifact handoff helpers can reference only ancestor nodes, and producers must
 mark exactly one contracted output as primary before another prompt can request
 that handoff.
 

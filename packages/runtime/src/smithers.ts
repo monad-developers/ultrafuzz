@@ -3378,13 +3378,6 @@ export interface CompiledSmithersWorkflow {
   replacePromptSchemas: boolean;
   /** Attempts whose group explicitly quarantines failures from independent branches. */
   nonBlockingAttemptIds: readonly string[];
-  /**
-   * Execution-only prompt bindings by attempt ID. Emitted into the task-spec
-   * literal, never into the compiled task manifest -- the manifest must stay
-   * byte-identical to the sealed base so verifyDynamicRuntimeMaterialization
-   * can re-derive the published tasks.json from it.
-   */
-  retainedPromptPaths?: Readonly<Record<string, string>>;
   projectRoot: string;
   runRoot: string;
   sourceRevision?: string;
@@ -3402,83 +3395,6 @@ export interface CompiledSmithersWorkflow {
   productionSourceRoots?: string[];
   controllerSourceDigest: string;
   dataGovernance?: RunDataGovernanceReference;
-}
-
-/**
- * Bind a continuation's plan-time prompts to their authenticated retained
- * snapshots WITHOUT moving the binding into the task manifest.
- *
- * The compiled task keeps `plan.json`'s sealed launch path, because the
- * controller publishes that manifest into `smithers/tasks.json` and
- * `verifyDynamicRuntimeMaterialization` re-derives it from the sealed
- * `controls/runtime-base-tasks.json` by whole-document fingerprint. Rebinding
- * the manifest field made the refreshed controller publish a document that no
- * longer re-derives, so every gated lifecycle command failed
- * `WORKFLOW_CONTROL_EVIDENCE_INVALID` for the rest of the run's life.
- *
- * The retained snapshot is returned alongside instead, and reaches only the
- * task-spec literal, which is what actually binds the bytes the agent opens.
- * The manifest field is a NAME that has to re-derive from the seal, not a
- * pointer to authenticated bytes: no execution path reads it, and the one place
- * that does open it -- `smithersExecutionControlFiles`, on launch -- hard-requires
- * it to equal its `plan.json` row, which is exactly what this normalization
- * restores and what the rebinding used to violate.
- */
-function currentControllerPromptBindings(
-  layout: RunLayout,
-  tasks: SmithersTaskManifestDocument
-): { tasks: readonly CompiledSmithersTask[]; retainedPromptPaths: Record<string, string> } {
-  const plan = readRunPlanDocument(path.join(layout.root, "plan.json"), layout.runId);
-  const plannedPrompts = new Map(plan.rendered_prompts.map((prompt) => [prompt.attempt_id, prompt]));
-  const retainedPromptPaths: Record<string, string> = {};
-  const bound = tasks.tasks.map((task) => {
-    if (task.renderedPromptPath === undefined) return task;
-    // A prompt deferred to the dynamic runtime is never rendered at plan time, so `plan.json` has
-    // no row to rebind it to and no retained snapshot to authenticate against. That covers every
-    // generated task and every planned task with a dynamic ancestor, whose prompt the runtime
-    // re-derives from the sealed template and republishes under the task's own artifact directory.
-    // `verifyDynamicRuntimeMaterialization` is what holds those bytes to their seal. Requiring a
-    // plan row here instead made `--refresh-controller` throw
-    // `persisted prompt plan does not match continuation task ...` for every run that had expanded
-    // a dynamic group -- exactly the stopped runs a refresh exists to rescue.
-    if ((task.deferredPromptGroups ?? []).length > 0) return task;
-    const planned = plannedPrompts.get(task.attemptId);
-    if (planned === undefined) {
-      throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
-    }
-    const snapshotPath = safeResolveInside(
-      layout.root,
-      planned.rendered_prompt_snapshot_path,
-      `retained rendered prompt snapshot for ${task.attemptId}`
-    );
-    if (task.renderedPromptPath !== planned.rendered_prompt_path && task.renderedPromptPath !== snapshotPath) {
-      throw new Error(`persisted prompt plan does not match continuation task ${task.attemptId}`);
-    }
-    assertRegularFileInside(layout.root, snapshotPath, `retained rendered prompt snapshot for ${task.attemptId}`);
-    assertNoSymlinkComponents(layout.root, snapshotPath, `retained rendered prompt snapshot for ${task.attemptId}`);
-    const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES).toString("utf8");
-    if (sha256Stable(contents) !== planned.rendered_prompt_digest) {
-      throw new Error(`retained rendered prompt snapshot digest does not match task ${task.attemptId}`);
-    }
-    retainedPromptPaths[task.attemptId] = snapshotPath;
-    // The manifest keeps the SEALED launch path so the published tasks.json re-derives from
-    // controls/runtime-base-tasks.json. `smithersExecutionControlFiles` rejects any compiled task
-    // whose renderedPromptPath diverges from its plan row, so this normalization is byte-exact for
-    // any run that sealed -- and it also scrubs a manifest already poisoned by a prior refresh.
-    // The authenticated retained snapshot binds the bytes the agent reads, via the task-spec
-    // literal only (see renderWorkflowSource / taskSpecsFromCompiled).
-    return { ...task, renderedPromptPath: planned.rendered_prompt_path };
-  });
-  // A silently missing binding would fall back to the launch path, which retry cleanup owns and may
-  // have deleted, and which is read with no digest gate. Fail loudly instead.
-  for (const task of bound) {
-    if (task.renderedPromptPath === undefined) continue;
-    if ((task.deferredPromptGroups ?? []).length > 0) continue;
-    if (!Object.hasOwn(retainedPromptPaths, task.attemptId)) {
-      throw new Error(`continuation prompt binding is missing for ${task.attemptId}`);
-    }
-  }
-  return { tasks: bound, retainedPromptPaths };
 }
 
 /**
@@ -3521,6 +3437,10 @@ function currentControllerBaseTasks(
  * Render the current controller beside, rather than over, the source that
  * originally launched a stopped run. Smithers records this path and its
  * workflow hash as continuation provenance; neither value authorizes resume.
+ * Every task keeps its compiled prompt path, the run's own
+ * `artifacts/<attempt>/prompt.rendered.md`, so an edit to that file reaches
+ * the refreshed controller too. Resume restores a missing static prompt
+ * before it starts the engine.
  */
 export function renderCurrentSmithersController(input: {
   projectRoot: string;
@@ -3532,7 +3452,7 @@ export function renderCurrentSmithersController(input: {
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
   const baseTaskDocument = currentControllerBaseTasks(input.layout, input.tasks);
-  const { tasks, retainedPromptPaths } = currentControllerPromptBindings(input.layout, baseTaskDocument);
+  const tasks = baseTaskDocument.tasks;
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
@@ -3560,7 +3480,6 @@ export function renderCurrentSmithersController(input: {
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     replacePromptSchemas: true,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
-    retainedPromptPaths,
     projectRoot,
     runRoot: input.layout.root,
     ...(baseTaskDocument.source_revision === undefined ? {} : { sourceRevision: baseTaskDocument.source_revision }),
@@ -3934,10 +3853,11 @@ function sourceRevisionForCompilation(
 }
 
 /**
- * Enumerates the complete package/config/prompt closure consumed by a generated
+ * Enumerates the complete package/config closure consumed by a generated
  * workflow. The returned paths are sealed before any Smithers command and are
  * copied into the generation snapshot rather than read from mutable project
- * paths after verification.
+ * paths after verification. Prompt files are deliberately not part of it: each
+ * attempt reads the run's own rendered prompt file.
  */
 export async function smithersExecutionControlFiles(
   compiled: CompiledSmithersWorkflow,
@@ -3980,9 +3900,9 @@ export async function smithersExecutionControlFiles(
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
   // Prompt artifact-authority selectors resolve through the same immutable
-  // execution generation as the workflow and rendered prompts. Keep the
-  // complete task manifest in that snapshot so a continuation reads identical
-  // sealed task/output declarations.
+  // execution generation as the workflow. Keep the complete task manifest in
+  // that snapshot so a continuation reads identical sealed task/output
+  // declarations.
   add(compiled.tasksPath, "controls/tasks.json");
   if (compiled.dynamicGroups.length > 0) {
     const dynamicBaseGraphPath = path.join(layout.root, "smithers", "runtime-base-graph.json");
@@ -4011,30 +3931,10 @@ export async function smithersExecutionControlFiles(
     return candidate;
   })();
   add(governancePath, `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
-  const plannedPrompts = new Map<string, Record<string, unknown>>();
-  for (const value of plan.rendered_prompts) {
-    if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);
-  }
-  for (const task of compiled.tasks) {
-    if (task.renderedPromptPath === undefined) continue;
-    const planned = plannedPrompts.get(task.attemptId);
-    if (
-      planned === undefined ||
-      planned.rendered_prompt_path !== task.renderedPromptPath ||
-      typeof planned.rendered_prompt_snapshot_path !== "string"
-    ) {
-      throw new Error(`persisted prompt plan does not match compiled task ${task.attemptId}`);
-    }
-    // INVARIANT: reachable on launch only, where these bytes were just rendered and digested by
-    // `plan-run`. It is asserted equal to the plan row above but NOT re-digested here, and it lives
-    // under the agent-writable artifact dir -- so any future lane that re-seals an already-executing
-    // controller must digest it against `planned.rendered_prompt_digest` first.
-    add(task.renderedPromptPath, `controls/rendered-prompts/${task.attemptId}.md`);
-    add(
-      path.resolve(layout.root, planned.rendered_prompt_snapshot_path),
-      `controls/prompt-snapshots/${task.attemptId}.md`
-    );
-  }
+  // Prompt files are not execution controls. Every engine reads each attempt's own
+  // `artifacts/<attempt>/prompt.rendered.md` and uses it as it is, so a run's prompts can be edited
+  // after launch; `prompt-snapshots/` keeps the launch copy that resume, replay and fork restore a
+  // missing static prompt from.
 
   add(compiled.executionConfigPath, "controls/ultrafuzz.toml");
   add(compiled.resolvedConfigPath, "controls/resolved-config.json");
@@ -4845,20 +4745,21 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
 }
 
 /**
- * Restore missing presentation prompts from immutable plan snapshots before Smithers renders a
- * continuation. `timetravel` owns task artifact directories and can remove these launch-time copies
- * even though persisted frames still refer to them. Any later resume renders the whole graph, so a
- * prompt removed by an earlier reset must be available too. Only static agent tasks have plan rows
- * here; dynamic tasks keep their runtime materialization path.
+ * Restore missing static prompts from the launch copies in `prompt-snapshots/` before any engine
+ * starts: resume, replay or fork. A static prompt has no other source, and every render reads the
+ * prompt of every available task, so its task could not run without it. The file goes missing when
+ * someone deletes it, or when the attempt reset of an engine launched by an earlier release removed
+ * it. Only static agent tasks have plan rows here; dynamic tasks get their runtime prompt rendered
+ * again when it is missing.
  *
- * A row whose retained snapshot is gone as well has nothing to restore from and is skipped: the
- * continuation then proceeds exactly as it did before this recovery existed, and Smithers reports
- * the missing prompt itself when it renders the task. A run without `plan.json` at all has no rows
- * to begin with and is skipped the same way: `resumeRun` natively continues bare Smithers runs
- * that ultrafuzz never planned (`run.json` and the persisted workflow only), and it treats every
- * other launch document as optional for that run shape. Every other check gates a write, so a
- * plan or snapshot that is present but wrong (digest, symlink, non-regular file, escaping path)
- * still fails the continuation.
+ * A prompt file that exists is never replaced, whatever its bytes, and a launch copy is restored as
+ * it is, without comparing it with the digest recorded at launch: a run's prompt files may be
+ * edited. A row whose launch copy is gone as well has nothing to restore from and is skipped; that
+ * task then fails when it prepares. A run without `plan.json` at all has no rows to begin with and
+ * is skipped the same way: `resumeRun` natively continues bare Smithers runs that ultrafuzz never
+ * planned (`run.json` and the persisted workflow only), and it treats every other launch document
+ * as optional for that run shape. The path checks still gate the write, so a plan or copy that is
+ * present but unsafe (symlink, non-regular file, escaping path) fails the command.
  */
 function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: string }): void {
   const runRoot = path.resolve(input.runRoot);
@@ -4882,9 +4783,6 @@ function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: st
     assertRegularFileInside(runRoot, snapshotPath, snapshotLabel);
     assertNoSymlinkComponents(runRoot, snapshotPath, snapshotLabel);
     const contents = readRegularFileSnapshot(snapshotPath, MAX_WORKFLOW_EXECUTION_FILE_BYTES);
-    if (sha256Stable(contents.toString("utf8")) !== planned.rendered_prompt_digest) {
-      throw new Error(`retained rendered prompt snapshot does not match task ${nodeId}`);
-    }
     const relativePromptPath = path.relative(runRoot, promptPath).split(path.sep).join("/");
     publishFileDurableExclusive(runRoot, relativePromptPath, contents);
   }
@@ -5078,6 +4976,13 @@ export async function runSmithersLifecycleCommand(input: {
     }
   }
 
+  // Every engine this command starts, for resume, replay or fork, renders the prompt of every
+  // available task, so a missing static prompt is restored before any of them starts. `timetravel`
+  // removes no files, so restoring before a reset is as good as after it.
+  if (input.relaunchPaths !== undefined) {
+    restoreMissingRenderedPrompts({ projectRoot: input.projectRoot, runRoot: input.relaunchPaths.runRoot });
+  }
+
   if (input.action === "resume" && input.resetNode !== undefined) {
     const resetMarkerPath =
       input.relaunchPaths === undefined
@@ -5126,12 +5031,6 @@ export async function runSmithersLifecycleCommand(input: {
           "Smithers reset-node marker"
         );
       }
-    }
-    if (input.relaunchPaths !== undefined) {
-      restoreMissingRenderedPrompts({
-        projectRoot: input.projectRoot,
-        runRoot: input.relaunchPaths.runRoot
-      });
     }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
     try {
@@ -5238,13 +5137,6 @@ export async function runSmithersLifecycleCommand(input: {
       command: resumeResult.command,
       workflowRunId: forkedRunId
     };
-  }
-
-  if (input.action === "resume" && input.relaunchPaths !== undefined) {
-    restoreMissingRenderedPrompts({
-      projectRoot: input.projectRoot,
-      runRoot: input.relaunchPaths.runRoot
-    });
   }
 
   const command =
@@ -7995,16 +7887,6 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
   });
 }
 
-/**
- * The execution-only retained prompt binding for a task, if the compile produced one. Own-property
- * only: an attempt ID is never allowed to reach `Object.prototype` and yield a non-path value.
- */
-function retainedTaskPromptPath(compiled: CompiledSmithersWorkflow, attemptId: string): string | undefined {
-  const bindings = compiled.retainedPromptPaths;
-  if (bindings === undefined || !Object.hasOwn(bindings, attemptId)) return undefined;
-  return bindings[attemptId];
-}
-
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
   const controllerTasks = compiled.replacePromptSchemas
     ? compiled.tasks.map((task) => taskWithCurrentArtifactSchemas(task))
@@ -8042,10 +7924,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
       prompt: "",
-      promptPath:
-        task.renderedPromptPath === undefined
-          ? undefined
-          : (retainedTaskPromptPath(compiled, task.attemptId) ?? task.renderedPromptPath),
+      promptPath: task.renderedPromptPath,
       workspacePath: task.workspacePath,
       artifactDir: task.artifactDir,
       dependencyArtifactDirs: task.dependencyArtifactDirs,

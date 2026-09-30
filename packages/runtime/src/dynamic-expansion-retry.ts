@@ -144,19 +144,23 @@ export function planDynamicExpansionRetryArchive(input: {
 /**
  * Withdraw the planned expansion generation into `dynamic-expansion-history/`.
  *
- * The whole manifest directory is renamed in one step, so the old generation
- * stays durable and no partially rewritten manifest set can be observed. The
- * generation's attempt-owned artifacts move with it, so a regenerated attempt
+ * The generation's attempt-owned artifacts move first, so a regenerated attempt
  * with a stable storage ID never meets a stale rendered prompt. The published
  * prompt of each planned task that waits on the generation moves too, so the
- * next expansion renders it afresh instead of refusing it as changed. The mutable
- * runtime graph and task plan are then re-derived from the sealed base with no
- * ready group, exactly as the next render would publish them, so the control
- * admission check re-derives cleanly before that render happens. Finally the
- * generation's node records leave `state.json`. The synchronizer creates a
- * record only for an attempt that has none and never re-finalizes a successful
- * one, so a regenerated attempt that reuses a storage ID would otherwise start
- * from the archived record, and an archived success would stand in for it.
+ * next expansion renders it afresh from the new items. Rendered prompts are
+ * used as they are, never compared, so a stale one left beside a new manifest
+ * would silently run the withdrawn item's prompt. Only after every move has
+ * succeeded is the whole manifest directory renamed, in one step, so the old
+ * generation stays durable and no partially rewritten manifest set can be
+ * observed. A move that fails leaves the old manifests in place, and every
+ * later render stays consistent with them. The mutable runtime graph and task
+ * plan are then re-derived from the sealed base with no ready group, exactly as
+ * the next render would publish them, so the control admission check re-derives
+ * cleanly before that render happens. Finally the generation's node records
+ * leave `state.json`. The synchronizer creates a record only for an attempt
+ * that has none and never re-finalizes a successful one, so a regenerated
+ * attempt that reuses a storage ID would otherwise start from the archived
+ * record, and an archived success would stand in for it.
  */
 export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan): DynamicExpansionRetryArchive {
   const archiveRoot = path.join(plan.runRoot, "dynamic-expansion-history");
@@ -165,14 +169,14 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
   const archivedAt = new Date().toISOString();
   const archiveDir = path.join(archiveRoot, `${archivedAt.replaceAll(":", "-")}-${crypto.randomUUID()}`);
   fs.mkdirSync(archiveDir, { mode: 0o700 });
-  fs.renameSync(plan.manifestDir, path.join(archiveDir, "manifests"));
-  fs.mkdirSync(plan.manifestDir, { mode: plan.manifestDirMode });
   const archivedAttemptPaths = collectAttemptStateMoves(plan.runRoot, plan.manifests, plan.runtimeBase).map((move) => {
     const destination = path.join(archiveDir, move.relativePath);
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
     fs.renameSync(move.source, destination);
     return path.relative(plan.runRoot, destination).split(path.sep).join("/");
   });
+  fs.renameSync(plan.manifestDir, path.join(archiveDir, "manifests"));
+  fs.mkdirSync(plan.manifestDir, { mode: plan.manifestDirMode });
   rematerializeDynamicRuntimeBase(plan);
   const prunedStateNodeIds = pruneArchivedRunStateNodes(plan.runRoot, plan.manifests);
   const groupNodeIds = plan.manifests.map((manifest) => manifest.group_node_id);
@@ -267,10 +271,10 @@ function collectAttemptStateMoves(
     }
   }
   // A planned task whose prompt waits on a withdrawn group was rendered from this generation's
-  // children. Left in place, a prompt that names them no longer matches the render once the
-  // retried source plans other items, and every later render and admission check refuses it as
-  // changed. Moved, it renders again from the new expansion. Only a prompt that was never rendered
-  // is skipped: `lstat` counts a dangling symlink as present, so the file-type check refuses it.
+  // children. Left in place, it would be used as it is once the retried source plans other items,
+  // naming children that no longer exist. Moved, it renders again from the new expansion. Only a
+  // prompt that was never rendered is skipped: `lstat` counts a dangling symlink as present, so the
+  // file-type check refuses it.
   const groupIds = new Set(manifests.map((manifest) => manifest.group_node_id));
   for (const task of runtimeBase?.tasks ?? []) {
     if (!(task.deferredPromptGroups ?? []).some((groupId) => groupIds.has(groupId))) continue;

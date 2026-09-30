@@ -807,11 +807,9 @@ function loadWorkflowControlPathResolvers(): {
     persistedWorkflowPath: string | undefined;
     persistedExecutionSnapshotRoot: string | undefined;
   }) => {
-    promptExecutionSnapshotRoot: string | undefined;
     workflowPath: string | undefined;
     executionSnapshotRoot: string | undefined;
   };
-  sealedTaskPromptPath: (attemptId: string, snapshotRoot: string | undefined) => string | undefined;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("type AdmittedWorkflowControls");
@@ -828,7 +826,7 @@ function loadWorkflowControlPathResolvers(): {
     "path",
     "existsSync",
     "realpathSync",
-    `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath };`
+    `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths };`
   )(path, fs.existsSync, fs.realpathSync) as ReturnType<typeof loadWorkflowControlPathResolvers>;
 }
 
@@ -7190,25 +7188,20 @@ test(
     assert.ok(projectionEnd > projectionStart, source);
     const projection = source.slice(projectionStart, projectionEnd);
     assert.match(projection, /const controlPaths = taskWorkflowControlPaths\(admittedWorkflowControls\)/u);
-    assert.match(projection, /sealedTaskPromptPath\(task\.attemptId, controlPaths\.promptExecutionSnapshotRoot\)/u);
     assert.match(projection, /workflowPath: controlPaths\.workflowPath \?\?/u);
     assert.match(projection, /executionSnapshotRoot: controlPaths\.executionSnapshotRoot/u);
 
-    const { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath } =
-      loadWorkflowControlPathResolvers();
+    const { admitWorkflowControls, taskWorkflowControlPaths } = loadWorkflowControlPathResolvers();
     const snapshotsRoot = temporaryRoot("ultrafuzz-detached-task-paths-");
     const generationRoot = path.join(snapshotsRoot, "a".repeat(64));
     const workflowRelativePath = path.join(".smithers", "workflows", "detached-paths.tsx");
     const persistedWorkflowPath = path.join(generationRoot, workflowRelativePath);
-    const promptRoot = path.join(generationRoot, "controls", "rendered-prompts");
-    const persistedPromptPath = path.join(promptRoot, "project-discovery.md");
     fs.mkdirSync(path.dirname(persistedWorkflowPath), { recursive: true });
     fs.mkdirSync(path.join(generationRoot, "dependencies"), { recursive: true });
-    fs.mkdirSync(promptRoot, { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "controls"), { recursive: true });
     fs.writeFileSync(persistedWorkflowPath, "export default function Workflow() {}\n", "utf8");
     fs.writeFileSync(path.join(generationRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
     fs.writeFileSync(path.join(generationRoot, "controls", "plan.json"), "{}\n", "utf8");
-    fs.writeFileSync(persistedPromptPath, "SEALED DETACHED PROMPT\n", "utf8");
 
     let descriptor: number | undefined;
     try {
@@ -7217,20 +7210,15 @@ test(
       const loadedWorkflowPath = path.join(descriptorRoot, workflowRelativePath);
       const admitted = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
       const localControls = taskWorkflowControlPaths(admitted);
-      const localPromptPath = sealedTaskPromptPath("project-discovery", localControls.promptExecutionSnapshotRoot);
 
       assert.equal(admitted.loadedExecutionSnapshotRoot, descriptorRoot);
-      assert.equal(localControls.promptExecutionSnapshotRoot, generationRoot);
       assert.equal(localControls.workflowPath, persistedWorkflowPath);
       assert.equal(localControls.executionSnapshotRoot, generationRoot);
-      assert.equal(localPromptPath, persistedPromptPath);
       assert.doesNotMatch(JSON.stringify(localControls), /\/proc\/(?:self|[1-9][0-9]*)\/fd\//u);
 
       fs.closeSync(descriptor);
       descriptor = undefined;
       assert.throws(() => fs.readFileSync(loadedWorkflowPath), /ENOENT|no such file/u);
-      assertRegularFileInside(promptRoot, localPromptPath!, "detached rendered prompt");
-      assert.equal(fs.readFileSync(localPromptPath!, "utf8"), "SEALED DETACHED PROMPT\n");
 
       descriptor = fs.openSync(generationRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
       const replacedLoadedWorkflowPath = path.join(`/proc/self/fd/${descriptor}`, workflowRelativePath);
@@ -7286,7 +7274,6 @@ test("generated workflow controls admit the same persisted native workflow outsi
     assert.equal(admitted.loadedExecutionSnapshotRoot, undefined);
     assert.equal(admitted.persistedExecutionSnapshotRoot, undefined);
     assert.deepEqual(taskWorkflowControlPaths(admitted), {
-      promptExecutionSnapshotRoot: undefined,
       workflowPath: undefined,
       executionSnapshotRoot: undefined
     });
@@ -7298,6 +7285,232 @@ test("generated workflow controls admit the same persisted native workflow outsi
       () => admitWorkflowControls(snapshotWorkflowPath, nativeAliasPath),
       /persisted workflow path does not identify the loaded execution snapshot/u
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function templateSlice(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0, `the template has no ${startMarker}`);
+  assert.ok(end > start, `the template has no ${endMarker} after ${startMarker}`);
+  return source.slice(start, end);
+}
+
+type PromptBoundTask = { attemptId: string; promptPath?: string; artifactDir: string };
+
+/**
+ * The template's task-spec projections, executed against given workflow controls: `hydrateTaskSpec`
+ * for the compiled literal, and `taskSpecsFromCompiled` for the tasks a dynamic render publishes.
+ */
+function loadTaskSpecProjections(input: {
+  admittedWorkflowControls: unknown;
+  sourceProjectRoot: string;
+  cwd: string;
+  serializedTaskSpecs: readonly unknown[];
+}): {
+  hydrateTaskSpec: (task: unknown) => PromptBoundTask;
+  taskSpecsFromCompiled: (tasks: readonly unknown[]) => PromptBoundTask[];
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helpers = ts.transpileModule(
+    [
+      templateSlice(source, "type AdmittedWorkflowControls", "\n\nfunction workflowExecutionSnapshotRoot"),
+      templateSlice(source, "function hydrateTaskSpec", "\nlet taskSpecs ="),
+      templateSlice(source, "const INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS", "\n\n/** Validates the dispatch document"),
+      templateSlice(source, "function currentProjectPath", "\n\nfunction dynamicallyAvailableTaskSpecs")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "path",
+    "process",
+    "admittedWorkflowControls",
+    "serializedTaskSpecs",
+    "sourceProjectRoot",
+    "dynamicGroupSpecs",
+    "topologyRuntimeContextForTimeout",
+    "topologyRuntimeBudgetForTimeout",
+    "__ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__",
+    "__ULTRAFUZZ_RUN_ROOT_RELATIVE__",
+    "__ULTRAFUZZ_RUN_ID_LITERAL__",
+    `${helpers}; return { hydrateTaskSpec, taskSpecsFromCompiled };`
+  )(
+    path,
+    { cwd: () => input.cwd },
+    input.admittedWorkflowControls,
+    input.serializedTaskSpecs,
+    input.sourceProjectRoot,
+    [],
+    () => ({}),
+    () => ({ finalizationReserveSeconds: 0 }),
+    ".smithers/workflows/ultrafuzz-prompt-paths.tsx",
+    ".ultrafuzz/runs/prompt-paths",
+    "prompt-paths"
+  ) as ReturnType<typeof loadTaskSpecProjections>;
+}
+
+test("every engine binds an attempt's own prompt file, launched from an execution snapshot or not", () => {
+  const root = temporaryRoot("ultrafuzz-task-prompt-paths-");
+  try {
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "prompt-paths");
+    const artifactDir = path.join(runRoot, "artifacts", "project-discovery");
+    const runPrompt = path.join(artifactDir, "prompt.rendered.md");
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(runPrompt, "Edited run prompt.\n", "utf8");
+    // A snapshot of an earlier release still carries a sealed copy; no engine may read it.
+    const generationRoot = path.join(runRoot, "smithers", "execution-snapshots", "a".repeat(64));
+    const snapshotWorkflowPath = path.join(generationRoot, ".smithers", "workflows", "ultrafuzz-prompt-paths.tsx");
+    fs.mkdirSync(path.dirname(snapshotWorkflowPath), { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "dependencies"), { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "controls", "rendered-prompts"), { recursive: true });
+    fs.writeFileSync(snapshotWorkflowPath, "export default function Workflow() {}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "controls", "plan.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "controls", "rendered-prompts", "project-discovery.md"), "Sealed.\n");
+
+    const { admitWorkflowControls } = loadWorkflowControlPathResolvers();
+    const nativeWorkflowPath = path.join(root, ".smithers", "workflows", "ultrafuzz-prompt-paths.tsx");
+    fs.mkdirSync(path.dirname(nativeWorkflowPath), { recursive: true });
+    fs.writeFileSync(nativeWorkflowPath, "export default function Workflow() {}\n", "utf8");
+    const serializedTask = {
+      id: "node:project-discovery",
+      smithersRunId: "ultrafuzz-prompt-paths",
+      attemptId: "project-discovery",
+      promptPath: runPrompt,
+      sourceTaskManifestPath: path.join(runRoot, "smithers", "tasks.json"),
+      workflowPath: nativeWorkflowPath,
+      workspacePath: path.join(runRoot, "workspaces", "project-discovery"),
+      artifactDir,
+      dependencyArtifactDirs: [],
+      optionalDependencyArtifactDirs: [],
+      referenceArtifactDirs: []
+    };
+    const compiledTask = {
+      attemptId: "project-discovery",
+      smithersNodeId: "node:project-discovery",
+      verifierSmithersNodeId: "verify:project-discovery",
+      logicalNodeId: "project-discovery",
+      dependencySmithersNodeIds: [],
+      agentRef: "CodexAgent",
+      agentChain: [],
+      renderedPromptPath: runPrompt,
+      workspacePath: path.join(runRoot, "workspaces", "project-discovery"),
+      artifactDir,
+      dependencyArtifactDirs: [],
+      timeoutMs: 60_000,
+      heartbeatTimeoutMs: 30_000,
+      retries: 1,
+      retryPolicy: {},
+      metadata: {
+        node: {},
+        dependencies: { attemptIds: [], smithersNodeIds: [] },
+        workspace: { path: path.join(runRoot, "workspaces", "project-discovery") },
+        artifacts: { dir: artifactDir, manifestPath: path.join(artifactDir, "artifact-manifest.json"), outputs: [] },
+        timeout: { seconds: 60 }
+      }
+    };
+    const taskPromptPathForArtifactReset = loadTaskPromptPathForArtifactReset();
+    for (const [engine, workflowPath] of [
+      ["launch, replay or fork", snapshotWorkflowPath],
+      ["native resume", nativeWorkflowPath]
+    ] as const) {
+      const projections = loadTaskSpecProjections({
+        admittedWorkflowControls: admitWorkflowControls(workflowPath, workflowPath),
+        sourceProjectRoot: root,
+        cwd: root,
+        serializedTaskSpecs: [serializedTask]
+      });
+      const hydrated = projections.hydrateTaskSpec(serializedTask);
+      const [published] = projections.taskSpecsFromCompiled([compiledTask]);
+      for (const task of [hydrated, published]) {
+        assert.equal(task?.promptPath, runPrompt, engine);
+        // The attempt reset keeps that file, edits included.
+        assert.equal(taskPromptPathForArtifactReset(task.artifactDir, task.promptPath), runPrompt, engine);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** The template's prompt read and its preparation check, with the latest render's failures. */
+function loadTaskPromptInputHarness(
+  runtimePromptRenderFailures: ReadonlyMap<string, string>,
+  cwd: string
+): {
+  promptForTask: (task: Record<string, unknown>) => string;
+  assertTaskPromptInput: (task: Record<string, unknown>) => void;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helpers = ts.transpileModule(
+    [
+      templateSlice(source, "function promptForTask", "\nconst promptArtifactAuthoritySnapshotsByTask"),
+      templateSlice(source, "function assertTaskPromptInput", "\n\nfunction assertTaskDependencyInputs")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "path",
+    "process",
+    "readFileSync",
+    "lstatSync",
+    "assertRegularFileInside",
+    "isMissingPathError",
+    "mirroredArtifactDir",
+    "runtimePromptRenderFailures",
+    `${helpers}; return { promptForTask, assertTaskPromptInput };`
+  )(
+    path,
+    { cwd: () => cwd },
+    fs.readFileSync,
+    fs.lstatSync,
+    assertRegularFileInside,
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    (task: { artifactDir: string }) => task.artifactDir,
+    runtimePromptRenderFailures
+  ) as ReturnType<typeof loadTaskPromptInputHarness>;
+}
+
+test("a missing or unrenderable prompt fails only its own task at assert-task-inputs", () => {
+  const root = temporaryRoot("ultrafuzz-task-prompt-input-");
+  try {
+    const artifactDir = path.join(root, "run", "artifacts", "summarize");
+    const promptPath = path.join(artifactDir, "prompt.rendered.md");
+    fs.mkdirSync(artifactDir, { recursive: true });
+    const failures = new Map<string, string>();
+    const { promptForTask, assertTaskPromptInput } = loadTaskPromptInputHarness(failures, root);
+    const task = { attemptId: "summarize", prompt: "", promptPath, sourceProjectRoot: root, artifactDir };
+
+    // Every render builds the prompt of every available task, so a missing file reads as an empty
+    // prompt; the task itself then fails when it prepares, with the cause and the recovery.
+    assert.equal(promptForTask(task), "");
+    const missing =
+      /^Error: rendered prompt for summarize is missing; ultrafuzz resume restores static prompts from prompt-snapshots\/$/u;
+    assert.throws(() => assertTaskPromptInput(task), missing);
+    const notDirectory = path.join(root, "run", "a-file");
+    fs.writeFileSync(notDirectory, "not a directory\n", "utf8");
+    const underFile = { ...task, promptPath: path.join(notDirectory, "prompt.rendered.md") };
+    assert.equal(promptForTask(underFile), "");
+    assert.throws(() => assertTaskPromptInput(underFile), missing);
+
+    fs.writeFileSync(promptPath, "Summarize the discovery notes.\n", "utf8");
+    assert.equal(promptForTask(task), "Summarize the discovery notes.\n");
+    assert.doesNotThrow(() => assertTaskPromptInput(task));
+
+    // A runtime prompt the latest render could not publish fails its task with the renderer's message.
+    failures.set("summarize", "unknown prompt template variable: artifact_pth:fanout");
+    assert.throws(
+      () => assertTaskPromptInput(task),
+      /^Error: rendered prompt for summarize could not be rendered: unknown prompt template variable: artifact_pth:fanout$/u
+    );
+    failures.clear();
+
+    // Any other read error still fails the render loudly.
+    fs.rmSync(promptPath);
+    fs.mkdirSync(promptPath);
+    assert.throws(() => promptForTask(task), /EISDIR/u);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -8681,50 +8894,43 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
   assert.doesNotMatch(firstAttemptPrompt, /gpt55-xhigh|failed_attempts/u);
 });
 
-test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
+test("retry cleanup preserves the task's own prompt file and never removes a prompt outside it", () => {
   const root = temporaryRoot("ultrafuzz-retry-prompt-");
   try {
     const artifactDir = path.join(root, "run", "artifacts", "final-report");
     const taskPrompt = path.join(artifactDir, "prompt.rendered.md");
-    const sealedPrompt = path.join(
-      root,
-      "run",
-      "smithers",
-      "execution-snapshots",
-      "sealed",
-      "controls",
-      "rendered-prompts",
-      "final-report.md"
-    );
+    // A prompt path outside the artifact root, such as a launch copy in `prompt-snapshots/`, is not
+    // the task's own file: the reset neither preserves nor removes it.
+    const launchCopy = path.join(root, "run", "prompt-snapshots", "final-report.md");
     fs.mkdirSync(path.dirname(taskPrompt), { recursive: true });
-    fs.mkdirSync(path.dirname(sealedPrompt), { recursive: true });
-    fs.writeFileSync(taskPrompt, "legacy prompt\n");
-    fs.writeFileSync(sealedPrompt, "sealed prompt\n");
+    fs.mkdirSync(path.dirname(launchCopy), { recursive: true });
+    fs.writeFileSync(taskPrompt, "edited task prompt\n");
+    fs.writeFileSync(launchCopy, "launch copy\n");
 
     const taskPromptPathForArtifactReset = loadTaskPromptPathForArtifactReset();
     const resetCanonicalArtifacts = loadCanonicalTaskArtifactRetryReset();
     assert.equal(taskPromptPathForArtifactReset(artifactDir, taskPrompt), taskPrompt);
-    assert.equal(taskPromptPathForArtifactReset(artifactDir, sealedPrompt), undefined);
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, launchCopy), undefined);
     assert.equal(taskPromptPathForArtifactReset(artifactDir, path.join(artifactDir, "nested", "prompt.md")), undefined);
 
     fs.writeFileSync(path.join(artifactDir, "stale-report.json"), "{}\n");
     resetCanonicalArtifacts(artifactDir, "final-report", taskPrompt);
-    assert.equal(fs.readFileSync(taskPrompt, "utf8"), "legacy prompt\n");
+    assert.equal(fs.readFileSync(taskPrompt, "utf8"), "edited task prompt\n");
     assert.equal(fs.existsSync(path.join(artifactDir, "stale-report.json")), false);
 
     fs.mkdirSync(path.join(artifactDir, "stale", "nested"), { recursive: true });
     fs.writeFileSync(path.join(artifactDir, "stale", "nested", "report.md"), "stale\n");
-    resetCanonicalArtifacts(artifactDir, "final-report", sealedPrompt);
+    resetCanonicalArtifacts(artifactDir, "final-report", launchCopy);
     assert.deepEqual(fs.readdirSync(artifactDir), []);
-    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+    assert.equal(fs.readFileSync(launchCopy, "utf8"), "launch copy\n");
 
     const linkedPrompt = path.join(artifactDir, "prompt.rendered.md");
-    fs.symlinkSync(sealedPrompt, linkedPrompt);
+    fs.symlinkSync(launchCopy, linkedPrompt);
     assert.throws(
       () => resetCanonicalArtifacts(artifactDir, "final-report", linkedPrompt),
       /unsafe canonical task input final-report/u
     );
-    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+    assert.equal(fs.readFileSync(launchCopy, "utf8"), "launch copy\n");
     fs.unlinkSync(linkedPrompt);
 
     // The reset runs before every attempt's first generation, attempt 1 included, and the preparation

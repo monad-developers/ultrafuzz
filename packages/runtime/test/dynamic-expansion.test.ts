@@ -65,7 +65,6 @@ function expansionFixture(input: {
     sourcePath: "$.goals",
     keyPath: "id",
     nodeIdTemplate: "dynamic:item:{{ item.id }}",
-    templatePath,
     templateDigest: digest(fs.readFileSync(templatePath)),
     templateFingerprint: digest(`fingerprint:${groupNodeId}`),
     maxDynamicNodes: input.maxDynamicNodes ?? 2048,
@@ -92,7 +91,11 @@ function item(index: number): Record<string, unknown> {
  * Like the stock final report, the join's prompt waits on the group. Unlike it, the prompt names the
  * generated children, as a custom join using `{{artifact_path:<group>}}` does.
  */
-function sealedDynamicRun(runId: string, goals: Array<Record<string, unknown>>) {
+function sealedDynamicRun(
+  runId: string,
+  goals: Array<Record<string, unknown>>,
+  template = "Investigate {{item.goal_prompt}}.\n"
+) {
   const projectRoot = tempDirectory();
   const runRoot = path.join(projectRoot, "runs", runId);
   const sourceArtifactPath = path.join(runRoot, "artifacts", "planner", "plan.json");
@@ -106,7 +109,7 @@ function sealedDynamicRun(runId: string, goals: Array<Record<string, unknown>>) 
   fs.mkdirSync(path.dirname(templatePath), { recursive: true });
   fs.mkdirSync(path.dirname(tasksPath), { recursive: true });
   fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals })}\n`, "utf8");
-  fs.writeFileSync(templatePath, "Investigate {{item.goal_prompt}}.\n", "utf8");
+  fs.writeFileSync(templatePath, template, "utf8");
   fs.writeFileSync(joinTemplatePath, "Join {{artifact_path:fanout}}.\n", "utf8");
   const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
   const joinTask = {
@@ -323,23 +326,26 @@ test("persisted expansion rejects tampering, transplantation, and symlink manife
   );
 });
 
-test("persisted expansion rejects prompt-template, topology-contract, and dynamic-limit changes", () => {
+test("persisted expansion rejects topology-contract and dynamic-limit changes, never its template file's", () => {
+  // The run's template copy is a renderer input, not a sealed control: an edit to it is never a reason
+  // to refuse the group. The manifest keeps recording the compiled launch digest.
   const changedTemplate = expansionFixture({ runId: "changed-template", items: [item(0)] });
-  changedTemplate.invoke();
+  const published = changedTemplate.invoke();
   fs.writeFileSync(changedTemplate.templatePath, "Changed {{item.goal_prompt}}.\n", "utf8");
-  assert.throws(
-    () => changedTemplate.invoke(),
-    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_TEMPLATE_CHANGED"
-  );
+  assert.deepEqual(changedTemplate.invoke(), published);
+  fs.rmSync(changedTemplate.templatePath);
+  assert.deepEqual(changedTemplate.invoke(), published);
 
   // A published manifest is reused without reading the source again, so this comparison is what
-  // keeps a changed group definition from silently adopting the old items.
+  // keeps a changed group definition from silently adopting the old items. Both sides are compiled
+  // launch values, so the template rows can never fire on an edited template copy.
   const changedContract = expansionFixture({ runId: "changed-contract", items: [item(0)] });
   changedContract.invoke();
   for (const overrides of [
     { sourcePath: "$.other_goals" },
     { keyPath: "goal_prompt" },
     { nodeIdTemplate: "dynamic:other:{{ item.id }}" },
+    { templateDigest: digest("another compiled template") },
     { templateFingerprint: digest("fingerprint:other") }
   ]) {
     assert.throws(
@@ -541,8 +547,7 @@ test("explicit source retry re-derives the base runtime controls after archiving
 
   // The retried source plans another item and the group expands again. The join's prompt named the
   // withdrawn child, so the retry withdrew it with the generation and the join renders afresh from
-  // the new one. Left in place, it would not match that render, which then throws `runtime rendered
-  // prompt changed for join`, and so would every later render and admission check of the run.
+  // the new one. Left in place, it would be used as it is, still naming the withdrawn child.
   fs.writeFileSync(sourceArtifactPath, `${JSON.stringify({ goals: [item(1)] })}\n`, "utf8");
   const reexpanded = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
   const regenerated = reexpanded.tasks.find((task) => task.metadata.node.dynamic !== undefined);
@@ -620,6 +625,56 @@ test("explicit source retry refuses a withdrawn prompt that is not a regular fil
     assert.equal(fs.existsSync(path.join(runRoot, "dynamic-expansion-history")), false, name);
   }
 });
+
+test(
+  "an interrupted retry archive never leaves a withdrawn generation's prompt beside a new manifest",
+  { skip: process.getuid?.() === 0 ? "root ignores the directory permissions this test uses" : false },
+  () => {
+    // A storage ID depends only on the group and the generated node ID, so a retried source that keeps
+    // an item's key but changes its content regenerates the child in the same artifact directory. The
+    // first case fails the first move (the child's directory); the second fails the move of the join's
+    // deferred prompt, after the child's directory moved.
+    for (const blocked of ["artifacts", "artifacts/join"]) {
+      const { sourceArtifactPath, controls } = sealedDynamicRun(`retry-interrupted-${blocked.replaceAll("/", "-")}`, [
+        item(0)
+      ]);
+      const { projectRoot, runRoot } = controls;
+      const withdrawn = publishedRuntimePrompts(controls);
+      const withdrawnChildPrompt = fs.readFileSync(withdrawn.child.promptPath, "utf8");
+      fs.writeFileSync(
+        sourceArtifactPath,
+        `${JSON.stringify({ goals: [{ ...item(0), goal_prompt: "a replanned goal" }] })}\n`,
+        "utf8"
+      );
+      const plan = planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] });
+      assert.ok(plan, blocked);
+      const blockedDirectory = path.join(runRoot, ...blocked.split("/"));
+      fs.chmodSync(blockedDirectory, 0o555);
+      try {
+        assert.throws(() => archiveDynamicExpansionsForRetry(plan), /EACCES/u, blocked);
+      } finally {
+        fs.chmodSync(blockedDirectory, 0o755);
+      }
+
+      // The generation is still published, so every render stays consistent with it: no prompt of the
+      // withdrawn item ends up beside a manifest planned from the new output.
+      assert.deepEqual(fs.readdirSync(path.join(runRoot, "dynamic-expansions")), ["fanout.json"], blocked);
+      const rendered = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+      assert.deepEqual(rendered.promptRenderFailures, [], blocked);
+      assert.equal(fs.readFileSync(withdrawn.child.promptPath, "utf8"), withdrawnChildPrompt, blocked);
+      assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"], blocked);
+
+      // A later complete archive withdraws the generation, and the group expands again from the new output.
+      const retry = planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] });
+      assert.ok(retry, blocked);
+      archiveDynamicExpansionsForRetry(retry);
+      const replanned = publishedRuntimePrompts(controls);
+      assert.equal(replanned.child.promptPath, withdrawn.child.promptPath, blocked);
+      assert.match(fs.readFileSync(replanned.child.promptPath, "utf8"), /a replanned goal/u, blocked);
+      assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"], blocked);
+    }
+  }
+);
 
 test("a lock file left by a killed materializer blocks neither expansion nor a source retry", () => {
   // Earlier builds serialized every expansion read behind this file and never reclaimed it, so a
@@ -762,6 +817,208 @@ test("a re-run dynamic source keeps the published fan-out for renders and admiss
     tasks.tasks.flatMap((task) => task.metadata.node.dynamic?.expansionKey ?? []),
     ["goal-0", "goal-1"]
   );
+});
+
+function publishedRuntimePrompts(controls: ReturnType<typeof sealedDynamicRun>["controls"]) {
+  const { tasks } = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  const child = tasks.find((task) => task.metadata.node.dynamic !== undefined);
+  const join = tasks.find((task) => task.attemptId === "join");
+  assert.ok(child?.renderedPromptPath && child.promptTemplatePath);
+  assert.ok(join?.renderedPromptPath && join.promptTemplatePath);
+  return {
+    child: { promptPath: child.renderedPromptPath, templatePath: child.promptTemplatePath },
+    join: { promptPath: join.renderedPromptPath, templatePath: join.promptTemplatePath }
+  };
+}
+
+function groupTemplatePath(controls: ReturnType<typeof sealedDynamicRun>["controls"]): string {
+  const [group] = controls.groups;
+  assert.ok(group);
+  return group.templatePath;
+}
+
+function publishedRuntimeControls(controls: ReturnType<typeof sealedDynamicRun>["controls"]) {
+  return { tasks: fs.readFileSync(controls.tasksPath, "utf8"), graph: fs.readFileSync(controls.graphPath, "utf8") };
+}
+
+test("an edited published runtime prompt is adopted by renders and admission", () => {
+  const { controls } = sealedDynamicRun("prompt-edit-adopted", [item(0)]);
+  const prompts = publishedRuntimePrompts(controls);
+  const published = publishedRuntimeControls(controls);
+  // An operator's edit of a task that has not run, or the bytes an earlier build rendered (#1176,
+  // #1195): either way the published file is the task's prompt.
+  const edited = [prompts.child.promptPath, prompts.join.promptPath].map((promptPath) => {
+    const bytes = `${fs.readFileSync(promptPath, "utf8")}\nOperator note: check rounding first.\n`;
+    fs.writeFileSync(promptPath, bytes, "utf8");
+    return { promptPath, bytes };
+  });
+  // A published prompt is never rendered again, so a template this build can no longer render
+  // does not matter to it either.
+  fs.appendFileSync(prompts.join.templatePath, "{{variable_a_later_build_removed}}\n", "utf8");
+
+  const rendered = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(rendered.promptRenderFailures, []);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"]);
+  for (const { promptPath, bytes } of edited) assert.equal(fs.readFileSync(promptPath, "utf8"), bytes);
+  assert.deepEqual(publishedRuntimeControls(controls), published);
+
+  // Only prompt bytes are adopted: the manifest the prompts derive from still binds.
+  const manifestPath = path.join(controls.runRoot, "dynamic-expansions", "fanout.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { items: Array<{ item_sha256: string }> };
+  const [manifestItem] = manifest.items;
+  assert.ok(manifestItem);
+  manifestItem.item_sha256 = "0".repeat(64);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, "utf8");
+  assert.throws(
+    () => verifyDynamicRuntimeMaterialization(controls),
+    (error: unknown) => error instanceof DynamicExpansionError && error.code === "DYNAMIC_MANIFEST_INVALID"
+  );
+});
+
+test("an edited group template reaches unexpanded children and never fails published ones", () => {
+  const edit = "Investigate {{item.goal_prompt}}, starting with rounding.\n";
+  // Before the group expands, its children render from the run's template copy as it is then. The
+  // manifest still records the compiled launch digest of the template.
+  const before = sealedDynamicRun("template-edit-before-expansion", [item(0)]);
+  const [group] = before.controls.groups;
+  assert.ok(group);
+  fs.writeFileSync(group.templatePath, edit, "utf8");
+  const expanded = publishedRuntimePrompts(before.controls);
+  assert.match(fs.readFileSync(expanded.child.promptPath, "utf8"), /starting with rounding/u);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(before.controls).expandedGroupIds, ["fanout"]);
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(before.controls.runRoot, "dynamic-expansions", "fanout.json"), "utf8")
+  ) as { template: { prompt_sha256: string } };
+  assert.equal(manifest.template.prompt_sha256, group.templateDigest);
+
+  // After it expands, a published child keeps its prompt, and a child whose prompt is rendered later
+  // uses the edited copy.
+  const after = sealedDynamicRun("template-edit-after-expansion", [item(0), item(1)]);
+  const { tasks } = materializeDynamicRuntime({ ...after.controls, readyGroupIds: ["fanout"] });
+  const [kept, rerendered] = tasks.filter((task) => task.metadata.node.dynamic !== undefined);
+  assert.ok(kept?.renderedPromptPath && rerendered?.renderedPromptPath);
+  const keptBytes = fs.readFileSync(kept.renderedPromptPath, "utf8");
+  const published = publishedRuntimeControls(after.controls);
+  fs.writeFileSync(groupTemplatePath(after.controls), edit, "utf8");
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(after.controls).expandedGroupIds, ["fanout"]);
+  fs.rmSync(rerendered.renderedPromptPath);
+  const rendered = materializeDynamicRuntime({ ...after.controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(rendered.promptRenderFailures, []);
+  assert.equal(fs.readFileSync(kept.renderedPromptPath, "utf8"), keptBytes);
+  assert.match(fs.readFileSync(rerendered.renderedPromptPath, "utf8"), /goal 1 using .*, starting with rounding/u);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(after.controls).expandedGroupIds, ["fanout"]);
+  assert.deepEqual(publishedRuntimeControls(after.controls), published);
+});
+
+test("a missing published runtime prompt is admitted and republished by the next render", () => {
+  const { controls } = sealedDynamicRun("prompt-missing-republished", [item(0)]);
+  const prompts = publishedRuntimePrompts(controls);
+  const expected = [prompts.child.promptPath, prompts.join.promptPath].map((promptPath) => ({
+    promptPath,
+    bytes: fs.readFileSync(promptPath, "utf8")
+  }));
+  const published = publishedRuntimeControls(controls);
+  for (const { promptPath } of expected) fs.rmSync(promptPath);
+
+  // Admission renders nothing: it neither refuses the missing prompts nor republishes them.
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"]);
+  for (const { promptPath } of expected) assert.equal(fs.existsSync(promptPath), false);
+  assert.deepEqual(publishedRuntimeControls(controls), published);
+
+  const rendered = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(rendered.promptRenderFailures, []);
+  for (const { promptPath, bytes } of expected) assert.equal(fs.readFileSync(promptPath, "utf8"), bytes);
+  assert.deepEqual(publishedRuntimeControls(controls), published);
+});
+
+test("a runtime prompt that cannot be rendered is reported, not thrown", () => {
+  // E1: a published deferred prompt is deleted and its template copy no longer renders.
+  const joinCase = sealedDynamicRun("render-failure-join", [item(0)]);
+  const prompts = publishedRuntimePrompts(joinCase.controls);
+  const joinTemplate = fs.readFileSync(prompts.join.templatePath, "utf8");
+  const joinBytes = fs.readFileSync(prompts.join.promptPath, "utf8");
+  fs.rmSync(prompts.join.promptPath);
+  fs.writeFileSync(prompts.join.templatePath, "Join {{artifact_pth:fanout}}.\n", "utf8");
+  const failedJoin = materializeDynamicRuntime({ ...joinCase.controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(
+    failedJoin.promptRenderFailures.map((failure) => failure.attemptId),
+    ["join"]
+  );
+  assert.match(failedJoin.promptRenderFailures[0]?.message ?? "", /artifact_pth:fanout/u);
+  assert.equal(fs.existsSync(prompts.join.promptPath), false);
+  assert.equal(failedJoin.tasks.find((task) => task.attemptId === "join")?.renderedPromptPath, prompts.join.promptPath);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(joinCase.controls).expandedGroupIds, ["fanout"]);
+  fs.writeFileSync(prompts.join.templatePath, joinTemplate, "utf8");
+  const fixedJoin = materializeDynamicRuntime({ ...joinCase.controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(fixedJoin.promptRenderFailures, []);
+  assert.equal(fs.readFileSync(prompts.join.promptPath, "utf8"), joinBytes);
+
+  // E2: a typo in the group template before the group expands. The manifest, task plan and graph
+  // are still published, so admission re-derives them, and the other prompts still render.
+  const childCase = sealedDynamicRun("render-failure-child", [item(0)], "Investigate {{item.goal_promt}}.\n");
+  const failedChild = materializeDynamicRuntime({ ...childCase.controls, readyGroupIds: ["fanout"] });
+  const child = failedChild.tasks.find((task) => task.metadata.node.dynamic !== undefined);
+  assert.ok(child?.renderedPromptPath);
+  assert.deepEqual(
+    failedChild.promptRenderFailures.map((failure) => failure.attemptId),
+    [child.attemptId]
+  );
+  assert.match(failedChild.promptRenderFailures[0]?.message ?? "", /item\.goal_promt/u);
+  assert.equal(fs.existsSync(child.renderedPromptPath), false);
+  assert.equal(fs.existsSync(path.join(childCase.controls.runRoot, "artifacts", "join", "prompt.rendered.md")), true);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(childCase.controls).expandedGroupIds, ["fanout"]);
+  fs.writeFileSync(groupTemplatePath(childCase.controls), "Investigate {{item.goal_prompt}}.\n", "utf8");
+  const fixedChild = materializeDynamicRuntime({ ...childCase.controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(fixedChild.promptRenderFailures, []);
+  assert.match(fs.readFileSync(child.renderedPromptPath, "utf8"), /^Investigate goal 0 using context 0\.$/mu);
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(childCase.controls).expandedGroupIds, ["fanout"]);
+});
+
+test("an adopted runtime prompt must still be a confined regular file", () => {
+  const cases: Array<{ name: string; corrupt: (promptPath: string, outside: string) => void; message: RegExp }> = [
+    {
+      name: "symlink",
+      corrupt: (promptPath, outside) => {
+        fs.writeFileSync(outside, "outside\n", "utf8");
+        fs.rmSync(promptPath);
+        fs.symlinkSync(outside, promptPath);
+      },
+      message: /runtime rendered prompt for \S+ cannot be a symlink/u
+    },
+    {
+      name: "dangling-symlink",
+      corrupt: (promptPath, outside) => {
+        fs.rmSync(promptPath);
+        fs.symlinkSync(outside, promptPath);
+      },
+      message: /runtime rendered prompt for \S+ cannot be a symlink/u
+    },
+    {
+      name: "directory",
+      corrupt: (promptPath) => {
+        fs.rmSync(promptPath);
+        fs.mkdirSync(promptPath);
+      },
+      message: /runtime rendered prompt for \S+ must be a regular file/u
+    },
+    {
+      name: "symlinked-artifact-directory",
+      corrupt: (promptPath, outside) => {
+        const artifactDir = path.dirname(promptPath);
+        fs.renameSync(artifactDir, outside);
+        fs.symlinkSync(outside, artifactDir);
+      },
+      message: /runtime artifact directory for /u
+    }
+  ];
+  for (const target of ["child", "join"] as const) {
+    for (const { name, corrupt, message } of cases) {
+      const { controls } = sealedDynamicRun(`adopted-prompt-${target}-${name}`, [item(0)]);
+      corrupt(publishedRuntimePrompts(controls)[target].promptPath, path.join(controls.projectRoot, "outside"));
+      assert.throws(() => materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }), message, name);
+      assert.throws(() => verifyDynamicRuntimeMaterialization(controls), message, name);
+    }
+  }
 });
 
 test("100 generated attempts remain queued under the ordinary concurrency projection", () => {
@@ -1056,7 +1313,6 @@ test("an empty group and a nonempty group sharing a count boundary stay determin
     runId,
     sourcePath: "$.goals",
     keyPath: "id",
-    templatePath,
     templateDigest: digest(fs.readFileSync(templatePath)),
     maxDynamicNodes: 2048,
     reservedNodeIds: ["planner-empty", "planner-work", "z-empty", "a-work", "join"]
@@ -1157,7 +1413,6 @@ test("a legacy empty manifest without a sequence stays valid when a new group ex
     runId,
     sourcePath: "$.goals",
     keyPath: "id",
-    templatePath,
     templateDigest: digest(fs.readFileSync(templatePath)),
     maxDynamicNodes: 2048,
     reservedNodeIds: ["planner-empty", "planner-work", "z-empty", "a-work", "join"]

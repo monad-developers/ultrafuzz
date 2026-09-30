@@ -25,8 +25,9 @@ The rest of this page describes what Ultrafuzz does and does not enforce
 once it is running. None of it substitutes for the host being disposable.
 
 Ultrafuzz uses a trusted local execution model. Agents run as the project
-configures them, and the product boundary is prompt review before launch plus
-explicit artifact review before materialization.
+configures them, and the product boundary is prompt review before launch, and of
+any prompt file you edit in a run, plus explicit artifact review before
+materialization.
 
 Agent adapters are intentionally allowed to use their unrestricted execution
 modes, including `--dangerously-skip-permissions` and
@@ -66,6 +67,15 @@ Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
+Ultrafuzz does not integrity-check a run's prompt files after launch. Each
+attempt receives its task's `artifacts/<attempt-id>/prompt.rendered.md` as that
+file is when the attempt starts; nothing re-renders it, compares it with a
+launch digest, or seals a copy. A process running as the operator, including an
+agent in another task, can therefore change the prompt of a task that has not
+run, and nothing reports it. This is within the trusted local execution model
+above: such a process can already change the run's workflow source, which
+native resume runs as it is.
+
 ## Campaign data governance
 
 Campaigns default to `private`. Set `ULTRAFUZZ_DATA_GOVERNANCE_POLICY`
@@ -85,8 +95,9 @@ Put reviewed acknowledgement records in
 `ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS` as an array that matches the
 canonical
 [data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
-Acknowledgements bind the policy, effective inputs, prompt, routes, and
-Git/worktree identity. A runtime semantic gate rejects more than one
+Acknowledgements bind the policy, effective inputs, the prompt catalog at
+launch, routes, and Git/worktree identity; a prompt file edited in a run after
+launch is not acknowledged again. A runtime semantic gate rejects more than one
 acknowledgement for the same destination. Any change makes an acknowledgement
 stale. Credential values are never persisted. Private standalone Modal evals
 remain fail-closed pending the separate R-26 disclosure authorization. Public

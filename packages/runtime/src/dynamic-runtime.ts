@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -48,6 +47,12 @@ export interface DynamicRuntimeMaterialization {
   graph: PlannedGraph;
   expandedGroupIds: string[];
   unresolvedGroupIds: string[];
+  /**
+   * Ready runtime prompts this render could not publish, with the renderer's message. Only a
+   * publishing render has any. They are never persisted: the next render tries each one again, and
+   * until one succeeds the workflow fails that task alone, at `assert-task-inputs`.
+   */
+  promptRenderFailures: Array<{ attemptId: string; message: string }>;
 }
 
 /**
@@ -62,7 +67,8 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
 /**
  * Re-derives an already-published dynamic graph/task extension from the sealed base controls and
  * digest-bound expansion manifests. This is the admission check used before lifecycle commands trust
- * mutable runtime state; it never creates a manifest, prompt, graph, or task document.
+ * mutable runtime state; it never creates a manifest, prompt, graph, or task document. It renders no
+ * prompt either, so a missing, edited, or no longer renderable prompt file never fails it.
  */
 export function verifyDynamicRuntimeMaterialization(
   input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
@@ -103,7 +109,6 @@ function deriveDynamicRuntime(
       group.promptContext.projectRoot,
       projectRoot
     );
-    const templatePath = remapProjectPath(group.templatePath, group.promptContext.projectRoot, projectRoot);
     const manifest = loadOrCreateDynamicExpansion({
       runRoot,
       runId,
@@ -114,7 +119,6 @@ function deriveDynamicRuntime(
       sourcePath: group.sourcePath,
       keyPath: group.keyPath,
       nodeIdTemplate: group.nodeIdTemplate,
-      templatePath,
       templateDigest: group.templateDigest,
       templateFingerprint: group.templateFingerprint,
       maxDynamicNodes: group.maxDynamicNodes,
@@ -158,7 +162,7 @@ function deriveDynamicRuntime(
 
   assertRuntimeIdentityUniqueness(runtimeGraph, tasks, generatedTasks);
 
-  renderReadyRuntimePrompts({
+  const promptRenderFailures = renderReadyRuntimePrompts({
     tasks,
     graph: runtimeGraph,
     groups,
@@ -205,7 +209,8 @@ function deriveDynamicRuntime(
     unresolvedGroupIds: groups
       .map((group) => group.groupNodeId)
       .filter((groupId) => !manifests.has(groupId))
-      .sort()
+      .sort(),
+    promptRenderFailures
   };
 }
 
@@ -460,6 +465,18 @@ function insertGeneratedNodes(
   return baseNodes.flatMap((node) => [node, ...(generatedNodesByGroup.get(node.id) ?? [])]);
 }
 
+/**
+ * A runtime prompt is rendered once, by the first publishing render that finds its task ready and
+ * its file missing. From then on the file is the task's prompt and is used as it is: it is never
+ * rendered again or compared, so an edited file, an edited template copy or an upgraded renderer
+ * never strands the run. Admission (`publishMissing: false`) renders nothing and accepts a prompt
+ * that is not published yet.
+ *
+ * A task whose prompt cannot be rendered is returned, not thrown, so every other prompt still
+ * renders and the task plan is still published; the workflow then fails that task alone. The
+ * artifact-directory and published-file checks stay outside that scope, so a corrupted run tree
+ * still fails the whole render.
+ */
 function renderReadyRuntimePrompts(input: {
   tasks: CompiledSmithersTask[];
   graph: PlannedGraph;
@@ -469,69 +486,101 @@ function renderReadyRuntimePrompts(input: {
   runRoot: string;
   runId: string;
   publishMissing: boolean;
-}): void {
+}): DynamicRuntimeMaterialization["promptRenderFailures"] {
+  const failures: DynamicRuntimeMaterialization["promptRenderFailures"] = [];
   const groupContext = input.groups[0]?.promptContext;
-  if (groupContext === undefined) return;
-  const graphContext = promptGraphContext(input.graph, input.tasks);
+  if (groupContext === undefined) return failures;
+  let graphContext: ReturnType<typeof promptGraphContext> | undefined;
   for (const task of input.tasks) {
     if (task.promptTemplatePath === undefined) continue;
     if ((task.deferredPromptGroups ?? []).some((groupId) => !input.manifests.has(groupId))) continue;
-    const templatePath = remapProjectPath(task.promptTemplatePath, groupContext.projectRoot, input.projectRoot);
-    assertPathInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
-    assertNoSymlinkComponents(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
-    assertRegularFileInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
     const artifactDir = remapProjectPath(task.artifactDir, groupContext.projectRoot, input.projectRoot);
-    const workspacePath = remapProjectPath(task.workspacePath, groupContext.projectRoot, input.projectRoot);
-    const result = renderPrompt({
-      prompt: fs.readFileSync(templatePath, "utf8"),
-      ...(task.dynamicVariables === undefined ? {} : { dynamicVariables: { ...task.dynamicVariables } }),
-      graph: graphContext,
-      node: {
-        logicalId: task.logicalNodeId,
-        concreteId: task.attemptId,
-        artifactDir,
-        workspacePath,
-        repoPath: remapProjectPath(groupContext.repoPath, groupContext.projectRoot, input.projectRoot),
-        attemptIndex: task.metadata.model?.attemptIndex ?? task.metadata.loop.attemptIndex,
-        loopIndex: task.metadata.loop.index,
-        loopCount: task.metadata.loop.count,
-        agentRef: task.agentRef,
-        modelProfileId: task.metadata.model?.profileId,
-        modelName: task.modelName,
-        modelIndex: task.metadata.model?.modelIndex
-      },
-      run: {
-        id: input.runId,
-        artifactsDir: path.join(input.runRoot, "artifacts"),
-        metadataPath: path.join(input.runRoot, path.basename(groupContext.runMetadataPath))
-      },
-      outputs: {
-        patchPath: path.join(artifactDir, "patch.diff")
-      },
-      resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
-    });
-    assertRenderedPromptValidatorCommands({
-      attemptId: task.attemptId,
-      outputContractMarkdown: result.outputContractMarkdown,
-      schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
-    });
     const promptPath = path.join(artifactDir, "prompt.rendered.md");
     assertPathInside(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
+    // Both modes bind the same path whether or not the prompt exists, so admission re-derives the
+    // task plan a render published even when that render could not publish the prompt.
+    task.renderedPromptPath = promptPath;
+    if (fs.lstatSync(promptPath, { throwIfNoEntry: false }) !== undefined) {
+      assertRegularFileInside(input.runRoot, promptPath, `runtime rendered prompt for ${task.attemptId}`);
+      continue;
+    }
+    if (!input.publishMissing) continue;
+    graphContext ??= promptGraphContext(input.graph, input.tasks);
+    let renderedMarkdown: string;
+    try {
+      renderedMarkdown = renderRuntimePrompt({
+        task,
+        promptTemplatePath: task.promptTemplatePath,
+        artifactDir,
+        groupContext,
+        graphContext,
+        projectRoot: input.projectRoot,
+        runRoot: input.runRoot,
+        runId: input.runId
+      });
+    } catch (error) {
+      failures.push({ attemptId: task.attemptId, message: error instanceof Error ? error.message : String(error) });
+      continue;
+    }
     fs.mkdirSync(artifactDir, { recursive: true });
     assertNoSymlinkComponents(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
-    if (fs.existsSync(promptPath)) {
-      assertRegularFileInside(input.runRoot, promptPath, `runtime rendered prompt for ${task.attemptId}`);
-      if (fs.readFileSync(promptPath, "utf8") !== result.renderedMarkdown) {
-        throw new Error(`runtime rendered prompt changed for ${task.attemptId}`);
-      }
-    } else if (input.publishMissing) {
-      writeFileDurable(promptPath, result.renderedMarkdown);
-    } else {
-      throw new Error(`runtime rendered prompt is missing for ${task.attemptId}`);
-    }
-    task.renderedPromptPath = promptPath;
+    writeFileDurable(promptPath, renderedMarkdown);
   }
+  return failures;
+}
+
+/** Render one runtime prompt from the run's template copy, with the checks every fresh render keeps. */
+function renderRuntimePrompt(input: {
+  task: CompiledSmithersTask;
+  promptTemplatePath: string;
+  artifactDir: string;
+  groupContext: CompiledSmithersDynamicGroup["promptContext"];
+  graphContext: ReturnType<typeof promptGraphContext>;
+  projectRoot: string;
+  runRoot: string;
+  runId: string;
+}): string {
+  const { task, artifactDir, groupContext } = input;
+  const templatePath = remapProjectPath(input.promptTemplatePath, groupContext.projectRoot, input.projectRoot);
+  assertPathInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
+  assertNoSymlinkComponents(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
+  assertRegularFileInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
+  const workspacePath = remapProjectPath(task.workspacePath, groupContext.projectRoot, input.projectRoot);
+  const result = renderPrompt({
+    prompt: fs.readFileSync(templatePath, "utf8"),
+    ...(task.dynamicVariables === undefined ? {} : { dynamicVariables: { ...task.dynamicVariables } }),
+    graph: input.graphContext,
+    node: {
+      logicalId: task.logicalNodeId,
+      concreteId: task.attemptId,
+      artifactDir,
+      workspacePath,
+      repoPath: remapProjectPath(groupContext.repoPath, groupContext.projectRoot, input.projectRoot),
+      attemptIndex: task.metadata.model.attemptIndex,
+      loopIndex: task.metadata.loop.index,
+      loopCount: task.metadata.loop.count,
+      agentRef: task.agentRef,
+      modelProfileId: task.metadata.model.profileId,
+      modelName: task.modelName,
+      modelIndex: task.metadata.model.modelIndex
+    },
+    run: {
+      id: input.runId,
+      artifactsDir: path.join(input.runRoot, "artifacts"),
+      metadataPath: path.join(input.runRoot, path.basename(groupContext.runMetadataPath))
+    },
+    outputs: {
+      patchPath: path.join(artifactDir, "patch.diff")
+    },
+    resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
+  });
+  assertRenderedPromptValidatorCommands({
+    attemptId: task.attemptId,
+    outputContractMarkdown: result.outputContractMarkdown,
+    schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
+  });
+  return result.renderedMarkdown;
 }
 
 /**
@@ -735,9 +784,4 @@ export function dynamicRuntimeFingerprint(value: DynamicRuntimeMaterialization):
       dependencies: task.dependencies
     }))
   });
-}
-
-export function dynamicRuntimePromptDigest(task: CompiledSmithersTask): string | undefined {
-  if (task.renderedPromptPath === undefined || !fs.existsSync(task.renderedPromptPath)) return undefined;
-  return crypto.createHash("sha256").update(fs.readFileSync(task.renderedPromptPath)).digest("hex");
 }
