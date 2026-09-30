@@ -218,7 +218,11 @@ export function loadOrCreateDynamicExpansion(input: {
   sourcePath: string;
   keyPath: string;
   nodeIdTemplate: string;
-  templatePath: string;
+  /**
+   * The compiled launch digest and fingerprint of the group's template. The manifest records them,
+   * and a published manifest must match them; the template file itself is never hashed again, so a
+   * run's template copy can be edited before its children render.
+   */
   templateDigest: string;
   templateFingerprint: string;
   maxDynamicNodes: number;
@@ -226,17 +230,6 @@ export function loadOrCreateDynamicExpansion(input: {
 }): DynamicExpansionManifest {
   const runRoot = path.resolve(input.runRoot);
   assertPathInside(runRoot, input.sourceArtifactPath, "dynamic source artifact");
-  assertPathInside(runRoot, input.templatePath, "dynamic prompt template");
-  assertNoSymlinkComponents(runRoot, input.templatePath, "dynamic prompt template");
-  assertRegularFileInside(runRoot, input.templatePath, "dynamic prompt template");
-  const actualTemplateDigest = sha256Bytes(fs.readFileSync(input.templatePath));
-  if (actualTemplateDigest !== input.templateDigest) {
-    throw dynamicError("DYNAMIC_TEMPLATE_CHANGED", `Dynamic group ${input.groupNodeId} prompt template changed`, {
-      groupNodeId: input.groupNodeId,
-      expected: input.templateDigest,
-      actual: actualTemplateDigest
-    });
-  }
   const manifestDir = path.join(runRoot, "dynamic-expansions");
   assertPathInside(runRoot, manifestDir, "dynamic expansion manifest directory");
   assertNoSymlinkComponents(runRoot, manifestDir, "dynamic expansion manifest directory");

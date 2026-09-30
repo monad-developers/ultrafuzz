@@ -273,9 +273,14 @@ execution identity by itself. Unknown frontmatter fields MUST fail validation.
 Prompt frontmatter MUST NOT own execution knobs such as loops, enabled state,
 model profiles, or timeouts.
 
-Prompt rendering MUST happen before workflow launch and the rendered prompt
-MUST be stored as a node artifact. Unknown template variables MUST fail
-validation.
+A static prompt MUST be rendered before workflow launch. A prompt that waits on
+a dynamic group MUST be rendered when the group expands, from the run's own
+template copy. Each rendered prompt MUST be stored as its attempt's
+`artifacts/<attempt-id>/prompt.rendered.md`, and that file is the prompt every
+later attempt of the task receives: it MUST be rendered only while it is
+missing and MUST NOT be re-rendered, compared, or sealed afterwards. A prompt
+that cannot be rendered at runtime MUST fail only its own task. Unknown
+template variables MUST fail validation.
 
 The prompt variable set includes:
 
@@ -474,7 +479,7 @@ Before or at launch, each run MUST persist:
 - `attempts.jsonl`
 - `plan.json`
 - `trusted-cli.json`, a run-owned trusted launcher, and content-addressed trusted CLI closures for schema-backed producers
-- immutable rendered prompt snapshots under `prompt-snapshots/`
+- launch copies of static rendered prompts under `prompt-snapshots/`, used only to restore a missing static prompt
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
 - workspace metadata under `workspaces/`

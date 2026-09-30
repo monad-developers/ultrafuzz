@@ -598,11 +598,12 @@ export function verifyWorkflowControlSnapshot(
       throw new Error("sealed workflow graph or task plan changed without a compiled dynamic group");
     }
     // Re-deriving the published expansion is an admission check: it decides whether the mutable
-    // runtime graph and task plan may be *scheduled from*. A run whose expansion stopped part-way --
-    // a group whose manifest exists but whose prompts were never rendered, which is what a killed
-    // controller leaves behind -- fails it, and failing it took `status` with it. Reading is not
-    // scheduling: the counts an observer reports come from the workflow runner, not from this graph.
-    // So an observer records that the expansion no longer re-derives and reports the run; execution
+    // runtime graph and task plan may be *scheduled from*. It reads no prompt file, so an edited or
+    // missing runtime prompt never fails it. A run whose expansion stopped part-way -- a group whose
+    // manifest exists but whose task plan was never republished, which is what a killed controller
+    // leaves behind -- fails it, and failing it took `status` with it. Reading is not scheduling:
+    // the counts an observer reports come from the workflow runner, not from this graph. So an
+    // observer records that the expansion no longer re-derives and reports the run; execution
     // callers still take the throw from `reportDivergence`.
     try {
       verifyDynamicRuntimeMaterialization({
@@ -657,8 +658,8 @@ export function verifyWorkflowControlSnapshot(
   // Only a clean pass may reuse it. A remembered snapshot is recorded solely
   // when this function found no divergence, so its `divergences` is always
   // empty, while the reuse test compares only WORKFLOW_CONTROL_FILE_KEYS —
-  // divergence in anything else (a deleted rendered prompt, an expansion that
-  // no longer re-derives) leaves every compared byte equal. Reusing the
+  // divergence in anything else (an expansion that no longer re-derives)
+  // leaves every compared byte equal. Reusing the
   // snapshot there would substitute the remembered empty list for what this
   // pass just observed and report a corrupted run as clean to every tolerant
   // reader, which is the `status` blindness issue #866 exists to prevent.

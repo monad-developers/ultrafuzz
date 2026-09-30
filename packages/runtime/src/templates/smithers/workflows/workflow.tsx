@@ -269,6 +269,7 @@ const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
 const MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES = 32 * 1024 * 1024;
+const MAX_TASK_PROMPT_BYTES = 64 * 1024 * 1024;
 const MAX_FINAL_REPORT_RUN_METADATA_BYTES = 64 * 1024 * 1024;
 const MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES = 1024 * 1024;
 const MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES = MAX_PRE_AGENT_EVIDENCE_BYTES;
@@ -307,11 +308,8 @@ function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
     controlPaths.executionSnapshotRoot === undefined
       ? path.resolve(process.cwd(), task.sourceTaskManifestPath)
       : path.join(controlPaths.executionSnapshotRoot, "controls", "tasks.json");
-  const promptPath =
-    task.promptPath === undefined
-      ? undefined
-      : (sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
-        path.resolve(process.cwd(), task.promptPath));
+  // Every engine, launched from the execution snapshot or not, reads the attempt's own prompt file.
+  const promptPath = task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath);
   return {
     ...task,
     promptPath,
@@ -394,24 +392,12 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
   return tasks.map((task) => {
     const controlPaths = taskWorkflowControlPaths(admittedWorkflowControls);
     const compiled = compiledById.get(task.smithersNodeId);
-    const runtimePromptPath =
+    // Static, deferred and generated prompts alike are read from the attempt's own prompt file in the
+    // run root.
+    const promptPath =
       task.renderedPromptPath === undefined
         ? undefined
         : currentProjectPath(task.renderedPromptPath, "rendered prompt");
-    const compiledPromptPath =
-      compiled?.promptPath === undefined ? undefined : path.resolve(process.cwd(), compiled.promptPath);
-    const retainedPromptPath =
-      compiledPromptPath !== undefined && compiledPromptPath !== runtimePromptPath ? compiledPromptPath : undefined;
-    // A static compiled prompt exists in the initial execution seal. A deferred or generated prompt
-    // cannot exist there, so it is read from the run root instead. A continuation may rebind a static
-    // prompt to its authenticated retained snapshot after the cleanup-owned launch path is gone; that
-    // execution-only binding takes precedence without changing the sealed dynamic-runtime task manifest.
-    const promptPath =
-      compiled?.promptPath === undefined
-        ? runtimePromptPath
-        : (retainedPromptPath ??
-          sealedTaskPromptPath(task.attemptId, controlPaths.promptExecutionSnapshotRoot) ??
-          runtimePromptPath);
     return {
       id: task.smithersNodeId,
       smithersNodeId: task.smithersNodeId,
@@ -625,14 +611,12 @@ function admitWorkflowControls(loadedPath: string, persistedPath: string | undef
 }
 
 function taskWorkflowControlPaths(controls: AdmittedWorkflowControls): {
-  promptExecutionSnapshotRoot: string | undefined;
   workflowPath: string | undefined;
   executionSnapshotRoot: string | undefined;
 } {
   const anySnapshotRoot = controls.loadedExecutionSnapshotRoot ?? controls.persistedExecutionSnapshotRoot;
   if (anySnapshotRoot === undefined) {
     return {
-      promptExecutionSnapshotRoot: undefined,
       workflowPath: undefined,
       executionSnapshotRoot: undefined
     };
@@ -643,7 +627,6 @@ function taskWorkflowControlPaths(controls: AdmittedWorkflowControls): {
     // the Ultrafuzz controller. Smithers may continue a detached local run
     // after that controller closes the descriptor, so no task-spec path that
     // survives admission may retain it when a verified persisted path exists.
-    promptExecutionSnapshotRoot: persistedSnapshotRoot,
     workflowPath: controls.persistedWorkflowPath ?? controls.loadedWorkflowPath,
     executionSnapshotRoot: persistedSnapshotRoot
   };
@@ -663,13 +646,6 @@ function workflowExecutionSnapshotRoot(workflowPath: string): string | undefined
     return undefined;
   }
   return candidate;
-}
-
-function sealedTaskPromptPath(attemptId: string, snapshotRoot: string | undefined): string | undefined {
-  if (snapshotRoot === undefined) return undefined;
-  const promptPath = path.join(snapshotRoot, "controls", "rendered-prompts", `${attemptId}.md`);
-  if (!existsSync(promptPath)) throw new Error(`sealed rendered prompt is missing for ${attemptId}`);
-  return promptPath;
 }
 
 function sealedRuntimeControlPath(name: string, controls: AdmittedWorkflowControls): string | undefined {
@@ -855,14 +831,36 @@ function promptForTask(
     prompt = task.prompt;
   } else {
     const promptPath = task.promptPath ?? inputTask?.prompt_path;
-    prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
+    prompt = promptPath ? readTaskPromptFile(task.attemptId, promptPath) : "";
   }
-  // A sealed prompt still names controller-host paths. Rebase that root first
+  // A rendered prompt still names controller-host paths. Rebase that root first
   // so the now-local artifact path can then be narrowed to this task's mirror.
   // This order matters when either root contains an apostrophe because
   // validation commands contain the shell-escaped form rather than raw paths.
   prompt = relocatePromptPath(prompt, task.sourceProjectRoot, process.cwd());
   return relocatePromptPath(prompt, task.artifactDir, mirroredArtifactDir(task));
+}
+
+/**
+ * Every render reads the prompt of every available task, finished ones included, so a prompt file
+ * that cannot be read must not stop them all. The read follows no symlink and never blocks on a
+ * FIFO. A prompt that is missing, is not a regular file or cannot be read reads as empty, and the
+ * cause is kept: its task fails at `assert-task-inputs` before the agent can start, so the empty
+ * text never reaches a model.
+ */
+function readTaskPromptFile(attemptId: string, promptPath: string): string {
+  try {
+    const prompt = readRegularFileSnapshot(promptPath, MAX_TASK_PROMPT_BYTES).toString("utf8");
+    taskPromptReadFailures.delete(attemptId);
+    return prompt;
+  } catch (error) {
+    taskPromptReadFailures.set(attemptId, error instanceof Error ? error.message : String(error));
+    return "";
+  }
+}
+
+function isMissingTaskPromptError(error: unknown): boolean {
+  return isMissingPathError(error) || (error instanceof Error && "code" in error && error.code === "ENOTDIR");
 }
 
 function relocatePromptPath(prompt: string, sourcePath: string, destinationPath: string): string {
@@ -2627,10 +2625,10 @@ function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string 
 }
 
 function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number], runtime?: FinalReportTaskRuntime): Promise<void> {
-  // A task-owned prompt may live directly in the task artifact root, so retry
-  // cleanup must preserve it. A sealed prompt instead lives in the immutable
-  // execution snapshot. That file is outside this cleanup root and is validated
-  // independently; treating it as a task-owned child rejects every second
+  // The task's prompt is the `prompt.rendered.md` directly in its artifact root.
+  // The next attempt and every later engine read that file, so retry cleanup
+  // must preserve it, edits included. A prompt path anywhere else is not a
+  // task-owned child of this root; treating it as one would reject every second
   // attempt as an unsafe canonical input.
   const promptPath = taskPromptPathForArtifactReset(task.metadata.artifacts.dir, task.promptPath);
   resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical", promptPath);
@@ -3046,7 +3044,9 @@ function prepareArtifactMirror(
   if (options.pinnedSubmodules !== "verify") {
     preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
   }
-  preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
+  preparationStep(task.attemptId, "assert-task-inputs", () =>
+    assertTaskInputs(task, workspaceRoot, options.pinnedSubmodules !== "verify")
+  );
   preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
     materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode)
   );
@@ -4619,15 +4619,52 @@ function restoreInvariantSuiteWorkspaceSnapshot(
   }
 }
 
-function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+/**
+ * The prompt is checked only before the agent runs. The post-agent verify pass skips it
+ * (`checkPrompt` is false there): the agent has already received its prompt, so a later edit or
+ * deletion of the file must not fail completed work.
+ */
+function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string, checkPrompt = true): void {
   const schemaRoot = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   for (const schema of ["property-lens.schema.json", "properties.schema.json"]) {
     assertRegularFileInside(schemaRoot, path.join(schemaRoot, schema), `prompt schema ${schema}`);
   }
-  if (task.promptPath !== undefined) {
-    assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
-  }
+  if (checkPrompt) assertTaskPromptInput(task);
   assertTaskDependencyInputs(task);
+}
+
+// Runtime prompts the latest render could not publish, by attempt ID, with the renderer's message.
+// Every render replaces it, so fixing a template copy while the engine runs clears its tasks.
+let runtimePromptRenderFailures: ReadonlyMap<string, string> = new Map();
+// Prompt files the latest render could not read, by attempt ID, with the cause. Each read of a
+// task's prompt replaces its entry, so a file fixed while the engine runs clears it.
+const taskPromptReadFailures = new Map<string, string>();
+
+/**
+ * A prompt problem fails only its own task, here, and says why; every other task keeps running.
+ * Preparation retries, and each retry sees the latest render, so a fix made while the engine runs
+ * is picked up by the next attempt.
+ */
+function assertTaskPromptInput(task: (typeof taskSpecs)[number]): void {
+  const renderFailure = runtimePromptRenderFailures.get(task.attemptId);
+  if (renderFailure !== undefined) {
+    throw new Error(`rendered prompt for ${task.attemptId} could not be rendered: ${renderFailure}`);
+  }
+  if (task.promptPath === undefined) return;
+  try {
+    lstatSync(task.promptPath);
+  } catch (error) {
+    if (!isMissingTaskPromptError(error)) throw error;
+    throw new Error(
+      `rendered prompt for ${task.attemptId} is missing; ultrafuzz resume restores static prompts from prompt-snapshots/`,
+      { cause: error }
+    );
+  }
+  assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
+  const readFailure = taskPromptReadFailures.get(task.attemptId);
+  if (readFailure !== undefined) {
+    throw new Error(`rendered prompt for ${task.attemptId} could not be read: ${readFailure}`);
+  }
 }
 
 function assertTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {
@@ -9008,6 +9045,12 @@ export default smithers((ctx) => {
       groups: dynamicGroupSpecs,
       readyGroupIds
     });
+    runtimePromptRenderFailures = new Map(
+      materialized.promptRenderFailures.map((failure: { attemptId: string; message: string }) => [
+        failure.attemptId,
+        failure.message
+      ])
+    );
     taskSpecs = reconcileTaskSpecIdentities(
       taskSpecs,
       taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks)

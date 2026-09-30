@@ -138,14 +138,8 @@ function hydrateSerializedTask(source: string) {
     "path",
     "taskWorkflowControlPaths",
     "admittedWorkflowControls",
-    "sealedTaskPromptPath",
     `const serializedTaskSpecs = ${literal}; ${helper}; return hydrateTaskSpec(serializedTaskSpecs[0]);`
-  )(
-    path,
-    () => ({}),
-    {},
-    () => undefined
-  ) as SmithersTaskManifestTask & { id: string; smithersRunId: string };
+  )(path, () => ({}), {}) as SmithersTaskManifestTask & { id: string; smithersRunId: string };
 }
 
 test("serialized tasks retain identities through hydration and durable attempt reconciliation", async () => {
