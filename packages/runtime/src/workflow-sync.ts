@@ -5436,7 +5436,14 @@ function errorText(value: unknown): string | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
-  return stringField(value, "message") ?? stringField(value, "code") ?? stringField(value, "_tag");
+  const text = stringField(value, "message") ?? stringField(value, "code") ?? stringField(value, "_tag");
+  // An agent CLI can report a generic failure while stating the real cause
+  // elsewhere, e.g. Claude Code's "Claude run failed" for an OAuth refresh race
+  // (#1084). The workflow carries that statement beside the message so it is
+  // shown here without ever reaching Smithers' message-based classifiers.
+  const stated = isRecord(value.details) ? stringField(value.details, "agentStatedFailure") : undefined;
+  if (stated === undefined) return text;
+  return text === undefined ? stated : `${text}: ${stated}`;
 }
 
 /**

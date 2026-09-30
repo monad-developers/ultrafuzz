@@ -3379,7 +3379,7 @@ function artifactAwareAgent(
     // Retain only normalized text and allowlisted scheduler controls.
     const normalizedError = new Error(normalizedFailureMessage ?? fallback) as Error & {
       code?: string;
-      details?: Record<string, boolean | number>;
+      details?: Record<string, boolean | number | string>;
     };
     if (sourceName === "AbortError") {
       Object.defineProperty(normalizedError, "name", {
@@ -3392,7 +3392,7 @@ function artifactAwareAgent(
       normalizedError.code = sourceCode;
     }
     if (sourceDetails !== null && typeof sourceDetails === "object") {
-      const details: Record<string, boolean | number> = {};
+      const details: Record<string, boolean | number | string> = {};
       for (const key of ["failureQuota", "failureRetryable", "discardResumeSession", "discardAgentCheckpoint"]) {
         const value = readProperty(sourceDetails, key);
         if (typeof value === "boolean") details[key] = value;
@@ -3409,6 +3409,15 @@ function artifactAwareAgent(
       if (Number.isSafeInteger(retryAfterMs) && (retryAfterMs as number) >= 0) {
         details.retryAfterMs = retryAfterMs as number;
       }
+      // The failure an agent CLI stated when its thrown message is generic
+      // (#1084). Operator-facing only: Smithers classifies the message and
+      // the control fields above, never this text.
+      const agentStatedFailure = readProperty(sourceDetails, "agentStatedFailure");
+      const normalizedStatedFailure =
+        typeof agentStatedFailure === "string"
+          ? normalizeNodeAttemptFailureMessage(agentStatedFailure, forbiddenSecretValues)
+          : undefined;
+      if (normalizedStatedFailure !== undefined) details.agentStatedFailure = normalizedStatedFailure;
       if (Object.keys(details).length > 0) normalizedError.details = details;
     }
     // Promote an otherwise-unclassified 402 to Smithers' quota control plane so

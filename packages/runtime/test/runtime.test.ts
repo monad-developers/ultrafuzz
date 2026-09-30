@@ -3466,7 +3466,6 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(claudeAgentText, /=\s*createClaudeAgent\(\)/);
   assert.match(claudeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(claudeAgentText, /function readStringTable/);
-  assert.doesNotMatch(claudeAgentText, /JSON\.parse/);
   const deepSeekAgentText = fs.readFileSync(path.join(project, ".smithers/agents/deepseek.ts"), "utf8");
   assert.match(deepSeekAgentText, /DeepSeekClaudeCodeAgent/);
   assert.match(deepSeekAgentText, /createDeepSeekAgent/);
@@ -7019,6 +7018,61 @@ bunAdapterTest(
     }
   }
 );
+
+bunAdapterTest("generated Claude adapter carries the failure Claude Code states beside the generic error", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const { CompatibleClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+  const bin = path.join(project, "fake-claude-bin");
+  fs.mkdirSync(bin);
+  const failedGeneration = async (
+    result: Record<string, unknown>
+  ): Promise<Error & { code?: string; details?: Record<string, unknown> }> => {
+    // Claude Code 2.1.x prints an is_error result line and exits 1; `result`
+    // is the only place it states an auth or OAuth refresh failure (#1084).
+    const line = JSON.stringify({ type: "result", is_error: true, session_id: "s", ...result });
+    fs.writeFileSync(
+      path.join(bin, "claude"),
+      `#!/bin/sh\n[ "$1" = auth ] && exit 0\nprintf '%s\\n' ${shellQuote(line)}\nexit 1\n`,
+      { mode: 0o755 }
+    );
+    const agent = new CompatibleClaudeCodeAgent({
+      permissionMode: "bypassPermissions",
+      env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` }
+    }) as unknown as { generate(args: Record<string, unknown>): Promise<unknown> };
+    try {
+      await agent.generate({ prompt: "p", rootDir: project });
+    } catch (error) {
+      assert.ok(error instanceof Error, String(error));
+      return error;
+    }
+    return assert.fail("a failed Claude result was reported as success");
+  };
+
+  const stated = "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.";
+  const race = await failedGeneration({ subtype: "success", result: stated });
+  // Smithers classifies the thrown message, so it stays generic and the retry
+  // decision #1171 established is unchanged; the cause rides beside it.
+  assert.match(race.message, /^Claude run failed\b/u);
+  assert.ok(!race.message.includes("OAuth"), race.message);
+  assert.equal(race.code, "AGENT_CLI_ERROR");
+  assert.equal(race.details?.agentStatedFailure, stated);
+
+  // Auth-worded text would disable the agent for the run and end the node if
+  // it reached the message; beside it, it changes nothing Smithers decides.
+  const expired = "API Error: 401 OAuth token has expired. Please run /login.";
+  const expiredFailure = await failedGeneration({ subtype: "success", result: expired });
+  assert.match(expiredFailure.message, /^Claude run failed\b/u);
+  assert.ok(!expiredFailure.message.includes("401"), expiredFailure.message);
+  assert.equal(expiredFailure.code, "AGENT_CLI_ERROR");
+  assert.equal(expiredFailure.details?.agentStatedFailure, expired);
+
+  // A result that states nothing adds nothing.
+  const silent = await failedGeneration({ subtype: "error_during_execution" });
+  assert.match(silent.message, /^Claude run failed\b/u);
+  assert.equal(silent.details?.agentStatedFailure, undefined);
+});
 
 bunAdapterTest(
   "generated DeepSeek adapter uses the official endpoint and isolates Claude routing",
@@ -22977,6 +23031,57 @@ test("syncRun binds an optional prerequisite digest before a final-boundary mani
     "the consumer must use the captured state-pinned digest instead of rereading the swapped manifest"
   );
   assert.notEqual(optionalManifestSha256, crypto.createHash("sha256").update(swappedManifestBytes).digest("hex"));
+});
+
+test("syncRun shows the failure an agent stated beside its generic error (#1084)", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stated-failure";
+  const stated = "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "Claude run failed", details: { agentStatedFailure: stated } }
+      }
+    ]),
+    attemptSelections: {
+      "node:project-discovery": { 1: { chainIndex: 0, profileId: "default", model: "gpt-5.5" } }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stated-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stated-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { last_error?: string }>;
+  };
+  // The durable text passes the usual secret redaction, which reads
+  // "token: another" as an assignment; the stated cause stays recognisable.
+  const shown = /^Claude run failed: Failed to refresh OAuth token\b.*Claude Code process is refreshing it/u;
+  assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", shown);
+  const ledger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    ledger.map((entry) => [entry.outcome, entry.failure_category]),
+    [["failed", "executor-error"]]
+  );
+  assert.match(String(ledger[0]?.failure_message), shown);
 });
 
 test("syncRun maps failed workflow nodes into durable failed run state", async () => {

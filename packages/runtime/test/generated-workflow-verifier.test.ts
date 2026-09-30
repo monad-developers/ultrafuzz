@@ -8492,6 +8492,46 @@ test("agent failure normalization preserves only validated Smithers recovery con
   });
 });
 
+test("agent failure normalization keeps an agent's stated failure beside the message, redacted", async () => {
+  const credentialName = "ULTRAFUZZ_TEST_STATED_FAILURE_CREDENTIAL";
+  const credential = "stated failure credential value";
+  await withEnvironment({ [credentialName]: credential }, async () => {
+    const stated = `Failed to refresh OAuth token for ${credential}; retry in a minute`;
+    const normalized = await captureAgentFailure(
+      Object.assign(new Error("Claude run failed"), {
+        code: "AGENT_CLI_ERROR",
+        details: { agentStatedFailure: stated }
+      }),
+      { agentChain: [{}], execution: { agentCredentialEnv: [credentialName] } }
+    );
+    assert.equal(normalized.message, "Claude run failed");
+    assert.equal("code" in normalized, false);
+    assert.deepEqual(normalized.details, {
+      agentStatedFailure: "Failed to refresh OAuth token for <redacted>; retry in a minute"
+    });
+  });
+
+  // The stated text is operator evidence, never a control input: quota or 402
+  // wording there must not park the run the way it would in the message (#1084).
+  const quotaWorded = await captureAgentFailure(
+    Object.assign(new Error("Claude run failed"), {
+      code: "AGENT_CLI_ERROR",
+      details: { agentStatedFailure: "unexpected status 402 Payment Required: usage limit reached" }
+    })
+  );
+  assert.equal("code" in quotaWorded, false);
+  assert.deepEqual(quotaWorded.details, {
+    agentStatedFailure: "unexpected status 402 Payment Required: usage limit reached"
+  });
+
+  for (const agentStatedFailure of [42, "", "   "]) {
+    const ignored = await captureAgentFailure(
+      Object.assign(new Error("Claude run failed"), { details: { agentStatedFailure } })
+    );
+    assert.equal("details" in ignored, false, JSON.stringify(agentStatedFailure));
+  }
+});
+
 test("agent preflight failures redact configured credentials without retaining their cause", async () => {
   const credentialName = "ULTRAFUZZ_TEST_PREFLIGHT_CREDENTIAL";
   const credential = "preflight credential value that rotated";
