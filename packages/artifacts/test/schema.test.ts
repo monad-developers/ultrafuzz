@@ -105,6 +105,7 @@ import {
   artifactContractSchemaFile,
   isArtifactContractId,
   type ArtifactContractId,
+  type ArtifactSchemaBundle,
   type PlannedGraphDocument,
   type PlannedGraphNodeDocument,
   smithersTaskManifestJsonSchema,
@@ -181,6 +182,23 @@ test("schema materialization replaces a workspace copy that differs from the bun
     assert.doesNotThrow(() => materializePromptSchemas(destination, installedArtifactSchemaBundle()));
   } finally {
     for (const file of readdirSync(destination)) fs.chmodSync(path.join(destination, file), 0o600);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("schema materialization names the refresh that a workflow rendered by an earlier release needs", () => {
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-earlier-workflow-"));
+  try {
+    const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+    // Such a workflow passes its old `{ replaceExisting }` options, or nothing, where the bundle goes.
+    for (const earlier of [{ replaceExisting: false }, undefined]) {
+      assert.throws(
+        () => materializePromptSchemas(destination, earlier as unknown as ArtifactSchemaBundle),
+        /rendered by an earlier Ultrafuzz release.*`ultrafuzz resume <run-id> --refresh-controller --retry-failed`/u
+      );
+    }
+    assert.equal(fs.existsSync(destination), false);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -291,6 +309,40 @@ test("a run's planned schema bundle is the one its plan names, not the one this 
       () => plannedArtifactSchemaBundle(run.runRoot, "c".repeat(64)),
       /schema bundle sealed for this run is not the bundle its plan names/u
     );
+  } finally {
+    fs.chmodSync(root, 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an artifact that a sealed bundle accepted is not validated again against the same registry", () => {
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-sealed-bundle-acceptance-"));
+  try {
+    const run = runPlannedWithEarlierBundle(root);
+    const planned = plannedArtifactSchemaBundle(run.runRoot, run.sealedSha256);
+    const findings = planned.registry.find((entry) => entry.filename === "findings.schema.json");
+    assert.ok(findings);
+    const schema = {
+      bundle: planned,
+      schemaFile: findings.filename,
+      schemaId: findings.id,
+      schemaSha256: findings.sha256
+    };
+    const accepted = Buffer.from("[]\n");
+    assert.equal(validateArtifactContractBytes("ultrafuzz/findings@2", accepted, "findings.json", schema).ok, true);
+
+    // A sealed bundle has no long-lived validator isolate, so each validation would start a worker that
+    // compiles the whole bundle. Dependency admission re-checks the same bytes before and after every
+    // agent attempt; with the bundle's files gone, only a remembered acceptance can still pass.
+    for (const file of readdirSync(run.sealedSchemas)) fs.rmSync(path.join(run.sealedSchemas, file));
+    assert.equal(validateArtifactContractBytes("ultrafuzz/findings@2", accepted, "findings.json", schema).ok, true);
+    // Other bytes, and the same bytes against another registry of that bundle, are validated again.
+    assert.equal(
+      validateArtifactContractBytes("ultrafuzz/findings@2", Buffer.from("[ ]\n"), "findings.json", schema).ok,
+      false
+    );
+    const reloaded = { ...schema, bundle: { ...planned, registry: [...planned.registry] } };
+    assert.equal(validateArtifactContractBytes("ultrafuzz/findings@2", accepted, "findings.json", reloaded).ok, false);
   } finally {
     fs.chmodSync(root, 0o700);
     rmSync(root, { recursive: true, force: true });

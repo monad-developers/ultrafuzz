@@ -255,28 +255,9 @@ function validateJsonContractBytes(
   if (expected === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
   }
-  const validation = validateRegisteredJsonBytesSync({
-    schemaPath: path.join(expected.bundle.directory, expected.schemaFile),
-    instanceBytes: contents,
-    schemaRegistry: expected.bundle.registry,
-    schemaBundleSha256: expected.bundle.sha256
-  });
-  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, expected)) {
-    return failure(
-      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
-      `Registered validator identity does not match ${contract}`,
-      artifactPath
-    );
-  }
-  if (validation.status !== "valid") {
-    return workerValidationFailure(validation, artifactPath);
-  }
-  if (validation.schema === null) {
-    return failure(
-      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
-      `Registered validator did not report its schema identity for ${contract}`,
-      artifactPath
-    );
+  if (!sealedBundleAccepted(expected, contents)) {
+    const rejection = validatorRejection(contract, contents, artifactPath, expected);
+    if (rejection !== undefined) return rejection;
   }
 
   // The isolated worker is the sole shape-acceptance boundary. Parse the same
@@ -300,6 +281,69 @@ function installedContractSchema(
     schemaId: binding.schema_id,
     schemaSha256: binding.schema_sha256
   };
+}
+
+function validatorRejection(
+  contract: ArtifactContractId,
+  contents: Uint8Array,
+  artifactPath: string,
+  expected: PlannedArtifactSchema
+): ArtifactContractValidationResult | undefined {
+  const sealed = expected.bundle.registry !== artifactSchemaRegistry();
+  const validation = validateRegisteredJsonBytesSync({
+    schemaPath: path.join(expected.bundle.directory, expected.schemaFile),
+    instanceBytes: contents,
+    schemaRegistry: expected.bundle.registry,
+    schemaBundleSha256: expected.bundle.sha256,
+    ...(sealed ? { deadlineMs: SEALED_BUNDLE_VALIDATION_DEADLINE_MS } : {})
+  });
+  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, expected)) {
+    return failure(
+      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+      `Registered validator identity does not match ${contract}`,
+      artifactPath
+    );
+  }
+  if (validation.status !== "valid") {
+    return workerValidationFailure(validation, artifactPath);
+  }
+  if (validation.schema === null) {
+    return failure(
+      "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
+      `Registered validator did not report its schema identity for ${contract}`,
+      artifactPath
+    );
+  }
+  if (sealed) rememberSealedBundleAcceptance(expected, contents);
+  return undefined;
+}
+
+// A bundle other than this build's, such as the one sealed for a run planned before an upgrade, has no
+// long-lived validator isolate: each validation starts a worker that compiles the whole bundle, which
+// takes a few hundred milliseconds idle and seconds under load. It gets the longest deadline the
+// validator allows, and the bytes it accepted against a schema are remembered for that bundle's
+// registry, so re-checking an unchanged artifact, as dependency admission does before and after every
+// agent attempt, starts no worker. Only acceptances are remembered: a failure, such as a timeout, is
+// validated again next time.
+const SEALED_BUNDLE_VALIDATION_DEADLINE_MS = 30_000;
+const MAX_REMEMBERED_SEALED_ACCEPTANCES = 4_096;
+const sealedBundleAcceptances = new WeakMap<ArtifactSchemaBundle["registry"], Set<string>>();
+
+function sealedBundleAcceptance(expected: PlannedArtifactSchema, contents: Uint8Array): string {
+  const artifactSha256 = crypto.createHash("sha256").update(contents).digest("hex");
+  return [expected.schemaFile, expected.schemaId, expected.schemaSha256, artifactSha256].join("\0");
+}
+
+function sealedBundleAccepted(expected: PlannedArtifactSchema, contents: Uint8Array): boolean {
+  const acceptances = sealedBundleAcceptances.get(expected.bundle.registry);
+  return acceptances !== undefined && acceptances.has(sealedBundleAcceptance(expected, contents));
+}
+
+function rememberSealedBundleAcceptance(expected: PlannedArtifactSchema, contents: Uint8Array): void {
+  const acceptances = sealedBundleAcceptances.get(expected.bundle.registry) ?? new Set<string>();
+  if (acceptances.size >= MAX_REMEMBERED_SEALED_ACCEPTANCES) acceptances.clear();
+  acceptances.add(sealedBundleAcceptance(expected, contents));
+  sealedBundleAcceptances.set(expected.bundle.registry, acceptances);
 }
 
 // The validator build the worker reports is provenance (#921), so only the schema content binds.

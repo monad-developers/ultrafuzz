@@ -16,8 +16,10 @@ import {
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  artifactContractSchemaFile,
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
+  artifactSchemaRegistryFromDirectory,
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   assertRunMetadataDocument,
@@ -26,6 +28,8 @@ import {
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  installedArtifactSchemaBundle,
+  materializePromptSchemas,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
@@ -38,6 +42,7 @@ import {
   publishFileDurableExclusive,
   readRegularFileSnapshot,
   RUN_METADATA_SCHEMA_VERSION,
+  schemaRegistryBundleDigest,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
@@ -6634,14 +6639,13 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   assert.doesNotMatch(hydration, /readBoundedRegularArtifactSnapshot|readFileSync|resolveRegularArtifactFile/u);
 });
 
-test("generated task preparation requires the run's planned bundle, not this build's, to hold each output schema", () => {
+test("the generated workflow validates a declared output against its schema in the run's planned bundle, never this build's", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const start = source.indexOf("function assertTaskOutputSchemaBindings");
-  const end = source.indexOf("\n}\n", start) + 2;
-  assert.ok(start >= 0 && end > start, source);
   const helpers = ts.transpileModule(
-    `${templateSlice(source, "function plannedOutputSchema", "\n\nconst serializedTaskSpecs")}\n${source.slice(start, end)}`,
-    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+    templateSlice(source, "function isSchemaBackedOutput", "\n\nconst serializedTaskSpecs"),
+    {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+    }
   ).outputText;
   const installed = installedBundle();
   const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
@@ -6653,55 +6657,114 @@ test("generated task preparation requires the run's planned bundle, not this bui
     registry: installed.registry.map((entry) => (entry === findings ? sealedFindings : entry)),
     sha256: "2".repeat(64)
   };
-  const bundles = new Map([installed, sealed].map((bundle) => [bundle.sha256, bundle]));
-  const assertTaskOutputSchemaBindings = new Function(
+  const plannedOutputSchema = new Function(
+    "artifactContractSchemaFile",
     "plannedSchemaBundle",
-    `${helpers}; return assertTaskOutputSchemaBindings;`
-  )((bundleSha256: string) => {
-    const bundle = bundles.get(bundleSha256);
-    if (bundle === undefined) throw new Error(`no planned bundle ${bundleSha256}`);
-    return bundle;
-  }) as (task: unknown) => void;
-  const planned = artifactContractSchemaBinding("ultrafuzz/findings@2");
-  assert.ok(planned);
-  const task = (binding: Record<string, string>) => ({
-    outputs: [
-      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
-      {
-        path: "findings.json",
-        contract: "ultrafuzz/findings@2",
-        schemaFile: planned.schema_file,
-        schemaId: planned.schema_id,
-        schemaSha256: planned.schema_sha256,
-        schemaBundleSha256: planned.schema_bundle_sha256,
-        validatorBuild: planned.validator_build,
-        ...binding
-      }
-    ]
+    `${helpers}; return plannedOutputSchema;`
+  )(artifactContractSchemaFile, () => sealed) as (output: Record<string, unknown>) => unknown;
+  const findingsOutput = (binding: Record<string, unknown> = {}) => ({
+    path: "findings.json",
+    contract: "ultrafuzz/findings@2",
+    schemaFile: sealedFindings.filename,
+    schemaId: sealedFindings.id,
+    schemaSha256: sealedFindings.sha256,
+    schemaBundleSha256: sealed.sha256,
+    validatorBuild: "ultrafuzz-json-validator.v1:launch",
+    ...binding
   });
-  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task({})));
-  // #921: neither a rebuilt validator nor an upgraded schema bundle is compared with the plan. A run
-  // planned with the sealed bundle keeps preparing its tasks with it.
-  assert.doesNotThrow(() =>
-    assertTaskOutputSchemaBindings(task({ validatorBuild: "ultrafuzz-json-validator.v1:rebuilt" }))
-  );
-  assert.doesNotThrow(() =>
-    assertTaskOutputSchemaBindings(task({ schemaSha256: sealedFindings.sha256, schemaBundleSha256: sealed.sha256 }))
-  );
-  // The planned bundle must still hold the planned schema, or the verifier could not validate against it.
-  const unheld: Array<Record<string, string>> = [
-    { schemaSha256: sealedFindings.sha256 },
-    { schemaId: "urn:ultrafuzz:schema:artifacts:findings:1" },
-    { schemaFile: "finding.schema.json" },
-    { schemaSha256: findings.sha256, schemaBundleSha256: sealed.sha256 }
-  ];
-  for (const binding of unheld) {
+
+  assert.equal(plannedOutputSchema({ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }), undefined);
+  // #921: the run keeps validating with the bundle it was planned with, and its validator build is provenance.
+  assert.deepEqual(plannedOutputSchema(findingsOutput({ validatorBuild: "ultrafuzz-json-validator.v1:rebuilt" })), {
+    bundle: sealed,
+    schemaFile: "findings.schema.json",
+    schemaId: findings.id,
+    schemaSha256: sealedFindings.sha256
+  });
+  // A schema-backed output that does not name its schema in that bundle is refused, instead of being
+  // validated against this build's schema for the contract.
+  for (const binding of [
+    { schemaBundleSha256: installed.sha256 },
+    { schemaBundleSha256: undefined },
+    { schemaFile: undefined },
+    { schemaId: undefined },
+    { schemaSha256: undefined }
+  ]) {
     assert.throws(
-      () => assertTaskOutputSchemaBindings(task(binding)),
-      /the run's schema bundle does not hold the planned schema for findings\.json/u,
+      () => plannedOutputSchema(findingsOutput(binding)),
+      /findings\.json does not name its schema in the run's planned schema bundle/u,
       JSON.stringify(binding)
     );
   }
+});
+
+test("the generated goal-search census counts a lane's findings validated against the run's planned schema", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const emitted = ts.transpileModule(
+    [
+      templateSlice(source, "function isSchemaBackedOutput", "\n\nconst serializedTaskSpecs"),
+      templateSlice(source, "function verifiedGoalSearchFindingCount", "\n\nconst goalSearchCoverageSignatures")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  const root = fs.realpathSync(temporaryRoot("ufz-goal-search-count-"));
+  // The bundle the run was planned with, whose findings schema accepts any array; this build's does not.
+  const directory = path.join(root, "sealed-schemas");
+  materializePromptSchemas(directory, installedArtifactSchemaBundle());
+  const findingsSchemaPath = path.join(directory, "findings.schema.json");
+  const findingsSchema = JSON.parse(fs.readFileSync(findingsSchemaPath, "utf8")) as Record<string, unknown>;
+  findingsSchema.items = {};
+  fs.chmodSync(findingsSchemaPath, 0o600);
+  fs.writeFileSync(findingsSchemaPath, `${JSON.stringify(findingsSchema, null, 2)}\n`, "utf8");
+  const registry = artifactSchemaRegistryFromDirectory(directory);
+  const sealed = { directory, registry, sha256: schemaRegistryBundleDigest(registry) };
+  const sealedFindings = registry.find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(sealedFindings);
+  const findingCount = new Function(
+    "artifactContractSchemaFile",
+    "plannedSchemaBundle",
+    "realpathSync",
+    "resolveRegularArtifactFile",
+    "readBoundedRegularArtifactSnapshot",
+    "MAX_PRE_AGENT_EVIDENCE_BYTES",
+    "validateArtifactContractBytes",
+    "path",
+    "process",
+    `${emitted}; return verifiedGoalSearchFindingCount;`
+  )(
+    artifactContractSchemaFile,
+    () => sealed,
+    fs.realpathSync,
+    (_artifactDir: string, candidate: string) => candidate,
+    (_artifactDir: string, candidate: string) => ({ bytes: fs.readFileSync(candidate) }),
+    1024 * 1024,
+    validateArtifactContractBytes,
+    path,
+    process
+  ) as (task: unknown) => number | undefined;
+  const artifactDir = path.join(root, "artifacts", "goal-1");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const findings = Buffer.from(`${JSON.stringify([{ title: "planned shape" }])}\n`, "utf8");
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), findings);
+  assert.equal(validateArtifactContractBytes("ultrafuzz/findings@2", findings, "findings.json").ok, false);
+
+  assert.equal(
+    findingCount({
+      metadata: { artifacts: { dir: artifactDir } },
+      outputs: [
+        {
+          path: "findings.json",
+          contract: "ultrafuzz/findings@2",
+          primary: true,
+          schemaFile: sealedFindings.filename,
+          schemaId: sealedFindings.id,
+          schemaSha256: sealedFindings.sha256,
+          schemaBundleSha256: sealed.sha256
+        }
+      ]
+    }),
+    1
+  );
 });
 
 test("generated validator preflight expects the run's planned schema identity, not this build's", () => {
@@ -7647,7 +7710,7 @@ test("only the preparation before the agent checks its prompt, never the verify 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const emitted = ts.transpileModule(
     [
-      templateSlice(source, "function prepareArtifactMirror", "\n\nfunction assertTaskOutputSchemaBindings"),
+      templateSlice(source, "function prepareArtifactMirror", "\n\n/**\n * How long the validator preflight"),
       templateSlice(source, "function assertTaskInputs", "\n\nfunction assertTaskDependencyInputs")
     ].join("\n"),
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
@@ -7677,7 +7740,7 @@ test("only the preparation before the agent checks its prompt, never the verify 
       "preservePinnedSourceProof",
       "plannedSchemaBundle",
       "materializePromptSchemas",
-      "assertTaskOutputSchemaBindings",
+      "isSchemaBackedOutput",
       "preflightJsonValidator",
       "materializeWorkspacePatchDependencies",
       "requireInvariantSuiteWorkspaceSnapshot",
@@ -10117,7 +10180,7 @@ test("generated Smithers preparation names its failing step and carries a retry 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function preparationStep");
   const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const preparationEnd = source.indexOf("\n\nfunction assertTaskOutputSchemaBindings", preparationStart);
+  const preparationEnd = source.indexOf("\n\n/**\n * How long the validator preflight", preparationStart);
 
   assert.ok(helperStart >= 0, source);
   assert.ok(preparationStart > helperStart, source);
@@ -10140,7 +10203,6 @@ test("generated Smithers preparation names its failing step and carries a retry 
     "hydrate-pinned-submodules",
     "preserve-pinned-source-proof",
     "materialize-prompt-schemas",
-    "assert-task-output-schema-bindings",
     "preflight-json-validator",
     "assert-task-inputs",
     "materialize-workspace-patch-dependencies",

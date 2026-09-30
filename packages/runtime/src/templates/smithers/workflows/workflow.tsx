@@ -38,6 +38,7 @@ const runtimeModule =
   new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href;
 const {
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  artifactContractSchemaFile,
   artifactValidatorSmokeFixturePath,
   assertArtifactPublicationsContainNoSecrets,
   assertRunMetadataDocument,
@@ -303,32 +304,44 @@ const plannedSchemaBundleSha256: string | undefined = [
 ]
   .flatMap((task) => task.metadata.artifacts.outputs)
   .find((output) => output.schemaBundleSha256 !== undefined)?.schemaBundleSha256;
-const plannedSchemaBundles = new Map<string, ArtifactSchemaBundle>();
+let resolvedPlannedSchemaBundle: ArtifactSchemaBundle | undefined;
 
 /**
  * The schema bundle a run's artifacts are checked against, by this workflow and by the host: the one
  * its plan names (#921). This process's installed schemas are that bundle unless an upgrade changed a
- * schema after launch, and then the run's execution snapshot still holds it.
+ * schema after launch, and then the run's execution snapshot still holds it. A plan without a
+ * schema-backed output names no bundle, and its tasks read this build's schemas.
  */
-function plannedSchemaBundle(bundleSha256 = plannedSchemaBundleSha256): ArtifactSchemaBundle {
-  if (bundleSha256 === undefined) return installedArtifactSchemaBundle();
-  let bundle = plannedSchemaBundles.get(bundleSha256);
-  if (bundle === undefined) {
-    bundle = plannedArtifactSchemaBundle(dynamicRunRoot, bundleSha256);
-    plannedSchemaBundles.set(bundleSha256, bundle);
-  }
-  return bundle;
+function plannedSchemaBundle(): ArtifactSchemaBundle {
+  if (plannedSchemaBundleSha256 === undefined) return installedArtifactSchemaBundle();
+  resolvedPlannedSchemaBundle ??= plannedArtifactSchemaBundle(dynamicRunRoot, plannedSchemaBundleSha256);
+  return resolvedPlannedSchemaBundle;
 }
 
-/** The schema a declared output was planned with, or undefined for an output without one. */
+/** Whether a declared output's contract is a JSON contract, which its plan binds to a schema. */
+function isSchemaBackedOutput(output: { contract: string }): boolean {
+  return artifactContractSchemaFile(output.contract) !== undefined;
+}
+
+/**
+ * The schema a declared output was planned with, in the run's planned bundle, or undefined for an
+ * output whose contract has no schema. A schema-backed output that does not name its schema in that
+ * bundle is refused, never validated against this build's schema instead.
+ */
 function plannedOutputSchema(output: (typeof taskSpecs)[number]["outputs"][number]) {
-  if (output.schemaFile === undefined || output.schemaBundleSha256 === undefined) return undefined;
-  return {
-    bundle: plannedSchemaBundle(output.schemaBundleSha256),
-    schemaFile: output.schemaFile,
-    schemaId: output.schemaId,
-    schemaSha256: output.schemaSha256
-  };
+  if (!isSchemaBackedOutput(output)) return undefined;
+  const bundle = plannedSchemaBundle();
+  if (
+    output.schemaFile === undefined ||
+    output.schemaId === undefined ||
+    output.schemaSha256 === undefined ||
+    output.schemaBundleSha256 !== bundle.sha256
+  ) {
+    throw new Error(
+      `artifact-contract failure: ${output.path} does not name its schema in the run's planned schema bundle`
+    );
+  }
+  return { bundle, schemaFile: output.schemaFile, schemaId: output.schemaId, schemaSha256: output.schemaSha256 };
 }
 
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
@@ -3042,10 +3055,11 @@ function prepareArtifactMirror(
     materializePromptSchemas(schemaDirectory, bundle);
     return bundle;
   });
-  preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
-  // `pinnedSubmodules: "verify"` is the post-agent verify pass. It checks outputs in-process and never
-  // runs the agent-facing CLI, so a CLI cold start there could only fail its zero-retry task.
-  if (options.pinnedSubmodules !== "verify") {
+  // Only a task with a schema-backed output runs the agent-facing validator; a run whose plan has none
+  // has no planned bundle for that validator to report. `pinnedSubmodules: "verify"` is the post-agent
+  // verify pass. It checks outputs in-process and never runs the agent-facing CLI, so a CLI cold start
+  // there could only fail its zero-retry task.
+  if (options.pinnedSubmodules !== "verify" && task.outputs.some((output) => isSchemaBackedOutput(output))) {
     preparationStep(task.attemptId, "preflight-json-validator", () =>
       preflightJsonValidator(schemaDirectory, schemaBundle)
     );
@@ -3113,22 +3127,6 @@ function prepareArtifactMirror(
     }
   });
   return { prepared: true };
-}
-
-function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void {
-  // The verifier validates each output against the schema its plan names and records that binding in
-  // its marker, so the run's planned bundle must hold that schema. Neither this build's schemas nor the
-  // recorded validator build is compared: an upgrade or rebuild must not stop an in-flight run (#921).
-  for (const output of task.outputs) {
-    const planned = plannedOutputSchema(output);
-    if (planned === undefined) continue;
-    const schema = planned.bundle.registry.find((entry) => entry.filename === planned.schemaFile);
-    if (schema?.id !== planned.schemaId || schema.sha256 !== planned.schemaSha256) {
-      throw new Error(
-        `artifact-contract failure: the run's schema bundle does not hold the planned schema for ${output.path}`
-      );
-    }
-  }
 }
 
 /**
@@ -5025,7 +5023,9 @@ function assertVerifiedDependency(
         plannedOutputSchema(expected)
       );
       if (!validation.ok) {
-        throw new Error(`verified dependency artifact is no longer valid ${entry.path}`);
+        throw new Error(
+          `verified dependency artifact is no longer valid ${entry.path}: ${formatSchemaValidationIssues(validation.issues)}`
+        );
       }
       authenticatedArtifacts.set(
         entry.path,

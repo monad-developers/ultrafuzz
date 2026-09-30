@@ -1,9 +1,8 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { layoutForRunRoot } from "./run-layout.js";
-import { safeResolveInside, writeFileDurable } from "./safe-paths.js";
+import { safeResolveInside, sha256Bytes, writeFileDurable } from "./safe-paths.js";
 import {
   artifactSchemaBundleDigest,
   artifactSchemaDirectory,
@@ -54,8 +53,7 @@ export function plannedArtifactSchemaBundle(runRoot: string, plannedBundleSha256
 /** The directory of the schema bundle sealed in a run's execution snapshot at launch. */
 function sealedArtifactSchemaDirectory(runRoot: string): string {
   const layout = layoutForRunRoot(runRoot);
-  const workflow = readRunState(layout).provenance?.workflow;
-  const snapshot = workflow?.controllerExecutionSnapshot ?? workflow?.executionSnapshot;
+  const snapshot = readRunState(layout).provenance?.workflow.executionSnapshot;
   if (snapshot === undefined) throw new Error("run state is missing sealed workflow schema authority");
   const snapshotRoot = safeResolveInside(layout.root, snapshot, "sealed workflow execution snapshot");
   return safeResolveInside(snapshotRoot, "modules/@ultrafuzz/artifacts/schema", "sealed artifact schema bundle");
@@ -68,6 +66,12 @@ function sealedArtifactSchemaDirectory(runRoot: string): string {
  * artifacts against the bundle itself.
  */
 export function materializePromptSchemas(destination: string, bundle: ArtifactSchemaBundle): string[] {
+  // A workflow rendered before planned schema bundles passes its old options object, or nothing, here.
+  if (typeof (bundle as Partial<ArtifactSchemaBundle> | undefined)?.directory !== "string") {
+    throw new Error(
+      "this run's workflow was rendered by an earlier Ultrafuzz release and cannot prepare its tasks with this one; continue the run with `ultrafuzz resume <run-id> --refresh-controller --retry-failed`"
+    );
+  }
   const source = bundle.directory;
   const target = path.resolve(destination);
   assertNoSymlinkComponents(target);
@@ -107,7 +111,7 @@ export function materializePromptSchemas(destination: string, bundle: ArtifactSc
       fs.copyFileSync(sourcePath, targetPath);
     }
     fs.chmodSync(targetPath, 0o400);
-    if (sha256(readRegularFileSnapshot(targetPath, MAX_SCHEMA_FILE_BYTES)) !== schema.sha256) {
+    if (sha256Bytes(readRegularFileSnapshot(targetPath, MAX_SCHEMA_FILE_BYTES)) !== schema.sha256) {
       throw new Error(`prompt schema destination failed its pinned digest check: ${targetPath}`);
     }
     copied.push(targetPath);
@@ -128,8 +132,4 @@ function assertNoSymlinkComponents(candidate: string): void {
       throw new Error(`prompt schema destination crosses a symlink: ${current}`);
     }
   }
-}
-
-function sha256(bytes: Uint8Array): string {
-  return crypto.createHash("sha256").update(bytes).digest("hex");
 }

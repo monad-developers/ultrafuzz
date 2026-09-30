@@ -100,7 +100,6 @@ function preparationHarness(
     assertWorkspaceSourceRevision: () => undefined,
     preservePinnedSourceProof: () => undefined,
     preflightJsonValidator: () => options.onPreflight?.(),
-    assertTaskOutputSchemaBindings: () => undefined,
     plannedSchemaBundle: () => undefined,
     materializePromptSchemas: (root: string) => {
       fs.mkdirSync(root, { recursive: true });
