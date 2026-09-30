@@ -70,7 +70,14 @@ A run keeps the artifact schemas it was planned with, with or without
 `--refresh-controller`. After an upgrade that changes a schema, its tasks copy,
 validate against, and preflight their validator with the bundle sealed in the
 run's execution snapshot, so the new schemas apply only to runs launched after
-the upgrade.
+the upgrade. Code that reads an already validated artifact into the new
+release's types still applies its schemas: an upgrade that tightens the
+properties, implemented-properties, property-campaign, findings, or report
+schema without a new contract version can fail a resumed task whose artifact no
+longer satisfies it; start a new run for such an upgrade. A run launched before
+planned schema bundles must be continued with `ultrafuzz resume <run-id>
+--refresh-controller` on every resume; a plain `resume` of it fails with
+`WORKFLOW_CONTROLLER_REFRESH_REQUIRED` before Smithers starts.
 
 Usage recorded before the continuation remains in the run's append-only usage
 ledger. After synchronization, segment rollups remain attributable to their

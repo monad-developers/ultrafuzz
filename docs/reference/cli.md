@@ -341,15 +341,19 @@ seals, link journals, controller generations, graph fingerprints, current
 schema bindings, and metadata projections remain provenance for inspection;
 they are not resume authorization. The resumed tasks keep the schemas the run
 was planned with: after an upgrade that changed a schema, task preparation
-copies, and the verifier validates against, the bundle sealed in the run's
-execution snapshot. Smithers decides which finished rows can be
+copies, and the verifier and dependency admission validate against, the bundle
+sealed in the run's execution snapshot. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
 fork completed work. The run's `smithers/resolved-config.json` records the
 execution mode its tasks were planned with, so before starting Smithers
 `resume` fails with `WORKFLOW_LIFECYCLE_FAILED` when that file is missing or
 does not parse as the current resolved-config schema, and with
-`WORKFLOW_CLOUD_EXECUTION_REMOVED` when it records `mode = "cloud"`. Agent
+`WORKFLOW_CLOUD_EXECUTION_REMOVED` when it records `mode = "cloud"`. A plain
+`resume` of a run whose launch workflow predates planned schema bundles fails
+with `WORKFLOW_CONTROLLER_REFRESH_REQUIRED`, also before starting Smithers,
+because that workflow cannot prepare a task with this release; continue such a
+run with `resume --refresh-controller`, every time. Agent
 adapters in the continued workflow read the run's
 `smithers/execution-config.toml` (launch gave them a copy of the same file). If
 resume cannot prune stale task-worktree registrations, it reports a
@@ -413,8 +417,10 @@ controller generation. The refreshed workflow keeps each declared output's
 recorded schema binding, contract digest, and validator build, so its
 verification markers still match the run's sealed plan after a rebuild or an
 upgrade that changed a schema. After such an upgrade the refresh also keeps the
-run's own validator launcher, because the installed CLI validates with other
-schemas, and reports that as `WORKFLOW_TRUSTED_CLI_UNVERIFIED`. Refresh rejects an actively owned
+run's own validator launcher, which validates with the run's planned schemas,
+instead of switching to the installed CLI, which validates with other ones. It
+reports `WORKFLOW_TRUSTED_CLI_UNVERIFIED` when it cannot verify the launcher it
+keeps or the installed CLI it switches to. Refresh rejects an actively owned
 workflow. Because Smithers admits changed workflow source, replay determinism is
 the operator's responsibility; inspect the retained source and Smithers workflow
 hash when auditing a continuation.

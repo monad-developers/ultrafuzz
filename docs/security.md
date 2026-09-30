@@ -237,13 +237,22 @@ closure are copied into a run-owned content-addressed, read-only generation;
 the launcher verifies that closure before every invocation, removes ambient Node
 loader/search injection, and rejects ESM or CommonJS modules resolved outside
 it. Module confinement does not prevent the validator from reading the artifact
-or schema paths it was asked to check. Its pinned CLI is preflighted with a real
-fixture before model work and must report the run's planned schema bundle,
-which the host checks the run's artifacts against even after an upgrade changed
-a schema; the validator build it reports is provenance. Every registered schema
-path is checked against its pinned digest. This keeps
-the producer and host on the same contract; it does not turn same-UID local
-agent execution into an OS security boundary.
+or schema paths it was asked to check. Before a schema-backed task's model work,
+its pinned CLI is preflighted with a real fixture and must report the run's
+planned schema bundle, which the host artifact gates and the workflow's verifier
+check the run's artifacts against even after an upgrade changed a schema; the
+validator build it reports is provenance. Every registered schema path is
+checked against its pinned digest. This keeps the producer and host on the same
+contract; it does not turn same-UID local agent execution into an OS security
+boundary.
+
+A task's `.ultrafuzz/schemas` copy is not tamper-evident: every preparation
+rewrites a file that differs from the run's planned bundle, without refusing or
+recording the difference. It is only the agent's view of the schemas. The run's
+own validator rejects a schema file whose bytes are not the planned ones, and
+after an upgrade that changed a schema the engine reads the planned bundle from
+the run's execution snapshot, which the run directory's same-UID trust covers
+like the rest of the run.
 
 The workflow engine is installed by the controller rather than from the target
 repository. At launch, Ultrafuzz verifies the complete closure of its exact npm
