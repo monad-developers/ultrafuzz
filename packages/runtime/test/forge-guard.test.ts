@@ -131,7 +131,7 @@ test("Forge guard clears anything but the wrapper from its directory, which the 
   const input = fixture("stray-entries");
   const safeBin = path.join(input.layout.root, "safe-bin");
   fs.mkdirSync(path.join(safeBin, "stray-directory"), { recursive: true });
-  // What an interrupted durable write leaves beside the wrapper.
+  // What an interrupted write left beside the wrapper while writes were staged there.
   fs.writeFileSync(path.join(safeBin, ".forge.tmp-1-2-3"), "");
 
   const prepared = prepareForgeGuardEnvironment({
@@ -145,6 +145,46 @@ test("Forge guard clears anything but the wrapper from its directory, which the 
   assert.deepEqual(prepared.diagnostics, []);
   assert.deepEqual(fs.readdirSync(safeBin), ["forge"]);
   assert.equal(enginePath(input.root, prepared.env)[0], safeBin);
+});
+
+// Launch holds the control lock and resume the lifecycle lock, so both can
+// prepare the same run's wrapper at once. The one that clears the directory
+// must not delete the other's write in progress, and a command composing the
+// engine PATH meanwhile must still find the wrapper alone in the directory.
+test("Forge guard preparations of one run can overlap", (t) => {
+  const input = fixture("overlapping-preparations");
+  const safeBin = path.join(input.layout.root, "safe-bin");
+  const wrapper = path.join(safeBin, "forge");
+  const prepare = () =>
+    prepareForgeGuardEnvironment({
+      layout: input.layout,
+      projectRoot: input.root,
+      config: resolvedConfig(),
+      env: { PATH: input.pathValue }
+    });
+  const launched = prepare();
+  const renameSync = fs.renameSync;
+  let overlapped = false;
+  let admittedMidWrite: boolean | undefined;
+  let overlapping: ReturnType<typeof prepare> | undefined;
+  t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+    if (!overlapped && path.resolve(String(to)) === wrapper) {
+      // This command's wrapper is written but not yet in place.
+      overlapped = true;
+      admittedMidWrite = enginePath(input.root, launched.env)[0] === safeBin;
+      overlapping = prepare();
+    }
+    renameSync(from, to);
+  });
+
+  const resumed = prepare();
+
+  assert.equal(overlapped, true);
+  assert.equal(admittedMidWrite, true);
+  assert.equal(overlapping?.active, true);
+  assert.equal(resumed.active, true);
+  assert.deepEqual(fs.readdirSync(safeBin), ["forge"]);
+  assert.equal(enginePath(input.root, resumed.env)[0], safeBin);
 });
 
 test("Forge guard reports itself inactive when the engine PATH would drop its wrapper", () => {

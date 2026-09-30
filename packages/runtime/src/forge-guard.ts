@@ -52,8 +52,9 @@ export function prepareForgeGuardEnvironment(input: {
   // does not apply it, and also repairs a directory an earlier launch created.
   fs.chmodSync(safeBinRoot, 0o700);
   // The admission also wants the wrapper alone in the directory. Anything else
-  // there, such as the temporary file of an interrupted write, would drop the
-  // guard for every later command of the run, so remove it.
+  // there, such as the temporary file an interrupted write left when writes
+  // were still staged in this directory, would drop the guard for every later
+  // command of the run, so remove it.
   for (const name of fs.readdirSync(safeBinRoot)) {
     if (name === "forge") continue;
     try {
@@ -66,8 +67,11 @@ export function prepareForgeGuardEnvironment(input: {
   assertNoSymlinkComponents(input.layout.root, wrapperPath, "Forge guard wrapper");
   // Created executable: resume and replay replace the wrapper while tasks may
   // be running, and a PATH lookup that met it without its execute bit would
-  // run the real Forge.
-  writeFileDurable(wrapperPath, forgeGuardWrapper(), { mode: 0o700 });
+  // run the real Forge. Staged in the run root: a launch and a resume hold
+  // different locks and can prepare the run at once, and a temporary file in
+  // this directory would be deleted by the other's cleanup above, or make the
+  // other's engine PATH drop the wrapper.
+  writeFileDurable(wrapperPath, forgeGuardWrapper(), { mode: 0o700, temporaryDirectory: input.layout.root });
   fs.chmodSync(wrapperPath, 0o700);
   // The engine PATH drops every target-local entry that fails this check, so a
   // wrapper that fails it would never run: report the guard inactive rather
