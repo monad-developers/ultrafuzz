@@ -98,53 +98,80 @@ those nodes run again.
 
 ## Change A Prompt Of A Running Campaign
 
-Edit the project's prompt under `.ultrafuzz/prompts/`, then resume the run:
+Edit the project's prompt under `.ultrafuzz/prompts/`, then resume the run. A
+run that is still running must be paused first: while the workflow engine
+reports the run active, `resume` only attaches to it and applies nothing. Wait
+until `status` reports the run paused before you resume it:
 
 ```bash
+ultrafuzz pause <run-id> --project /path/to/target-protocol
+ultrafuzz status <run-id> --project /path/to/target-protocol
 ultrafuzz resume <run-id> --project /path/to/target-protocol
 ```
 
 Every `resume`, with or without `--refresh-controller`, `--retry-failed` or
-`--reset-node`, first applies the project's current prompts to every task of
-the run that has not finished, before it resets anything or starts the engine.
-It selects each prompt exactly as `ultrafuzz run` does, from
-`.ultrafuzz/prompts/**` and the packaged built-ins, and renders it the way the
-run's launch did, with the run's own config. A task has finished when the
-workflow engine reports its agent `finished` and the resume does not reset it.
-The refresh reaches:
+`--reset-node`, applies the project's current prompts to every task of the run
+that has not finished. It does so after the checks that can refuse the resume,
+and before the resume resets anything or starts the engine. It selects each
+prompt exactly as `ultrafuzz run` does, from `.ultrafuzz/prompts/**` and the
+packaged built-ins, and renders it the way the run's launch did, with the run's
+own config. A task has finished when the workflow engine reports its agent
+`finished` and the resume does not reset it. The refresh reaches:
 
 - static tasks that have not run, that failed or were interrupted, and those
   that `--retry-failed` or `--reset-node` reruns, with the tasks that depend on
   them;
 - the rendered prompts of generated children and of later nodes such as the
   final report, once their dynamic group has expanded;
-- the template copies under `dynamic-prompt-templates/` from which every prompt
-  not rendered yet is rendered, such as the children of a group that has not
-  expanded.
+- the template copies under `dynamic-prompt-templates/` that a later render
+  reads: the copy of a group that has not expanded, from which its children are
+  rendered, and the copy of a task whose prompt is not rendered yet, such as
+  the final report's before its groups expand.
 
 A finished task keeps its `prompt.rendered.md`, the record of the prompt it
 ran with. To rerun a finished task with the edited prompt, use
 `resume --reset-node node:<attempt-id>`. A reset also reruns finished tasks
-that merely started after the reset task; those keep their prompt. While the
-workflow engine still reports the run active, resume refreshes nothing, and an
-attempt that is running keeps the prompt it started with.
+that merely started after the reset task; those keep their prompt. If the
+workflow engine then fails to reset a task, the resume fails after the refresh,
+so that task's file holds an edited prompt it did not run with; `refresh.json`
+lists the file, and the bytes it ran with are beside it. An attempt that is
+running keeps the prompt it started with.
+
+When `resume --retry-failed` reruns the source of a dynamic group, the group's
+generated children and the rendered prompts that wait on the group move to
+`dynamic-expansion-history/` with the prompts they ran with. The refresh applies
+the edits to the group's template copies instead, and the next expansion
+renders from them.
 
 Resume reports what the refresh did, and none of it fails the resume:
 
 - `PROMPTS_REFRESHED` (info) names the tasks whose prompts it rewrote and
-  counts the template copies. It copies each file first to
-  `.ultrafuzz/runs/<run-id>/prompt-history/<time>-<id>/`, at the file's path
-  in the run, then replaces it atomically; `refresh.json` there lists every
-  rewritten file with its old and new SHA-256.
+  counts the template copies. Before it changes a file, it writes
+  `.ultrafuzz/runs/<run-id>/prompt-history/<time>-<id>/refresh.json`, which
+  lists every file it rewrites with its old and new SHA-256. It then copies
+  each file there, at the file's path in the run, and replaces it atomically.
 - `PROMPT_REFRESH_REJECTED` (warning) names a prompt it did not apply, and why:
   `ultrafuzz run` would reject it, it does not render for one of its tasks, it
   names an artifact authority that a task was not compiled with, or it shares
-  a template copy with another prompt whose new text differs. A prompt is
-  applied to every task rendered from it or to none, and the other prompts
-  still apply. Fix it and resume again.
-- `PROMPT_REFRESH_SKIPPED` (warning) means it applied nothing, for example
-  because the project's topology no longer matches the run's, or
-  `ultrafuzz.toml` cannot be read. Change the topology only for a new run.
+  a template copy that a later render reads with another prompt whose new text
+  differs. A prompt is applied to every task rendered from it or to none, and
+  the other prompts still apply. Fix it and resume again.
+- `PROMPT_REFRESH_SKIPPED` (warning) means it applied nothing, and says why:
+  the effective topology file differs from the one the run launched with (any
+  edit counts, even to a comment; change the topology only for a new run), a
+  file under `.ultrafuzz/prompts/` breaks the whole prompt catalog as it would
+  break `ultrafuzz run`, such as invalid frontmatter or two files with the same
+  `id` (the warning names the file), `ultrafuzz.toml` cannot be read, or the
+  engine still reports the run active (`--force` or `--reset-node` on a running
+  run).
+- `PROMPT_REFRESH_INCOMPLETE` (warning) means it stopped part way, for example
+  at a directory it cannot write, and says how many files it replaced. Every
+  file that `refresh.json` lists holds either its old bytes or its new ones.
+  Fix the cause and resume again to apply the rest.
+
+A refresh changes none of the run's launch provenance: `prompt_digest` and the
+other prompt digests keep their launch values, and `refresh.json` is the only
+record of it.
 
 A prompt that renders now can still fail later: a typo in an item variable,
 such as `{{item.goal_promt}}`, fails only when the group expands, and then only
@@ -220,8 +247,13 @@ the run's launch workflow, which stops the whole run, instead of one task, when
 a runtime prompt no longer renders, including one rendered from a template copy
 that the refresh rewrote; with `--refresh-controller` the run continues on this
 release's workflow instead. `replay` and `fork` of such a run keep running its
-launch snapshot, and so behave like its original engine. That engine has also
-removed the prompt file of every static task it started. Resume renders the
+launch snapshot, and so behave like its original engine: once a resume has
+rewritten one of the run's runtime prompts or template copies, they stop at
+their first render, with `runtime rendered prompt changed` or
+`DYNAMIC_TEMPLATE_CHANGED`. To keep replay and fork of such a run working, set
+`refresh_prompts_on_resume = false` before you resume it; to recover them, copy
+each file that a `prompt-history/` entry lists back from the earliest entry.
+That engine has also removed the prompt file of every static task it started. Resume renders the
 file again for such a task that has not finished; for a finished one it
 restores the launch copy that `plan.json` names for the attempt
 (`rendered_prompts[].rendered_prompt_snapshot_path`). To edit one by hand with

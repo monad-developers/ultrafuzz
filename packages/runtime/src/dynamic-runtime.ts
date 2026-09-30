@@ -73,15 +73,29 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
 export function verifyDynamicRuntimeMaterialization(
   input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
 ): DynamicRuntimeMaterialization {
-  const readyGroupIds = input.groups
+  return deriveDynamicRuntime({ ...input, readyGroupIds: publishedGroupIds(input) }, "verify");
+}
+
+/**
+ * The same derivation from the sealed base controls and the published expansion manifests, as the
+ * next render derives it, without publishing, rendering or comparing anything. `resume` renders the
+ * project's current prompts against it, before any render has republished what launch wrote.
+ */
+export function deriveDynamicRuntimeMaterialization(
+  input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
+): DynamicRuntimeMaterialization {
+  return deriveDynamicRuntime({ ...input, readyGroupIds: publishedGroupIds(input) }, "derive");
+}
+
+function publishedGroupIds(input: Pick<DynamicRuntimeMaterializeInput, "groups" | "runRoot">): string[] {
+  return input.groups
     .map((group) => group.groupNodeId)
     .filter((groupId) => fs.existsSync(path.join(input.runRoot, "dynamic-expansions", `${groupId}.json`)));
-  return deriveDynamicRuntime({ ...input, readyGroupIds }, "verify");
 }
 
 function deriveDynamicRuntime(
   input: DynamicRuntimeMaterializeInput,
-  mode: "publish" | "verify"
+  mode: "publish" | "verify" | "derive"
 ): DynamicRuntimeMaterialization {
   const runId = validateSafeId(input.runId, "run ID");
   const projectRoot = path.resolve(input.projectRoot);
@@ -191,7 +205,7 @@ function deriveDynamicRuntime(
     // renders re-derive exactly the documents already on disk.
     writeJsonDurableIfChanged(tasksPath, runtimeTaskDocument);
     writeJsonDurableIfChanged(graphPath, runtimeGraph);
-  } else {
+  } else if (mode === "verify") {
     const observedTasks = readRecord(tasksPath);
     const observedGraph = readPlannedGraph(graphPath);
     if (jsonFingerprint(observedTasks) !== jsonFingerprint(runtimeTaskDocument)) {

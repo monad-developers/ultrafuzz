@@ -143,16 +143,13 @@ every engine hands the agent that file: launch, `resume` (with or without
 dynamic group, a generated child's or a later node's such as the final report,
 is rendered from the run's template copy under `dynamic-prompt-templates/` when
 the group expands, and only while its file is missing. No prompt file is
-compared with a recorded digest or sealed. Beyond that, a prompt file is
-rendered again only when `resume` applies the project's current prompts to the
-tasks that have not finished, which it does unless
-`run.refresh_prompts_on_resume = false`: it re-renders their files and the
-template copies, and first copies every file it replaces to
-`prompt-history/<time>-<id>/`, at the file's path in the run, with
-`refresh.json` listing each rewritten file, its attempt and prompt, and its old
-and new SHA-256. A finished task's file stays the record of the prompt it ran
-with. Otherwise an edited file is what the task's next attempt receives. A
-runtime prompt that cannot be rendered, or a prompt file that is missing,
+compared with a recorded digest or sealed, and an edited file is what the
+task's next attempt receives, except that `resume` renders the files of
+unfinished tasks again from the project's current prompts, unless
+`run.refresh_prompts_on_resume = false`, and keeps every file it replaces under
+`prompt-history/` (see
+[Change A Prompt Of A Running Campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign)).
+A runtime prompt that cannot be rendered, or a prompt file that is missing,
 unreadable or not a regular file, fails only its task, at the
 `assert-task-inputs` preparation step, with the cause.
 
@@ -164,8 +161,11 @@ restores a missing static prompt from its copy, as it is; it never replaces a
 prompt file that exists. That recovery concerns runtime-owned task input only;
 it never reconstructs an agent-owned output. `prompt_digest` in `run.json` and
 `plan.json`, like the final report's `run_metadata.prompt_digest`, is the
-digest of the prompt catalog the run launched with; editing a run's prompt
-files does not change it.
+digest of the prompt catalog the run launched with. Neither editing a run's
+prompt files nor a `resume` that applies the project's current prompts changes
+it, an expansion manifest's `template.prompt_sha256` or `plan.json`'s
+`rendered_prompts[].rendered_prompt_digest`: `prompt-history/*/refresh.json` is
+the only record of such a refresh.
 
 `trusted-cli.json` binds the run-owned launcher in `trusted-bin/` to the exact
 CLI entrypoint bytes, validator build, and artifact schema-bundle digest. The

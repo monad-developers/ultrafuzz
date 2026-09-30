@@ -4808,6 +4808,18 @@ function runEntryExists(filePath: string): boolean {
   }
 }
 
+/** What a resume that starts an engine knows before its first reset. */
+export interface SmithersContinuationContext {
+  /** Each Smithers node's state before this resume; undefined for a run with no Smithers history. */
+  nodeStates: ReadonlyMap<string, SmithersNodeState> | undefined;
+  /** The Smithers nodes this resume resets, and whether each reset also reopens the nodes after it. */
+  resets: ReadonlyArray<{ nodeId: string; dependents: boolean }>;
+  /** The dynamic groups whose published generation this resume withdraws, so that they expand again. */
+  withdrawnGroupIds: readonly string[];
+  /** Smithers still reports the run active, so an engine may be reading its prompt files. */
+  active: boolean;
+}
+
 export async function runSmithersLifecycleCommand(input: {
   action: "resume" | "replay" | "fork";
   smithersRunId: string;
@@ -4823,14 +4835,10 @@ export async function runSmithersLifecycleCommand(input: {
   /** Prepare launch authority only after ruling out an idempotent active attach. */
   prepareContinuationEnvironment?: () => Record<string, string | undefined>;
   /**
-   * Runs once per resume that starts an engine, before it completes a retry withdrawal, resets,
-   * archives or submits anything, with the node states it inspected and the resets it will issue.
+   * Runs once per resume that starts an engine: after it completes an interrupted withdrawal and after
+   * every check that can refuse it before it resets or archives anything, and before its first reset.
    */
-  beforeContinuation?: (context: {
-    nodeStates: ReadonlyMap<string, SmithersNodeState> | undefined;
-    resets: ReadonlyArray<{ nodeId: string; dependents: boolean }>;
-    active: boolean;
-  }) => Promise<void>;
+  beforeContinuation?: (context: SmithersContinuationContext) => Promise<void>;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -4920,90 +4928,101 @@ export async function runSmithersLifecycleCommand(input: {
   if (input.action === "resume" && input.prepareContinuationEnvironment !== undefined) {
     input.env = input.prepareContinuationEnvironment();
   }
+  // Once Smithers has reset a retried source, nothing plans its withdrawal again, so one that an
+  // earlier `--retry-failed` began and did not finish is completed before any engine starts.
+  if (input.relaunchPaths !== undefined) {
+    finishInterruptedDynamicExpansionRetry({ projectRoot: input.projectRoot, runRoot: input.relaunchPaths.runRoot });
+  }
+  // Each failed task `--retry-failed` resets, with the agent-owned artifact producer that its reset
+  // reopens instead when it is a failed generated verifier. Both the resets and the prompt refresh
+  // below read this one list.
+  const retries =
+    currentInspection !== undefined && input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
+      ? smithersFailedTasks(currentInspection).map((failedTask) => ({
+          failedTask,
+          producer: retryProducerForFailedVerifier(currentInspection, failedTask)
+        }))
+      : [];
+  const retryProducers = retries.flatMap(({ producer }) => (producer === undefined ? [] : [producer]));
+  // A reopened dynamic source owns the published expansion generation, which
+  // lives outside Smithers state. Decide and validate its withdrawal before
+  // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
+  // closed while nothing has been reset. The rename itself waits until after
+  // the reset: the dependent set Smithers resolves at reset time must still
+  // see the materialized generation (#1063).
+  const retryArchivePlan =
+    retryProducers.length > 0 && input.relaunchPaths !== undefined
+      ? planDynamicExpansionRetryArchive({
+          projectRoot: input.projectRoot,
+          runRoot: input.relaunchPaths.runRoot,
+          sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
+        })
+      : undefined;
+  if (
+    currentInspection !== undefined &&
+    inspection !== undefined &&
+    retries.length === 0 &&
+    input.retryFailed === true &&
+    input.resetNode === undefined &&
+    (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
+    smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
+    !isCompatibleSmithersRunId(input.smithersRunId)
+  ) {
+    throw new Error(
+      `persisted workflow run ID ${JSON.stringify(input.smithersRunId)} is unsupported by the pinned workflow runner; historical runs are not converted or transferred`
+    );
+  }
+  // The checks above refuse the resume before it has reset or archived anything, and an interrupted
+  // withdrawal is already complete, so the hook sees the run as the resets will find it.
   if (input.action === "resume" && input.beforeContinuation !== undefined) {
     await input.beforeContinuation({
       nodeStates:
         currentInspection === undefined
           ? undefined
           : new Map(currentInspection.nodes.map((node) => [node.nodeId, node.state])),
-      resets: continuationResets(currentInspection, input.retryFailed === true, input.resetNode),
+      resets: [
+        ...retries.map(({ failedTask, producer }) => ({
+          nodeId: producer?.nodeId ?? failedTask.nodeId,
+          dependents: producer !== undefined
+        })),
+        ...(input.resetNode === undefined ? [] : [{ nodeId: input.resetNode, dependents: true }])
+      ],
+      withdrawnGroupIds: retryArchivePlan?.manifests.map((manifest) => manifest.group_node_id) ?? [],
       active: currentInspection !== undefined && smithersRunStateIsActive(currentInspection)
     });
   }
-  // Once Smithers has reset a retried source, nothing plans its withdrawal again, so one that an
-  // earlier `--retry-failed` began and did not finish is completed before any engine starts.
-  if (input.relaunchPaths !== undefined) {
-    finishInterruptedDynamicExpansionRetry({ projectRoot: input.projectRoot, runRoot: input.relaunchPaths.runRoot });
-  }
-  if (currentInspection !== undefined && inspection !== undefined) {
-    const failedTasks =
-      input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
-        ? smithersFailedTasks(currentInspection)
-        : [];
-    const retryProducers = failedTasks.flatMap((failedTask) => {
-      const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
-      return producer === undefined ? [] : [producer];
-    });
-    // A reopened dynamic source owns the published expansion generation, which
-    // lives outside Smithers state. Decide and validate its withdrawal before
-    // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
-    // closed while nothing has been reset. The rename itself waits until after
-    // the reset: the dependent set Smithers resolves at reset time must still
-    // see the materialized generation (#1063).
-    const retryArchivePlan =
-      retryProducers.length > 0 && input.relaunchPaths !== undefined
-        ? planDynamicExpansionRetryArchive({
-            projectRoot: input.projectRoot,
-            runRoot: input.relaunchPaths.runRoot,
-            sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
-          })
-        : undefined;
-    if (failedTasks.length > 0) {
-      const resetStderr: string[] = [];
-      for (const failedTask of failedTasks) {
-        const producerTask = retryProducerForFailedVerifier(currentInspection, failedTask);
-        const resetResult = await execSmithersCli({
-          args: [
-            "timetravel",
-            input.workflowPath,
-            "--run-id",
-            input.smithersRunId,
-            "--node-id",
-            producerTask?.nodeId ?? failedTask.nodeId,
-            "--iteration",
-            String(producerTask?.iteration ?? failedTask.iteration),
-            // Generated verifiers deliberately have zero automatic retries. An
-            // explicit retry must reopen their agent-owned artifact producer,
-            // and Smithers must reset its verifier/dependents with it. Ordinary
-            // failed tasks retain the narrow, node-only reset used before.
-            ...(producerTask === undefined ? ["--no-deps"] : []),
-            "--force",
-            "--format",
-            "json"
-          ],
-          projectRoot: input.projectRoot,
-          env: input.env,
-          environmentVariableNames: input.environmentVariableNames,
-          keepWorkspaces: input.keepWorkspaces
-        });
-        if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
-      }
-      preResumeStderr = resetStderr.join("\n");
+  if (retries.length > 0) {
+    const resetStderr: string[] = [];
+    for (const { failedTask, producer } of retries) {
+      const resetResult = await execSmithersCli({
+        args: [
+          "timetravel",
+          input.workflowPath,
+          "--run-id",
+          input.smithersRunId,
+          "--node-id",
+          producer?.nodeId ?? failedTask.nodeId,
+          "--iteration",
+          String(producer?.iteration ?? failedTask.iteration),
+          // Generated verifiers deliberately have zero automatic retries. An
+          // explicit retry must reopen their agent-owned artifact producer,
+          // and Smithers must reset its verifier/dependents with it. Ordinary
+          // failed tasks retain the narrow, node-only reset used before.
+          ...(producer === undefined ? ["--no-deps"] : []),
+          "--force",
+          "--format",
+          "json"
+        ],
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
+      });
+      if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
     }
-    if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
-    if (
-      failedTasks.length === 0 &&
-      input.retryFailed === true &&
-      input.resetNode === undefined &&
-      (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
-      smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
-      !isCompatibleSmithersRunId(input.smithersRunId)
-    ) {
-      throw new Error(
-        `persisted workflow run ID ${JSON.stringify(input.smithersRunId)} is unsupported by the pinned workflow runner; historical runs are not converted or transferred`
-      );
-    }
+    preResumeStderr = resetStderr.join("\n");
   }
+  if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
 
   // Every engine this command starts, for resume, replay or fork, renders the prompt of every
   // available task, so a missing static prompt is restored before any of them starts. `timetravel`
@@ -5396,27 +5415,6 @@ function retryProducerForFailedVerifier(
   const producer = inspect.nodes.find((node) => node.nodeId === producerNodeId);
   if (producer === undefined) return undefined;
   return { nodeId: producer.nodeId, iteration: failedTask.iteration };
-}
-
-/**
- * The nodes a resume resets, as `runSmithersLifecycleCommand` issues the resets, and whether each
- * reset also reopens the nodes after it (every reset without `--no-deps`).
- */
-function continuationResets(
-  inspect: CurrentSmithersInspect | undefined,
-  retryFailed: boolean,
-  resetNode: string | undefined
-): Array<{ nodeId: string; dependents: boolean }> {
-  const retried =
-    inspect === undefined || !retryFailed || smithersRunStateIsActive(inspect)
-      ? []
-      : smithersFailedTasks(inspect).map((failedTask) => {
-          const producer = retryProducerForFailedVerifier(inspect, failedTask);
-          return producer === undefined
-            ? { nodeId: failedTask.nodeId, dependents: false }
-            : { nodeId: producer.nodeId, dependents: true };
-        });
-  return resetNode === undefined ? retried : [...retried, { nodeId: resetNode, dependents: true }];
 }
 
 /**

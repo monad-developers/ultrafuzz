@@ -25,10 +25,10 @@ The rest of this page describes what Ultrafuzz does and does not enforce
 once it is running. None of it substitutes for the host being disposable.
 
 Ultrafuzz uses a trusted local execution model. Agents run as the project
-configures them, and the product boundary is prompt review before launch and
-before each resume, which applies the project's current prompts to the tasks of
-the run that have not finished, and of any prompt file you edit in a run, plus
-explicit artifact review before materialization.
+configures them, and the product boundary is review of the prompts before
+launch, of the project's prompts before each resume, which applies them to the
+run's unfinished tasks, and of any prompt file you edit in a run, plus explicit
+artifact review before materialization.
 
 Agent adapters are intentionally allowed to use their unrestricted execution
 modes, including `--dangerously-skip-permissions` and
@@ -82,9 +82,9 @@ Ultrafuzz does not integrity-check a run's prompt files after launch:
 Nothing compares these files with a launch digest or seals a copy, and the
 digests that name some of them are launch provenance only. Unless
 `run.refresh_prompts_on_resume = false`, each `resume` renders the files of the
-unfinished tasks and the template copies again from the project's current
-`.ultrafuzz/prompts/**` and packaged built-ins, and keeps every file it
-replaces under `prompt-history/`. The vulnerability-database catalog digest is
+unfinished tasks, and the template copies a later render reads, again from the
+project's current `.ultrafuzz/prompts/**` and packaged built-ins, and keeps
+every file it replaces under `prompt-history/`. The vulnerability-database catalog digest is
 checked only when a prompt is rendered. A process running as the operator,
 including an agent in another task, can therefore change the prompt of a task
 that has not run, in the run's files or in the project's prompts. Nothing flags
@@ -115,8 +115,9 @@ canonical
 Acknowledgements bind the policy, effective inputs, the prompt catalog at
 launch, routes, and Git/worktree identity. Any change to these bound inputs
 before launch makes an acknowledgement stale; neither a prompt file edited in a
-run after launch nor a prompt that `resume` applies is acknowledged again. A runtime semantic gate rejects more
-than one acknowledgement for the same destination. Credential values are never
+run after launch nor a prompt that `resume` applies is acknowledged again. A
+runtime semantic gate rejects more than one acknowledgement for the same
+destination. Credential values are never
 persisted. Private standalone Modal evals
 remain fail-closed pending the separate R-26 disclosure authorization. Public
 Modal runs record `cloud:modal`. These controls are not a sandbox or egress

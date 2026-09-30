@@ -9,64 +9,44 @@ import {
   readRegularFileSnapshot,
   readRunPlanDocument,
   safeResolveInside,
+  sha256Bytes,
   type RunLayout,
+  type SmithersTaskManifestDynamicGroup,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
 import { loadProjectConfig, redactDiagnostics, type ResolvedConfig } from "@ultrafuzz/config";
 import { loadPromptCatalog, validatePromptVariables, type PromptCatalog } from "@ultrafuzz/prompts";
-import { loadReferenceCatalog } from "@ultrafuzz/references";
 import {
   assertExpandedGraphSchema,
-  expandTopology,
   loadTopology,
   validateArtifactHandoffs,
   validateTopology,
   type ExpandedGraph,
-  type ExpandedNode,
   type NormalizedProjectTopology
 } from "@ultrafuzz/topology";
 
 import { effectiveTopologyPath } from "./audit-profile-policy.js";
 import { readDynamicRuntimeBase } from "./dynamic-expansion-retry.js";
-import { renderRuntimePromptsFromTemplates, verifyDynamicRuntimeMaterialization } from "./dynamic-runtime.js";
+import {
+  deriveDynamicRuntimeMaterialization,
+  renderRuntimePromptsFromTemplates,
+  type DynamicRuntimeMaterialization
+} from "./dynamic-runtime.js";
 import { renderRunStaticPrompts } from "./plan-run.js";
 import { applyPromptRefresh, type PromptFileChange } from "./prompt-history.js";
-import { assertExpandedGraphRetryChains } from "./retry-chain.js";
+import type { SmithersContinuationContext } from "./smithers.js";
 import { transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
-import { sha256Stable } from "./utils.js";
-import { modelProfilesForTopology } from "./validate.js";
 
 const MAX_RUN_DOCUMENT_BYTES = 128 * 1024 * 1024;
 const MAX_PROMPT_FILE_BYTES = 16 * 1024 * 1024;
-/** Planning adds this output to reference nodes for `run --reference-expectations`; the topology never declares it. */
-const REFERENCE_EXPECTATIONS_CONTRACT = "ultrafuzz/reference-expectations@2";
-/** Output fields the installed build supplies; the run keeps the bindings it planned with. */
-const BUILD_OWNED_OUTPUT_FIELDS = new Set([
-  "contractDigest",
-  "schemaFile",
-  "schemaId",
-  "schemaSha256",
-  "schemaBundleSha256",
-  "validatorBuild"
-]);
-
-/** What `resume` knows about the run before it resets, archives or submits anything. */
-interface PromptRefreshContext {
-  /** Each Smithers node's state before this resume; undefined for a run with no Smithers history. */
-  nodeStates: ReadonlyMap<string, string> | undefined;
-  /** The Smithers nodes this resume resets, and whether a reset also reopens the tasks after them. */
-  resets: ReadonlyArray<{ nodeId: string; dependents: boolean }>;
-  /** Smithers still reports the run active, so an engine may be reading its prompt files. */
-  active: boolean;
-}
 
 interface RefreshInput {
   projectRoot: string;
   layout: RunLayout;
   /** The run's resolved config, frozen at launch. */
   config: ResolvedConfig;
-  context: PromptRefreshContext;
+  context: SmithersContinuationContext;
 }
 
 /** A prompt whose current text is not applied: every file rendered from it keeps its bytes. */
@@ -80,21 +60,24 @@ interface PromptRejection {
  * built-ins selected exactly as `run` selects them, to every task of the run that has not finished.
  * A task has finished when Smithers reports its agent node `finished` and this resume does not reset
  * it. That covers static tasks, including those a reset reruns, generated children that are already
- * rendered, and the template copies under `dynamic-prompt-templates/` from which every prompt not
- * rendered yet will be, such as unexpanded children and the final report.
+ * rendered, and the template copies under `dynamic-prompt-templates/` that a later render reads, such
+ * as those of unexpanded children and of the final report. A group that this resume withdraws counts
+ * as unexpanded, and the files of its generation move to `dynamic-expansion-history/` as they are.
  * `run.refresh_prompts_on_resume = false` in the project's current `ultrafuzz.toml` turns it off.
  *
- * It runs before this resume resets, archives or submits anything, and it never fails the resume:
+ * It runs after every check that can refuse the resume before it resets or archives anything, and
+ * before the first reset, and it never fails the resume:
  *
  * - When it cannot rebuild the run's plan exactly as launch built it, from the run's frozen config
- *   and the project's current topology and prompts, or the rebuilt topology differs from the run's,
- *   it changes nothing and returns one warning.
+ *   and the project's current topology and prompts, or the topology is not the one the run launched
+ *   with, it changes nothing and returns one warning.
  * - A prompt is applied to every file rendered from it, or to none. One that `run` would reject, that
  *   cannot be rendered for one of its tasks, that would name an artifact authority a task was not
  *   compiled with, or that shares a template copy with a prompt whose new text differs, is not
  *   applied; it returns one warning naming the prompt and the reason.
- * - Every file it replaces is copied first to `prompt-history/<time>-<uuid>/`, where `refresh.json`
- *   lists each rewritten file with its old and new digests; each file is written atomically.
+ * - `prompt-history/<time>-<uuid>/refresh.json` lists every file it rewrites with its old and new
+ *   digests before the first one changes, each old file is copied beside it, and each file is
+ *   written atomically.
  */
 export async function refreshRunPrompts(input: RefreshInput): Promise<RuntimeDiagnostic[]> {
   let enabled: boolean;
@@ -114,17 +97,7 @@ export async function refreshRunPrompts(input: RefreshInput): Promise<RuntimeDia
     return [skipped(errorMessage(error))];
   }
   const diagnostics = plan.rejections.map(rejectedWarning);
-  if (plan.changes.length === 0) return diagnostics;
-  try {
-    diagnostics.push(applyPromptRefresh(input.layout.root, plan.changes));
-  } catch (error) {
-    diagnostics.push({
-      code: "PROMPT_REFRESH_INCOMPLETE",
-      message: `resume could not finish applying the project's current prompts, so some unfinished tasks keep the run's: ${errorMessage(error)}; the files it replaced are under prompt-history/, and the next resume applies the rest`,
-      severity: "warning",
-      source: "prompts"
-    });
-  }
+  if (plan.changes.length > 0) diagnostics.push(applyPromptRefresh(input.layout.root, plan.changes));
   return diagnostics;
 }
 
@@ -149,6 +122,13 @@ interface LaunchedRun {
   promptByLogicalId: ReadonlyMap<string, string>;
 }
 
+/** A dynamic run's runtime, as the next render derives it. */
+interface RunRuntime {
+  runId: string;
+  groups: readonly SmithersTaskManifestDynamicGroup[];
+  materialization: DynamicRuntimeMaterialization;
+}
+
 /** What the refresh has decided so far. */
 interface RefreshState {
   runRoot: string;
@@ -158,20 +138,27 @@ interface RefreshState {
   rejected: Map<string, string>;
   /** The unfinished tasks and template copies each prompt would change, for its warning. */
   targets: Map<string, Set<string>>;
-  /** Each template copy, relative to the run root, and the prompts rendered from it. */
+  /**
+   * Each template copy the run's groups and tasks name, relative to the run root, and the prompts
+   * rendered from it.
+   */
   templates: Map<string, Set<string>>;
+  /** The template copies a later render reads; only these are rewritten. */
+  liveTemplates: Set<string>;
   changes: PromptFileChange[];
 }
 
 function planPromptRefresh(input: RefreshInput): { changes: PromptFileChange[]; rejections: PromptRejection[] } {
   const run = readLaunchedRun(input.layout);
   const { catalog, topology } = currentProjectInputs(input, run);
+  const runtime = deriveRunRuntime(input);
   const state: RefreshState = {
     runRoot: input.layout.root,
     bodies: new Map(),
     rejected: new Map(),
     targets: new Map(),
     templates: new Map(),
+    liveTemplates: new Set(),
     changes: []
   };
   for (const prompt of new Set(run.promptByLogicalId.values())) {
@@ -181,9 +168,10 @@ function planPromptRefresh(input: RefreshInput): { changes: PromptFileChange[]; 
       reject(state, prompt, errorMessage(error));
     }
   }
-  const unfinished = unfinishedAttempts(run.tasks, input.context);
+  // The derived runtime also lists generated children, with the dependencies the next render gives them.
+  const unfinished = unfinishedAttempts(runtime?.materialization.tasks ?? run.tasks, input.context);
   refreshStaticPrompts(input, run, catalog, unfinished, state);
-  refreshRuntimePrompts(input, run, unfinished, state);
+  if (runtime !== undefined) refreshRuntimePrompts(input, run, runtime, unfinished, state);
   settleTemplateCopies(state);
   return {
     changes: state.changes.filter((change) =>
@@ -217,8 +205,9 @@ function readLaunchedRun(layout: RunLayout): LaunchedRun {
 
 /**
  * The project's current topology and prompt catalog, loaded with the planning inputs launch used:
- * the run's frozen config and the topology choices its plan records. A topology that no longer
- * expands to the run's graph throws, which skips the whole refresh.
+ * the run's frozen config and the topology choices its plan records. The refresh renders against the
+ * run's own graph and checks each prompt's artifact handoffs against this topology, so it throws, which
+ * skips the whole refresh, unless the topology file is the one the run launched with.
  */
 function currentProjectInputs(
   input: RefreshInput,
@@ -239,26 +228,44 @@ function currentProjectInputs(
       ? { runtimeTopologyPath: auditProfile.effective_topology_path }
       : {})
   });
+  // Launch records the digest of the file's bytes, so any edit, even to a comment, skips the refresh.
+  if (sha256Bytes(fs.readFileSync(topologyPath)) !== auditProfile.topology_digest) {
+    throw new Error(`the topology ${auditProfile.effective_topology_path} changed since the run launched`);
+  }
   const topology = transformTopologyForRun(loadTopology(projectRoot, { topologyPath, validate: false }), transform);
-  // Without a project root or prompt texts these check the topology's structure only; each prompt is
+  // Without a project root or prompt texts this checks the topology's structure only; each prompt is
   // validated on its own, so one bad prompt cannot hide every other edit.
   const normalized = validateTopology(topology).topology;
-  const current = expandTopology(topology, {
-    runId: input.layout.runId,
-    defaultTimeoutSeconds: config.run.defaultTimeoutSeconds,
-    defaultMaxAttempts: config.retry.sameAgentAttempts,
-    modelProfiles: modelProfilesForTopology(config),
-    defaultModelProfileId: config.retry.agents[0] ?? config.models.default,
-    ...(normalized.nodes.some((node) => node.kind === "reference")
-      ? { referenceCatalog: loadReferenceCatalog(projectRoot) }
-      : {})
-  });
-  assertExpandedGraphRetryChains(config, current);
-  const difference = topologyChange(run.launchGraph, current);
-  if (difference !== undefined) throw new Error(`the project's topology no longer matches the run's: ${difference}`);
+  // An eval run can launch without some of the topology's nodes, which its plan does not record.
+  const launched = new Set(run.launchGraph.nodes.map((node) => node.logicalId));
+  if (normalized.nodes.length !== launched.size || normalized.nodes.some((node) => !launched.has(node.id))) {
+    throw new Error("the run launched without some of its topology's nodes");
+  }
   return {
     catalog: transformPromptCatalogForRun(loadPromptCatalog({ projectRoot, validateVariables: false }), transform),
     topology: normalized
+  };
+}
+
+/** The dynamic runtime of a run that compiled a dynamic group, derived as the next render derives it. */
+function deriveRunRuntime(input: RefreshInput): RunRuntime | undefined {
+  const runRoot = input.layout.root;
+  const base = readDynamicRuntimeBase(runRoot);
+  if (base === undefined) return undefined;
+  return {
+    runId: base.runId,
+    groups: base.groups,
+    materialization: deriveDynamicRuntimeMaterialization({
+      runId: base.runId,
+      projectRoot: input.projectRoot,
+      runRoot,
+      graphPath: path.join(runRoot, "graph.json"),
+      tasksPath: path.join(runRoot, "smithers", "tasks.json"),
+      baseGraphPath: base.graphPath,
+      baseTasksPath: base.tasksPath,
+      baseTasks: base.tasks,
+      groups: base.groups
+    })
   };
 }
 
@@ -298,7 +305,7 @@ function refreshStaticPrompts(
   for (const { plan, result } of rendered) {
     const target = targets.get(plan.attempt_id);
     if (target === undefined) continue;
-    tryPropose(state, target.prompt, plan.attempt_id, () => {
+    tryPropose(state, [target.prompt], plan.attempt_id, () => {
       const relativePath = promptFilePath(plan.attempt_id);
       if (path.resolve(result.renderedPromptPath) !== path.join(state.runRoot, relativePath)) {
         throw new Error(`its prompt path is not ${relativePath}`);
@@ -313,105 +320,102 @@ function refreshStaticPrompts(
 }
 
 /**
- * Runtime prompts: the template copies, and the published prompts of unfinished generated or deferred
- * tasks, rendered as the next publishing render would render them. A prompt that waits on a group, or
- * is not published yet, is rendered later from its template copy.
+ * Runtime prompts: the published prompts of unfinished generated or deferred tasks, rendered as the
+ * next publishing render would render them, and the template copies that a later render reads: those
+ * of groups that have not expanded, and those of unfinished tasks whose prompt is not published yet.
  */
 function refreshRuntimePrompts(
   input: RefreshInput,
   run: LaunchedRun,
+  runtime: RunRuntime,
   unfinished: ReadonlySet<string>,
   state: RefreshState
 ): void {
-  const base = readDynamicRuntimeBase(state.runRoot);
-  if (base === undefined) return;
-  const materialization = verifyDynamicRuntimeMaterialization({
-    runId: base.runId,
-    projectRoot: input.projectRoot,
-    runRoot: state.runRoot,
-    graphPath: path.join(state.runRoot, "graph.json"),
-    tasksPath: path.join(state.runRoot, "smithers", "tasks.json"),
-    baseGraphPath: base.graphPath,
-    baseTasksPath: base.tasksPath,
-    baseTasks: base.tasks,
-    groups: base.groups
-  });
-  for (const group of base.groups) {
+  // A withdrawn group expands again from its template copy, and so do the prompts that wait on it;
+  // their current files are the withdrawn generation's record, so they are left as they are.
+  const withdrawn = new Set(input.context.withdrawnGroupIds);
+  const expanded = new Set(runtime.materialization.expandedGroupIds.filter((groupId) => !withdrawn.has(groupId)));
+  for (const group of runtime.groups) {
     const prompt = run.promptByLogicalId.get(group.logicalNodeId);
-    if (prompt !== undefined) addTemplateCopy(state, input.projectRoot, group.templatePath, prompt);
+    if (prompt === undefined) continue;
+    bindTemplateCopy(state, input.projectRoot, group.templatePath, prompt, !expanded.has(group.groupNodeId));
   }
-  const expanded = new Set(materialization.expandedGroupIds);
   const published = new Map<string, { prompt: string; body: string }>();
-  for (const task of materialization.tasks) {
+  for (const task of runtime.materialization.tasks) {
     if (task.promptTemplatePath === undefined) continue;
     const prompt = promptOf(run, task);
-    addTemplateCopy(state, input.projectRoot, task.promptTemplatePath, prompt);
-    if (!unfinished.has(task.attemptId) || !(task.deferredPromptGroups ?? []).every((id) => expanded.has(id))) continue;
+    const groupId = task.metadata.node.dynamic?.groupNodeId;
+    const open = unfinished.has(task.attemptId) && (groupId === undefined || !withdrawn.has(groupId));
+    const hasPrompt =
+      open &&
+      (task.deferredPromptGroups ?? []).every((id) => expanded.has(id)) &&
+      fs.lstatSync(path.join(state.runRoot, promptFilePath(task.attemptId)), { throwIfNoEntry: false }) !== undefined;
+    bindTemplateCopy(state, input.projectRoot, task.promptTemplatePath, prompt, open && !hasPrompt);
+    if (!hasPrompt) continue;
     markTarget(state, prompt, task.attemptId);
     const body = acceptedBody(state, prompt);
-    const file = fs.lstatSync(path.join(state.runRoot, promptFilePath(task.attemptId)), { throwIfNoEntry: false });
-    if (body !== undefined && file !== undefined) published.set(task.attemptId, { prompt, body });
+    if (body !== undefined) published.set(task.attemptId, { prompt, body });
   }
   const renders = renderRuntimePromptsFromTemplates({
-    materialization,
-    groups: base.groups,
+    materialization: runtime.materialization,
+    groups: runtime.groups,
     projectRoot: input.projectRoot,
     runRoot: state.runRoot,
-    runId: base.runId,
+    runId: runtime.runId,
     templates: new Map([...published].map(([attemptId, { body }]) => [attemptId, body]))
   });
   for (const [attemptId, render] of renders) {
     const target = published.get(attemptId);
     if (target === undefined) continue;
-    tryPropose(state, target.prompt, attemptId, () => {
+    tryPropose(state, [target.prompt], attemptId, () => {
       if ("error" in render) throw new Error(render.error);
       return { relativePath: promptFilePath(attemptId), prompt: target.prompt, attemptId, next: render.markdown };
     });
   }
 }
 
-/** The task manifest records template copies relative to the project root. */
-function addTemplateCopy(state: RefreshState, projectRoot: string, templatePath: string, prompt: string): void {
+/**
+ * Records that `prompt` is rendered from this template copy, and whether a later render reads it.
+ * The task manifest records template copies relative to the project root.
+ */
+function bindTemplateCopy(
+  state: RefreshState,
+  projectRoot: string,
+  templatePath: string,
+  prompt: string,
+  read: boolean
+): void {
   const relativePath = path.relative(state.runRoot, path.resolve(projectRoot, templatePath)).split(path.sep).join("/");
   safeResolveInside(state.runRoot, relativePath, `template copy of ${prompt}`);
   state.templates.set(relativePath, (state.templates.get(relativePath) ?? new Set()).add(prompt));
+  if (!read) return;
+  state.liveTemplates.add(relativePath);
   markTarget(state, prompt, relativePath);
 }
 
 /**
  * A template copy is named by the digest of its launch text and bound into the task manifest, so it
- * is rewritten in place, and only when every prompt behind it is applied with the same new text.
- * Rejecting one prompt can block another that shares a copy with it, so this repeats until stable.
+ * is rewritten in place, and only when every prompt rendered from it is applied with the same new
+ * text; otherwise none of those prompts is applied. A prompt's only copy is the one named by its
+ * launch text, so rejecting the prompts of one copy never affects another, and one pass settles all.
  */
 function settleTemplateCopies(state: RefreshState): void {
-  for (let settled = false; !settled;) {
-    settled = true;
-    for (const [relativePath, prompts] of state.templates) {
-      const conflict = templateConflict(state, prompts);
-      if (conflict === undefined) continue;
-      for (const prompt of [...prompts].filter((user) => isAccepted(state, user))) {
-        reject(state, prompt, `it shares the template copy ${relativePath} with ${conflict(prompt)}`);
-        settled = false;
-      }
+  for (const relativePath of state.liveTemplates) {
+    const users = [...(state.templates.get(relativePath) ?? [])].sort();
+    const blocked = users.filter((prompt) => !isAccepted(state, prompt));
+    const [first] = users;
+    const next = first === undefined ? undefined : acceptedBody(state, first);
+    if (first !== undefined && next !== undefined && users.every((prompt) => acceptedBody(state, prompt) === next)) {
+      tryPropose(state, users, relativePath, () => ({ relativePath, prompt: first, next }));
+      continue;
+    }
+    for (const prompt of users) {
+      const others = (blocked.length > 0 ? blocked : users).filter((other) => other !== prompt);
+      if (others.length === 0) continue;
+      const why = blocked.length > 0 ? "which is not applied" : "whose new text differs";
+      reject(state, prompt, `it shares the template copy ${relativePath} with ${others.join(", ")}, ${why}`);
     }
   }
-  for (const [relativePath, prompts] of state.templates) {
-    const [prompt] = [...prompts].sort();
-    const body = prompt === undefined ? undefined : acceptedBody(state, prompt);
-    if (prompt === undefined || body === undefined) continue;
-    try {
-      propose(state, { relativePath, prompt, next: body });
-    } catch (error) {
-      for (const user of prompts) reject(state, user, `${relativePath}: ${errorMessage(error)}`);
-    }
-  }
-}
-
-function templateConflict(state: RefreshState, prompts: ReadonlySet<string>): ((prompt: string) => string) | undefined {
-  const blocked = [...prompts].find((prompt) => !isAccepted(state, prompt));
-  if (blocked !== undefined) return () => `${blocked}, which is not applied`;
-  if (new Set([...prompts].map((prompt) => state.bodies.get(prompt))).size <= 1) return undefined;
-  return (prompt) => `${[...prompts].filter((other) => other !== prompt).join(", ")}, whose new text differs`;
 }
 
 function promptOf(run: LaunchedRun, task: SmithersTaskManifestTask): string {
@@ -447,11 +451,17 @@ function propose(state: RefreshState, change: PromptFileChange): void {
   state.changes.push({ ...change, ...(current === undefined ? {} : { previous: current }) });
 }
 
-function tryPropose(state: RefreshState, prompt: string, label: string, change: () => PromptFileChange): void {
+/** Propose the change; when it cannot be, none of these prompts is applied. */
+function tryPropose(
+  state: RefreshState,
+  prompts: readonly string[],
+  label: string,
+  change: () => PromptFileChange
+): void {
   try {
     propose(state, change());
   } catch (error) {
-    reject(state, prompt, `${label}: ${errorMessage(error)}`);
+    for (const prompt of prompts) reject(state, prompt, `${label}: ${errorMessage(error)}`);
   }
 }
 
@@ -481,7 +491,10 @@ function currentPromptBody(
  * resets a node's dependents by start time, so a reset also reruns a finished task that merely
  * started after it; only the reset task and the tasks that depend on it are counted here.
  */
-function unfinishedAttempts(tasks: readonly SmithersTaskManifestTask[], context: PromptRefreshContext): Set<string> {
+function unfinishedAttempts(
+  tasks: readonly SmithersTaskManifestTask[],
+  context: SmithersContinuationContext
+): Set<string> {
   const ownerOf = new Map<string, SmithersTaskManifestTask>();
   const dependents = new Map<string, string[]>();
   for (const task of tasks) {
@@ -531,41 +544,6 @@ function addedAuthoritySelectors(
         : []
   );
   return [...new Set(named)].filter((selector) => !compiled.has(selector)).sort();
-}
-
-/**
- * The first structural difference between the run's launch graph and one expanded from the current
- * topology. Prompt digests and the schema bindings and contract digests the installed build supplies
- * are ignored: prompts are what the refresh applies, and bindings stay as the run planned them.
- */
-function topologyChange(launched: ExpandedGraph, current: ExpandedGraph): string | undefined {
-  const structure = (graph: ExpandedGraph): Map<string, string> =>
-    new Map(graph.nodes.map((node) => [node.id, sha256Stable(structuralNode(node))]));
-  const before = structure(launched);
-  const after = structure(current);
-  for (const nodeId of before.keys()) {
-    if (!after.has(nodeId)) return `node ${nodeId} was removed`;
-  }
-  for (const [nodeId, digest] of after) {
-    if (!before.has(nodeId)) return `node ${nodeId} was added`;
-    if (before.get(nodeId) !== digest) return `node ${nodeId} changed`;
-  }
-  return sha256Stable(launched.groups) === sha256Stable(current.groups) ? undefined : "its groups changed";
-}
-
-function structuralNode(node: ExpandedNode): unknown {
-  const { dynamic, outputs, ...rest } = node;
-  return {
-    ...rest,
-    outputs: outputs
-      .filter((output) => node.kind !== "reference" || output.contract !== REFERENCE_EXPECTATIONS_CONTRACT)
-      .map((output) =>
-        Object.fromEntries(Object.entries(output).filter(([key]) => !BUILD_OWNED_OUTPUT_FIELDS.has(key)))
-      ),
-    ...(dynamic === undefined
-      ? {}
-      : { dynamic: { from: dynamic.from, key: dynamic.key, nodeIdTemplate: dynamic.nodeIdTemplate } })
-  };
 }
 
 /** The file's bytes, or undefined when it is missing; anything else at the path is refused. */

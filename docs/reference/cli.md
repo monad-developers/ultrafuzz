@@ -384,22 +384,13 @@ once that directory is gone their engine commands fail with
 
 Every task of a resumed run, with or without `--refresh-controller`,
 `--retry-failed` or `--reset-node`, and of a `replay` or `fork`, receives the
-run's own `artifacts/<attempt-id>/prompt.rendered.md`. Before it resets
-anything or starts the engine, `resume` applies the project's current prompts,
-`.ultrafuzz/prompts/**` and the packaged built-ins, to every task that has not
-finished: it re-renders their prompt files and the template copies that later
-prompts render from, copies each file it replaces to `prompt-history/`, and
-reports `PROMPTS_REFRESHED`. A prompt that does not validate or render keeps
-its tasks' files and is reported as `PROMPT_REFRESH_REJECTED`; a topology that
-no longer matches the run's skips the refresh with `PROMPT_REFRESH_SKIPPED`.
-Neither fails the resume. `run.refresh_prompts_on_resume = false` in the
-project's current `ultrafuzz.toml` turns the refresh off, and then an edit to a
-run's prompt file reaches the task's next attempt. `replay` and `fork` never
-refresh prompts. Before any of these commands starts an engine, it restores a
-missing static prompt from its launch copy in `prompt-snapshots/`; it never
-replaces anything else at a prompt path. A prompt that is still missing or
-cannot be read, or a runtime prompt that no longer renders, fails only its
-task. See
+run's own `artifacts/<attempt-id>/prompt.rendered.md`. Unless
+`run.refresh_prompts_on_resume = false`, `resume` first renders that file again
+from the project's current prompts for every task that has not finished;
+`replay` and `fork` never do. Before any of these commands starts an engine, it
+restores a missing static prompt from its launch copy in `prompt-snapshots/`,
+never over an existing file. A prompt that is still missing or cannot be read,
+or a runtime prompt that no longer renders, fails only its task. See
 [Change a prompt of a running campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 A run that ends `failed` with no failed durable node was stopped by something

@@ -29,41 +29,50 @@ export interface PromptFileChange {
 }
 
 /**
- * Copy each file about to be replaced into a new `prompt-history/` entry, then replace it atomically,
- * then record what changed, and describe it. A process killed part way leaves every file whole: each
- * one either holds its old bytes or its new ones, whose old bytes are already in the entry.
+ * Record the refresh in a new `prompt-history/` entry, then copy each file about to be replaced into
+ * it and replace the file atomically, and describe the outcome; it never throws. `refresh.json` is
+ * published before the first file changes, so after a failure or a killed process every file it
+ * lists holds either its previous bytes or its new ones.
  */
 export function applyPromptRefresh(runRoot: string, changes: readonly PromptFileChange[]): RuntimeDiagnostic {
-  const historyRoot = path.join(runRoot, PROMPT_HISTORY_DIR);
-  fs.mkdirSync(historyRoot, { recursive: true, mode: 0o700 });
-  assertNoSymlinkComponents(runRoot, historyRoot, "prompt history");
-  const refreshedAt = new Date().toISOString();
-  const entry = path.join(historyRoot, `${refreshedAt.replaceAll(":", "-")}-${crypto.randomUUID()}`);
-  fs.mkdirSync(entry, { mode: 0o700 });
-  for (const change of changes) {
-    if (change.previous !== undefined) publishFileDurableExclusive(entry, change.relativePath, change.previous);
-    writeFileDurable(prepareSafeFilePath(runRoot, change.relativePath), change.next);
+  let entry: string | undefined;
+  let replaced = 0;
+  try {
+    const historyRoot = path.join(runRoot, PROMPT_HISTORY_DIR);
+    fs.mkdirSync(historyRoot, { recursive: true, mode: 0o700 });
+    assertNoSymlinkComponents(runRoot, historyRoot, "prompt history");
+    const refreshedAt = new Date().toISOString();
+    const entryPath = path.join(historyRoot, `${refreshedAt.replaceAll(":", "-")}-${crypto.randomUUID()}`);
+    fs.mkdirSync(entryPath, { mode: 0o700 });
+    publishFileDurableExclusive(entryPath, "refresh.json", refreshRecord(refreshedAt, changes));
+    entry = path.relative(runRoot, entryPath).split(path.sep).join("/");
+    for (const change of changes) {
+      if (change.previous !== undefined) publishFileDurableExclusive(entryPath, change.relativePath, change.previous);
+      writeFileDurable(prepareSafeFilePath(runRoot, change.relativePath), change.next);
+      replaced += 1;
+    }
+    return refreshedInfo(entry, changes);
+  } catch (error) {
+    return incompleteWarning(error, entry, replaced, changes.length);
   }
-  publishFileDurableExclusive(
-    entry,
-    "refresh.json",
-    `${JSON.stringify(
-      {
-        schema_version: PROMPT_REFRESH_SCHEMA_VERSION,
-        refreshed_at: refreshedAt,
-        files: changes.map((change) => ({
-          path: change.relativePath,
-          ...(change.attemptId === undefined ? {} : { attempt_id: change.attemptId }),
-          prompt: `.ultrafuzz/prompts/${change.prompt}`,
-          previous_sha256: change.previous === undefined ? null : sha256Bytes(change.previous),
-          sha256: sha256Bytes(Buffer.from(change.next, "utf8"))
-        }))
-      },
-      null,
-      2
-    )}\n`
-  );
-  return refreshedInfo(path.relative(runRoot, entry).split(path.sep).join("/"), changes);
+}
+
+function refreshRecord(refreshedAt: string, changes: readonly PromptFileChange[]): string {
+  return `${JSON.stringify(
+    {
+      schema_version: PROMPT_REFRESH_SCHEMA_VERSION,
+      refreshed_at: refreshedAt,
+      files: changes.map((change) => ({
+        path: change.relativePath,
+        ...(change.attemptId === undefined ? {} : { attempt_id: change.attemptId }),
+        prompt: `.ultrafuzz/prompts/${change.prompt}`,
+        previous_sha256: change.previous === undefined ? null : sha256Bytes(change.previous),
+        sha256: sha256Bytes(Buffer.from(change.next, "utf8"))
+      }))
+    },
+    null,
+    2
+  )}\n`;
 }
 
 function refreshedInfo(entry: string, changes: readonly PromptFileChange[]): RuntimeDiagnostic {
@@ -84,5 +93,24 @@ function refreshedInfo(entry: string, changes: readonly PromptFileChange[]): Run
     severity: "info",
     source: "prompts",
     path: entry
+  };
+}
+
+function incompleteWarning(
+  error: unknown,
+  entry: string | undefined,
+  replaced: number,
+  planned: number
+): RuntimeDiagnostic {
+  const outcome =
+    entry === undefined
+      ? "no prompt file changed"
+      : `${entry}/refresh.json lists every file it planned, and each holds either its previous bytes or its new ones`;
+  return {
+    code: "PROMPT_REFRESH_INCOMPLETE",
+    message: `resume stopped applying the project's current prompts after ${String(replaced)} of ${String(planned)} files: ${error instanceof Error ? error.message : String(error)}; ${outcome}. Resume again once the cause is fixed.`,
+    severity: "warning",
+    source: "prompts",
+    ...(entry === undefined ? {} : { path: entry })
   };
 }

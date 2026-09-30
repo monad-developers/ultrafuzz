@@ -996,8 +996,6 @@ interface StaticPromptRender {
 /** A static attempt whose prompt could not be rendered, and why. */
 interface StaticPromptRenderFailure {
   attemptId: string;
-  /** The node's `prompt_path`, such as `.ultrafuzz/prompts/setup/project-discovery.md`. */
-  promptPath: string;
   message: string;
 }
 
@@ -1074,7 +1072,6 @@ function renderStaticPrompts(
         if (options.failures === undefined) throw error;
         options.failures.push({
           attemptId: attempt.attemptId,
-          promptPath: node.prompt_path,
           message: error instanceof Error ? error.message : String(error)
         });
       }

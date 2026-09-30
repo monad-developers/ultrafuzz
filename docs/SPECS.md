@@ -282,9 +282,10 @@ MUST be rendered again only while it is missing or when `resume` applies the
 project's current prompts. `resume` MUST apply them, unless
 `run.refresh_prompts_on_resume` is `false` in the project's current
 `ultrafuzz.toml`, to every task that has not finished and to the template
-copies, before it resets or submits anything, and MUST NOT fail because of it:
-a prompt that does not validate or render keeps its tasks' files, and a
-topology that no longer matches the run's skips the refresh. A prompt that
+copies a later render reads, after the checks that can refuse the resume and
+before it resets or submits anything, and MUST NOT fail because of it: a prompt
+that does not validate or render keeps its tasks' files, and a topology that
+differs from the one the run launched with skips the refresh. A prompt that
 cannot be rendered at runtime MUST fail only its own task. Unknown template
 variables MUST fail validation.
 
