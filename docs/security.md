@@ -222,9 +222,11 @@ before cache reuse. `resume`, `ps`, the `--refresh-controller` ownership
 inspection, commands on a run without a sealed runner, and each run's
 `trusted-bin/smithers` shim instead run the engine from Ultrafuzz's own pnpm
 install, which pnpm patches at install time from the committed `patches/`
-files. That engine is not sealed: only its entrypoint and the Bun that runs it
-are digest-anchored for each command, its package closure is not hashed, and it
-runs without the Bun module confinement a sealed runner has. Ultrafuzz refuses
+files. That engine is not sealed. For each command Ultrafuzz runs, only its
+entrypoint and the Bun that runs it are digest-anchored, and the
+`trusted-bin/smithers` shim checks neither again: it executes the two paths it
+recorded when it was written. The engine's package closure is not hashed, and
+it runs without the Bun module confinement a sealed runner has. Ultrafuzz refuses
 it when it lacks any compatibility patch or lies inside the target project. It
 starts the engine's command process with
 `--config=/dev/null --no-env-file --no-install --no-addons`, so that process
