@@ -22763,11 +22763,13 @@ test("syncRun shows the failure an agent stated beside its generic error (#1084)
   });
   const run = await startRun({ projectRoot: project, runId: "sync-stated-failure", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
 
   const sync = await syncRun({ projectRoot: project, runId: "sync-stated-failure", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
     nodes?: Record<string, { last_error?: string }>;
   };
   // The durable text passes the usual secret redaction, which reads
@@ -22775,7 +22777,7 @@ test("syncRun shows the failure an agent stated beside its generic error (#1084)
   const shown = /^Claude run failed: Failed to refresh OAuth token\b.*Claude Code process is refreshing it/u;
   assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", shown);
   const ledger = fs
-    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .readFileSync(path.join(runRoot, "attempts.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
