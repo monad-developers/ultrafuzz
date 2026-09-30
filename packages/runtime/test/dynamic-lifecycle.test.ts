@@ -783,10 +783,25 @@ async function assertSynchronizableRun(fixture: DynamicFixture): Promise<void> {
   }
 }
 
+/** Sets `run.refresh_prompts_on_resume` in the project's `ultrafuzz.toml`, which `resume` reads. */
+function setRefreshPromptsOnResume(project: string, enabled: boolean): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[run\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[run\]$/mu, `[run]\nrefresh_prompts_on_resume = ${String(enabled)}`),
+    "utf8"
+  );
+}
+
 test("a hand-edited runtime prompt keeps a launched dynamic run synchronizable and resumable", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-prompt-edit" });
   const planner = plannerSuccessEvidence(fixture);
   setLifecycle(fixture, planner.steps, planner.events);
+  // A hand edit of a run's prompt file survives resume only with the prompt refresh off; otherwise
+  // resume renders the project's current prompt over it.
+  setRefreshPromptsOnResume(fixture.project, false);
   // An operator's edit of tasks that have not run, and what an upgrade that changed a renderer or a
   // projection leaves (#1176, #1195): the join, like the stock final report, renders only after the
   // group expands.
@@ -874,6 +889,83 @@ test("a runtime prompt that cannot be rendered fails only its task and recovers 
   assert.deepEqual(recovered.promptRenderFailures, []);
   assert.match(fs.readFileSync(child.renderedPromptPath, "utf8"), /find any vulnerability affecting/u);
   assert.equal(fs.existsSync(fixture.joinTask.renderedPromptPath), true);
+  setLifecycle(fixture, planner.steps, planner.events);
+  await assertSynchronizableRun(fixture);
+});
+
+test("resume applies edited project prompts to unfinished dynamic children and to prompts not rendered yet", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-prompt-refresh" });
+  const planner = plannerSuccessEvidence(fixture);
+  const child = fixture.generatedTasks[0];
+  assert.ok(child?.renderedPromptPath && fixture.joinTask.renderedPromptPath && fixture.joinTask.promptTemplatePath);
+  assert.ok(fixture.plannerTask.renderedPromptPath);
+  const taskDocument = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"), "utf8")) as {
+    dynamic_groups: CompiledSmithersDynamicGroup[];
+  };
+  const [group] = taskDocument.dynamic_groups;
+  assert.ok(group);
+  const groupTemplatePath = path.resolve(fixture.project, group.templatePath);
+  const joinTemplatePath = path.resolve(fixture.project, fixture.joinTask.promptTemplatePath);
+  const launched = new Map(
+    [child.renderedPromptPath, fixture.joinTask.renderedPromptPath, groupTemplatePath, joinTemplatePath].map(
+      (filePath) => [filePath, fs.readFileSync(filePath, "utf8")] as const
+    )
+  );
+  const plannerPrompt = fs.readFileSync(fixture.plannerTask.renderedPromptPath, "utf8");
+  // The operator edits the project's prompts of the group's children, of the join, and of the planner,
+  // which has finished.
+  const notes = {
+    "dynamic/worker.md": "Operator note: check the grace period first.",
+    "dynamic/join.md": "Operator note: list the goals without findings too.",
+    "dynamic/planner.md": "Operator note: plan one goal per threat."
+  };
+  for (const [prompt, note] of Object.entries(notes)) {
+    fs.appendFileSync(path.join(fixture.project, ".ultrafuzz", "prompts", prompt), `\n${note}\n`, "utf8");
+  }
+
+  setLifecycle(fixture, planner.steps, planner.events, { status: "failed", state: "failed" });
+  const resumed = await resumeRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const prompts = resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  assert.deepEqual(
+    prompts.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(prompts)
+  );
+
+  // The published child and join prompts carry the edits, and so do the template copies that every
+  // prompt not rendered yet is rendered from.
+  for (const [filePath, note] of [
+    [child.renderedPromptPath, notes["dynamic/worker.md"]],
+    [fixture.joinTask.renderedPromptPath, notes["dynamic/join.md"]],
+    [groupTemplatePath, notes["dynamic/worker.md"]],
+    [joinTemplatePath, notes["dynamic/join.md"]]
+  ] as const) {
+    assert.ok(fs.readFileSync(filePath, "utf8").includes(note), filePath);
+  }
+  assert.ok(fs.readFileSync(child.renderedPromptPath, "utf8").includes("find any vulnerability affecting"));
+  // The planner finished, so its prompt file stays the record of the prompt it ran with.
+  assert.equal(fs.readFileSync(fixture.plannerTask.renderedPromptPath, "utf8"), plannerPrompt);
+  // Each replaced file is archived with its launch bytes, and refresh.json lists all four.
+  const entryPath = prompts[0]?.path;
+  assert.ok(entryPath);
+  const entry = path.join(fixture.runRoot, entryPath);
+  const record = JSON.parse(fs.readFileSync(path.join(entry, "refresh.json"), "utf8")) as {
+    files: Array<{ path: string }>;
+  };
+  const relative = (filePath: string): string => path.relative(fixture.runRoot, filePath).split(path.sep).join("/");
+  assert.deepEqual(record.files.map((file) => file.path).sort(), [...launched.keys()].map(relative).sort());
+  for (const [filePath, bytes] of launched) {
+    assert.equal(fs.readFileSync(path.join(entry, relative(filePath)), "utf8"), bytes);
+  }
+
+  // The resumed engine renders with the refreshed prompts; a child rendered after the refresh, as one
+  // of a group that expands later is, renders from the refreshed template copy.
+  const refreshedChild = fs.readFileSync(child.renderedPromptPath, "utf8");
+  fs.rmSync(child.renderedPromptPath);
+  const rendered = replayResumedWorkflowRender(fixture);
+  assert.deepEqual(rendered.promptRenderFailures, []);
+  assert.equal(fs.readFileSync(child.renderedPromptPath, "utf8"), refreshedChild);
   setLifecycle(fixture, planner.steps, planner.events);
   await assertSynchronizableRun(fixture);
 });

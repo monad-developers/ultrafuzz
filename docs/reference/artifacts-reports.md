@@ -26,6 +26,7 @@ usage.jsonl
 attempts.jsonl
 plan.json
 prompt-snapshots/
+prompt-history/
 trusted-cli.json
 trusted-bin/
 artifacts/
@@ -141,13 +142,19 @@ every engine hands the agent that file: launch, `resume` (with or without
 `fork`. A static prompt is rendered at plan time. A prompt that waits on a
 dynamic group, a generated child's or a later node's such as the final report,
 is rendered from the run's template copy under `dynamic-prompt-templates/` when
-the group expands, and only while its file is missing. After that, no prompt
-file is re-rendered, compared with a recorded digest, or sealed: an edited file
-is what the task's next attempt receives, and an upgrade that renders templates
-differently leaves published prompts as they are. A runtime prompt that cannot
-be rendered, or a prompt file that is missing, unreadable or not a regular file,
-fails only its task, at the `assert-task-inputs` preparation step, with the
-cause.
+the group expands, and only while its file is missing. No prompt file is
+compared with a recorded digest or sealed. Beyond that, a prompt file is
+rendered again only when `resume` applies the project's current prompts to the
+tasks that have not finished, which it does unless
+`run.refresh_prompts_on_resume = false`: it re-renders their files and the
+template copies, and first copies every file it replaces to
+`prompt-history/<time>-<id>/`, at the file's path in the run, with
+`refresh.json` listing each rewritten file, its attempt and prompt, and its old
+and new SHA-256. A finished task's file stays the record of the prompt it ran
+with. Otherwise an edited file is what the task's next attempt receives. A
+runtime prompt that cannot be rendered, or a prompt file that is missing,
+unreadable or not a regular file, fails only its task, at the
+`assert-task-inputs` preparation step, with the cause.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 the launch render of each static prompt (its path and digest) and the path of

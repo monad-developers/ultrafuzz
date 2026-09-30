@@ -457,7 +457,7 @@ function collectAttemptStateMoves(
  * The same light shape check `verifyDynamicRuntimeMaterialization`'s caller
  * applies to the sealed copy is applied here.
  */
-function readDynamicRuntimeBase(runRoot: string): DynamicRuntimeBase | undefined {
+export function readDynamicRuntimeBase(runRoot: string): DynamicRuntimeBase | undefined {
   const graphPath = path.join(runRoot, "smithers", "runtime-base-graph.json");
   const tasksPath = path.join(runRoot, "smithers", "runtime-base-tasks.json");
   const hasGraph = fs.existsSync(graphPath);

@@ -54,7 +54,10 @@ only unfinished or newly rendered downstream tasks. Ultrafuzz control seals,
 link journals, controller generations, graph fingerprints, schema bindings,
 and metadata projections do not authorize continuation, so runs created before
 those records existed can still reach Smithers. Historical artifact bytes and
-embedded run IDs are never rewritten.
+embedded run IDs are never rewritten. Before it resets anything or starts the
+engine, resume applies the project's current prompts to the tasks that have not
+finished; see
+[Change A Prompt Of A Running Campaign](#change-a-prompt-of-a-running-campaign).
 
 Use `--refresh-controller` when continuation should render the currently
 installed controller and stock adapters. The new source is retained beside the
@@ -95,20 +98,83 @@ those nodes run again.
 
 ## Change A Prompt Of A Running Campaign
 
-A run keeps its own prompts. Edits to `.ultrafuzz/prompts/**` apply to new runs
-only. To change what a task of a launched run receives, edit that task's file
-in the run and resume:
+Edit the project's prompt under `.ultrafuzz/prompts/`, then resume the run:
+
+```bash
+ultrafuzz resume <run-id> --project /path/to/target-protocol
+```
+
+Every `resume`, with or without `--refresh-controller`, `--retry-failed` or
+`--reset-node`, first applies the project's current prompts to every task of
+the run that has not finished, before it resets anything or starts the engine.
+It selects each prompt exactly as `ultrafuzz run` does, from
+`.ultrafuzz/prompts/**` and the packaged built-ins, and renders it the way the
+run's launch did, with the run's own config. A task has finished when the
+workflow engine reports its agent `finished` and the resume does not reset it.
+The refresh reaches:
+
+- static tasks that have not run, that failed or were interrupted, and those
+  that `--retry-failed` or `--reset-node` reruns, with the tasks that depend on
+  them;
+- the rendered prompts of generated children and of later nodes such as the
+  final report, once their dynamic group has expanded;
+- the template copies under `dynamic-prompt-templates/` from which every prompt
+  not rendered yet is rendered, such as the children of a group that has not
+  expanded.
+
+A finished task keeps its `prompt.rendered.md`, the record of the prompt it
+ran with. To rerun a finished task with the edited prompt, use
+`resume --reset-node node:<attempt-id>`. A reset also reruns finished tasks
+that merely started after the reset task; those keep their prompt. While the
+workflow engine still reports the run active, resume refreshes nothing, and an
+attempt that is running keeps the prompt it started with.
+
+Resume reports what the refresh did, and none of it fails the resume:
+
+- `PROMPTS_REFRESHED` (info) names the tasks whose prompts it rewrote and
+  counts the template copies. It copies each file first to
+  `.ultrafuzz/runs/<run-id>/prompt-history/<time>-<id>/`, at the file's path
+  in the run, then replaces it atomically; `refresh.json` there lists every
+  rewritten file with its old and new SHA-256.
+- `PROMPT_REFRESH_REJECTED` (warning) names a prompt it did not apply, and why:
+  `ultrafuzz run` would reject it, it does not render for one of its tasks, it
+  names an artifact authority that a task was not compiled with, or it shares
+  a template copy with another prompt whose new text differs. A prompt is
+  applied to every task rendered from it or to none, and the other prompts
+  still apply. Fix it and resume again.
+- `PROMPT_REFRESH_SKIPPED` (warning) means it applied nothing, for example
+  because the project's topology no longer matches the run's, or
+  `ultrafuzz.toml` cannot be read. Change the topology only for a new run.
+
+A prompt that renders now can still fail later: a typo in an item variable,
+such as `{{item.goal_promt}}`, fails only when the group expands, and then only
+the child's task, at the `assert-task-inputs` step. Fix the project prompt and
+run `resume --retry-failed`.
+
+### Edit A Run's Own Prompt Files
+
+To edit a run's prompt files by hand instead, turn the refresh off first, or
+the next resume renders the project's prompt over your edit:
+
+```toml
+[run]
+refresh_prompts_on_resume = false
+```
+
+Resume reads this key from the project's current `ultrafuzz.toml`, so it also
+applies to runs already in flight. With the refresh off, every engine hands the
+agent the run's own file as it is: `resume` with or without
+`--refresh-controller`, `--retry-failed` or `--reset-node`, and `replay` and
+`fork`, which never refresh prompts. Nothing re-renders it or compares it with
+the launch render, so the edit neither strands the run nor stops `status` from
+synchronizing.
 
 ```text
 .ultrafuzz/runs/<run-id>/artifacts/<attempt-id>/prompt.rendered.md
 ```
 
-Every engine hands the agent that file as it is: `resume` with or without
-`--refresh-controller`, `--retry-failed` or `--reset-node`, and `replay` and
-`fork`. Nothing re-renders it or compares it with the launch render, so the
-edit neither strands the run nor stops `status` from synchronizing. Edit the
-file in place and keep it a regular file: a symlink or a directory at that path
-fails the task.
+Edit the file in place and keep it a regular file: a symlink or a directory at
+that path fails the task.
 
 - A prompt that waits on a dynamic group, a generated child's or a later
   node's such as the final report, has no file until the group expands. Before
@@ -129,13 +195,12 @@ fails the task.
   lines. The agent needs them, and they are checked only when a prompt is
   rendered, not when you edit it.
 - A running attempt keeps the prompt it started with; the edit reaches the
-  task's next attempt. To rerun a finished task with an edited prompt, use
-  `resume --reset-node node:<attempt-id>`. This reset, like `--retry-failed`,
-  restarts the task's attempt numbers in the workflow engine, and each rerun
-  attempt replaces the engine's record of the earlier attempt with the same
-  number, including the prompt that attempt received. Run `ultrafuzz status`
-  before the reset so that `attempts.jsonl` records the finished attempt, and
-  keep a copy of the prompt file if you need to know what it received.
+  task's next attempt. `--reset-node` and `--retry-failed` restart the task's
+  attempt numbers in the workflow engine, and each rerun attempt replaces the
+  engine's record of the earlier attempt with the same number, including the
+  prompt that attempt received. Run `ultrafuzz status` before the reset so that
+  `attempts.jsonl` records the finished attempt, and keep a copy of the prompt
+  file if you need to know what it received.
 - A deleted static prompt is restored from its launch copy in
   `prompt-snapshots/` before the next engine starts, so it comes back without
   your edit. A deleted runtime prompt is rendered again from its template copy.
@@ -144,19 +209,24 @@ fails the task.
   own task, at the `assert-task-inputs` preparation step, with the cause. Fix
   the file and run `resume --retry-failed`.
 
+### Runs Launched By An Earlier Release
+
 For a run launched by a release before this one, edit prompts only while the
 run is stopped (`pause` it first), then resume it with this release, using
 `resume --refresh-controller`. Until then, its original engine still reads
 sealed copies of static prompts, so a static edit is lost, and still compares
 runtime prompts, so a runtime edit stops the run. A plain `resume` continues
 the run's launch workflow, which stops the whole run, instead of one task, when
-a runtime prompt no longer renders; with `--refresh-controller` the run
-continues on this release's workflow instead. `replay` and `fork` of such a run
-keep running its launch snapshot, and so behave like its original engine. That
-engine has also removed the prompt file of every static task it started: copy
-the launch copy that `plan.json` names for the attempt
-(`rendered_prompts[].rendered_prompt_snapshot_path`) to the attempt's
-`prompt.rendered.md`, then edit it.
+a runtime prompt no longer renders, including one rendered from a template copy
+that the refresh rewrote; with `--refresh-controller` the run continues on this
+release's workflow instead. `replay` and `fork` of such a run keep running its
+launch snapshot, and so behave like its original engine. That engine has also
+removed the prompt file of every static task it started. Resume renders the
+file again for such a task that has not finished; for a finished one it
+restores the launch copy that `plan.json` names for the attempt
+(`rendered_prompts[].rendered_prompt_snapshot_path`). To edit one by hand with
+the refresh off, copy that launch copy to the attempt's `prompt.rendered.md`,
+then edit it.
 
 ## Replay A Linked Run
 

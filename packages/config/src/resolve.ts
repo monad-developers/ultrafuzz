@@ -30,6 +30,7 @@ import {
   type ProjectConfigInput,
   type ResolveConfigInput,
   type ResolvedConfig,
+  type RunConfigInput,
   type RuntimeConfigOverrides
 } from "./types.js";
 
@@ -582,8 +583,11 @@ function applyRuntimeOverrides(
   syncDefaultModelProfile(config);
 }
 
-function applyRunConfig(target: ResolvedConfig["run"], source: Partial<ResolvedConfig["run"]>): void {
-  Object.assign(target, definedOnly(source));
+function applyRunConfig(target: ResolvedConfig["run"], source: RunConfigInput): void {
+  // `resume` reads `refresh_prompts_on_resume` from the current file; a run's config never records it.
+  const frozen = { ...source };
+  delete frozen.refreshPromptsOnResume;
+  Object.assign(target, definedOnly(frozen));
 }
 
 function applyPermissionConfig(target: PermissionConfig, source: Partial<PermissionConfig>): void {

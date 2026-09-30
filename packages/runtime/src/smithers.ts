@@ -4822,6 +4822,15 @@ export async function runSmithersLifecycleCommand(input: {
   priorInspection?: SmithersResumeInspection;
   /** Prepare launch authority only after ruling out an idempotent active attach. */
   prepareContinuationEnvironment?: () => Record<string, string | undefined>;
+  /**
+   * Runs once per resume that starts an engine, before it completes a retry withdrawal, resets,
+   * archives or submits anything, with the node states it inspected and the resets it will issue.
+   */
+  beforeContinuation?: (context: {
+    nodeStates: ReadonlyMap<string, SmithersNodeState> | undefined;
+    resets: ReadonlyArray<{ nodeId: string; dependents: boolean }>;
+    active: boolean;
+  }) => Promise<void>;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -4910,6 +4919,16 @@ export async function runSmithersLifecycleCommand(input: {
   }
   if (input.action === "resume" && input.prepareContinuationEnvironment !== undefined) {
     input.env = input.prepareContinuationEnvironment();
+  }
+  if (input.action === "resume" && input.beforeContinuation !== undefined) {
+    await input.beforeContinuation({
+      nodeStates:
+        currentInspection === undefined
+          ? undefined
+          : new Map(currentInspection.nodes.map((node) => [node.nodeId, node.state])),
+      resets: continuationResets(currentInspection, input.retryFailed === true, input.resetNode),
+      active: currentInspection !== undefined && smithersRunStateIsActive(currentInspection)
+    });
   }
   // Once Smithers has reset a retried source, nothing plans its withdrawal again, so one that an
   // earlier `--retry-failed` began and did not finish is completed before any engine starts.
@@ -5377,6 +5396,27 @@ function retryProducerForFailedVerifier(
   const producer = inspect.nodes.find((node) => node.nodeId === producerNodeId);
   if (producer === undefined) return undefined;
   return { nodeId: producer.nodeId, iteration: failedTask.iteration };
+}
+
+/**
+ * The nodes a resume resets, as `runSmithersLifecycleCommand` issues the resets, and whether each
+ * reset also reopens the nodes after it (every reset without `--no-deps`).
+ */
+function continuationResets(
+  inspect: CurrentSmithersInspect | undefined,
+  retryFailed: boolean,
+  resetNode: string | undefined
+): Array<{ nodeId: string; dependents: boolean }> {
+  const retried =
+    inspect === undefined || !retryFailed || smithersRunStateIsActive(inspect)
+      ? []
+      : smithersFailedTasks(inspect).map((failedTask) => {
+          const producer = retryProducerForFailedVerifier(inspect, failedTask);
+          return producer === undefined
+            ? { nodeId: failedTask.nodeId, dependents: false }
+            : { nodeId: producer.nodeId, dependents: true };
+        });
+  return resetNode === undefined ? retried : [...retried, { nodeId: resetNode, dependents: true }];
 }
 
 /**

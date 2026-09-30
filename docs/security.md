@@ -25,9 +25,10 @@ The rest of this page describes what Ultrafuzz does and does not enforce
 once it is running. None of it substitutes for the host being disposable.
 
 Ultrafuzz uses a trusted local execution model. Agents run as the project
-configures them, and the product boundary is prompt review before launch, and of
-any prompt file you edit in a run, plus explicit artifact review before
-materialization.
+configures them, and the product boundary is prompt review before launch and
+before each resume, which applies the project's current prompts to the tasks of
+the run that have not finished, and of any prompt file you edit in a run, plus
+explicit artifact review before materialization.
 
 Agent adapters are intentionally allowed to use their unrestricted execution
 modes, including `--dangerously-skip-permissions` and
@@ -60,9 +61,9 @@ Ultrafuzz does not enforce a deterministic repository mutation policy across
 agent behavior. Instructions not to commit, push, open pull requests, submit
 external findings, stage changes, or merge are expressed in agent prompts and
 depend on user acknowledgement plus the trusted local execution model. Review
-prompts before launch and any prompt file you edit in a run, review artifacts
-before materialization, and use normal repository review tools such as
-`git status` before publishing.
+prompts before launch and before a resume, and any prompt file you edit in a
+run, review artifacts before materialization, and use normal repository review
+tools such as `git status` before publishing.
 
 Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
@@ -78,14 +79,19 @@ Ultrafuzz does not integrity-check a run's prompt files after launch:
 - the launch copies under `prompt-snapshots/`, which restore a missing static
   prompt.
 
-Nothing re-renders these files, compares them with a launch digest, or seals a
-copy, and the digests that name some of them are launch provenance only. The
-vulnerability-database catalog digest is checked only when a prompt is
-rendered. A process running as the operator, including an agent in another
-task, can therefore change the prompt of a task that has not run, and nothing
-reports it. This is within the trusted local execution model above: such a
-process can already change the run's workflow source, which native resume runs
-as it is.
+Nothing compares these files with a launch digest or seals a copy, and the
+digests that name some of them are launch provenance only. Unless
+`run.refresh_prompts_on_resume = false`, each `resume` renders the files of the
+unfinished tasks and the template copies again from the project's current
+`.ultrafuzz/prompts/**` and packaged built-ins, and keeps every file it
+replaces under `prompt-history/`. The vulnerability-database catalog digest is
+checked only when a prompt is rendered. A process running as the operator,
+including an agent in another task, can therefore change the prompt of a task
+that has not run, in the run's files or in the project's prompts. Nothing flags
+such a change; a resume only lists, in `PROMPTS_REFRESHED` and `refresh.json`,
+the prompts it rendered again. This is within the trusted local execution model
+above: such a process can already change the run's workflow source, which
+native resume runs as it is.
 
 ## Campaign data governance
 
@@ -108,8 +114,8 @@ canonical
 [data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
 Acknowledgements bind the policy, effective inputs, the prompt catalog at
 launch, routes, and Git/worktree identity. Any change to these bound inputs
-before launch makes an acknowledgement stale; a prompt file edited in a run
-after launch is not acknowledged again. A runtime semantic gate rejects more
+before launch makes an acknowledgement stale; neither a prompt file edited in a
+run after launch nor a prompt that `resume` applies is acknowledged again. A runtime semantic gate rejects more
 than one acknowledgement for the same destination. Credential values are never
 persisted. Private standalone Modal evals
 remain fail-closed pending the separate R-26 disclosure authorization. Public

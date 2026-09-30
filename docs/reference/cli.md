@@ -382,15 +382,24 @@ Restart long-lived Ultrafuzz processes, such as the dashboard or
 once that directory is gone their engine commands fail with
 `restart this Ultrafuzz process`.
 
-Prompt files are used as they are. Every task of a resumed run, with or without
-`--refresh-controller`, `--retry-failed` or `--reset-node`, and of a `replay` or
-`fork`, receives the run's own `artifacts/<attempt-id>/prompt.rendered.md`, so
-an edit to that file reaches the task's next attempt. Before any of these
-commands starts an engine, it restores a missing static prompt from its launch
-copy in `prompt-snapshots/`; it never replaces anything at a prompt path. A
-prompt that is still missing or cannot be read, or a runtime prompt that no
-longer renders, fails only its task. Edits to `.ultrafuzz/prompts/**` apply to
-new runs. See
+Every task of a resumed run, with or without `--refresh-controller`,
+`--retry-failed` or `--reset-node`, and of a `replay` or `fork`, receives the
+run's own `artifacts/<attempt-id>/prompt.rendered.md`. Before it resets
+anything or starts the engine, `resume` applies the project's current prompts,
+`.ultrafuzz/prompts/**` and the packaged built-ins, to every task that has not
+finished: it re-renders their prompt files and the template copies that later
+prompts render from, copies each file it replaces to `prompt-history/`, and
+reports `PROMPTS_REFRESHED`. A prompt that does not validate or render keeps
+its tasks' files and is reported as `PROMPT_REFRESH_REJECTED`; a topology that
+no longer matches the run's skips the refresh with `PROMPT_REFRESH_SKIPPED`.
+Neither fails the resume. `run.refresh_prompts_on_resume = false` in the
+project's current `ultrafuzz.toml` turns the refresh off, and then an edit to a
+run's prompt file reaches the task's next attempt. `replay` and `fork` never
+refresh prompts. Before any of these commands starts an engine, it restores a
+missing static prompt from its launch copy in `prompt-snapshots/`; it never
+replaces anything else at a prompt path. A prompt that is still missing or
+cannot be read, or a runtime prompt that no longer renders, fails only its
+task. See
 [Change a prompt of a running campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 A run that ends `failed` with no failed durable node was stopped by something
