@@ -32,6 +32,7 @@ import {
   readRunState,
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
+  plannedArtifactSchemaBundle,
   replayUsageEvents,
   safeResolveInside,
   sensitiveEnvironmentValues,
@@ -44,7 +45,6 @@ import {
   validateArtifactContractBytes,
   validateArtifactManifest,
   validateArtifactVerificationMarker,
-  validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
   writeRunState,
@@ -66,6 +66,7 @@ import {
   type NodeProvenance,
   type NodeState,
   type NodeStatus,
+  type PlannedArtifactSchema,
   type PrerequisiteManifestDigest,
   type RunLayout,
   type RunMetadataAccounting,
@@ -3398,13 +3399,18 @@ async function finalizeTerminalTask(input: {
     if (findingsSnapshot === undefined) continue;
     try {
       assertSynchronizationBudget(input.control);
-      const contract = validateArtifactContractBytes("ultrafuzz/findings@2", findingsSnapshot.bytes, findingsPath);
+      // The findings are counted as validated against the schema the run planned them with, which the
+      // artifact gate above and the engine's verifier checked, not this build's (#921). Both checks read
+      // the verifier-authenticated byte snapshot, never the mutable file twice.
+      const contract = validateArtifactContractBytes(
+        "ultrafuzz/findings@2",
+        findingsSnapshot.bytes,
+        findingsPath,
+        plannedFindingsSchema(input.layout, output)
+      );
       let outputCount: number | undefined;
-      if (!contract.ok || contract.value === undefined) {
+      if (!contract.ok || !Array.isArray(contract.value)) {
         findingsValidationFailed = true;
-        // Both retained-schema checks consume the verifier-authenticated byte
-        // snapshot. They can disagree only if the registered and retained
-        // validators drift, never because the mutable file was read twice.
         if (gate.ok) {
           diagnostics.push({
             code: "FINDINGS_VALIDATION_FAILED",
@@ -3417,23 +3423,9 @@ async function finalizeTerminalTask(input: {
           });
         }
       } else {
-        const result = validateFindingsSchema(contract.value, findingsPath);
-        if (!result.ok || result.value === undefined) {
-          findingsValidationFailed = true;
-          diagnostics.push({
-            code: "FINDINGS_VALIDATION_FAILED",
-            message: `registered findings and retained typed schema disagree: ${result.issues
-              .map((issue) => `${issue.path} ${issue.message}`)
-              .join("; ")}`,
-            severity: "error",
-            source: "findings",
-            details: { issues: result.issues }
-          });
-        } else {
-          outputCount = result.value.length;
-          totalFindings += outputCount;
-          validatedFindingsOutputs += 1;
-        }
+        outputCount = contract.value.length;
+        totalFindings += outputCount;
+        validatedFindingsOutputs += 1;
       }
       events.push({
         eventType: "findings-validated",
@@ -3591,6 +3583,24 @@ async function finalizeTerminalTask(input: {
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
     },
     events
+  };
+}
+
+/** The schema a planned findings output is bound to, in the run's planned schema bundle. */
+function plannedFindingsSchema(layout: RunLayout, output: PlannedGraphNode["outputs"][number]): PlannedArtifactSchema {
+  if (
+    output.schema_file === undefined ||
+    output.schema_id === undefined ||
+    output.schema_sha256 === undefined ||
+    output.schema_bundle_sha256 === undefined
+  ) {
+    throw new Error(`declared findings output ${output.path} has no planned schema binding`);
+  }
+  return {
+    bundle: plannedArtifactSchemaBundle(layout.root, output.schema_bundle_sha256),
+    schemaFile: output.schema_file,
+    schemaId: output.schema_id,
+    schemaSha256: output.schema_sha256
   };
 }
 

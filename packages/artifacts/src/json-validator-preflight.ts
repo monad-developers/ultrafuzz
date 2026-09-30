@@ -1,6 +1,4 @@
-import { artifactContractSchemaBinding } from "./artifact-contracts.js";
 import { validateRegisteredJsonSchema } from "./json-schema-validator.js";
-import { ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256 } from "./schema-registry.js";
 import { executeSchemaSemanticGates } from "./semantic-gates.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
@@ -111,10 +109,13 @@ export interface JsonValidatorPreflightExpectedIdentity {
   artifactSha256: string;
 }
 
-/** Strict JSON + registered JSON Schema + named contextual identity validation, without repair or coercion. */
+/**
+ * Strict JSON + registered JSON Schema + named contextual identity validation, without repair or coercion.
+ * The caller names the identity: the schema a run was planned with, never the reading build's own.
+ */
 export function parseJsonValidatorPreflightSuccessEnvelope(
   bytes: Uint8Array,
-  expectedIdentity?: JsonValidatorPreflightExpectedIdentity
+  expected: JsonValidatorPreflightExpectedIdentity
 ): JsonValidatorPreflightSuccessEnvelope {
   const value = parseStrictJsonBytes(bytes);
   const structural = validateRegisteredJsonSchema(JSON_VALIDATOR_PREFLIGHT_SUCCESS_JSON_SCHEMA_ID, value);
@@ -125,16 +126,6 @@ export function parseJsonValidatorPreflightSuccessEnvelope(
     );
   }
 
-  const binding = expectedIdentity === undefined ? artifactContractSchemaBinding("ultrafuzz/findings@2") : undefined;
-  if (expectedIdentity === undefined && binding === undefined) {
-    throw new Error("validator preflight schema is not registered");
-  }
-  const expected = expectedIdentity ?? {
-    schemaId: binding!.schema_id,
-    schemaSha256: binding!.schema_sha256,
-    schemaBundleSha256: binding!.schema_bundle_sha256,
-    artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
-  };
   const gates = executeSchemaSemanticGates(JSON_VALIDATOR_PREFLIGHT_SUCCESS_SCHEMA_FILENAME, {
     document: value,
     context: {

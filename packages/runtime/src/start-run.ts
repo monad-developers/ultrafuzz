@@ -546,6 +546,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // the config, not the optional task manifest, and a run whose config cannot be read is refused.
     const config = readContinuationResolvedConfig(layout.root, configPath, runId);
     if (config.execution.mode === "cloud") return cloudExecutionRemovedFailure(runId);
+    if (input.refreshController !== true && workflowPredatesPlannedSchemaBundles(workflowPath)) {
+      return controllerRefreshRequiredFailure(runId);
+    }
     let taskDocument: SmithersTaskManifestDocument | undefined;
     if (fs.existsSync(tasksPath)) {
       assertRegularFileInside(layout.root, tasksPath, "workflow task manifest");
@@ -737,6 +740,31 @@ function cloudExecutionRemovedFailure(runId: string): RuntimeResult<WorkflowLife
     {
       code: "WORKFLOW_CLOUD_EXECUTION_REMOVED",
       message: `run ${runId} was planned for per-node cloud execution, which was removed; it cannot be resumed, so start a new run`,
+      severity: "error",
+      source: "runtime"
+    }
+  ]);
+}
+
+// The bound on a sealed workflow control file (workflow-integrity.ts).
+const MAX_PERSISTED_WORKFLOW_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Whether a persisted workflow was rendered before task preparation took the run's planned schema
+ * bundle. Such a workflow still calls `materializePromptSchemas(schemaDirectory)` or passes it
+ * `{ replaceExisting }` (#983), which this release's installed modules reject, so every task it
+ * prepares would fail.
+ */
+function workflowPredatesPlannedSchemaBundles(workflowPath: string): boolean {
+  const source = readRegularFileSnapshot(workflowPath, MAX_PERSISTED_WORKFLOW_BYTES).toString("utf8");
+  return /materializePromptSchemas\(schemaDirectory(?:\)|,\s*\{\s*replaceExisting\b)/u.test(source);
+}
+
+function controllerRefreshRequiredFailure(runId: string): RuntimeResult<WorkflowLifecycleValue> {
+  return runtimeFailure<WorkflowLifecycleValue>([
+    {
+      code: "WORKFLOW_CONTROLLER_REFRESH_REQUIRED",
+      message: `run ${runId} was launched by an earlier Ultrafuzz release whose workflow cannot prepare tasks with this one; continue it with \`ultrafuzz resume ${runId} --refresh-controller\``,
       severity: "error",
       source: "runtime"
     }

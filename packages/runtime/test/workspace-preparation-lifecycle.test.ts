@@ -100,7 +100,7 @@ function preparationHarness(
     assertWorkspaceSourceRevision: () => undefined,
     preservePinnedSourceProof: () => undefined,
     preflightJsonValidator: () => options.onPreflight?.(),
-    assertTaskOutputSchemaBindings: () => undefined,
+    plannedSchemaBundle: () => undefined,
     materializePromptSchemas: (root: string) => {
       fs.mkdirSync(root, { recursive: true });
       for (const name of ["property-lens.schema.json", "properties.schema.json"])
@@ -148,7 +148,6 @@ function preparationHarness(
       }
     },
     taskSpecs: tasks,
-    replacePromptSchemas: true,
     hydratePinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>
       options.onPinnedSubmodules?.("hydrate", input.expectation),
     verifyPinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>

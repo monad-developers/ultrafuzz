@@ -174,12 +174,15 @@ content-addressed directory under `trusted-cli-closures/`; the launcher verifies
 the manifest, files, and dependency links before dispatch, clears ambient Node
 loader/search injection, confines ESM and CommonJS module resolution to the
 closure, and precedes target-controlled directories on the producer's `PATH`.
-Before model work, Ultrafuzz uses it to validate a real known-valid fixture and
-checks the returned schema ID, schema digest, bundle digest, and build identity.
-A missing, changed, or stale launcher or closure remains a setup failure for
-new schema-backed model work, but its historical identity is not continuation
-authorization. A current-controller continuation may select the current
-launcher and validator packages while retaining the old closure as provenance.
+Before a schema-backed task's model work, Ultrafuzz uses it to validate a real
+known-valid fixture and checks the returned schema ID, schema digest, and bundle
+digest against the run's planned schema bundle; the returned validator build is
+provenance. A missing, changed, or stale launcher or closure remains a setup
+failure for new schema-backed model work, but its historical identity is not
+continuation authorization. A current-controller continuation selects the
+current launcher and validator packages when they validate with the run's
+planned schema bundle, retaining the old closure as provenance, and otherwise
+keeps the run's launcher.
 Modal images provide the equivalent root-owned, read-only
 `/usr/local/bin/ultrafuzz` entrypoint and preflight.
 
