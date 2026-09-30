@@ -243,15 +243,18 @@ Every planned JSON output MUST resolve through the checked-in schema registry.
 The planned and expanded graph representations MUST persist the schema filename,
 fragment-free schema ID, schema SHA-256, package schema-bundle SHA-256, and
 validator build identity. Missing or partial bindings MUST fail planning or host
-verification. Host artifact gates and verified reads MUST validate against the
-schema content a binding names, using the run's sealed schema snapshot when the
-installed bundle differs. The recorded validator build and contract digest are
-provenance: graph reads, host artifact gates, verified reads, task preparation,
-dependency admission, and the validator preflight MUST NOT require them to equal
-the reading build's own. Task preparation and the validator preflight MUST still
-require the schema bundle they validate with to be the planned one. Operators
-declare the versioned contract in topology; they MUST NOT supply these trust
-identities manually in YAML.
+verification. Host artifact gates, verified reads, and the workflow's task
+preparation, verifier, and dependency admission MUST validate against the
+schema content a binding names, in the run's planned schema bundle: the
+installed schemas when their bundle digest is the planned one, otherwise the
+bundle sealed in the run's execution snapshot. Task preparation MUST copy that
+bundle into the task workspace, replacing a copy that differs, and the
+validator preflight MUST require the run's validator to report that bundle. The
+recorded validator build and contract digest are provenance: graph reads, host
+artifact gates, verified reads, task preparation, dependency admission, and the
+validator preflight MUST NOT require them, or the installed schema bundle, to
+equal the reading build's own. Operators declare the versioned contract in
+topology; they MUST NOT supply these trust identities manually in YAML.
 
 ## Prompts
 
@@ -465,13 +468,15 @@ closure before dispatch, clear ambient Node loader/search injection, and reject
 every non-builtin module whose lexical or physical resolution escapes the
 closure. Ordinary artifact and schema data reads remain outside this module
 boundary. The launcher MUST run a real known-valid fixture and verify the
-returned schema ID, schema digest, and bundle digest; the returned validator
-build is provenance and MUST NOT be compared. `command -v` alone is
+returned schema ID, schema digest, and bundle digest against the run's planned
+schema bundle; the returned validator build is provenance and MUST NOT be
+compared. `command -v` alone is
 insufficient. A missing, tampered, or stale launcher or closure is a setup
 failure for new model work. It MUST NOT turn historical
 seals or schema identities into resume authorization. A current-controller
-continuation MAY select current validator packages while retaining historical
-source and artifacts as provenance.
+continuation MAY select current validator packages that validate with the run's
+planned schema bundle, while retaining historical source and artifacts as
+provenance.
 
 Before or at launch, each run MUST persist:
 

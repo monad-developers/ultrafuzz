@@ -339,7 +339,10 @@ rejected before the run directory is created.
 Smithers run IDs and automatically accepts changed workflow source. Control
 seals, link journals, controller generations, graph fingerprints, current
 schema bindings, and metadata projections remain provenance for inspection;
-they are not resume authorization. Smithers decides which finished rows can be
+they are not resume authorization. The resumed tasks keep the schemas the run
+was planned with: after an upgrade that changed a schema, task preparation
+copies, and the verifier validates against, the bundle sealed in the run's
+execution snapshot. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
 fork completed work. The run's `smithers/resolved-config.json` records the
@@ -406,10 +409,12 @@ again.
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
 that same Smithers run. It does not publish or authenticate a historical
-controller generation. The refreshed workflow rebinds each declared output to
-the installed schema bundle but keeps its recorded contract digest and validator
-build, so after a rebuild that changed only the validator build its verification
-markers still match the run's sealed plan. Refresh rejects an actively owned
+controller generation. The refreshed workflow keeps each declared output's
+recorded schema binding, contract digest, and validator build, so its
+verification markers still match the run's sealed plan after a rebuild or an
+upgrade that changed a schema. After such an upgrade the refresh also keeps the
+run's own validator launcher, because the installed CLI validates with other
+schemas, and reports that as `WORKFLOW_TRUSTED_CLI_UNVERIFIED`. Refresh rejects an actively owned
 workflow. Because Smithers admits changed workflow source, replay determinism is
 the operator's responsibility; inspect the retained source and Smithers workflow
 hash when auditing a continuation.

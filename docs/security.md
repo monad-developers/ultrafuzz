@@ -237,9 +237,11 @@ closure are copied into a run-owned content-addressed, read-only generation;
 the launcher verifies that closure before every invocation, removes ambient Node
 loader/search injection, and rejects ESM or CommonJS modules resolved outside
 it. Module confinement does not prevent the validator from reading the artifact
-or schema paths it was asked to check. Its pinned CLI, schema-bundle, and
-validator identity are preflighted with a real fixture before model work, and
-every registered schema path is checked against its pinned digest. This keeps
+or schema paths it was asked to check. Its pinned CLI is preflighted with a real
+fixture before model work and must report the run's planned schema bundle,
+which the host checks the run's artifacts against even after an upgrade changed
+a schema; the validator build it reports is provenance. Every registered schema
+path is checked against its pinned digest. This keeps
 the producer and host on the same contract; it does not turn same-UID local
 agent execution into an OS security boundary.
 

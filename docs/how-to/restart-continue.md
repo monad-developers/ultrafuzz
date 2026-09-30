@@ -66,6 +66,12 @@ workflow is not refreshed. Accepting changed workflow source transfers replay
 determinism responsibility to Smithers and the operator; review the retained
 source and Smithers workflow hash when that distinction matters.
 
+A run keeps the artifact schemas it was planned with, with or without
+`--refresh-controller`. After an upgrade that changes a schema, its tasks copy,
+validate against, and preflight their validator with the bundle sealed in the
+run's execution snapshot, so the new schemas apply only to runs launched after
+the upgrade.
+
 Usage recorded before the continuation remains in the run's append-only usage
 ledger. After synchronization, segment rollups remain attributable to their
 checkpoint generations and the cumulative rollup includes every unique usage
