@@ -143,8 +143,6 @@ const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_0
 if (runningUnderBun) process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/index.js", import.meta.url).href;
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
-  "SMITHERS_FAKE_CLOUD_ENV_LOG",
-  "SMITHERS_FAKE_CLOUD_SELECTOR_LOG",
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
@@ -1875,9 +1873,6 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_GOVERNANCE_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$1" "$ULTRAFUZZ_DATA_GOVERNANCE_PATH" >> "$SMITHERS_FAKE_GOVERNANCE_LOG"',
-      "fi",
-      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
-      '  printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$KIMI_CODE_HOME" "$KIMI_SHARE_DIR" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
@@ -19060,8 +19055,8 @@ test("generated workflow dependencies require exact runner pins while allowing t
     /must retain Ultrafuzz's exact runner versions/u
   );
   // Pinning Effect itself but leaving the `@effect/*` packages layered on it
-  // floating is what lets two cloud containers install different Effect trees for
-  // the same run, so an incomplete override block must be rejected too.
+  // floating is what lets a run's launch and a later resume install different
+  // Effect trees, so an incomplete override block must be rejected too.
   assert.throws(
     () =>
       assertSmithersPackageManifest({

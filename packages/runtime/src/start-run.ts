@@ -229,7 +229,6 @@ export async function startRun(input: StartRunInput) {
       renderedPrompts: plan.rendered_prompts,
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput,
-      env: { ...process.env, ...(input.env ?? {}) },
       controllerSourceDigest: plan.controller_source_digest,
       dataGovernance: plan.data_governance
     });

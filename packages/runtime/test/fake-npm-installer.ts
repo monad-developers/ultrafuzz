@@ -54,7 +54,7 @@ export function writeFakeNpmInstaller(
       "const target = path.join(prefix, 'node_modules/smthrs/src/bin/smithers.js'); fs.mkdirSync(path.dirname(target), { recursive: true });",
       `fs.writeFileSync(target, ${JSON.stringify(
         failures.runnerSource ??
-          '#!/bin/sh\nif [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then printf \'%s|%s\\n\' "$MODAL_TOKEN_ID" "$MODAL_TOKEN_SECRET" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"; fi\nprintf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"\nprintf \'%s\\n\' \'{"ok":true}\'\n'
+          "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n"
       )});`,
       "fs.chmodSync(target, 0o755);",
       "const shim = path.join(prefix, 'node_modules/.bin/smithers'); fs.mkdirSync(path.dirname(shim), { recursive: true }); fs.symlinkSync(path.relative(path.dirname(shim), target), shim);",
@@ -65,7 +65,7 @@ export function writeFakeNpmInstaller(
   const optionalRunner =
     (failures.imported ?? failures.optional) === undefined
       ? undefined
-      : `#!/usr/bin/env bun\nconst fs = require("node:fs");\nrequire("../../index.js");\ntry { require(${JSON.stringify(failures.imported ?? failures.optional)}); } catch {}\nif (process.env.SMITHERS_FAKE_CLOUD_ENV_LOG) fs.writeFileSync(process.env.SMITHERS_FAKE_CLOUD_ENV_LOG, (process.env.MODAL_TOKEN_ID ?? "") + "|" + (process.env.MODAL_TOKEN_SECRET ?? "") + "\\n");\nif (process.env.SMITHERS_FAKE_LOG) fs.appendFileSync(process.env.SMITHERS_FAKE_LOG, process.argv.slice(2).join(" ") + "\\n");\nconsole.log('{"ok":true}');\n`;
+      : `#!/usr/bin/env bun\nconst fs = require("node:fs");\nrequire("../../index.js");\ntry { require(${JSON.stringify(failures.imported ?? failures.optional)}); } catch {}\nif (process.env.SMITHERS_FAKE_LOG) fs.appendFileSync(process.env.SMITHERS_FAKE_LOG, process.argv.slice(2).join(" ") + "\\n");\nconsole.log('{"ok":true}');\n`;
   if (optionalRunner !== undefined)
     fs.appendFileSync(npm, `\nfs.writeFileSync(target, ${JSON.stringify(optionalRunner)});\n`);
   fs.chmodSync(npm, 0o500);

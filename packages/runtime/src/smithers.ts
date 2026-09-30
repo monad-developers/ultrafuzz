@@ -3363,7 +3363,6 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
-  env?: Record<string, string | undefined>;
   controllerSourceDigest?: string;
   dataGovernance?: RunDataGovernanceReference;
   vulnerabilityDatabase?: { relative_path: string; sha256: string };
@@ -3731,7 +3730,6 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         const ancestorNodeIds = artifactAncestorNodeIds(node.id, input.graph.nodes);
         return compileTask({
           config: input.config,
-          env: input.env ?? {},
           graph: input.graph,
           node,
           attempt,
@@ -4054,7 +4052,7 @@ export async function smithersExecutionControlFiles(
     add(sourcePath, path.posix.join(".smithers/agents", relativeExecutionPath(agentsRoot, sourcePath)));
   }
 
-  const queuedModules = Object.values(workflowModuleEntryUrls()).filter((value): value is string => value.length > 0);
+  const queuedModules = [import.meta.resolve("@ultrafuzz/artifacts"), import.meta.resolve("@ultrafuzz/runtime")];
   const modulesByRoot = new Map<string, WorkflowExecutionModule>();
   const modulesByName = new Map<string, WorkflowExecutionModule>();
   while (queuedModules.length > 0) {
@@ -4370,13 +4368,6 @@ function stableWorkflowDependencyJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
-}
-
-function workflowModuleEntryUrls(): { artifacts: string; runtime: string } {
-  return {
-    artifacts: import.meta.resolve("@ultrafuzz/artifacts"),
-    runtime: import.meta.resolve("@ultrafuzz/runtime")
-  };
 }
 
 function workflowPackageRoot(entryPath: string): string {
@@ -7395,7 +7386,6 @@ function compileDynamicGroup(input: {
   const taskTemplates = nodeAttemptsFor(input.node).map((attempt) =>
     compileTask({
       config: input.input.config,
-      env: input.input.env ?? {},
       graph: input.input.graph,
       node: input.node,
       attempt,
@@ -7486,7 +7476,6 @@ function compileDynamicGroup(input: {
 
 function compileTask(input: {
   config: ResolvedConfig;
-  env: NodeJS.ProcessEnv;
   graph: ExpandedGraph;
   node: ExpandedNode;
   attempt: NodeAttemptProvenance;

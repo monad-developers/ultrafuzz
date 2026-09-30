@@ -40,11 +40,12 @@ export const MIGRATABLE_PRIOR_SMITHERS_VERSIONS = ["0.34.0"] as const;
 // itself, not just deduplicated. `@effect/platform-bun` asks for
 // `@effect/platform-node-shared: ^4.0.0-beta.105`, an open caret over
 // prereleases, and each ephemeral generated workspace is installed with
-// `--package-lock=false`. Unpinned, two cloud containers resuming the same run
-// at different times install different `@effect/*` builds, and a newer beta that
-// needs Effect APIs absent from the pinned core breaks every run including
-// in-flight resumes. Every entry below publishes at SMITHERS_EFFECT_VERSION and
-// peers `^4.0.0-beta.105`, so the pinned set is internally consistent.
+// `--package-lock=false`. Unpinned, the launch and a later resume of the same
+// run install at different times and can get different `@effect/*` builds, and
+// a newer beta that needs Effect APIs absent from the pinned core breaks every
+// run including in-flight resumes. Every entry below publishes at
+// SMITHERS_EFFECT_VERSION and peers `^4.0.0-beta.105`, so the pinned set is
+// internally consistent.
 const SMITHERS_EFFECT_PACKAGE_NAMES = [
   "@effect/opentelemetry",
   "@effect/platform-bun",
