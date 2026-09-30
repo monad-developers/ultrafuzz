@@ -99,10 +99,13 @@ that post-agent contract failure is terminal.
 `failure_policy: continue` marks every node in that group as nonblocking. The
 generated workflow waits for such a node to settle and consumes its artifacts
 only when its verifier succeeded. When it fails or is skipped, unrelated work
-continues and nodes in other groups run with the results that did succeed. A
-node of the same group never runs without it: a node that depends on it
-directly, or through nodes of the same group, is skipped, and one that reaches
-it only through another group fails its input admission instead. The packaged
+continues, and every node outside the group, including a node with no `group`
+and the nodes a dynamic group generates, runs with the results that did
+succeed. A node of the same group never runs without it: a node that depends on
+it directly, or through nodes of the same group, is skipped. One that reaches it
+only through another group fails its input admission instead, which counts as
+an `artifact-contract` failure, so the run's best-effort report is published
+unverified. Keep a chain that must stay strict inside one group. The packaged
 topologies use this for the property lenses, goals, strategies, and
 specialists; ordinary groups retain fail-closed `halt` semantics.
 
