@@ -22397,6 +22397,188 @@ for (const retryVerified of ["after", "before"] as const) {
   });
 }
 
+/** A continuing lens, the halting catalog after it, and two review stages whose host gates chain. */
+function writeRetriedLensReviewProject(): string {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const markdownOutput = `
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true`;
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  properties:
+    label: Properties
+    defaults:
+      failure_policy: continue
+  property-catalog:
+    label: Property catalog
+  review:
+    label: Review
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: lens
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: properties
+    depends_on: [__start__]
+    outputs:${markdownOutput}
+  - id: catalog
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: property-catalog
+    depends_on: [lens]
+    outputs:${markdownOutput}
+  - id: dedupe
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: review
+    depends_on: [catalog]
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
+      - path: finding-lifecycle-ledger.json
+        contract: ultrafuzz/finding-lifecycle-ledger@1
+  - id: triage
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: review
+    depends_on: [dedupe]
+    outputs:
+      - path: triaged-findings.json
+        contract: ultrafuzz/triaged-findings@1
+        primary: true
+      - path: finding-lifecycle-ledger.json
+        contract: ultrafuzz/finding-lifecycle-ledger@1
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [triage]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "runtime-fixture.md"),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+  return project;
+}
+
+// A sync pass can run while `resume --retry-failed` still reruns a failed optional producer, as
+// Modal's `ultrafuzz inspect` poll does. A consumer that ran without the producer must finalize in
+// that pass too: while it reads failed, the host gate of a dependent that reads its outputs fails,
+// and that output-validation failure is final.
+test("syncRun finalizes consumers admitted without an optional prerequisite whose retry is still running", async () => {
+  const project = writeRetriedLensReviewProject();
+  const workflowRunId = "ultrafuzz-sync-optional-retry-running";
+  const runId = "sync-optional-retry-running";
+  const failedEvents = [
+    { type: "NodeFailed", nodeId: "node:lens", attempt: 1 },
+    { type: "NodeStarted", nodeId: "prepare:catalog", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:catalog", attempt: 1 }
+  ];
+  const failedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      steps: [
+        { id: "node:lens", state: "failed", attempt: 1 },
+        { id: "node:catalog", state: "finished", attempt: 1 },
+        { id: "node:dedupe", state: "pending", attempt: 0 },
+        { id: "node:triage", state: "pending", attempt: 0 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, failedEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId, env: failedEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  const writeArtifacts = (attemptId: string, files: Record<string, string>) => {
+    for (const [relative, contents] of Object.entries(files)) {
+      const filePath = path.join(runRoot, "artifacts", attemptId, ...relative.split("/"));
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, contents, "utf8");
+    }
+    writeCurrentArtifactVerificationMarker(runRoot, attemptId);
+  };
+  const emptyLedger = JSON.stringify({ schema_version: "ultrafuzz.finding-lifecycle-ledger.v1", records: [] });
+  const nodeStatus = (nodeId: string) =>
+    (
+      JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+        nodes: Record<string, { status?: string }>;
+      }
+    ).nodes[nodeId]?.status;
+  writeArtifacts("catalog", { [GENERIC_RUNTIME_MARKDOWN_PATH]: "catalog without the lens\n" });
+  assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
+  assert.equal(nodeStatus("lens"), "failed");
+  assert.equal(nodeStatus("catalog"), "succeeded");
+
+  // The retried lens is still running when dedupe and triage finish without it.
+  writeArtifacts("dedupe", { "findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
+  writeArtifacts("triage", { "triaged-findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
+  const retryEvents = [
+    ...failedEvents,
+    { type: "NodeStarted", nodeId: "node:lens", attempt: 2 },
+    { type: "NodeStarted", nodeId: "prepare:dedupe", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:dedupe", attempt: 1 },
+    { type: "NodeStarted", nodeId: "prepare:triage", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:triage", attempt: 1 }
+  ];
+  const retryEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      steps: [
+        { id: "node:lens", state: "in-progress", attempt: 2 },
+        { id: "node:catalog", state: "finished", attempt: 1 },
+        { id: "node:dedupe", state: "finished", attempt: 1 },
+        { id: "node:triage", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, retryEvents)
+  });
+  const retrySync = await syncRun({ projectRoot: project, runId, env: retryEnv });
+  assert.equal(retrySync.ok, true, JSON.stringify(retrySync.diagnostics));
+  assert.equal(nodeStatus("dedupe"), "succeeded", JSON.stringify(retrySync.diagnostics));
+
+  writeArtifacts("lens", { [GENERIC_RUNTIME_MARKDOWN_PATH]: "lens retried\n" });
+  const finalEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:lens", state: "finished", attempt: 2 },
+        { id: "node:catalog", state: "finished", attempt: 1 },
+        { id: "node:dedupe", state: "finished", attempt: 1 },
+        { id: "node:triage", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...retryEvents,
+      { type: "NodeFinished", nodeId: "node:lens", attempt: 2 },
+      { type: "NodeFinished", nodeId: "verify:lens", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const sync = await syncRun({ projectRoot: project, runId, env: finalEnv });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  for (const nodeId of ["lens", "catalog", "dedupe", "triage"]) {
+    assert.equal(nodeStatus(nodeId), "succeeded", `${nodeId}: ${JSON.stringify(sync.diagnostics)}`);
+  }
+  assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
+});
+
 test("syncRun binds an optional prerequisite digest before a final-boundary manifest swap", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

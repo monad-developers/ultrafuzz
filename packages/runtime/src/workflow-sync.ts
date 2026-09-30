@@ -3701,11 +3701,11 @@ function captureReferenceManifestDigest(
  * or malformed optional marker from turning a previously admitted success into
  * an unauthenticated omission during a later synchronization pass.
  *
- * The one exception is a producer that verified only after the consumer's
- * admission began, which happens when `resume --retry-failed` reruns a failed
- * producer while its consumers keep running. The consumer ran without it, which
- * is the omission its verifier recorded, so failing it would stop the run over
- * bookkeeping.
+ * The one exception is a producer that `resume --retry-failed` reruns while its
+ * consumers keep running. A consumer admitted without it ran without it, which
+ * is the omission its verifier recorded, so failing the consumer would stop the
+ * run over bookkeeping. The omission stands while the rerun is in progress, and
+ * after it when the rerun verified only after the consumer's admission began.
  */
 function assertOptionalDependencyAuthoritiesCurrent(
   layout: RunLayout,
@@ -3742,8 +3742,10 @@ function assertOptionalDependencyAuthoritiesCurrent(
       );
     }
     if (!finalizedSuccess) {
-      if (dependencyStatus === undefined || !terminalStatus(dependencyStatus)) {
-        throw new Error(`optional dependency is not terminal for verifier admission ${attemptId}`);
+      // Tasks synchronize in dependency order and start only after their producers settle, so a
+      // producer that is not terminal here is being rerun and was unverified when this task was admitted.
+      if (dependencyStatus === undefined) {
+        throw new Error(`optional dependency has no recorded state for verifier admission ${attemptId}`);
       }
       continue;
     }
