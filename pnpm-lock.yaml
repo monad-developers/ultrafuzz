@@ -13,7 +13,7 @@ overrides:
 
 patchedDependencies:
   modal@0.9.0: 9accfbbd1590adb697cbc549e196f0f139357421988180457c20c633eebd82ae
-  npm@11.19.0: beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f
+  npm@11.19.0: cb8c755821fe95a7872b93902d79f4626a7591f7c83cd1b74647c2d658c5bcba
 
 importers:
 
@@ -318,7 +318,7 @@ importers:
         version: 2.0.3
       npm:
         specifier: 11.19.0
-        version: 11.19.0(patch_hash=beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f)
+        version: 11.19.0(patch_hash=cb8c755821fe95a7872b93902d79f4626a7591f7c83cd1b74647c2d658c5bcba)
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
@@ -3018,11 +3018,11 @@ packages:
   boundary@2.0.0:
     resolution: {integrity: sha512-rJKn5ooC9u8q13IMCrW0RSp31pxBCHE3y9V/tp3TdWSLf8Em3p6Di4NBpfzbJge9YjjFEsD0RtFEjtvHL5VyEA==}
 
-  brace-expansion@2.1.4:
-    resolution: {integrity: sha512-hGfVzPxthbf3+2yjg/RBs60cB0FhqBS/zvdV/4wn4/BmN0bNMMHPc4V/BbFieqf1TKAGGAHnY4eSjajCl0f2Xg==}
+  brace-expansion@2.1.7:
+    resolution: {integrity: sha512-uZbew1NqdmPDTMJ8ah1y+b+9QEJrfkXFk3RcTQw3X0jW/xRUvFKsg1CfQdSYGdTbXZWExtU3J3ccxtnfw1Fi0g==}
 
-  brace-expansion@5.0.9:
-    resolution: {integrity: sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==}
+  brace-expansion@5.0.12:
+    resolution: {integrity: sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==}
     engines: {node: 20 || >=22}
 
   browserslist@4.28.4:
@@ -9403,11 +9403,11 @@ snapshots:
 
   boundary@2.0.0: {}
 
-  brace-expansion@2.1.4:
+  brace-expansion@2.1.7:
     dependencies:
       balanced-match: 1.0.2
 
-  brace-expansion@5.0.9:
+  brace-expansion@5.0.12:
     dependencies:
       balanced-match: 4.0.4
 
@@ -10719,11 +10719,11 @@ snapshots:
 
   minimatch@10.2.5:
     dependencies:
-      brace-expansion: 5.0.9
+      brace-expansion: 5.0.12
 
   minimatch@5.1.9:
     dependencies:
-      brace-expansion: 2.1.4
+      brace-expansion: 2.1.7
 
   modal@0.9.0(patch_hash=9accfbbd1590adb697cbc549e196f0f139357421988180457c20c633eebd82ae):
     dependencies:
@@ -10794,7 +10794,7 @@ snapshots:
 
   node-releases@2.0.50: {}
 
-  npm@11.19.0(patch_hash=beeb1f98ca00d870d2df66ffad0adb3478554cc6a72e7cd6c1d817bb0ac3f92f): {}
+  npm@11.19.0(patch_hash=cb8c755821fe95a7872b93902d79f4626a7591f7c83cd1b74647c2d658c5bcba): {}
 
   object-assign@4.1.1: {}
 

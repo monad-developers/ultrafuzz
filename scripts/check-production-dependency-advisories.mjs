@@ -15,7 +15,9 @@ const exceptionSchema = "ultrafuzz.dependency-advisory-exceptions.v1";
 const auditSchema = "ultrafuzz.production-dependency-audit.v1";
 export const APPROVED_AUDIT_ENDPOINT = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
 const highSeverities = new Set(["high", "critical"]);
-const knownSeverities = new Set(["info", "low", "moderate", ...highSeverities]);
+// Least to most severe, so merged registry entries keep their worst severity.
+const severityOrder = ["info", "low", "moderate", ...highSeverities];
+const knownSeverities = new Set(severityOrder);
 const exceptionStatuses = new Set(["not-reachable", "remediation-in-progress", "risk-accepted"]);
 const ghsaIdentifier = /^GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}$/u;
 const dateOnly = /^\d{4}-\d{2}-\d{2}$/u;
@@ -620,7 +622,8 @@ export function strictProductionAuditFromBulkResponse(bulk, request) {
     throw new Error("production dependency audit request is invalid");
   }
   const advisories = [];
-  const seen = new Set();
+  const byKey = new Map();
+  const seenIds = new Set();
   for (const [packageName, candidates] of Object.entries(bulk).sort(([left], [right]) => left.localeCompare(right))) {
     if (!Object.hasOwn(request, packageName)) {
       throw new Error(`approved registry returned an unrequested package ${packageName}`);
@@ -646,10 +649,22 @@ export function strictProductionAuditFromBulkResponse(bulk, request) {
       }
       validateRegistryCwe(candidate.cwe, prefix);
       validateRegistryCvss(candidate.cvss, prefix);
+      if (seenIds.has(candidate.id)) throw new Error(`${prefix} duplicates registry advisory id ${candidate.id}`);
+      seenIds.add(candidate.id);
+      // The registry returns one entry per vulnerable version range, so one
+      // GHSA repeats for a package under distinct ids. Audit it once, at the
+      // most severe of those ranges.
       const key = advisoryKey(advisory, packageName);
-      if (seen.has(key)) throw new Error(`${prefix} duplicates ${advisory}`);
-      seen.add(key);
-      advisories.push({ advisory, package: packageName, severity: candidate.severity });
+      const merged = byKey.get(key);
+      if (merged !== undefined) {
+        if (severityOrder.indexOf(candidate.severity) > severityOrder.indexOf(merged.severity)) {
+          merged.severity = candidate.severity;
+        }
+        continue;
+      }
+      const audited = { advisory, package: packageName, severity: candidate.severity };
+      byKey.set(key, audited);
+      advisories.push(audited);
       if (advisories.length > maximumAuditItems) throw new Error("approved registry returned too many advisories");
     }
   }
