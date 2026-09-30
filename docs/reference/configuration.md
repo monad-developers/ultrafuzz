@@ -173,7 +173,13 @@ The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
 resolves the real executable before launch, writes an executable wrapper under
 the run directory, and places that wrapper ahead of Foundry on worker `PATH`.
 The memory limit and Rayon default are recorded in `config.resolved.toml` and
-`run.json`. Set `forge_guard_enabled = false` to opt out, or raise
+`run.json`. `run.json` records the guard as active only when the workflow
+engine keeps the wrapper on `PATH`. The engine keeps it only from
+`<project>/.ultrafuzz/runs/<run-id>/safe-bin`, holding just the wrapper and not
+writable by group or others. Otherwise, for example with a custom
+`output_dir`, tasks run the real Forge, and launch, `resume`, `replay` and
+`fork` report a `FORGE_GUARD_INACTIVE` warning. Set
+`forge_guard_enabled = false` to opt out, or raise
 `forge_vmem_limit_kb` for intentionally larger jobs. A limited Forge process
 exits through the normal task command path, so its diagnostics remain task
 evidence without applying the limit to the workflow controller.

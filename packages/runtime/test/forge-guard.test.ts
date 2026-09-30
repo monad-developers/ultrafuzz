@@ -9,6 +9,8 @@ import { createRunLayout } from "@ultrafuzz/artifacts";
 import { resolveConfig, type ResolvedConfig } from "@ultrafuzz/config";
 
 import { prepareForgeGuardEnvironment } from "../src/forge-guard.js";
+import { composeSmithersCommandPath } from "../src/smithers.js";
+import { underGroupWritableUmask } from "./process-umask.js";
 
 function resolvedConfig(run: Partial<ResolvedConfig["run"]> = {}): ResolvedConfig {
   const resolved = resolveConfig({ env: {}, runtimeOverrides: { run } });
@@ -17,7 +19,12 @@ function resolvedConfig(run: Partial<ResolvedConfig["run"]> = {}): ResolvedConfi
   return resolved.value;
 }
 
-function fixture(runId: string): {
+// The run lives where launch puts it, `<project>/.ultrafuzz/runs/<run-id>`,
+// because that is the only place the engine PATH admits the wrapper from.
+function fixture(
+  runId: string,
+  outputRoot?: string
+): {
   root: string;
   bin: string;
   forge: string;
@@ -41,22 +48,28 @@ function fixture(runId: string): {
     pathValue: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
     layout: createRunLayout({
       projectRoot: root,
-      outputRoot: path.join(root, "runs"),
+      ...(outputRoot === undefined ? {} : { outputRoot: path.join(root, outputRoot) }),
       runId
     })
   };
+}
+
+function enginePath(root: string, env: Record<string, string | undefined>): string[] {
+  return composeSmithersCommandPath(root, env).split(path.delimiter);
 }
 
 test("Forge guard creates a leading wrapper and preserves subprocess diagnostics", () => {
   const input = fixture("guarded");
   const prepared = prepareForgeGuardEnvironment({
     layout: input.layout,
+    projectRoot: input.root,
     config: resolvedConfig({ forgeVmemLimitKb: 1_048_576, forgeRayonThreads: 3 }),
     env: { PATH: input.pathValue }
   });
 
   const wrapper = path.join(input.layout.root, "safe-bin", "forge");
   assert.equal(prepared.active, true);
+  assert.deepEqual(prepared.diagnostics, []);
   assert.equal(prepared.env.PATH?.split(path.delimiter)[0], path.dirname(wrapper));
   assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
   assert.equal(prepared.environmentVariableNames.length, 3);
@@ -70,15 +83,83 @@ test("Forge guard creates a leading wrapper and preserves subprocess diagnostics
   assert.equal(result.stdout, "1048576|3|test --match-test guard\n");
 });
 
+// Ubuntu's default umask made mkdir create safe-bin 0775, which the engine PATH
+// refuses, so tasks ran the real Forge while run.json recorded the guard active.
+test(
+  "Forge guard keeps its wrapper on the engine PATH under a group-writable umask",
+  underGroupWritableUmask(() => {
+    const input = fixture("group-writable-umask");
+    const prepared = prepareForgeGuardEnvironment({
+      layout: input.layout,
+      projectRoot: input.root,
+      config: resolvedConfig(),
+      env: { PATH: input.pathValue }
+    });
+
+    const safeBin = path.join(input.layout.root, "safe-bin");
+    assert.equal(prepared.active, true);
+    assert.equal(fs.statSync(safeBin).mode & 0o777, 0o700);
+    assert.equal(enginePath(input.root, prepared.env)[0], safeBin);
+  })
+);
+
+test("Forge guard repairs a group-writable wrapper directory an earlier launch created", () => {
+  const input = fixture("group-writable-safe-bin");
+  const safeBin = path.join(input.layout.root, "safe-bin");
+  fs.mkdirSync(safeBin);
+  fs.chmodSync(safeBin, 0o775);
+
+  const prepared = prepareForgeGuardEnvironment({
+    layout: input.layout,
+    projectRoot: input.root,
+    config: resolvedConfig(),
+    env: { PATH: input.pathValue }
+  });
+
+  assert.equal(prepared.active, true);
+  assert.equal(fs.statSync(safeBin).mode & 0o777, 0o700);
+  assert.equal(enginePath(input.root, prepared.env)[0], safeBin);
+});
+
+test("Forge guard reports itself inactive when the engine PATH would drop its wrapper", () => {
+  const strayFile = fixture("stray-file");
+  fs.mkdirSync(path.join(strayFile.layout.root, "safe-bin"));
+  // What an interrupted durable write leaves beside the wrapper.
+  fs.writeFileSync(path.join(strayFile.layout.root, "safe-bin", ".forge.tmp-1-2-3"), "");
+  const customOutputDir = fixture("custom-output-dir", "audit-runs");
+
+  for (const input of [strayFile, customOutputDir]) {
+    const prepared = prepareForgeGuardEnvironment({
+      layout: input.layout,
+      projectRoot: input.root,
+      config: resolvedConfig(),
+      env: { PATH: input.pathValue }
+    });
+
+    assert.equal(prepared.active, false, input.layout.root);
+    assert.equal(prepared.env.PATH, input.pathValue);
+    assert.deepEqual(prepared.environmentVariableNames, []);
+    assert.equal(prepared.env.ULTRAFUZZ_REAL_FORGE, undefined);
+    assert.deepEqual(
+      prepared.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
+      [["FORGE_GUARD_INACTIVE", "warning"]]
+    );
+    assert.match(prepared.diagnostics[0]?.message ?? "", /without the configured memory and thread limits/u);
+    assert.equal(enginePath(input.root, prepared.env).includes(path.join(input.layout.root, "safe-bin")), false);
+  }
+});
+
 test("Forge guard opt-out leaves PATH and the run directory unchanged", () => {
   const input = fixture("unguarded");
   const prepared = prepareForgeGuardEnvironment({
     layout: input.layout,
+    projectRoot: input.root,
     config: resolvedConfig({ forgeGuardEnabled: false }),
     env: { PATH: input.pathValue }
   });
 
   assert.equal(prepared.active, false);
+  assert.deepEqual(prepared.diagnostics, []);
   assert.equal(prepared.env.PATH, input.pathValue);
   assert.deepEqual(prepared.environmentVariableNames, []);
   assert.equal(fs.existsSync(path.join(input.layout.root, "safe-bin")), false);
@@ -88,6 +169,7 @@ test("Forge guard excludes its run wrapper through a symlinked PATH entry", () =
   const input = fixture("symlinked-safe-bin");
   prepareForgeGuardEnvironment({
     layout: input.layout,
+    projectRoot: input.root,
     config: resolvedConfig(),
     env: { PATH: input.pathValue }
   });
@@ -97,6 +179,7 @@ test("Forge guard excludes its run wrapper through a symlinked PATH entry", () =
   fs.symlinkSync(path.dirname(wrapper), safeBinAlias, "dir");
   const prepared = prepareForgeGuardEnvironment({
     layout: input.layout,
+    projectRoot: input.root,
     config: resolvedConfig(),
     env: { PATH: `${safeBinAlias}${path.delimiter}${input.pathValue}` }
   });

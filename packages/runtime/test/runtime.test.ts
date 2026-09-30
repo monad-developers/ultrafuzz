@@ -130,6 +130,7 @@ import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import { writeLocalResolvedConfig } from "./local-resolved-config.js";
+import { underGroupWritableUmask } from "./process-umask.js";
 import {
   shippedReferenceCatalog,
   writeShippedDocumentReferenceCaches,
@@ -4601,12 +4602,17 @@ bunAdapterTest(
 bunAdapterTest(
   "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
   { timeout: 30_000 },
-  async () => {
+  // Every provider-home ancestor must refuse group writes, and Ubuntu's default
+  // umask leaves directories created without an explicit mode group writable.
+  underGroupWritableUmask(async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
-    const providerHomeRoot = path.join(project, ".ultrafuzz", "provider-homes");
+    // Operator state outside the target, as in production: `ultrafuzz init`
+    // creates the target's `.ultrafuzz` with the process umask, so a provider
+    // home beneath it fails the ancestor check on a group-writable host.
+    const providerHomeRoot = temporaryRoot("ufz-openrouter-provider-homes-");
     const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
@@ -4696,7 +4702,7 @@ bunAdapterTest(
         else process.env[name] = value;
       }
     }
-  }
+  })
 );
 
 bunAdapterTest(
@@ -14146,46 +14152,129 @@ test("startRun defaults detached admission to five minutes without overriding an
   }
 });
 
-test("startRun injects the configured Forge guard into the workflow environment and metadata", async () => {
+function forgeGuardLaunchFixture(configEdits: ReadonlyArray<readonly [string, string]> = []): {
+  project: string;
+  env: Record<string, string | undefined>;
+  realForge: string;
+  guardLog: string;
+} {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
-  const binDir = path.dirname(env.SMITHERS_BIN!);
-  const realForge = path.join(binDir, "forge");
-  fs.writeFileSync(realForge, "#!/bin/sh\nexit 0\n", "utf8");
-  fs.chmodSync(realForge, 0o755);
+  const realForge = writeForgeBesideFakeRunner(env);
   const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs
-      .readFileSync(configPath, "utf8")
-      .replace("forge_vmem_limit_kb = 12582912", "forge_vmem_limit_kb = 16777216")
-      .replace("forge_rayon_threads = 1", "forge_rayon_threads = 2"),
-    "utf8"
-  );
+  let config = fs.readFileSync(configPath, "utf8");
+  for (const [from, to] of configEdits) {
+    assert.ok(config.includes(from), from);
+    config = config.replace(from, to);
+  }
+  fs.writeFileSync(configPath, config, "utf8");
+  // The fake runner logs `command -v forge` under the engine PATH it was given.
   const guardLog = path.join(project, "forge-guard.log");
   env.SMITHERS_FAKE_FORGE_GUARD_LOG = guardLog;
+  return { project, env, realForge, guardLog };
+}
 
-  const run = await startRun({ projectRoot: project, runId: "forge-guard", env });
+/** A Forge outside the project, on the PATH the fake runner is found on. */
+function writeForgeBesideFakeRunner(env: Record<string, string | undefined>): string {
+  const runner = env.SMITHERS_BIN;
+  assert.ok(runner);
+  const forge = path.join(path.dirname(runner), "forge");
+  fs.writeFileSync(forge, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return forge;
+}
+
+function recordedForgeGuard(runRoot: string): Record<string, unknown> | undefined {
+  return (
+    JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as { forge_guard?: Record<string, unknown> }
+  ).forge_guard;
+}
+
+// Ubuntu's default umask 0002 made the run's safe-bin group writable, so the
+// engine PATH dropped the wrapper while run.json recorded the guard active.
+test(
+  "startRun injects the configured Forge guard into the workflow environment and metadata",
+  underGroupWritableUmask(async () => {
+    const { project, env, guardLog } = forgeGuardLaunchFixture([
+      ["forge_vmem_limit_kb = 12582912", "forge_vmem_limit_kb = 16777216"],
+      ["forge_rayon_threads = 1", "forge_rayon_threads = 2"]
+    ]);
+
+    const run = await startRun({ projectRoot: project, runId: "forge-guard", env });
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    const wrapper = path.join(runRoot, "safe-bin", "forge");
+    assert.equal(fs.readFileSync(guardLog, "utf8"), `${wrapper}\n`);
+    assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.dirname(wrapper)).mode & 0o777, 0o700);
+    assert.match(
+      fs.readFileSync(path.join(runRoot, "config.resolved.toml"), "utf8"),
+      /forge_vmem_limit_kb = 16777216/u
+    );
+    assert.deepEqual(recordedForgeGuard(runRoot), {
+      enabled: true,
+      active: true,
+      virtual_memory_limit_kb: 16_777_216,
+      rayon_threads: 2
+    });
+    assert.equal(
+      run.diagnostics.some((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE"),
+      false
+    );
+  })
+);
+
+// The engine PATH admits the wrapper only from `.ultrafuzz/runs/<run-id>/safe-bin`.
+test("startRun records the Forge guard inactive and warns when the engine PATH drops its wrapper", async () => {
+  const { project, env, realForge, guardLog } = forgeGuardLaunchFixture([
+    ['output_dir = ".ultrafuzz/runs"', 'output_dir = "audit-runs"']
+  ]);
+
+  const run = await startRun({ projectRoot: project, runId: "forge-guard-dropped", env });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const wrapper = path.join(run.value!.run_root, "safe-bin", "forge");
-  assert.equal(fs.readFileSync(guardLog, "utf8"), `${wrapper}\n`);
-  assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
-  assert.match(
-    fs.readFileSync(path.join(run.value!.run_root, "config.resolved.toml"), "utf8"),
-    /forge_vmem_limit_kb = 16777216/u
+  assert.ok(run.value);
+  assert.equal(run.value.run_root, path.join(project, "audit-runs", "forge-guard-dropped"));
+  assert.equal(fs.readFileSync(guardLog, "utf8"), `${realForge}\n`);
+  assert.equal(recordedForgeGuard(run.value.run_root)?.active, false);
+  assert.deepEqual(
+    run.diagnostics
+      .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+      .map((diagnostic) => diagnostic.severity),
+    ["warning"]
   );
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    forge_guard?: Record<string, unknown>;
-  };
-  assert.deepEqual(metadata.forge_guard, {
-    enabled: true,
-    active: true,
-    virtual_memory_limit_kb: 16_777_216,
-    rayon_threads: 2
-  });
+});
+
+test("resume records the Forge guard of the controller it starts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "resume-forge-guard";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  writeForgeBesideFakeRunner(env);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  assert.equal(recordedForgeGuard(runRoot)?.active, true);
+  // What an interrupted durable write leaves beside the wrapper; the engine
+  // PATH no longer admits the directory.
+  fs.writeFileSync(path.join(runRoot, "safe-bin", ".forge.tmp-1-2-3"), "");
+
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.equal(recordedForgeGuard(runRoot)?.active, false);
+  assert.deepEqual(
+    resumed.diagnostics
+      .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+      .map((diagnostic) => diagnostic.severity),
+    ["warning"]
+  );
 });
 
 test("startRun forwards configured and explicitly allowed environment variables only", async () => {

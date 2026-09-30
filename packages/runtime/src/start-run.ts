@@ -270,6 +270,7 @@ export async function startRun(input: StartRunInput) {
 
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: plan.layout,
+      projectRoot: plan.validation.project_root,
       config: plan.resolved_config,
       env: input.env
     });
@@ -342,7 +343,7 @@ export async function startRun(input: StartRunInput) {
         config_fingerprint: plan.config_fingerprint,
         workflow_ids: [compiled.smithersRunId]
       },
-      planned.diagnostics
+      [...planned.diagnostics, ...forgeGuard.diagnostics]
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
@@ -576,7 +577,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       });
     }
     const tasks = taskDocument?.tasks ?? [];
-    const forgeGuard = prepareForgeGuardEnvironment({ layout, config, env: input.env });
+    const forgeGuard = prepareForgeGuardEnvironment({ layout, projectRoot, config, env: input.env });
+    diagnostics.push(...forgeGuard.diagnostics);
     const controllerEnvironment = {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
@@ -690,7 +692,12 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // so it must not re-record status, lease or deadline; the resume that
     // starts the next controller does.
     if (result.alreadyRunning !== true) {
-      recordNativeContinuationState({ layout, config, requestedConcurrency: input.maxConcurrency });
+      recordNativeContinuationState({
+        layout,
+        config,
+        requestedConcurrency: input.maxConcurrency,
+        forgeGuardActive: forgeGuard.active
+      });
     }
     return runtimeResult(
       true,
@@ -773,7 +780,16 @@ function recordNativeContinuationState(input: {
   layout: RunLayout;
   config: ResolvedConfig;
   requestedConcurrency: number | undefined;
+  forgeGuardActive: boolean;
 }): void {
+  try {
+    // run.json describes the Forge guard of the controller that now runs the
+    // workflow, as launch, replay and fork record it for theirs.
+    persistForgeGuardMetadata(input.layout, input.config, input.forgeGuardActive);
+  } catch {
+    // Best effort like the state below: a legacy run.json that the current
+    // schema rejects must not fail a continuation Smithers already accepted.
+  }
   try {
     const submittedAt = new Date().toISOString();
     const submittedAtMs = Date.parse(submittedAt);
@@ -973,6 +989,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
+      projectRoot: path.resolve(input.projectRoot),
       config: sealedConfig,
       env: input.env
     });
@@ -1097,7 +1114,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
         action,
         submitted: !lifecycleResult.alreadyRunning
       },
-      preflightDiagnostics
+      [...preflightDiagnostics, ...forgeGuard.diagnostics]
     );
   } catch (error) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);

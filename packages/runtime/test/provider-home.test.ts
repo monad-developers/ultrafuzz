@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 import { loadRuntimeTemplate } from "../src/runtime-template.js";
+import { underGroupWritableUmask } from "./process-umask.js";
 type ResolveProviderHome = (provider: string, configured?: string) => string;
 async function loadProviderHome(): Promise<ResolveProviderHome> {
   const fixture = temporaryRoot("ufz-provider-home-module-"),
@@ -59,3 +60,25 @@ test("provider homes are private, operator-owned, and link-free", async () => {
     }
   }
 });
+// The adapter creates each missing provider-home component itself with an
+// explicit private mode, so the next call's ancestor check passes on a host
+// whose umask leaves new directories group writable.
+test(
+  "provider homes created under a group-writable umask pass the ancestor check on reuse",
+  underGroupWritableUmask(async () => {
+    const resolve = await loadProviderHome(),
+      fixture = temporaryRoot("ufz-provider-home-umask-"),
+      root = path.join(fixture, "operator-state");
+    const previous = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = root;
+    try {
+      const selected = resolve("codex", "teams/codex");
+      assert.equal(resolve("codex", "teams/codex"), selected);
+      for (let current = selected; current !== fixture; current = path.dirname(current))
+        assert.equal(fs.statSync(current).mode & 0o777, 0o700, current);
+    } finally {
+      if (previous === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous;
+    }
+  })
+);
