@@ -8,7 +8,8 @@ const TARGET_LOCAL_DELEGATION_ANCHOR = "if (!delegateToLocalCliIfPresent()) {";
  * Bun reads `bunfig.toml` (and runs its `preload` list) and `.env` from its
  * working directory, which for every controller process is the target
  * repository. A controller Bun process without execution-snapshot startup
- * controls runs with these flags, so target configuration never reaches it.
+ * controls runs with these flags, so Bun itself loads neither file. They do not
+ * confine what the runner imports: that process has no module confinement.
  */
 export const BUN_TARGET_CONFIGURATION_GUARD_ARGS: readonly string[] = [
   "--config=/dev/null",
@@ -73,7 +74,8 @@ export function bindSmithersExecutableCapability<T extends Record<string, string
 /**
  * Binds Ultrafuzz's own installed runner. `operatorRoot` is the directory that
  * holds the runner package and its dependencies, which bare imports in a
- * continued workflow resolve through (see `operatorSmithersNodePath`).
+ * continued workflow resolve through (see `operatorSmithersNodePath`). Like an
+ * explicit `SMITHERS_BIN`, the runner is refused inside `forbiddenRoot`.
  */
 export function bindOperatorSmithersExecutableCapability<T extends Record<string, string | undefined>>(
   env: T,
@@ -81,6 +83,7 @@ export function bindOperatorSmithersExecutableCapability<T extends Record<string
   operatorRoot: string,
   forbiddenRoot?: string
 ): T {
+  if (forbiddenRoot !== undefined) assertExecutableOutsideRoot(executable, forbiddenRoot);
   const root = fs.realpathSync(path.resolve(operatorRoot));
   if (!pathInside(root, path.resolve(executable)) || !pathInside(root, fs.realpathSync(executable))) {
     throw new Error("operator workflow runner must be inside its controller root");

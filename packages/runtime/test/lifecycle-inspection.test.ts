@@ -1977,9 +1977,13 @@ test("installation inspection reports a posture for every tracked compatibility 
   assert.ok(Object.hasOwn(reported, "terminal_state_restore"));
   assert.ok(Object.hasOwn(reported, "resume_hydration"));
   // Commands never run a runner that lacks a patch.
+  const unapplied = Object.values(expected).filter((posture) => posture !== "applied").length;
   assert.throws(
     () => patchedWorkflowRunner(runnerRoot),
-    /lacks Ultrafuzz's compatibility patches \(.*\); reinstall Ultrafuzz with pnpm install --frozen-lockfile$/u
+    new RegExp(
+      `lacks ${String(unapplied)} of ${String(Object.keys(expected).length)} Ultrafuzz compatibility patches \\(ultrafuzz doctor lists them\\); reinstall and rebuild Ultrafuzz in its repository checkout: pnpm install --frozen-lockfile && pnpm -w build$`,
+      "u"
+    )
   );
 });
 
@@ -2002,7 +2006,7 @@ test("installation inspection refuses a missing, mismatched or retargeted runner
   assert.match(retargeted.layout_error ?? "", /unexpected workflow runner target/u);
   assert.throws(
     () => patchedWorkflowRunner(runnerRoot),
-    /unexpected workflow runner target; reinstall Ultrafuzz with pnpm install --frozen-lockfile$/u
+    /unexpected workflow runner target; reinstall and rebuild Ultrafuzz in its repository checkout: pnpm install --frozen-lockfile && pnpm -w build$/u
   );
 });
 

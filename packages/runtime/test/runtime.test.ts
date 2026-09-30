@@ -16399,24 +16399,21 @@ async function patchedSmithersAgentUsageModules(): Promise<{
   fs.rmSync(path.join(isolatedAgentsRoot, "node_modules"), { recursive: true, force: true });
   fs.symlinkSync(path.dirname(path.dirname(pinnedAgentsRoot)), path.join(isolatedAgentsRoot, "node_modules"), "dir");
 
-  const sourceContents = new Map<string, string>();
   for (const patch of SMITHERS_COMPATIBILITY_PATCHES.filter(
     (candidate) => candidate.packageName === "@smthrs/agents"
   )) {
-    const sourcePath = path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/"));
-    const current = sourceContents.get(sourcePath) ?? fs.readFileSync(sourcePath, "utf8");
-    assert.equal(current.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned agents`);
-    sourceContents.set(sourcePath, current);
+    const source = fs.readFileSync(path.join(isolatedAgentsRoot, ...patch.sourceRelativePath.split("/")), "utf8");
+    assert.equal(source.split(patch.patched).length, 2, `${patch.id} is not installed in the pinned agents`);
   }
+  // The copy only has to export a helper the installed agents keep private.
   const baseCliSourcePath = path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js");
-  const baseCliSource = sourceContents.get(baseCliSourcePath);
-  assert.ok(baseCliSource);
+  const baseCliSource = fs.readFileSync(baseCliSourcePath, "utf8");
   assert.equal(baseCliSource.split("function usageFromCompletedEvent(").length, 2);
-  sourceContents.set(
+  fs.writeFileSync(
     baseCliSourcePath,
-    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent(")
+    baseCliSource.replace("function usageFromCompletedEvent(", "export function usageFromCompletedEvent("),
+    "utf8"
   );
-  for (const [sourcePath, contents] of sourceContents) fs.writeFileSync(sourcePath, contents, "utf8");
 
   const baseCli = (await import(
     pathToFileURL(path.join(isolatedAgentsRoot, "src", "BaseCliAgent", "BaseCliAgent.js")).href
@@ -18824,6 +18821,15 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
   assert.equal(fs.readFileSync(installer.npmLogPath, "utf8").includes(project), false);
   assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
   assert.equal(fs.existsSync(injectedMarker), false);
+  // `@ultrafuzz/runtime` depends on the runner only for host commands, which run
+  // the installed one; following that edge would seal a second engine closure.
+  assert.ok(run.value);
+  const dependencyMap = JSON.parse(
+    fs.readFileSync(path.join(run.value.run_root, "smithers", "execution-dependencies.json"), "utf8")
+  ) as { issuers: Array<{ id: string; dependencies: Record<string, string> }> };
+  const runtimeIssuer = dependencyMap.issuers.find((issuer) => issuer.id === "module:@ultrafuzz/runtime");
+  assert.ok(runtimeIssuer, JSON.stringify(dependencyMap.issuers.map((issuer) => issuer.id)));
+  assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "smthrs"), false);
   {
     const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
       missing = await startRun({

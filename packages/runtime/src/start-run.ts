@@ -76,6 +76,7 @@ import {
   smithersExecutionControlFiles,
   smithersDiagnostic,
   submitSmithersWorkflow,
+  bindInstalledWorkflowRunner,
   writeTrustedSmithersShim,
   type CompiledSmithersWorkflow
 } from "./smithers.js";
@@ -190,8 +191,14 @@ export async function startRun(input: StartRunInput) {
   let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
     enforceDataGovernance: true,
-    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph),
+    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
+      // Launch writes the run's `smithers` shim for the installed runner only
+      // after installing its own controller, so refuse a runner it cannot bind
+      // (an unpatched install, a missing Bun, an engine inside the target)
+      // before creating the run.
+      bindInstalledWorkflowRunner({}, input.projectRoot);
+      return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);
+    },
     afterLayoutCreated: (layout) => {
       createdLayout = layout;
     }
@@ -598,16 +605,17 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli = prepared;
       } catch (error) {
         // Historical validator identity is task setup provenance, not authority
-        // to prevent Smithers from continuing the workflow. Keep the run-owned
-        // launcher first on PATH anyway: it re-verifies its closure on every
-        // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
+        // to prevent Smithers from continuing the workflow. trusted-bin, which
+        // also holds the `smithers` shim written below, leads the engine PATH on
+        // every resume, so a kept launcher stays first: it re-verifies its
+        // closure on every call, while dropping it lets tasks run whatever
+        // `ultrafuzz` is on PATH.
         const launcher = path.join(
           layout.root,
           "trusted-bin",
           process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz"
         );
         const launcherKept = fs.existsSync(launcher);
-        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = path.dirname(launcher);
         diagnostics.push(
           resumeWarning(
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",

@@ -13,7 +13,7 @@ import {
   BUN_TARGET_CONFIGURATION_GUARD_ARGS,
   smithersExecutableCapability
 } from "../src/smithers-executable-capability.js";
-import { runSmithersInspectionCommand, streamSmithersCommand } from "../src/smithers.js";
+import { runSmithersInspectionCommand, streamSmithersCommand, writeTrustedSmithersShim } from "../src/smithers.js";
 
 function temporaryDirectory(prefix: string): string {
   return temporaryRoot(prefix);
@@ -302,6 +302,40 @@ test(
   }
 );
 
+test(
+  "installed-runner commands and the run's smithers shim never import the target's Smithers config",
+  { skip: !bunAvailable || process.platform === "win32" },
+  async () => {
+    const root = temporaryDirectory("ufz-installed-runner-config-"),
+      targetRoot = path.join(root, "target"),
+      runRoot = path.join(root, "run"),
+      marker = path.join(root, "target-config-ran");
+    fs.mkdirSync(path.join(targetRoot, ".smithers"), { recursive: true });
+    fs.mkdirSync(runRoot);
+    // Smithers imports this to choose its store backend unless one is pinned,
+    // and the installed runner has no module confinement to refuse the import.
+    fs.writeFileSync(
+      path.join(targetRoot, ".smithers", "smithers.config.ts"),
+      `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(marker)}, "ran");\nexport default {};\n`
+    );
+
+    const listed = await runSmithersInspectionCommand({
+      args: ["ps", "--all", "--format", "json"],
+      projectRoot: targetRoot
+    });
+    assert.equal(listed.ok, true, listed.error);
+    assert.equal(fs.existsSync(marker), false);
+
+    const shim = path.join(writeTrustedSmithersShim(runRoot, targetRoot), "smithers");
+    execFileSync(shim, ["ps", "--all", "--format", "json"], {
+      cwd: targetRoot,
+      env: { ...process.env, SMITHERS_BACKEND: undefined },
+      encoding: "utf8"
+    });
+    assert.equal(fs.existsSync(marker), false);
+  }
+);
+
 test("streaming Smithers commands keep the executable anchor through child close", async () => {
   const root = temporaryDirectory("ufz-runner-stream-");
   const runner = nodeRunner(root, "console.log(JSON.stringify({ sequence: 1 }));\n");
@@ -539,6 +573,11 @@ test(
         /interpreter cannot (?:be|resolve) inside the target project/u
       );
     }
+    // Ultrafuzz's own installed runner is held to the same rule as an explicit one.
+    assert.throws(
+      () => bindOperatorSmithersExecutableCapability({}, local, target, target),
+      /workflow runner cannot be inside the target project/u
+    );
     assert.equal(assertExecutableOutsideRoot(external, target), undefined);
     assert.ok(smithersExecutableCapability(bindSmithersExecutableCapability({}, external, target)));
   }

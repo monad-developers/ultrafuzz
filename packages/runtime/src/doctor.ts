@@ -5,7 +5,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { referencesStatus } from "./references.js";
-import { inspectSmithersInstallation } from "./smithers.js";
+import {
+  inspectSmithersInstallation,
+  unappliedCompatibilityPatches,
+  WORKFLOW_RUNNER_REINSTALL_HINT
+} from "./smithers.js";
 import { SMITHERS_PACKAGE_NAME, SMITHERS_VERSION } from "./smithers-package.js";
 import type {
   DoctorCheck,
@@ -171,25 +175,24 @@ export async function diagnoseProject(input: DoctorInput) {
     });
   }
 
-  const unappliedPatches = Object.entries(installation.compatibility_patches)
-    .filter(([, posture]) => posture !== "applied")
-    .map(([id]) => id);
+  const unappliedPatches = unappliedCompatibilityPatches(installation);
+  const patchCount = Object.keys(installation.compatibility_patches).length;
   checks.push(
     {
       name: "workflow-engine-install",
       status: installation.layout_error === null ? "ok" : "error",
       summary:
         installation.layout_error === null
-          ? `resume runs the installed workflow engine ${String(installation.installed_version)}`
-          : "the installed workflow engine cannot run; see the workflow engine layout detail"
+          ? `resume, ps and each run's smithers shim run the installed workflow engine ${String(installation.installed_version)}`
+          : `the installed workflow engine cannot run (see the workflow engine layout detail); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
     },
     {
       name: "workflow-engine-patches",
       status: unappliedPatches.length === 0 ? "ok" : "error",
       summary:
         unappliedPatches.length === 0
-          ? `the installed runner carries all ${String(Object.keys(installation.compatibility_patches).length)} compatibility patches`
-          : `the installed runner lacks compatibility patches (${unappliedPatches.join(", ")}); reinstall Ultrafuzz with pnpm install --frozen-lockfile`
+          ? `the installed runner carries all ${String(patchCount)} compatibility patches`
+          : `the installed runner lacks ${String(unappliedPatches.length)} of ${String(patchCount)} compatibility patches (${unappliedPatches.join(", ")}); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
     }
   );
 

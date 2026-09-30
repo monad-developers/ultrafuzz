@@ -78,8 +78,9 @@ try {
     )}\n`,
     "utf8"
   );
-  // Resume refuses a workflow engine without Ultrafuzz's compatibility patches,
-  // so the consumer gets the same patches, Effect pins, and build allowlist.
+  // Launch, resume, replay and fork refuse a workflow engine without Ultrafuzz's
+  // compatibility patches, so the consumer gets the same patches, Effect pins,
+  // and build allowlist.
   const smithersPatches = Object.entries(pnpmWorkspace.patchedDependencies ?? {}).filter(([name]) =>
     /^(?:smthrs|@smthrs\/)/u.test(name)
   );

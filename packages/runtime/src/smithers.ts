@@ -94,7 +94,7 @@ import {
   smithersExecutableCapability,
   type SmithersExecutableAnchor
 } from "./smithers-executable-capability.js";
-import { writeCurrentBunStartupControls, type WorkflowExecutionControlFile } from "./workflow-integrity.js";
+import type { WorkflowExecutionControlFile } from "./workflow-integrity.js";
 import {
   acquireWorkflowExecutionSnapshotAnchor,
   hasWorkflowExecutionSnapshotCapability,
@@ -6193,13 +6193,7 @@ function prepareSmithersExecutableEnvironment(
     return bindSmithersExecutableCapability({ ...(env ?? {}) }, explicit, projectRoot);
   }
   if (hasWorkflowExecutionSnapshotCapability(env)) throw new Error("sealed workflow has no runner capability");
-  const runner = installedWorkflowRunner();
-  return bindOperatorSmithersExecutableCapability(
-    { ...(env ?? {}), ULTRAFUZZ_BUN_MODULE_CONFINEMENT: undefined },
-    runner.executable,
-    runner.dependencyRoot,
-    projectRoot
-  );
+  return bindInstalledWorkflowRunner({ ...(env ?? {}), ULTRAFUZZ_BUN_MODULE_CONFINEMENT: undefined }, projectRoot);
 }
 
 let installedRunner: { executable: string; dependencyRoot: string } | undefined;
@@ -6211,10 +6205,47 @@ let installedRunner: { executable: string; dependencyRoot: string } | undefined;
  * a runner of its own, and an install that skipped them — a packed or plain npm
  * install — is refused instead of running unpatched. Launch still seals the
  * separately installed controller it copies into the run's execution snapshot.
+ *
+ * It is resolved once per process. A `pnpm install` that changes the engine's
+ * dependency tree moves the package to a new directory and may delete this one;
+ * re-resolving cannot follow it, because Node and Bun cache module resolution,
+ * so a long-lived process whose runner is gone is told to restart.
  */
 export function installedWorkflowRunner(): { executable: string; dependencyRoot: string } {
   installedRunner ??= patchedWorkflowRunner();
+  if (!fs.existsSync(installedRunner.executable))
+    throw new Error(
+      `installed workflow runner ${installedRunner.executable} no longer exists, most likely because a pnpm install in Ultrafuzz's checkout replaced it; restart this Ultrafuzz process`
+    );
   return installedRunner;
+}
+
+/**
+ * Binds the installed runner into `env` for a command that runs in
+ * `projectRoot`, refusing a runner inside that project. Launch binds it before
+ * creating the run, so an install the shim cannot use fails the launch first.
+ */
+export function bindInstalledWorkflowRunner<T extends Record<string, string | undefined>>(
+  env: T,
+  projectRoot: string
+): T {
+  const runner = installedWorkflowRunner();
+  return bindOperatorSmithersExecutableCapability(env, runner.executable, runner.dependencyRoot, projectRoot);
+}
+
+/**
+ * The fix for a runner Ultrafuzz refuses. The build matters too: the patch
+ * registry that classifies the installed files is compiled into Ultrafuzz, so
+ * a pull followed by an install but no build is refused the same way.
+ */
+export const WORKFLOW_RUNNER_REINSTALL_HINT =
+  "reinstall and rebuild Ultrafuzz in its repository checkout: pnpm install --frozen-lockfile && pnpm -w build";
+
+/** The compatibility patches and engine anchors a posture does not classify as applied. */
+export function unappliedCompatibilityPatches(posture: SmithersInstallationPosture): string[] {
+  return Object.entries(posture.compatibility_patches)
+    .filter(([, patchPosture]) => patchPosture !== "applied")
+    .map(([id]) => id);
 }
 
 /**
@@ -6223,15 +6254,14 @@ export function installedWorkflowRunner(): { executable: string; dependencyRoot:
  */
 export function patchedWorkflowRunner(packageRoot?: string): { executable: string; dependencyRoot: string } {
   const posture = inspectSmithersInstallation(packageRoot);
-  const unapplied = Object.entries(posture.compatibility_patches)
-    .filter(([, patchPosture]) => patchPosture !== "applied")
-    .map(([id, patchPosture]) => `${id}: ${patchPosture}`);
-  const reinstall = "reinstall Ultrafuzz with pnpm install --frozen-lockfile";
   if (posture.layout_error !== null || posture.bin_path === null)
-    throw new Error(`${posture.layout_error ?? "installed workflow runner has no entrypoint"}; ${reinstall}`);
+    throw new Error(
+      `${posture.layout_error ?? "installed workflow runner has no entrypoint"}; ${WORKFLOW_RUNNER_REINSTALL_HINT}`
+    );
+  const unapplied = unappliedCompatibilityPatches(posture);
   if (unapplied.length > 0)
     throw new Error(
-      `installed workflow runner ${posture.bin_path} lacks Ultrafuzz's compatibility patches (${unapplied.join(", ")}); ${reinstall}`
+      `installed workflow runner ${posture.bin_path} lacks ${String(unapplied.length)} of ${String(Object.keys(posture.compatibility_patches).length)} Ultrafuzz compatibility patches (ultrafuzz doctor lists them); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
     );
   return { executable: posture.bin_path, dependencyRoot: path.dirname(packageRoot ?? installedRunnerPackageRoot()) };
 }
@@ -6245,23 +6275,19 @@ function installedRunnerPackageRoot(): string {
 
 /**
  * Writes `<run>/trusted-bin/smithers`, which runs the installed runner under
- * the Bun it resolves to with BUN_TARGET_CONFIGURATION_GUARD_ARGS, and returns
- * that directory. The generated workflow shells out to a bare `smithers`
- * (#1143), and the controller PATH otherwise carries no runner; trusted-bin
- * comes first on it.
+ * the Bun it resolves to with BUN_TARGET_CONFIGURATION_GUARD_ARGS and the same
+ * SQLite backend pin as `smithersCommandEnv`, and returns that directory. The
+ * generated workflow shells out to a bare `smithers` (#1143), and the
+ * controller PATH otherwise carries no runner; trusted-bin comes first on it.
  */
 export function writeTrustedSmithersShim(runRoot: string, projectRoot: string): string {
-  const runner = installedWorkflowRunner();
-  const capability = smithersExecutableCapability(
-    bindOperatorSmithersExecutableCapability({}, runner.executable, runner.dependencyRoot, projectRoot)
-  );
+  const capability = smithersExecutableCapability(bindInstalledWorkflowRunner({}, projectRoot));
   if (capability === undefined) throw new Error("installed workflow runner has no bound interpreter");
-  const { interpreter } = capability;
   const quote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
   const trustedBin = ensureSafeDirectory(runRoot, "trusted-bin");
   writeFileDurable(
     path.join(trustedBin, "smithers"),
-    `#!/bin/sh\nexec ${[interpreter.path, ...BUN_TARGET_CONFIGURATION_GUARD_ARGS, runner.executable].map(quote).join(" ")} "$@"\n`,
+    `#!/bin/sh\nexport SMITHERS_BACKEND=sqlite\nexec ${[capability.interpreter.path, ...BUN_TARGET_CONFIGURATION_GUARD_ARGS, capability.runner.path].map(quote).join(" ")} "$@"\n`,
     { mode: 0o500 }
   );
   return trustedBin;
@@ -6271,7 +6297,6 @@ async function ensureSmithersDependencies(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined,
   control: {
-    signal?: AbortSignal;
     timeoutMs?: number;
     requirePinnedRunner?: boolean;
     packageLock?: boolean;
@@ -6339,34 +6364,30 @@ async function ensureSmithersDependencies(
       repairCause = error;
     }
   }
-  await withTransientNpmRegistryRetry(
-    async () => {
+  await withTransientNpmRegistryRetry(async () => {
+    control.assertNpmCli?.();
+    try {
+      return await execFileAsync(
+        control.npmCli === undefined ? "npm" : process.execPath,
+        [
+          ...(control.npmCli === undefined ? [] : [control.npmCli]),
+          ...smithersDependencyInstallArgs({
+            prefix: packageRoot,
+            registry: "https://registry.npmjs.org",
+            packageLock: control.packageLock
+          })
+        ],
+        {
+          cwd: projectRoot,
+          env: smithersCommandEnv(projectRoot, env),
+          maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+          ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
+        }
+      );
+    } finally {
       control.assertNpmCli?.();
-      try {
-        return await execFileAsync(
-          control.npmCli === undefined ? "npm" : process.execPath,
-          [
-            ...(control.npmCli === undefined ? [] : [control.npmCli]),
-            ...smithersDependencyInstallArgs({
-              prefix: packageRoot,
-              registry: "https://registry.npmjs.org",
-              packageLock: control.packageLock
-            })
-          ],
-          {
-            cwd: projectRoot,
-            env: smithersCommandEnv(projectRoot, env),
-            maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-            ...(control.signal === undefined ? {} : { signal: control.signal }),
-            ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
-          }
-        );
-      } finally {
-        control.assertNpmCli?.();
-      }
-    },
-    control.signal === undefined ? {} : { signal: control.signal }
-  );
+    }
+  });
   const validationError = installedSmithersValidationError(projectRoot);
   if (validationError !== undefined) {
     throw new Error(
@@ -6396,8 +6417,7 @@ const repairedSmithersInstalls = new Set<string>();
 
 async function operatorControllerProjectRoot(
   targetRoot: string,
-  env: Record<string, string | undefined> | undefined,
-  control: { signal?: AbortSignal; timeoutMs?: number } = {}
+  env: Record<string, string | undefined> | undefined
 ): Promise<string> {
   const npmAuthority = resolveOperatorNpmAuthority(targetRoot, env);
   let project = operatorControllerProjects.get(npmAuthority.cacheKey);
@@ -6407,23 +6427,17 @@ async function operatorControllerProjectRoot(
       const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-controller-"));
       registerOperatorControllerRoot(root);
       try {
-        const timeoutMs = Math.min(
-            control.timeoutMs ?? SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
-            SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS
-          ),
-          npm = npmAuthority.provision(root),
+        const npm = npmAuthority.provision(root),
           packageRoot = path.join(root, ".smithers");
         fs.mkdirSync(packageRoot, { mode: 0o700 });
         writeFileDurable(path.join(packageRoot, "package.json"), renderSmithersPackageJson());
         await ensureSmithersDependencies(root, env, {
-          signal: control.signal,
-          timeoutMs,
+          timeoutMs: SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS,
           requirePinnedRunner: true,
           packageLock: true,
           npmCli: npm.cliPath,
           assertNpmCli: npm.assertCurrent
         });
-        writeCurrentBunStartupControls(root);
         return { npm, root, seal: operatorControllerProjectSeal(root) };
       } catch (error) {
         disposeOperatorControllerRoot(root);
@@ -6461,8 +6475,6 @@ function operatorControllerProjectSeal(projectRoot: string): string {
     externalRunner: false,
     add
   });
-  for (const name of ["bun-module-confinement.js", "bun-empty.env", "bunfig.toml"])
-    add(path.join(projectRoot, "controls", name), `controls/${name}`);
   const hash = crypto.createHash("sha256").update("ultrafuzz-operator-controller-v2\0");
   for (const [snapshotPath, sourcePath] of [...files].sort(([left], [right]) =>
     compareWorkflowExecutionStrings(left, right)
@@ -7256,6 +7268,11 @@ function smithersCommandEnv(
     }
   }
   if (operatorNodePath !== undefined) merged.NODE_PATH = operatorNodePath;
+  // Ultrafuzz's run store is always SQLite. Without this pin Smithers imports the
+  // target's `.smithers/smithers.config.ts` to choose a backend: target code the
+  // unconfined installed runner would execute, and an import a sealed runner's
+  // module confinement refuses, failing the command.
+  merged.SMITHERS_BACKEND = "sqlite";
   merged.PATH = composeSmithersCommandPath(projectRoot, source);
   return merged;
 }
