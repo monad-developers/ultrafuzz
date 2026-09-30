@@ -13,7 +13,7 @@ import {
   BUN_TARGET_CONFIGURATION_GUARD_ARGS,
   smithersExecutableCapability
 } from "../src/smithers-executable-capability.js";
-import { runSmithersInspectionCommand, streamSmithersCommand, writeTrustedSmithersShim } from "../src/smithers.js";
+import { runSmithersInspectionCommand, streamSmithersCommand } from "../src/smithers.js";
 
 function temporaryDirectory(prefix: string): string {
   return temporaryRoot(prefix);
@@ -303,15 +303,13 @@ test(
 );
 
 test(
-  "installed-runner commands and the run's smithers shim never import the target's Smithers config",
+  "installed-runner commands never import the target's Smithers config",
   { skip: !bunAvailable || process.platform === "win32" },
   async () => {
     const root = temporaryDirectory("ufz-installed-runner-config-"),
       targetRoot = path.join(root, "target"),
-      runRoot = path.join(root, "run"),
       marker = path.join(root, "target-config-ran");
     fs.mkdirSync(path.join(targetRoot, ".smithers"), { recursive: true });
-    fs.mkdirSync(runRoot);
     // Smithers imports this to choose its store backend unless one is pinned,
     // and the installed runner has no module confinement to refuse the import.
     fs.writeFileSync(
@@ -324,14 +322,6 @@ test(
       projectRoot: targetRoot
     });
     assert.equal(listed.ok, true, listed.error);
-    assert.equal(fs.existsSync(marker), false);
-
-    const shim = path.join(writeTrustedSmithersShim(runRoot, targetRoot), "smithers");
-    execFileSync(shim, ["ps", "--all", "--format", "json"], {
-      cwd: targetRoot,
-      env: { ...process.env, SMITHERS_BACKEND: undefined },
-      encoding: "utf8"
-    });
     assert.equal(fs.existsSync(marker), false);
   }
 );

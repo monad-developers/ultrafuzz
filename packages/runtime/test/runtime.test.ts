@@ -25366,6 +25366,8 @@ test("a resume that cannot re-verify the trusted CLI leaves tasks on the run's o
   parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
   const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED");
   assert.equal(warning?.severity, "warning", JSON.stringify(resumed.diagnostics));
+  // Tasks find the validator launcher there, and no workflow runner CLI.
+  assert.deepEqual(fs.readdirSync(path.dirname(resolved)), ["ultrafuzz"]);
 });
 
 test("native continuation hands generated agents the run's TOML config, so CodexAgent keeps API-key auth", async () => {

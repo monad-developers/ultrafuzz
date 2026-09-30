@@ -1431,7 +1431,7 @@ test("diagnoseProject reports the installed runner that commands after launch ex
 
 test("diagnoseProject reports an installed runner inside the target project as refused, as launch and resume do", async () => {
   // Ultrafuzz's own checkout audited as the target: its installed runner lies
-  // inside the project, so launch, resume, replay and fork refuse to bind it.
+  // inside the project, so launch and resume refuse to bind it.
   const checkout = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../.."));
   assert.ok(
     installedWorkflowRunner().executable.startsWith(`${checkout}${path.sep}`),
@@ -1452,7 +1452,7 @@ test("diagnoseProject reports an installed runner inside the target project as r
     {
       name: "workflow-engine-install",
       status: "error",
-      summary: `launch, resume, replay and fork refuse the installed workflow engine for this project: ${refusal}`
+      summary: `launch and resume refuse the installed workflow engine for this project: ${refusal}`
     }
   );
   assert.equal(doctor.value?.workflow_engine.layout_status, "error");

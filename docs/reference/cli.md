@@ -355,19 +355,19 @@ resume cannot prune stale task-worktree registrations, it reports a
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so
 resume makes no package-registry request and leaves nothing in the OS
-temporary directory. Launch, resume, replay, and fork also write
-`<run>/trusted-bin/smithers`, which runs that engine for the workflow's own
-`smithers` calls. All four refuse an install that lacks any of those patches,
-such as a plain npm install of the packed packages, and an engine inside the
-target project; launch refuses before it creates the run directory. To fix
-the install, run `pnpm install --frozen-lockfile && pnpm -w build` in the
-Ultrafuzz repository checkout. The build matters because the patch registry
-that checks the installed files is compiled into Ultrafuzz.
+temporary directory. Resume refuses an install that lacks any of those
+patches, such as a plain npm install of the packed packages, and an engine
+inside the target project. Launch refuses the same install before it creates
+the run directory, because the run could not be resumed; `replay` and `fork`
+run the run's sealed engine instead. To fix the install, run
+`pnpm install --frozen-lockfile && pnpm -w build` in the Ultrafuzz repository
+checkout. The build matters because the patch registry that checks the
+installed files is compiled into Ultrafuzz.
 
 Run long campaigns from a dedicated checkout or worktree, and leave its install
 and build alone while they run. The resumed engine and its supervisor run from
-that install, the resumed workflow imports that checkout's built
-`@ultrafuzz/runtime`, and every run's `trusted-bin/smithers` points into it.
+that install, and the resumed workflow imports that checkout's built
+`@ultrafuzz/runtime`.
 A `pnpm install` there that changes the engine's resolved dependency tree
 moves the engine to a new package directory. A Smithers patch changes that
 tree, and so does a version change anywhere in the engine's dependency graph,
@@ -375,9 +375,8 @@ such as TypeScript or React; a pull or a branch switch often brings both.
 pnpm then deletes the old directory, in that install or a later one: by
 default it clears orphaned package directories during an install once seven
 days have passed since it last did. From then on the running engine can fail
-on its next lazy import, the supervisor's next relaunch of it fails, and so
-does the run's `trusted-bin/smithers`. Run `ultrafuzz resume` again to continue
-the run from the new install; it also rewrites the run's `trusted-bin/smithers`.
+on its next lazy import, and the supervisor's next relaunch of it fails. Run
+`ultrafuzz resume` again to continue the run from the new install.
 Restart long-lived Ultrafuzz processes, such as the dashboard or
 `ultrafuzz eval run`, after such an install: each resolves the engine once, so
 once that directory is gone their engine commands fail with
@@ -670,9 +669,9 @@ non-launching configuration contract unchanged. Doctor reports:
 - npm's latest published stable engine version when the registry check is
   available;
 - whether that installed engine passes Ultrafuzz's version and path checks,
-  and the posture of each compatibility patch in it. Launch, `resume`,
-  `replay`, and `fork` refuse an engine that fails either check, so each
-  failure is reported as an error. Doctor then binds an engine that passes
+  and the posture of each compatibility patch in it. Launch and `resume`
+  refuse an engine that fails either check, so each failure is reported as an
+  error. Doctor then binds an engine that passes
   both for the project the way those commands do, and reports it as refused
   when it lies inside the project (for example, when the Ultrafuzz checkout is
   under `--project`) or when `bun` is not on `PATH`;
