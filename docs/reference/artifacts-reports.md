@@ -281,10 +281,21 @@ events first; a stream that returns exactly that many events is reported as
 
 For terminal report producers, `report.json#run_metadata.agent_execution`
 contains the full planned attempt chain, the attempts that failed before the
-successful generation, and the actual producing profile/model. The workflow
-verifier compares that field with controller memory or independently persisted
-Smithers attempt authority before accepting the report, so downstream evals can
-detect mixed-model runs without trusting a model-writable file.
+successful generation, and the actual producing profile/model. Before each
+producer attempt starts its agent, the workflow records the chain rung it
+selected in `smithers/final-report-selections/<attempt-id>.json` under the run
+directory, outside the agent's worktree and artifact roots. The workflow
+verifier compares the report field with controller memory or, after a
+controller restart, with that record before accepting the report, so downstream
+evals can detect mixed-model runs without trusting the task-local copy the
+agent was given. `failed_attempts` is inexact in two cases: it omits attempts
+that ran before `resume --refresh-controller` replaced an earlier release's
+workflow, and after a reset that reuses attempt numbers it can list an attempt
+from before the reset. The record is host evidence, not a sandbox boundary: an
+agent running unsandboxed as the same user could edit it, as it could edit the
+Smithers database, and so could a Codex agent in its `workspace-write` sandbox
+when the project lives under `/tmp` or `$TMPDIR`, which that sandbox leaves
+writable.
 
 The runtime does not serialize `agent_execution` or
 `property_implementation_coverage` into the model prompt. Immediately before a

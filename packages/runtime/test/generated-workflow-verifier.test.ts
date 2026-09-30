@@ -425,62 +425,6 @@ function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
   )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportPromptAuthority>;
 }
 
-function loadFinalReportAgentExecutionAuthority(
-  options: {
-    smithersDetail?: unknown;
-    smithersFailure?: unknown;
-    chainIndex?: number;
-    execution?: unknown;
-  } = {}
-): {
-  remember(task: unknown, execution: unknown): void;
-  read(task: unknown): unknown;
-  smithersReads(): number;
-  smithersTimeoutMs(): number | undefined;
-  budgetMs: number;
-} {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const helperStart = source.indexOf("const finalReportAgentExecutionAuthority");
-  const helperEnd = source.indexOf("\n\nfunction baseAgentForProfile", helperStart);
-  assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  let reads = 0;
-  let observedTimeout: number | undefined;
-  const loaded = new Function(
-    "declaredFinalReportOutputPair",
-    "execFileSync",
-    "parseStrictJsonBytes",
-    "isPlainJsonRecord",
-    "reconcileSmithersAttemptAgentSelection",
-    "inspectSmithersAttemptAgentSelection",
-    "finalReportAgentExecution",
-    `${helper}; return {
-      remember: rememberFinalReportAgentExecutionAuthority,
-      read: authoritativeFinalReportAgentExecution,
-      budgetMs: SMITHERS_REPORT_PRODUCER_AUTHORITY_TIMEOUT_MS
-    };`
-  )(
-    () => ({}),
-    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
-      reads += 1;
-      observedTimeout = spawnOptions.timeout;
-      if (options.smithersFailure !== undefined) throw options.smithersFailure;
-      if (options.smithersDetail === undefined) {
-        throw new Error("Smithers fallback should not be needed");
-      }
-      return JSON.stringify(options.smithersDetail);
-    },
-    (bytes: Uint8Array) => JSON.parse(Buffer.from(bytes).toString("utf8")),
-    (value: unknown) => typeof value === "object" && value !== null && !Array.isArray(value),
-    () => ({ chainIndex: options.chainIndex ?? 0 }),
-    () => ({ chainIndex: options.chainIndex ?? 0 }),
-    () => options.execution ?? {}
-  ) as { remember(task: unknown, execution: unknown): void; read(task: unknown): unknown; budgetMs: number };
-  return { ...loaded, smithersReads: () => reads, smithersTimeoutMs: () => observedTimeout };
-}
-
 function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: string } = {}): {
   preflight(): void;
   observedTimeoutMs(): number | undefined;
@@ -8725,9 +8669,6 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
   );
   assert.match(verification, /authoritativeFinalReportAgentExecution\(task\)/u);
   assert.match(verification, /controller-observed producer/u);
-  assert.doesNotMatch(source, /agent-execution|execution\.json|readFinalReportAgentExecutionRecord/u);
-  assert.match(source, /reconcileSmithersAttemptAgentSelection\(task, authority\.authorityDetail/u);
-  assert.match(source, /detail\.ok === true && isPlainJsonRecord\(detail\.data\)/u);
   assert.match(source, /finalReportAgentExecutionAuthority\.get\(task\.attemptId\)/u);
 
   const promptWithAuthority = loadPromptWithAuthoritativeFinalReportPromptAuthority();
@@ -8738,106 +8679,6 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
   assert.equal(fallbackAttemptPrompt, firstAttemptPrompt);
   assert.match(firstAttemptPrompt, /bounded host-generated JSON object/u);
   assert.doesNotMatch(firstAttemptPrompt, /gpt55-xhigh|failed_attempts/u);
-});
-
-test("a non-Codex fallback cannot forge final-report producer authority through the run filesystem", () => {
-  const root = temporaryRoot("ultrafuzz-forged-producer-");
-  try {
-    const task = {
-      id: "node:final-report",
-      smithersNodeId: "node:final-report",
-      execution: { mode: "local" },
-      attemptId: "final-report",
-      runRoot: root,
-      smithersRunId: "ultrafuzz-authority-recovery",
-      agentChain: [{ profileId: "primary" }, { profileId: "deepseek" }]
-    };
-    const actual = {
-      planned_chain: [{ attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }],
-      failed_attempts: [],
-      producer: { attempt: 1, profile_id: "deepseek", agent_ref: "DeepSeekAgent", role: "fallback" }
-    };
-    const forged = {
-      ...actual,
-      producer: { attempt: 1, profile_id: "forged", agent_ref: "CodexAgent", role: "primary" }
-    };
-    const legacyRecord = path.join(root, "smithers", "agent-execution", "final-report", "execution.json");
-    fs.mkdirSync(path.dirname(legacyRecord), { recursive: true });
-    fs.writeFileSync(legacyRecord, `${JSON.stringify(forged)}\n`, "utf8");
-
-    const authority = loadFinalReportAgentExecutionAuthority();
-    authority.remember(task, actual);
-    assert.deepEqual(authority.read(task), actual);
-    assert.equal(authority.smithersReads(), 0);
-    assert.notDeepEqual(authority.read(task), JSON.parse(fs.readFileSync(legacyRecord, "utf8")));
-
-    const recovered = loadFinalReportAgentExecutionAuthority({
-      smithersDetail: {
-        ok: true,
-        data: {
-          node: { nodeId: task.id, lastAttempt: 1 },
-          attempts: [
-            {
-              nodeId: task.id,
-              attempt: 1,
-              state: "finished",
-              meta: {
-                agentChainIndex: 0,
-                agentId: "ultrafuzz-agent:final-report:0:deepseek",
-                agentModel: "deepseek-chat"
-              }
-            }
-          ]
-        },
-        meta: { command: "node", duration: "1ms" }
-      },
-      chainIndex: 0,
-      execution: actual
-    });
-    assert.deepEqual(recovered.read(task), actual);
-    assert.equal(recovered.smithersReads(), 1);
-    assert.notDeepEqual(recovered.read(task), JSON.parse(fs.readFileSync(legacyRecord, "utf8")));
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("multi-rung report-producer authority budgets a contended Smithers read and reports its wall time", () => {
-  const timedOut = Object.assign(new Error("spawnSync smithers ETIMEDOUT"), { code: "ETIMEDOUT" });
-  const authority = loadFinalReportAgentExecutionAuthority({ smithersFailure: timedOut });
-  const task = {
-    attemptId: "final-report",
-    id: "final-report",
-    execution: { mode: "local" },
-    smithersRunId: "run-1",
-    agentChain: [{ profileId: "primary" }, { profileId: "fallback" }]
-  };
-
-  // #1026: this read shares the finalizer with every other agent's build work, and it serializes the
-  // node's whole attempt history on top of a CLI start, so it needs the same order of budget as the
-  // validator preflight while staying a minority of the lane's 1800 s `node_timeout_seconds`.
-  assert.ok(authority.budgetMs >= 120_000, String(authority.budgetMs));
-  assert.ok(authority.budgetMs <= 600_000, String(authority.budgetMs));
-
-  assert.throws(
-    () => authority.read(task),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.equal(authority.smithersTimeoutMs(), authority.budgetMs);
-      assert.equal(error.cause, timedOut);
-      // `--full-output` can return up to 64 MiB, so the failing command's own text stays behind
-      // `cause` as the neighbouring authority failures keep it; only the timing is published.
-      assert.match(
-        error.message,
-        new RegExp(
-          `^artifact-contract failure: Smithers report-producer authority is unavailable after \\d+ms against a ${authority.budgetMs}ms budget$`,
-          "u"
-        )
-      );
-      return true;
-    }
-  );
-  assert.equal(authority.smithersReads(), 1);
 });
 
 test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
