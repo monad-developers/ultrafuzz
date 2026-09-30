@@ -38,6 +38,7 @@ import {
   sha256Bytes,
   sha256File,
   updateNodeState,
+  updateRunMetadataDocument,
   updateRunStatus,
   usageLedgerIdentity,
   validateArtifactContractBytes,
@@ -46,7 +47,6 @@ import {
   validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
-  writeRunMetadataDocument,
   writeRunState,
   type AppendEventInput,
   type AppendNodeAttemptInput,
@@ -643,13 +643,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: loaded.diagnostics };
   }
   const previousControlState = structuredClone(readRunState(layout));
-  const forbiddenSecretValues = sensitiveEnvironmentValues(
-    input.env ?? process.env,
-    loaded.tasks.flatMap((task) => [
-      ...task.execution.agentCredentialEnv,
-      ...(task.execution.modal?.credentialEnv ?? [])
-    ])
-  );
+  const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env);
 
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
@@ -1186,12 +1180,7 @@ async function synchronizeWorkflowAccounting(input: {
   budgetDiagnostic?: RuntimeDiagnostic;
 }> {
   const metadata = readRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId);
-  if (metadata.workflow?.run_id !== input.workflowRunId) {
-    throw new Error("run.json workflow does not match the linked Smithers run");
-  }
-  if (metadata.workflow.control_generation !== input.controlGeneration) {
-    throw new Error("run.json workflow control generation does not match the linked Smithers run");
-  }
+  assertAccountedWorkflow(metadata, input.workflowRunId, input.controlGeneration);
   // run.json accounting is a cache derived from usage.jsonl: every pass rebuilds
   // it from the ledger and reads the prior copy only for its cached prices. A
   // pass stopped between the ledger append and the run.json write therefore
@@ -1300,7 +1289,8 @@ async function synchronizeWorkflowAccounting(input: {
     updated_at:
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
-  const nextMetadata = assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
+  // Checked before the ledger append below; the write re-checks the document it lands in.
+  assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
 
   if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
     return { changed: false, available: true };
@@ -1316,9 +1306,29 @@ async function synchronizeWorkflowAccounting(input: {
 
   if (preparedUsage.inputs.length > 0) appendUsageEvents(input.layout, preparedUsage.inputs);
   if (accountingChanged) {
-    writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
+    // A lifecycle command can rewrite run.json while this pass runs, as resume
+    // does to record its controller's Forge guard. Writing back the copy read
+    // above would undo that write, so the accounting goes into the document as
+    // it is now, which must still be bound to the workflow it was computed for.
+    updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
+      assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
+      return { ...current, accounting: nextAccounting };
+    });
   }
   return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
+}
+
+function assertAccountedWorkflow(
+  metadata: RunMetadataDocument,
+  workflowRunId: string,
+  controlGeneration: string
+): void {
+  if (metadata.workflow?.run_id !== workflowRunId) {
+    throw new Error("run.json workflow does not match the linked Smithers run");
+  }
+  if (metadata.workflow.control_generation !== controlGeneration) {
+    throw new Error("run.json workflow control generation does not match the linked Smithers run");
+  }
 }
 
 function accountingFromWorkflowEvents(

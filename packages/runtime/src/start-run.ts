@@ -20,6 +20,7 @@ import {
   replayEvents,
   safeResolveInside,
   sensitiveEnvironmentValues,
+  updateRunMetadataDocument,
   updateRunStatus,
   validatePlannedGraph,
   validateSafeId,
@@ -77,7 +78,6 @@ import {
   smithersDiagnostic,
   submitSmithersWorkflow,
   bindInstalledWorkflowRunner,
-  writeTrustedSmithersShim,
   type CompiledSmithersWorkflow
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
@@ -192,10 +192,10 @@ export async function startRun(input: StartRunInput) {
   const planned = await planRun(input, {
     enforceDataGovernance: true,
     beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
-      // Launch writes the run's `smithers` shim for the installed runner only
-      // after installing its own controller, so refuse a runner it cannot bind
-      // (an unpatched install, a missing Bun, an engine inside the target)
-      // before creating the run.
+      // Launch seals a controller of its own, but `resume` runs the installed
+      // runner, so refuse one it cannot bind (an unpatched install, a missing
+      // Bun, an engine inside the target) before creating a run that could not
+      // be resumed.
       bindInstalledWorkflowRunner({}, input.projectRoot);
       return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);
     },
@@ -270,6 +270,7 @@ export async function startRun(input: StartRunInput) {
 
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: plan.layout,
+      projectRoot: plan.validation.project_root,
       config: plan.resolved_config,
       env: input.env
     });
@@ -284,10 +285,6 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
-    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(
-      plan.layout.root,
-      plan.validation.project_root
-    );
     assertCurrentDataGovernanceTarget(
       plan.validation.project_root,
       prepared.verifiedControl.executionFiles,
@@ -342,7 +339,7 @@ export async function startRun(input: StartRunInput) {
         config_fingerprint: plan.config_fingerprint,
         workflow_ids: [compiled.smithersRunId]
       },
-      planned.diagnostics
+      [...planned.diagnostics, ...forgeGuard.diagnostics]
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
@@ -576,7 +573,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       });
     }
     const tasks = taskDocument?.tasks ?? [];
-    const forgeGuard = prepareForgeGuardEnvironment({ layout, config, env: input.env });
+    const forgeGuard = prepareForgeGuardEnvironment({ layout, projectRoot, config, env: input.env });
     const controllerEnvironment = {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
@@ -605,17 +602,16 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli = prepared;
       } catch (error) {
         // Historical validator identity is task setup provenance, not authority
-        // to prevent Smithers from continuing the workflow. trusted-bin, which
-        // also holds the `smithers` shim written below, leads the engine PATH on
-        // every resume, so a kept launcher stays first: it re-verifies its
-        // closure on every call, while dropping it lets tasks run whatever
-        // `ultrafuzz` is on PATH.
+        // to prevent Smithers from continuing the workflow. Keep the run-owned
+        // launcher first on PATH anyway: it re-verifies its closure on every
+        // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
         const launcher = path.join(
           layout.root,
           "trusted-bin",
           process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz"
         );
         const launcherKept = fs.existsSync(launcher);
+        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = path.dirname(launcher);
         diagnostics.push(
           resumeWarning(
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
@@ -627,7 +623,6 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         );
       }
     }
-    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(layout.root, projectRoot);
     const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(config, agentRefs);
     const continuedEnvironment =
@@ -687,10 +682,17 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       )
     });
     // An attach to a run Smithers still reports active started no controller,
-    // so it must not re-record status, lease or deadline; the resume that
-    // starts the next controller does.
+    // so it must not re-record status, lease, deadline or Forge guard, or warn
+    // about a guard no controller runs with; the resume that starts the next
+    // controller does.
     if (result.alreadyRunning !== true) {
-      recordNativeContinuationState({ layout, config, requestedConcurrency: input.maxConcurrency });
+      diagnostics.push(...forgeGuard.diagnostics);
+      recordNativeContinuationState({
+        layout,
+        config,
+        requestedConcurrency: input.maxConcurrency,
+        forgeGuardActive: forgeGuard.active
+      });
     }
     return runtimeResult(
       true,
@@ -773,7 +775,16 @@ function recordNativeContinuationState(input: {
   layout: RunLayout;
   config: ResolvedConfig;
   requestedConcurrency: number | undefined;
+  forgeGuardActive: boolean;
 }): void {
+  try {
+    // run.json describes the Forge guard of the controller that now runs the
+    // workflow, as launch, replay and fork record it for theirs.
+    persistForgeGuardMetadata(input.layout, input.config, input.forgeGuardActive);
+  } catch {
+    // Best effort like the state below: a legacy run.json that the current
+    // schema rejects must not fail a continuation Smithers already accepted.
+  }
   try {
     const submittedAt = new Date().toISOString();
     const submittedAtMs = Date.parse(submittedAt);
@@ -973,6 +984,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
     const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
+      projectRoot: path.resolve(input.projectRoot),
       config: sealedConfig,
       env: input.env
     });
@@ -985,7 +997,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
-    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(evidence.layout.root, input.projectRoot);
     const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleEnvironment = {
@@ -1097,7 +1108,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
         action,
         submitted: !lifecycleResult.alreadyRunning
       },
-      preflightDiagnostics
+      [...preflightDiagnostics, ...forgeGuard.diagnostics]
     );
   } catch (error) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);
@@ -1891,11 +1902,12 @@ function linkedWorkflowAgentRefs(taskContents: Buffer): string[] {
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
-  const metadata = readRunMetadataDocument(layout.runMetadataPath, layout.runId);
-  writeRunMetadataDocument(layout.runMetadataPath, {
+  // Under run.json's lock, like synchronization's accounting write: an
+  // observer's pass in progress must not write the previous guard back.
+  updateRunMetadataDocument(layout.runMetadataPath, layout.runId, (metadata) => ({
     ...metadata,
     forge_guard: forgeGuardMetadata(config, active)
-  });
+  }));
 }
 
 function mergeEnvironmentVariableNames(...groups: readonly (readonly string[])[]): string[] {

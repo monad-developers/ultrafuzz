@@ -444,7 +444,11 @@ forge_rayon_threads = 1
 The wrapper limits only Forge and its child processes. Raise the memory ceiling
 for larger validation jobs or set `forge_guard_enabled = false` to opt out.
 Resolved run config and run metadata record the configured limit and whether
-the wrapper was active.
+the wrapper was active: whether the workflow engine kept it on `PATH`, which
+it does only for runs under the default `.ultrafuzz/runs` output directory, in
+a project whose path has no symbolic links. When it does not, tasks run the
+real Forge and the command that started the controller reports a
+`FORGE_GUARD_INACTIVE` warning.
 
 `ultrafuzz init` may create generated workflow adapter files. Those files are
 implementation plumbing for launching workflows; project configuration should

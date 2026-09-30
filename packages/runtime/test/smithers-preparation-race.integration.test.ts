@@ -248,22 +248,10 @@ process.stdout.write(JSON.stringify(result));`
     const downstream = JSON.parse(fs.readFileSync(downstreamArtifact, "utf8")) as {
       producer_run_id: string;
       controller_node_path: string;
-      controller_path: string;
     };
     assert.equal(downstream.producer_run_id, "historical-embedded-run-id");
     assert.equal(downstream.controller_node_path, path.dirname(smithersPackageRoot));
     assert.deepEqual(fs.readdirSync(resumeTmpdir), []);
-    // The workflow's bare `smithers` calls (#1143) find the run's shim first.
-    const trustedBin = path.join(runRoot, "trusted-bin");
-    assert.equal(downstream.controller_path.split(path.delimiter)[0], trustedBin);
-    const viaShim = JSON.parse(
-      execFileSync(path.join(trustedBin, "smithers"), ["inspect", runId, "--format", "json"], {
-        cwd: root,
-        encoding: "utf8",
-        env: { ...process.env, ...offline }
-      })
-    ) as { run?: { status?: string }; status?: string };
-    assert.equal(viaShim.run?.status ?? viaShim.status, "finished");
     assert.equal(registryConnections, 0, "the resumed run reached the package registry");
   } finally {
     registry?.close();
@@ -500,8 +488,7 @@ export default smithers((ctx) => (
         fs.appendFileSync(executionLog, "downstream\\n", "utf8");
         fs.writeFileSync(downstreamArtifact, JSON.stringify({
           producer_run_id: producer.embedded_run_id,
-          controller_node_path: process.env.NODE_PATH,
-          controller_path: process.env.PATH
+          controller_node_path: process.env.NODE_PATH
         }) + "\\n", "utf8");
         return { producer_run_id: producer.embedded_run_id };
       }}

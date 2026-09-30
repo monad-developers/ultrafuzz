@@ -41,14 +41,13 @@ nodes:
   );
 }
 
-async function plannedRunWithArtifact(project: string): Promise<{ runId: string; runRoot: string; nodeId: string }> {
+async function plannedRunWithArtifact(
+  project: string,
+  runId = `clean-${crypto.randomBytes(4).toString("hex")}`
+): Promise<{ runId: string; runRoot: string; nodeId: string }> {
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const plan = await planRun({
-    projectRoot: project,
-    runId: `clean-${crypto.randomBytes(4).toString("hex")}`,
-    env: {}
-  });
+  const plan = await planRun({ projectRoot: project, runId, env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const nodeId = plan.value!.graph.nodes[0]!.id;
   assert.ok(nodeId);
@@ -88,15 +87,14 @@ test("cleanRun can remove a selected run root after confirmation without deletin
     selections: [`runs/${first.runId}`]
   });
   assert.equal(cleaned.ok, true, JSON.stringify(cleaned.diagnostics));
+  assert.deepEqual(cleaned.diagnostics, []);
   assert.equal(fs.existsSync(first.runRoot), false);
   assert.equal(fs.existsSync(second.runRoot), true);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "clean-audit.jsonl")), true);
 });
 
-test("cleanRun removes a run planned for removed cloud execution without provider credentials", async () => {
-  const project = tempProject();
-  const { runId, runRoot } = await plannedRunWithArtifact(project);
-  // The execution block a run planned with `execution.mode = "cloud"` recorded before that mode was removed.
+/** The execution block a run planned with `execution.mode = "cloud"` recorded before that mode was removed. */
+function planForRemovedCloudExecution(runRoot: string): void {
   const planPath = path.join(runRoot, "plan.json");
   const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as { execution: Record<string, unknown> };
   plan.execution = {
@@ -104,17 +102,94 @@ test("cleanRun removes a run planned for removed cloud execution without provide
     mode: "cloud",
     provider: "modal",
     providers: {
-      modal: { app: "ultrafuzz", image: "ultrafuzz", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
+      modal: { app: "audit-nodes", image: "ultrafuzz", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
     }
   };
   fs.writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+}
 
-  const cleaned = await cleanRun({ projectRoot: project, confirmed: true, selections: [`runs/${runId}`] });
+test("cleanRun names the Modal storage of a run planned for removed cloud execution and still removes it", async () => {
+  const project = tempProject();
+  // A run ID in the format launch generates: `ultrafuzz-<run-id>` is longer
+  // than the 32 characters the removed provider kept of it.
+  const { runId, runRoot } = await plannedRunWithArtifact(project, "run-20260930t161149123z-ab12cd34");
+  planForRemovedCloudExecution(runRoot);
+  // The names the removed Modal node provider derived from the Smithers run ID
+  // `ultrafuzz-run-20260930t161149123z-ab12cd34`, which `ultrafuzz clean` used to remove.
+  const volume = "ultrafuzz-node-ultrafuzz-run-20260930t161149123-d99772718708";
+  const sandboxTag = "run=ultrafuzz-run-20260930t161149123-d99772718708";
+  const early: Array<{ codes: string[]; planPresent: boolean }> = [];
+  const onRetainedStorage = (warnings: readonly { code: string }[]): void => {
+    early.push({
+      codes: warnings.map((warning) => warning.code),
+      planPresent: fs.existsSync(path.join(runRoot, "plan.json"))
+    });
+  };
+
+  // A preview shows the warning while the plan that names the storage exists.
+  const preview = await cleanRun({
+    projectRoot: project,
+    dryRun: true,
+    selections: [`runs/${runId}`],
+    onRetainedStorage
+  });
+
+  assert.equal(preview.ok, true, JSON.stringify(preview.diagnostics));
+  assert.deepEqual(
+    preview.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity, diagnostic.path]),
+    [["CLEAN_CLOUD_STORAGE_RETAINED", "warning", `runs/${runId}`]]
+  );
+  const message = preview.diagnostics[0]?.message ?? "";
+  for (const expected of [`\`modal volume delete ${volume}\``, "Modal app audit-nodes", sandboxTag]) {
+    assert.ok(message.includes(expected), `${expected} missing from: ${message}`);
+  }
+  assert.equal(fs.existsSync(runRoot), true);
+  assert.deepEqual(early, []);
+
+  const cleaned = await cleanRun({
+    projectRoot: project,
+    confirmed: true,
+    selections: [`runs/${runId}`],
+    onRetainedStorage
+  });
 
   assert.equal(cleaned.ok, true, JSON.stringify(cleaned.diagnostics));
   assert.deepEqual(cleaned.value?.removed, [`runs/${runId}`]);
   assert.equal(fs.existsSync(runRoot), false);
+  assert.deepEqual(cleaned.diagnostics, preview.diagnostics);
+  // Handed over before the removal deleted the plan.
+  assert.deepEqual(early, [{ codes: ["CLEAN_CLOUD_STORAGE_RETAINED"], planPresent: true }]);
 });
+
+test(
+  "cleanRun still returns the retained Modal storage when the audit record fails after the removal",
+  { skip: process.getuid?.() === 0 ? "root ignores the read-only directory" : false },
+  async () => {
+    const project = tempProject();
+    const { runId, runRoot } = await plannedRunWithArtifact(project);
+    planForRemovedCloudExecution(runRoot);
+    // The run directory stays removable, but no audit record or lock can be created.
+    const generatedRoot = path.join(project, ".ultrafuzz");
+    fs.chmodSync(generatedRoot, 0o555);
+    let cleaned: Awaited<ReturnType<typeof cleanRun>>;
+    try {
+      cleaned = await cleanRun({ projectRoot: project, confirmed: true, selections: [`runs/${runId}`] });
+    } finally {
+      fs.chmodSync(generatedRoot, 0o755);
+    }
+
+    assert.equal(cleaned.ok, false);
+    assert.equal(fs.existsSync(runRoot), false);
+    assert.deepEqual(
+      cleaned.diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
+      [
+        ["CLEAN_AUDIT_FAILED", "error"],
+        ["CLEAN_CLOUD_STORAGE_RETAINED", "warning"]
+      ]
+    );
+    assert.match(cleaned.diagnostics[0]?.message ?? "", /^the selections were removed, but the clean audit record/u);
+  }
+);
 
 test("cleanRun rejects missing confirmation, non-generated paths, state files, missing selections, and symlinks", async () => {
   const project = tempProject();

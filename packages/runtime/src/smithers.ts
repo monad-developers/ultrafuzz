@@ -14,7 +14,6 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
-  ensureSafeDirectory,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   isArtifactContractId,
@@ -6136,7 +6135,8 @@ export function installedWorkflowRunner(): { executable: string; dependencyRoot:
 /**
  * Binds the installed runner into `env` for a command that runs in
  * `projectRoot`, refusing a runner inside that project. Launch binds it before
- * creating the run, so an install the shim cannot use fails the launch first.
+ * creating the run, so an install that `resume` could not run fails the launch
+ * first.
  */
 export function bindInstalledWorkflowRunner<T extends Record<string, string | undefined>>(
   env: T,
@@ -6184,26 +6184,6 @@ function installedRunnerPackageRoot(): string {
   // Resolve it as ESM: once Bun has loaded that entrypoint, its `require.resolve`
   // returns the bare specifier instead of a path.
   return path.resolve(fs.realpathSync(fileURLToPath(import.meta.resolve(SMITHERS_PACKAGE_NAME))), "..", "..");
-}
-
-/**
- * Writes `<run>/trusted-bin/smithers`, which runs the installed runner under
- * the Bun it resolves to with BUN_TARGET_CONFIGURATION_GUARD_ARGS and the same
- * SQLite backend pin as `smithersCommandEnv`, and returns that directory. The
- * generated workflow shells out to a bare `smithers` (#1143), and the
- * controller PATH otherwise carries no runner; trusted-bin comes first on it.
- */
-export function writeTrustedSmithersShim(runRoot: string, projectRoot: string): string {
-  const capability = smithersExecutableCapability(bindInstalledWorkflowRunner({}, projectRoot));
-  if (capability === undefined) throw new Error("installed workflow runner has no bound interpreter");
-  const quote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
-  const trustedBin = ensureSafeDirectory(runRoot, "trusted-bin");
-  writeFileDurable(
-    path.join(trustedBin, "smithers"),
-    `#!/bin/sh\nexport SMITHERS_BACKEND=sqlite\nexec ${[capability.interpreter.path, ...BUN_TARGET_CONFIGURATION_GUARD_ARGS, capability.runner.path].map(quote).join(" ")} "$@"\n`,
-    { mode: 0o500 }
-  );
-  return trustedBin;
 }
 
 async function ensureSmithersDependencies(
