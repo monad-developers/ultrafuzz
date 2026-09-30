@@ -14248,45 +14248,42 @@ test("startRun records the Forge guard inactive and warns when the engine PATH d
   );
 });
 
-test(
-  "resume records the Forge guard of the controller it starts",
-  { skip: process.getuid?.() === 0 ? "root can remove the entry that makes the guard inactive" : false },
-  async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = "resume-forge-guard";
-    const env = controllerRefreshTerminalEnv(project, runId);
-    writeForgeBesideFakeRunner(env);
-    const launched = await startRun({ projectRoot: project, runId, env });
-    assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
-    assert.ok(launched.value);
-    const runRoot = launched.value.run_root;
-    assert.equal(recordedForgeGuard(runRoot)?.active, true);
-    // An entry beside the wrapper that resume cannot remove, so the engine
-    // PATH no longer admits the directory.
-    const stuck = path.join(runRoot, "safe-bin", "stuck");
-    fs.mkdirSync(stuck);
-    fs.writeFileSync(path.join(stuck, "entry"), "");
-    fs.chmodSync(stuck, 0o500);
-    let resumed: Awaited<ReturnType<typeof resumeRun>>;
-    try {
-      resumed = await resumeRun({ projectRoot: project, runId, env });
-    } finally {
-      fs.chmodSync(stuck, 0o700);
-    }
-
-    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    assert.equal(resumed.value?.submitted, true);
-    assert.equal(recordedForgeGuard(runRoot)?.active, false);
-    assert.deepEqual(
-      resumed.diagnostics
-        .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
-        .map((diagnostic) => diagnostic.severity),
-      ["warning"]
-    );
+// Root can remove the entry that makes the guard inactive.
+testWhen(process.getuid?.() !== 0)("resume records the Forge guard of the controller it starts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "resume-forge-guard";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  writeForgeBesideFakeRunner(env);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  assert.equal(recordedForgeGuard(runRoot)?.active, true);
+  // An entry beside the wrapper that resume cannot remove, so the engine
+  // PATH no longer admits the directory.
+  const stuck = path.join(runRoot, "safe-bin", "stuck");
+  fs.mkdirSync(stuck);
+  fs.writeFileSync(path.join(stuck, "entry"), "");
+  fs.chmodSync(stuck, 0o500);
+  let resumed: Awaited<ReturnType<typeof resumeRun>>;
+  try {
+    resumed = await resumeRun({ projectRoot: project, runId, env });
+  } finally {
+    fs.chmodSync(stuck, 0o700);
   }
-);
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.equal(recordedForgeGuard(runRoot)?.active, false);
+  assert.deepEqual(
+    resumed.diagnostics
+      .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+      .map((diagnostic) => diagnostic.severity),
+    ["warning"]
+  );
+});
 
 test("resume warns about an inactive Forge guard only when it starts a controller", async () => {
   const { project, env } = forgeGuardLaunchFixture([['output_dir = ".ultrafuzz/runs"', 'output_dir = "audit-runs"']]);
