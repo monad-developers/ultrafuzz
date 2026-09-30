@@ -369,8 +369,11 @@ again (and refuses if another source published any of them), so the group
 expands again from the new output. The generated children's artifacts and the
 rendered prompts of later nodes that wait on the group move with them, so those
 prompts render again from the new expansion. The withdrawal is recorded before
-anything moves, so one that is interrupted after the source's reset is
-completed by the next `resume`, `replay` or `fork` before it starts an engine.
+anything moves and until its last step, so one that is interrupted after the
+source's reset is completed by the next `resume` before it starts an engine.
+`replay` and `fork` complete it too, except one that stopped after the manifests
+moved and before the task plan was re-derived: `replay`, `fork` and
+synchronization refuse that run until a `resume` has completed it.
 
 ## Model Fan-Out
 

@@ -1525,96 +1525,135 @@ test(
   "the next resume completes a source retry whose withdrawal was interrupted after the reset",
   { skip: process.getuid?.() === 0 ? "root ignores the directory permissions this test uses" : false },
   async () => {
-    const fixture = await createDynamicFixture({ runId: "dynamic-retry-interrupted" });
-    const planner = plannerSuccessEvidence(fixture);
-    for (const task of fixture.generatedTasks) writeFinding(task);
-    const generationSteps: LifecycleStep[] = fixture.generatedTasks.map((task) => ({
-      id: task.smithersNodeId,
-      state: "finished",
-      attempt: 1
-    }));
-    const generationEvents: LifecycleEvent[] = [
-      ...planner.events,
-      ...fixture.generatedTasks.flatMap((task) => [
-        { type: "NodeStarted", nodeId: task.smithersNodeId, attempt: 1 },
-        { type: "NodeFinished", nodeId: task.smithersNodeId, attempt: 1 }
-      ])
-    ];
-    setLifecycle(fixture, [...planner.steps, ...generationSteps], generationEvents);
-    const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
-    assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+    // A read-only `artifacts/` fails the withdrawal's first move, before its manifests move. A
+    // directory at `graph.json`, which plain resume does not read before the withdrawal, fails the
+    // first step after they moved: re-deriving the runtime graph and task plan.
+    for (const stopped of ["before-rename", "after-rename"] as const) {
+      const fixture = await createDynamicFixture({ runId: `dynamic-retry-interrupted-${stopped}` });
+      const planner = plannerSuccessEvidence(fixture);
+      for (const task of fixture.generatedTasks) writeFinding(task);
+      const generationSteps: LifecycleStep[] = fixture.generatedTasks.map((task) => ({
+        id: task.smithersNodeId,
+        state: "finished",
+        attempt: 1
+      }));
+      const generationEvents: LifecycleEvent[] = [
+        ...planner.events,
+        ...fixture.generatedTasks.flatMap((task) => [
+          { type: "NodeStarted", nodeId: task.smithersNodeId, attempt: 1 },
+          { type: "NodeFinished", nodeId: task.smithersNodeId, attempt: 1 }
+        ])
+      ];
+      setLifecycle(fixture, [...planner.steps, ...generationSteps], generationEvents);
+      const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+      assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+      assert.ok(fixture.storageId, stopped);
+      const generationStateIds = [
+        ...new Set([fixture.storageId, ...fixture.generatedTasks.map((task) => task.attemptId)])
+      ].sort();
+      for (const nodeId of generationStateIds) assert.ok(readState(fixture).nodes[nodeId], nodeId);
 
-    // The producer's verifier fails and the operator retries it. Smithers resets the producer, and then
-    // the first move of the withdrawal fails, which leaves the published generation in place.
-    const failedLifecycle: LifecycleStep[] = [
-      ...planner.steps,
-      { id: fixture.plannerTask.verifierSmithersNodeId, state: "failed", attempt: 1 },
-      ...generationSteps
-    ];
-    setLifecycle(fixture, failedLifecycle, generationEvents, { status: "failed", state: "failed" });
-    const manifestDir = path.join(fixture.runRoot, "dynamic-expansions");
-    const artifactsRoot = path.join(fixture.runRoot, "artifacts");
-    fs.chmodSync(artifactsRoot, 0o555);
-    let interrupted: Awaited<ReturnType<typeof resumeRun>>;
-    try {
-      interrupted = await resumeRun({
+      // The producer's verifier fails and the operator retries it. Smithers resets the producer, and
+      // then the withdrawal fails part-way.
+      const failedLifecycle: LifecycleStep[] = [
+        ...planner.steps,
+        { id: fixture.plannerTask.verifierSmithersNodeId, state: "failed", attempt: 1 },
+        ...generationSteps
+      ];
+      setLifecycle(fixture, failedLifecycle, generationEvents, { status: "failed", state: "failed" });
+      const manifestDir = path.join(fixture.runRoot, "dynamic-expansions");
+      const historyRoot = path.join(fixture.runRoot, "dynamic-expansion-history");
+      const artifactsRoot = path.join(fixture.runRoot, "artifacts");
+      const graphPath = path.join(fixture.runRoot, "graph.json");
+      const graphBytes = fs.readFileSync(graphPath);
+      if (stopped === "before-rename") {
+        fs.chmodSync(artifactsRoot, 0o555);
+      } else {
+        fs.rmSync(graphPath);
+        fs.mkdirSync(graphPath);
+      }
+      let interrupted: Awaited<ReturnType<typeof resumeRun>>;
+      try {
+        interrupted = await resumeRun({
+          projectRoot: fixture.project,
+          runId: fixture.runId,
+          force: true,
+          retryFailed: true,
+          env: fixture.env
+        });
+      } finally {
+        if (stopped === "before-rename") {
+          fs.chmodSync(artifactsRoot, 0o755);
+        } else {
+          fs.rmdirSync(graphPath);
+          fs.writeFileSync(graphPath, graphBytes);
+        }
+      }
+      assert.equal(interrupted.ok, false, stopped);
+      assert.match(
+        JSON.stringify(interrupted.diagnostics),
+        stopped === "before-rename" ? /EACCES/u : /runtime graph must be a regular file/u,
+        stopped
+      );
+      assert.equal(fs.existsSync(path.join(historyRoot, ".retry-withdrawal.json")), true, stopped);
+      // Before the rename the generation is still published. After it the manifests have moved, but the
+      // task plan and the run state still name the withdrawn generation, so the task plan no longer
+      // re-derives and the admission that `replay` and `fork` run first refuses the run.
+      assert.deepEqual(fs.readdirSync(manifestDir), stopped === "before-rename" ? ["fanout.json"] : [], stopped);
+      for (const nodeId of generationStateIds) assert.ok(readState(fixture).nodes[nodeId], nodeId);
+      const admitted = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
+      assert.equal(admitted.ok, stopped === "before-rename", stopped);
+      if (!admitted.ok) {
+        assert.match(admitted.diagnostics[0]?.message ?? "", /persisted dynamic runtime task plan does not match/u);
+      }
+
+      // Smithers has reset the producer and its dependents, and left the run without an owner, so no
+      // task is failed and a later `--retry-failed` would plan no withdrawal. The next resume completes
+      // the recorded one before it starts the engine, and the retried producer's new output expands the
+      // group again.
+      setLifecycle(
+        fixture,
+        [{ id: fixture.plannerTask.smithersNodeId, state: "pending", attempt: 1 }],
+        generationEvents,
+        {
+          status: "running",
+          state: "stale"
+        }
+      );
+      const resumed = await resumeRun({
         projectRoot: fixture.project,
         runId: fixture.runId,
         force: true,
         retryFailed: true,
         env: fixture.env
       });
-    } finally {
-      fs.chmodSync(artifactsRoot, 0o755);
-    }
-    assert.equal(interrupted.ok, false);
-    assert.match(JSON.stringify(interrupted.diagnostics), /EACCES/u);
-    assert.deepEqual(fs.readdirSync(manifestDir).sort(), [".retry-withdrawal.json", "fanout.json"]);
-
-    // Smithers has reset the producer and its dependents, and left the run without an owner, so no
-    // task is failed and a later `--retry-failed` would plan no withdrawal. The next resume completes
-    // the recorded one before it starts the engine, and the retried producer's new output expands the
-    // group again.
-    setLifecycle(
-      fixture,
-      [{ id: fixture.plannerTask.smithersNodeId, state: "pending", attempt: 1 }],
-      generationEvents,
-      {
-        status: "running",
-        state: "stale"
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+      assert.deepEqual(fs.readdirSync(manifestDir), [], stopped);
+      const [archiveName, ...otherEntries] = fs.readdirSync(historyRoot);
+      assert.ok(archiveName, stopped);
+      assert.deepEqual(otherEntries, [], stopped);
+      const retryRecord = JSON.parse(fs.readFileSync(path.join(historyRoot, archiveName, "retry.json"), "utf8")) as {
+        group_node_ids?: string[];
+        pruned_state_node_ids?: string[];
+      };
+      assert.deepEqual(retryRecord.group_node_ids, ["fanout"], stopped);
+      assert.deepEqual(retryRecord.pruned_state_node_ids, generationStateIds, stopped);
+      for (const nodeId of generationStateIds) assert.equal(readState(fixture).nodes[nodeId], undefined, nodeId);
+      for (const task of fixture.generatedTasks) {
+        assert.equal(fs.existsSync(task.artifactDir), false, task.attemptId);
+        assert.equal(
+          fs.existsSync(path.join(historyRoot, archiveName, "artifacts", task.attemptId)),
+          true,
+          task.attemptId
+        );
       }
-    );
-    const resumed = await resumeRun({
-      projectRoot: fixture.project,
-      runId: fixture.runId,
-      force: true,
-      retryFailed: true,
-      env: fixture.env
-    });
-    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    assert.deepEqual(fs.readdirSync(manifestDir), []);
-    const historyRoot = path.join(fixture.runRoot, "dynamic-expansion-history");
-    const [archiveName, ...otherArchives] = fs.readdirSync(historyRoot);
-    assert.ok(archiveName);
-    assert.deepEqual(otherArchives, []);
-    const retryRecord = JSON.parse(fs.readFileSync(path.join(historyRoot, archiveName, "retry.json"), "utf8")) as {
-      group_node_ids?: string[];
-    };
-    assert.deepEqual(retryRecord.group_node_ids, ["fanout"]);
-    for (const task of fixture.generatedTasks) {
-      assert.equal(fs.existsSync(task.artifactDir), false, task.attemptId);
-      assert.equal(
-        fs.existsSync(path.join(historyRoot, archiveName, "artifacts", task.attemptId)),
-        true,
-        task.attemptId
-      );
+      const joinPromptPath = fixture.joinTask.renderedPromptPath;
+      assert.ok(joinPromptPath, stopped);
+      assert.equal(fs.existsSync(joinPromptPath), false, stopped);
+      const regenerated = republishRetriedExpansion(fixture);
+      assert.notEqual(regenerated[0]?.metadata.node.storageId, fixture.storageId, stopped);
+      await assertObserversAdmitted(fixture);
     }
-    const joinPromptPath = fixture.joinTask.renderedPromptPath;
-    assert.ok(joinPromptPath);
-    assert.equal(fs.existsSync(joinPromptPath), false);
-    const regenerated = republishRetriedExpansion(fixture);
-    assert.notEqual(regenerated[0]?.metadata.node.storageId, fixture.storageId);
-    await assertObserversAdmitted(fixture);
   }
 );
 

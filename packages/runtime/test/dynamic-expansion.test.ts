@@ -661,11 +661,16 @@ test(
         fs.chmodSync(blockedDirectory, 0o755);
       }
 
-      // The generation is still published, beside the record of the unfinished withdrawal, so every
-      // render stays consistent with it: no prompt of the withdrawn item ends up beside a manifest
-      // planned from the new output.
+      // The generation is still published, and the record of the unfinished withdrawal sits beside the
+      // history entry it fills, so every render stays consistent with the generation: no prompt of the
+      // withdrawn item ends up beside a manifest planned from the new output.
       const manifestDir = path.join(runRoot, "dynamic-expansions");
-      assert.deepEqual(fs.readdirSync(manifestDir).sort(), [".retry-withdrawal.json", "fanout.json"], blocked);
+      assert.deepEqual(fs.readdirSync(manifestDir), ["fanout.json"], blocked);
+      const historyRoot = path.join(runRoot, "dynamic-expansion-history");
+      const [recordName, archiveName, ...otherEntries] = fs.readdirSync(historyRoot).sort();
+      assert.equal(recordName, ".retry-withdrawal.json", blocked);
+      assert.ok(archiveName, blocked);
+      assert.deepEqual(otherEntries, [], blocked);
       const rendered = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
       assert.deepEqual(rendered.promptRenderFailures, [], blocked);
       assert.equal(fs.readFileSync(withdrawn.child.promptPath, "utf8"), withdrawnChildPrompt, blocked);
@@ -674,10 +679,6 @@ test(
       // Smithers has already reset the source, so no later plan would withdraw the generation again.
       // The next engine start completes the recorded withdrawal into the same history entry, and the
       // group expands again from the new output.
-      const historyRoot = path.join(runRoot, "dynamic-expansion-history");
-      const [archiveName, ...otherArchives] = fs.readdirSync(historyRoot);
-      assert.ok(archiveName, blocked);
-      assert.deepEqual(otherArchives, [], blocked);
       const completed = finishInterruptedDynamicExpansionRetry({ projectRoot, runRoot });
       assert.ok(completed, blocked);
       assert.equal(completed.archive_path, path.join(historyRoot, archiveName), blocked);
@@ -1525,3 +1526,101 @@ test("a legacy empty manifest without a sequence stays valid when a new group ex
   });
   assert.deepEqual(resumedWork.items, work.items);
 });
+
+test(
+  "a retry withdrawal stopped after its manifests moved is completed by the next engine start",
+  { skip: process.getuid?.() === 0 ? "root ignores the directory permissions this test uses" : false },
+  () => {
+    // A read-only `smithers/` fails the first step after the manifest rename, re-deriving the task
+    // plan. The second case also stands for a process killed before it recreated the manifest
+    // directory, and the third for one killed after it published retry.json.
+    for (const stoppedBefore of ["task-plan", "manifest-directory", "record-removal"] as const) {
+      const { controls } = sealedDynamicRun(`retry-stopped-before-${stoppedBefore}`, [item(0)]);
+      const { runId, projectRoot, runRoot } = controls;
+      const withdrawn = publishedRuntimePrompts(controls);
+      const childAttemptId = path.basename(path.dirname(withdrawn.child.promptPath));
+      const statePath = path.join(runRoot, "state.json");
+      writeRunState(
+        statePath,
+        createInitialRunState({
+          runId,
+          graphFingerprint: "a".repeat(64),
+          configFingerprint: "b".repeat(64),
+          nodes: ["planner", "fanout", "join", childAttemptId].map((id) => ({ id }))
+        })
+      );
+      const plan = planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] });
+      assert.ok(plan, stoppedBefore);
+      const smithersRoot = path.join(runRoot, "smithers");
+      fs.chmodSync(smithersRoot, 0o555);
+      try {
+        assert.throws(() => archiveDynamicExpansionsForRetry(plan), /EACCES/u, stoppedBefore);
+      } finally {
+        fs.chmodSync(smithersRoot, 0o755);
+      }
+
+      // The manifests and the generation's attempt state have moved, but the task plan still lists the
+      // withdrawn child, so it no longer re-derives from the manifests, and the child's state record is
+      // still there. The record of the withdrawal stays beside the history entry it fills.
+      const manifestDir = path.join(runRoot, "dynamic-expansions");
+      const historyRoot = path.join(runRoot, "dynamic-expansion-history");
+      const [recordName, archiveName, ...otherEntries] = fs.readdirSync(historyRoot).sort();
+      assert.equal(recordName, ".retry-withdrawal.json", stoppedBefore);
+      assert.ok(archiveName, stoppedBefore);
+      assert.deepEqual(otherEntries, [], stoppedBefore);
+      const archiveDir = path.join(historyRoot, archiveName);
+      assert.deepEqual(fs.readdirSync(manifestDir), [], stoppedBefore);
+      assert.deepEqual(fs.readdirSync(path.join(archiveDir, "manifests")), ["fanout.json"], stoppedBefore);
+      assert.equal(fs.existsSync(path.dirname(withdrawn.child.promptPath)), false, stoppedBefore);
+      assert.equal(fs.existsSync(withdrawn.join.promptPath), false, stoppedBefore);
+      assert.ok(readRunState(statePath).nodes[childAttemptId], stoppedBefore);
+      assert.throws(
+        () => verifyDynamicRuntimeMaterialization(controls),
+        /persisted dynamic runtime task plan does not match its sealed templates and manifests/u,
+        stoppedBefore
+      );
+
+      const recordPath = path.join(historyRoot, recordName);
+      const retryPath = path.join(archiveDir, "retry.json");
+      let publishedRetry: string | undefined;
+      if (stoppedBefore === "manifest-directory") fs.rmdirSync(manifestDir);
+      if (stoppedBefore === "record-removal") {
+        const record = fs.readFileSync(recordPath);
+        assert.ok(finishInterruptedDynamicExpansionRetry({ projectRoot, runRoot }), stoppedBefore);
+        publishedRetry = fs.readFileSync(retryPath, "utf8");
+        fs.writeFileSync(recordPath, record);
+      }
+
+      // Only the steps after the rename are left, and the next engine start completes them into the same
+      // history entry: the task plan re-derives with the group unexpanded, and the withdrawn child's
+      // state record is gone, so a regenerated child that reuses its storage ID starts afresh.
+      const completed = finishInterruptedDynamicExpansionRetry({ projectRoot, runRoot });
+      assert.ok(completed, stoppedBefore);
+      assert.equal(completed.archive_path, archiveDir, stoppedBefore);
+      assert.deepEqual(completed.group_node_ids, ["fanout"], stoppedBefore);
+      assert.deepEqual(fs.readdirSync(historyRoot), [archiveName], stoppedBefore);
+      assert.deepEqual(fs.readdirSync(manifestDir), [], stoppedBefore);
+      assert.deepEqual(Object.keys(readRunState(statePath).nodes).sort(), ["fanout", "join", "planner"], stoppedBefore);
+      const verified = verifyDynamicRuntimeMaterialization(controls);
+      assert.deepEqual(verified.expandedGroupIds, [], stoppedBefore);
+      assert.deepEqual(verified.unresolvedGroupIds, ["fanout"], stoppedBefore);
+      // A completion that finds retry.json already published keeps it, since the state records it lists
+      // as pruned are already gone.
+      const retryRecord = JSON.parse(fs.readFileSync(retryPath, "utf8")) as {
+        source_node_ids?: string[];
+        archived_attempt_paths?: string[];
+        pruned_state_node_ids?: string[];
+      };
+      if (publishedRetry !== undefined) assert.equal(fs.readFileSync(retryPath, "utf8"), publishedRetry);
+      assert.deepEqual(retryRecord.source_node_ids, ["node:planner"], stoppedBefore);
+      assert.deepEqual(retryRecord.pruned_state_node_ids, [childAttemptId], stoppedBefore);
+      const archived = `dynamic-expansion-history/${archiveName}/artifacts`;
+      assert.deepEqual(
+        retryRecord.archived_attempt_paths,
+        [`${archived}/${childAttemptId}`, `${archived}/join/prompt.rendered.md`],
+        stoppedBefore
+      );
+      assert.equal(finishInterruptedDynamicExpansionRetry({ projectRoot, runRoot }), undefined, stoppedBefore);
+    }
+  }
+);
