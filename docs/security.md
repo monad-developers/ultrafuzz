@@ -168,9 +168,13 @@ The inventory also opens installed packages that declare bundled dependencies,
 validates their bounded no-symlink package trees, and submits every exact bundled
 version to the same advisory endpoint. This matters for the private workflow
 controller's pinned npm: pnpm otherwise reports npm as one opaque package and
-omits the packages npm ships inside itself. The lockfile-bound npm patch mirrors
-the green npm v11 upstream fixes in `npm/cli#9842` and `npm/cli#9872`: bundled
-`brace-expansion` 5.0.9, `ip-address` 10.5.0, `tar` 7.5.22, and `undici` 6.28.0.
+omits the packages npm ships inside itself. The lockfile-bound npm patch bundles
+`brace-expansion` 5.0.12, `ip-address` 10.5.0, `tar` 7.5.22, and `undici`
+6.28.1. The `ip-address` and `tar` versions mirror the green npm v11 upstream
+fixes in `npm/cli#9842` and `npm/cli#9872`. No npm release yet bundles the
+`brace-expansion` and `undici` fixes for GHSA-6j4f-fj2g-mc7p,
+GHSA-qhr7-859c-m2p7, and GHSA-rfgv-xxqx-mfg5, so the patch carries those
+registry releases, limited to the files npm's own bundling keeps.
 The patch can be removed when an upstream npm release carries those versions;
 the operator npm closure digest and advisory inventory both fail if that
 composition drifts. Pnpm's generated `node_modules/.bin` shims are excluded from
