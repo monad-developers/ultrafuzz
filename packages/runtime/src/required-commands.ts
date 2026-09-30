@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import type { ResolvedConfig } from "@ultrafuzz/config";
 import { composeSmithersCommandPath } from "./smithers.js";
 
 const execFileAsync = promisify(execFile);
@@ -17,66 +16,30 @@ export interface RequiredCommandProbe {
 }
 
 export async function probeCommandsForExecution(
-  config: ResolvedConfig,
   commands: readonly string[],
   env: Record<string, string | undefined>,
-  options: { includeVersions?: boolean; cwd?: string; createProviderAppIfMissing?: boolean } = {}
+  options: { includeVersions?: boolean; cwd?: string } = {}
 ): Promise<RequiredCommandProbe[]> {
   const uniqueCommands = [...new Set(commands)].sort();
   if (uniqueCommands.length === 0) return [];
-  if (config.execution.mode === "local") {
-    const cwd = options.cwd ?? process.cwd();
-    const sourcePath = Object.hasOwn(env, "PATH") ? env.PATH : process.env.PATH;
-    const effectiveEnv = {
-      ...env,
-      PATH: composeSmithersCommandPath(cwd, { ...env, PATH: sourcePath, ULTRAFUZZ_TRUSTED_BIN: undefined })
-    };
-    return Promise.all(
-      uniqueCommands.map(async (name) => {
-        const resolved = resolveExecutable(name, effectiveEnv);
-        return {
-          name,
-          ...resolved,
-          version:
-            resolved.path === null || options.includeVersions !== true
-              ? null
-              : await executableVersion(resolved.path, effectiveEnv, cwd)
-        };
-      })
-    );
-  }
-
-  const modal = config.execution.providers.modal;
-  if (config.execution.provider !== "modal" || modal === undefined) {
-    throw new Error("cloud command preflight requires a configured execution provider");
-  }
-  const moduleName = "@ultrafuzz/modal";
-  const provider = (await import(moduleName)) as {
-    probeModalCommands(
-      providerOptions: {
-        app: string;
-        image: string;
-        region?: string;
-        credentialEnv: readonly string[];
-        env?: Record<string, string | undefined>;
-      },
-      requiredCommands: readonly string[],
-      probeOptions?: { includeVersions?: boolean; createAppIfMissing?: boolean }
-    ): Promise<RequiredCommandProbe[]>;
+  const cwd = options.cwd ?? process.cwd();
+  const sourcePath = Object.hasOwn(env, "PATH") ? env.PATH : process.env.PATH;
+  const effectiveEnv = {
+    ...env,
+    PATH: composeSmithersCommandPath(cwd, { ...env, PATH: sourcePath, ULTRAFUZZ_TRUSTED_BIN: undefined })
   };
-  return provider.probeModalCommands(
-    {
-      app: modal.app,
-      image: modal.image,
-      ...(modal.region === undefined ? {} : { region: modal.region }),
-      credentialEnv: modal.credentialEnv,
-      env
-    },
-    uniqueCommands,
-    {
-      includeVersions: options.includeVersions,
-      createAppIfMissing: options.createProviderAppIfMissing
-    }
+  return Promise.all(
+    uniqueCommands.map(async (name) => {
+      const resolved = resolveExecutable(name, effectiveEnv);
+      return {
+        name,
+        ...resolved,
+        version:
+          resolved.path === null || options.includeVersions !== true
+            ? null
+            : await executableVersion(resolved.path, effectiveEnv, cwd)
+      };
+    })
   );
 }
 

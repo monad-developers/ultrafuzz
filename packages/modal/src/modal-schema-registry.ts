@@ -18,14 +18,7 @@ import {
   MODAL_BENCHMARK_CONFIG_SCHEMA_ID,
   MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID,
   MODAL_COMMON_SCHEMA_ID,
-  MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_LAUNCH_STATE_SCHEMA_ID,
-  MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
-  MODAL_NODE_CHECKPOINT_SCHEMA_ID,
-  MODAL_NODE_INPUT_SCHEMA_ID,
-  MODAL_NODE_RESTORE_SCHEMA_ID,
-  MODAL_NODE_RESULT_SCHEMA_ID,
-  MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   MODAL_PINNED_HOLDOUT_SCHEMA_ID,
   MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID,
@@ -83,16 +76,7 @@ export const modalBenchmarkConfigJsonSchema = loadSchemaDocument("modal-benchmar
 export const modalBenchmarkControlManifestJsonSchema = loadSchemaDocument(
   "modal-benchmark-control-manifest.schema.json"
 );
-export const modalExecutionDependencyManifestJsonSchema = loadSchemaDocument(
-  "modal-execution-dependency-manifest.schema.json"
-);
 export const modalLaunchStateJsonSchema = loadSchemaDocument("modal-launch-state.schema.json");
-export const modalNodeCheckpointIndexJsonSchema = loadSchemaDocument("modal-node-checkpoint-index.schema.json");
-export const modalNodeCheckpointJsonSchema = loadSchemaDocument("modal-node-checkpoint.schema.json");
-export const modalNodeInputJsonSchema = loadSchemaDocument("modal-node-input.schema.json");
-export const modalNodeRestoreJsonSchema = loadSchemaDocument("modal-node-restore.schema.json");
-export const modalNodeResultJsonSchema = loadSchemaDocument("modal-node-result.schema.json");
-export const modalNodeWorkerErrorJsonSchema = loadSchemaDocument("modal-node-worker-error.schema.json");
 export const modalPinnedHoldoutJsonSchema = loadSchemaDocument("modal-pinned-holdout.schema.json");
 export const modalPinnedSourceProofJsonSchema = loadSchemaDocument("modal-pinned-source-proof.schema.json");
 export const modalPublicBenchmarkBundleJsonSchema = loadSchemaDocument("modal-public-benchmark-bundle.schema.json");
@@ -108,14 +92,7 @@ export const MODAL_SCHEMA_EXPORTS = Object.freeze({
   modalBenchmarkConfigJsonSchema,
   modalBenchmarkControlManifestJsonSchema,
   modalCommonJsonSchema,
-  modalExecutionDependencyManifestJsonSchema,
   modalLaunchStateJsonSchema,
-  modalNodeCheckpointIndexJsonSchema,
-  modalNodeCheckpointJsonSchema,
-  modalNodeInputJsonSchema,
-  modalNodeRestoreJsonSchema,
-  modalNodeResultJsonSchema,
-  modalNodeWorkerErrorJsonSchema,
   modalPinnedHoldoutJsonSchema,
   modalPinnedSourceProofJsonSchema,
   modalPublicBenchmarkBundleJsonSchema,
@@ -148,53 +125,11 @@ export const MODAL_SCHEMA_METADATA: Readonly<Record<string, ModalSchemaMetadata>
     typescriptExport: "modalCommonJsonSchema",
     semanticGates: []
   },
-  "modal-execution-dependency-manifest.schema.json": {
-    id: MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalExecutionDependencyManifestJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID]
-  },
   "modal-launch-state.schema.json": {
     id: MODAL_LAUNCH_STATE_SCHEMA_ID,
     role: "runtime-state",
     typescriptExport: "modalLaunchStateJsonSchema",
     semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_LAUNCH_STATE_SCHEMA_ID]
-  },
-  "modal-node-checkpoint-index.schema.json": {
-    id: MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalNodeCheckpointIndexJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID]
-  },
-  "modal-node-checkpoint.schema.json": {
-    id: MODAL_NODE_CHECKPOINT_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalNodeCheckpointJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_CHECKPOINT_SCHEMA_ID]
-  },
-  "modal-node-input.schema.json": {
-    id: MODAL_NODE_INPUT_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalNodeInputJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_INPUT_SCHEMA_ID]
-  },
-  "modal-node-restore.schema.json": {
-    id: MODAL_NODE_RESTORE_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalNodeRestoreJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_RESTORE_SCHEMA_ID]
-  },
-  "modal-node-result.schema.json": {
-    id: MODAL_NODE_RESULT_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalNodeResultJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_RESULT_SCHEMA_ID]
-  },
-  "modal-node-worker-error.schema.json": {
-    id: MODAL_NODE_WORKER_ERROR_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "modalNodeWorkerErrorJsonSchema",
-    semanticGates: MODAL_SEMANTIC_GATES_BY_SCHEMA_ID[MODAL_NODE_WORKER_ERROR_SCHEMA_ID]
   },
   "modal-pinned-holdout.schema.json": {
     id: MODAL_PINNED_HOLDOUT_SCHEMA_ID,
@@ -263,14 +198,7 @@ const schemaExportsByFilename: Readonly<Record<string, Readonly<Record<string, u
   "modal-benchmark-config.schema.json": modalBenchmarkConfigJsonSchema,
   "modal-benchmark-control-manifest.schema.json": modalBenchmarkControlManifestJsonSchema,
   "modal-common.schema.json": modalCommonJsonSchema,
-  "modal-execution-dependency-manifest.schema.json": modalExecutionDependencyManifestJsonSchema,
   "modal-launch-state.schema.json": modalLaunchStateJsonSchema,
-  "modal-node-checkpoint-index.schema.json": modalNodeCheckpointIndexJsonSchema,
-  "modal-node-checkpoint.schema.json": modalNodeCheckpointJsonSchema,
-  "modal-node-input.schema.json": modalNodeInputJsonSchema,
-  "modal-node-restore.schema.json": modalNodeRestoreJsonSchema,
-  "modal-node-result.schema.json": modalNodeResultJsonSchema,
-  "modal-node-worker-error.schema.json": modalNodeWorkerErrorJsonSchema,
   "modal-pinned-holdout.schema.json": modalPinnedHoldoutJsonSchema,
   "modal-pinned-source-proof.schema.json": modalPinnedSourceProofJsonSchema,
   "modal-public-benchmark-bundle.schema.json": modalPublicBenchmarkBundleJsonSchema,

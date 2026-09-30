@@ -313,10 +313,6 @@ function requiredDestinations(config: ResolvedConfig, graph: PlannedGraph, env: 
         add(fallback.agent, fallback.model);
       }
     }
-  if (config.execution.mode === "cloud" && config.execution.provider === "modal") {
-    source.add("cloud:modal");
-    artifact.add("cloud:modal");
-  }
   return {
     source: [...source].sort(),
     artifact: [...artifact].sort(),
@@ -325,16 +321,7 @@ function requiredDestinations(config: ResolvedConfig, graph: PlannedGraph, env: 
   };
 }
 export function modelDestination(agent: string, config: ResolvedConfig, env: NodeJS.ProcessEnv): string {
-  const routeConfig = providerHomeRouteConfig(agent, config, env);
-  if (
-    routeConfig !== undefined &&
-    config.execution.mode === "cloud" &&
-    routeBearingConfig(agent, routeConfig, env) !== undefined
-  )
-    throw new Error(
-      "cloud execution cannot use host provider-home routing; select and acknowledge the route through environment variables"
-    );
-  return providerRouteDestination(agent, env, routeConfig);
+  return providerRouteDestination(agent, env, providerHomeRouteConfig(agent, config, env));
 }
 /**
  * The data destination an agent's model traffic reaches. Plan-time disclosure

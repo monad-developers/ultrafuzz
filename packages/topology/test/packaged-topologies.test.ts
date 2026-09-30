@@ -509,7 +509,7 @@ describe("packaged topology collection", () => {
   // Loads and validates every packaged profile's full topology (#792 added the 67-node
   // exhaustive graph to that set), ~3.2s on an idle machine — the vitest default of 5s
   // is a coin flip on a loaded CI runner. The repo convention for such suites is an
-  // explicit budget (cf. modal node-provider, evals lineage).
+  // explicit budget (cf. evals lineage).
   it("keeps one stuck agentic node from consuming a whole profile's workflow deadline", { timeout: 30_000 }, () => {
     const toml = readFileSync(path.join(REPOSITORY_ROOT, "ultrafuzz.toml"), "utf8");
     const configuredDeadline = /^\s*workflow_deadline_seconds\s*=\s*(\d+)\s*$/mu.exec(toml);

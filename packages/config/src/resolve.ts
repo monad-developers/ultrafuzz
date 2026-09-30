@@ -14,11 +14,6 @@ import {
 } from "./audit-profiles.js";
 import { validateAgentConfigs } from "./agents.js";
 import { MAX_WORKFLOW_DEADLINE_SECONDS } from "./constants.js";
-import {
-  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
-  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
-  MODAL_SANDBOX_MAX_LIFETIME_SECONDS
-} from "./execution.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
 import { resolvedConfigZodSchema } from "./resolved-config-schema.js";
@@ -78,8 +73,8 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
     applyRuntimeOverrides(config, input.runtimeOverrides, diagnostics);
   }
 
-  // Preserve whether the global cloud timeout was deliberately set. A default
-  // allocation can follow a longer task; an explicit allocation is a cap.
+  // Record whether execution.resources.timeout_seconds was set explicitly, so
+  // the serialized resolved config leaves an inherited default out.
   config.execution.resourceTimeoutOrigin =
     input.runtimeOverrides?.execution?.resources?.timeoutSeconds !== undefined
       ? "runtime-override"
@@ -89,7 +84,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   syncDefaultModelProfile(config);
   finalizeAuditProfileResolution(config, input, environment);
   sortConfig(config);
-  for (const entry of validateResolvedConfig(config, environment)) {
+  for (const entry of validateResolvedConfig(config)) {
     if (!diagnostics.some((existing) => sameDiagnosticIdentity(existing, entry))) diagnostics.push(entry);
   }
 
@@ -99,10 +94,7 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   return ok(config, diagnostics);
 }
 
-export function validateResolvedConfig(
-  config: ResolvedConfig,
-  env: Record<string, string | undefined> = process.env
-): ConfigDiagnostic[] {
+export function validateResolvedConfig(config: ResolvedConfig): ConfigDiagnostic[] {
   const diagnostics = schemaIssues(resolvedConfigZodSchema, config)
     .filter(
       (issue) => !isNamedSemanticSchemaIssue(issue) && !isModelProfileSchemaIssue(issue) && !isRetrySchemaIssue(issue)
@@ -112,7 +104,7 @@ export function validateResolvedConfig(
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
   diagnostics.push(...validateRetryConfig(config));
-  diagnostics.push(...validateExecutionConfig(config, env));
+  diagnostics.push(...validateExecutionConfig(config));
   return diagnostics;
 }
 
@@ -373,98 +365,28 @@ function applyExecutionConfig(config: ResolvedConfig, layer: NonNullable<Project
   }
 }
 
-function validateExecutionConfig(config: ResolvedConfig, env: Record<string, string | undefined>): ConfigDiagnostic[] {
-  const diagnostics: ConfigDiagnostic[] = [];
-  if (config.execution.mode === "local") {
-    if (config.execution.provider !== undefined) {
-      diagnostics.push(
-        diagnostic(
-          "CONFIG_EXECUTION_LOCAL_PROVIDER",
-          "execution.provider is only valid when execution.mode is cloud",
-          ["execution", "provider"],
-          "validation"
-        )
-      );
-    }
-    if (config.execution.providers.modal !== undefined) {
-      diagnostics.push(
-        diagnostic(
-          "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
-          "cloud provider settings are only valid when execution.mode is cloud",
-          ["execution", "providers", "modal"],
-          "validation"
-        )
-      );
-    }
-    return diagnostics;
-  }
+// Per-node cloud execution (one Modal sandbox per agentic attempt) was removed. The rest of
+// `[execution]` stays accepted and inert: `ultrafuzz init` scaffolds it, and every persisted run
+// config carries it.
+const CLOUD_EXECUTION_REMOVED_MESSAGE =
+  'per-node cloud execution was removed; set [execution] mode = "local" (or delete the table) and remove execution.provider and [execution.providers.*]. Every agentic attempt now runs locally; to use Modal, run the whole campaign inside one sandbox (the ultrafuzz-modal eval runner does this for benchmark rows, see docs/how-to/run-evals-on-modal.md)';
 
-  if (config.execution.provider === undefined) {
-    diagnostics.push(
-      diagnostic(
-        "CONFIG_EXECUTION_PROVIDER_REQUIRED",
-        "cloud execution requires an execution provider",
-        ["execution", "provider"],
-        "validation"
-      )
-    );
-    return diagnostics;
+function validateExecutionConfig(config: ResolvedConfig): ConfigDiagnostic[] {
+  // Each diagnostic names its setting: plain-text output prints messages without their paths.
+  const removed: Array<[setting: string, settingPath: string[]]> = [];
+  if (config.execution.mode === "cloud") removed.push(['execution.mode = "cloud"', ["execution", "mode"]]);
+  if (config.execution.provider !== undefined) removed.push(["execution.provider", ["execution", "provider"]]);
+  if (config.execution.providers.modal !== undefined) {
+    removed.push(["[execution.providers.modal]", ["execution", "providers", "modal"]]);
   }
-  const provider = config.execution.providers[config.execution.provider];
-  if (provider === undefined) {
-    diagnostics.push(
-      diagnostic(
-        "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
-        "cloud execution requires settings for the selected provider",
-        ["execution", "providers", config.execution.provider],
-        "validation"
-      )
-    );
-    return diagnostics;
-  }
-  if (config.execution.provider === "modal") {
-    const timeoutEntries: Array<{ timeoutSeconds: number; path: string[] }> = [
-      {
-        timeoutSeconds: config.execution.resources.timeoutSeconds,
-        path: ["execution", "resources", "timeout_seconds"]
-      },
-      ...Object.entries(config.execution.nodes).flatMap(([nodeId, override]) =>
-        override.resources.timeoutSeconds === undefined
-          ? []
-          : [
-              {
-                timeoutSeconds: override.resources.timeoutSeconds,
-                path: ["execution", "nodes", nodeId, "resources", "timeout_seconds"]
-              }
-            ]
-      )
-    ];
-    for (const entry of timeoutEntries) {
-      if (entry.timeoutSeconds <= MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS) continue;
-      diagnostics.push(
-        diagnostic(
-          "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
-          `Modal cloud timeout_seconds must be at most ${MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS} so the ${MODAL_NODE_LIFECYCLE_RESERVE_SECONDS}-second lifecycle reserve stays within Modal's ${MODAL_SANDBOX_MAX_LIFETIME_SECONDS}-second maximum sandbox lifetime`,
-          entry.path,
-          "validation"
-        )
-      );
-    }
-  }
-  provider.credentialEnv.forEach((name, index) => {
-    const value = env[name];
-    if (value === undefined || value.trim() === "") {
-      diagnostics.push(
-        diagnostic(
-          "CONFIG_EXECUTION_CREDENTIAL_MISSING",
-          "a configured cloud credential environment variable is not set",
-          ["execution", "providers", config.execution.provider!, "credential_env", String(index)],
-          "validation"
-        )
-      );
-    }
-  });
-  return diagnostics;
+  return removed.map(([setting, settingPath]) =>
+    diagnostic(
+      "CONFIG_EXECUTION_CLOUD_REMOVED",
+      `${setting} is no longer supported: ${CLOUD_EXECUTION_REMOVED_MESSAGE}`,
+      settingPath,
+      "validation"
+    )
+  );
 }
 
 function applyProjectConfigLayer(

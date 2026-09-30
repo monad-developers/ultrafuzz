@@ -98,7 +98,7 @@ function nonRetryableWorkflowSource(root: string, template: string): string {
 import fs from "node:fs";
 import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
-${templateSlice(template, "type WorkflowTaskStateContext =", "type DependencyVerificationProducer =")}
+${templateSlice(template, "type WorkflowTaskStateContext =", "const agentPromptTemplate =")}
 ${templateSlice(template, "function preparationStep", "\n\nfunction prepareArtifactMirror")}
 ${templateSlice(template, "function nonRetryableFailure", "\n\nfunction assertVerifiedDependency")}
 const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
@@ -141,7 +141,7 @@ function syntheticWorkflowSource(root: string, template: string): string {
 import fs from "node:fs";
 import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
-${templateSlice(template, "type WorkflowTaskStateContext =", "type DependencyVerificationProducer =")}
+${templateSlice(template, "type WorkflowTaskStateContext =", "const agentPromptTemplate =")}
 const evidence = ${JSON.stringify(path.join(root, "executed.log"))};
 const { Workflow, Parallel, Task, smithers, outputs } = createSmithers({
   input: z.object({}),

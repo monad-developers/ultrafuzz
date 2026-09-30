@@ -20,11 +20,6 @@ export function retryChainAttemptCount(
   if (sameAgentAttempts > MAX_RETRY_CHAIN_ATTEMPTS || expandedAttempts > MAX_RETRY_CHAIN_ATTEMPTS) {
     throw new Error(`retry chain expands to ${expandedAttempts} attempts; maximum is ${MAX_RETRY_CHAIN_ATTEMPTS}`);
   }
-  if (config.execution.mode === "cloud" && expandedAttempts > 1) {
-    throw new Error(
-      "cloud execution currently requires one model attempt; retry chains will be enabled after every rung can run in a fresh isolated sandbox"
-    );
-  }
   const agentRefs = new Set([
     config.models.profiles[primaryProfileId]?.agent,
     ...fallbackProfileIds.map((fallbackId) => config.models.profiles[fallbackId]?.agent)

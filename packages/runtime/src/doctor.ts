@@ -53,8 +53,6 @@ const AGENT_EXECUTABLES: Record<string, string> = {
  * Operational superset of `validate`: reports configuration posture plus the
  * local toolchain and pinned workflow-engine install posture. It never changes
  * project or run state and never installs, upgrades, or repairs dependencies.
- * Cloud toolchain checks may create the configured provider app on first use
- * and always use a transient sandbox so they inspect the launch image itself.
  */
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -127,22 +125,20 @@ export async function diagnoseProject(input: DoctorInput) {
   }
   const commandRequirements = [...requiredByName].map(([name, required]) => ({ name, required }));
   let probeFailure: string | undefined;
-  const probes =
-    resolved.config === undefined
-      ? []
-      : await (
-          input.requiredCommandProbe === undefined
-            ? probeCommandsForExecution(
-                resolved.config,
-                commandRequirements.map((entry) => entry.name),
-                env,
-                { includeVersions: true, cwd: projectRoot, createProviderAppIfMissing: true }
-              )
-            : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
-        ).catch((error: unknown) => {
-          probeFailure = error instanceof Error ? error.message : String(error);
-          return [];
-        });
+  // Commands are always probed on the local PATH, so a config that fails to resolve still gets a
+  // truthful toolchain report.
+  const probes = await (
+    input.requiredCommandProbe === undefined
+      ? probeCommandsForExecution(
+          commandRequirements.map((entry) => entry.name),
+          env,
+          { includeVersions: true, cwd: projectRoot }
+        )
+      : input.requiredCommandProbe(commandRequirements.map((entry) => entry.name))
+  ).catch((error: unknown) => {
+    probeFailure = error instanceof Error ? error.message : String(error);
+    return [];
+  });
   const probeByName = new Map(probes.map((probe) => [probe.name, probe]));
   const toolchain = commandRequirements.map((requirement) => ({
     ...requirement,

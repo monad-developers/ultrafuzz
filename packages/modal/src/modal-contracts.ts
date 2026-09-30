@@ -1,5 +1,3 @@
-import type { CloudSelectedTask } from "@ultrafuzz/artifacts";
-
 export const MODAL_COMMON_SCHEMA_ID = "urn:ultrafuzz:schema:modal:common:1" as const;
 export const MODAL_BENCHMARK_CONTROL_MANIFEST_SCHEMA_ID =
   "urn:ultrafuzz:schema:modal:benchmark-control-manifest:1" as const;
@@ -9,14 +7,6 @@ export const MODAL_RECOVERY_LIFECYCLE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:re
 export const MODAL_RECOVERY_STATE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:recovery-state:1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:worker-lineage:1" as const;
 export const MODAL_WORKER_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:worker-result:2" as const;
-export const MODAL_NODE_INPUT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-input:2" as const;
-export const MODAL_NODE_RESULT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-result:2" as const;
-export const MODAL_NODE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-checkpoint:1" as const;
-export const MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-checkpoint-index:1" as const;
-export const MODAL_NODE_RESTORE_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-restore:1" as const;
-export const MODAL_NODE_WORKER_ERROR_SCHEMA_ID = "urn:ultrafuzz:schema:modal:node-worker-error:1" as const;
-export const MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID =
-  "urn:ultrafuzz:schema:modal:execution-dependency-manifest:1" as const;
 export const MODAL_PINNED_HOLDOUT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-holdout:1" as const;
 export const MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID = "urn:ultrafuzz:schema:modal:pinned-source-proof:2" as const;
 export const MODAL_SMOKE_CHECKPOINT_SCHEMA_ID = "urn:ultrafuzz:schema:modal:smoke-checkpoint:1" as const;
@@ -366,133 +356,6 @@ export interface StrictModalWorkerResultDocument {
   diagnostic_code: StrictModalWorkerDiagnosticCode;
 }
 
-export interface StrictModalDependencyVerificationAuthorityDocument {
-  attempt_id: string;
-  marker_sha256: string;
-  size_bytes: number;
-}
-
-export interface StrictModalNodeInputDocument {
-  schema_version: "ultrafuzz.modal.node.v2";
-  run_id: string;
-  task_id: string;
-  attempt_id: string;
-  source_revision?: string;
-  source_ref?: string;
-  execution_generation: string;
-  execution_snapshot_root: string;
-  workflow_path: string;
-  prompt_path?: string;
-  run_root: string;
-  artifact_dir: string;
-  workspace_dir: string;
-  dependency_artifact_dirs: string[];
-  reference_artifact_dirs?: string[];
-  vulnerability_database?: { catalogPath: string; catalogSha256: string };
-  optional_dependency_artifact_dirs?: string[];
-  dependency_verification_authorities: StrictModalDependencyVerificationAuthorityDocument[];
-  selected_task?: CloudSelectedTask;
-  project_content_sha256?: string;
-  project_archive_sha256?: string;
-  resources: {
-    cpu: number;
-    memory_mib: number;
-    timeout_seconds: number;
-  };
-  agent_credential_env: string[];
-  operator_prompt?: string;
-}
-
-export interface StrictModalNodeResultDocument {
-  schema_version: "ultrafuzz.modal.node-result.v2";
-  status: "succeeded";
-  artifact_archive: string;
-  artifact_sha256: string;
-  storage_lineage: string;
-  logical_dispatch_fingerprint: string;
-  durable_checkpoint: string;
-  durable_checkpoint_index: string;
-}
-
-export type StrictModalNodeCheckpointStage = "prepared" | "running" | "failed" | "completed";
-
-export interface StrictModalNodeCheckpointDocument {
-  schema_version: "ultrafuzz.modal.node-checkpoint.v1";
-  checkpoint_id: string;
-  sequence: number;
-  stage: StrictModalNodeCheckpointStage;
-  created_at: string;
-  storage_lineage: string;
-  logical_dispatch_fingerprint: string;
-  workspace_path: string;
-  run_root: string;
-  execution_snapshot_root: string;
-  handoff_archive: string;
-  project_archive_sha256: string;
-  restored_from?: string;
-  error?: string;
-}
-
-export interface StrictModalNodeCheckpointIndexEntry {
-  checkpoint_id: string;
-  sequence: number;
-  stage: StrictModalNodeCheckpointStage;
-  created_at: string;
-  manifest: string;
-}
-
-export interface StrictModalNodeCheckpointIndexDocument {
-  schema_version: "ultrafuzz.modal.node-checkpoint-index.v1";
-  storage_lineage: string;
-  logical_dispatch_fingerprint: string;
-  workspace_path: string;
-  run_root: string;
-  execution_snapshot_root: string;
-  handoff_archive: string;
-  project_archive_sha256: string;
-  checkpoints: StrictModalNodeCheckpointIndexEntry[];
-}
-
-export interface StrictModalNodeRestoreDocument {
-  schema_version: "ultrafuzz.modal.node-restore.v1";
-  source_root: string;
-}
-
-export interface StrictModalNodeWorkerErrorDocument {
-  schema_version: "ultrafuzz.modal.node-worker-error.v1";
-  message: string;
-  phase?: string;
-  command?: string;
-  exit_code?: number;
-  stdout?: string;
-  stderr?: string;
-}
-
-export interface StrictModalExecutionDependencyTarget {
-  id: string;
-  name: string;
-  snapshot_path: string;
-}
-
-export interface StrictModalExecutionDependencyPackage extends StrictModalExecutionDependencyTarget {
-  version: string;
-}
-
-export interface StrictModalExecutionDependencyIssuer {
-  id: string;
-  snapshot_path: string;
-  dependencies: Record<string, string>;
-}
-
-export interface StrictModalExecutionDependencyManifestDocument {
-  schema_version: "ultrafuzz.workflow-execution-dependencies.v1";
-  modules: StrictModalExecutionDependencyTarget[];
-  packages: StrictModalExecutionDependencyPackage[];
-  issuers: StrictModalExecutionDependencyIssuer[];
-  executable_paths: string[];
-  smithers_bin: string;
-}
-
 export interface StrictModalPinnedSubmoduleExpectation {
   manifest_location: "git-common-dir";
   schema_version: "ultrafuzz.pinned-submodules-expectation.v1";
@@ -684,13 +547,6 @@ export interface ModalContractBySchemaId {
   [MODAL_RECOVERY_STATE_SCHEMA_ID]: StrictModalRecoveryStateDocument;
   [MODAL_WORKER_LINEAGE_SCHEMA_ID]: StrictModalWorkerLineageDocument;
   [MODAL_WORKER_RESULT_SCHEMA_ID]: StrictModalWorkerResultDocument;
-  [MODAL_NODE_INPUT_SCHEMA_ID]: StrictModalNodeInputDocument;
-  [MODAL_NODE_RESULT_SCHEMA_ID]: StrictModalNodeResultDocument;
-  [MODAL_NODE_CHECKPOINT_SCHEMA_ID]: StrictModalNodeCheckpointDocument;
-  [MODAL_NODE_CHECKPOINT_INDEX_SCHEMA_ID]: StrictModalNodeCheckpointIndexDocument;
-  [MODAL_NODE_RESTORE_SCHEMA_ID]: StrictModalNodeRestoreDocument;
-  [MODAL_NODE_WORKER_ERROR_SCHEMA_ID]: StrictModalNodeWorkerErrorDocument;
-  [MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID]: StrictModalExecutionDependencyManifestDocument;
   [MODAL_PINNED_HOLDOUT_SCHEMA_ID]: StrictModalPinnedHoldoutDocument;
   [MODAL_PINNED_SOURCE_PROOF_SCHEMA_ID]: StrictModalPinnedSourceProofDocument;
   [MODAL_SMOKE_CHECKPOINT_SCHEMA_ID]: StrictModalSmokeCheckpointDocument;

@@ -10,10 +10,11 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 /**
  * The generated workflow-runner workspace and this repository install Effect
  * independently. The runner manifest pins Effect and the `@effect/*` packages so a
- * cloud run cannot end up with two Effect builds; pinning only there would leave
- * the repository's own Smithers integration test running against whatever the open
- * caret on `@effect/platform-node-shared` resolves to, so CI would not exercise the
- * tree production installs. These two pin sets must stay identical.
+ * run's launch and a later resume cannot end up with two Effect builds; pinning
+ * only there would leave the repository's own Smithers integration test running
+ * against whatever the open caret on `@effect/platform-node-shared` resolves to,
+ * so CI would not exercise the tree production installs. These two pin sets must
+ * stay identical.
  */
 describe("workspace workflow-engine overrides", () => {
   const workspaceOverrides = (

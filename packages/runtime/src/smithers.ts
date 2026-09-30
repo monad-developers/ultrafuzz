@@ -44,22 +44,16 @@ import {
 } from "@ultrafuzz/artifacts";
 import {
   invariantPropertyPrioritySelection,
-  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
   resolveExecutionResources,
   serializeResolvedConfigJsonBytes,
   serializeResolvedConfigToml,
   type ResolvedConfig
 } from "@ultrafuzz/config";
 import { loadAgentPreambleTemplate, renderAgentPreambleTemplate } from "@ultrafuzz/prompts";
-import { isPathInside, isSensitiveSecretValue, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
+import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
-import {
-  DATA_GOVERNANCE_PROVENANCE_PATH,
-  effectiveRouteEnvironment,
-  isCredentialLikeEnvironmentVariableName,
-  routeOwnsCredentialLikeEnvironmentVariable
-} from "./data-governance.js";
+import { DATA_GOVERNANCE_PROVENANCE_PATH } from "./data-governance.js";
 import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
 import { reconcilesPartialResults } from "./dynamic-runtime.js";
 import {
@@ -81,8 +75,6 @@ import { retryChainAttemptCount, retryFallbackProfileIds } from "./retry-chain.j
 import { assertRunSourceRevision, captureRunSourceRevision, type RunSourceRevision } from "./source-revision.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import {
-  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
-  CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
   SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
   SMITHERS_RESET_NODE_SCHEMA_VERSION,
   SMITHERS_SUBMISSION_JSON_SCHEMA_ID,
@@ -3285,7 +3277,6 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-  "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
   ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
   ULTRAFUZZ_TRUSTED_BIN_ENV,
@@ -3372,7 +3363,6 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
-  env?: Record<string, string | undefined>;
   controllerSourceDigest?: string;
   dataGovernance?: RunDataGovernanceReference;
   vulnerabilityDatabase?: { relative_path: string; sha256: string };
@@ -3740,7 +3730,6 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         const ancestorNodeIds = artifactAncestorNodeIds(node.id, input.graph.nodes);
         return compileTask({
           config: input.config,
-          env: input.env ?? {},
           graph: input.graph,
           node,
           attempt,
@@ -3828,10 +3817,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
-  // Cloud handoffs seal the same pinned dependency bytes as local runs, so the
-  // expectation is computed for every execution mode. Every task worktree is
-  // created locally, so Git's shared worktree-config prerequisite is enabled
-  // whenever a pinned expectation exists.
+  // Every task worktree is created locally, so Git's shared worktree-config
+  // prerequisite is enabled whenever a pinned expectation exists.
   const pinnedSubmodules = source?.pinned === true ? pinnedSubmoduleExpectationForProject(projectRoot) : undefined;
   enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
   const compiled: CompiledSmithersWorkflow = {
@@ -3985,9 +3972,7 @@ export async function smithersExecutionControlFiles(
   };
 
   const externalRunner = explicitSmithersExecutable(env) !== undefined;
-  const useExternalRunnerForExecutionClosure =
-    externalRunner && compiled.tasks.every((task) => task.execution.mode !== "cloud");
-  const dependencyProjectRoot = useExternalRunnerForExecutionClosure
+  const dependencyProjectRoot = externalRunner
     ? compiled.projectRoot
     : await operatorControllerProjectRoot(compiled.projectRoot, env);
   (() => {
@@ -4004,8 +3989,8 @@ export async function smithersExecutionControlFiles(
   add(planPath, "controls/plan.json");
   // Prompt artifact-authority selectors resolve through the same immutable
   // execution generation as the workflow and rendered prompts. Keep the
-  // complete task manifest in that snapshot so a local continuation and a
-  // relocated cloud worker read identical sealed task/output declarations.
+  // complete task manifest in that snapshot so a continuation reads identical
+  // sealed task/output declarations.
   add(compiled.tasksPath, "controls/tasks.json");
   if (compiled.dynamicGroups.length > 0) {
     const dynamicBaseGraphPath = path.join(layout.root, "smithers", "runtime-base-graph.json");
@@ -4067,9 +4052,7 @@ export async function smithersExecutionControlFiles(
     add(sourcePath, path.posix.join(".smithers/agents", relativeExecutionPath(agentsRoot, sourcePath)));
   }
 
-  const queuedModules = Object.values(workflowModuleEntryUrls(compiled)).filter(
-    (value): value is string => value.length > 0
-  );
+  const queuedModules = [import.meta.resolve("@ultrafuzz/artifacts"), import.meta.resolve("@ultrafuzz/runtime")];
   const modulesByRoot = new Map<string, WorkflowExecutionModule>();
   const modulesByName = new Map<string, WorkflowExecutionModule>();
   while (queuedModules.length > 0) {
@@ -4114,7 +4097,7 @@ export async function smithersExecutionControlFiles(
   const dependencyMap = collectWorkflowExecutionDependencies({
     projectRoot: dependencyProjectRoot,
     modules: [...modulesByRoot.values()],
-    externalRunner: useExternalRunnerForExecutionClosure,
+    externalRunner,
     add
   });
   const dependencyMapPath = path.join(layout.root, "smithers", "execution-dependencies.json");
@@ -4387,18 +4370,6 @@ function stableWorkflowDependencyJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function workflowModuleEntryUrls(compiled: CompiledSmithersWorkflow): {
-  artifacts: string;
-  runtime: string;
-  modal: string;
-} {
-  return {
-    artifacts: import.meta.resolve("@ultrafuzz/artifacts"),
-    runtime: import.meta.resolve("@ultrafuzz/runtime"),
-    modal: compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
-  };
-}
-
 function workflowPackageRoot(entryPath: string): string {
   let current = path.dirname(fs.realpathSync(entryPath));
   for (;;) {
@@ -4457,9 +4428,7 @@ function smithersInputDocument(
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
-      ...(task.renderedPromptPath
-        ? { prompt_path: executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt") }
-        : {})
+      ...(task.renderedPromptPath ? { prompt_path: task.renderedPromptPath } : {})
     }))
   };
 }
@@ -5135,17 +5104,6 @@ export async function runSmithersLifecycleCommand(input: {
             applied_at: appliedAt
           },
           "Smithers reset-node marker"
-        );
-        writeRuntimeDocument(
-          path.join(input.relaunchPaths!.runRoot, "smithers", "cloud-execution-generation.json"),
-          CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
-          {
-            schema_version: CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION,
-            generation: crypto.randomUUID(),
-            reset_node: input.resetNode,
-            applied_at: appliedAt
-          },
-          "cloud execution generation evidence"
         );
       }
     }
@@ -7428,7 +7386,6 @@ function compileDynamicGroup(input: {
   const taskTemplates = nodeAttemptsFor(input.node).map((attempt) =>
     compileTask({
       config: input.input.config,
-      env: input.input.env ?? {},
       graph: input.input.graph,
       node: input.node,
       attempt,
@@ -7519,7 +7476,6 @@ function compileDynamicGroup(input: {
 
 function compileTask(input: {
   config: ResolvedConfig;
-  env: NodeJS.ProcessEnv;
   graph: ExpandedGraph;
   node: ExpandedNode;
   attempt: NodeAttemptProvenance;
@@ -7570,59 +7526,12 @@ function compileTask(input: {
           sha256: input.vulnerabilityDatabase.sha256
         };
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
-  const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
-  // A cloud container must survive the agent task; its provider adds lifecycle
-  // overhead separately. Smaller resource defaults cannot truncate the task.
-  const taskTimeoutSeconds = Math.ceil(timeoutMs / 1000);
-  const explicitNodeTimeout = input.config.execution.nodes[input.node.logicalId]?.resources.timeoutSeconds;
-  const explicitResourceTimeout =
-    explicitNodeTimeout ??
-    (input.config.execution.resourceTimeoutOrigin === "default"
-      ? undefined
-      : input.config.execution.resources.timeoutSeconds);
-  if (input.config.execution.mode === "cloud") {
-    if (explicitResourceTimeout !== undefined && explicitResourceTimeout < taskTimeoutSeconds) {
-      const setting =
-        explicitNodeTimeout === undefined
-          ? "execution.resources.timeout_seconds"
-          : `execution.nodes.${input.node.logicalId}.resources.timeout_seconds`;
-      throw new Error(
-        `CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED: explicit resource timeout ${String(explicitResourceTimeout)}s for ${input.node.logicalId} cannot contain its ${String(taskTimeoutSeconds)}s task; increase ${setting} or reduce the task timeout`
-      );
-    }
-    executionResources.timeoutSeconds = Math.max(executionResources.timeoutSeconds, taskTimeoutSeconds);
-    if (executionResources.timeoutSeconds > MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS) {
-      throw new Error(
-        `CLOUD_TASK_TIMEOUT_BUDGET_EXCEEDED: ${input.node.logicalId} leaves no room for the Modal lifecycle reserve`
-      );
-    }
-  }
-  const agentCredentialEnv = [
-    ...new Set(
-      agentChain.flatMap((entry) =>
-        cloudAgentCredentialEnv(
-          input.config.execution.mode,
-          entry.agentRef,
-          input.config.agents[entry.agentRef],
-          input.config.agents,
-          input.env
-        )
-      )
-    )
-  ];
+  // The persisted task manifest keeps its historical `execution` block so sealed documents and the
+  // artifact schema bundle stay unchanged; for local execution it is inert provenance.
   const execution = {
-    mode: input.config.execution.mode,
-    ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
-    resources: executionResources,
-    ...(input.config.execution.providers.modal === undefined
-      ? {}
-      : {
-          modal: {
-            ...input.config.execution.providers.modal,
-            credentialEnv: [...input.config.execution.providers.modal.credentialEnv]
-          }
-        }),
-    agentCredentialEnv
+    mode: "local",
+    resources: resolveExecutionResources(input.config, input.node.logicalId),
+    agentCredentialEnv: []
   } satisfies CompiledSmithersTask["execution"];
   const metadata: SmithersTaskMetadata = {
     schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
@@ -7685,11 +7594,7 @@ function compileTask(input: {
       seconds: Math.ceil(timeoutMs / 1000),
       heartbeatTimeoutMs
     },
-    execution: {
-      mode: execution.mode,
-      ...(execution.provider === undefined ? {} : { provider: execution.provider }),
-      resources: execution.resources
-    }
+    execution: { mode: execution.mode, resources: execution.resources }
   };
   return {
     attemptId: input.attempt.attemptId,
@@ -7833,88 +7738,6 @@ function assertInvariantCampaignTimeoutBudget(
       `artifact_finalization_reserve_seconds=${runtimeBudget.finalizationReserveSeconds}). ` +
       `Increase the campaign node or group timeout_seconds to at least ${requiredSeconds}, or lower the invariant timeouts.`
   );
-}
-
-function cloudAgentCredentialEnv(
-  executionMode: ResolvedConfig["execution"]["mode"],
-  agentRef: string,
-  agent: ResolvedConfig["agents"][string] | undefined,
-  configuredAgents: ResolvedConfig["agents"],
-  env: NodeJS.ProcessEnv
-): string[] {
-  if (executionMode !== "cloud" || agent === undefined) return [];
-  const names = agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : [];
-  if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
-  const routes = effectiveRouteEnvironment(agentRef, env);
-  const configuredCredentials = configuredAgentCredentialEnvironmentVariableNames(configuredAgents);
-  let hasSensitiveExtra = false;
-  const extra = allowlistedCloudEnvironmentEntries(env).filter(([name, value]) => {
-    if (configuredCredentials.has(name.toUpperCase())) return false;
-    const sensitive = isCredentialLikeEnvironmentVariableName(name) || isSensitiveSecretValue(value);
-    if (sensitive && !routeOwnsCredentialLikeEnvironmentVariable(agentRef, name)) return false;
-    if (sensitive) hasSensitiveExtra = true;
-    return true;
-  });
-  names.push(...routes.map(([name]) => name), ...extra.map(([name]) => name));
-  if (extra.length > 0) names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
-  if (hasSensitiveExtra) names.push("ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES");
-  return [...new Set(names)].sort();
-}
-
-export function assertCurrentCloudAgentCredentialEnvironment(
-  config: ResolvedConfig,
-  tasks: readonly SmithersTaskManifestTask[],
-  env: NodeJS.ProcessEnv
-): void {
-  if (config.execution.mode !== "cloud") return;
-  for (const task of tasks) {
-    const expected = [
-      ...new Set(
-        task.agentChain.flatMap((entry) =>
-          cloudAgentCredentialEnv(
-            config.execution.mode,
-            entry.agentRef,
-            config.agents[entry.agentRef],
-            config.agents,
-            env
-          )
-        )
-      )
-    ].sort();
-    const sealed = [...new Set(task.execution.agentCredentialEnv)].sort();
-    if (JSON.stringify(expected) !== JSON.stringify(sealed)) {
-      throw new Error(
-        `cloud agent credential classification changed after workflow compilation for task ${task.smithersNodeId}; start a new run`
-      );
-    }
-  }
-}
-
-function configuredAgentCredentialEnvironmentVariableNames(agents: ResolvedConfig["agents"]): Set<string> {
-  const names = new Set<string>();
-  for (const [agentRef, agent] of Object.entries(agents)) {
-    if (agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
-    names.add(agent.apiKeyEnv.toUpperCase());
-    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.add("MOONSHOT_API_KEY");
-  }
-  return names;
-}
-
-function allowlistedCloudEnvironmentEntries(env: NodeJS.ProcessEnv): Array<[string, string]> {
-  const entries: Array<[string, string]> = [];
-  const normalizedNames = new Set<string>();
-  for (const rawName of (env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")) {
-    const name = rawName.trim();
-    if (name.length === 0) continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
-      throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
-    }
-    normalizedNames.add(name.toUpperCase());
-  }
-  for (const [name, value] of Object.entries(env)) {
-    if (value?.trim() && normalizedNames.has(name.toUpperCase())) entries.push([name, value]);
-  }
-  return entries;
 }
 
 function artifactAncestorNodeIds(nodeId: string, nodes: readonly ExpandedNode[]): string[] {
@@ -8202,42 +8025,26 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       promptPath:
         task.renderedPromptPath === undefined
           ? undefined
-          : executionPath(
-              compiled.projectRoot,
-              task,
-              retainedTaskPromptPath(compiled, task.attemptId) ?? task.renderedPromptPath,
-              "rendered prompt"
-            ),
-      workspacePath: executionPath(compiled.projectRoot, task, task.workspacePath, "task workspace"),
-      artifactDir: executionPath(compiled.projectRoot, task, task.artifactDir, "task artifact directory"),
-      dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
-        executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")
-      ),
-      referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
-        executionPath(compiled.projectRoot, task, directory, "reference artifact directory")
-      ),
+          : (retainedTaskPromptPath(compiled, task.attemptId) ?? task.renderedPromptPath),
+      workspacePath: task.workspacePath,
+      artifactDir: task.artifactDir,
+      dependencyArtifactDirs: task.dependencyArtifactDirs,
+      referenceArtifactDirs: task.referenceArtifactDirs ?? [],
       ...(task.vulnerabilityDatabaseCatalog === undefined
         ? {}
         : {
             vulnerabilityDatabase: {
-              catalogPath: executionPath(
-                compiled.projectRoot,
-                task,
-                task.vulnerabilityDatabaseCatalog.path,
-                "vulnerability database catalog"
-              ),
+              catalogPath: task.vulnerabilityDatabaseCatalog.path,
               catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
             }
           }),
-      optionalDependencyArtifactDirs: (task.optionalDependencyArtifactDirs ?? []).map((directory) =>
-        executionPath(compiled.projectRoot, task, directory, "optional dependency artifact directory")
-      ),
+      optionalDependencyArtifactDirs: task.optionalDependencyArtifactDirs ?? [],
       dependencyVerificationProducers: dependencyVerificationProducersForTask(task, taskByArtifactDir),
       ...(task.promptArtifactAuthoritySelectors === undefined
         ? {}
         : { promptArtifactAuthoritySelectors: task.promptArtifactAuthoritySelectors }),
-      runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
-      workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
+      runRoot: path.resolve(task.artifactDir, "..", ".."),
+      workflowPath: compiled.workflowPath,
       sourceTaskManifestPath: compiled.tasksPath,
       sourceProjectRoot: compiled.projectRoot,
       sourceRevision: task.sourceRevision ?? null,
@@ -8261,9 +8068,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
         backoff: task.retryPolicy.backoff,
         initialDelayMs: task.retryPolicy.initialDelayMs
       },
-      metadata: executionMetadata(compiled.projectRoot, task),
+      metadata: task.metadata,
       outputs: task.metadata.artifacts.outputs,
-      execution: task.execution,
       pinnedSubmodules: compiled.pinnedSubmodules ?? null,
       productionSourceRoots: compiled.productionSourceRoots ?? ["src", "contracts"]
     })),
@@ -8348,26 +8154,6 @@ function dependencyVerificationProducersForTask(
       }
     ];
   });
-}
-
-function executionMetadata(projectRoot: string, task: CompiledSmithersTask): SmithersTaskMetadata {
-  if (task.execution.mode === "local") return task.metadata;
-  return {
-    ...task.metadata,
-    workspace: {
-      ...task.metadata.workspace,
-      path: relativeProjectPath(projectRoot, task.metadata.workspace.path, "workspace metadata path")
-    },
-    artifacts: {
-      ...task.metadata.artifacts,
-      dir: relativeProjectPath(projectRoot, task.metadata.artifacts.dir, "artifact metadata directory"),
-      manifestPath: relativeProjectPath(projectRoot, task.metadata.artifacts.manifestPath, "artifact manifest path")
-    }
-  };
-}
-
-function executionPath(projectRoot: string, task: CompiledSmithersTask, value: string, label: string): string {
-  return task.execution.mode === "cloud" ? relativeProjectPath(projectRoot, value, label) : value;
 }
 
 function relativeProjectPath(projectRoot: string, value: string, label: string): string {

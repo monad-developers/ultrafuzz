@@ -522,8 +522,8 @@ function renderReadyRuntimePrompts(input: {
  * Resolves the documented `vulnerability_database_path` and `artifact_schema_dir` core variables
  * against the actual run and project roots.
  *
- * The compiled group stores the digest-bound catalog run-root-relative, so a relocated workspace or
- * a cloud root renders the correct absolute path instead of silently substituting "unavailable".
+ * The compiled group stores the digest-bound catalog run-root-relative, so a relocated workspace
+ * renders the correct absolute path instead of silently substituting "unavailable".
  */
 function resolvedConfigForRuntimeRoot(
   resolvedConfig: CompiledSmithersDynamicGroup["promptContext"]["resolvedConfig"],

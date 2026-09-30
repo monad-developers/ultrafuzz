@@ -30,7 +30,6 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
-import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
@@ -1781,6 +1780,34 @@ test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in
   }
 });
 
+test("diagnoseProject still probes the local toolchain when the project config does not resolve", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const scaffold = fs.readFileSync(configPath, "utf8");
+  assert.ok(scaffold.includes('[execution]\nmode = "local"'), scaffold);
+  fs.writeFileSync(configPath, scaffold.replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"'), "utf8");
+  let probed: readonly string[] = [];
+
+  const doctor = await diagnoseProject({
+    projectRoot: project,
+    env: { PATH: "/usr/bin" },
+    offline: true,
+    requiredCommandProbe: async (names) => {
+      probed = names;
+      return allAvailable(names);
+    }
+  });
+
+  assert.ok(doctor.diagnostics.some((entry) => entry.code === "CONFIG_EXECUTION_CLOUD_REMOVED"));
+  for (const name of ["git", "node", "forge"]) assert.ok(probed.includes(name), `${name} probed: ${probed.join(",")}`);
+  assert.equal(doctor.value?.checks.find((check) => check.name === "toolchain")?.status, "ok");
+  assert.equal(
+    doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING"),
+    false
+  );
+});
+
 test("diagnoseProject never executes a target-local required-command shim", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -1876,92 +1903,6 @@ nodes:
   assert.deepEqual(probed, ["covg-eval"]);
   assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "transformed-command-requirements")), false);
-});
-
-test("startRun delegates cloud requirements to the execution-provider probe before creating a run", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, "recon");
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    `${fs
-      .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')
-      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 1\n\n[agents.CodexAgent]")}
-
-[execution.providers.modal]
-app = "ultrafuzz-test"
-image = "ultrafuzz-test"
-credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-`,
-    "utf8"
-  );
-  let probed: readonly string[] = [];
-
-  const run = await startRun({
-    projectRoot: project,
-    runId: "missing-cloud-recon",
-    env: {
-      ...Object.fromEntries(effectiveRouteEnvironment("CodexAgent", process.env).map(([name]) => [name, undefined])),
-      PATH: path.join(project, "controller-empty-bin"),
-      MODAL_TOKEN_ID: "provider-one",
-      MODAL_TOKEN_SECRET: "provider-two"
-    },
-    requiredCommandProbe: async (commands) => {
-      probed = commands;
-      return commands.map((name) => ({ name, available: false, path: null, version: null }));
-    }
-  });
-
-  assert.deepEqual(probed, ["recon"], JSON.stringify(run.diagnostics));
-  assert.equal(run.diagnostics[0]?.code, "RUN_REQUIRED_COMMAND_MISSING");
-  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "missing-cloud-recon")), false);
-});
-
-test("diagnoseProject probes topology commands in the configured cloud execution environment", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project, "recon");
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
-  const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    `${fs
-      .readFileSync(configPath, "utf8")
-      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
-
-[execution.providers.modal]
-app = "ultrafuzz-test"
-image = "ultrafuzz-test"
-credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-`,
-    "utf8"
-  );
-  let probed: readonly string[] = [];
-
-  const doctor = await diagnoseProject({
-    projectRoot: project,
-    env: {
-      PATH: path.join(project, "controller-empty-bin"),
-      MODAL_TOKEN_ID: "provider-one",
-      MODAL_TOKEN_SECRET: "provider-two"
-    },
-    offline: true,
-    requiredCommandProbe: async (commands) => {
-      probed = commands;
-      return commands.map((name) => ({
-        name,
-        available: name !== "recon",
-        path: name === "recon" ? null : `/usr/local/bin/${name}`,
-        version: null
-      }));
-    }
-  });
-
-  assert.ok(probed.includes("recon"), JSON.stringify(doctor.diagnostics));
-  assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
-  assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING"));
 });
 
 // The scheduler and engine workarounds are the two that carry durable resume

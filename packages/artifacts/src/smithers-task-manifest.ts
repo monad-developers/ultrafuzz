@@ -1311,14 +1311,6 @@ function assertReferenceArtifactManifestAuthorities(task: SmithersTaskManifestTa
   }
 }
 
-/** Locate a sealed reference outer-manifest authority by its exact dependency artifact directory. */
-export function referenceArtifactManifestAuthorityForArtifactDir(
-  task: SmithersTaskManifestTask,
-  artifactDir: string
-): SmithersTaskManifestReferenceArtifactManifestAuthority | undefined {
-  return task.referenceArtifactManifestAuthorities?.find((authority) => authority.artifactDir === artifactDir);
-}
-
 function assertPinnedSubmodulePath(value: string): void {
   const segments = value.split("/");
   if (

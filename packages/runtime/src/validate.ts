@@ -313,19 +313,6 @@ function validateTopologySurface(
         selectedAgents.add(config.models.profiles[profileId]!.agent);
       }
     }
-    if (config?.execution.mode === "cloud") {
-      for (const agentId of [...selectedAgents].sort()) {
-        if (config.agents[agentId]?.auth === "subscription") {
-          executionDiagnostics.push({
-            code: "CONFIG_EXECUTION_AGENT_AUTH_UNSUPPORTED",
-            message: "cloud execution requires API-key agent authentication configured by environment-variable name",
-            severity: "error",
-            source: "config",
-            path: `agents.${agentId}.auth`
-          });
-        }
-      }
-    }
     return {
       posture: postureFromDiagnostics(
         "topology",

@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { assertNoSymlinkComponents, readRunPlanDocument, safeResolveInside } from "@ultrafuzz/artifacts";
-import type { ModalExecutionProviderConfig } from "@ultrafuzz/config";
 import { isPathInside, validateCleanPolicy } from "@ultrafuzz/security";
 
 import {
@@ -20,7 +19,6 @@ import {
 } from "./source-revision.js";
 import type { CleanGeneratedInput, CleanGeneratedValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
-import { isRecord } from "@ultrafuzz/artifacts";
 
 interface PlannedRemoval {
   selection: string;
@@ -83,10 +81,6 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
           ".ultrafuzz/runs"
         )
       ]);
-    }
-    const cloudCleanup = await cleanupCloudRunStorage(input, planned);
-    if (cloudCleanup !== undefined) {
-      return runtimeFailure([cloudCleanup]);
     }
     try {
       for (const removal of planned) {
@@ -160,65 +154,6 @@ function runSourceRefsForCleanup(projectRoot: string, planned: PlannedRemoval[])
   return sources;
 }
 
-async function cleanupCloudRunStorage(
-  input: CleanGeneratedInput,
-  planned: PlannedRemoval[]
-): Promise<RuntimeDiagnostic | undefined> {
-  try {
-    const cloudRuns = cloudRunsForCleanup(planned);
-    if (cloudRuns.length === 0) return undefined;
-    const moduleName = "@ultrafuzz/modal";
-    const provider = (await import(moduleName)) as {
-      cleanupModalNodeRun(
-        options: {
-          app: string;
-          image: string;
-          region?: string;
-          credentialEnv: readonly string[];
-        },
-        controllerRunId: string,
-        cleanupOptions: { force: boolean }
-      ): Promise<unknown>;
-    };
-    for (const { runId, modal } of cloudRuns) {
-      await provider.cleanupModalNodeRun(
-        {
-          app: modal.app,
-          image: modal.image,
-          ...(modal.region === undefined ? {} : { region: modal.region }),
-          credentialEnv: modal.credentialEnv
-        },
-        `ultrafuzz-${runId}`,
-        { force: input.confirmed === true }
-      );
-    }
-    return undefined;
-  } catch (error) {
-    if (isRecord(error) && error.code === "MODAL_NODE_CLEANUP_REFUSED") {
-      return runtimeError(
-        "CLEAN_CLOUD_STORAGE_REFUSED",
-        "cloud run storage cleanup was refused because active sandboxes remain; rerun with --yes or --confirm to terminate them, or wait for them to finish; local evidence was preserved",
-        "clean",
-        ".ultrafuzz/runs"
-      );
-    }
-    return runtimeError(
-      "CLEAN_CLOUD_STORAGE_FAILED",
-      "cloud run storage cleanup failed; local evidence was preserved",
-      "clean",
-      ".ultrafuzz/runs"
-    );
-  }
-}
-
-function cloudRunsForCleanup(planned: PlannedRemoval[]): Array<{ runId: string; modal: ModalExecutionProviderConfig }> {
-  return runRootsForCleanup(planned).flatMap((root) => {
-    const runId = path.basename(root);
-    const modal = readPersistedModalExecution(root);
-    return modal === undefined ? [] : [{ runId, modal }];
-  });
-}
-
 function runRootsForCleanup(planned: PlannedRemoval[]): string[] {
   return planned.flatMap((removal) => {
     const match = /^runs\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(removal.selection);
@@ -231,17 +166,6 @@ function runRootsForCleanup(planned: PlannedRemoval[]): string[] {
       .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
       .map((entry) => path.join(removal.absolutePath, entry.name));
   });
-}
-
-function readPersistedModalExecution(runRoot: string): ModalExecutionProviderConfig | undefined {
-  const planPath = path.join(runRoot, "plan.json");
-  if (!fs.existsSync(planPath)) return undefined;
-  assertNoSymlinkComponents(runRoot, planPath, "cloud cleanup plan");
-  const plan = readRunPlanDocument(planPath, path.basename(runRoot));
-  if (plan.execution.mode !== "cloud") return undefined;
-  const modal = plan.execution.providers.modal;
-  if (modal === undefined) throw new Error("persisted cloud cleanup plan is missing its Modal provider");
-  return modal;
 }
 
 function planRemoval(

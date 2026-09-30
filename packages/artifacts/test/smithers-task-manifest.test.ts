@@ -6,7 +6,6 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   assertSmithersTaskManifestMatchesPlannedGraph,
   parseSmithersTaskManifestBytes,
-  referenceArtifactManifestAuthorityForArtifactDir,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestDynamicGroup,
   type SmithersTaskManifestTask
@@ -698,12 +697,9 @@ test("planned-graph joins retain reference dependencies without inventing workfl
     model_fanout: []
   });
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, withReference));
-  assert.deepEqual(referenceArtifactManifestAuthorityForArtifactDir(parsed.tasks[0]!, referenceArtifactDir), {
-    attemptId: "reference-input",
-    artifactDir: referenceArtifactDir,
-    sizeBytes: 123,
-    sha256: SHA256
-  });
+  assert.deepEqual(parsed.tasks[0]?.referenceArtifactManifestAuthorities, [
+    { attemptId: "reference-input", artifactDir: referenceArtifactDir, sizeBytes: 123, sha256: SHA256 }
+  ]);
 
   const missing = structuredClone(parsed);
   delete missing.tasks[0]!.referenceArtifactManifestAuthorities;
