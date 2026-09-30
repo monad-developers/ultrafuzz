@@ -4607,18 +4607,18 @@ bunAdapterTest(
 bunAdapterTest(
   "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
   { timeout: 30_000 },
-  // Every provider-home ancestor must refuse group writes, and Ubuntu's default
-  // umask leaves directories created without an explicit mode group writable.
+  // The default provider-home root, on Ubuntu's layout under its default umask:
+  // a 0750 home whose ~/.local is 0775.
   underGroupWritableUmask(async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
-    // Operator state outside the target, as in production: `ultrafuzz init`
-    // creates the target's `.ultrafuzz` with the process umask, so a provider
-    // home beneath it fails the ancestor check on a group-writable host.
-    const providerHomeRoot = temporaryRoot("ufz-openrouter-provider-homes-");
-    const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-test-codex");
+    const home = temporaryRoot("ufz-openrouter-home-");
+    fs.chmodSync(home, 0o750);
+    fs.mkdirSync(path.join(home, ".local", "state"), { recursive: true });
+    fs.chmodSync(path.join(home, ".local"), 0o775);
+    const codexHome = path.join(home, ".ultrafuzz", "provider-homes", "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
       fs
@@ -4634,13 +4634,17 @@ bunAdapterTest(
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
+      home: process.env.HOME,
+      xdgState: process.env.XDG_STATE_HOME,
       openrouter: process.env.OPENROUTER_API_KEY,
       openai: process.env.OPENAI_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
       baseUrl: process.env.OPENAI_BASE_URL
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    process.env.HOME = home;
+    process.env.XDG_STATE_HOME = path.join(home, ".local", "state");
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.OPENAI_API_KEY = "unrelated-openai-key";
     process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
@@ -4692,12 +4696,15 @@ bunAdapterTest(
         ].join("\n")
       );
       assert.equal(providerConfig.includes("deterministic-openrouter-test-key"), false);
-      assert.equal(fs.statSync(codexHome).mode & 0o777, 0o700);
+      for (let current = codexHome; current !== home; current = path.dirname(current))
+        assert.equal(fs.statSync(current).mode & 0o777, 0o700, current);
       assert.equal(fs.statSync(path.join(codexHome, "config.toml")).mode & 0o777, 0o600);
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot,
+        HOME: previous.home,
+        XDG_STATE_HOME: previous.xdgState,
         OPENROUTER_API_KEY: previous.openrouter,
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,

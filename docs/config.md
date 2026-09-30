@@ -87,6 +87,8 @@ api_key_env = "OPENAI_API_KEY"
 
 API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
+When `ULTRAFUZZ_PROVIDER_HOME_ROOT` is unset, that root is `~/.ultrafuzz/provider-homes`. `OpenRouterAgent` and `DeepSeekAgent` always keep their homes there, and `ClaudeAgent`, `CodexAgent`, and `KimiAgent` do when they set `config_dir`. The adapters create any missing directory of that path with mode `0700`. `XDG_STATE_HOME` does not move the root. No directory above a provider home may be writable by its group or by others unless it has the sticky bit, so a root you set must not sit below a directory such as Ubuntu's `~/.local`, which the default umask `0002` makes `0775`.
+
 ## OpenRouter through Codex
 
 `ultrafuzz init` generates a dedicated `OpenRouterAgent`, which uses the Codex
