@@ -835,7 +835,10 @@ type DirectArtifactDependency = {
   task?: SmithersTaskManifestTask;
 };
 
-/** Resolve the current attempt's exact direct dependencies from its sealed task declaration. */
+/**
+ * Resolve the current attempt's exact direct dependencies from its sealed task declaration,
+ * omitting an optional producer its verifier did not admit.
+ */
 function sealedDirectArtifactDependencies(
   layout: RunLayout,
   consumer: PlannedGraphNode,
@@ -869,7 +872,9 @@ function sealedDirectArtifactDependencies(
           `sealed Smithers dependency ${JSON.stringify(dependencyAttemptId)} does not bind one planned agentic attempt`
         );
       }
-      dependencies.push({ attemptId: dependencyAttemptId, node, task });
+      if (!optionalDeclaredProducerWasNotAdmitted(dependencyAttemptId, task, authority)) {
+        dependencies.push({ attemptId: dependencyAttemptId, node, task });
+      }
       continue;
     }
 

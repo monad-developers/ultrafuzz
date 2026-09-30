@@ -7389,6 +7389,92 @@ for (const finalizationState of ["failed", "unfinalized"] as const) {
   });
 }
 
+test("property fan-in consumes the admitted lenses when an optional lens failed", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-optional-failed-lens" });
+  const node = writeMinimalPropertyFaninFixture(layout, {
+    dependsOn: ["property-specification-recon", "property-specification-crytic"]
+  });
+  writePropertyLens(layout, "property-specification-recon", ["recon-1"]);
+  // The continue-policy lens failed before its verifier wrote a marker.
+  registerArtifactNode(layout, "property-specification-crytic", [
+    boundOutput("properties/crytic.json", "ultrafuzz/property-lens@2", true)
+  ]);
+  updateNodeState(layout, "property-specification-crytic", { status: "failed" });
+  // As a required input, the failed lens still rejects the fan-in.
+  const required = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.ok(
+    required.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+    JSON.stringify(required.diagnostics)
+  );
+
+  // As packaged: the lenses continue on failure and the fan-in, in another group, reconciles them.
+  const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph;
+  graph.groups = { properties: { defaults: { failure_policy: "continue" } }, "property-catalog": {} };
+  for (const candidate of graph.nodes) {
+    if (candidate.id === node.id) candidate.group = "property-catalog";
+    else if (candidate.outputs.some((output) => output.contract === "ultrafuzz/property-lens@2")) {
+      candidate.group = "properties";
+    }
+  }
+  fs.writeFileSync(layout.graphPath, JSON.stringify(graph), "utf8");
+  const sealed = sealedFixtureAuthority(layout, node.id);
+  const lensDirs = ["property-specification-recon", "property-specification-crytic"].map((attemptId) =>
+    getNodeArtifactDir(layout, attemptId)
+  );
+  const task = { ...sealed.task, optionalDependencyArtifactDirs: lensDirs };
+  const tasks = sealed.tasks.map((candidate) => (candidate.attemptId === task.attemptId ? task : candidate));
+  writeSealedFixtureTaskAuthority(layout, graph.nodes, tasks);
+  const planned = (JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph).nodes.find(
+    (candidate) => candidate.id === node.id
+  );
+  assert.ok(planned);
+  const declared = task.dependencyArtifactDirs.map((directory) => path.basename(directory));
+  const withoutFailedLens = {
+    task,
+    tasks,
+    admittedDependencyAttemptIds: declared.filter((attemptId) => attemptId !== "property-specification-crytic")
+  };
+  const result = verifyRuntimeRequiredArtifactsForAttempt(layout, planned, node.id, withoutFailedLens);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // The fan-in cannot recreate the failed lens's rows: a source it was not given is unknown.
+  const fabricated = JSON.stringify({
+    schema_version: "ultrafuzz.properties.v2",
+    properties: [
+      {
+        id: "property-1",
+        description: "Supply accounting remains consistent.",
+        category: "accounting",
+        priority: "high",
+        sources: [
+          { source_node_id: "property-specification-recon", source_property_id: "recon-1" },
+          { source_node_id: "property-specification-crytic", source_property_id: "crytic-1" }
+        ],
+        ledger_ids: ["evidence-1"]
+      }
+    ]
+  });
+  writeArtifactFile(layout, node.id, "properties.json", fabricated);
+  writeArtifactFile(layout, node.id, "properties.md", fixtureCanonicalPropertiesMarkdown(fabricated));
+  const fabricatedResult = verifyRuntimeRequiredArtifactsForAttempt(layout, planned, node.id, withoutFailedLens);
+  assert.deepEqual(
+    gateIssuePaths(fabricatedResult, "property-source-join"),
+    ["$.properties[0].sources[1]"],
+    JSON.stringify(fabricatedResult.diagnostics)
+  );
+
+  // Only the verifier's admission drops a lens: an admitted lens is still read and authenticated.
+  const admitted = verifyRuntimeRequiredArtifactsForAttempt(layout, planned, node.id, {
+    task,
+    tasks,
+    admittedDependencyAttemptIds: declared
+  });
+  assert.ok(
+    admitted.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_LENS_AUTHORITY_INVALID"),
+    JSON.stringify(admitted.diagnostics)
+  );
+});
+
 for (const missingAuthority of ["manifest", "verification marker"] as const) {
   test(`property fan-in rejects a declared lens with a missing ${missingAuthority}`, () => {
     const layout = createRunLayout({

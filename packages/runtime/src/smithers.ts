@@ -3749,7 +3749,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         });
       })
   );
-  const dynamicGroups = input.graph.nodes
+  const compiledDynamicGroups = input.graph.nodes
     .filter(
       (node): node is ExpandedNode & { dynamic: NonNullable<ExpandedNode["dynamic"]> } => node.dynamic !== undefined
     )
@@ -3768,19 +3768,29 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         workflowName
       })
     );
-  const nonBlockingAttemptIds = compiledTasks
-    .filter((task) => {
+  const nonBlockingGroupByAttemptId = new Map(
+    compiledTasks.flatMap((task) => {
       const group = task.metadata.node.group;
-      return group !== undefined && input.graph.groups[group]?.defaults?.failure_policy === "continue";
+      return group !== undefined && input.graph.groups[group]?.defaults?.failure_policy === "continue"
+        ? [[task.attemptId, group] as const]
+        : [];
     })
-    .map((task) => task.attemptId)
-    .sort();
-  const nonBlockingAttemptIdSet = new Set(nonBlockingAttemptIds);
-  const tasks = compiledTasks.map((task) => ({
-    ...task,
-    optionalDependencyArtifactDirs: reconcilesPartialResults(task)
-      ? task.dependencyArtifactDirs.filter((directory) => nonBlockingAttemptIdSet.has(path.basename(directory)))
-      : []
+  );
+  const nonBlockingAttemptIds = [...nonBlockingGroupByAttemptId.keys()].sort();
+  const optionalInputs = (task: CompiledSmithersTask): string[] =>
+    task.dependencyArtifactDirs.filter((directory) => {
+      const producerGroup = nonBlockingGroupByAttemptId.get(path.basename(directory));
+      return producerGroup !== undefined && reconcilesPartialResults(task, producerGroup);
+    });
+  const tasks = compiledTasks.map((task) => ({ ...task, optionalDependencyArtifactDirs: optionalInputs(task) }));
+  // Generated children are cloned from their group's templates, so the templates follow the same
+  // rule. A template without optional inputs keeps its bytes.
+  const dynamicGroups = compiledDynamicGroups.map((group) => ({
+    ...group,
+    taskTemplates: group.taskTemplates.map((template) => {
+      const optionalDependencyArtifactDirs = optionalInputs(template);
+      return optionalDependencyArtifactDirs.length === 0 ? template : { ...template, optionalDependencyArtifactDirs };
+    })
   }));
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });

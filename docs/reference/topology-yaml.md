@@ -75,13 +75,13 @@ colors such as `#7c3aed`.
 
 Group defaults may include:
 
-| Field             | Meaning                                               |
-| ----------------- | ----------------------------------------------------- |
-| `loops`           | Default loop count for nodes in the group.            |
-| `timeout_seconds` | Default timeout for nodes in the group.               |
-| `max_attempts`    | Maximum attempts for an agent task.                   |
-| `model_profiles`  | Explicit model profile list for nodes in the group.   |
-| `failure_policy`  | `halt` (default) or `continue` for optional branches. |
+| Field             | Meaning                                                  |
+| ----------------- | -------------------------------------------------------- |
+| `loops`           | Default loop count for nodes in the group.               |
+| `timeout_seconds` | Default timeout for nodes in the group.                  |
+| `max_attempts`    | Maximum attempts for an agent task.                      |
+| `model_profiles`  | Explicit model profile list for nodes in the group.      |
+| `failure_policy`  | `halt` (default) or `continue` (nonblocking; see below). |
 
 Node fields override group defaults. A node or group `model_profiles` list is
 the model fan-out surface. When neither a node nor its group selects model
@@ -97,10 +97,17 @@ completed agent session whose required output is missing or schema-invalid;
 that post-agent contract failure is terminal.
 
 `failure_policy: continue` marks every node in that group as nonblocking. The
-generated workflow waits for such a node to settle, consumes its artifacts only
-when its verifier succeeded, and lets unrelated or downstream reconciliation
-continue when it failed or was skipped. Use this only for optional specialist
-lanes; ordinary groups retain fail-closed `halt` semantics.
+generated workflow waits for such a node to settle and consumes its artifacts
+only when its verifier succeeded. When it fails or is skipped, unrelated work
+continues, and every node outside the group, including a node with no `group`
+and the nodes a dynamic group generates, runs with the results that did
+succeed. A node of the same group never runs without it: a node that depends on
+it directly, or through nodes of the same group, is skipped. One that reaches it
+only through another group fails its input admission instead, which counts as
+an `artifact-contract` failure, so the run's best-effort report is published
+unverified. Keep a chain that must stay strict inside one group. The packaged
+topologies use this for the property lenses, goals, strategies, and
+specialists; ordinary groups retain fail-closed `halt` semantics.
 
 ## Node Fields
 
