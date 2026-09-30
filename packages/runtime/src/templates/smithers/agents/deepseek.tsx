@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
+import { attachStatedFailure, claudeResultText, GENERIC_CLAUDE_FAILURE } from "./claude";
 import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
 import { resolveProviderHome } from "./provider-home";
 import { readStringTable, stringField } from "./toml";
@@ -11,6 +12,8 @@ export type DeepSeekTaskOptions = { model?: string; reasoningEffort?: string; ad
 type DeepSeekAgentOptions = ConstructorParameters<typeof SmithersClaudeCodeAgent>[0] & DeepSeekAuthOptions;
 type DeepSeekCommandParams = Parameters<SmithersClaudeCodeAgent["buildCommand"]>[0];
 type DeepSeekCommand = Awaited<ReturnType<SmithersClaudeCodeAgent["buildCommand"]>>;
+type DeepSeekOutputInterpreter = ReturnType<SmithersClaudeCodeAgent["createOutputInterpreter"]>;
+type DeepSeekGenerateOptions = Parameters<SmithersClaudeCodeAgent["generate"]>[0];
 type DeepSeekReasoningEffort = "low" | "high" | "max";
 
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
@@ -40,6 +43,10 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
 
 export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
   private readonly ultrafuzzApiKey: string;
+  // Same gap as the Claude adapter (#1084): Smithers reports a failed result
+  // without an `error` field as "Claude run failed" and drops the `result`
+  // text. It is carried beside the error, never in the classified message.
+  private statedFailure: string | undefined;
 
   // Smithers 0.35.0's BaseCliAgent rejects unknown constructor options with a
   // TypeError, so the Ultrafuzz-only credential is held here instead of on
@@ -48,6 +55,31 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
     const { ultrafuzzApiKey, ...smithersOptions } = options;
     super(smithersOptions);
     this.ultrafuzzApiKey = ultrafuzzApiKey;
+  }
+
+  override createOutputInterpreter(): DeepSeekOutputInterpreter {
+    const base = super.createOutputInterpreter();
+    return {
+      ...base,
+      onStdoutLine: (line) => {
+        const events = base?.onStdoutLine?.(line);
+        const list = events === undefined || events === null ? [] : Array.isArray(events) ? events : [events];
+        if (list.some((event) => event.type === "completed" && event.error === GENERIC_CLAUDE_FAILURE)) {
+          this.statedFailure = claudeResultText(line);
+        }
+        return events;
+      }
+    };
+  }
+
+  override async generate(options?: DeepSeekGenerateOptions): ReturnType<SmithersClaudeCodeAgent["generate"]> {
+    this.statedFailure = undefined;
+    try {
+      return await super.generate(options);
+    } catch (error) {
+      if (this.statedFailure !== undefined && error instanceof Error) attachStatedFailure(error, this.statedFailure);
+      throw error;
+    }
   }
 
   override async buildCommand(params: DeepSeekCommandParams): Promise<DeepSeekCommand> {

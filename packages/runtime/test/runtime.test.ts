@@ -1669,6 +1669,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   const deepSeekSource = fs
     .readFileSync(path.join(agentsDir, "deepseek.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./claude"', 'from "./claude.mjs"')
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"')
@@ -7060,6 +7061,54 @@ bunAdapterTest("generated Claude adapter carries the failure Claude Code states 
   assert.match(silent.message, /^Claude run failed\b/u);
   assert.equal(silent.details?.agentStatedFailure, undefined);
 });
+
+bunAdapterTest(
+  "generated DeepSeek adapter carries the failure Claude Code states beside the generic error",
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const bin = path.join(project, "fake-claude-bin");
+    fs.mkdirSync(bin);
+    const failedGeneration = async (
+      result: Record<string, unknown>
+    ): Promise<Error & { code?: string; details?: Record<string, unknown> }> => {
+      const line = JSON.stringify({ type: "result", is_error: true, session_id: "s", ...result });
+      fs.writeFileSync(
+        path.join(bin, "claude"),
+        `#!/bin/sh\n[ "$1" = auth ] && exit 0\nprintf '%s\\n' ${shellQuote(line)}\nexit 1\n`,
+        { mode: 0o755 }
+      );
+      const agent = new DeepSeekClaudeCodeAgent({
+        permissionMode: "bypassPermissions",
+        ultrafuzzApiKey: "deepseek-test-key",
+        configDir: path.join(project, ".ultrafuzz", "deepseek-claude"),
+        env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` }
+      });
+      try {
+        await agent.generate({ prompt: "p", rootDir: project });
+      } catch (error) {
+        assert.ok(error instanceof Error, String(error));
+        return error;
+      }
+      return assert.fail("a failed DeepSeek result was reported as success");
+    };
+
+    // The same #1084 gap as the Claude adapter: the cause rides beside the
+    // generic message Smithers classifies, never inside it.
+    const stated = "API Error: 401 authentication_error: invalid DeepSeek API key";
+    const failure = await failedGeneration({ subtype: "success", result: stated });
+    assert.match(failure.message, /^Claude run failed\b/u);
+    assert.ok(!failure.message.includes("401"), failure.message);
+    assert.equal(failure.code, "AGENT_CLI_ERROR");
+    assert.equal(failure.details?.agentStatedFailure, stated);
+
+    const silent = await failedGeneration({ subtype: "error_during_execution" });
+    assert.match(silent.message, /^Claude run failed\b/u);
+    assert.equal(silent.details?.agentStatedFailure, undefined);
+  }
+);
 
 bunAdapterTest(
   "generated DeepSeek adapter uses the official endpoint and isolates Claude routing",
