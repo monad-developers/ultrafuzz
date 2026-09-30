@@ -372,12 +372,20 @@ const CLOUD_EXECUTION_REMOVED_MESSAGE =
   'per-node cloud execution was removed; set [execution] mode = "local" (or delete the table) and remove execution.provider and [execution.providers.*]. Every agentic attempt now runs locally; to use Modal, run the whole campaign inside one sandbox (the ultrafuzz-modal eval runner does this for benchmark rows, see docs/how-to/run-evals-on-modal.md)';
 
 function validateExecutionConfig(config: ResolvedConfig): ConfigDiagnostic[] {
-  const removed: string[][] = [];
-  if (config.execution.mode === "cloud") removed.push(["execution", "mode"]);
-  if (config.execution.provider !== undefined) removed.push(["execution", "provider"]);
-  if (config.execution.providers.modal !== undefined) removed.push(["execution", "providers", "modal"]);
-  return removed.map((settingPath) =>
-    diagnostic("CONFIG_EXECUTION_CLOUD_REMOVED", CLOUD_EXECUTION_REMOVED_MESSAGE, settingPath, "validation")
+  // Each diagnostic names its setting: plain-text output prints messages without their paths.
+  const removed: Array<[setting: string, settingPath: string[]]> = [];
+  if (config.execution.mode === "cloud") removed.push(['execution.mode = "cloud"', ["execution", "mode"]]);
+  if (config.execution.provider !== undefined) removed.push(["execution.provider", ["execution", "provider"]]);
+  if (config.execution.providers.modal !== undefined) {
+    removed.push(["[execution.providers.modal]", ["execution", "providers", "modal"]]);
+  }
+  return removed.map(([setting, settingPath]) =>
+    diagnostic(
+      "CONFIG_EXECUTION_CLOUD_REMOVED",
+      `${setting} is no longer supported: ${CLOUD_EXECUTION_REMOVED_MESSAGE}`,
+      settingPath,
+      "validation"
+    )
   );
 }
 

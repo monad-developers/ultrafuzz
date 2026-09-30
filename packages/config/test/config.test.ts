@@ -333,10 +333,10 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
     expect(resolveConfig({ projectConfig: cloud.value, env: {} })).toEqual({
       ok: false,
       diagnostics: [
-        ["execution", "mode"],
-        ["execution", "provider"],
-        ["execution", "providers", "modal"]
-      ].map((path) => validationDiagnostic("CONFIG_EXECUTION_CLOUD_REMOVED", CLOUD_EXECUTION_REMOVED_MESSAGE, path))
+        cloudExecutionRemovedDiagnostic('execution.mode = "cloud"', ["execution", "mode"]),
+        cloudExecutionRemovedDiagnostic("execution.provider", ["execution", "provider"]),
+        cloudExecutionRemovedDiagnostic("[execution.providers.modal]", ["execution", "providers", "modal"])
+      ]
     });
 
     // `ultrafuzz init` writes exactly this serialization into ultrafuzz.toml.
@@ -784,9 +784,7 @@ describe("resolved config named semantic diagnostics", () => {
           mode: "cloud"
         }
       },
-      diagnostics: [
-        validationDiagnostic("CONFIG_EXECUTION_CLOUD_REMOVED", CLOUD_EXECUTION_REMOVED_MESSAGE, ["execution", "mode"])
-      ]
+      diagnostics: [cloudExecutionRemovedDiagnostic('execution.mode = "cloud"', ["execution", "mode"])]
     }
   ];
 
@@ -1019,8 +1017,13 @@ describe("model profile and triage validation", () => {
   });
 });
 
-const CLOUD_EXECUTION_REMOVED_MESSAGE =
-  'per-node cloud execution was removed; set [execution] mode = "local" (or delete the table) and remove execution.provider and [execution.providers.*]. Every agentic attempt now runs locally; to use Modal, run the whole campaign inside one sandbox (the ultrafuzz-modal eval runner does this for benchmark rows, see docs/how-to/run-evals-on-modal.md)';
+function cloudExecutionRemovedDiagnostic(setting: string, path: string[]): ConfigDiagnostic {
+  return validationDiagnostic(
+    "CONFIG_EXECUTION_CLOUD_REMOVED",
+    `${setting} is no longer supported: per-node cloud execution was removed; set [execution] mode = "local" (or delete the table) and remove execution.provider and [execution.providers.*]. Every agentic attempt now runs locally; to use Modal, run the whole campaign inside one sandbox (the ultrafuzz-modal eval runner does this for benchmark rows, see docs/how-to/run-evals-on-modal.md)`,
+    path
+  );
+}
 
 function validationDiagnostic(code: string, message: string, path: string[]): ConfigDiagnostic {
   return {
