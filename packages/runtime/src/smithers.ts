@@ -4752,7 +4752,7 @@ export function commandPayload(value: unknown): Record<string, unknown> | undefi
  * it. Only static agent tasks have plan rows here; dynamic tasks get their runtime prompt rendered
  * again when it is missing.
  *
- * A prompt file that exists is never replaced, whatever its bytes, and a launch copy is restored as
+ * A prompt entry that exists is never replaced, whatever it holds, and a launch copy is restored as
  * it is, without comparing it with the digest recorded at launch: a run's prompt files may be
  * edited. A row whose launch copy is gone as well has nothing to restore from and is skipped; that
  * task then fails when it prepares. A run without `plan.json` at all has no rows to begin with and
@@ -4771,7 +4771,9 @@ function restoreMissingRenderedPrompts(input: { projectRoot: string; runRoot: st
     const promptPath = path.isAbsolute(planned.rendered_prompt_path)
       ? path.resolve(planned.rendered_prompt_path)
       : path.resolve(input.projectRoot, planned.rendered_prompt_path);
-    if (fs.existsSync(promptPath)) continue;
+    // A dangling symlink counts as present too: the workflow reads the entry without following it
+    // and fails only that task, while publishing over it would refuse the whole command.
+    if (runEntryExists(promptPath)) continue;
     const snapshotLabel = `retained rendered prompt snapshot for task ${nodeId}`;
     const snapshotPath = safeResolveInside(runRoot, planned.rendered_prompt_snapshot_path, snapshotLabel);
     if (!runEntryExists(snapshotPath)) continue;

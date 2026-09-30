@@ -469,13 +469,14 @@ function insertGeneratedNodes(
  * A runtime prompt is rendered once, by the first publishing render that finds its task ready and
  * its file missing. From then on the file is the task's prompt and is used as it is: it is never
  * rendered again or compared, so an edited file, an edited template copy or an upgraded renderer
- * never strands the run. Admission (`publishMissing: false`) renders nothing and accepts a prompt
- * that is not published yet.
+ * never strands the run. Admission (`publishMissing: false`) renders nothing and opens no prompt
+ * entry, so it accepts a prompt that is not published yet.
  *
  * A task whose prompt cannot be rendered is returned, not thrown, so every other prompt still
- * renders and the task plan is still published; the workflow then fails that task alone. The
- * artifact-directory and published-file checks stay outside that scope, so a corrupted run tree
- * still fails the whole render.
+ * renders and the task plan is still published; the workflow then fails that task alone. So is a
+ * published entry that is not a regular file, such as a symlink: it is neither read nor replaced.
+ * The artifact-directory checks stay outside that scope, so a corrupted run tree still fails the
+ * whole render.
  */
 function renderReadyRuntimePrompts(input: {
   tasks: CompiledSmithersTask[];
@@ -501,11 +502,11 @@ function renderReadyRuntimePrompts(input: {
     // Both modes bind the same path whether or not the prompt exists, so admission re-derives the
     // task plan a render published even when that render could not publish the prompt.
     task.renderedPromptPath = promptPath;
+    if (!input.publishMissing) continue;
     if (fs.lstatSync(promptPath, { throwIfNoEntry: false }) !== undefined) {
-      assertRegularFileInside(input.runRoot, promptPath, `runtime rendered prompt for ${task.attemptId}`);
+      failures.push(...unusablePublishedPrompt(task.attemptId, promptPath));
       continue;
     }
-    if (!input.publishMissing) continue;
     graphContext ??= promptGraphContext(input.graph, input.tasks);
     let renderedMarkdown: string;
     try {
@@ -784,4 +785,16 @@ export function dynamicRuntimeFingerprint(value: DynamicRuntimeMaterialization):
       dependencies: task.dependencies
     }))
   });
+}
+
+/**
+ * A published runtime prompt is used as it is. An entry there that is not a regular file, such as a
+ * symlink or a directory, is neither read nor replaced: it fails its task until someone removes it.
+ */
+function unusablePublishedPrompt(
+  attemptId: string,
+  promptPath: string
+): DynamicRuntimeMaterialization["promptRenderFailures"] {
+  if (fs.lstatSync(promptPath).isFile()) return [];
+  return [{ attemptId, message: `runtime rendered prompt for ${attemptId} is not a regular file: ${promptPath}` }];
 }

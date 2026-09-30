@@ -974,50 +974,68 @@ test("a runtime prompt that cannot be rendered is reported, not thrown", () => {
   assert.deepEqual(verifyDynamicRuntimeMaterialization(childCase.controls).expandedGroupIds, ["fanout"]);
 });
 
-test("an adopted runtime prompt must still be a confined regular file", () => {
-  const cases: Array<{ name: string; corrupt: (promptPath: string, outside: string) => void; message: RegExp }> = [
+test("a published runtime prompt that is not a regular file fails only its own task", () => {
+  // Such an entry is neither read nor replaced. The publishing render reports it as its task's
+  // failure, admission opens no prompt entry, and the workflow never follows a symlink to a prompt.
+  const cases: Array<{ name: string; corrupt: (promptPath: string, outside: string) => void }> = [
     {
       name: "symlink",
       corrupt: (promptPath, outside) => {
         fs.writeFileSync(outside, "outside\n", "utf8");
         fs.rmSync(promptPath);
         fs.symlinkSync(outside, promptPath);
-      },
-      message: /runtime rendered prompt for \S+ cannot be a symlink/u
+      }
     },
     {
       name: "dangling-symlink",
       corrupt: (promptPath, outside) => {
         fs.rmSync(promptPath);
         fs.symlinkSync(outside, promptPath);
-      },
-      message: /runtime rendered prompt for \S+ cannot be a symlink/u
+      }
     },
     {
       name: "directory",
       corrupt: (promptPath) => {
         fs.rmSync(promptPath);
         fs.mkdirSync(promptPath);
-      },
-      message: /runtime rendered prompt for \S+ must be a regular file/u
-    },
-    {
-      name: "symlinked-artifact-directory",
-      corrupt: (promptPath, outside) => {
-        const artifactDir = path.dirname(promptPath);
-        fs.renameSync(artifactDir, outside);
-        fs.symlinkSync(outside, artifactDir);
-      },
-      message: /runtime artifact directory for /u
+      }
     }
   ];
   for (const target of ["child", "join"] as const) {
-    for (const { name, corrupt, message } of cases) {
+    for (const { name, corrupt } of cases) {
+      const label = `${target} ${name}`;
       const { controls } = sealedDynamicRun(`adopted-prompt-${target}-${name}`, [item(0)]);
-      corrupt(publishedRuntimePrompts(controls)[target].promptPath, path.join(controls.projectRoot, "outside"));
-      assert.throws(() => materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }), message, name);
-      assert.throws(() => verifyDynamicRuntimeMaterialization(controls), message, name);
+      const { promptPath } = publishedRuntimePrompts(controls)[target];
+      const published = publishedRuntimeControls(controls);
+      const outside = path.join(controls.projectRoot, "outside");
+      corrupt(promptPath, outside);
+      const outsideBefore = fs.existsSync(outside) ? fs.readFileSync(outside, "utf8") : undefined;
+      const rendered = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+      assert.deepEqual(
+        rendered.promptRenderFailures.map((failure) => failure.attemptId),
+        [path.basename(path.dirname(promptPath))],
+        label
+      );
+      assert.match(
+        rendered.promptRenderFailures[0]?.message ?? "",
+        /^runtime rendered prompt for \S+ is not a regular file: /u,
+        label
+      );
+      assert.equal(fs.lstatSync(promptPath).isFile(), false, label);
+      assert.equal(fs.existsSync(outside) ? fs.readFileSync(outside, "utf8") : undefined, outsideBefore, label);
+      assert.deepEqual(publishedRuntimeControls(controls), published, label);
+      assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"], label);
     }
+
+    // A symlinked artifact directory is a corrupted run tree, and still stops the render and admission.
+    const { controls } = sealedDynamicRun(`adopted-prompt-${target}-symlinked-artifact-directory`, [item(0)]);
+    const artifactDir = path.dirname(publishedRuntimePrompts(controls)[target].promptPath);
+    const outside = path.join(controls.projectRoot, "outside");
+    fs.renameSync(artifactDir, outside);
+    fs.symlinkSync(outside, artifactDir);
+    const message = /runtime artifact directory for /u;
+    assert.throws(() => materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] }), message, target);
+    assert.throws(() => verifyDynamicRuntimeMaterialization(controls), message, target);
   }
 });
 

@@ -26942,9 +26942,17 @@ test("replay and fork restore a missing static prompt before they start an engin
     assert.equal(submitted.ok, true, `${action}: ${JSON.stringify(submitted.diagnostics)}`);
     assert.deepEqual(fs.readFileSync(planned.rendered_prompt_path), launchCopy, action);
   }
+  // Any entry at the prompt path is left alone, a dangling symlink included: the workflow reads it
+  // without following it and fails only that task, while publishing over it would refuse the command.
+  fs.rmSync(planned.rendered_prompt_path);
+  fs.symlinkSync(path.join(runRoot, "absent-prompt.md"), planned.rendered_prompt_path);
+  const replayed = await replayRun({ projectRoot: project, runId, env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(fs.lstatSync(planned.rendered_prompt_path).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(runRoot, "absent-prompt.md")), false);
 });
 
-test("a missing static prompt no longer stops the whole workflow render", async () => {
+test("a static prompt that cannot be read no longer stops the whole workflow render", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -26965,45 +26973,66 @@ test("a missing static prompt no longer stops the whole workflow render", async 
     workflowName: "ultrafuzz-graph-missing-prompt",
     renderedPrompts: plan.value.rendered_prompts
   });
-  // Every render builds the prompt of every available task. A deleted file, by an agent cleaning its
-  // own artifact directory or by hand, fails only its task when it prepares.
-  const [missing] = plan.value.rendered_prompts;
-  assert.ok(missing);
-  fs.rmSync(missing.rendered_prompt_path);
-
-  const graphProcess = spawnSync(
-    path.join(process.cwd(), "node_modules", ".bin", "smithers"),
-    [
-      "graph",
-      compiled.evidenceWorkflowPath,
-      "--run-id",
-      compiled.smithersRunId,
-      "--root",
-      project,
-      "--input",
-      fs.readFileSync(compiled.inputPath, "utf8"),
-      "--compact",
-      "--format",
-      "json"
-    ],
-    {
-      cwd: project,
-      encoding: "utf8",
-      maxBuffer: 1024 * 1024 * 16,
-      env: {
-        ...process.env,
-        OPENAI_API_KEY: "test-openai-api-key",
-        ULTRAFUZZ_ARTIFACTS_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/artifacts/dist/index.js")).href,
-        ULTRAFUZZ_RUNTIME_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/runtime/dist/index.js")).href
+  // Every render builds the prompt of every available task. A file an agent or an operator deleted,
+  // replaced, or made unreadable fails only its task when it prepares.
+  const [broken] = plan.value.rendered_prompts;
+  assert.ok(broken);
+  const promptPath = broken.rendered_prompt_path;
+  const outside = path.join(project, "outside-prompt.md");
+  fs.writeFileSync(outside, "Text outside the run.\n", "utf8");
+  const cases: Array<[string, () => void]> = [
+    ["missing", () => undefined],
+    ["directory", () => fs.mkdirSync(promptPath)],
+    ["symlink", () => fs.symlinkSync(outside, promptPath)]
+  ];
+  if (process.getuid?.() !== 0) {
+    cases.push([
+      "unreadable",
+      () => {
+        fs.writeFileSync(promptPath, "An unreadable prompt.\n", "utf8");
+        fs.chmodSync(promptPath, 0o000);
       }
-    }
-  );
-  assert.equal(graphProcess.status, 0, [graphProcess.stderr.trim(), graphProcess.stdout.trim()].join("\n"));
-  const graph = JSON.parse(graphProcess.stdout) as { tasks?: Array<{ nodeId?: string }> };
-  assert.equal(
-    graph.tasks?.some((task) => task.nodeId === `prepare:${missing.attempt_id}`),
-    true
-  );
+    ]);
+  }
+  for (const [name, corrupt] of cases) {
+    fs.rmSync(promptPath, { recursive: true, force: true });
+    corrupt();
+    const graphProcess = spawnSync(
+      path.join(process.cwd(), "node_modules", ".bin", "smithers"),
+      [
+        "graph",
+        compiled.evidenceWorkflowPath,
+        "--run-id",
+        compiled.smithersRunId,
+        "--root",
+        project,
+        "--input",
+        fs.readFileSync(compiled.inputPath, "utf8"),
+        "--compact",
+        "--format",
+        "json"
+      ],
+      {
+        cwd: project,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * 16,
+        env: {
+          ...process.env,
+          OPENAI_API_KEY: "test-openai-api-key",
+          ULTRAFUZZ_ARTIFACTS_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/artifacts/dist/index.js"))
+            .href,
+          ULTRAFUZZ_RUNTIME_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/runtime/dist/index.js")).href
+        }
+      }
+    );
+    assert.equal(graphProcess.status, 0, [name, graphProcess.stderr.trim(), graphProcess.stdout.trim()].join("\n"));
+    const graph = JSON.parse(graphProcess.stdout) as { tasks?: Array<{ nodeId?: string }> };
+    assert.equal(
+      graph.tasks?.some((task) => task.nodeId === `prepare:${broken.attempt_id}`),
+      true,
+      name
+    );
+  }
 });
 
 test("compiled Smithers workflow passes a real non-executing graph smoke", async () => {

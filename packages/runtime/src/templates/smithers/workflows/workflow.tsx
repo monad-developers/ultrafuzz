@@ -269,6 +269,7 @@ const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
 const MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES = 32 * 1024 * 1024;
+const MAX_TASK_PROMPT_BYTES = 64 * 1024 * 1024;
 const MAX_FINAL_REPORT_RUN_METADATA_BYTES = 64 * 1024 * 1024;
 const MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES = 1024 * 1024;
 const MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES = MAX_PRE_AGENT_EVIDENCE_BYTES;
@@ -793,7 +794,7 @@ function promptForTask(
     prompt = task.prompt;
   } else {
     const promptPath = task.promptPath ?? inputTask?.prompt_path;
-    prompt = promptPath ? readTaskPromptFile(promptPath) : "";
+    prompt = promptPath ? readTaskPromptFile(task.attemptId, promptPath) : "";
   }
   // A rendered prompt still names controller-host paths. Rebase that root first
   // so the now-local artifact path can then be narrowed to this task's mirror.
@@ -804,16 +805,20 @@ function promptForTask(
 }
 
 /**
- * Every render reads the prompt of every available task, finished ones included, so a missing
- * prompt file must not stop them all. It reads as an empty prompt, which never reaches a model: its
- * task fails at `assert-task-inputs` before the agent can start.
+ * Every render reads the prompt of every available task, finished ones included, so a prompt file
+ * that cannot be read must not stop them all. The read follows no symlink and never blocks on a
+ * FIFO. A prompt that is missing, is not a regular file or cannot be read reads as empty, and the
+ * cause is kept: its task fails at `assert-task-inputs` before the agent can start, so the empty
+ * text never reaches a model.
  */
-function readTaskPromptFile(promptPath: string): string {
+function readTaskPromptFile(attemptId: string, promptPath: string): string {
   try {
-    return readFileSync(promptPath, "utf8");
+    const prompt = readRegularFileSnapshot(promptPath, MAX_TASK_PROMPT_BYTES).toString("utf8");
+    taskPromptReadFailures.delete(attemptId);
+    return prompt;
   } catch (error) {
-    if (isMissingTaskPromptError(error)) return "";
-    throw error;
+    taskPromptReadFailures.set(attemptId, error instanceof Error ? error.message : String(error));
+    return "";
   }
 }
 
@@ -3001,7 +3006,9 @@ function prepareArtifactMirror(
   if (options.pinnedSubmodules !== "verify") {
     preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
   }
-  preparationStep(task.attemptId, "assert-task-inputs", () => assertTaskInputs(task, workspaceRoot));
+  preparationStep(task.attemptId, "assert-task-inputs", () =>
+    assertTaskInputs(task, workspaceRoot, options.pinnedSubmodules !== "verify")
+  );
   preparationStep(task.attemptId, "materialize-workspace-patch-dependencies", () =>
     materializeWorkspacePatchDependencies(task, workspaceRoot, options.replayWorkspacePatches ?? true, evidenceMode)
   );
@@ -4573,18 +4580,26 @@ function restoreInvariantSuiteWorkspaceSnapshot(
   }
 }
 
-function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+/**
+ * The prompt is checked only before the agent runs. The post-agent verify pass skips it
+ * (`checkPrompt` is false there): the agent has already received its prompt, so a later edit or
+ * deletion of the file must not fail completed work.
+ */
+function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string, checkPrompt = true): void {
   const schemaRoot = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   for (const schema of ["property-lens.schema.json", "properties.schema.json"]) {
     assertRegularFileInside(schemaRoot, path.join(schemaRoot, schema), `prompt schema ${schema}`);
   }
-  assertTaskPromptInput(task);
+  if (checkPrompt) assertTaskPromptInput(task);
   assertTaskDependencyInputs(task);
 }
 
 // Runtime prompts the latest render could not publish, by attempt ID, with the renderer's message.
 // Every render replaces it, so fixing a template copy while the engine runs clears its tasks.
 let runtimePromptRenderFailures: ReadonlyMap<string, string> = new Map();
+// Prompt files the latest render could not read, by attempt ID, with the cause. Each read of a
+// task's prompt replaces its entry, so a file fixed while the engine runs clears it.
+const taskPromptReadFailures = new Map<string, string>();
 
 /**
  * A prompt problem fails only its own task, here, and says why; every other task keeps running.
@@ -4607,6 +4622,10 @@ function assertTaskPromptInput(task: (typeof taskSpecs)[number]): void {
     );
   }
   assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
+  const readFailure = taskPromptReadFailures.get(task.attemptId);
+  if (readFailure !== undefined) {
+    throw new Error(`rendered prompt for ${task.attemptId} could not be read: ${readFailure}`);
+  }
 }
 
 function assertTaskDependencyInputs(task: (typeof taskSpecs)[number]): void {

@@ -106,7 +106,9 @@ in the run and resume:
 Every engine hands the agent that file as it is: `resume` with or without
 `--refresh-controller`, `--retry-failed` or `--reset-node`, and `replay` and
 `fork`. Nothing re-renders it or compares it with the launch render, so the
-edit neither strands the run nor stops `status` from synchronizing.
+edit neither strands the run nor stops `status` from synchronizing. Edit the
+file in place and keep it a regular file: a symlink or a directory at that path
+fails the task.
 
 - A prompt that waits on a dynamic group, a generated child's or a later
   node's such as the final report, has no file until the group expands. Before
@@ -126,9 +128,9 @@ edit neither strands the run nor stops `status` from synchronizing.
   `prompt-snapshots/` before the next engine starts, so it comes back without
   your edit. A deleted runtime prompt is rendered again from its template copy.
 - A prompt that cannot be rendered, for example after a typo in a template
-  copy, or a prompt file that is still missing, fails only its own task, at the
-  `assert-task-inputs` preparation step, with the cause. Fix the file and run
-  `resume --retry-failed`.
+  copy, or a prompt file that is still missing or cannot be read, fails only its
+  own task, at the `assert-task-inputs` preparation step, with the cause. Fix
+  the file and run `resume --retry-failed`.
 
 For a run launched by a release before this one, edit prompts only while the
 run is stopped (`pause` it first), then resume it with this release. Until
