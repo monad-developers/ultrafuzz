@@ -162,7 +162,6 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS",
   "SMITHERS_FAKE_RETRY_CREDENTIAL_ENV_LOG",
   "SMITHERS_FAKE_RUN_EXISTS",
-  "SMITHERS_FAKE_SNAPSHOT_ATTEMPT",
   "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"
 ] as const;
 const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
@@ -1853,16 +1852,15 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
     [
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
-      'if [ -n "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG" ] && [ -n "$SMITHERS_FAKE_SNAPSHOT_ATTEMPT" ]; then',
+      'if [ -n "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG" ]; then',
       '  case "$2" in',
       "    */.smithers/workflows/*.tsx)",
       '      snapshot_workflow="$2"',
       '      snapshot_root="${snapshot_workflow%/.smithers/workflows/*}"',
-      '      snapshot_prompt="$snapshot_root/controls/rendered-prompts/$SMITHERS_FAKE_SNAPSHOT_ATTEMPT.md"',
       '      snapshot_agent="$snapshot_root/.smithers/agents/codex.ts"',
       "      {",
-      '        printf \'workflow=%s\\nconfig=%s\\nprompt=%s\\nagent=%s\\n\' "$snapshot_workflow" "$ULTRAFUZZ_CONFIG_PATH" "$snapshot_prompt" "$snapshot_agent"',
-      '        cat "$snapshot_workflow" "$ULTRAFUZZ_CONFIG_PATH" "$snapshot_prompt" "$snapshot_agent"',
+      '        printf \'workflow=%s\\nconfig=%s\\nagent=%s\\n\' "$snapshot_workflow" "$ULTRAFUZZ_CONFIG_PATH" "$snapshot_agent"',
+      '        cat "$snapshot_workflow" "$ULTRAFUZZ_CONFIG_PATH" "$snapshot_agent"',
       '      } > "$SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"',
       "      ;;",
       "  esac",
@@ -11171,12 +11169,6 @@ test("current-controller rendering preserves prompts idempotently and continue p
     renderedPrompts: plan.value!.rendered_prompts
   });
   const tasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as SmithersTaskManifestDocument;
-  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.layout.root, "plan.json"), "utf8")) as {
-    rendered_prompts: Array<{
-      attempt_id: string;
-      rendered_prompt_snapshot_path: string;
-    }>;
-  };
   const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
   assert.ok(leaf);
   leaf.metadata.node.group = "leaf-continue";
@@ -11193,6 +11185,7 @@ test("current-controller rendering preserves prompts idempotently and continue p
   historicalOutput.validatorBuild = `ultrafuzz-json-validator.v1:${"0".repeat(64)}`;
   const promptedTask = tasks.tasks.find((task) => task.renderedPromptPath !== undefined);
   assert.ok(promptedTask?.renderedPromptPath);
+  // A missing prompt does not matter to the refresh: resume restores it before it starts the engine.
   fs.rmSync(promptedTask.renderedPromptPath);
 
   const workflowPath = renderCurrentSmithersController({
@@ -11227,15 +11220,10 @@ test("current-controller rendering preserves prompts idempotently and continue p
   // refreshed verifier copies into markers compared with the sealed plan, so they keep the run's values.
   assert.equal(reboundOutput?.contractDigest, historicalOutput.contractDigest);
   assert.equal(reboundOutput?.validatorBuild, historicalOutput.validatorBuild);
-  const plannedPrompt = persistedPlan.rendered_prompts.find((prompt) => prompt.attempt_id === promptedTask.attemptId);
-  assert.ok(plannedPrompt);
-  const snapshotPath = path.join(plan.value!.layout.root, plannedPrompt.rendered_prompt_snapshot_path);
-  assert.equal(specs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, snapshotPath);
+  const promptPath = promptedTask.renderedPromptPath;
+  assert.equal(specs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, promptPath);
 
-  // The workflow runtime persists the current task specifications back to tasks.json. A later
-  // refresh therefore sees the retained path produced above, not the cleanup-owned launch path.
-  // It must accept only that exact authenticated snapshot and produce the same prompt binding.
-  promptedTask.renderedPromptPath = snapshotPath;
+  // Rendering the same run again produces the same prompt binding.
   const repeatedWorkflowPath = renderCurrentSmithersController({
     projectRoot: project,
     layout: plan.value!.layout,
@@ -11251,59 +11239,54 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const repeatedSpecs = JSON.parse(
     repeatedSource.slice(repeatedStart + specsPrefix.length, repeatedEnd)
   ) as typeof specs;
-  assert.equal(repeatedSpecs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, snapshotPath);
+  assert.equal(repeatedSpecs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, promptPath);
   assert.equal(repeatedSpecs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
-
-  promptedTask.renderedPromptPath = path.join(plan.value!.layout.root, "prompt-snapshots", `${"0".repeat(64)}.md`);
-  assert.throws(
-    () =>
-      renderCurrentSmithersController({
-        projectRoot: project,
-        layout: plan.value!.layout,
-        smithersRunId: compiled.smithersRunId,
-        tasks,
-        config: plan.value!.resolved_config
-      }),
-    /persisted prompt plan does not match continuation task/u
-  );
 });
 
-test("current-controller rendering fails closed on retained prompt snapshot drift", async () => {
+test("--refresh-controller keeps a hand-edited static prompt", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
-  writeOptionalSpecialistTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "refresh-prompt-drift", env: {} });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const { compileSmithersWorkflow, renderCurrentSmithersController } = await import("../src/smithers.js");
-  const compiled = compileSmithersWorkflow({
-    projectRoot: project,
-    config: plan.value!.resolved_config,
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
-    workflowName: "ultrafuzz-refresh-prompt-drift",
-    renderedPrompts: plan.value!.rendered_prompts
-  });
-  const tasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as SmithersTaskManifestDocument;
-  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.layout.root, "plan.json"), "utf8")) as {
-    rendered_prompts: Array<{ attempt_id: string; rendered_prompt_snapshot_path: string }>;
+  writeSmallTopology(project);
+  const runId = "refresh-edited-static-prompt";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{
+      attempt_id: string;
+      rendered_prompt_path: string;
+      rendered_prompt_snapshot_path: string;
+    }>;
   };
-  const promptedTask = tasks.tasks.find((task) => task.renderedPromptPath !== undefined);
-  assert.ok(promptedTask);
-  const plannedPrompt = persistedPlan.rendered_prompts.find((prompt) => prompt.attempt_id === promptedTask.attemptId);
-  assert.ok(plannedPrompt);
-  fs.appendFileSync(path.join(plan.value!.layout.root, plannedPrompt.rendered_prompt_snapshot_path), "drift\n");
+  const planned = plan.rendered_prompts[0];
+  assert.ok(planned);
+  // The operator edits the prompt of a task that has not run. The launch copy is edited too: it is
+  // never read while the run's file exists, so it can neither revert nor refuse the edit.
+  const edited = `${fs.readFileSync(planned.rendered_prompt_path, "utf8")}\nOperator note: map the entry points first.\n`;
+  fs.writeFileSync(planned.rendered_prompt_path, edited, "utf8");
+  fs.appendFileSync(path.join(runRoot, planned.rendered_prompt_snapshot_path), "\nAn edited launch copy.\n");
+  fs.writeFileSync(commandLog, "", "utf8");
 
-  assert.throws(
-    () =>
-      renderCurrentSmithersController({
-        projectRoot: project,
-        layout: plan.value!.layout,
-        smithersRunId: compiled.smithersRunId,
-        tasks,
-        config: plan.value!.resolved_config
-      }),
-    /retained rendered prompt snapshot digest does not match task/u
-  );
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  const continuationPath = /^up (\S+)/mu.exec(fs.readFileSync(commandLog, "utf8"))?.[1];
+  assert.ok(continuationPath);
+  const continuationSource = fs.readFileSync(continuationPath, "utf8");
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const specsStart = continuationSource.indexOf(specsPrefix);
+  const specsEnd = continuationSource.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart, continuationSource);
+  const specs = JSON.parse(continuationSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    promptPath?: string;
+  }>;
+  assert.equal(specs.find((spec) => spec.attemptId === planned.attempt_id)?.promptPath, planned.rendered_prompt_path);
+  assert.equal(fs.readFileSync(planned.rendered_prompt_path, "utf8"), edited);
 });
 
 test("compileSmithersWorkflow seals the canonical selector union from rendered prompt provenance", async () => {
@@ -15449,17 +15432,35 @@ test("native resume delegates the persisted workflow after mutable project sourc
     fs.readFileSync(path.join(evidence.executionSnapshot.root, ".smithers", "agents", "codex.ts"), "utf8"),
     /hostile/u
   );
-  assert.doesNotMatch(
-    fs.readFileSync(
-      path.join(evidence.executionSnapshot.root, "controls", "rendered-prompts", `${renderedPrompt.attempt_id}.md`),
-      "utf8"
-    ),
-    /HOSTILE_MUTABLE_PROMPT/u
+  // Prompts are not execution controls: the snapshot holds no copy, and every engine, the snapshot's
+  // included, binds the attempt's own prompt file, which is what now holds the edited bytes.
+  assert.equal(fs.existsSync(path.join(evidence.executionSnapshot.root, "controls", "rendered-prompts")), false);
+  assert.equal(fs.existsSync(path.join(evidence.executionSnapshot.root, "controls", "prompt-snapshots")), false);
+  const seal = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "control-integrity.json"), "utf8")) as {
+    execution_files: Array<{ snapshot_path: string }>;
+  };
+  assert.deepEqual(
+    seal.execution_files
+      .map((file) => file.snapshot_path)
+      .filter((snapshotPath) => /^controls\/(?:rendered-prompts|prompt-snapshots)\//u.test(snapshotPath)),
+    []
+  );
+  const specsPrefix = "const serializedTaskSpecs = ";
+  const snapshotWorkflow = fs.readFileSync(evidence.workflowPath, "utf8");
+  const specsStart = snapshotWorkflow.indexOf(specsPrefix);
+  const specsEnd = snapshotWorkflow.indexOf(" as const;", specsStart);
+  assert.ok(specsStart >= 0 && specsEnd > specsStart);
+  const specs = JSON.parse(snapshotWorkflow.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
+    attemptId: string;
+    promptPath?: string;
+  }>;
+  assert.equal(
+    specs.find((spec) => spec.attemptId === renderedPrompt.attempt_id)?.promptPath,
+    renderedPrompt.rendered_prompt_path
   );
 
   const snapshotBytesLog = path.join(project, "snapshot-consumed-bytes.log");
   env.SMITHERS_FAKE_SNAPSHOT_BYTES_LOG = snapshotBytesLog;
-  env.SMITHERS_FAKE_SNAPSHOT_ATTEMPT = renderedPrompt.attempt_id;
   const resumed = await resumeRun({
     projectRoot: project,
     runId: "snapshot-source-replacement",
@@ -15474,6 +15475,8 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.match(consumed, /HostileReplacement/u);
   assert.match(consumed, /export const hostile/u);
   assert.doesNotMatch(consumed, /^workflow=\/proc\//mu);
+  // Resume restores only a missing prompt, so the edited bytes are what the resumed task reads.
+  assert.equal(fs.readFileSync(renderedPrompt.rendered_prompt_path, "utf8"), "HOSTILE_MUTABLE_PROMPT\n");
 });
 
 test("linked evidence rejects extra snapshot generations and malformed control seal keys", async () => {
@@ -26829,29 +26832,11 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   );
   const failedCommands = fs.readFileSync(commandLog, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
+  // A launch copy is the only source of a deleted static prompt, and it is restored as it is: a run's
+  // prompt files may be edited, so no digest recorded at launch can refuse it.
   fs.rmSync(plannedPrompt.rendered_prompt_path);
   fs.rmSync(priorPlannedPrompt.rendered_prompt_path);
-  fs.writeFileSync(priorSnapshotPath, "mismatched retained prompt\n", "utf8");
-  fs.writeFileSync(commandLog, "", "utf8");
-
-  const rejected = await resumeRun({
-    projectRoot: project,
-    runId: "reset-lifecycle-run",
-    resetNode: "node:actors-flows",
-    env
-  });
-
-  assert.equal(rejected.ok, false);
-  assert.match(rejected.diagnostics[0]?.message ?? "", /snapshot does not match task/u);
-  const rejectedCommands = fs.readFileSync(commandLog, "utf8");
-  assert.match(rejectedCommands, /^inspect /mu);
-  assert.doesNotMatch(
-    rejectedCommands,
-    /^(?:timetravel|up) /mu,
-    "invalid snapshot must fail before mutation or launch"
-  );
-  assert.equal(fs.existsSync(markerPath), true, "rejected recovery must retain the reset marker");
-  fs.writeFileSync(priorSnapshotPath, expectedPriorPrompt);
+  fs.writeFileSync(priorSnapshotPath, "edited launch copy\n", "utf8");
   fs.writeFileSync(commandLog, "", "utf8");
 
   const retried = await resumeRun({
@@ -26865,7 +26850,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(retried.value?.submitted, true);
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
-  assert.deepEqual(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path), expectedPriorPrompt);
+  assert.equal(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path, "utf8"), "edited launch copy\n");
   const retriedCommands = fs.readFileSync(commandLog, "utf8");
   assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
   assert.match(
@@ -26907,6 +26892,11 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
   const expectedPrompt = fs.readFileSync(snapshotPath);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
+  // An operator's edit of the failed task's prompt: restore never overwrites a prompt that exists.
+  const editedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows");
+  assert.ok(editedPrompt !== undefined, "plan must record the failed node prompt");
+  fs.appendFileSync(editedPrompt.rendered_prompt_path, "\nOperator note: follow the withdrawal flow.\n", "utf8");
+  const edited = fs.readFileSync(editedPrompt.rendered_prompt_path);
   fs.writeFileSync(commandLog, "", "utf8");
 
   const resumed = await resumeRun({
@@ -26918,12 +26908,131 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
+  assert.deepEqual(fs.readFileSync(editedPrompt.rendered_prompt_path), edited);
   const commands = fs.readFileSync(commandLog, "utf8");
   assert.doesNotMatch(commands, /^timetravel /mu, "ordinary resume must not reset any node");
   assert.match(
     commands,
     /up .*ultrafuzz-ordinary-resume-prompt-run\.tsx --resume ultrafuzz-ordinary-resume-prompt-run --run-id ultrafuzz-ordinary-resume-prompt-run --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
+});
+
+test("replay and fork restore a missing static prompt before they start an engine", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  // The fake runner names the replayed and forked runs after this run ID.
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const { run_id: runId, run_root: runRoot } = run.value;
+  const plan = JSON.parse(fs.readFileSync(path.join(runRoot, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{ rendered_prompt_path: string; rendered_prompt_snapshot_path: string }>;
+  };
+  const planned = plan.rendered_prompts[0];
+  assert.ok(planned);
+  const launchCopy = fs.readFileSync(path.join(runRoot, planned.rendered_prompt_snapshot_path));
+  for (const [action, submit] of [
+    ["replay", () => replayRun({ projectRoot: project, runId, env })],
+    ["fork", () => forkRun({ projectRoot: project, runId, forkFrame: 44, env })]
+  ] as const) {
+    fs.rmSync(planned.rendered_prompt_path);
+    const submitted = await submit();
+    assert.equal(submitted.ok, true, `${action}: ${JSON.stringify(submitted.diagnostics)}`);
+    assert.deepEqual(fs.readFileSync(planned.rendered_prompt_path), launchCopy, action);
+  }
+  // Any entry at the prompt path is left alone, a dangling symlink included: the workflow reads it
+  // without following it and fails only that task, while publishing over it would refuse the command.
+  fs.rmSync(planned.rendered_prompt_path);
+  fs.symlinkSync(path.join(runRoot, "absent-prompt.md"), planned.rendered_prompt_path);
+  const replayed = await replayRun({ projectRoot: project, runId, env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(fs.lstatSync(planned.rendered_prompt_path).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(path.join(runRoot, "absent-prompt.md")), false);
+});
+
+test("a static prompt that cannot be read no longer stops the whole workflow render", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  fs.symlinkSync(
+    path.dirname(fs.realpathSync(path.join(process.cwd(), "node_modules", "smthrs"))),
+    path.join(project, ".smithers", "node_modules"),
+    "dir"
+  );
+  const plan = await planRun({ projectRoot: project, runId: "graph-missing-prompt", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value.resolved_config,
+    graph: plan.value.expanded_graph,
+    runLayout: plan.value.layout,
+    workflowName: "ultrafuzz-graph-missing-prompt",
+    renderedPrompts: plan.value.rendered_prompts
+  });
+  // Every render builds the prompt of every available task. A file an agent or an operator deleted,
+  // replaced, or made unreadable fails only its task when it prepares.
+  const [broken] = plan.value.rendered_prompts;
+  assert.ok(broken);
+  const promptPath = broken.rendered_prompt_path;
+  const outside = path.join(project, "outside-prompt.md");
+  fs.writeFileSync(outside, "Text outside the run.\n", "utf8");
+  const cases: Array<[string, () => void]> = [
+    ["missing", () => undefined],
+    ["directory", () => fs.mkdirSync(promptPath)],
+    ["symlink", () => fs.symlinkSync(outside, promptPath)]
+  ];
+  if (process.getuid?.() !== 0) {
+    cases.push([
+      "unreadable",
+      () => {
+        fs.writeFileSync(promptPath, "An unreadable prompt.\n", "utf8");
+        fs.chmodSync(promptPath, 0o000);
+      }
+    ]);
+  }
+  for (const [name, corrupt] of cases) {
+    fs.rmSync(promptPath, { recursive: true, force: true });
+    corrupt();
+    const graphProcess = spawnSync(
+      path.join(process.cwd(), "node_modules", ".bin", "smithers"),
+      [
+        "graph",
+        compiled.evidenceWorkflowPath,
+        "--run-id",
+        compiled.smithersRunId,
+        "--root",
+        project,
+        "--input",
+        fs.readFileSync(compiled.inputPath, "utf8"),
+        "--compact",
+        "--format",
+        "json"
+      ],
+      {
+        cwd: project,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * 16,
+        env: {
+          ...process.env,
+          OPENAI_API_KEY: "test-openai-api-key",
+          ULTRAFUZZ_ARTIFACTS_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/artifacts/dist/index.js"))
+            .href,
+          ULTRAFUZZ_RUNTIME_MODULE: pathToFileURL(path.join(workspaceRoot(), "packages/runtime/dist/index.js")).href
+        }
+      }
+    );
+    assert.equal(graphProcess.status, 0, [name, graphProcess.stderr.trim(), graphProcess.stdout.trim()].join("\n"));
+    const graph = JSON.parse(graphProcess.stdout) as { tasks?: Array<{ nodeId?: string }> };
+    assert.equal(
+      graph.tasks?.some((task) => task.nodeId === `prepare:${broken.attempt_id}`),
+      true,
+      name
+    );
+  }
 });
 
 test("compiled Smithers workflow passes a real non-executing graph smoke", async () => {

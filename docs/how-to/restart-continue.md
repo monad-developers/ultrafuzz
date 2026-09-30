@@ -93,6 +93,71 @@ after it. A retried artifact verifier is different: resetting its agent
 producer also resets every node that started after that producer's attempt, so
 those nodes run again.
 
+## Change A Prompt Of A Running Campaign
+
+A run keeps its own prompts. Edits to `.ultrafuzz/prompts/**` apply to new runs
+only. To change what a task of a launched run receives, edit that task's file
+in the run and resume:
+
+```text
+.ultrafuzz/runs/<run-id>/artifacts/<attempt-id>/prompt.rendered.md
+```
+
+Every engine hands the agent that file as it is: `resume` with or without
+`--refresh-controller`, `--retry-failed` or `--reset-node`, and `replay` and
+`fork`. Nothing re-renders it or compares it with the launch render, so the
+edit neither strands the run nor stops `status` from synchronizing. Edit the
+file in place and keep it a regular file: a symlink or a directory at that path
+fails the task.
+
+- A prompt that waits on a dynamic group, a generated child's or a later
+  node's such as the final report, has no file until the group expands. Before
+  then, edit the template copy under `dynamic-prompt-templates/` that
+  `.ultrafuzz/runs/<run-id>/smithers/tasks.json` names: the task's
+  `promptTemplatePath`, or, for the generated children of a group that has not
+  expanded, the group's `templatePath` under `dynamic_groups`. A copy is
+  rendered when the group expands; after that, edit the rendered files. A copy
+  is named by the digest of its launch text and shared by every task that
+  launched with the same text, such as the loop and model attempts of one node,
+  so an edit to it reaches each of them that has not rendered yet.
+- When `resume --retry-failed` reruns the source of a dynamic group, it
+  withdraws the group's generated children and the rendered prompts that wait
+  on the group, and those prompts render again from their template copies. To
+  keep an edit across such a retry, make it in the template copy as well.
+- Change the task text and keep the output-contract block, the
+  `Validate against:`, `Validation command:` and `Contract validation command:`
+  lines. The agent needs them, and they are checked only when a prompt is
+  rendered, not when you edit it.
+- A running attempt keeps the prompt it started with; the edit reaches the
+  task's next attempt. To rerun a finished task with an edited prompt, use
+  `resume --reset-node node:<attempt-id>`. This reset, like `--retry-failed`,
+  restarts the task's attempt numbers in the workflow engine, and each rerun
+  attempt replaces the engine's record of the earlier attempt with the same
+  number, including the prompt that attempt received. Run `ultrafuzz status`
+  before the reset so that `attempts.jsonl` records the finished attempt, and
+  keep a copy of the prompt file if you need to know what it received.
+- A deleted static prompt is restored from its launch copy in
+  `prompt-snapshots/` before the next engine starts, so it comes back without
+  your edit. A deleted runtime prompt is rendered again from its template copy.
+- A prompt that cannot be rendered, for example after a typo in a template
+  copy, or a prompt file that is still missing or cannot be read, fails only its
+  own task, at the `assert-task-inputs` preparation step, with the cause. Fix
+  the file and run `resume --retry-failed`.
+
+For a run launched by a release before this one, edit prompts only while the
+run is stopped (`pause` it first), then resume it with this release, using
+`resume --refresh-controller`. Until then, its original engine still reads
+sealed copies of static prompts, so a static edit is lost, and still compares
+runtime prompts, so a runtime edit stops the run. A plain `resume` continues
+the run's launch workflow, which stops the whole run, instead of one task, when
+a runtime prompt no longer renders; with `--refresh-controller` the run
+continues on this release's workflow instead. `replay` and `fork` of such a run
+keep running its launch snapshot, and so behave like its original engine. That
+engine has also removed the prompt file of every static task it started: copy
+the launch copy that `plan.json` names for the attempt
+(`rendered_prompts[].rendered_prompt_snapshot_path`) to the attempt's
+`prompt.rendered.md`, then edit it.
+
 ## Replay A Linked Run
 
 Use replay when you want the workflow engine to replay the linked run from the
@@ -143,7 +208,9 @@ was still in flight.
 
 If you changed `ultrafuzz.toml`, `.ultrafuzz/topology.yml`,
 `.ultrafuzz/prompts/**`, or `.ultrafuzz/references.yml` and want those changes
-to define a new campaign, run validation and start a new run:
+to define a new campaign, run validation and start a new run. To change the
+prompt of a task in a run that has already launched instead, see
+[Change A Prompt Of A Running Campaign](#change-a-prompt-of-a-running-campaign).
 
 ```bash
 ultrafuzz validate --project /path/to/target-protocol

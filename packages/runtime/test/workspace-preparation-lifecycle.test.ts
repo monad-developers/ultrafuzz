@@ -118,7 +118,7 @@ function preparationHarness(
     if (!ts.isVariableStatement(statement)) return [];
     const names = statement.declarationList.declarations.map((entry) => entry.name.getText(source));
     const included = names.every((name) =>
-      /^(?:INVARIANT_|MAX_INVARIANT_|WORKSPACE_|MAX_PRE_AGENT_|MAX_VERIFIED_|ARTIFACT_VERIFICATION_|invariantSuite.*(?:Snapshots|Ids|Tombstones)$|workspacePatch.*Trees$|dependencyArtifactAdmissionsByTask$|authenticatedAggregationSourcesByTask$)/u.test(
+      /^(?:INVARIANT_|MAX_INVARIANT_|WORKSPACE_|MAX_PRE_AGENT_|MAX_VERIFIED_|ARTIFACT_VERIFICATION_|invariantSuite.*(?:Snapshots|Ids|Tombstones)$|workspacePatch.*Trees$|dependencyArtifactAdmissionsByTask$|authenticatedAggregationSourcesByTask$|runtimePromptRenderFailures$|taskPromptReadFailures$)/u.test(
         name
       )
     );

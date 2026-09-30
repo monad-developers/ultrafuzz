@@ -132,14 +132,33 @@ and item digest, path-safe `storage_id`, and expansion-manifest path.
 records canonical ordered items, generated IDs, source and template digests,
 and the run-wide limit. Recovery validates and reuses it; incompatible or
 tampered manifests fail rather than causing replanning or duplicate attempts.
+Its template digest is the compiled launch digest of the group's template, also
+for children rendered after the run's template copy was edited.
+
+Each attempt's prompt is its `artifacts/<attempt-id>/prompt.rendered.md`, and
+every engine hands the agent that file: launch, `resume` (with or without
+`--refresh-controller`, `--retry-failed` or `--reset-node`), `replay` and
+`fork`. A static prompt is rendered at plan time. A prompt that waits on a
+dynamic group, a generated child's or a later node's such as the final report,
+is rendered from the run's template copy under `dynamic-prompt-templates/` when
+the group expands, and only while its file is missing. After that, no prompt
+file is re-rendered, compared with a recorded digest, or sealed: an edited file
+is what the task's next attempt receives, and an upgrade that renders templates
+differently leaves published prompts as they are. A runtime prompt that cannot
+be rendered, or a prompt file that is missing, unreadable or not a regular file,
+fails only its task, at the `assert-task-inputs` preparation step, with the
+cause.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
-rendered prompt paths and digests, immutable prompt snapshot paths, and
-validation posture. Exact rendered prompt snapshots live under
-`prompt-snapshots/`; lifecycle recovery uses those snapshots to restore missing
-task input without consulting mutable prompt sources or current configuration.
-That recovery concerns runtime-owned control input only; it never reconstructs
-an agent-owned output.
+the launch render of each static prompt (its path and digest) and the path of
+its launch copy, and validation posture. The launch copies live under
+`prompt-snapshots/`. Before `resume`, `replay` or `fork` starts an engine, it
+restores a missing static prompt from its copy, as it is; it never replaces a
+prompt file that exists. That recovery concerns runtime-owned task input only;
+it never reconstructs an agent-owned output. `prompt_digest` in `run.json` and
+`plan.json`, like the final report's `run_metadata.prompt_digest`, is the
+digest of the prompt catalog the run launched with; editing a run's prompt
+files does not change it.
 
 `trusted-cli.json` binds the run-owned launcher in `trusted-bin/` to the exact
 CLI entrypoint bytes, validator build, and artifact schema-bundle digest. The

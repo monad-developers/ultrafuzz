@@ -37,6 +37,10 @@ human generated ID, safe storage/attempt ID, template group, source lineage,
 and terminal state. IDs containing `:` must be URL-encoded as one route
 segment. The dynamic group remains visible as the aggregate downstream join.
 
+A node's rendered prompt is its task's `prompt.rendered.md` as the file is now,
+which is what the task's next attempt receives. After the file is edited, it can
+differ from the prompt that the attempts whose outputs the node shows received.
+
 Editors for config, topology, prompts, and reference state must apply the same
 validation as the CLI. Invalid changes must be rejected without partial writes.
 

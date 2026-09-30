@@ -357,16 +357,23 @@ exceeding it fails explicitly and never truncates the source array.
 The first successful expansion is persisted under
 `dynamic-expansions/<group-id>.json`, and from then on that manifest alone
 decides the group's generated nodes. Resume reuses it and rejects changes to its
-prompt template, topology contract, or dynamic-node limit instead of silently
-changing the graph. The source artifact is read only to create the manifest, so
-a source node that runs again, for example after a reset, leaves the published
-fan-out unchanged. The exception is `resume --retry-failed` for a source whose
-verifier failed: it moves the published manifests to
-`dynamic-expansion-history/` before the source runs again (and refuses if
-another source published any of them), so the group expands again from the new
-output. The generated children's artifacts and the rendered prompts of later
-nodes that wait on the group move with them, so those prompts render again from
-the new expansion.
+topology contract or dynamic-node limit instead of silently changing the graph.
+The run's copy of the group's prompt template is only a renderer input: a child
+whose prompt is rendered after an edit to it uses the edited text, and a
+published prompt is never rendered again. The source artifact is read only to
+create the manifest, so a source node that runs again, for example after a
+reset, leaves the published fan-out unchanged. The exception is
+`resume --retry-failed` for a source whose verifier failed: it moves the
+published manifests to `dynamic-expansion-history/` before the source runs
+again (and refuses if another source published any of them), so the group
+expands again from the new output. The generated children's artifacts and the
+rendered prompts of later nodes that wait on the group move with them, so those
+prompts render again from the new expansion. The withdrawal is recorded before
+anything moves and until its last step, so one that is interrupted after the
+source's reset is completed by the next `resume` before it starts an engine.
+`replay` and `fork` complete it too, except one that stopped after the manifests
+moved and before the task plan was re-derived: `replay`, `fork` and
+synchronization refuse that run until a `resume` has completed it.
 
 ## Model Fan-Out
 
