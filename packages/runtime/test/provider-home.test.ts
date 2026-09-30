@@ -19,17 +19,19 @@ async function loadProviderHome(): Promise<ResolveProviderHome> {
   return ((await import(pathToFileURL(modulePath).href)) as { resolveProviderHome: ResolveProviderHome })
     .resolveProviderHome;
 }
-// Ubuntu's layout under its default umask 0002: a 0750 home whose ~/.local is 0775.
+// Ubuntu's layout under its default umask 0002: a 0750 home whose ~/.local is 0775, and whose
+// ~/.ultrafuzz is 0775 too when `ultrafuzz init` made the home a project.
 test(
-  "the default provider-home root is a private directory under HOME that XDG_STATE_HOME does not move",
+  "the default provider-home root is a private directory directly under HOME that XDG_STATE_HOME does not move",
   underGroupWritableUmask(async () => {
     const resolve = await loadProviderHome(),
       home = temporaryRoot("ufz-provider-home-default-"),
       xdgState = path.join(home, ".local", "state"),
-      root = path.join(home, ".ultrafuzz", "provider-homes");
+      root = path.join(home, ".ultrafuzz-provider-homes");
     fs.chmodSync(home, 0o750);
     fs.mkdirSync(xdgState, { recursive: true });
     fs.chmodSync(path.join(home, ".local"), 0o775);
+    fs.mkdirSync(path.join(home, ".ultrafuzz"), { mode: 0o775 });
     const previous = Object.fromEntries(
       ["HOME", "XDG_STATE_HOME", "ULTRAFUZZ_PROVIDER_HOME_ROOT"].map((name) => [name, process.env[name]])
     );

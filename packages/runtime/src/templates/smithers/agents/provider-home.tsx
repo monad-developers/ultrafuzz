@@ -29,8 +29,8 @@ export function resolveProviderHome(provider: string, configured?: string): stri
       components.some((component) => component === "." || component === ".." || !SAFE_COMPONENT.test(component)))
   )
     throw new Error("agent config_dir must be a safe relative path beneath the Ultrafuzz provider-home root");
-  // Deliberately not $XDG_STATE_HOME: Ubuntu's default umask leaves ~/.local group writable (#1236).
-  const root = selectedRoot || path.join(home, ".ultrafuzz", "provider-homes");
+  // Directly under HOME: Ubuntu's umask leaves ~/.local, and a project's ~/.ultrafuzz, group writable (#1236).
+  const root = selectedRoot || path.join(home, ".ultrafuzz-provider-homes");
   if (!path.isAbsolute(root)) throw new Error("ULTRAFUZZ_PROVIDER_HOME_ROOT must be an absolute operator-owned path");
   return prepareProviderHome(path.join(prepareProviderHome(root), provider, ...components));
 }

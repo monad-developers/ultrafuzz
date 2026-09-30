@@ -365,7 +365,7 @@ function providerHome(agent: string, provider: string, configured: string | unde
   const selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(),
     userHome = env.HOME?.trim() || os.homedir();
   if (configured)
-    return path.join(selectedRoot || path.join(userHome, ".ultrafuzz", "provider-homes"), provider, configured);
+    return path.join(selectedRoot || path.join(userHome, ".ultrafuzz-provider-homes"), provider, configured);
   if (selectedRoot) return path.join(selectedRoot, provider);
   if (agent === "CodexAgent") return env.CODEX_HOME?.trim() || path.join(userHome, ".codex");
   if (agent === "KimiAgent")

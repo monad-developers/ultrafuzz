@@ -4618,7 +4618,7 @@ bunAdapterTest(
     fs.chmodSync(home, 0o750);
     fs.mkdirSync(path.join(home, ".local", "state"), { recursive: true });
     fs.chmodSync(path.join(home, ".local"), 0o775);
-    const codexHome = path.join(home, ".ultrafuzz", "provider-homes", "openrouter", "openrouter-test-codex");
+    const codexHome = path.join(home, ".ultrafuzz-provider-homes", "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
       fs
