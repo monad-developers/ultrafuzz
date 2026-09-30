@@ -55,7 +55,11 @@ import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultraf
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { DATA_GOVERNANCE_PROVENANCE_PATH } from "./data-governance.js";
-import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "./dynamic-expansion-retry.js";
+import {
+  archiveDynamicExpansionsForRetry,
+  finishInterruptedDynamicExpansionRetry,
+  planDynamicExpansionRetryArchive
+} from "./dynamic-expansion-retry.js";
 import { reconcilesPartialResults } from "./dynamic-runtime.js";
 import {
   assertControllerSourceDigest,
@@ -4907,6 +4911,11 @@ export async function runSmithersLifecycleCommand(input: {
   }
   if (input.action === "resume" && input.prepareContinuationEnvironment !== undefined) {
     input.env = input.prepareContinuationEnvironment();
+  }
+  // Once Smithers has reset a retried source, nothing plans its withdrawal again, so one that an
+  // earlier `--retry-failed` began and did not finish is completed before any engine starts.
+  if (input.relaunchPaths !== undefined) {
+    finishInterruptedDynamicExpansionRetry({ projectRoot: input.projectRoot, runRoot: input.relaunchPaths.runRoot });
   }
   if (currentInspection !== undefined && inspection !== undefined) {
     const failedTasks =

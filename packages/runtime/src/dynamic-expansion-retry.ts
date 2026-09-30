@@ -10,6 +10,8 @@ import {
   publishFileDurableExclusive,
   readRegularFileSnapshot,
   readRunState,
+  safeResolveInside,
+  writeFileDurable,
   writeRunState,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -19,6 +21,15 @@ import { materializeDynamicRuntime } from "./dynamic-runtime.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "./smithers.js";
 
 const MAX_RUNTIME_BASE_CONTROL_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The record of a withdrawal in progress. It is written into the manifest directory before anything
+ * moves, so the manifest rename takes it along: while it is still there, a withdrawal that began
+ * after its Smithers reset has not finished, and the next engine start completes it.
+ */
+const RETRY_WITHDRAWAL_FILE = ".retry-withdrawal.json";
+const RETRY_WITHDRAWAL_SCHEMA_VERSION = "ultrafuzz.dynamic-expansion-withdrawal.v1";
+const MAX_RETRY_WITHDRAWAL_BYTES = 16 * 1024 * 1024;
 
 /**
  * Attempt-owned state that belongs to a generated dynamic attempt. The
@@ -54,6 +65,13 @@ export interface DynamicExpansionRetryArchive {
   archive_path: string;
   group_node_ids: string[];
   pruned_state_node_ids: string[];
+}
+
+interface RetryWithdrawal {
+  archived_at: string;
+  archive_path: string;
+  source_node_ids: string[];
+  archived_attempt_paths: string[];
 }
 
 /**
@@ -114,7 +132,8 @@ export function planDynamicExpansionRetryArchive(input: {
   }
   const expectedEntries = new Set(manifests.map((manifest) => `${manifest.group_node_id}.json`));
   // A dot entry is never a manifest (readExpansionManifests skips it): an interrupted publication's
-  // temporary file, or the `.expansion.lock` older builds left behind. It moves with the directory.
+  // temporary file, a withdrawal record, or the `.expansion.lock` older builds left behind. It moves
+  // with the directory.
   const unexpectedEntries = fs
     .readdirSync(manifestDir)
     .filter((entry) => !entry.startsWith(".") && !expectedEntries.has(entry));
@@ -144,23 +163,23 @@ export function planDynamicExpansionRetryArchive(input: {
 /**
  * Withdraw the planned expansion generation into `dynamic-expansion-history/`.
  *
- * The generation's attempt-owned artifacts move first, so a regenerated attempt
- * with a stable storage ID never meets a stale rendered prompt. The published
- * prompt of each planned task that waits on the generation moves too, so the
- * next expansion renders it afresh from the new items. Rendered prompts are
- * used as they are, never compared, so a stale one left beside a new manifest
- * would silently run the withdrawn item's prompt. Only after every move has
- * succeeded is the whole manifest directory renamed, in one step, so the old
- * generation stays durable and no partially rewritten manifest set can be
- * observed. A move that fails leaves the old manifests in place, and every
- * later render stays consistent with them. The mutable runtime graph and task
- * plan are then re-derived from the sealed base with no ready group, exactly as
- * the next render would publish them, so the control admission check re-derives
- * cleanly before that render happens. Finally the generation's node records
- * leave `state.json`. The synchronizer creates a record only for an attempt
- * that has none and never re-finalizes a successful one, so a regenerated
- * attempt that reuses a storage ID would otherwise start from the archived
- * record, and an archived success would stand in for it.
+ * The withdrawal is recorded in the manifest directory first. The generation's attempt-owned
+ * artifacts move next, so a regenerated attempt with a stable storage ID never meets a stale
+ * rendered prompt. The published prompt of each planned task that waits on the generation moves
+ * too, so the next expansion renders it afresh from the new items. Rendered prompts are used as
+ * they are, never compared, so a stale one left beside a new manifest would silently run the
+ * withdrawn item's prompt. Only after every move has succeeded is the whole manifest directory
+ * renamed, in one step, so the old generation stays durable and no partially rewritten manifest set
+ * can be observed. A move that fails, or a process killed before the rename, leaves the old
+ * manifests and the record in place: every render stays consistent with the old generation, and
+ * `finishInterruptedDynamicExpansionRetry` completes the withdrawal before the next engine starts,
+ * because nothing would plan it again once Smithers has reset the source. The mutable runtime graph
+ * and task plan are then re-derived from the sealed base with no ready group, exactly as the next
+ * render would publish them, so the control admission check re-derives cleanly before that render
+ * happens. Finally the generation's node records leave `state.json`. The synchronizer creates a
+ * record only for an attempt that has none and never re-finalizes a successful one, so a
+ * regenerated attempt that reuses a storage ID would otherwise start from the archived record, and
+ * an archived success would stand in for it.
  */
 export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan): DynamicExpansionRetryArchive {
   const archiveRoot = path.join(plan.runRoot, "dynamic-expansion-history");
@@ -169,14 +188,77 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
   const archivedAt = new Date().toISOString();
   const archiveDir = path.join(archiveRoot, `${archivedAt.replaceAll(":", "-")}-${crypto.randomUUID()}`);
   fs.mkdirSync(archiveDir, { mode: 0o700 });
-  const archivedAttemptPaths = collectAttemptStateMoves(plan.runRoot, plan.manifests, plan.runtimeBase).map((move) => {
-    const destination = path.join(archiveDir, move.relativePath);
+  const withdrawal: RetryWithdrawal = {
+    archived_at: archivedAt,
+    archive_path: runRelativePath(plan.runRoot, archiveDir),
+    source_node_ids: plan.sourceNodeIds,
+    archived_attempt_paths: collectAttemptStateMoves(plan.runRoot, plan.manifests, plan.runtimeBase)
+      .map((move) => runRelativePath(plan.runRoot, path.join(archiveDir, move.relativePath)))
+      .sort()
+  };
+  writeFileDurable(
+    path.join(plan.manifestDir, RETRY_WITHDRAWAL_FILE),
+    `${JSON.stringify({ schema_version: RETRY_WITHDRAWAL_SCHEMA_VERSION, ...withdrawal }, null, 2)}\n`
+  );
+  return withdrawDynamicExpansions(plan, archiveDir, withdrawal);
+}
+
+/**
+ * Complete a withdrawal that `archiveDynamicExpansionsForRetry` recorded but did not finish, into
+ * the same history directory; returns `undefined` when none is recorded. It re-validates the
+ * manifests as a new plan would and moves only what is still in place. Every engine start runs it
+ * before it resets or renders anything.
+ */
+export function finishInterruptedDynamicExpansionRetry(input: {
+  projectRoot: string;
+  runRoot: string;
+}): DynamicExpansionRetryArchive | undefined {
+  const runRoot = path.resolve(input.runRoot);
+  const manifestDir = path.join(runRoot, "dynamic-expansions");
+  if (fs.lstatSync(manifestDir, { throwIfNoEntry: false })?.isDirectory() !== true) return undefined;
+  const withdrawalPath = path.join(manifestDir, RETRY_WITHDRAWAL_FILE);
+  if (fs.lstatSync(withdrawalPath, { throwIfNoEntry: false }) === undefined) return undefined;
+  assertNoSymlinkComponents(runRoot, withdrawalPath, "interrupted dynamic retry");
+  assertRegularFileInside(runRoot, withdrawalPath, "interrupted dynamic retry");
+  const withdrawal = parseRetryWithdrawal(
+    parseStrictJsonBytes(readRegularFileSnapshot(withdrawalPath, MAX_RETRY_WITHDRAWAL_BYTES)),
+    withdrawalPath
+  );
+  const plan = planDynamicExpansionRetryArchive({
+    projectRoot: input.projectRoot,
+    runRoot,
+    sourceNodeIds: withdrawal.source_node_ids
+  });
+  const archiveDir = safeResolveInside(runRoot, withdrawal.archive_path, "interrupted dynamic retry archive");
+  if (plan === undefined || path.dirname(archiveDir) !== path.join(runRoot, "dynamic-expansion-history")) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Interrupted dynamic source retry cannot be completed", {
+      withdrawalPath
+    });
+  }
+  fs.mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+  return withdrawDynamicExpansions(plan, archiveDir, withdrawal);
+}
+
+function withdrawDynamicExpansions(
+  plan: DynamicExpansionRetryPlan,
+  archiveDir: string,
+  withdrawal: RetryWithdrawal
+): DynamicExpansionRetryArchive {
+  const archivedAttemptPaths = new Set(withdrawal.archived_attempt_paths);
+  for (const move of collectAttemptStateMoves(plan.runRoot, plan.manifests, plan.runtimeBase)) {
+    // A render between an interrupted withdrawal and its completion can recreate an entry that has
+    // already moved. Both copies belong to the withdrawn generation, so the later one moves beside it.
+    let destination = path.join(archiveDir, move.relativePath);
+    for (let copy = 1; fs.lstatSync(destination, { throwIfNoEntry: false }) !== undefined; copy += 1) {
+      destination = `${path.join(archiveDir, move.relativePath)}.${String(copy)}`;
+    }
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
     fs.renameSync(move.source, destination);
-    return path.relative(plan.runRoot, destination).split(path.sep).join("/");
-  });
+    archivedAttemptPaths.add(runRelativePath(plan.runRoot, destination));
+  }
   fs.renameSync(plan.manifestDir, path.join(archiveDir, "manifests"));
   fs.mkdirSync(plan.manifestDir, { mode: plan.manifestDirMode });
+  fs.rmSync(path.join(archiveDir, "manifests", RETRY_WITHDRAWAL_FILE), { force: true });
   rematerializeDynamicRuntimeBase(plan);
   const prunedStateNodeIds = pruneArchivedRunStateNodes(plan.runRoot, plan.manifests);
   const groupNodeIds = plan.manifests.map((manifest) => manifest.group_node_id);
@@ -186,10 +268,10 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
     `${JSON.stringify(
       {
         schema_version: "ultrafuzz.dynamic-expansion-retry.v1",
-        archived_at: archivedAt,
+        archived_at: withdrawal.archived_at,
         source_node_ids: plan.sourceNodeIds,
         group_node_ids: groupNodeIds,
-        archived_attempt_paths: archivedAttemptPaths.sort(),
+        archived_attempt_paths: [...archivedAttemptPaths].sort(),
         pruned_state_node_ids: prunedStateNodeIds
       },
       null,
@@ -197,6 +279,33 @@ export function archiveDynamicExpansionsForRetry(plan: DynamicExpansionRetryPlan
     )}\n`
   );
   return { archive_path: archiveDir, group_node_ids: groupNodeIds, pruned_state_node_ids: prunedStateNodeIds };
+}
+
+function parseRetryWithdrawal(value: unknown, withdrawalPath: string): RetryWithdrawal {
+  const record = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+  const { schema_version, archived_at, archive_path, source_node_ids, archived_attempt_paths } = record as Record<
+    string,
+    unknown
+  >;
+  const isStringList = (list: unknown): list is string[] =>
+    Array.isArray(list) && list.every((entry) => typeof entry === "string");
+  if (
+    schema_version !== RETRY_WITHDRAWAL_SCHEMA_VERSION ||
+    typeof archived_at !== "string" ||
+    typeof archive_path !== "string" ||
+    !isStringList(source_node_ids) ||
+    source_node_ids.length === 0 ||
+    !isStringList(archived_attempt_paths)
+  ) {
+    throw dynamicError("DYNAMIC_RETRY_EXPANSION_INVALID", "Interrupted dynamic source retry record is invalid", {
+      withdrawalPath
+    });
+  }
+  return { archived_at, archive_path, source_node_ids, archived_attempt_paths };
+}
+
+function runRelativePath(runRoot: string, candidate: string): string {
+  return path.relative(runRoot, candidate).split(path.sep).join("/");
 }
 
 /**

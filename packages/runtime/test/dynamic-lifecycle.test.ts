@@ -1521,6 +1521,103 @@ test("explicit source retry prunes the withdrawn generation from run state and k
   for (const nodeId of generationStateIds) assert.equal(regeneratedState.nodes[nodeId], undefined, nodeId);
 });
 
+test(
+  "the next resume completes a source retry whose withdrawal was interrupted after the reset",
+  { skip: process.getuid?.() === 0 ? "root ignores the directory permissions this test uses" : false },
+  async () => {
+    const fixture = await createDynamicFixture({ runId: "dynamic-retry-interrupted" });
+    const planner = plannerSuccessEvidence(fixture);
+    for (const task of fixture.generatedTasks) writeFinding(task);
+    const generationSteps: LifecycleStep[] = fixture.generatedTasks.map((task) => ({
+      id: task.smithersNodeId,
+      state: "finished",
+      attempt: 1
+    }));
+    const generationEvents: LifecycleEvent[] = [
+      ...planner.events,
+      ...fixture.generatedTasks.flatMap((task) => [
+        { type: "NodeStarted", nodeId: task.smithersNodeId, attempt: 1 },
+        { type: "NodeFinished", nodeId: task.smithersNodeId, attempt: 1 }
+      ])
+    ];
+    setLifecycle(fixture, [...planner.steps, ...generationSteps], generationEvents);
+    const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+    assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+
+    // The producer's verifier fails and the operator retries it. Smithers resets the producer, and then
+    // the first move of the withdrawal fails, which leaves the published generation in place.
+    const failedLifecycle: LifecycleStep[] = [
+      ...planner.steps,
+      { id: fixture.plannerTask.verifierSmithersNodeId, state: "failed", attempt: 1 },
+      ...generationSteps
+    ];
+    setLifecycle(fixture, failedLifecycle, generationEvents, { status: "failed", state: "failed" });
+    const manifestDir = path.join(fixture.runRoot, "dynamic-expansions");
+    const artifactsRoot = path.join(fixture.runRoot, "artifacts");
+    fs.chmodSync(artifactsRoot, 0o555);
+    let interrupted: Awaited<ReturnType<typeof resumeRun>>;
+    try {
+      interrupted = await resumeRun({
+        projectRoot: fixture.project,
+        runId: fixture.runId,
+        force: true,
+        retryFailed: true,
+        env: fixture.env
+      });
+    } finally {
+      fs.chmodSync(artifactsRoot, 0o755);
+    }
+    assert.equal(interrupted.ok, false);
+    assert.match(JSON.stringify(interrupted.diagnostics), /EACCES/u);
+    assert.deepEqual(fs.readdirSync(manifestDir).sort(), [".retry-withdrawal.json", "fanout.json"]);
+
+    // Smithers has reset the producer and its dependents, and left the run without an owner, so no
+    // task is failed and a later `--retry-failed` would plan no withdrawal. The next resume completes
+    // the recorded one before it starts the engine, and the retried producer's new output expands the
+    // group again.
+    setLifecycle(
+      fixture,
+      [{ id: fixture.plannerTask.smithersNodeId, state: "pending", attempt: 1 }],
+      generationEvents,
+      {
+        status: "running",
+        state: "stale"
+      }
+    );
+    const resumed = await resumeRun({
+      projectRoot: fixture.project,
+      runId: fixture.runId,
+      force: true,
+      retryFailed: true,
+      env: fixture.env
+    });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.deepEqual(fs.readdirSync(manifestDir), []);
+    const historyRoot = path.join(fixture.runRoot, "dynamic-expansion-history");
+    const [archiveName, ...otherArchives] = fs.readdirSync(historyRoot);
+    assert.ok(archiveName);
+    assert.deepEqual(otherArchives, []);
+    const retryRecord = JSON.parse(fs.readFileSync(path.join(historyRoot, archiveName, "retry.json"), "utf8")) as {
+      group_node_ids?: string[];
+    };
+    assert.deepEqual(retryRecord.group_node_ids, ["fanout"]);
+    for (const task of fixture.generatedTasks) {
+      assert.equal(fs.existsSync(task.artifactDir), false, task.attemptId);
+      assert.equal(
+        fs.existsSync(path.join(historyRoot, archiveName, "artifacts", task.attemptId)),
+        true,
+        task.attemptId
+      );
+    }
+    const joinPromptPath = fixture.joinTask.renderedPromptPath;
+    assert.ok(joinPromptPath);
+    assert.equal(fs.existsSync(joinPromptPath), false);
+    const regenerated = republishRetriedExpansion(fixture);
+    assert.notEqual(regenerated[0]?.metadata.node.storageId, fixture.storageId);
+    await assertObserversAdmitted(fixture);
+  }
+);
+
 test("empty dynamic groups terminate successfully and release their strict join", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-empty", goals: [] });
   const planner = plannerSuccessEvidence(fixture);

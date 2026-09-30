@@ -23,7 +23,11 @@ import {
   verifyDynamicRuntimeMaterialization,
   type PlannedGraph
 } from "../src/index.js";
-import { archiveDynamicExpansionsForRetry, planDynamicExpansionRetryArchive } from "../src/dynamic-expansion-retry.js";
+import {
+  archiveDynamicExpansionsForRetry,
+  finishInterruptedDynamicExpansionRetry,
+  planDynamicExpansionRetryArchive
+} from "../src/dynamic-expansion-retry.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask } from "../src/smithers.js";
 import { projectWorkflowControlState } from "../src/workflow-control.js";
 
@@ -627,7 +631,7 @@ test("explicit source retry refuses a withdrawn prompt that is not a regular fil
 });
 
 test(
-  "an interrupted retry archive never leaves a withdrawn generation's prompt beside a new manifest",
+  "an interrupted retry archive keeps the published generation until the next engine start completes it",
   { skip: process.getuid?.() === 0 ? "root ignores the directory permissions this test uses" : false },
   () => {
     // A storage ID depends only on the group and the generated node ID, so a retried source that keeps
@@ -641,6 +645,7 @@ test(
       const { projectRoot, runRoot } = controls;
       const withdrawn = publishedRuntimePrompts(controls);
       const withdrawnChildPrompt = fs.readFileSync(withdrawn.child.promptPath, "utf8");
+      const childAttemptId = path.basename(path.dirname(withdrawn.child.promptPath));
       fs.writeFileSync(
         sourceArtifactPath,
         `${JSON.stringify({ goals: [{ ...item(0), goal_prompt: "a replanned goal" }] })}\n`,
@@ -656,18 +661,48 @@ test(
         fs.chmodSync(blockedDirectory, 0o755);
       }
 
-      // The generation is still published, so every render stays consistent with it: no prompt of the
-      // withdrawn item ends up beside a manifest planned from the new output.
-      assert.deepEqual(fs.readdirSync(path.join(runRoot, "dynamic-expansions")), ["fanout.json"], blocked);
+      // The generation is still published, beside the record of the unfinished withdrawal, so every
+      // render stays consistent with it: no prompt of the withdrawn item ends up beside a manifest
+      // planned from the new output.
+      const manifestDir = path.join(runRoot, "dynamic-expansions");
+      assert.deepEqual(fs.readdirSync(manifestDir).sort(), [".retry-withdrawal.json", "fanout.json"], blocked);
       const rendered = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
       assert.deepEqual(rendered.promptRenderFailures, [], blocked);
       assert.equal(fs.readFileSync(withdrawn.child.promptPath, "utf8"), withdrawnChildPrompt, blocked);
       assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).expandedGroupIds, ["fanout"], blocked);
 
-      // A later complete archive withdraws the generation, and the group expands again from the new output.
-      const retry = planDynamicExpansionRetryArchive({ projectRoot, runRoot, sourceNodeIds: ["node:planner"] });
-      assert.ok(retry, blocked);
-      archiveDynamicExpansionsForRetry(retry);
+      // Smithers has already reset the source, so no later plan would withdraw the generation again.
+      // The next engine start completes the recorded withdrawal into the same history entry, and the
+      // group expands again from the new output.
+      const historyRoot = path.join(runRoot, "dynamic-expansion-history");
+      const [archiveName, ...otherArchives] = fs.readdirSync(historyRoot);
+      assert.ok(archiveName, blocked);
+      assert.deepEqual(otherArchives, [], blocked);
+      const completed = finishInterruptedDynamicExpansionRetry({ projectRoot, runRoot });
+      assert.ok(completed, blocked);
+      assert.equal(completed.archive_path, path.join(historyRoot, archiveName), blocked);
+      assert.deepEqual(completed.group_node_ids, ["fanout"], blocked);
+      assert.deepEqual(fs.readdirSync(historyRoot), [archiveName], blocked);
+      assert.deepEqual(fs.readdirSync(manifestDir), [], blocked);
+      assert.deepEqual(fs.readdirSync(path.join(historyRoot, archiveName, "manifests")), ["fanout.json"], blocked);
+      const record = JSON.parse(fs.readFileSync(path.join(historyRoot, archiveName, "retry.json"), "utf8")) as {
+        source_node_ids?: string[];
+        archived_attempt_paths?: string[];
+      };
+      assert.deepEqual(record.source_node_ids, ["node:planner"], blocked);
+      const archived = `dynamic-expansion-history/${archiveName}/artifacts`;
+      assert.deepEqual(
+        record.archived_attempt_paths,
+        [
+          `${archived}/${childAttemptId}`,
+          // The render above recreated the child's prompt after its directory had moved; that copy is
+          // the withdrawn generation's too, and moves beside it.
+          ...(blocked === "artifacts/join" ? [`${archived}/${childAttemptId}.1`] : []),
+          `${archived}/join/prompt.rendered.md`
+        ],
+        blocked
+      );
+      assert.equal(finishInterruptedDynamicExpansionRetry({ projectRoot, runRoot }), undefined, blocked);
       const replanned = publishedRuntimePrompts(controls);
       assert.equal(replanned.child.promptPath, withdrawn.child.promptPath, blocked);
       assert.match(fs.readFileSync(replanned.child.promptPath, "utf8"), /a replanned goal/u, blocked);

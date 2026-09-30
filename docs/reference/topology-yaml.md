@@ -368,7 +368,9 @@ published manifests to `dynamic-expansion-history/` before the source runs
 again (and refuses if another source published any of them), so the group
 expands again from the new output. The generated children's artifacts and the
 rendered prompts of later nodes that wait on the group move with them, so those
-prompts render again from the new expansion.
+prompts render again from the new expansion. The withdrawal is recorded before
+anything moves, so one that is interrupted after the source's reset is
+completed by the next `resume`, `replay` or `fork` before it starts an engine.
 
 ## Model Fan-Out
 
