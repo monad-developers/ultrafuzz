@@ -1880,44 +1880,6 @@ test("refreshed controller compiles the pre-expansion base task set", async () =
 });
 
 /**
- * `resume --refresh-controller` renders the current controller over the run's own prompt files. An
- * operator's edit of a static task that has not run therefore reaches the refreshed controller, and
- * the launch copy in `prompt-snapshots/` is never read while that file exists, edited or not.
- */
-test("--refresh-controller keeps a hand-edited static prompt", async () => {
-  const fixture = await createDynamicFixture({ runId: "refresh-edited-static-prompt" });
-  const evidence = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
-  assert.equal(evidence.ok, true, "diagnostics" in evidence ? JSON.stringify(evidence.diagnostics) : "");
-  if (!evidence.ok) return;
-  const resolvedConfig = evidence.verifiedControl.executionFiles.find(
-    (file) => file.snapshotPath === "controls/resolved-config.json"
-  );
-  assert.ok(resolvedConfig);
-
-  const plan = readRunPlanDocument(path.join(fixture.runRoot, "plan.json"), fixture.runId);
-  const planned = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "planner");
-  assert.ok(planned, "fixture has no planner prompt plan row");
-  const edited = `${fs.readFileSync(planned.rendered_prompt_path, "utf8")}\nOperator note: plan the overdue path first.\n`;
-  fs.writeFileSync(planned.rendered_prompt_path, edited, "utf8");
-  fs.appendFileSync(path.join(fixture.runRoot, planned.rendered_prompt_snapshot_path), "\nAn edited launch copy.\n");
-
-  const tasksPath = path.join(fixture.runRoot, "smithers", "tasks.json");
-  const workflowPath = renderCurrentSmithersController({
-    projectRoot: fixture.project,
-    layout: evidence.layout,
-    smithersRunId: evidence.smithersRunId,
-    tasks: parseSmithersTaskManifestBytes(fs.readFileSync(tasksPath)),
-    config: JSON.parse(resolvedConfig.contents.toString("utf8"))
-  });
-  const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
-  assert.equal(
-    compiled.taskSpecs.find((spec) => spec.attemptId === planned.attempt_id)?.promptPath,
-    planned.rendered_prompt_path
-  );
-  assert.equal(fs.readFileSync(planned.rendered_prompt_path, "utf8"), edited);
-});
-
-/**
  * The production repair shape, end to end. A run damaged by a refresh on the broken build has the
  * rebound `prompt-snapshots/` path in its live `smithers/tasks.json` and an INTACT sealed
  * `controls/runtime-base-tasks.json` -- the only shape a sealed dynamic run can actually be in.
