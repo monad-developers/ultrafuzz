@@ -11,15 +11,23 @@ import {
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  artifactSchemaBundleDigest,
   artifactSchemaDirectory,
+  artifactSchemaRegistryFromDirectory,
   createInitialRunState,
   createRunLayout,
   derivePropertyImplementationCoverage,
   getNodeArtifactDir,
+  installedArtifactSchemaBundle,
+  materializePromptSchemas,
+  plannedArtifactSchemaBundle,
   readRunState,
+  schemaRegistryBundleDigest,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   updateNodeState,
+  validateArtifactContractBytes,
+  validateRegisteredJsonBytesSync,
   validateRegisteredJsonFileSync,
   writeArtifact as writeArtifactFile,
   writeArtifactManifest,
@@ -36,6 +44,7 @@ import {
   captureWorkspacePatch,
   captureWorkspaceTree,
   dependencyGateForNode,
+  verifyRequiredArtifactSchemaBinding,
   verifyRequiredArtifactsForAttempt as verifyRuntimeRequiredArtifactsForAttempt,
   type AuthenticatedArtifactGateSnapshots,
   type ArtifactGateAttemptAuthority,
@@ -5214,6 +5223,91 @@ test("artifact validation binds schema content and treats the validator build as
     JSON.stringify(unknownSchema.diagnostics)
   );
 });
+
+test("host artifact validation gives a run's sealed schema bundle the deadline its workflow gives it", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-sealed-bundle-deadline" });
+  // #921: the run was planned with an earlier build's schemas, which its execution snapshot sealed.
+  const snapshot = `smithers/execution-snapshots/${"a".repeat(64)}`;
+  const sealedSchemas = path.join(layout.root, ...snapshot.split("/"), "modules", "@ultrafuzz", "artifacts", "schema");
+  materializePromptSchemas(sealedSchemas, installedArtifactSchemaBundle());
+  const reportSchemaPath = path.join(sealedSchemas, "report.schema.json");
+  const reportSchema = JSON.parse(fs.readFileSync(reportSchemaPath, "utf8")) as Record<string, unknown>;
+  fs.chmodSync(reportSchemaPath, 0o600);
+  fs.writeFileSync(reportSchemaPath, JSON.stringify({ ...reportSchema, $comment: "the build that planned this run" }));
+  const state = readRunState(layout);
+  state.provenance = {
+    workflow: {
+      inspection: { runId: "ultrafuzz-run-sealed-bundle-deadline" },
+      runId: "ultrafuzz-run-sealed-bundle-deadline",
+      compiledRunId: "ultrafuzz-run-sealed-bundle-deadline",
+      name: "ultrafuzz-run-sealed-bundle-deadline",
+      controlGeneration: "b".repeat(64),
+      linkId: "00000000-0000-4000-8000-000000000000",
+      executionSnapshot: snapshot
+    }
+  };
+  writeRunState(layout, state);
+  const bundle = plannedArtifactSchemaBundle(
+    layout.root,
+    schemaRegistryBundleDigest(artifactSchemaRegistryFromDirectory(sealedSchemas))
+  );
+  assert.notEqual(bundle.sha256, artifactSchemaBundleDigest());
+  const binding = artifactContractSchemaBinding("ultrafuzz/findings@2");
+  assert.ok(binding);
+  const output = { ...boundOutput("findings.json", "ultrafuzz/findings@2", true), schema_bundle_sha256: bundle.sha256 };
+  const artifactPath = path.join(getNodeArtifactDir(layout, "strategy-a", { create: true }), "findings.json");
+  const artifact = Buffer.from("[]\n", "utf8");
+
+  // A bundle other than this build's has no long-lived validator isolate: each validation starts a worker
+  // that compiles the whole bundle, and under load that can outlast the validator's default deadline.
+  const byDefault = afterSlowSchemaCompile(() =>
+    validateRegisteredJsonBytesSync({
+      schemaPath: path.join(bundle.directory, binding.schema_file),
+      instanceBytes: artifact,
+      schemaRegistry: bundle.registry
+    })
+  );
+  assert.equal(byDefault.diagnostics[0]?.code, "JSON_VALIDATION_TIMEOUT", JSON.stringify(byDefault.diagnostics));
+  // The workflow's verifier waits for that compile. The host gate that syncs the attempt, and verified
+  // reads after it, must wait as long, or they fail an attempt its verifier accepted.
+  const planned = {
+    bundle,
+    schemaFile: binding.schema_file,
+    schemaId: binding.schema_id,
+    schemaSha256: binding.schema_sha256
+  };
+  const verifier = afterSlowSchemaCompile(() =>
+    validateArtifactContractBytes("ultrafuzz/findings@2", artifact, artifactPath, planned)
+  );
+  assert.equal(verifier.ok, true, JSON.stringify(verifier.issues));
+  assert.deepEqual(
+    afterSlowSchemaCompile(() => verifyRequiredArtifactSchemaBinding(layout, artifactPath, output, artifact)),
+    []
+  );
+});
+
+/**
+ * Run `validate` as if the first validator worker it waits for took 10 s to compile its schemas: past the
+ * validator's 5 s default deadline, within the 30 s it allows at most. The validator waits for a worker in
+ * `Atomics.wait` slices against a `Date.now` deadline, so the clock runs 10 s ahead from the first slice
+ * until `validate` returns.
+ */
+function afterSlowSchemaCompile<T>(validate: () => T): T {
+  const now = Date.now;
+  const wait = Atomics.wait;
+  let ahead = 0;
+  Date.now = () => now() + ahead;
+  Atomics.wait = ((typedArray: Int32Array, index: number, value: number, timeout?: number) => {
+    ahead = 10_000;
+    return wait(typedArray, index, value, timeout);
+  }) as typeof Atomics.wait;
+  try {
+    return validate();
+  } finally {
+    Date.now = now;
+    Atomics.wait = wait;
+  }
+}
 
 test("project discovery gate accepts a repository-root scan probe", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-probe" });

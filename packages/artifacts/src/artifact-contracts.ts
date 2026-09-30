@@ -290,13 +290,11 @@ function validatorRejection(
   expected: PlannedArtifactSchema
 ): ArtifactContractValidationResult | undefined {
   const sealed = expected.bundle.registry !== artifactSchemaRegistry();
-  const validation = validateRegisteredJsonBytesSync({
-    schemaPath: path.join(expected.bundle.directory, expected.schemaFile),
-    instanceBytes: contents,
-    schemaRegistry: expected.bundle.registry,
-    schemaBundleSha256: expected.bundle.sha256,
-    ...(sealed ? { deadlineMs: SEALED_BUNDLE_VALIDATION_DEADLINE_MS } : {})
-  });
+  const validation = validateJsonBytesAgainstBundleSync(
+    expected.bundle,
+    path.join(expected.bundle.directory, expected.schemaFile),
+    contents
+  );
   if (validation.schema !== null && !sameSchemaIdentity(validation.schema, expected)) {
     return failure(
       "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
@@ -328,6 +326,25 @@ function validatorRejection(
 const SEALED_BUNDLE_VALIDATION_DEADLINE_MS = 30_000;
 const MAX_REMEMBERED_SEALED_ACCEPTANCES = 4_096;
 const sealedBundleAcceptances = new WeakMap<ArtifactSchemaBundle["registry"], Set<string>>();
+
+/**
+ * Validate JSON bytes against the schema at `schemaPath` in `bundle`, with the deadline that bundle needs.
+ * The workflow's contract checks and the host's artifact gate both validate this way, so the host does not
+ * reject, for a slow compile, an artifact that the run's verifier accepted.
+ */
+export function validateJsonBytesAgainstBundleSync(
+  bundle: ArtifactSchemaBundle,
+  schemaPath: string,
+  instanceBytes: Uint8Array
+): JsonFileValidationResult {
+  return validateRegisteredJsonBytesSync({
+    schemaPath,
+    instanceBytes,
+    schemaRegistry: bundle.registry,
+    schemaBundleSha256: bundle.sha256,
+    ...(bundle.registry === artifactSchemaRegistry() ? {} : { deadlineMs: SEALED_BUNDLE_VALIDATION_DEADLINE_MS })
+  });
+}
 
 function sealedBundleAcceptance(expected: PlannedArtifactSchema, contents: Uint8Array): string {
   const artifactSha256 = crypto.createHash("sha256").update(contents).digest("hex");

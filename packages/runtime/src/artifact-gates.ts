@@ -42,12 +42,12 @@ import {
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
+  validateJsonBytesAgainstBundleSync,
   validateLensPropertiesSchema,
   validateReferenceExpectationsSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
-  validateRegisteredJsonBytesSync,
   validateRegisteredJsonSchema,
   verifyArtifactManifestPrerequisites,
   type ArtifactSchemaBundle,
@@ -3325,13 +3325,12 @@ export function verifyRequiredArtifactSchemaBinding(
   // The planned binding names schema content. Its validator build only records which build planned
   // the output and is never compared: validate with the run's planned bundle, as its workflow does,
   // so a rebuild or upgrade does not change which schema an in-flight run's artifacts must satisfy (#921).
+  let bundle: ArtifactSchemaBundle;
   let schemaPath: string;
-  let schemaRegistry: ArtifactSchemaBundle["registry"];
   try {
-    const bundle = plannedArtifactSchemaBundle(layout.root, planned.schema_bundle_sha256);
+    bundle = plannedArtifactSchemaBundle(layout.root, planned.schema_bundle_sha256);
     schemaPath = safeResolveInside(bundle.directory, planned.schema_file, "planned artifact schema");
     assertRegularFileInside(bundle.directory, schemaPath, "planned artifact schema");
-    schemaRegistry = bundle.registry;
   } catch (error) {
     return [
       {
@@ -3345,7 +3344,7 @@ export function verifyRequiredArtifactSchemaBinding(
     ];
   }
 
-  const validation = validateRegisteredJsonBytesSync({ schemaPath, instanceBytes: artifactBytes, schemaRegistry });
+  const validation = validateJsonBytesAgainstBundleSync(bundle, schemaPath, artifactBytes);
   if (
     validation.schema?.id !== planned.schema_id ||
     validation.schema?.sha256 !== planned.schema_sha256 ||
