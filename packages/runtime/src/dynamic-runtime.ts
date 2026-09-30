@@ -270,6 +270,13 @@ function instantiateDynamicTasks(input: {
       dependencyArtifactDirs: template.dependencyArtifactDirs.map((directory) =>
         remapProjectPath(directory, input.group.promptContext.projectRoot, input.projectRoot)
       ),
+      ...(template.optionalDependencyArtifactDirs === undefined
+        ? {}
+        : {
+            optionalDependencyArtifactDirs: template.optionalDependencyArtifactDirs.map((directory) =>
+              remapProjectPath(directory, input.group.promptContext.projectRoot, input.projectRoot)
+            )
+          }),
       renderedPromptPath: path.join(artifactDir, "prompt.rendered.md"),
       promptTemplatePath: remapProjectPath(
         input.group.templatePath,

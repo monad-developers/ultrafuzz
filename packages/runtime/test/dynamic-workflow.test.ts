@@ -197,6 +197,144 @@ test("compiled dynamic workflow defers templates, emits syntactically valid Type
   assert.ok(materialized.tasks.every((task) => task.sourceRef === plan.value!.source_ref));
 });
 
+test("dynamic templates and their children treat a continuing producer in another group as optional", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writePrompt(project, "dynamic/context.md", "dynamic-context", "Write context to {{artifact_path}}/context.md.");
+  writePrompt(project, "dynamic/planner.md", "dynamic-planner", "Write the plan to {{artifact_path}}/plan.json.");
+  writePrompt(
+    project,
+    "dynamic/worker.md",
+    "dynamic-worker",
+    "Your /goal is {{item.goal_prompt}}.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
+  );
+  writePrompt(
+    project,
+    "dynamic/hunter.md",
+    "dynamic-hunter",
+    "Hunt the plan.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
+  );
+  // `producer` continues on failure and reaches the dynamic group only through `planner`, a node of
+  // another group; the static `hunter` beside the group already treats its output as optional.
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  strategies:
+    label: Strategies
+    defaults:
+      failure_policy: continue
+  planning:
+    label: Planning
+  goals:
+    label: Goals
+    defaults:
+      failure_policy: continue
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: producer
+    kind: agentic
+    prompt: dynamic/context.md
+    group: strategies
+    depends_on: [__start__]
+    outputs:
+      - path: context.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: planner
+    kind: agentic
+    prompt: dynamic/planner.md
+    group: planning
+    depends_on: [producer]
+    outputs:
+      - path: plan.json
+        contract: ultrafuzz/goal-plan@1
+        primary: true
+  - id: fanout
+    kind: agentic
+    prompt: dynamic/worker.md
+    group: goals
+    depends_on: [planner]
+    dynamic:
+      from:
+        node: planner
+        path: $.goals
+      key: id
+      node_id: "dynamic:item:{{ item.id }}"
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
+  - id: hunter
+    kind: agentic
+    prompt: dynamic/hunter.md
+    group: goals
+    depends_on: [planner]
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [fanout, hunter]
+`,
+    "utf8"
+  );
+  const plan = await planRun({ projectRoot: project, runId: "dynamic-optional-inputs", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.ok(plan.value);
+  const planned = plan.value;
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: planned.resolved_config,
+    graph: planned.expanded_graph,
+    runLayout: planned.layout,
+    workflowName: "ultrafuzz-dynamic-optional-inputs",
+    renderedPrompts: planned.rendered_prompts
+  });
+  const producerDir = compiled.tasks.find((task) => task.concreteNodeId === "producer")?.artifactDir;
+  assert.ok(producerDir);
+  for (const nodeId of ["planner", "hunter"]) {
+    const task = compiled.tasks.find((candidate) => candidate.concreteNodeId === nodeId);
+    assert.deepEqual(task?.optionalDependencyArtifactDirs, [producerDir], nodeId);
+  }
+  const [group] = compiled.dynamicGroups;
+  assert.ok(group);
+  assert.deepEqual(
+    group.taskTemplates.map((task) => task.optionalDependencyArtifactDirs),
+    [[producerDir]]
+  );
+
+  const sourceArtifactPath = path.resolve(project, group.source.artifactPath);
+  fs.mkdirSync(path.dirname(sourceArtifactPath), { recursive: true });
+  fs.writeFileSync(
+    sourceArtifactPath,
+    `${JSON.stringify({ goals: [0, 1].map((index) => ({ id: `goal-${index}`, goal_prompt: `find ${index}` })) })}\n`,
+    "utf8"
+  );
+  const materialized = materializeDynamicRuntime({
+    runId: planned.run_id,
+    projectRoot: project,
+    runRoot: planned.run_root,
+    graphPath: path.join(planned.run_root, "graph.json"),
+    tasksPath: compiled.tasksPath,
+    baseTasks: compiled.tasks,
+    groups: compiled.dynamicGroups,
+    readyGroupIds: ["fanout"]
+  });
+  const children = materialized.tasks.filter((task) => task.metadata.node.dynamic !== undefined);
+  assert.equal(children.length, 2);
+  for (const child of children) {
+    assert.deepEqual(child.optionalDependencyArtifactDirs, [producerDir], child.attemptId);
+  }
+});
+
 test("compilation snapshots the exact transformed prompt body used during planning", async () => {
   const project = tempProject();
   writeDynamicProject(project, { excludableContextNode: true });

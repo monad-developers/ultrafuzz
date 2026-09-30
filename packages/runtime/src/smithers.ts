@@ -3749,7 +3749,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         });
       })
   );
-  const dynamicGroups = input.graph.nodes
+  const compiledDynamicGroups = input.graph.nodes
     .filter(
       (node): node is ExpandedNode & { dynamic: NonNullable<ExpandedNode["dynamic"]> } => node.dynamic !== undefined
     )
@@ -3777,11 +3777,19 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     })
   );
   const nonBlockingAttemptIds = [...nonBlockingGroupByAttemptId.keys()].sort();
-  const tasks = compiledTasks.map((task) => ({
-    ...task,
-    optionalDependencyArtifactDirs: task.dependencyArtifactDirs.filter((directory) => {
+  const optionalInputs = (task: CompiledSmithersTask): string[] =>
+    task.dependencyArtifactDirs.filter((directory) => {
       const producerGroup = nonBlockingGroupByAttemptId.get(path.basename(directory));
       return producerGroup !== undefined && reconcilesPartialResults(task, producerGroup);
+    });
+  const tasks = compiledTasks.map((task) => ({ ...task, optionalDependencyArtifactDirs: optionalInputs(task) }));
+  // Generated children are cloned from their group's templates, so the templates follow the same
+  // rule. A template without optional inputs keeps its bytes.
+  const dynamicGroups = compiledDynamicGroups.map((group) => ({
+    ...group,
+    taskTemplates: group.taskTemplates.map((template) => {
+      const optionalDependencyArtifactDirs = optionalInputs(template);
+      return optionalDependencyArtifactDirs.length === 0 ? template : { ...template, optionalDependencyArtifactDirs };
     })
   }));
   const smithersDir = path.join(input.runLayout.root, "smithers");
