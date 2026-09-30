@@ -145,8 +145,9 @@ the group expands, and only while its file is missing. After that, no prompt
 file is re-rendered, compared with a recorded digest, or sealed: an edited file
 is what the task's next attempt receives, and an upgrade that renders templates
 differently leaves published prompts as they are. A runtime prompt that cannot
-be rendered, or a prompt file that is missing, fails only its task, at the
-`assert-task-inputs` preparation step, with the cause.
+be rendered, or a prompt file that is missing, unreadable or not a regular file,
+fails only its task, at the `assert-task-inputs` preparation step, with the
+cause.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 the launch render of each static prompt (its path and digest) and the path of

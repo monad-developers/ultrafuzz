@@ -60,21 +60,32 @@ Ultrafuzz does not enforce a deterministic repository mutation policy across
 agent behavior. Instructions not to commit, push, open pull requests, submit
 external findings, stage changes, or merge are expressed in agent prompts and
 depend on user acknowledgement plus the trusted local execution model. Review
-prompts before launch, review artifacts before materialization, and use normal
-repository review tools such as `git status` before publishing.
+prompts before launch and any prompt file you edit in a run, review artifacts
+before materialization, and use normal repository review tools such as
+`git status` before publishing.
 
 Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
 
-Ultrafuzz does not integrity-check a run's prompt files after launch. Each
-attempt receives its task's `artifacts/<attempt-id>/prompt.rendered.md` as that
-file is when the attempt starts; nothing re-renders it, compares it with a
-launch digest, or seals a copy. A process running as the operator, including an
-agent in another task, can therefore change the prompt of a task that has not
-run, and nothing reports it. This is within the trusted local execution model
-above: such a process can already change the run's workflow source, which
-native resume runs as it is.
+Ultrafuzz does not integrity-check a run's prompt files after launch:
+
+- each attempt's `artifacts/<attempt-id>/prompt.rendered.md`, which the attempt
+  receives as the file is when it starts;
+- the template copies under `dynamic-prompt-templates/`, from which every
+  prompt rendered after launch, such as a generated child's or the final
+  report's, is rendered;
+- the launch copies under `prompt-snapshots/`, which restore a missing static
+  prompt.
+
+Nothing re-renders these files, compares them with a launch digest, or seals a
+copy, and the digests that name some of them are launch provenance only. The
+vulnerability-database catalog digest is checked only when a prompt is
+rendered. A process running as the operator, including an agent in another
+task, can therefore change the prompt of a task that has not run, and nothing
+reports it. This is within the trusted local execution model above: such a
+process can already change the run's workflow source, which native resume runs
+as it is.
 
 ## Campaign data governance
 
@@ -96,10 +107,11 @@ Put reviewed acknowledgement records in
 canonical
 [data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
 Acknowledgements bind the policy, effective inputs, the prompt catalog at
-launch, routes, and Git/worktree identity; a prompt file edited in a run after
-launch is not acknowledged again. A runtime semantic gate rejects more than one
-acknowledgement for the same destination. Any change makes an acknowledgement
-stale. Credential values are never persisted. Private standalone Modal evals
+launch, routes, and Git/worktree identity. Any change to these bound inputs
+before launch makes an acknowledgement stale; a prompt file edited in a run
+after launch is not acknowledged again. A runtime semantic gate rejects more
+than one acknowledgement for the same destination. Credential values are never
+persisted. Private standalone Modal evals
 remain fail-closed pending the separate R-26 disclosure authorization. Public
 Modal runs record `cloud:modal`. These controls are not a sandbox or egress
 filter: YOLO agents remain unrestricted.

@@ -388,9 +388,10 @@ Prompt files are used as they are. Every task of a resumed run, with or without
 `fork`, receives the run's own `artifacts/<attempt-id>/prompt.rendered.md`, so
 an edit to that file reaches the task's next attempt. Before any of these
 commands starts an engine, it restores a missing static prompt from its launch
-copy in `prompt-snapshots/`; it never replaces a prompt file that exists. A
-prompt that is still missing, or a runtime prompt that no longer renders, fails
-only its task. Edits to `.ultrafuzz/prompts/**` apply to new runs. See
+copy in `prompt-snapshots/`; it never replaces anything at a prompt path. A
+prompt that is still missing or cannot be read, or a runtime prompt that no
+longer renders, fails only its task. Edits to `.ultrafuzz/prompts/**` apply to
+new runs. See
 [Change a prompt of a running campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 A run that ends `failed` with no failed durable node was stopped by something

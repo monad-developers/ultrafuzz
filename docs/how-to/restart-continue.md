@@ -116,14 +116,26 @@ fails the task.
   `.ultrafuzz/runs/<run-id>/smithers/tasks.json` names: the task's
   `promptTemplatePath`, or, for the generated children of a group that has not
   expanded, the group's `templatePath` under `dynamic_groups`. A copy is
-  rendered when the group expands; after that, edit the rendered files.
+  rendered when the group expands; after that, edit the rendered files. A copy
+  is named by the digest of its launch text and shared by every task that
+  launched with the same text, such as the loop and model attempts of one node,
+  so an edit to it reaches each of them that has not rendered yet.
+- When `resume --retry-failed` reruns the source of a dynamic group, it
+  withdraws the group's generated children and the rendered prompts that wait
+  on the group, and those prompts render again from their template copies. To
+  keep an edit across such a retry, make it in the template copy as well.
 - Change the task text and keep the output-contract block, the
   `Validate against:`, `Validation command:` and `Contract validation command:`
   lines. The agent needs them, and they are checked only when a prompt is
   rendered, not when you edit it.
 - A running attempt keeps the prompt it started with; the edit reaches the
   task's next attempt. To rerun a finished task with an edited prompt, use
-  `resume --reset-node node:<attempt-id>`.
+  `resume --reset-node node:<attempt-id>`. This reset, like `--retry-failed`,
+  restarts the task's attempt numbers in the workflow engine, and each rerun
+  attempt replaces the engine's record of the earlier attempt with the same
+  number, including the prompt that attempt received. Run `ultrafuzz status`
+  before the reset so that `attempts.jsonl` records the finished attempt, and
+  keep a copy of the prompt file if you need to know what it received.
 - A deleted static prompt is restored from its launch copy in
   `prompt-snapshots/` before the next engine starts, so it comes back without
   your edit. A deleted runtime prompt is rendered again from its template copy.
@@ -133,13 +145,17 @@ fails the task.
   the file and run `resume --retry-failed`.
 
 For a run launched by a release before this one, edit prompts only while the
-run is stopped (`pause` it first), then resume it with this release. Until
-then, its original engine still reads sealed copies of static prompts, so a
-static edit is lost, and still compares runtime prompts, so a runtime edit stops
-the run. `replay` and `fork` of such a run keep running its launch snapshot, and
-so behave the same way. That engine has also removed the prompt file of every
-static task it started: copy the launch copy that `plan.json` names for the
-attempt (`rendered_prompts[].rendered_prompt_snapshot_path`) to the attempt's
+run is stopped (`pause` it first), then resume it with this release, using
+`resume --refresh-controller`. Until then, its original engine still reads
+sealed copies of static prompts, so a static edit is lost, and still compares
+runtime prompts, so a runtime edit stops the run. A plain `resume` continues
+the run's launch workflow, which stops the whole run, instead of one task, when
+a runtime prompt no longer renders; with `--refresh-controller` the run
+continues on this release's workflow instead. `replay` and `fork` of such a run
+keep running its launch snapshot, and so behave like its original engine. That
+engine has also removed the prompt file of every static task it started: copy
+the launch copy that `plan.json` names for the attempt
+(`rendered_prompts[].rendered_prompt_snapshot_path`) to the attempt's
 `prompt.rendered.md`, then edit it.
 
 ## Replay A Linked Run
