@@ -643,13 +643,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: loaded.diagnostics };
   }
   const previousControlState = structuredClone(readRunState(layout));
-  const forbiddenSecretValues = sensitiveEnvironmentValues(
-    input.env ?? process.env,
-    loaded.tasks.flatMap((task) => [
-      ...task.execution.agentCredentialEnv,
-      ...(task.execution.modal?.credentialEnv ?? [])
-    ])
-  );
+  const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env);
 
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],

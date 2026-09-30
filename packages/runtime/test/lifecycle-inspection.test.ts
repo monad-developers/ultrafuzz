@@ -1477,7 +1477,6 @@ test("diagnoseProject reports a missing credential for a selected OpenRouter pro
       ),
     "utf8"
   );
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const probe = async (names: readonly string[]) =>
     names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
 
@@ -1519,7 +1518,6 @@ test("diagnoseProject checks an OpenRouter profile selected only by topology", a
       ),
     "utf8"
   );
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const probe = async (names: readonly string[]) =>
     names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
 
@@ -1551,7 +1549,6 @@ test("diagnoseProject checks an OpenRouter profile selected by a runtime topolog
       ),
     "utf8"
   );
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const probe = async (names: readonly string[]) =>
     names.map((name) => ({ name, available: true, path: `/usr/bin/${name}`, version: "test" }));
 
@@ -1579,7 +1576,6 @@ test("diagnoseProject reports commands required by the active topology", async (
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
 
   const doctor = await diagnoseProject({
     projectRoot: project,
@@ -1809,7 +1805,6 @@ test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
     writeSmallTopology(project, "recon");
-    writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
     const executableDir = searchPath === "" ? project : path.join(project, searchPath);
     fs.mkdirSync(executableDir, { recursive: true });
     const executable = path.join(executableDir, "recon");
@@ -1855,9 +1850,9 @@ test("diagnoseProject never executes a target-local required-command shim", asyn
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project, "recon");
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const executable = path.join(project, ".smithers", "node_modules", ".bin", "recon");
   const marker = path.join(project, "target-recon-ran");
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
   fs.writeFileSync(executable, `#!/bin/sh\nprintf hostile > ${shellQuote(marker)}\necho recon test\n`, "utf8");
   fs.chmodSync(executable, 0o755);
 
@@ -2047,7 +2042,6 @@ test("installation inspection refuses a missing, mismatched or retargeted runner
 
 test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
   const { project, env } = projectWithFakeRunner();
-  writeFakeInstalledEngine(project, { version: SMITHERS_VERSION });
   const failingBin = path.join(project, "offline-bin");
   fs.mkdirSync(failingBin, { recursive: true });
   const npm = path.join(failingBin, "npm");
