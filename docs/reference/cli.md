@@ -382,15 +382,15 @@ Restart long-lived Ultrafuzz processes, such as the dashboard or
 once that directory is gone their engine commands fail with
 `restart this Ultrafuzz process`.
 
-Prompt files are used as they are. Every task of a resumed run, with or without
-`--refresh-controller`, `--retry-failed` or `--reset-node`, and of a `replay` or
-`fork`, receives the run's own `artifacts/<attempt-id>/prompt.rendered.md`, so
-an edit to that file reaches the task's next attempt. Before any of these
-commands starts an engine, it restores a missing static prompt from its launch
-copy in `prompt-snapshots/`; it never replaces anything at a prompt path. A
-prompt that is still missing or cannot be read, or a runtime prompt that no
-longer renders, fails only its task. Edits to `.ultrafuzz/prompts/**` apply to
-new runs. See
+Every task of a resumed run, with or without `--refresh-controller`,
+`--retry-failed` or `--reset-node`, and of a `replay` or `fork`, receives the
+run's own `artifacts/<attempt-id>/prompt.rendered.md`. Unless
+`run.refresh_prompts_on_resume = false`, `resume` first renders that file again
+from the project's current prompts for every task that has not finished;
+`replay` and `fork` never do. Before any of these commands starts an engine, it
+restores a missing static prompt from its launch copy in `prompt-snapshots/`,
+never over an existing file. A prompt that is still missing or cannot be read,
+or a runtime prompt that no longer renders, fails only its task. See
 [Change a prompt of a running campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 A run that ends `failed` with no failed durable node was stopped by something

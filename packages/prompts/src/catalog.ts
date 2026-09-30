@@ -74,7 +74,7 @@ export function loadPromptCatalog(options: LoadPromptCatalogOptions = {}): Promp
         if (previousProjectEntry?.source === "project") {
           throw new PromptError(
             "duplicate-prompt-id",
-            `duplicate project prompt id \`${entry.id}\` at ${entry.relativePath}`
+            `duplicate project prompt id \`${entry.id}\` at ${previousProjectEntry.relativePath} and ${entry.relativePath}`
           );
         }
       }
@@ -129,12 +129,23 @@ function parseCatalogEntry(
     validateVariables: boolean;
   }
 ): PromptCatalogEntry {
-  const document = parsePromptFrontmatter(markdown);
-  if (options.validateVariables) {
-    // Catalog loading validates syntax without topology context. Whether item-
-    // scoped variables are legal is enforced later for the concrete topology
-    // node; static nodes still reject them before launch.
-    validatePromptVariables(document.body, { allowDynamicItemVariables: true });
+  let document: ParsedPromptDocument;
+  try {
+    document = parsePromptFrontmatter(markdown);
+    if (options.validateVariables) {
+      // Catalog loading validates syntax without topology context. Whether item-
+      // scoped variables are legal is enforced later for the concrete topology
+      // node; static nodes still reject them before launch.
+      validatePromptVariables(document.body, { allowDynamicItemVariables: true });
+    }
+  } catch (error) {
+    // One bad file fails the whole catalog, so the error names it.
+    if (!(error instanceof PromptError)) throw error;
+    throw new PromptError(
+      error.code,
+      `${options.source} prompt ${options.relativePath}: ${error.message}`,
+      error.details
+    );
   }
   const fallbackId = path.basename(options.relativePath).replace(/\.(md|mdx)$/i, "");
   const id = document.frontmatter.id ?? fallbackId;

@@ -18,8 +18,8 @@ const CLI_ENTRYPOINT = fileURLToPath(new URL("../../../dist/index.js", import.me
 const MINUTE = 60_000;
 const AGENT_NODES = ["project-discovery", "summarize", "final-report"] as const;
 const INTERRUPTED_NODE = "summarize";
-// Appended to the interrupted node's prompt file before resume, as an operator's edit of a task that
-// has not finished; the stub records whether each call's prompt carries it.
+// Appended before resume to the project prompt the interrupted node and a finished node were both
+// rendered from, as an operator's edit; the stub records whether each call's prompt carries it.
 const PROMPT_EDIT_MARKER = "Operator note added before resume: keep the summary to one line.";
 
 const TOPOLOGY = `version: 2
@@ -471,21 +471,36 @@ test(
       });
       fs.rmSync(campaign.holdPath);
       // Every engine reads the attempt's own prompt file, and the attempt reset keeps it, so the file
-      // survives two engines that ran the node, and an edit to it reaches the resumed attempt.
-      const promptPath = path.join(
-        campaign.project,
-        ".ultrafuzz",
-        "runs",
-        runId,
-        "artifacts",
-        INTERRUPTED_NODE,
-        "prompt.rendered.md"
+      // survives two engines that ran the node. The operator then edits the project prompt that
+      // project-discovery, which finished, and the interrupted node were both rendered from.
+      const runRoot = path.join(campaign.project, ".ultrafuzz", "runs", runId);
+      const promptFile = (node: string): string => path.join(runRoot, "artifacts", node, "prompt.rendered.md");
+      assert.equal(
+        fs.existsSync(promptFile(INTERRUPTED_NODE)),
+        true,
+        `${promptFile(INTERRUPTED_NODE)} did not survive the interrupted attempts`
       );
-      assert.equal(fs.existsSync(promptPath), true, `${promptPath} did not survive the interrupted attempts`);
-      fs.appendFileSync(promptPath, `\n${PROMPT_EDIT_MARKER}\n`);
+      const finishedPrompt = fs.readFileSync(promptFile("project-discovery"), "utf8");
+      fs.appendFileSync(
+        path.join(campaign.project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+        `\n${PROMPT_EDIT_MARKER}\n`
+      );
       const resumed = await ultrafuzz<{ submitted: boolean }>(campaign, ["resume", runId], 15 * MINUTE);
       mark("resume submitted");
       assert.equal(resumed.submitted, true);
+      // Resume applied the edit to the unfinished node only; the finished node's file stays the record
+      // of the prompt it ran with, and prompt-history/ keeps the file the refresh replaced.
+      assert.ok(fs.readFileSync(promptFile(INTERRUPTED_NODE), "utf8").includes(PROMPT_EDIT_MARKER));
+      assert.equal(fs.readFileSync(promptFile("project-discovery"), "utf8"), finishedPrompt);
+      const [entry, ...others] = fs.readdirSync(path.join(runRoot, "prompt-history"));
+      assert.ok(entry !== undefined && others.length === 0);
+      const refresh = JSON.parse(
+        fs.readFileSync(path.join(runRoot, "prompt-history", entry, "refresh.json"), "utf8")
+      ) as { files: Array<{ attempt_id?: string }> };
+      assert.deepEqual(
+        refresh.files.map((file) => file.attempt_id),
+        [INTERRUPTED_NODE]
+      );
 
       // `events` reads the engine's event log without synchronizing the run, so it is the cheaper poll.
       const ended = ["RunFinished", "RunFailed", "RunCancelled"];

@@ -51,6 +51,7 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun } from "./plan-run.js";
+import { refreshRunPrompts } from "./prompt-refresh.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import {
@@ -652,6 +653,10 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       force: input.force,
       retryFailed: input.retryFailed,
       priorInspection: refreshInspection,
+      // Applies the project's current prompts to the unfinished tasks; never fails the resume.
+      beforeContinuation: async (context) => {
+        diagnostics.push(...(await refreshRunPrompts({ projectRoot, layout, config, context })));
+      },
       relaunchPaths: {
         runRoot: layout.root,
         logsDir: path.join(smithersRoot, "logs")

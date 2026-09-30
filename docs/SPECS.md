@@ -277,10 +277,17 @@ A static prompt MUST be rendered before workflow launch. A prompt that waits on
 a dynamic group MUST be rendered when the group expands, from the run's own
 template copy. Each rendered prompt MUST be stored as its attempt's
 `artifacts/<attempt-id>/prompt.rendered.md`, and that file is the prompt every
-later attempt of the task receives: it MUST be rendered only while it is
-missing and MUST NOT be re-rendered, compared, or sealed afterwards. A prompt
-that cannot be rendered at runtime MUST fail only its own task. Unknown
-template variables MUST fail validation.
+later attempt of the task receives: it MUST NOT be compared or sealed, and it
+MUST be rendered again only while it is missing or when `resume` applies the
+project's current prompts. `resume` MUST apply them, unless
+`run.refresh_prompts_on_resume` is `false` in the project's current
+`ultrafuzz.toml`, to every task that has not finished and to the template
+copies a later render reads, after the checks that can refuse the resume and
+before it resets or submits anything, and MUST NOT fail because of it: a prompt
+that does not validate or render keeps its tasks' files, and a topology that
+differs from the one the run launched with skips the refresh. A prompt that
+cannot be rendered at runtime MUST fail only its own task. Unknown template
+variables MUST fail validation.
 
 The prompt variable set includes:
 
@@ -480,6 +487,7 @@ Before or at launch, each run MUST persist:
 - `plan.json`
 - `trusted-cli.json`, a run-owned trusted launcher, and content-addressed trusted CLI closures for schema-backed producers
 - launch copies of static rendered prompts under `prompt-snapshots/`, used only to restore a missing static prompt
+- the prompt files `resume` replaced when it applied the project's current prompts, with a `refresh.json` record, under `prompt-history/`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
 - workspace metadata under `workspaces/`

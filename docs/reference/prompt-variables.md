@@ -18,8 +18,9 @@ prompt to its attempt's artifact directory as:
 prompt.rendered.md
 ```
 
-That file is the prompt every later attempt of the task receives; it is not
-rendered again. See
+That file is the prompt every later attempt of the task receives. It is
+rendered again only while it is missing, or when `resume` applies the project's
+current prompts to a task that has not finished. See
 [Change A Prompt Of A Running Campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 Unknown template variables fail validation.

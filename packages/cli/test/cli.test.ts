@@ -2014,6 +2014,11 @@ test("resume of an already-active run says no controller was started instead of 
     resumed.stdout,
     /^Run already active: ultrafuzz-resume-already-active; no new controller was started\./mu
   );
+  // An attach applies no prompt edit, and says so.
+  assert.match(
+    resumed.stdout,
+    /This resume applied none of the project's current prompts; only a resume that starts a controller does\.$/mu
+  );
   assert.doesNotMatch(resumed.stdout, /Submitted/u);
 });
 

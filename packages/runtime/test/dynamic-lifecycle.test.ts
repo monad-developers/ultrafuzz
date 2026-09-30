@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
+import { setRefreshPromptsOnResume } from "./prompt-refresh-config.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -40,6 +41,7 @@ import {
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { verifySealedTaskManifestSnapshot, verifyWorkflowControlSnapshot } from "../src/workflow-integrity.js";
+import type { RuntimeDiagnostic } from "../src/types.js";
 
 const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
   schema_version: "ultrafuzz.data-governance-policy.v1",
@@ -108,7 +110,8 @@ function writePrompt(project: string, relativePath: string, id: string, body: st
   fs.writeFileSync(promptPath, `---\nid: ${id}\ndisplay_name: ${id}\n---\n\n${body}\n`, "utf8");
 }
 
-function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup = false): void {
+/** `twinJoin` adds a second join whose prompt launches with the join's text, so both share one template copy. */
+function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup = false, twinJoin = false): void {
   initProject({ projectRoot: project, force: true });
   // The fake runner never heartbeats, so a sync that runs one lease after launch parks every open node
   // as a lost controller. Slow CI setup alone can take longer than the default 30 s lease.
@@ -124,6 +127,14 @@ function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup =
     "Your /goal is {{item.goal_prompt}} using threat model threat {{liquidation:overdue}}.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
   );
   writePrompt(project, "dynamic/join.md", "dynamic-join", "Summarize completed work in {{artifact_path}}/report.md.");
+  if (twinJoin) {
+    writePrompt(
+      project,
+      "dynamic/twin-join.md",
+      "dynamic-twin-join",
+      "Summarize completed work in {{artifact_path}}/report.md."
+    );
+  }
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
@@ -164,10 +175,22 @@ ${modelFanout ? "    model_profiles: [default, claude]\n" : ""}    dynamic:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
-  - id: __finish__
+${
+  twinJoin
+    ? `  - id: twin-join
+    kind: agentic
+    prompt: dynamic/twin-join.md
+    depends_on: [fanout]
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+`
+    : ""
+}  - id: __finish__
     kind: meta
     role: finish
-    depends_on: [strict-join]
+    depends_on: [strict-join${twinJoin ? ", twin-join" : ""}]
 `,
     "utf8"
   );
@@ -292,12 +315,13 @@ async function createDynamicFixture(input: {
   runId: string;
   goals?: Array<Record<string, unknown>>;
   modelFanout?: boolean;
+  twinJoin?: boolean;
   /** Runs after launch and before the fixture's render expands the group. */
   beforeExpansion?: (project: string, groups: readonly CompiledSmithersDynamicGroup[]) => void;
 }): Promise<DynamicFixture> {
   const project = tempProject();
   const emptyGroup = input.goals !== undefined && input.goals.length === 0;
-  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup);
+  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup, input.twinJoin ?? false);
   const lifecycle = lifecycleEnvironment(project);
   const started = await startRun({
     projectRoot: project,
@@ -783,10 +807,38 @@ async function assertSynchronizableRun(fixture: DynamicFixture): Promise<void> {
   }
 }
 
+/** The group's template copy, as the task manifest names it relative to the project root. */
+function groupTemplate(fixture: DynamicFixture): string {
+  const taskDocument = JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"), "utf8")) as {
+    dynamic_groups: CompiledSmithersDynamicGroup[];
+  };
+  const [group] = taskDocument.dynamic_groups;
+  assert.ok(group);
+  return group.templatePath;
+}
+
+/** Resumes the fixture and returns the prompt refresh's diagnostics. */
+async function resumePrompts(fixture: DynamicFixture): Promise<RuntimeDiagnostic[]> {
+  const resumed = await resumeRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+}
+
+/** The run-relative paths a `prompt-history/` entry's refresh.json lists, sorted. */
+function refreshedPaths(entry: string): string[] {
+  const record = JSON.parse(fs.readFileSync(path.join(entry, "refresh.json"), "utf8")) as {
+    files: Array<{ path: string }>;
+  };
+  return record.files.map((file) => file.path).sort();
+}
+
 test("a hand-edited runtime prompt keeps a launched dynamic run synchronizable and resumable", async () => {
   const fixture = await createDynamicFixture({ runId: "dynamic-prompt-edit" });
   const planner = plannerSuccessEvidence(fixture);
   setLifecycle(fixture, planner.steps, planner.events);
+  // A hand edit of a run's prompt file survives resume only with the prompt refresh off; otherwise
+  // resume renders the project's current prompt over it.
+  setRefreshPromptsOnResume(fixture.project, false);
   // An operator's edit of tasks that have not run, and what an upgrade that changed a renderer or a
   // projection leaves (#1176, #1195): the join, like the stock final report, renders only after the
   // group expands.
@@ -874,6 +926,80 @@ test("a runtime prompt that cannot be rendered fails only its task and recovers 
   assert.deepEqual(recovered.promptRenderFailures, []);
   assert.match(fs.readFileSync(child.renderedPromptPath, "utf8"), /find any vulnerability affecting/u);
   assert.equal(fs.existsSync(fixture.joinTask.renderedPromptPath), true);
+  setLifecycle(fixture, planner.steps, planner.events);
+  await assertSynchronizableRun(fixture);
+});
+
+test("resume applies edited project prompts to unfinished dynamic children and to prompts not rendered yet", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-prompt-refresh" });
+  const planner = plannerSuccessEvidence(fixture);
+  const child = fixture.generatedTasks[0];
+  assert.ok(child?.renderedPromptPath && fixture.joinTask.renderedPromptPath && fixture.joinTask.promptTemplatePath);
+  assert.ok(fixture.plannerTask.renderedPromptPath);
+  const groupTemplatePath = path.resolve(fixture.project, groupTemplate(fixture));
+  const joinTemplatePath = path.resolve(fixture.project, fixture.joinTask.promptTemplatePath);
+  const launched = new Map(
+    [child.renderedPromptPath, fixture.joinTask.renderedPromptPath, groupTemplatePath, joinTemplatePath].map(
+      (filePath) => [filePath, fs.readFileSync(filePath, "utf8")] as const
+    )
+  );
+  const plannerPrompt = fs.readFileSync(fixture.plannerTask.renderedPromptPath, "utf8");
+  // The operator edits the project's prompts of the group's children, of the join, and of the planner,
+  // which has finished.
+  const notes = {
+    "dynamic/worker.md": "Operator note: check the grace period first.",
+    "dynamic/join.md": "Operator note: list the goals without findings too.",
+    "dynamic/planner.md": "Operator note: plan one goal per threat."
+  };
+  for (const [prompt, note] of Object.entries(notes)) {
+    fs.appendFileSync(path.join(fixture.project, ".ultrafuzz", "prompts", prompt), `\n${note}\n`, "utf8");
+  }
+
+  setLifecycle(fixture, planner.steps, planner.events, { status: "failed", state: "failed" });
+  const prompts = await resumePrompts(fixture);
+  assert.deepEqual(
+    prompts.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(prompts)
+  );
+
+  // The published child and join prompts carry the edits. While they exist, no render reads the
+  // template copies, so the copies keep their launch text.
+  assert.ok(fs.readFileSync(child.renderedPromptPath, "utf8").includes(notes["dynamic/worker.md"]));
+  assert.ok(fs.readFileSync(child.renderedPromptPath, "utf8").includes("find any vulnerability affecting"));
+  assert.ok(fs.readFileSync(fixture.joinTask.renderedPromptPath, "utf8").includes(notes["dynamic/join.md"]));
+  for (const templatePath of [groupTemplatePath, joinTemplatePath]) {
+    assert.equal(fs.readFileSync(templatePath, "utf8"), launched.get(templatePath), templatePath);
+  }
+  // The planner finished, so its prompt file stays the record of the prompt it ran with.
+  assert.equal(fs.readFileSync(fixture.plannerTask.renderedPromptPath, "utf8"), plannerPrompt);
+  // Each replaced file is archived with its launch bytes, and refresh.json lists both.
+  const entryPath = prompts[0]?.path;
+  assert.ok(entryPath);
+  const entry = path.join(fixture.runRoot, entryPath);
+  const relative = (filePath: string): string => path.relative(fixture.runRoot, filePath).split(path.sep).join("/");
+  const replaced = [child.renderedPromptPath, fixture.joinTask.renderedPromptPath];
+  assert.deepEqual(refreshedPaths(entry), replaced.map(relative).sort());
+  for (const filePath of replaced) {
+    assert.equal(fs.readFileSync(path.join(entry, relative(filePath)), "utf8"), launched.get(filePath));
+  }
+
+  // A prompt that is not rendered yet is rendered from its template copy, so a resume refreshes the copy
+  // while such a prompt is missing, and the next render renders the child from it.
+  const refreshedChild = fs.readFileSync(child.renderedPromptPath, "utf8");
+  fs.rmSync(child.renderedPromptPath);
+  const copyRefresh = await resumePrompts(fixture);
+  assert.deepEqual(
+    copyRefresh.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(copyRefresh)
+  );
+  assert.match(copyRefresh[0]?.message ?? "", /to 1 template copy that later prompts are rendered from/u);
+  assert.ok(fs.readFileSync(groupTemplatePath, "utf8").includes(notes["dynamic/worker.md"]));
+  assert.equal(fs.readFileSync(joinTemplatePath, "utf8"), launched.get(joinTemplatePath));
+  const rendered = replayResumedWorkflowRender(fixture);
+  assert.deepEqual(rendered.promptRenderFailures, []);
+  assert.equal(fs.readFileSync(child.renderedPromptPath, "utf8"), refreshedChild);
   setLifecycle(fixture, planner.steps, planner.events);
   await assertSynchronizableRun(fixture);
 });
@@ -2084,4 +2210,162 @@ test("a controller refresh by a rebuilt validator keeps the run's recorded outpu
   const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
   assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
   assert.equal(readState(fixture).nodes[generated.attemptId]?.status, "succeeded");
+});
+
+test("a source retry withdraws its generation's prompts as they ran and refreshes the prompts it reruns", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-prompt-refresh-retry" });
+  const planner = plannerSuccessEvidence(fixture);
+  const [child] = fixture.generatedTasks;
+  assert.ok(child?.renderedPromptPath && fixture.joinTask.renderedPromptPath && fixture.joinTask.promptTemplatePath);
+  assert.ok(fixture.plannerTask.renderedPromptPath);
+  for (const task of fixture.generatedTasks) writeFinding(task);
+  const generationSteps: LifecycleStep[] = fixture.generatedTasks.map((task) => ({
+    id: task.smithersNodeId,
+    state: "finished",
+    attempt: 1
+  }));
+  const generationEvents: LifecycleEvent[] = [
+    ...planner.events,
+    ...fixture.generatedTasks.flatMap((task) => [
+      { type: "NodeStarted", nodeId: task.smithersNodeId, attempt: 1 },
+      { type: "NodeFinished", nodeId: task.smithersNodeId, attempt: 1 }
+    ])
+  ];
+  setLifecycle(fixture, [...planner.steps, ...generationSteps], generationEvents);
+  const synced = await syncRun({ projectRoot: fixture.project, runId: fixture.runId, env: fixture.env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  const groupTemplatePath = path.resolve(fixture.project, groupTemplate(fixture));
+  const joinTemplatePath = path.resolve(fixture.project, fixture.joinTask.promptTemplatePath);
+  const launched = new Map(
+    [
+      child.renderedPromptPath,
+      fixture.joinTask.renderedPromptPath,
+      fixture.plannerTask.renderedPromptPath,
+      groupTemplatePath,
+      joinTemplatePath
+    ].map((filePath) => [filePath, fs.readFileSync(filePath, "utf8")] as const)
+  );
+  const notes = {
+    "dynamic/worker.md": "Operator note: check the grace period first.",
+    "dynamic/join.md": "Operator note: list the goals without findings too.",
+    "dynamic/planner.md": "Operator note: plan one goal per threat."
+  };
+  for (const [prompt, note] of Object.entries(notes)) {
+    fs.appendFileSync(path.join(fixture.project, ".ultrafuzz", "prompts", prompt), `\n${note}\n`, "utf8");
+  }
+  // The producer's verifier fails after its generation ran, and the operator retries it.
+  setLifecycle(
+    fixture,
+    [
+      ...planner.steps,
+      { id: fixture.plannerTask.verifierSmithersNodeId, state: "failed", attempt: 1 },
+      ...generationSteps
+    ],
+    generationEvents,
+    { status: "failed", state: "failed" }
+  );
+  const retry = () =>
+    resumeRun({ projectRoot: fixture.project, runId: fixture.runId, force: true, retryFailed: true, env: fixture.env });
+
+  // Unrecognized retry state refuses the withdrawal before anything is reset, and the refresh runs
+  // only after that check, so the refused resume changes no prompt file.
+  const stray = path.join(fixture.runRoot, "dynamic-expansions", "stray.txt");
+  fs.writeFileSync(stray, "left behind\n", "utf8");
+  const refused = await retry();
+  assert.equal(refused.ok, false);
+  assert.match(JSON.stringify(refused.diagnostics), /unrecognized retry state/u);
+  for (const [filePath, bytes] of launched) assert.equal(fs.readFileSync(filePath, "utf8"), bytes, filePath);
+  assert.equal(fs.existsSync(path.join(fixture.runRoot, "prompt-history")), false);
+  fs.rmSync(stray);
+
+  const resumed = await retry();
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const prompts = resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  assert.deepEqual(
+    prompts.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(prompts)
+  );
+  // The withdrawn generation's prompts move to the history as they are, the record of what its
+  // attempts received.
+  const historyRoot = path.join(fixture.runRoot, "dynamic-expansion-history");
+  const [archiveName] = fs.readdirSync(historyRoot);
+  assert.ok(archiveName);
+  for (const filePath of [child.renderedPromptPath, fixture.joinTask.renderedPromptPath]) {
+    const archived = path.join(historyRoot, archiveName, path.relative(fixture.runRoot, filePath));
+    assert.equal(fs.readFileSync(archived, "utf8"), launched.get(filePath), archived);
+  }
+  // The retried producer reruns with its edited prompt, and the group and the join render again from
+  // their refreshed template copies.
+  assert.ok(fs.readFileSync(fixture.plannerTask.renderedPromptPath, "utf8").includes(notes["dynamic/planner.md"]));
+  assert.ok(fs.readFileSync(groupTemplatePath, "utf8").includes(notes["dynamic/worker.md"]));
+  assert.ok(fs.readFileSync(joinTemplatePath, "utf8").includes(notes["dynamic/join.md"]));
+  const relative = (filePath: string): string => path.relative(fixture.runRoot, filePath).split(path.sep).join("/");
+  assert.deepEqual(
+    refreshedPaths(path.join(fixture.runRoot, prompts[0]?.path ?? "")),
+    [fixture.plannerTask.renderedPromptPath, groupTemplatePath, joinTemplatePath].map(relative).sort()
+  );
+  const regenerated = republishRetriedExpansion(fixture);
+  assert.ok(regenerated.length > 0);
+  for (const task of regenerated) {
+    assert.ok(task.renderedPromptPath);
+    assert.ok(fs.readFileSync(task.renderedPromptPath, "utf8").includes(notes["dynamic/worker.md"]), task.attemptId);
+  }
+  assert.ok(fs.readFileSync(fixture.joinTask.renderedPromptPath, "utf8").includes(notes["dynamic/join.md"]));
+});
+
+test("prompts that share a template copy apply their own edits until a later render reads the copy", async () => {
+  const fixture = await createDynamicFixture({ runId: "dynamic-prompt-refresh-shared", twinJoin: true });
+  const planner = plannerSuccessEvidence(fixture);
+  const tasks = (
+    JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"), "utf8")) as {
+      tasks: CompiledSmithersTask[];
+    }
+  ).tasks;
+  const twin = tasks.find((task) => task.concreteNodeId === "twin-join");
+  assert.ok(twin?.renderedPromptPath && fixture.joinTask.renderedPromptPath && fixture.joinTask.promptTemplatePath);
+  // Both joins launched with the same text, so they render from one template copy.
+  assert.equal(twin.promptTemplatePath, fixture.joinTask.promptTemplatePath);
+  const copyPath = path.resolve(fixture.project, fixture.joinTask.promptTemplatePath);
+  const launchedCopy = fs.readFileSync(copyPath, "utf8");
+  const notes = {
+    "dynamic/join.md": "Operator note: list the goals without findings too.",
+    "dynamic/twin-join.md": "Operator note: rank the goals by severity."
+  };
+  for (const [prompt, note] of Object.entries(notes)) {
+    fs.appendFileSync(path.join(fixture.project, ".ultrafuzz", "prompts", prompt), `\n${note}\n`, "utf8");
+  }
+  setLifecycle(fixture, planner.steps, planner.events, { status: "failed", state: "failed" });
+
+  // Both joins' prompts are published, so no render reads the copy: each takes its own edit.
+  const applied = await resumePrompts(fixture);
+  assert.deepEqual(
+    applied.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(applied)
+  );
+  assert.ok(fs.readFileSync(fixture.joinTask.renderedPromptPath, "utf8").includes(notes["dynamic/join.md"]));
+  assert.ok(fs.readFileSync(twin.renderedPromptPath, "utf8").includes(notes["dynamic/twin-join.md"]));
+  assert.equal(fs.readFileSync(copyPath, "utf8"), launchedCopy);
+
+  // With the twin's prompt missing, the next render reads the shared copy, which cannot carry both
+  // edits, so neither prompt is applied and every file rendered from them keeps its bytes.
+  const joinPrompt = fs.readFileSync(fixture.joinTask.renderedPromptPath, "utf8");
+  fs.rmSync(twin.renderedPromptPath);
+  const rejected = await resumePrompts(fixture);
+  assert.deepEqual(
+    rejected.map((diagnostic) => [diagnostic.code, diagnostic.path]),
+    [
+      ["PROMPT_REFRESH_REJECTED", ".ultrafuzz/prompts/dynamic/join.md"],
+      ["PROMPT_REFRESH_REJECTED", ".ultrafuzz/prompts/dynamic/twin-join.md"]
+    ]
+  );
+  for (const diagnostic of rejected) {
+    assert.match(
+      diagnostic.message,
+      /shares the template copy dynamic-prompt-templates\/[0-9a-f]{64}\.md with .*whose new text differs/u
+    );
+  }
+  assert.equal(fs.readFileSync(copyPath, "utf8"), launchedCopy);
+  assert.equal(fs.readFileSync(fixture.joinTask.renderedPromptPath, "utf8"), joinPrompt);
 });

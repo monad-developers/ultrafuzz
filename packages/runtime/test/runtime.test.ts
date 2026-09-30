@@ -83,6 +83,7 @@ import {
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 import { planDynamicExpansion } from "../src/dynamic-expansion.js";
+import { materializeDynamicRuntime } from "../src/dynamic-runtime.js";
 
 import {
   forkRun as runtimeForkRun,
@@ -108,7 +109,9 @@ import {
   assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
   runSmithersInspectionCommand,
-  runSmithersLifecycleCommand
+  runSmithersLifecycleCommand,
+  type CompiledSmithersDynamicGroup,
+  type CompiledSmithersTask
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -131,6 +134,7 @@ import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validat
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import { writeLocalResolvedConfig } from "./local-resolved-config.js";
 import { underGroupWritableUmask } from "./process-umask.js";
+import { setRefreshPromptsOnResume } from "./prompt-refresh-config.js";
 import {
   shippedReferenceCatalog,
   writeShippedDocumentReferenceCaches,
@@ -11271,7 +11275,9 @@ test("--refresh-controller keeps a hand-edited static prompt", async () => {
   const planned = plan.rendered_prompts[0];
   assert.ok(planned);
   // The operator edits the prompt of a task that has not run. The launch copy is edited too: it is
-  // never read while the run's file exists, so it can neither revert nor refuse the edit.
+  // never read while the run's file exists, so it can neither revert nor refuse the edit. A hand edit
+  // survives resume only with the prompt refresh off; otherwise resume renders the project's prompt.
+  setRefreshPromptsOnResume(project, false);
   const edited = `${fs.readFileSync(planned.rendered_prompt_path, "utf8")}\nOperator note: map the entry points first.\n`;
   fs.writeFileSync(planned.rendered_prompt_path, edited, "utf8");
   fs.appendFileSync(path.join(runRoot, planned.rendered_prompt_snapshot_path), "\nAn edited launch copy.\n");
@@ -15540,7 +15546,12 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.ok(renderedPrompt.rendered_prompt_path);
   const mutableWorkflow = path.join(project, ...(metadata.workflow?.path ?? "").split("/"));
   fs.writeFileSync(mutableWorkflow, "export default function HostileReplacement() {}\n", "utf8");
-  fs.writeFileSync(path.join(project, "ultrafuzz.toml"), '[project]\nname = "hostile-replacement"\n', "utf8");
+  // The refresh is off, so resume leaves the run's own prompt file as it is.
+  fs.writeFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    '[project]\nname = "hostile-replacement"\n\n[run]\nrefresh_prompts_on_resume = false\n',
+    "utf8"
+  );
   fs.writeFileSync(path.join(project, ".smithers", "agents", "codex.ts"), "export const hostile = true;\n", "utf8");
   fs.writeFileSync(path.join(project, ".smithers", "package.json"), "{}\n", "utf8");
   fs.writeFileSync(renderedPrompt.rendered_prompt_path, "HOSTILE_MUTABLE_PROMPT\n", "utf8");
@@ -15597,7 +15608,12 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.match(consumed, /HostileReplacement/u);
   assert.match(consumed, /export const hostile/u);
   assert.doesNotMatch(consumed, /^workflow=\/proc\//mu);
-  // Resume restores only a missing prompt, so the edited bytes are what the resumed task reads.
+  // With the refresh off, resume restores only a missing prompt, so the edited bytes are what the
+  // resumed task reads.
+  assert.deepEqual(
+    resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts"),
+    []
+  );
   assert.equal(fs.readFileSync(renderedPrompt.rendered_prompt_path, "utf8"), "HOSTILE_MUTABLE_PROMPT\n");
 });
 
@@ -27016,7 +27032,9 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
   const expectedPrompt = fs.readFileSync(snapshotPath);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
-  // An operator's edit of the failed task's prompt: restore never overwrites a prompt that exists.
+  // An operator's edit of the failed task's prompt: restore never overwrites a prompt that exists. The
+  // hand edit survives resume only with the prompt refresh off.
+  setRefreshPromptsOnResume(project, false);
   const editedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows");
   assert.ok(editedPrompt !== undefined, "plan must record the failed node prompt");
   fs.appendFileSync(editedPrompt.rendered_prompt_path, "\nOperator note: follow the withdrawal flow.\n", "utf8");
@@ -27040,6 +27058,465 @@ test("ordinary resume restores missing static presentation prompts", async () =>
     /up .*ultrafuzz-ordinary-resume-prompt-run\.tsx --resume ultrafuzz-ordinary-resume-prompt-run --run-id ultrafuzz-ordinary-resume-prompt-run --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
 });
+
+const PROMPT_REFRESH_NOTE = "Operator note: start from the withdrawal flow.";
+
+function appendProjectPrompt(project: string, prompt: string, text: string): void {
+  fs.appendFileSync(path.join(project, ".ultrafuzz", "prompts", prompt), `\n${text}\n`, "utf8");
+}
+
+/** A launched `writeOutOfOrderTopology` run, `project-discovery` before `actors-flows`, and its prompt files. */
+async function launchPromptRefreshRun(
+  runId: string,
+  steps: Array<{ id: string; state: TestSmithersNodeState; attempt?: number }>,
+  run: { status: TestSmithersRunStatus; state: TestSmithersRunState } = { status: "failed", state: "failed" }
+) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, ...run, steps })
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  const promptPath = (attemptId: string): string => path.join(runRoot, "artifacts", attemptId, "prompt.rendered.md");
+  const prompt = (attemptId: string): string => fs.readFileSync(promptPath(attemptId), "utf8");
+  return {
+    project,
+    runId,
+    runRoot,
+    env,
+    prompt,
+    launchPrompts: { discovery: prompt("project-discovery"), actors: prompt("actors-flows") },
+    resume: async (options: { resetNode?: string; retryFailed?: boolean } = {}) => {
+      const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+      assert.equal(resumed.value?.submitted, true);
+      return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+    }
+  };
+}
+
+test("resume applies an edited project prompt to a task that has not run and keeps a finished task's prompt", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-static", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  // With nothing edited, resume renders the prompts the run already has, so it replaces and records nothing.
+  assert.deepEqual(await run.resume(), []);
+  assert.equal(fs.existsSync(path.join(run.runRoot, "prompt-history")), false);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+
+  // The operator edits the project's prompt of each task, then resumes.
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  const diagnostics = await run.resume();
+
+  const refreshed = diagnostics.find((diagnostic) => diagnostic.code === "PROMPTS_REFRESHED");
+  assert.ok(refreshed?.path, JSON.stringify(diagnostics));
+  assert.equal(refreshed.severity, "info");
+  assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
+  // actors-flows has not run, so it receives the edited prompt, rendered as launch rendered it.
+  const actors = run.prompt("actors-flows");
+  assert.ok(actors.includes(PROMPT_REFRESH_NOTE), actors);
+  assert.ok(actors.includes("## Ultrafuzz Output Contract"), actors);
+  // project-discovery finished: its prompt file stays the record of the prompt it ran with.
+  assert.equal(run.prompt("project-discovery"), run.launchPrompts.discovery);
+  // The replaced file is archived under prompt-history/, and refresh.json lists what changed.
+  const entry = path.join(run.runRoot, refreshed.path);
+  assert.equal(
+    fs.readFileSync(path.join(entry, "artifacts", "actors-flows", "prompt.rendered.md"), "utf8"),
+    run.launchPrompts.actors
+  );
+  const sha256 = (text: string): string => crypto.createHash("sha256").update(text).digest("hex");
+  const { refreshed_at: refreshedAt, ...record } = JSON.parse(
+    fs.readFileSync(path.join(entry, "refresh.json"), "utf8")
+  ) as Record<string, unknown>;
+  assert.equal(typeof refreshedAt, "string");
+  assert.deepEqual(record, {
+    schema_version: "ultrafuzz.prompt-refresh.v1",
+    files: [
+      {
+        path: "artifacts/actors-flows/prompt.rendered.md",
+        attempt_id: "actors-flows",
+        prompt: ".ultrafuzz/prompts/setup/actors-flows.md",
+        previous_sha256: sha256(run.launchPrompts.actors),
+        sha256: sha256(actors)
+      }
+    ]
+  });
+
+  // A resume that finds the prompt already applied changes nothing more.
+  assert.deepEqual(await run.resume(), []);
+  assert.deepEqual(fs.readdirSync(path.join(run.runRoot, "prompt-history")), [path.basename(entry)]);
+});
+
+test("run.refresh_prompts_on_resume = false keeps the run's prompts until it is turned back on", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-disabled", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // `resume` reads the key from the project's current ultrafuzz.toml, not from the run's frozen config.
+  setRefreshPromptsOnResume(run.project, false);
+  assert.deepEqual(await run.resume(), []);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  assert.equal(fs.existsSync(path.join(run.runRoot, "prompt-history")), false);
+
+  setRefreshPromptsOnResume(run.project, true);
+  const diagnostics = await run.resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("an edited prompt that does not validate keeps its tasks' prompts, and the resume and other edits go ahead", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-invalid", [
+    { id: "node:project-discovery", state: "failed", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", "Read {{not_a_prompt_variable}} first.");
+
+  const diagnostics = await run.resume();
+
+  const [rejected, ...moreRejected] = diagnostics.filter((diagnostic) => diagnostic.code === "PROMPT_REFRESH_REJECTED");
+  assert.ok(rejected !== undefined && moreRejected.length === 0, JSON.stringify(diagnostics));
+  assert.equal(rejected.severity, "warning");
+  assert.equal(rejected.path, ".ultrafuzz/prompts/setup/actors-flows.md");
+  assert.match(rejected.message, /\.ultrafuzz\/prompts\/setup\/actors-flows\.md.*not_a_prompt_variable/su);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  // Each prompt is validated on its own: the failed task's valid edit still reaches it.
+  assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.code === "PROMPTS_REFRESHED"));
+});
+
+test("an edited prompt that names an artifact authority its task was not compiled with keeps the run's prompt", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-authority", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  // The workflow authorizes only the ancestor outputs a task was compiled with, so a new authority
+  // in the prompt would name outputs its agent is not allowed to read.
+  appendProjectPrompt(
+    run.project,
+    "setup/actors-flows.md",
+    "Read {{ancestor_contract_artifact_authority:ultrafuzz/nonempty-markdown@1}} first."
+  );
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.path]),
+    [["PROMPT_REFRESH_REJECTED", ".ultrafuzz/prompts/setup/actors-flows.md"]]
+  );
+  assert.match(
+    diagnostics[0]?.message ?? "",
+    /names artifact authorities the task was not compiled with: contract ultrafuzz\/nonempty-markdown@1/u
+  );
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+});
+
+test("a topology changed since launch skips the prompt refresh with a warning", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-topology", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  const topologyPath = path.join(run.project, ".ultrafuzz", "topology.yml");
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  fs.writeFileSync(
+    topologyPath,
+    topology.replace(
+      "    prompt: setup/actors-flows.md\n",
+      "    prompt: setup/actors-flows.md\n    timeout_seconds: 1234\n"
+    ),
+    "utf8"
+  );
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
+    [["PROMPT_REFRESH_SKIPPED", "warning"]]
+  );
+  assert.match(diagnostics[0]?.message ?? "", /topology \.ultrafuzz\/topology\.yml changed since the run launched/u);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  assert.equal(fs.existsSync(path.join(run.runRoot, "prompt-history")), false);
+});
+
+test("resume --reset-node applies edited prompts to the finished task it reruns and to its dependents", async () => {
+  const run = await launchPromptRefreshRun(
+    "prompt-refresh-reset",
+    [
+      { id: "node:project-discovery", state: "finished", attempt: 1 },
+      { id: "node:actors-flows", state: "finished", attempt: 1 }
+    ],
+    { status: "finished", state: "succeeded" }
+  );
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // Both tasks finished, so a plain resume keeps both prompts.
+  assert.deepEqual(await run.resume(), []);
+  assert.equal(run.prompt("project-discovery"), run.launchPrompts.discovery);
+
+  // Resetting project-discovery reruns it and actors-flows, which depends on it.
+  const diagnostics = await run.resume({ resetNode: "node:project-discovery" });
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("resume --retry-failed applies edited prompts to the finished producer of a failed verifier and to its dependents", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-retry", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 },
+    { id: "verify:project-discovery", state: "failed", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // A plain resume reruns only the verifier, so the producer, whose agent finished, keeps its prompt.
+  assert.deepEqual(
+    (await run.resume()).map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.equal(run.prompt("project-discovery"), run.launchPrompts.discovery);
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+
+  // Retrying the failed verifier reopens its producer and every task after it.
+  const diagnostics = await run.resume({ retryFailed: true });
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.match(diagnostics[0]?.message ?? "", /1 unfinished task \(project-discovery\)/u);
+  assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
+});
+
+/**
+ * Runs `body` with XDG_CACHE_HOME at a cache seeded with every reference the shipped catalog pins. A
+ * stock launch materializes them, so without it the launch reads the host's reference cache.
+ */
+async function withShippedReferenceCache<T>(project: string, body: () => Promise<T>): Promise<T> {
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    return await body();
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+}
+
+test("resume of a stock run renders its prompts as launch did and refreshes an unexpanded group's template copy", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runId = "prompt-refresh-stock";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, status: "failed", state: "failed", steps: [] })
+  });
+  const launched = await withShippedReferenceCache(project, () => startRun({ projectRoot: project, runId, env }));
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  const resume = async () => {
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  };
+  // Nothing is edited and no engine render has republished the dynamic controls launch wrote: every
+  // prompt renders byte for byte as launch rendered it, so nothing is replaced.
+  assert.deepEqual(await resume(), []);
+  assert.equal(fs.existsSync(path.join(runRoot, "prompt-history")), false);
+
+  // Both goal groups render their children from the one template copy of this prompt when they expand.
+  appendProjectPrompt(project, "strategies/goal-hunter.mdx", PROMPT_REFRESH_NOTE);
+  const diagnostics = await resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(diagnostics)
+  );
+  const entry = diagnostics[0]?.path;
+  assert.ok(entry);
+  const record = JSON.parse(fs.readFileSync(path.join(runRoot, entry, "refresh.json"), "utf8")) as {
+    files: Array<{ path: string; attempt_id?: string; prompt: string }>;
+  };
+  assert.equal(record.files.length, 1, JSON.stringify(record.files));
+  const [copy] = record.files;
+  assert.ok(copy && copy.attempt_id === undefined && copy.path.startsWith("dynamic-prompt-templates/"));
+  assert.equal(copy.prompt, ".ultrafuzz/prompts/strategies/goal-hunter.mdx");
+  assert.ok(fs.readFileSync(path.join(runRoot, copy.path), "utf8").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("resume applies an edited stock review prompt that names artifact authorities once its groups expanded", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runId = "prompt-refresh-stock-review";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:goal-plan", state: "finished", attempt: 1 }]
+    })
+  });
+  const launched = await withShippedReferenceCache(project, () => startRun({ projectRoot: project, runId, env }));
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  // goal-plan's plan, of which the goal groups' expansion reads only these two lists.
+  const goal = {
+    id: "liquidation:overdue",
+    node_id: "dynamic:threat:liquidation:overdue",
+    goal_prompt: "find any vulnerability affecting {{liquidation:overdue}}",
+    replacements: { "liquidation:overdue": "the persisted liquidation threat model" }
+  };
+  const planPath = path.join(runRoot, "artifacts", "goal-plan", "goal-plan.json");
+  fs.mkdirSync(path.dirname(planPath), { recursive: true });
+  fs.writeFileSync(planPath, `${JSON.stringify({ threat_goals: [goal], class_goals: [] }, null, 2)}\n`, "utf8");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const controls = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks: CompiledSmithersTask[];
+    dynamic_groups: CompiledSmithersDynamicGroup[];
+  };
+  // The engine's first render after goal-plan publishes the prompts that wait on both groups.
+  const published = materializeDynamicRuntime({
+    runId,
+    projectRoot: project,
+    runRoot,
+    graphPath: path.join(runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: controls.tasks,
+    groups: controls.dynamic_groups,
+    readyGroupIds: ["threat-goals", "class-goals"]
+  });
+  assert.deepEqual(published.promptRenderFailures, []);
+  // Like dedupe-findings' and aggregate-test-files', the final report's prompt names artifact authorities,
+  // which no task whose prompt is rendered at runtime is compiled with (#1234).
+  const reportPath = path.join(runRoot, "artifacts", "final-report", "prompt.rendered.md");
+  assert.match(fs.readFileSync(reportPath, "utf8"), /ancestor artifact authority JSON/u);
+  const resume = async () => {
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  };
+  // Unedited, they render as the engine published them, so nothing is rejected or replaced.
+  assert.deepEqual(await resume(), []);
+
+  appendProjectPrompt(project, "review/final-report.md", PROMPT_REFRESH_NOTE);
+  const diagnostics = await resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(diagnostics)
+  );
+  assert.match(diagnostics[0]?.message ?? "", /\(final-report\)/u);
+  const report = fs.readFileSync(reportPath, "utf8");
+  assert.ok(report.includes(PROMPT_REFRESH_NOTE), report);
+  assert.match(report, /ancestor artifact authority JSON/u);
+});
+
+test("a prompt file that breaks the prompt catalog skips the refresh with a warning naming the file", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-catalog", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // The run never uses this file, but `run` would refuse the catalog too: a file that does not parse
+  // could carry any prompt ID.
+  fs.writeFileSync(
+    path.join(run.project, ".ultrafuzz", "prompts", "setup", "unused-variant.md"),
+    "---\nid: [unclosed\n---\n\nA variant.\n",
+    "utf8"
+  );
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
+    [["PROMPT_REFRESH_SKIPPED", "warning"]]
+  );
+  assert.match(
+    diagnostics[0]?.message ?? "",
+    /project prompt setup\/unused-variant\.md: invalid prompt YAML frontmatter/u
+  );
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+});
+
+test("a refresh that cannot create its history entry changes no prompt file and says so", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-no-history", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  const historyRoot = path.join(run.runRoot, "prompt-history");
+  fs.writeFileSync(historyRoot, "not a directory\n", "utf8");
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity, diagnostic.path]),
+    [["PROMPT_REFRESH_INCOMPLETE", "warning", undefined]]
+  );
+  assert.match(diagnostics[0]?.message ?? "", /after 0 of 1 files: .*; no prompt file changed\./u);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  fs.rmSync(historyRoot);
+  assert.deepEqual(
+    (await run.resume()).map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+});
+
+testWhen(process.getuid?.() !== 0)(
+  "a refresh that fails part way has already recorded every file it planned",
+  async () => {
+    const run = await launchPromptRefreshRun("prompt-refresh-partial", [
+      { id: "node:project-discovery", state: "finished", attempt: 1 }
+    ]);
+    appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+    const artifactDir = path.join(run.runRoot, "artifacts", "actors-flows");
+    fs.chmodSync(artifactDir, 0o555);
+    let diagnostics: Awaited<ReturnType<typeof run.resume>>;
+    try {
+      diagnostics = await run.resume();
+    } finally {
+      fs.chmodSync(artifactDir, 0o755);
+    }
+
+    const [incomplete, ...others] = diagnostics;
+    assert.ok(incomplete?.code === "PROMPT_REFRESH_INCOMPLETE" && others.length === 0, JSON.stringify(diagnostics));
+    assert.match(incomplete.message, /after 0 of 1 files: .*EACCES/u);
+    assert.ok(incomplete.path);
+    // refresh.json was published before the first file changed, so it lists the file the refresh
+    // could not replace, which still holds its previous bytes.
+    const { files } = JSON.parse(fs.readFileSync(path.join(run.runRoot, incomplete.path, "refresh.json"), "utf8")) as {
+      files: Array<Record<string, unknown>>;
+    };
+    const sha256 = (text: string): string => crypto.createHash("sha256").update(text).digest("hex");
+    const [planned, ...unplanned] = files;
+    assert.ok(planned !== undefined && unplanned.length === 0, JSON.stringify(files));
+    const { sha256: plannedSha256, ...plannedFile } = planned;
+    assert.deepEqual(plannedFile, {
+      path: "artifacts/actors-flows/prompt.rendered.md",
+      attempt_id: "actors-flows",
+      prompt: ".ultrafuzz/prompts/setup/actors-flows.md",
+      previous_sha256: sha256(run.launchPrompts.actors)
+    });
+    assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+
+    // Once the directory is writable again, the next resume applies the planned bytes.
+    assert.deepEqual(
+      (await run.resume()).map((diagnostic) => diagnostic.code),
+      ["PROMPTS_REFRESHED"]
+    );
+    assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+    assert.equal(plannedSha256, sha256(run.prompt("actors-flows")));
+  }
+);
 
 test("replay and fork restore a missing static prompt before they start an engine", async () => {
   const project = tempProject();

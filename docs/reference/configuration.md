@@ -31,6 +31,7 @@ workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
+refresh_prompts_on_resume = true
 
 [execution]
 mode = "local"
@@ -124,8 +125,20 @@ empty path components, and dot components fail validation.
 | `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
 | `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).    |
 | `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
+| `refresh_prompts_on_resume` | boolean | Re-render unfinished tasks' prompts on `resume`. Defaults to `true`.        |
 
 Other workspace modes are outside the product contract.
+
+A run's configuration is frozen when it launches, with one exception:
+`refresh_prompts_on_resume` is never part of it. Every `resume` reads the key
+from the project's current `ultrafuzz.toml`, so setting it to `false` also
+keeps the prompts of a run already in flight, and it appears in neither the
+run's `config.resolved.toml` nor its `smithers/resolved-config.json`. When
+`ultrafuzz.toml` cannot be read, resume keeps the run's prompts and warns. With
+the key `true` or absent, resume re-renders the prompts of the run's unfinished
+tasks from `.ultrafuzz/prompts/**` and the packaged built-ins before it starts
+the engine; see
+[Change A Prompt Of A Running Campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 `max_parallel_agents` is the only concurrency limit the runtime enforces. It
 bounds every task the workflow submits, not only agent tasks.
