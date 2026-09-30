@@ -531,59 +531,6 @@ function renderReadyRuntimePrompts(input: {
   return failures;
 }
 
-/** Render one runtime prompt from the run's template copy, with the checks every fresh render keeps. */
-function renderRuntimePrompt(input: {
-  task: CompiledSmithersTask;
-  promptTemplatePath: string;
-  artifactDir: string;
-  groupContext: CompiledSmithersDynamicGroup["promptContext"];
-  graphContext: ReturnType<typeof promptGraphContext>;
-  projectRoot: string;
-  runRoot: string;
-  runId: string;
-}): string {
-  const { task, artifactDir, groupContext } = input;
-  const templatePath = remapProjectPath(input.promptTemplatePath, groupContext.projectRoot, input.projectRoot);
-  assertPathInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
-  assertNoSymlinkComponents(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
-  assertRegularFileInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
-  const workspacePath = remapProjectPath(task.workspacePath, groupContext.projectRoot, input.projectRoot);
-  const result = renderPrompt({
-    prompt: fs.readFileSync(templatePath, "utf8"),
-    ...(task.dynamicVariables === undefined ? {} : { dynamicVariables: { ...task.dynamicVariables } }),
-    graph: input.graphContext,
-    node: {
-      logicalId: task.logicalNodeId,
-      concreteId: task.attemptId,
-      artifactDir,
-      workspacePath,
-      repoPath: remapProjectPath(groupContext.repoPath, groupContext.projectRoot, input.projectRoot),
-      attemptIndex: task.metadata.model.attemptIndex,
-      loopIndex: task.metadata.loop.index,
-      loopCount: task.metadata.loop.count,
-      agentRef: task.agentRef,
-      modelProfileId: task.metadata.model.profileId,
-      modelName: task.modelName,
-      modelIndex: task.metadata.model.modelIndex
-    },
-    run: {
-      id: input.runId,
-      artifactsDir: path.join(input.runRoot, "artifacts"),
-      metadataPath: path.join(input.runRoot, path.basename(groupContext.runMetadataPath))
-    },
-    outputs: {
-      patchPath: path.join(artifactDir, "patch.diff")
-    },
-    resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
-  });
-  assertRenderedPromptValidatorCommands({
-    attemptId: task.attemptId,
-    outputContractMarkdown: result.outputContractMarkdown,
-    schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
-  });
-  return result.renderedMarkdown;
-}
-
 /**
  * Resolves the documented `vulnerability_database_path` and `artifact_schema_dir` core variables
  * against the actual run and project roots.
@@ -660,6 +607,59 @@ function promptGraphContext(
       modelIndex: task.metadata.model?.modelIndex
     }))
   };
+}
+
+/** Render one runtime prompt from the run's template copy, with the checks every fresh render keeps. */
+function renderRuntimePrompt(input: {
+  task: CompiledSmithersTask;
+  promptTemplatePath: string;
+  artifactDir: string;
+  groupContext: CompiledSmithersDynamicGroup["promptContext"];
+  graphContext: ReturnType<typeof promptGraphContext>;
+  projectRoot: string;
+  runRoot: string;
+  runId: string;
+}): string {
+  const { task, artifactDir, groupContext } = input;
+  const templatePath = remapProjectPath(input.promptTemplatePath, groupContext.projectRoot, input.projectRoot);
+  assertPathInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
+  assertNoSymlinkComponents(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
+  assertRegularFileInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
+  const workspacePath = remapProjectPath(task.workspacePath, groupContext.projectRoot, input.projectRoot);
+  const result = renderPrompt({
+    prompt: fs.readFileSync(templatePath, "utf8"),
+    ...(task.dynamicVariables === undefined ? {} : { dynamicVariables: { ...task.dynamicVariables } }),
+    graph: input.graphContext,
+    node: {
+      logicalId: task.logicalNodeId,
+      concreteId: task.attemptId,
+      artifactDir,
+      workspacePath,
+      repoPath: remapProjectPath(groupContext.repoPath, groupContext.projectRoot, input.projectRoot),
+      attemptIndex: task.metadata.model.attemptIndex,
+      loopIndex: task.metadata.loop.index,
+      loopCount: task.metadata.loop.count,
+      agentRef: task.agentRef,
+      modelProfileId: task.metadata.model.profileId,
+      modelName: task.modelName,
+      modelIndex: task.metadata.model.modelIndex
+    },
+    run: {
+      id: input.runId,
+      artifactsDir: path.join(input.runRoot, "artifacts"),
+      metadataPath: path.join(input.runRoot, path.basename(groupContext.runMetadataPath))
+    },
+    outputs: {
+      patchPath: path.join(artifactDir, "patch.diff")
+    },
+    resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
+  });
+  assertRenderedPromptValidatorCommands({
+    attemptId: task.attemptId,
+    outputContractMarkdown: result.outputContractMarkdown,
+    schemaBackedOutputCount: producerSchemaBackedOutputCount(task.metadata.artifacts.outputs)
+  });
+  return result.renderedMarkdown;
 }
 
 function attachWorkflowGraphMetadata(graph: PlannedGraph, tasks: readonly CompiledSmithersTask[]): void {
