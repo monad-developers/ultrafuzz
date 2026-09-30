@@ -88,7 +88,7 @@ contract used by the CLI and runtime.
 | `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |
 | `[project]`                     | Project paths.                                                             |
 | `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
-| `[execution]`                   | Retained for compatibility; `mode` must be `local` and the table is inert. |
+| `[execution]`                   | Validated but no longer affects execution; `mode` must be `local`.         |
 | `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
 | `[retry]`                       | Bounded primary retries and opt-in ordered model fallback.                 |
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
@@ -196,9 +196,10 @@ task manifest.
 
 Per-node cloud execution (`mode = "cloud"`, `provider`, and
 `[execution.providers.modal]`) was removed; those settings fail validation with
-`CONFIG_EXECUTION_CLOUD_REMOVED`. To use Modal, run the whole campaign inside
-one sandbox: the `ultrafuzz-modal` eval runner does this for benchmark rows (see
-[Run Evals on Modal](../how-to/run-evals-on-modal.md)).
+`CONFIG_EXECUTION_CLOUD_REMOVED`, and `resume` refuses a run planned with
+`mode = "cloud"` with `WORKFLOW_CLOUD_EXECUTION_REMOVED`. To use Modal, run the
+whole campaign inside one sandbox: the `ultrafuzz-modal` eval runner does this
+for benchmark rows (see [Run Evals on Modal](../how-to/run-evals-on-modal.md)).
 
 ## Model Profiles
 

@@ -24343,6 +24343,43 @@ test("a refresh resume reuses its own ownership inspection instead of inspecting
   );
 });
 
+test("resume refuses a run planned for removed per-node cloud execution before invoking Smithers", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "removed-cloud-execution-resume";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const fakeLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(fakeLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.ok(launched.ok && launched.value !== undefined, JSON.stringify(launched.diagnostics));
+  // Record the task manifest the pre-removal compiler wrote for `[execution] mode = "cloud"`.
+  const tasksPath = path.join(launched.value.run_root, "smithers", "tasks.json");
+  const tasks = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as SmithersTaskManifestDocument;
+  for (const task of tasks.tasks) {
+    task.execution = {
+      ...task.execution,
+      mode: "cloud",
+      provider: "modal",
+      modal: { app: "ultrafuzz-test", image: "ultrafuzz-test", credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"] }
+    };
+    task.metadata.execution = { ...task.metadata.execution, mode: "cloud", provider: "modal" };
+  }
+  fs.writeFileSync(tasksPath, `${JSON.stringify(tasks, null, 2)}\n`, "utf8");
+
+  for (const refreshController of [false, true]) {
+    fs.writeFileSync(fakeLog, "", "utf8");
+    const resumed = await resumeRun({ projectRoot: project, runId, refreshController, env });
+    assert.equal(resumed.ok, false, `refreshController=${String(refreshController)}`);
+    assert.deepEqual(
+      resumed.diagnostics.map((diagnostic) => diagnostic.code),
+      ["WORKFLOW_CLOUD_EXECUTION_REMOVED"],
+      JSON.stringify(resumed.diagnostics)
+    );
+    assert.equal(fs.readFileSync(fakeLog, "utf8"), "", "no Smithers command runs");
+  }
+});
+
 testWhen(runningUnderBun)(
   "engine-owned task runtime crosses sealed issuer aliases under production Bun symlink flags",
   () => {

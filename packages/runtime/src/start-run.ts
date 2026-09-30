@@ -542,6 +542,18 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         if (input.refreshController === true) throw error;
       }
     }
+    // The current controller renders every task as a local worktree task, so continuing a run
+    // planned for Modal sandboxes would run its remaining attempts on this host instead.
+    if (taskDocument?.tasks.some((task) => task.execution.mode === "cloud") === true) {
+      return runtimeFailure<WorkflowLifecycleValue>([
+        {
+          code: "WORKFLOW_CLOUD_EXECUTION_REMOVED",
+          message: `run ${runId} was planned for per-node cloud execution, which was removed; it cannot be resumed, so start a new run`,
+          severity: "error",
+          source: "runtime"
+        }
+      ]);
+    }
     if (fs.existsSync(configPath)) {
       assertRegularFileInside(layout.root, configPath, "workflow config");
       try {
