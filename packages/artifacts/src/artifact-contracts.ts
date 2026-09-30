@@ -8,12 +8,8 @@ import {
   type JsonFileValidationDiagnostic,
   type JsonFileValidationResult
 } from "./json-file-validator.js";
-import {
-  artifactSchemaBundleDigest,
-  artifactSchemaDirectory,
-  artifactSchemaRegistry,
-  VALIDATOR_BUILD_IDENTITY
-} from "./schema-registry.js";
+import { installedArtifactSchemaBundle, type ArtifactSchemaBundle } from "./schema-bundle.js";
+import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "./schema-registry.js";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
 import {
   WORKFLOW_CONTRACT_DESCRIPTIONS,
@@ -53,6 +49,14 @@ export interface ArtifactContractSchemaBinding {
   schema_sha256: string;
   schema_bundle_sha256: string;
   validator_build: string;
+}
+
+/** The schema a planned JSON output is bound to, in the schema bundle its run was planned with. */
+export interface PlannedArtifactSchema {
+  bundle: ArtifactSchemaBundle;
+  schemaFile: string;
+  schemaId: string;
+  schemaSha256: string;
 }
 const existingJsonContracts = {
   "ultrafuzz/findings@2": {
@@ -198,14 +202,18 @@ export function validateArtifactContract(
     return validateTextContract(contract, contents, artifactPath);
   }
 
-  return validateJsonContractBytes(contract, Buffer.from(contents, "utf8"), artifactPath);
+  return validateJsonContractBytes(contract, Buffer.from(contents, "utf8"), artifactPath, undefined);
 }
 
-/** Validate the exact immutable artifact bytes, including their UTF-8 encoding. */
+/**
+ * Validate the exact immutable artifact bytes, including their UTF-8 encoding: a JSON contract against
+ * `planned`, the schema its plan names, or else against this build's schema for the contract.
+ */
 export function validateArtifactContractBytes(
   contract: ArtifactContractId,
   contents: Uint8Array,
-  artifactPath = "$"
+  artifactPath = "$",
+  planned?: PlannedArtifactSchema
 ): ArtifactContractValidationResult {
   if (contract === "ultrafuzz/nonempty-markdown@1" || contract === "ultrafuzz/text@1") {
     let text: string;
@@ -221,7 +229,7 @@ export function validateArtifactContractBytes(
     return validateTextContract(contract, text, artifactPath);
   }
 
-  return validateJsonContractBytes(contract, contents, artifactPath);
+  return validateJsonContractBytes(contract, contents, artifactPath, planned);
 }
 
 function validateTextContract(
@@ -240,21 +248,20 @@ function validateTextContract(
 function validateJsonContractBytes(
   contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">,
   contents: Uint8Array,
-  artifactPath: string
+  artifactPath: string,
+  planned: PlannedArtifactSchema | undefined
 ): ArtifactContractValidationResult {
-  const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[contract];
-  if (schemaFile === undefined) {
+  const expected = planned ?? installedContractSchema(contract);
+  if (expected === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
   }
-  const binding = artifactContractSchemaBinding(contract);
-  if (binding === undefined) {
-    return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `Registered schema is unavailable: ${schemaFile}`, artifactPath);
-  }
   const validation = validateRegisteredJsonBytesSync({
-    schemaPath: path.join(artifactSchemaDirectory(), binding.schema_file),
-    instanceBytes: contents
+    schemaPath: path.join(expected.bundle.directory, expected.schemaFile),
+    instanceBytes: contents,
+    schemaRegistry: expected.bundle.registry,
+    schemaBundleSha256: expected.bundle.sha256
   });
-  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, binding)) {
+  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, expected)) {
     return failure(
       "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
       `Registered validator identity does not match ${contract}`,
@@ -282,16 +289,29 @@ function validateJsonContractBytes(
   }
 }
 
+function installedContractSchema(
+  contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">
+): PlannedArtifactSchema | undefined {
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) return undefined;
+  return {
+    bundle: installedArtifactSchemaBundle(),
+    schemaFile: binding.schema_file,
+    schemaId: binding.schema_id,
+    schemaSha256: binding.schema_sha256
+  };
+}
+
+// The validator build the worker reports is provenance (#921), so only the schema content binds.
 function sameSchemaIdentity(
   actual: NonNullable<JsonFileValidationResult["schema"]>,
-  expected: ArtifactContractSchemaBinding
+  expected: PlannedArtifactSchema
 ): boolean {
   return (
     actual.registered &&
-    actual.id === expected.schema_id &&
-    actual.sha256 === expected.schema_sha256 &&
-    actual.bundle_sha256 === expected.schema_bundle_sha256 &&
-    actual.validator_build === expected.validator_build
+    actual.id === expected.schemaId &&
+    actual.sha256 === expected.schemaSha256 &&
+    actual.bundle_sha256 === expected.bundle.sha256
   );
 }
 

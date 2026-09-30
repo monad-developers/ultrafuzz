@@ -11182,10 +11182,9 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
   assert.ok(leaf);
   leaf.metadata.node.group = "leaf-continue";
-  const historicalOutput = tasks.tasks
-    .flatMap((task) => task.metadata.artifacts.outputs)
-    .find((output) => output.primary === true);
-  assert.ok(historicalOutput);
+  const historicalTask = tasks.tasks.find((task) => task.metadata.artifacts.outputs.some((output) => output.primary));
+  const historicalOutput = historicalTask?.metadata.artifacts.outputs.find((output) => output.primary);
+  assert.ok(historicalTask && historicalOutput);
   historicalOutput.contract = "ultrafuzz/findings@2";
   historicalOutput.contractDigest = "0".repeat(64);
   historicalOutput.schemaFile = "findings.schema.json";
@@ -11207,7 +11206,6 @@ test("current-controller rendering preserves prompts idempotently and continue p
     expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
   });
   const workflowSource = fs.readFileSync(workflowPath, "utf8");
-  assert.match(workflowSource, /const replacePromptSchemas = true;/u);
   const specsPrefix = "const serializedTaskSpecs = ";
   const specsStart = workflowSource.indexOf(specsPrefix);
   const specsEnd = workflowSource.indexOf(" as const;", specsStart);
@@ -11215,21 +11213,21 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
     attemptId: string;
     continueOnFail: boolean;
-    outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string; validatorBuild?: string }>;
+    outputs: Array<Record<string, unknown>>;
     promptPath?: string;
   }>;
   assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
-  const reboundOutput = specs
-    .flatMap((task) => task.outputs)
-    .find((output) => output.contract === historicalOutput.contract);
-  assert.equal(
-    reboundOutput?.schemaBundleSha256,
+  // #921: the refreshed controller validates each output against the schema it was planned with, so it
+  // keeps the whole recorded binding instead of rebinding it to this build's bundle (#982). Its markers
+  // then still match the run's plan after an upgrade that changed a schema.
+  const refreshedOutput = specs
+    .find((task) => task.attemptId === historicalTask.attemptId)
+    ?.outputs.find((output) => output.path === historicalOutput.path);
+  assert.deepEqual(refreshedOutput, historicalOutput);
+  assert.notEqual(
+    refreshedOutput?.schemaBundleSha256,
     artifactContractSchemaBinding(historicalOutput.contract)?.schema_bundle_sha256
   );
-  // Only the schema is rebound (#982). The contract digest and validator build are provenance that the
-  // refreshed verifier copies into markers compared with the sealed plan, so they keep the run's values.
-  assert.equal(reboundOutput?.contractDigest, historicalOutput.contractDigest);
-  assert.equal(reboundOutput?.validatorBuild, historicalOutput.validatorBuild);
   const promptPath = promptedTask.renderedPromptPath;
   assert.equal(specs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, promptPath);
 
@@ -12125,11 +12123,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
-  assert.match(workflowSource, /const replacePromptSchemas = false;/u);
-  assert.match(
-    workflowSource,
-    /materializePromptSchemas\(schemaDirectory, \{ replaceExisting: replacePromptSchemas \}\)/u
-  );
+  assert.match(workflowSource, /materializePromptSchemas\(schemaDirectory, bundle\)/u);
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.artifactDir, mirroredArtifactDir\(task\)\)/u);
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.sourceProjectRoot, process\.cwd\(\)\)/u);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
@@ -13668,7 +13662,14 @@ await step("preflight", () => {
   const envelope = execFileSync(path.join(layout.root, "trusted-bin", "ultrafuzz"), ["json", "validate", "--json"], {
     encoding: "utf8"
   });
-  artifacts.parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(envelope, "utf8"));
+  // The rebuild changed only the validator build, so this build's findings binding is the planned one.
+  const findings = artifacts.artifactContractSchemaBinding("ultrafuzz/findings@2");
+  artifacts.parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(envelope, "utf8"), {
+    schemaId: findings.schema_id,
+    schemaSha256: findings.schema_sha256,
+    schemaBundleSha256: findings.schema_bundle_sha256,
+    artifactSha256: artifacts.ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  });
   return "ok";
 });
 await step("resume", async () =>
@@ -25197,6 +25198,292 @@ test("artifact gates validate a historical bundle through its active sealed sche
   );
 });
 
+/**
+ * A copy of this build's `@ultrafuzz/artifacts` with `edit` applied to its schema directory, the way an
+ * upgrade installs a package whose schemas changed. A resumed engine loads the installed package, not
+ * the one the run was launched with.
+ */
+function upgradedArtifactsModule(edit: (schemaDirectory: string) => void): string {
+  const artifactsRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("@ultrafuzz/artifacts"))));
+  const install = path.join(temporaryRoot("ufz-upgraded-artifacts-"), "node_modules", "@ultrafuzz", "artifacts");
+  fs.mkdirSync(install, { recursive: true });
+  for (const entry of ["package.json", "dist", "schema"]) {
+    fs.cpSync(path.join(artifactsRoot, entry), path.join(install, entry), { recursive: true });
+  }
+  fs.symlinkSync(path.join(artifactsRoot, "node_modules"), path.join(install, "node_modules"), "dir");
+  edit(path.join(install, "schema"));
+  return pathToFileURL(path.join(install, "dist", "index.js")).href;
+}
+
+function editSchemaFile(directory: string, filename: string, change: (schema: Record<string, unknown>) => void): void {
+  const schemaPath = path.join(directory, filename);
+  const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as Record<string, unknown>;
+  change(schema);
+  fs.chmodSync(schemaPath, 0o600);
+  fs.writeFileSync(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, "utf8");
+}
+
+type ResumedWorkflowTask = { id: string; children: (deps?: { agent?: unknown }) => unknown };
+
+/**
+ * Load a launched run's project workflow in this process the way a native `resume` runs it: that
+ * workflow file, the installed `@ultrafuzz/artifacts` named by `artifactsModule`, and this build's
+ * `@ultrafuzz/runtime`. Only Smithers and the project agents are stubbed. Returns the rendered tasks
+ * by ID; the caller runs their bodies with the project root as the working directory.
+ */
+async function loadResumedWorkflowTasks(
+  project: string,
+  runRoot: string,
+  artifactsModule: string
+): Promise<Map<string, ResumedWorkflowTask>> {
+  const stubs = temporaryRoot("ufz-resumed-workflow-stubs-");
+  const stub = (name: string, contents: string): string => {
+    fs.writeFileSync(path.join(stubs, name), contents, "utf8");
+    return pathToFileURL(path.join(stubs, name)).href;
+  };
+  const jsxRuntime = stub(
+    "jsx-runtime.mjs",
+    "export const jsx = (type, props) => ({ type, props: props ?? {} });\nexport const jsxs = jsx;\n"
+  );
+  const orchestrator = stub(
+    "smthrs.mjs",
+    `const component = (name) => ({ component: name });
+export function createSmithers() {
+  return {
+    Workflow: component("Workflow"),
+    Parallel: component("Parallel"),
+    Worktree: component("Worktree"),
+    Task: component("Task"),
+    smithers: (render) => render,
+    outputs: { agentProcess: {}, preparation: {}, verification: {} }
+  };
+}
+`
+  );
+  const tasksDocument = JSON.parse(
+    fs.readFileSync(path.join(runRoot, "smithers", "tasks.json"), "utf8")
+  ) as SmithersTaskManifestDocument;
+  const agentRefs = [...new Set(tasksDocument.tasks.flatMap((task) => task.agentChain.map((entry) => entry.agentRef)))];
+  const agents = stub(
+    "agents.mjs",
+    `export const agentFactories = { ${agentRefs.map((ref) => `${ref}: () => ({ id: "inert-agent" })`).join(", ")} };\n`
+  );
+  const workflowPath = path.join(project, ".smithers", "workflows", `ultrafuzz-${path.basename(runRoot)}.tsx`);
+  const program = ts
+    .transpileModule(fs.readFileSync(workflowPath, "utf8"), {
+      fileName: workflowPath,
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        jsx: ts.JsxEmit.ReactJSX,
+        jsxImportSource: "smthrs",
+        verbatimModuleSyntax: true
+      }
+    })
+    .outputText.replaceAll('"smthrs/jsx-runtime"', JSON.stringify(jsxRuntime))
+    .replaceAll('"smthrs"', JSON.stringify(orchestrator))
+    .replaceAll('"zod/v4"', JSON.stringify(import.meta.resolve("zod/v4")))
+    .replaceAll('"../agents/index.ts"', JSON.stringify(agents));
+  const programPath = path.join(path.dirname(workflowPath), `resumed-${crypto.randomUUID()}.mjs`);
+  fs.writeFileSync(programPath, program, "utf8");
+  const previous = {
+    artifacts: process.env.ULTRAFUZZ_ARTIFACTS_MODULE,
+    runtime: process.env.ULTRAFUZZ_RUNTIME_MODULE,
+    governance: process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH,
+    persisted: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH
+  };
+  process.env.ULTRAFUZZ_ARTIFACTS_MODULE = artifactsModule;
+  process.env.ULTRAFUZZ_RUNTIME_MODULE = new URL("../src/index.js", import.meta.url).href;
+  delete process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
+  delete process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
+  try {
+    const workflow = (await import(pathToFileURL(programPath).href)) as {
+      default: (ctx: { input: unknown; outputMaybe: () => undefined }) => unknown;
+    };
+    const tasks = new Map<string, ResumedWorkflowTask>();
+    const visit = (element: unknown): void => {
+      if (Array.isArray(element)) return element.forEach(visit);
+      if (element === null || typeof element !== "object") return;
+      const { type, props } = element as { type?: { component?: string }; props?: Record<string, unknown> };
+      if (props === undefined) return;
+      if (type?.component === "Task") tasks.set(props.id as string, props as unknown as ResumedWorkflowTask);
+      visit(props.children);
+    };
+    visit(
+      workflow.default({
+        input: JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "input.json"), "utf8")) as unknown,
+        outputMaybe: () => undefined
+      })
+    );
+    return tasks;
+  } finally {
+    for (const [name, value] of [
+      ["ULTRAFUZZ_ARTIFACTS_MODULE", previous.artifacts],
+      ["ULTRAFUZZ_RUNTIME_MODULE", previous.runtime],
+      ["ULTRAFUZZ_DATA_GOVERNANCE_PATH", previous.governance],
+      ["ULTRAFUZZ_WORKFLOW_PERSISTED_PATH", previous.persisted]
+    ] as const) {
+      if (value === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = value;
+    }
+  }
+}
+
+/** Make a task workspace a Git worktree with one commit, as the engine creates it before preparation. */
+function initTaskWorktree(workspace: string): void {
+  fs.mkdirSync(workspace, { recursive: true });
+  for (const args of [
+    ["init", "-q"],
+    ["commit", "-q", "--allow-empty", "-m", "launch"]
+  ]) {
+    execFileSync("git", ["-c", "user.name=Ultrafuzz", "-c", "user.email=test@ultrafuzz.invalid", ...args], {
+      cwd: workspace,
+      stdio: "ignore"
+    });
+  }
+}
+
+test("a run resumed after an upgrade changed its schemas finishes its tasks against the schemas it was planned with", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeNeutralRuntimeFixturePrompt(project);
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "runtime-fixture.md"),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: summarize
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    depends_on: [__start__]
+    outputs:
+      - path: summary.txt
+        contract: ultrafuzz/text@1
+        primary: true
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [summarize, project-discovery]
+`,
+    "utf8"
+  );
+  const runId = "resume-after-schema-upgrade";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  const workspace = (attemptId: string): string => path.join(runRoot, "workspaces", attemptId);
+  const mirror = (attemptId: string): string => path.join(workspace(attemptId), "artifacts", attemptId);
+  initTaskWorktree(workspace("summarize"));
+  // The launch engine had already prepared this task's worktree, with its schema copy, when the run
+  // stopped.
+  initTaskWorktree(workspace("project-discovery"));
+  fs.mkdirSync(path.join(workspace("project-discovery"), ".ultrafuzz"));
+  fs.cpSync(artifactSchemaDirectory(), path.join(workspace("project-discovery"), ".ultrafuzz", "schemas"), {
+    recursive: true
+  });
+
+  // The upgrade adds a comment to one schema, as the #921 measurement did, and relaxes another: the
+  // installed findings schema then accepts any array, while the run was planned with the strict one.
+  const artifactsModule = upgradedArtifactsModule((schemas) => {
+    editSchemaFile(schemas, "report.schema.json", (schema) => void (schema.$comment = "an upgrade after launch"));
+    editSchemaFile(schemas, "findings.schema.json", (schema) => void (schema.items = {}));
+  });
+  const upgraded = (await import(artifactsModule)) as { artifactSchemaBundleDigest(): string };
+  assert.notEqual(upgraded.artifactSchemaBundleDigest(), artifactSchemaBundleDigest());
+
+  const previousCwd = process.cwd();
+  const previousPath = process.env.PATH;
+  // Task preparation runs the run's own validator: the launcher launch wrote, not the upgraded CLI.
+  process.env.PATH = `${path.join(runRoot, "trusted-bin")}${path.delimiter}${previousPath ?? ""}`;
+  process.chdir(project);
+  try {
+    const tasks = await loadResumedWorkflowTasks(project, runRoot, artifactsModule);
+    const task = (id: string): ResumedWorkflowTask => {
+      const found = tasks.get(id);
+      assert.ok(found, `${id} is not among ${[...tasks.keys()].join(", ")}`);
+      return found;
+    };
+    // #921: the upgrade changed the installed schema bundle, not the run's plan. A task without a schema
+    // output used to fail its validator preflight, and one whose worktree kept the launch copy its
+    // schema materialization, on every attempt.
+    assert.deepEqual(task("prepare:summarize").children(), { prepared: true });
+    fs.writeFileSync(path.join(mirror("summarize"), "summary.txt"), "Summary.\n", "utf8");
+    assert.equal(
+      (task("verify:summarize").children({ agent: { completed: true } }) as { primary_artifact: string })
+        .primary_artifact,
+      "summary.txt"
+    );
+    assert.deepEqual(task("prepare:project-discovery").children(), { prepared: true });
+    for (const attemptId of ["summarize", "project-discovery"]) {
+      for (const file of ["report.schema.json", "findings.schema.json"]) {
+        assert.deepEqual(
+          fs.readFileSync(path.join(workspace(attemptId), ".ultrafuzz", "schemas", file)),
+          fs.readFileSync(path.join(artifactSchemaDirectory(), file)),
+          `${attemptId} must see the planned ${file}, not the upgraded one`
+        );
+      }
+    }
+
+    // An output invalid under the planned findings schema still fails, although the upgraded schema
+    // would accept it.
+    const discovery = mirror("project-discovery");
+    fs.mkdirSync(path.join(discovery, "setup"), { recursive: true });
+    fs.writeFileSync(path.join(discovery, GENERIC_RUNTIME_MARKDOWN_PATH), "# Discovery\n", "utf8");
+    fs.writeFileSync(path.join(discovery, "findings.json"), `${JSON.stringify([{ title: "unplanned shape" }])}\n`);
+    assert.throws(
+      () => task("verify:project-discovery").children({ agent: { completed: true } }),
+      /artifact-contract failure for findings\.json \(ultrafuzz\/findings@2\): .*required property/u
+    );
+
+    // A planned-valid output verifies and keeps the binding it was planned with.
+    fs.writeFileSync(path.join(discovery, "findings.json"), "[]\n", "utf8");
+    const verified = task("verify:project-discovery").children({ agent: { completed: true } }) as {
+      artifacts: Array<Record<string, unknown>>;
+    };
+    const planned = artifactContractSchemaBinding("ultrafuzz/findings@2");
+    assert.deepEqual(
+      verified.artifacts.find((artifact) => artifact.path === "findings.json"),
+      {
+        path: "findings.json",
+        contract: "ultrafuzz/findings@2",
+        contract_digest: artifactContractDefinition("ultrafuzz/findings@2").digest,
+        schema_file: planned?.schema_file,
+        schema_id: planned?.schema_id,
+        schema_sha256: planned?.schema_sha256,
+        schema_bundle_sha256: planned?.schema_bundle_sha256,
+        validator_build: planned?.validator_build,
+        sha256: crypto.createHash("sha256").update("[]\n").digest("hex"),
+        primary: false
+      }
+    );
+  } finally {
+    process.chdir(previousCwd);
+    process.env.PATH = previousPath;
+  }
+});
+
 test("controller refresh refuses an active workflow without publishing a generation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -25412,7 +25699,12 @@ test("a resume that cannot re-verify the trusted CLI leaves tasks on the run's o
     ],
     { encoding: "utf8", env: { ...process.env, PATH: runnerPath } }
   );
-  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
+  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"), {
+    schemaId: findings.id,
+    schemaSha256: findings.sha256,
+    schemaBundleSha256: artifactSchemaBundleDigest(),
+    artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  });
   const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED");
   assert.equal(warning?.severity, "warning", JSON.stringify(resumed.diagnostics));
   // Tasks find the validator launcher there, and no workflow runner CLI.

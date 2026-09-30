@@ -47,6 +47,12 @@ import {
   artifactSchemaBundleDigest,
   artifactSchemaRegistryFromDirectory,
   createInitialRunState,
+  createRunLayout,
+  installedArtifactSchemaBundle,
+  plannedArtifactSchemaBundle,
+  readRunState,
+  validateArtifactContractBytes,
+  writeRunState,
   assertGeneratedTestManifestSchema,
   assertPlannedGraph,
   assertSealedPlannedGraph,
@@ -136,7 +142,7 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-bundle-"));
   try {
     const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
-    const copied = materializePromptSchemas(destination);
+    const copied = materializePromptSchemas(destination, installedArtifactSchemaBundle());
     assert.ok(copied.some((file) => file.endsWith("property-lens.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("reference-expectations.schema.json")));
@@ -156,24 +162,137 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
   }
 });
 
-test("current-controller schema materialization replaces only an older physical bundle", () => {
+test("schema materialization replaces a workspace copy that differs from the bundle", () => {
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-refresh-"));
   const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
   try {
-    materializePromptSchemas(destination);
+    materializePromptSchemas(destination, installedArtifactSchemaBundle());
     const target = path.join(destination, "report.schema.json");
     const source = path.join(packageRoot, "schema", "report.schema.json");
     fs.chmodSync(target, 0o600);
     fs.writeFileSync(target, '{"$id":"urn:ultrafuzz:historical-report"}\n', "utf8");
     fs.chmodSync(target, 0o400);
 
-    assert.throws(() => materializePromptSchemas(destination), /destination differs from checked-in source/u);
-    assert.doesNotThrow(() => materializePromptSchemas(destination, { replaceExisting: true }));
+    // A copy left by another build, or edited in the workspace, is only the agent's view of the bundle,
+    // so it is rewritten instead of failing every later preparation of the task.
+    assert.doesNotThrow(() => materializePromptSchemas(destination, installedArtifactSchemaBundle()));
     assert.deepEqual(fs.readFileSync(target), fs.readFileSync(source));
     assert.equal(fs.statSync(target).mode & 0o777, 0o400);
-    assert.doesNotThrow(() => materializePromptSchemas(destination, { replaceExisting: true }));
+    assert.doesNotThrow(() => materializePromptSchemas(destination, installedArtifactSchemaBundle()));
   } finally {
     for (const file of readdirSync(destination)) fs.chmodSync(path.join(destination, file), 0o600);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A run launched by an earlier build whose execution snapshot seals that build's schema bundle: this
+ * build's bundle with a `$comment` added to report.schema.json and `maxProperties: 1` added to
+ * properties.schema.json, so an upgrade changed both after launch.
+ */
+function runPlannedWithEarlierBundle(root: string): { runRoot: string; sealedSchemas: string; sealedSha256: string } {
+  const layout = createRunLayout({ projectRoot: root, runId: "planned-with-earlier-bundle" });
+  const snapshot = `smithers/execution-snapshots/${"a".repeat(64)}`;
+  const sealedSchemas = path.join(layout.root, ...snapshot.split("/"), "modules", "@ultrafuzz", "artifacts", "schema");
+  materializePromptSchemas(sealedSchemas, installedArtifactSchemaBundle());
+  const edit = (file: string, change: (schema: Record<string, unknown>) => void): void => {
+    const schemaPath = path.join(sealedSchemas, file);
+    const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as Record<string, unknown>;
+    change(schema);
+    fs.chmodSync(schemaPath, 0o600);
+    fs.writeFileSync(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, "utf8");
+    fs.chmodSync(schemaPath, 0o400);
+  };
+  edit("report.schema.json", (schema) => void (schema.$comment = "the build that launched this run"));
+  edit("properties.schema.json", (schema) => void (schema.maxProperties = 1));
+  const state = readRunState(layout);
+  state.provenance = {
+    workflow: {
+      inspection: { runId: "ultrafuzz-planned-with-earlier-bundle" },
+      runId: "ultrafuzz-planned-with-earlier-bundle",
+      compiledRunId: "ultrafuzz-planned-with-earlier-bundle",
+      name: "ultrafuzz-planned-with-earlier-bundle",
+      controlGeneration: "b".repeat(64),
+      linkId: "00000000-0000-4000-8000-000000000000",
+      executionSnapshot: snapshot
+    }
+  };
+  writeRunState(layout, state);
+  const sealedSha256 = schemaRegistryBundleDigest(artifactSchemaRegistryFromDirectory(sealedSchemas));
+  return { runRoot: layout.root, sealedSchemas, sealedSha256 };
+}
+
+test("a run's planned schema bundle is the one its plan names, not the one this build installs", () => {
+  const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-planned-schema-bundle-"));
+  try {
+    const run = runPlannedWithEarlierBundle(root);
+    assert.notEqual(run.sealedSha256, artifactSchemaBundleDigest());
+    // Planned by this build: its installed schemas are the bundle, and the snapshot is never read.
+    assert.deepEqual(
+      plannedArtifactSchemaBundle(run.runRoot, artifactSchemaBundleDigest()),
+      installedArtifactSchemaBundle()
+    );
+
+    // #921: planned by the earlier build. The run keeps the bundle it launched with.
+    const planned = plannedArtifactSchemaBundle(run.runRoot, run.sealedSha256);
+    assert.equal(planned.directory, run.sealedSchemas);
+    assert.equal(planned.sha256, run.sealedSha256);
+    const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+    materializePromptSchemas(destination, installedArtifactSchemaBundle());
+    // The workspace copy an earlier engine of this build left is replaced with the planned bytes.
+    materializePromptSchemas(destination, planned);
+    for (const file of ["report.schema.json", "properties.schema.json"]) {
+      assert.deepEqual(
+        readFileSync(path.join(destination, file)),
+        readFileSync(path.join(run.sealedSchemas, file)),
+        file
+      );
+    }
+
+    // Artifacts are validated against the schema they were planned with. The same findings schema sits in
+    // another bundle, which the validator reports.
+    const plannedSchema = (filename: string) => {
+      const entry = planned.registry.find((candidate) => candidate.filename === filename);
+      assert.ok(entry, filename);
+      return { bundle: planned, schemaFile: entry.filename, schemaId: entry.id, schemaSha256: entry.sha256 };
+    };
+    const findings = validateArtifactContractBytes(
+      "ultrafuzz/findings@2",
+      Buffer.from("[]\n"),
+      "findings.json",
+      plannedSchema("findings.schema.json")
+    );
+    assert.equal(findings.ok, true, JSON.stringify(findings.issues));
+    // This build's properties schema accepts the empty catalog; the earlier one, which the run was
+    // planned with, does not, and that is the one it must satisfy.
+    const catalog = Buffer.from('{"schema_version":"ultrafuzz.properties.v2","properties":[]}');
+    assert.equal(validateArtifactContractBytes("ultrafuzz/properties@2", catalog, "properties.json").ok, true);
+    const invalid = validateArtifactContractBytes(
+      "ultrafuzz/properties@2",
+      catalog,
+      "properties.json",
+      plannedSchema("properties.schema.json")
+    );
+    assert.equal(invalid.ok, false);
+    assert.ok(
+      invalid.issues.some((issue) => issue.code === "ARTIFACT_SCHEMA_INVALID" && /maxProperties/u.test(issue.message)),
+      JSON.stringify(invalid.issues)
+    );
+    // A schema the planned bundle does not hold cannot be validated at all.
+    const unknown = validateArtifactContractBytes("ultrafuzz/findings@2", Buffer.from("[]\n"), "findings.json", {
+      ...plannedSchema("findings.schema.json"),
+      schemaSha256: "0".repeat(64)
+    });
+    assert.equal(unknown.ok, false);
+    assert.ok(unknown.issues.some((issue) => issue.code === "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH"));
+
+    // A plan that names a bundle neither this build nor the run's snapshot holds has no planned schema.
+    assert.throws(
+      () => plannedArtifactSchemaBundle(run.runRoot, "c".repeat(64)),
+      /schema bundle sealed for this run is not the bundle its plan names/u
+    );
+  } finally {
+    fs.chmodSync(root, 0o700);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -182,7 +301,7 @@ test("loads a sealed schema bundle exactly as it was sealed, even when the insta
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-sealed-schema-bundle-"));
   const destination = path.join(root, "schemas");
   try {
-    materializePromptSchemas(destination);
+    materializePromptSchemas(destination, installedArtifactSchemaBundle());
     assert.equal(
       schemaRegistryBundleDigest(artifactSchemaRegistryFromDirectory(destination)),
       artifactSchemaBundleDigest()
@@ -229,7 +348,7 @@ test("every contract-to-schema mapping names a file the bundle actually material
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-map-"));
   try {
     const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
-    materializePromptSchemas(destination);
+    materializePromptSchemas(destination, installedArtifactSchemaBundle());
     const materialized = new Set(readdirSync(destination));
 
     const mapped = Object.entries(ARTIFACT_CONTRACT_SCHEMA_FILES);
@@ -253,7 +372,7 @@ test("every contract-to-schema mapping names a file the bundle actually material
 test("materialized schema directory can be removed by its owning worktree cleanup", () => {
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-cleanup-"));
   const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
-  materializePromptSchemas(destination);
+  materializePromptSchemas(destination, installedArtifactSchemaBundle());
 
   assert.equal(statSync(destination).mode & 0o777, 0o700);
   assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
@@ -265,7 +384,7 @@ test("rejects a hard-linked schema destination before changing its inode", () =>
   const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
   const outside = path.join(root, "outside.json");
   try {
-    materializePromptSchemas(destination);
+    materializePromptSchemas(destination, installedArtifactSchemaBundle());
     const schema = path.join(destination, "property-lens.schema.json");
     fs.chmodSync(destination, 0o700);
     fs.unlinkSync(schema);
@@ -273,9 +392,8 @@ test("rejects a hard-linked schema destination before changing its inode", () =>
     fs.linkSync(outside, schema);
     fs.chmodSync(destination, 0o500);
 
-    assert.throws(() => materializePromptSchemas(destination), /destination entry is unsafe/u);
     assert.throws(
-      () => materializePromptSchemas(destination, { replaceExisting: true }),
+      () => materializePromptSchemas(destination, installedArtifactSchemaBundle()),
       /destination entry is unsafe/u
     );
     assert.equal(fs.readFileSync(outside, "utf8"), "outside\n");
@@ -297,7 +415,7 @@ test("rejects a schema destination that crosses an intermediate symlink", () => 
   fs.symlinkSync(outside, path.join(workspace, ".ultrafuzz"), "dir");
   try {
     assert.throws(
-      () => materializePromptSchemas(path.join(workspace, ".ultrafuzz", "schemas")),
+      () => materializePromptSchemas(path.join(workspace, ".ultrafuzz", "schemas"), installedArtifactSchemaBundle()),
       /destination crosses a symlink/u
     );
     assert.deepEqual(readdirSync(outside), []);

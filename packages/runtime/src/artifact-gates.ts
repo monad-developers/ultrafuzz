@@ -6,9 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   artifactContractSchemaBinding,
-  artifactSchemaDirectory,
   artifactSchemaRegistry,
-  artifactSchemaRegistryFromDirectory,
   assertArtifactVerificationMarkerSemantics,
   assertNoSymlinkComponents,
   assertSealedPlannedGraph,
@@ -31,6 +29,7 @@ import {
   readSinglyLinkedRegularFileSnapshotInside,
   readRunState,
   parseStrictJsonBytes,
+  plannedArtifactSchemaBundle,
   redactValue,
   resolveCampaignFindingBackends,
   safeResolveInside,
@@ -51,6 +50,7 @@ import {
   validateRegisteredJsonBytesSync,
   validateRegisteredJsonSchema,
   verifyArtifactManifestPrerequisites,
+  type ArtifactSchemaBundle,
   type ArtifactSchemaFilename,
   type ArtifactVerificationMarker,
   type ImplementedPropertiesArtifact,
@@ -3323,18 +3323,15 @@ export function verifyRequiredArtifactSchemaBinding(
   }
 
   // The planned binding names schema content. Its validator build only records which build planned
-  // the output and is never compared: validate with the installed schemas when they are the planned
-  // bundle, and otherwise with the bundle sealed into this run's execution snapshot, so a rebuild or
-  // upgrade does not change which schema an in-flight run's artifacts must satisfy (#921).
+  // the output and is never compared: validate with the run's planned bundle, as its workflow does,
+  // so a rebuild or upgrade does not change which schema an in-flight run's artifacts must satisfy (#921).
   let schemaPath: string;
-  let schemaRegistry: ReturnType<typeof artifactSchemaRegistryFromDirectory> | undefined;
+  let schemaRegistry: ArtifactSchemaBundle["registry"];
   try {
-    if (current.schema_bundle_sha256 === planned.schema_bundle_sha256) {
-      schemaPath = safeResolveInside(artifactSchemaDirectory(), planned.schema_file, "planned artifact schema");
-    } else {
-      schemaPath = sealedArtifactSchemaPath(layout, planned.schema_file);
-      schemaRegistry = artifactSchemaRegistryFromDirectory(path.dirname(schemaPath));
-    }
+    const bundle = plannedArtifactSchemaBundle(layout.root, planned.schema_bundle_sha256);
+    schemaPath = safeResolveInside(bundle.directory, planned.schema_file, "planned artifact schema");
+    assertRegularFileInside(bundle.directory, schemaPath, "planned artifact schema");
+    schemaRegistry = bundle.registry;
   } catch (error) {
     return [
       {
@@ -3348,11 +3345,7 @@ export function verifyRequiredArtifactSchemaBinding(
     ];
   }
 
-  const validation = validateRegisteredJsonBytesSync({
-    schemaPath,
-    instanceBytes: artifactBytes,
-    ...(schemaRegistry === undefined ? {} : { schemaRegistry })
-  });
+  const validation = validateRegisteredJsonBytesSync({ schemaPath, instanceBytes: artifactBytes, schemaRegistry });
   if (
     validation.schema?.id !== planned.schema_id ||
     validation.schema?.sha256 !== planned.schema_sha256 ||
@@ -3401,20 +3394,6 @@ function schemaBindingMismatchDiagnostic(
     path: absolutePath,
     details: { contract: output.contract, planned }
   };
-}
-
-function sealedArtifactSchemaPath(layout: RunLayout, schemaFile: string): string {
-  const workflow = readRunState(layout).provenance?.workflow;
-  const snapshot = workflow?.controllerExecutionSnapshot ?? workflow?.executionSnapshot;
-  if (snapshot === undefined) throw new Error("run state is missing sealed workflow schema authority");
-  const snapshotRoot = safeResolveInside(layout.root, snapshot, "sealed workflow execution snapshot");
-  const schemaPath = safeResolveInside(
-    snapshotRoot,
-    path.posix.join("modules/@ultrafuzz/artifacts/schema", schemaFile),
-    "sealed artifact schema"
-  );
-  assertRegularFileInside(snapshotRoot, schemaPath, "sealed artifact schema");
-  return schemaPath;
 }
 
 /** The run's resolved `[invariants]` settings, read with the project config parser. */

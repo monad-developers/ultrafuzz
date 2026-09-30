@@ -13,8 +13,11 @@ import { z } from "zod/v4";
 import { loadAgentPreambleTemplate } from "@ultrafuzz/prompts";
 
 import {
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   assertRunMetadataDocument,
@@ -27,6 +30,7 @@ import {
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
+  parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
   promptArtifactAuthorityPathSelectorId,
   prepareSafeFilePath,
@@ -425,7 +429,23 @@ function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
   )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportPromptAuthority>;
 }
 
-function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: string } = {}): {
+/** The schema bundle this build installs, as the generated workflow's planned-bundle helpers see it. */
+function installedBundle(): { directory: string; registry: ReturnType<typeof artifactSchemaRegistry>; sha256: string } {
+  return {
+    directory: path.join(path.sep, "fixture", "schemas"),
+    registry: artifactSchemaRegistry(),
+    sha256: artifactSchemaBundleDigest()
+  };
+}
+
+function loadJsonValidatorPreflight(
+  options: {
+    failure?: unknown;
+    stdout?: string;
+    parse?: typeof parseJsonValidatorPreflightSuccessEnvelope;
+    bundle?: ReturnType<typeof installedBundle>;
+  } = {}
+): {
   preflight(): void;
   observedTimeoutMs(): number | undefined;
   spawnCount(): number;
@@ -441,7 +461,7 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
   let observedTimeout: number | undefined;
   let spawns = 0;
   const loaded = new Function(
-    "artifactSchemaRegistry",
+    "ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256",
     "artifactValidatorSmokeFixturePath",
     "execFileSync",
     "parseJsonValidatorPreflightSuccessEnvelope",
@@ -451,7 +471,7 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
       budgetMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS
     };`
   )(
-    () => [{ filename: "findings.schema.json" }],
+    ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
     (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
       spawns += 1;
@@ -459,11 +479,11 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
       if (options.failure !== undefined) throw options.failure;
       return options.stdout ?? "{}";
     },
-    () => undefined,
+    options.parse ?? (() => undefined),
     path
-  ) as { preflight(schemaDirectory: string): void; budgetMs: number };
+  ) as { preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): void; budgetMs: number };
   return {
-    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas")),
+    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas"), options.bundle ?? installedBundle()),
     observedTimeoutMs: () => observedTimeout,
     spawnCount: () => spawns,
     budgetMs: loaded.budgetMs
@@ -1982,6 +2002,7 @@ function loadVerifyArtifactsHarness(
     "decodeStrictUtf8Snapshot",
     "artifactContractDefinition",
     "parseStrictJsonSnapshot",
+    "plannedOutputSchema",
     "validateArtifactContractBytes",
     "dependencyArtifactAdmission",
     "assertDependencyArtifactAdmissionCurrent",
@@ -2059,6 +2080,9 @@ function loadVerifyArtifactsHarness(
         throw new Error(`${failureMessage}: file is not strict JSON`, { cause: error });
       }
     },
+    // Every harness task is planned with this build's schemas, which the validator uses when no other
+    // planned schema is named.
+    () => undefined,
     (contract: Parameters<typeof validateArtifactContractBytes>[0], contents: Uint8Array, artifactPath: string) =>
       validateArtifactContractBytes(contract, contents, artifactPath),
     dependencyAdmissionFor,
@@ -5944,7 +5968,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
   assert.match(
     source,
-    /preflightJsonValidator\(schemaDirectory\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
+    /preflightJsonValidator\(schemaDirectory, schemaBundle\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
   );
   assert.match(
     source,
@@ -6610,23 +6634,39 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   assert.doesNotMatch(hydration, /readBoundedRegularArtifactSnapshot|readFileSync|resolveRegularArtifactFile/u);
 });
 
-test("generated task preparation binds output schema content but not the validator build", () => {
+test("generated task preparation requires the run's planned bundle, not this build's, to hold each output schema", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const start = source.indexOf("function assertTaskOutputSchemaBindings");
   const end = source.indexOf("\n}\n", start) + 2;
   assert.ok(start >= 0 && end > start, source);
-  const helper = ts.transpileModule(source.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
+  const helpers = ts.transpileModule(
+    `${templateSlice(source, "function plannedOutputSchema", "\n\nconst serializedTaskSpecs")}\n${source.slice(start, end)}`,
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  const installed = installedBundle();
+  const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  // The bundle a launch sealed before an upgrade added a `$comment` to the findings schema.
+  const sealedFindings = { ...findings, sha256: "1".repeat(64) };
+  const sealed = {
+    ...installed,
+    registry: installed.registry.map((entry) => (entry === findings ? sealedFindings : entry)),
+    sha256: "2".repeat(64)
+  };
+  const bundles = new Map([installed, sealed].map((bundle) => [bundle.sha256, bundle]));
+  const assertTaskOutputSchemaBindings = new Function(
+    "plannedSchemaBundle",
+    `${helpers}; return assertTaskOutputSchemaBindings;`
+  )((bundleSha256: string) => {
+    const bundle = bundles.get(bundleSha256);
+    if (bundle === undefined) throw new Error(`no planned bundle ${bundleSha256}`);
+    return bundle;
+  }) as (task: unknown) => void;
   const planned = artifactContractSchemaBinding("ultrafuzz/findings@2");
   assert.ok(planned);
-  let current = planned;
-  const assertTaskOutputSchemaBindings = new Function(
-    "artifactContractSchemaBinding",
-    `${helper}; return assertTaskOutputSchemaBindings;`
-  )(() => current) as (task: unknown) => void;
-  const task = {
+  const task = (binding: Record<string, string>) => ({
     outputs: [
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" },
       {
         path: "findings.json",
         contract: "ultrafuzz/findings@2",
@@ -6634,24 +6674,73 @@ test("generated task preparation binds output schema content but not the validat
         schemaId: planned.schema_id,
         schemaSha256: planned.schema_sha256,
         schemaBundleSha256: planned.schema_bundle_sha256,
-        validatorBuild: planned.validator_build
+        validatorBuild: planned.validator_build,
+        ...binding
       }
     ]
-  };
-  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
-  // #921: a rebuild after launch changed only the validator modules. The schemas the verifier will
-  // use are still the planned ones, so preparation proceeds.
-  current = { ...planned, validator_build: `ultrafuzz-json-validator.v1:${"9".repeat(64)}` };
-  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
-  // The installed schema content, including the whole bundle, must still be the planned one.
-  for (const field of ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"] as const) {
-    current = { ...planned, [field]: `changed-${field}` };
+  });
+  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task({})));
+  // #921: neither a rebuilt validator nor an upgraded schema bundle is compared with the plan. A run
+  // planned with the sealed bundle keeps preparing its tasks with it.
+  assert.doesNotThrow(() =>
+    assertTaskOutputSchemaBindings(task({ validatorBuild: "ultrafuzz-json-validator.v1:rebuilt" }))
+  );
+  assert.doesNotThrow(() =>
+    assertTaskOutputSchemaBindings(task({ schemaSha256: sealedFindings.sha256, schemaBundleSha256: sealed.sha256 }))
+  );
+  // The planned bundle must still hold the planned schema, or the verifier could not validate against it.
+  const unheld: Array<Record<string, string>> = [
+    { schemaSha256: sealedFindings.sha256 },
+    { schemaId: "urn:ultrafuzz:schema:artifacts:findings:1" },
+    { schemaFile: "finding.schema.json" },
+    { schemaSha256: findings.sha256, schemaBundleSha256: sealed.sha256 }
+  ];
+  for (const binding of unheld) {
     assert.throws(
-      () => assertTaskOutputSchemaBindings(task),
-      /planned schema binding changed for findings\.json/u,
-      field
+      () => assertTaskOutputSchemaBindings(task(binding)),
+      /the run's schema bundle does not hold the planned schema for findings\.json/u,
+      JSON.stringify(binding)
     );
   }
+});
+
+test("generated validator preflight expects the run's planned schema identity, not this build's", () => {
+  const installed = installedBundle();
+  const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const envelope = (schema: { sha256: string; bundle_sha256: string }) =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.cli.result.v2",
+      command: "json validate",
+      ok: true,
+      diagnostics: [],
+      data: {
+        status: "valid",
+        diagnostics: [],
+        schema: { id: findings.id, ...schema, validator_build: "ultrafuzz-json-validator.v1:launch", registered: true },
+        artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+        truncated: false
+      }
+    });
+  // #921: the run was planned with the bundle its launch sealed, and its own validator reports that one.
+  const sealedFindings = { ...findings, sha256: "1".repeat(64) };
+  const sealed = {
+    ...installed,
+    registry: installed.registry.map((entry) => (entry === findings ? sealedFindings : entry)),
+    sha256: "2".repeat(64)
+  };
+  const launchValidator = envelope({ sha256: sealedFindings.sha256, bundle_sha256: sealed.sha256 });
+  const preflight = (stdout: string) =>
+    loadJsonValidatorPreflight({ stdout, bundle: sealed, parse: parseJsonValidatorPreflightSuccessEnvelope });
+  assert.doesNotThrow(() => preflight(launchValidator).preflight());
+  // A validator reporting this build's bundle does not validate with the schemas the host checks.
+  assert.throws(
+    () => preflight(envelope({ sha256: findings.sha256, bundle_sha256: installed.sha256 })).preflight(),
+    (error: unknown) =>
+      error instanceof Error &&
+      /invalid success envelope/u.test(error.message) &&
+      /mismatched identity/u.test(String((error.cause as Error | undefined)?.message))
+  );
 });
 
 test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
@@ -7586,6 +7675,7 @@ test("only the preparation before the agent checks its prompt, never the verify 
       "verifyPinnedSubmodulesFromExecutionSnapshot",
       "hydratePinnedSubmodulesFromExecutionSnapshot",
       "preservePinnedSourceProof",
+      "plannedSchemaBundle",
       "materializePromptSchemas",
       "assertTaskOutputSchemaBindings",
       "preflightJsonValidator",
@@ -7609,7 +7699,6 @@ test("only the preparation before the agent checks its prompt, never the verify 
       "assertRegularFileInside",
       "isStrictlyInsideDirectory",
       "preparationStep",
-      "replacePromptSchemas",
       "renderFailures",
       ...steps,
       `${emitted}; runtimePromptRenderFailures = renderFailures; return prepareArtifactMirror;`
@@ -7622,7 +7711,6 @@ test("only the preparation before the agent checks its prompt, never the verify 
       assertRegularFileInside,
       (parent: string, candidate: string) => candidate.startsWith(`${parent}${path.sep}`),
       (_attemptId: string, _step: string, run: () => unknown) => run(),
-      false,
       renderFailures,
       ...steps.map((step) =>
         step === "isMissingTaskPromptError"
@@ -9589,6 +9677,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     "assertArtifactVerificationMarkerSemantics",
     "artifactContractDefinition",
     "artifactContractSchemaBinding",
+    "plannedOutputSchema",
     "validateArtifactContractBytes",
     "createHash",
     "invariantSuiteNodeIds",
@@ -9622,6 +9711,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       format: contract === "ultrafuzz/text@1" ? "text" : "json"
     }),
     (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : currentSchemaBinding),
+    () => undefined,
     (contract: string, contents: Uint8Array) => ({
       ok: true,
       issues: [],
