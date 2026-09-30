@@ -2220,7 +2220,9 @@ function finalReportAgentSelectionsForAttempt(
   // After a controller restart, seed the lost process-local history from the
   // record earlier attempts wrote. An attempt number Smithers dispatches again
   // replaces its own earlier entry. A failed preflight never reaches generate,
-  // so it is not an executed selection.
+  // so it is not an executed selection. After a reset reuses attempt numbers,
+  // a new-round attempt that fails before getting here leaves the old round's
+  // entry for its number, and later attempts report it.
   const previous =
     cached ?? (attempt > 1 ? readFinalReportSelections(task).filter((selection) => selection.attempt < attempt) : []);
   const selections = [...previous, { attempt, chainIndex }];
@@ -2239,7 +2241,9 @@ function authoritativeFinalReportAgentExecution(task: (typeof taskSpecs)[number]
   const selections = readFinalReportSelections(task);
   const producer = selections.at(-1);
   if (producer === undefined) {
-    throw new Error("artifact-contract failure: report producer selection was never recorded");
+    throw new Error(
+      "artifact-contract failure: report producer selection was never recorded; run `ultrafuzz resume <run-id> --refresh-controller --retry-failed` to rerun the producer"
+    );
   }
   const execution = finalReportAgentExecution(task, producer.chainIndex, selections);
   finalReportAgentExecutionAuthority.set(task.attemptId, execution);
