@@ -128,8 +128,10 @@ import { loadRuntimeTemplate } from "../src/runtime-template.js";
 import { assertRenderedPromptValidatorCommands } from "../src/prompt-validator-command.js";
 import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
+import { type AccountFiles, readingAccountFiles, writeAccountFiles } from "./account-files.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import { writeLocalResolvedConfig } from "./local-resolved-config.js";
+import { underGroupWritableUmask } from "./process-umask.js";
 import {
   shippedReferenceCatalog,
   writeShippedDocumentReferenceCaches,
@@ -751,6 +753,8 @@ async function loadGeneratedOpenRouterAgent(
     acknowledgeProvisionalRateLimit?: boolean;
     acknowledgeTerminalRateLimit?: boolean;
     expireRetryDeadlineBeforeReplacementBuild?: number;
+    /** Read by the provider-home module instead of the host's account files. */
+    accountFiles?: AccountFiles;
   }
 ): Promise<{
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
@@ -952,6 +956,7 @@ ${deadlineFrom}`
     assert.notEqual(replaced, openRouterSource, "missing generated OpenRouter build deadline source");
     openRouterSource = replaced;
   }
+  const providerHomeSource = fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8");
   fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
   fs.writeFileSync(path.join(fixture, "openrouter.mjs"), transpile(openRouterSource), "utf8");
   fs.writeFileSync(
@@ -961,7 +966,11 @@ ${deadlineFrom}`
   );
   fs.writeFileSync(
     path.join(fixture, "provider-home.mjs"),
-    transpile(fs.readFileSync(path.join(agentsDir, "provider-home.ts"), "utf8")),
+    transpile(
+      testInstrumentation?.accountFiles === undefined
+        ? providerHomeSource
+        : readingAccountFiles(providerHomeSource, testInstrumentation.accountFiles)
+    ),
     "utf8"
   );
   fs.writeFileSync(
@@ -4601,13 +4610,22 @@ bunAdapterTest(
 bunAdapterTest(
   "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
   { timeout: 30_000 },
-  async () => {
+  // Ubuntu's default umask 0002 leaves ~/.local group writable to the
+  // operator's private group, and provider homes default to a directory in it.
+  underGroupWritableUmask(async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
-    const providerHomeRoot = path.join(project, ".ultrafuzz", "provider-homes");
-    const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-test-codex");
+    // The default root, with XDG_STATE_HOME in place of ~/.local/state:
+    // Bun's os.homedir() does not follow a HOME set while it runs.
+    const operator = temporaryRoot("ufz-openrouter-operator-"),
+      stateHome = path.join(operator, "home", ".local", "state"),
+      accountFiles = { passwd: path.join(operator, "passwd"), group: path.join(operator, "group") };
+    fs.mkdirSync(stateHome, { recursive: true });
+    assert.equal(fs.statSync(path.dirname(stateHome)).mode & 0o777, 0o775);
+    writeAccountFiles(accountFiles);
+    const codexHome = path.join(stateHome, "ultrafuzz", "provider-homes", "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
       fs
@@ -4618,18 +4636,20 @@ bunAdapterTest(
         ),
       "utf8"
     );
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project, undefined, { accountFiles });
     const model = "~vendor/model.latest:free+preview@2026";
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
+      stateHome: process.env.XDG_STATE_HOME,
       openrouter: process.env.OPENROUTER_API_KEY,
       openai: process.env.OPENAI_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
       baseUrl: process.env.OPENAI_BASE_URL
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    process.env.XDG_STATE_HOME = stateHome;
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.OPENAI_API_KEY = "unrelated-openai-key";
     process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
@@ -4687,6 +4707,7 @@ bunAdapterTest(
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot,
+        XDG_STATE_HOME: previous.stateHome,
         OPENROUTER_API_KEY: previous.openrouter,
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,
@@ -4696,7 +4717,7 @@ bunAdapterTest(
         else process.env[name] = value;
       }
     }
-  }
+  })
 );
 
 bunAdapterTest(

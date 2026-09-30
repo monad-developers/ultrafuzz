@@ -87,6 +87,22 @@ api_key_env = "OPENAI_API_KEY"
 
 API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
+Without `ULTRAFUZZ_PROVIDER_HOME_ROOT`, that root is
+`$XDG_STATE_HOME/ultrafuzz/provider-homes`, or
+`~/.local/state/ultrafuzz/provider-homes` when `XDG_STATE_HOME` is unset.
+`OpenRouterAgent` and `DeepSeekAgent`, which have no canonical home, keep their
+provider homes under the root, as do `ClaudeAgent`, `CodexAgent` and
+`KimiAgent` when they set `config_dir`. An adapter refuses a provider home when
+a directory above it lets another account write to it. A world-writable
+directory must be sticky, as `/tmp` is. A group-writable directory must be
+sticky, or be owned by you and by your user-private group: your primary group,
+with no member other than you in `/etc/group` and no other `/etc/passwd`
+account that has it as its primary group. This is how Ubuntu's default umask,
+`0002`, leaves `~/.local`. A group those two files cannot show to be yours
+alone, such as one that comes from LDAP, counts as shared. The error names the
+directory: remove its group or world write access (`chmod g-w` or
+`chmod o-w`), or set `ULTRAFUZZ_PROVIDER_HOME_ROOT` to a directory outside it.
+
 ## OpenRouter through Codex
 
 `ultrafuzz init` generates a dedicated `OpenRouterAgent`, which uses the Codex
