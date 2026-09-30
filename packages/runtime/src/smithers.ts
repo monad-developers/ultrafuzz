@@ -67,6 +67,12 @@ import {
   loadPackagedControllerSource
 } from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
+import {
+  FRICTION_LOG_COMMAND_PATH,
+  FRICTION_LOG_ENTRIES_PATH,
+  frictionLogWrapper,
+  resolveFrogBin
+} from "./friction-log.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
 import {
@@ -130,8 +136,6 @@ const MAX_PACKAGE_MANAGER_MANIFEST_PROPERTIES = 10_000;
 const MAX_WORKFLOW_EXECUTION_FILE_BYTES = 64 * 1024 * 1024;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS = "300000";
-// Friction entries live at `<run>/friction/<id>/friction.md`.
-const FRICTION_LOG_ENTRIES_PATH = "friction";
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
@@ -7995,11 +7999,17 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     ),
     __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
     // Null unless run.friction_log_enabled is set. The workflow resolves the entry
-    // directory from each task's own run root, so continuation never depends on
-    // inherited environment and a disabled run renders byte-identical prompts.
+    // directory and the Frog wrapper from each task's own run root, so continuation
+    // never depends on inherited environment and a disabled run renders
+    // byte-identical prompts.
     __ULTRAFUZZ_FRICTION_LOG__: JSON.stringify(
       config.run.frictionLogEnabled === true
-        ? { instructions: loadAgentPreambleTemplate("friction-log"), entriesPath: FRICTION_LOG_ENTRIES_PATH }
+        ? {
+            instructions: loadAgentPreambleTemplate("friction-log"),
+            entriesPath: FRICTION_LOG_ENTRIES_PATH,
+            commandPath: FRICTION_LOG_COMMAND_PATH,
+            wrapper: frictionLogWrapper(process.execPath, resolveFrogBin())
+          }
         : null
     ),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,

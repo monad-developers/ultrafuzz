@@ -45,19 +45,25 @@ describe("agent preamble MDX", () => {
     ).toBe(`${mandatoryPrefix}${operatorPrompt}\n\n${taskPrompt}`);
   });
 
-  it("tells agents to write friction entries into the run's friction directory", () => {
+  it("tells agents to record friction only through the run's Frog command", () => {
     const template = loadAgentPreambleTemplate("friction-log");
-    // The directory is the only variable: nothing reaches the agent through the environment.
+    // The command and directory are the only variables: nothing reaches the agent through the environment.
     expect(new Set([...template.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu)].map((match) => match[1]))).toEqual(
-      new Set(["friction_log_directory"])
+      new Set(["friction_log_command", "friction_log_directory"])
     );
     expect(template).not.toMatch(/ULTRAFUZZ_FRICTION_LOG|\$[A-Z_]{3,}/u);
+    const command = "'/runs/example/friction-bin/ultrafuzz-friction-log'";
     const directory = "/runs/example/friction";
-    const fragment = renderAgentPreambleTemplate("friction-log", { friction_log_directory: directory });
-    expect(fragment).toContain(`${directory}/<UTC time as YYYYMMDDHHMMSS>-`);
-    expect(fragment).toContain("/friction.md");
-    // The entry front matter and its five sections, in order.
-    expect(fragment).toMatch(/---\ntitle: '[^\n]+'\nseverity: '[^\n]+'\n---/u);
+    const fragment = renderAgentPreambleTemplate("friction-log", {
+      friction_log_command: command,
+      friction_log_directory: directory
+    });
+    expect(fragment).toContain(`${command} list`);
+    expect(fragment).toContain(`${command} log '<one specific line>' --severity <blocker|major|minor> --body`);
+    // A failing command never stops the task, and agents never touch entries directly, because
+    // Frog refuses every later entry once one entry is malformed.
+    expect(fragment).toMatch(/if either command fails, continue without it/u);
+    expect(fragment).toContain(`Never create, edit, or delete anything under \`${directory}\` yourself.`);
     const sections = [
       "Expected Behavior",
       "Current Behavior",

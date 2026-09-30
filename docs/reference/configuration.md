@@ -181,20 +181,36 @@ exits through the normal task command path, so its diagnostics remain task
 evidence without applying the limit to the workflow controller.
 
 The friction log is disabled by default. With `friction_log_enabled = true`,
-every local task may record Ultrafuzz, tooling, or instruction roadblocks as
-Markdown entries under `<run>/friction/<YYYYMMDDHHMMSS>-<slug>/friction.md`.
-Each task resolves that directory from its own run root, receives write access
-to it, and creates it during preparation. Ultrafuzz adds no dependency for it,
-so a disabled run installs, seals, and renders nothing extra.
-Cloud tasks do not receive the friction log.
+every agent task may record Ultrafuzz, tooling, or instruction roadblocks with
+[Frog](https://github.com/wevm/frog), pinned as a dependency of
+`@ultrafuzz/runtime`. Agents run `<run>/friction-bin/ultrafuzz-friction-log`,
+which accepts only `frog log` and `frog list` with their local options and
+refuses publishing, `--update`, `--mcp`, `--cwd`, and `--target`. It pins
+Frog's directory to `<run>/friction` and stops Git discovery at the run root,
+so entries land under
+`<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md` and
+never in the target repository. It also removes `GITHUB_TOKEN`, `GH_TOKEN`,
+and `GITHUB_API_URL` before Frog runs.
+
+Each task resolves both paths from its own run root and creates them during
+preparation. Agents get write access to `<run>/friction` only, never to the
+command's directory. A friction log that cannot be prepared is reported on the
+workflow's stderr and never fails the task. Agents are told to continue their
+task when a `frog` command fails and never to edit entries by hand, because
+Frog refuses every later entry while one entry is malformed.
+
+Frog is installed and sealed with the runtime whether or not the friction log
+is enabled. A disabled run renders byte-identical prompts.
 
 Entries stay local. Review them before publishing anything, because they can
-describe private targets.
+describe private targets. List them with
+`GIT_CEILING_DIRECTORIES=<run> npx frog list --cwd <run>/friction`, or read the
+Markdown files directly.
 
 The agent instructions are one paragraph appended after the shared trust
-boundary. Its only variable is the entry directory, which is the same for every
-task in a run, so enabled runs keep it inside the prompt prefix all of the
-run's tasks share, and disabled runs render byte-identical prompts.
+boundary. Their only variables are the command and entry directory, which are
+the same for every task in a run, so enabled runs keep them inside the prompt
+prefix all of the run's tasks share.
 
 Every submitted workflow starts a run-scoped recovery supervisor. The
 supervisor renews controller ownership through runner heartbeats and uses an
