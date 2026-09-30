@@ -22,7 +22,6 @@ test("runtime audit schemas are closed, registered, and enforce exact current ve
     runtimeSchemaRegistry().map((entry) => entry.filename),
     [
       "clean-audit.schema.json",
-      "cloud-execution-generation.schema.json",
       "data-disclosure-acknowledgements.schema.json",
       "data-governance-policy.schema.json",
       "invariant-suite-baseline.schema.json",

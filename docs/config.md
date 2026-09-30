@@ -64,10 +64,8 @@ reading them, fails the task without a retry or fallback. The planned chain and
 actual producer are recorded in the task manifest, attempt ledger, and final
 report.
 
-Retry chains currently require local execution. Cloud planning accepts one
-effective attempt, and local fallback across different agent implementations
-cannot include an API-key-authenticated rung until per-rung credential isolation
-is available.
+Fallback across different agent implementations cannot include an
+API-key-authenticated rung until per-rung credential isolation is available.
 
 Agent configuration and model profiles may name only `ClaudeAgent`, `CodexAgent`,
 `DeepSeekAgent`, `KimiAgent`, `OpenCodeAgent`, `OpenRouterAgent`, or `PiAgent`.

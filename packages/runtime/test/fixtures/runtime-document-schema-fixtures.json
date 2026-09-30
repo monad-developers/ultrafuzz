@@ -1,10 +1,4 @@
 {
-  "cloud-execution-generation.schema.json": {
-    "schema_version": "ultrafuzz.cloud.execution-generation.v1",
-    "generation": "7cb5f68a-5ef5-46b1-8477-94fe4dfe0730",
-    "reset_node": "node-a",
-    "applied_at": "2026-08-09T12:00:00.000Z"
-  },
   "invariant-suite-baseline.schema.json": {
     "schema_version": "ultrafuzz.invariant-suite-baseline.v1",
     "files": [

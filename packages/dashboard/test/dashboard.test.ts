@@ -52,6 +52,7 @@ interface FlowResponse {
   };
   nodes: Array<{
     id: string;
+    type: string;
     data: {
       logicalNodeId: string;
       artifacts?: Record<string, boolean>;
@@ -79,6 +80,8 @@ test("serves logical topology flow with expanded attempt details", async () => {
     assert.ok(flow.nodes.length > 0);
     assert.ok(flow.run.expanded_nodes > flow.nodes.length);
     assert.ok(flow.nodes.every((node) => node.id === node.data.logicalNodeId));
+    // The property fan-in sits in its own `property-catalog` group and still renders as a property node.
+    assert.equal(flow.nodes.find((node) => node.id === "property-specification-fanin")?.type, "propertySpecification");
     assert.equal(flow.capabilities.runNewCampaign, true);
     assert.equal(flow.capabilities.referencesStatus, true);
   } finally {

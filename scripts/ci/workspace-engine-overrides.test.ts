@@ -10,10 +10,11 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 /**
  * The generated workflow-runner workspace and this repository install Effect
  * independently. The runner manifest pins Effect and the `@effect/*` packages so a
- * cloud run cannot end up with two Effect builds; pinning only there would leave
- * the repository's own Smithers integration test running against whatever the open
- * caret on `@effect/platform-node-shared` resolves to, so CI would not exercise the
- * tree production installs. These two pin sets must stay identical.
+ * run's launch and a later resume cannot end up with two Effect builds; pinning
+ * only there would leave the repository's own Smithers integration test running
+ * against whatever the open caret on `@effect/platform-node-shared` resolves to,
+ * so CI would not exercise the tree production installs. These two pin sets must
+ * stay identical.
  */
 describe("workspace workflow-engine overrides", () => {
   const workspaceOverrides = (
@@ -21,6 +22,9 @@ describe("workspace workflow-engine overrides", () => {
       overrides?: Record<string, string>;
     }
   ).overrides;
+  const workspaceEffectOverrides = Object.fromEntries(
+    Object.entries(workspaceOverrides ?? {}).filter(([name]) => name === "effect" || name.startsWith("@effect/"))
+  );
 
   const runnerOverrides = (() => {
     const source = fs.readFileSync(path.join(repoRoot, "packages", "runtime", "src", "smithers-package.ts"), "utf8");
@@ -34,11 +38,11 @@ describe("workspace workflow-engine overrides", () => {
   })();
 
   it("pins the same Effect versions the generated runner manifest pins", () => {
-    expect(workspaceOverrides).toEqual(runnerOverrides);
+    expect(workspaceEffectOverrides).toEqual(runnerOverrides);
   });
 
   it("pins every Effect package onto a single version", () => {
-    const versions = new Set(Object.values(workspaceOverrides ?? {}));
+    const versions = new Set(Object.values(workspaceEffectOverrides));
     expect(versions.size).toBe(1);
   });
 

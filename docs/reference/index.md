@@ -4,7 +4,6 @@ Reference pages describe Ultrafuzz's factual product surfaces.
 
 - [CLI Commands](cli.md)
 - [Configuration and Environment](configuration.md)
-- [Cloud Node Execution](cloud-execution.md)
 - [Agent Adapter Boundaries](agent-adapter-boundaries.md)
 - [Topology YAML](topology-yaml.md)
 - [JSON Schemas](../schemas.md)

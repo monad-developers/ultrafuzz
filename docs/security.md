@@ -128,7 +128,10 @@ does not honor a configurable package-registry URL for security decisions. The
 raw response is size-bounded and parsed with the repository's strict JSON
 reader before validating every package, advisory ID, GitHub advisory URL,
 severity, range, CWE, and CVSS field. Aliased dependencies are audited under
-their registry package names. Invalid UTF-8 and unknown, missing, duplicate,
+their registry package names. The registry returns one entry per vulnerable
+version range, so entries that share a GHSA for one package are audited as one
+advisory at their highest severity; a registry advisory ID that appears twice
+fails closed. Invalid UTF-8 and unknown, missing, duplicate,
 partial, or error-bearing fields fail closed instead of relying on pnpm
 normalization, which can discard malformed registry records.
 
@@ -165,9 +168,13 @@ The inventory also opens installed packages that declare bundled dependencies,
 validates their bounded no-symlink package trees, and submits every exact bundled
 version to the same advisory endpoint. This matters for the private workflow
 controller's pinned npm: pnpm otherwise reports npm as one opaque package and
-omits the packages npm ships inside itself. The lockfile-bound npm patch mirrors
-the green npm v11 upstream fixes in `npm/cli#9842` and `npm/cli#9872`: bundled
-`brace-expansion` 5.0.9, `ip-address` 10.5.0, `tar` 7.5.22, and `undici` 6.28.0.
+omits the packages npm ships inside itself. The lockfile-bound npm patch bundles
+`brace-expansion` 5.0.12, `ip-address` 10.5.0, `tar` 7.5.22, and `undici`
+6.28.1. The `ip-address` and `tar` versions mirror the green npm v11 upstream
+fixes in `npm/cli#9842` and `npm/cli#9872`. No npm release yet bundles the
+`brace-expansion` and `undici` fixes for GHSA-6j4f-fj2g-mc7p,
+GHSA-qhr7-859c-m2p7, and GHSA-rfgv-xxqx-mfg5, so the patch carries those
+registry releases, limited to the files npm's own bundling keeps.
 The patch can be removed when an upstream npm release carries those versions;
 the operator npm closure digest and advisory inventory both fail if that
 composition drifts. Pnpm's generated `node_modules/.bin` shims are excluded from
@@ -207,12 +214,32 @@ the producer and host on the same contract; it does not turn same-UID local
 agent execution into an OS security boundary.
 
 The workflow engine is installed by the controller rather than from the target
-repository. Ultrafuzz verifies the complete closure of its exact npm dependency,
-copies that closure into the target-specific private controller directory, and
-makes every copied directory and file read-only. It checks the closure before
-and after the script-disabled, registry-pinned install and again before cache
-reuse. The runner toolcache npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority;
-the latter remains only the run-owned validator launcher directory.
+repository. At launch, Ultrafuzz verifies the complete closure of its exact npm
+dependency, copies that closure into the target-specific private controller
+directory, and makes every copied directory and file read-only. It checks the
+closure before and after the script-disabled, registry-pinned install and again
+before cache reuse. `resume`, `ps`, the `--refresh-controller` ownership
+inspection, commands on a run without a sealed runner, and each run's
+`trusted-bin/smithers` shim instead run the engine from Ultrafuzz's own pnpm
+install, which pnpm patches at install time from the committed `patches/`
+files. That engine is not sealed. For each command Ultrafuzz runs, only its
+entrypoint and the Bun that runs it are digest-anchored, and the
+`trusted-bin/smithers` shim checks neither again: it executes the two paths it
+recorded when it was written. The engine's package closure is not hashed, and
+it runs without the Bun module confinement a sealed runner has. Ultrafuzz refuses
+it when it lacks any compatibility patch or lies inside the target project. It
+starts the engine's command process with
+`--config=/dev/null --no-env-file --no-install --no-addons`, so that process
+does not load the target's `bunfig.toml` or `.env`, and the compatibility
+patches pass the same flags to the detached engine and supervisor that process
+spawns, and to the supervisor's relaunch of a dead engine. Every engine process
+also gets `SMITHERS_BACKEND=sqlite`, which stops Smithers from importing the
+target's `.smithers/smithers.config.ts` to choose a store. The runner toolcache
+npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority; the latter remains only
+the run-owned directory holding the validator launcher and the `smithers` shim.
+Tasks inherit that directory first on `PATH`, so an agent can also drive its
+own run through `smithers` (for example `ps`, `cancel`, or `signal`); a
+same-UID agent could already run the engine by its path.
 
 Workflows that intentionally need additional variables can opt in explicitly:
 

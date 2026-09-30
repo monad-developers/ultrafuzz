@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID,
   MODAL_SMOKE_RESULT_SCHEMA_ID,
   MODAL_WORKER_RESULT_SCHEMA_ID,
   type ModalContractSchemaId,
-  type StrictModalExecutionDependencyManifestDocument,
   type StrictModalSmokeResultDocument,
   type StrictModalWorkerResultDocument
 } from "../src/modal-contracts.js";
@@ -69,35 +67,6 @@ function smokeResult(): StrictModalSmokeResultDocument {
       single_launch_owner: true
     },
     diagnostics: { completed_units: 1, repeated_units: 0, launch_owners: 1 }
-  };
-}
-
-function dependencyManifest(): StrictModalExecutionDependencyManifestDocument {
-  const moduleA = {
-    id: "module:@ultrafuzz/a",
-    name: "@ultrafuzz/a",
-    snapshot_path: "modules/@ultrafuzz/a"
-  };
-  const moduleB = {
-    id: "module:@ultrafuzz/b",
-    name: "@ultrafuzz/b",
-    snapshot_path: "modules/@ultrafuzz/b"
-  };
-  return {
-    schema_version: "ultrafuzz.workflow-execution-dependencies.v1",
-    modules: [moduleA, moduleB],
-    packages: [],
-    issuers: [
-      { id: moduleA.id, snapshot_path: moduleA.snapshot_path, dependencies: {} },
-      { id: moduleB.id, snapshot_path: moduleB.snapshot_path, dependencies: {} },
-      {
-        id: "root",
-        snapshot_path: ".",
-        dependencies: { "@ultrafuzz/a": moduleA.id, "@ultrafuzz/b": moduleB.id }
-      }
-    ],
-    executable_paths: ["bin/helper", "bin/smithers"],
-    smithers_bin: "bin/smithers"
   };
 }
 
@@ -176,31 +145,5 @@ describe("Modal semantic gate parity", () => {
         })
       )
     ).toThrow(ModalDocumentValidationError);
-  });
-
-  it("requires canonical dependency target, issuer-edge, and executable ordering", () => {
-    const base = dependencyManifest();
-    const unorderedModules = { ...base, modules: [...base.modules].reverse() };
-    const unorderedExecutables = { ...base, executable_paths: [...base.executable_paths].reverse() };
-    const root = base.issuers.at(-1)!;
-    const unorderedEdges = {
-      ...base,
-      issuers: [
-        ...base.issuers.slice(0, -1),
-        {
-          ...root,
-          dependencies: {
-            "@ultrafuzz/b": root.dependencies["@ultrafuzz/b"]!,
-            "@ultrafuzz/a": root.dependencies["@ultrafuzz/a"]!
-          }
-        }
-      ]
-    };
-
-    for (const value of [unorderedModules, unorderedExecutables, unorderedEdges]) {
-      expect(() => parseModalDocumentBytes(MODAL_EXECUTION_DEPENDENCY_MANIFEST_SCHEMA_ID, bytes(value))).toThrow(
-        ModalDocumentValidationError
-      );
-    }
   });
 });

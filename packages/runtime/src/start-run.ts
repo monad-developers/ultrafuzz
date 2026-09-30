@@ -68,16 +68,16 @@ import { controllerOwnedGovernancePaths, targetIdentity } from "./data-governanc
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
-  nativeSmithersContinuationEnvironment,
   renderCurrentSmithersController,
   requestSmithersPause,
   runSmithersLifecycleCommand,
   type SmithersResumeInspection,
-  assertCurrentCloudAgentCredentialEnvironment,
   assertSealedDataGovernance,
   smithersExecutionControlFiles,
   smithersDiagnostic,
   submitSmithersWorkflow,
+  bindInstalledWorkflowRunner,
+  writeTrustedSmithersShim,
   type CompiledSmithersWorkflow
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
@@ -142,7 +142,6 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
   "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
   "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
-  "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
@@ -192,8 +191,14 @@ export async function startRun(input: StartRunInput) {
   let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
     enforceDataGovernance: true,
-    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) =>
-      requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph),
+    beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
+      // Launch writes the run's `smithers` shim for the installed runner only
+      // after installing its own controller, so refuse a runner it cannot bind
+      // (an unpatched install, a missing Bun, an engine inside the target)
+      // before creating the run.
+      bindInstalledWorkflowRunner({}, input.projectRoot);
+      return requiredCommandPreflightDiagnostics(input, resolvedConfig, expandedGraph);
+    },
     afterLayoutCreated: (layout) => {
       createdLayout = layout;
     }
@@ -209,8 +214,7 @@ export async function startRun(input: StartRunInput) {
   const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env, [
     ...Object.values(plan.resolved_config.agents).flatMap((agent) =>
       agent.auth === "api-key" && agent.apiKeyEnv !== undefined ? [agent.apiKeyEnv] : []
-    ),
-    ...(plan.resolved_config.execution.providers.modal?.credentialEnv ?? [])
+    )
   ]);
   let releaseControlLock: () => Promise<void>;
   try {
@@ -232,7 +236,6 @@ export async function startRun(input: StartRunInput) {
       renderedPrompts: plan.rendered_prompts,
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput,
-      env: { ...process.env, ...(input.env ?? {}) },
       controllerSourceDigest: plan.controller_source_digest,
       dataGovernance: plan.data_governance
     });
@@ -281,6 +284,10 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
+    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(
+      plan.layout.root,
+      plan.validation.project_root
+    );
     assertCurrentDataGovernanceTarget(
       plan.validation.project_root,
       prepared.verifiedControl.executionFiles,
@@ -296,7 +303,6 @@ export async function startRun(input: StartRunInput) {
         providerCredentialNames
       )
     };
-    assertCurrentCloudAgentCredentialEnvironment(plan.resolved_config, compiled.tasks, submissionEnvironment);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
@@ -367,11 +373,8 @@ async function requiredCommandPreflightDiagnostics(
   try {
     commandProbes =
       input.requiredCommandProbe === undefined
-        ? await probeCommandsForExecution(resolvedConfig, requiredCommands, input.env ?? process.env, {
-            cwd: path.resolve(input.projectRoot),
-            // Normal cloud launch creates its configured app on first use.
-            // Preflight must preserve that behavior to inspect the real image.
-            createProviderAppIfMissing: true
+        ? await probeCommandsForExecution(requiredCommands, input.env ?? process.env, {
+            cwd: path.resolve(input.projectRoot)
           })
         : await input.requiredCommandProbe(requiredCommands);
     if (!Array.isArray(commandProbes)) {
@@ -539,8 +542,13 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // they find no agent tables and fall back to default auth. Launch writes
     // the same config as TOML beside it and hands adapters a copy of that file.
     const agentConfigPath = safeResolveInside(smithersRoot, "execution-config.toml", "workflow agent config");
+    // The compiler gave every task the execution mode this config records, and the current
+    // controller renders every task as a local worktree task, so continuing a run planned for
+    // Modal sandboxes would run its remaining attempts on this host instead. The mode comes from
+    // the config, not the optional task manifest, and a run whose config cannot be read is refused.
+    const config = readContinuationResolvedConfig(layout.root, configPath, runId);
+    if (config.execution.mode === "cloud") return cloudExecutionRemovedFailure(runId);
     let taskDocument: SmithersTaskManifestDocument | undefined;
-    let config: ResolvedConfig | undefined;
     if (fs.existsSync(tasksPath)) {
       assertRegularFileInside(layout.root, tasksPath, "workflow task manifest");
       try {
@@ -549,17 +557,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         if (input.refreshController === true) throw error;
       }
     }
-    if (fs.existsSync(configPath)) {
-      assertRegularFileInside(layout.root, configPath, "workflow config");
-      try {
-        config = parseContinuationResolvedConfigBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
-      } catch (error) {
-        if (input.refreshController === true) throw error;
-      }
-    }
     if (input.refreshController === true) {
-      if (taskDocument === undefined || config === undefined) {
-        throw new Error("current controller rendering requires the persisted workflow task manifest and config");
+      if (taskDocument === undefined) {
+        throw new Error("current controller rendering requires the persisted workflow task manifest");
       }
       refreshInspection = await assertSmithersControllerRefreshable({
         smithersRunId,
@@ -576,15 +576,12 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       });
     }
     const tasks = taskDocument?.tasks ?? [];
-    const forgeGuard =
-      config === undefined
-        ? { env: { ...(input.env ?? {}) }, environmentVariableNames: [] as readonly string[], active: false }
-        : prepareForgeGuardEnvironment({ layout, config, env: input.env });
+    const forgeGuard = prepareForgeGuardEnvironment({ layout, config, env: input.env });
     const controllerEnvironment = {
       ...forgeGuard.env,
       ULTRAFUZZ_ARTIFACTS_MODULE: import.meta.resolve("@ultrafuzz/artifacts"),
       ULTRAFUZZ_RUNTIME_MODULE: import.meta.resolve("@ultrafuzz/runtime"),
-      ...(config === undefined ? {} : { ULTRAFUZZ_CONFIG_PATH: agentConfigPath }),
+      ULTRAFUZZ_CONFIG_PATH: agentConfigPath,
       ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: workflowPath
     };
     let trustedCli: TrustedCliEnvironment = {
@@ -593,7 +590,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       environmentVariableNames: []
     };
     for (const name of TRUSTED_CLI_ENVIRONMENT_VARIABLES) trustedCli.env[name] = undefined;
-    if (taskDocument !== undefined && config !== undefined) {
+    if (taskDocument !== undefined) {
       try {
         const prepared = prepareTrustedCliEnvironment({
           layout,
@@ -608,16 +605,17 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         trustedCli = prepared;
       } catch (error) {
         // Historical validator identity is task setup provenance, not authority
-        // to prevent Smithers from continuing the workflow. Keep the run-owned
-        // launcher first on PATH anyway: it re-verifies its closure on every
-        // call, while dropping it lets tasks run whatever `ultrafuzz` is on PATH.
+        // to prevent Smithers from continuing the workflow. trusted-bin, which
+        // also holds the `smithers` shim written below, leads the engine PATH on
+        // every resume, so a kept launcher stays first: it re-verifies its
+        // closure on every call, while dropping it lets tasks run whatever
+        // `ultrafuzz` is on PATH.
         const launcher = path.join(
           layout.root,
           "trusted-bin",
           process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz"
         );
         const launcherKept = fs.existsSync(launcher);
-        if (launcherKept) trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = path.dirname(launcher);
         diagnostics.push(
           resumeWarning(
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
@@ -629,18 +627,15 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         );
       }
     }
+    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(layout.root, projectRoot);
     const agentRefs = tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
-    const providerCredentialNames =
-      config === undefined ? [] : agentCredentialEnvironmentVariableNames(config, agentRefs);
+    const providerCredentialNames = agentCredentialEnvironmentVariableNames(config, agentRefs);
     const continuedEnvironment =
       input.refreshController === true ? trustedCli.env : withoutSensitiveAllowlistedEnvironment(trustedCli.env);
     const lifecycleEnvironment = {
       ...process.env,
       ...providerScopedControllerEnvironment(continuedEnvironment, providerCredentialNames)
     };
-    if (config !== undefined && taskDocument !== undefined) {
-      assertCurrentCloudAgentCredentialEnvironment(config, tasks, lifecycleEnvironment);
-    }
     if (typeof metadata.source_revision === "string") {
       try {
         repairPrunableRunWorktreeRegistrations({ projectRoot, runRoot: layout.root, runId });
@@ -657,7 +652,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       smithersRunId,
       workflowPath,
       projectRoot,
-      maxConcurrency: input.maxConcurrency ?? config?.run.maxParallelAgents,
+      maxConcurrency: input.maxConcurrency ?? config.run.maxParallelAgents,
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
@@ -666,26 +661,26 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         runRoot: layout.root,
         logsDir: path.join(smithersRoot, "logs")
       },
-      keepWorkspaces: config?.run.keepWorkspaces ?? false,
-      controllerLeaseSeconds: config?.run.controllerLeaseSeconds ?? 60,
-      env: nativeSmithersContinuationEnvironment(lifecycleEnvironment),
+      keepWorkspaces: config.run.keepWorkspaces,
+      controllerLeaseSeconds: config.run.controllerLeaseSeconds,
+      env: lifecycleEnvironment,
       prepareContinuationEnvironment: () => {
         const claimsSealedControl =
           workflow.control_generation !== undefined || workflow.control_integrity_path !== undefined;
         if (!claimsSealedControl && pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)) {
-          return nativeSmithersContinuationEnvironment(lifecycleEnvironment);
+          return lifecycleEnvironment;
         }
-        return nativeSmithersContinuationEnvironment({
+        return {
           ...lifecycleEnvironment,
           ULTRAFUZZ_DATA_GOVERNANCE_PATH: authenticatedContinuationGovernancePath(
             projectRoot,
             layout,
             workflow.control_generation
           )
-        });
+        };
       },
       environmentVariableNames: mergeEnvironmentVariableNames(
-        config === undefined ? [] : agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
+        agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
         forgeGuard.environmentVariableNames,
         trustedCli.environmentVariableNames
@@ -715,6 +710,30 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
   } finally {
     await releaseLifecycleLock?.();
   }
+}
+
+// A missing or unreadable config fails the resume: without it the run's execution mode is unknown.
+function readContinuationResolvedConfig(runRoot: string, configPath: string, runId: string): ResolvedConfig {
+  try {
+    assertRegularFileInside(runRoot, configPath, "workflow config");
+    return parseContinuationResolvedConfigBytes(readRegularFileSnapshot(configPath, 16 * 1024 * 1024));
+  } catch (error) {
+    throw new Error(
+      `run ${runId} cannot be resumed without its resolved config, which records whether it was planned for the removed per-node cloud execution: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
+}
+
+function cloudExecutionRemovedFailure(runId: string): RuntimeResult<WorkflowLifecycleValue> {
+  return runtimeFailure<WorkflowLifecycleValue>([
+    {
+      code: "WORKFLOW_CLOUD_EXECUTION_REMOVED",
+      message: `run ${runId} was planned for per-node cloud execution, which was removed; it cannot be resumed, so start a new run`,
+      severity: "error",
+      source: "runtime"
+    }
+  ]);
 }
 
 function parseContinuationResolvedConfigBytes(bytes: Uint8Array): ResolvedConfig {
@@ -752,7 +771,7 @@ function readContinuationExpandedGraph(layout: RunLayout): unknown {
 
 function recordNativeContinuationState(input: {
   layout: RunLayout;
-  config: ResolvedConfig | undefined;
+  config: ResolvedConfig;
   requestedConcurrency: number | undefined;
 }): void {
   try {
@@ -763,8 +782,7 @@ function recordNativeContinuationState(input: {
     state.status = "running";
     state.started_at ??= submittedAt;
     delete state.finished_at;
-    const leaseDurationMs =
-      (input.config?.run.controllerLeaseSeconds ?? Math.max(1, state.controller_lease.duration_ms / 1_000)) * 1_000;
+    const leaseDurationMs = input.config.run.controllerLeaseSeconds * 1_000;
     state.controller_lease = {
       ...state.controller_lease,
       status: "active",
@@ -772,18 +790,10 @@ function recordNativeContinuationState(input: {
       renewed_at: submittedAt,
       expires_at: new Date(submittedAtMs + leaseDurationMs).toISOString()
     };
-    state.concurrency.requested_concurrency =
-      input.requestedConcurrency ?? input.config?.run.maxParallelAgents ?? state.concurrency.requested_concurrency;
-    if (input.config !== undefined) {
-      state.workflow_deadline_at = new Date(
-        submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
-      ).toISOString();
-    } else if (state.workflow_deadline_at !== undefined && Date.parse(state.workflow_deadline_at) <= submittedAtMs) {
-      // A legacy run without readable config cannot supply a fresh duration.
-      // Do not let its already-expired historical deadline cancel the Smithers
-      // continuation that was just accepted.
-      delete state.workflow_deadline_at;
-    }
+    state.concurrency.requested_concurrency = input.requestedConcurrency ?? input.config.run.maxParallelAgents;
+    state.workflow_deadline_at = new Date(
+      submittedAtMs + input.config.run.workflowDeadlineSeconds * 1_000
+    ).toISOString();
     writeRunState(input.layout, state);
   } catch {
     // Mutable Ultrafuzz projection is best effort after Smithers accepts the
@@ -975,6 +985,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       required: sealedTasksRequireTrustedCli(evidence.verifiedControl.contents.tasks)
     });
     runTrustedJsonValidatorPreflight({ layout: evidence.layout, trusted: trustedCli });
+    trustedCli.env[ULTRAFUZZ_TRUSTED_BIN_ENV] = writeTrustedSmithersShim(evidence.layout.root, input.projectRoot);
     const linkedAgentRefs = taskDocument.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(sealedConfig, linkedAgentRefs);
     const lifecycleEnvironment = {
@@ -985,7 +996,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
       evidence.verifiedControl.executionFiles,
       lifecycleEnvironment.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES
     );
-    assertCurrentCloudAgentCredentialEnvironment(sealedConfig, taskDocument.tasks, lifecycleEnvironment);
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -1967,15 +1977,6 @@ function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRe
     names.push(agent.apiKeyEnv);
     if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
   }
-  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
-    const provider = config.execution.providers[config.execution.provider];
-    if (provider !== undefined) {
-      for (const name of provider.credentialEnv) {
-        assertCredentialEnvironmentVariableName(name);
-        names.push(name);
-      }
-    }
-  }
   return [...new Set(names)].sort();
 }
 
@@ -2003,15 +2004,6 @@ function agentEnvironmentVariableNames(
     if (agentRef === "ClaudeAgent") names.push("CLAUDE_CONFIG_DIR");
     if (agentRef === "CodexAgent") names.push("OPENAI_BASE_URL");
   }
-  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
-    const provider = config.execution.providers[config.execution.provider];
-    if (provider !== undefined) {
-      pushEnvironmentVariableNames(names, provider.credentialEnv);
-      if (config.execution.provider === "modal") {
-        names.push("MODAL_ENVIRONMENT", "MODAL_PROFILE");
-      }
-    }
-  }
   const extra = env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
   if (extra !== undefined && extra.trim() !== "") {
     names.push("ULTRAFUZZ_AGENT_ENV_ALLOWLIST");
@@ -2024,19 +2016,6 @@ function agentEnvironmentVariableNames(
     }
   }
   return [...new Set(names)].sort();
-}
-
-function pushEnvironmentVariableNames(names: string[], value: unknown): void {
-  if (!Array.isArray(value)) {
-    return;
-  }
-  for (const name of value) {
-    if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
-      throw new Error("workflow environment allowlist contains an invalid environment variable name");
-    }
-    assertCredentialEnvironmentVariableName(name);
-    names.push(name);
-  }
 }
 
 function assertCredentialEnvironmentVariableName(name: string): void {

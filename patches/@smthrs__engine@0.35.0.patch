@@ -1,0 +1,768 @@
+diff --git a/src/engine.js b/src/engine.js
+index e4f801c88081e3e19e0f2a3ecc02b2612589888b..29a97879bd54a904bebcdc00f89b6f3c05f60033 100644
+--- a/src/engine.js
++++ b/src/engine.js
+@@ -89,7 +89,7 @@ import { runScorersAsync } from "@smthrs/scorers/run-scorers";
+ import { estimateCostUsd } from "@smthrs/scorers/estimateCostUsd";
+ import { modelTokenPrices } from "@smthrs/scorers/modelTokenPrices";
+ import { basename, delimiter, dirname, join, resolve } from "node:path";
+-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
++import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+ import { toSmithersError } from "@smthrs/errors/toSmithersError";
+ import { logDebug, logError, logInfo, logWarning } from "@smthrs/observability/logging";
+ import { formatRuntimeOwnerId } from "@smthrs/db/runtime-owner";
+@@ -1485,10 +1485,8 @@ function resetWorktreeSyncCache() {
+  * @returns {import("./worktreeSyncCache.js").WorktreeSyncCache}
+  */
+ function getWorktreeSyncCache() {
+-  if (!worktreeSyncCacheSingleton) {
+-    worktreeSyncCacheSingleton = createWorktreeSyncCache({ ttlMs: resolveWorktreeFetchTtlMs() });
+-  }
+-  return worktreeSyncCacheSingleton;
++  // ultrafuzz: task worktrees stay on their recorded launch commit (#1148).
++  return { shouldFetch: () => false, recordFetch() {}, shouldRebase: () => false, recordRebase() {} };
+ }
+ /**
+  * Resolve the commit the base branch currently points at, cheaply and without
+@@ -1633,11 +1631,8 @@ async function ensureWorktree(rootDir, worktreePath, branch, baseBranch, owner)
+       { rootDir },
+     );
+   }
+-  // Best effort: refresh remote refs for git so origin/main can be used as a
+-  // base when local main is absent.
+-  if (vcs.type === "git") {
+-    await runGitCommand(vcs.root, ["fetch", "origin"]);
+-  }
++  // ultrafuzz: task worktrees start from a local recorded commit, so creating
++  // one never fetches origin (#1148).
+   // One creation at a time per repo: every branch below mutates shared
+   // .git state (index, refs), which is exactly what #935 raced on.
+   const releaseCreationSlot = await acquireWorktreeCreationSlot(vcs.root);
+@@ -2901,11 +2896,12 @@ async function getGitPointer(cwd) {
+ /**
+  * @param {string | null} workflowPath
+  * @param {string} rootDir
++ * @param {string | null} [identityWorkflowPath]
+  * @returns {Promise<RunDurabilityMetadata>}
+  */
+-async function getRunDurabilityMetadata(workflowPath, rootDir) {
++async function getRunDurabilityMetadata(workflowPath, rootDir, identityWorkflowPath = workflowPath) {
+   const entryWorkflowHash = await readWorkflowEntryHash(workflowPath);
+-  const workflowHash = await readWorkflowGraphHash(workflowPath);
++  const workflowHash = await readWorkflowGraphHash(workflowPath, identityWorkflowPath);
+   const vcs = findVcsRoot(rootDir);
+   if (!vcs) {
+     return {
+@@ -3052,7 +3048,10 @@ function assertResumeDurabilityMetadata(existingRun, existingConfig, current, wo
+   ];
+   const acceptedWorkflowMismatches =
+     options.acceptWorkflowChange === true
+-      ? mismatches.filter((mismatch) => workflowHashMismatchLabels.includes(mismatch))
++      ? mismatches.filter(
++          (mismatch) =>
++            mismatch === "workflow path changed" || workflowHashMismatchLabels.includes(mismatch),
++        )
+       : [];
+   const blockingMismatches = mismatches.filter((mismatch) => !acceptedWorkflowMismatches.includes(mismatch));
+   if (blockingMismatches.length > 0) {
+@@ -3938,21 +3937,45 @@ function normalizeTokenUsage(usage) {
+   const inputTokens = usage.inputTokens ?? usage.promptTokens ?? 0;
+   const outputTokens = usage.outputTokens ?? usage.completionTokens ?? 0;
+   const cacheReadTokens = usage.inputTokenDetails?.cacheReadTokens ?? usage.cacheReadTokens ?? undefined;
+-  const cacheWriteTokens = usage.inputTokenDetails?.cacheWriteTokens ?? usage.cacheWriteTokens ?? undefined;
+-  if (!(inputTokens > 0 || outputTokens > 0)) return null;
++  const cacheWriteTokens =
++    usage.inputTokenDetails?.cacheWriteTokens ?? usage.cacheWriteTokens ?? undefined;
++  const reasoningTokens = usage.outputTokenDetails?.reasoningTokens ?? usage.reasoningTokens ?? undefined;
++  const reportedCostUsd = usage.reportedCostUsd;
++  const normalizedReportedCostUsd =
++    typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
++      ? reportedCostUsd
++      : undefined;
++  if (reportedCostUsd !== undefined && normalizedReportedCostUsd === undefined) return null;
++  if (!(inputTokens > 0 || outputTokens > 0 || normalizedReportedCostUsd !== undefined)) return null;
+   const reportedFreshInputTokens = usage.inputTokenDetails?.noCacheTokens ?? usage.freshInputTokens;
+-  const freshInputTokens =
+-    typeof reportedFreshInputTokens === "number" && Number.isFinite(reportedFreshInputTokens)
+-      ? Math.max(0, reportedFreshInputTokens)
+-      : Math.max(0, inputTokens);
+-  return {
++  if (
++    !Number.isSafeInteger(inputTokens) ||
++    inputTokens < 0 ||
++    !Number.isSafeInteger(outputTokens) ||
++    outputTokens < 0 ||
++    (cacheReadTokens !== undefined && (!Number.isSafeInteger(cacheReadTokens) || cacheReadTokens < 0)) ||
++    (cacheWriteTokens !== undefined && (!Number.isSafeInteger(cacheWriteTokens) || cacheWriteTokens < 0)) ||
++    (reasoningTokens !== undefined && (!Number.isSafeInteger(reasoningTokens) || reasoningTokens < 0)) ||
++    (reportedFreshInputTokens !== undefined &&
++      (!Number.isSafeInteger(reportedFreshInputTokens) || reportedFreshInputTokens < 0))
++  )
++    return null;
++  const inputBreakdownComplete = reportedFreshInputTokens !== undefined;
++  const freshInputTokens = inputBreakdownComplete ? reportedFreshInputTokens : inputTokens;
++  const normalizedUsage = {
+     inputTokens,
+     freshInputTokens,
+     outputTokens,
+     cacheReadTokens,
+     cacheWriteTokens,
+-    reasoningTokens: usage.outputTokenDetails?.reasoningTokens ?? usage.reasoningTokens ?? undefined,
++    reasoningTokens,
++    reportedCostUsd: normalizedReportedCostUsd,
+   };
++  Object.defineProperty(normalizedUsage, "inputBreakdownComplete", {
++    value: inputBreakdownComplete,
++    enumerable: false,
++  });
++  return normalizedUsage;
+ }
+ /**
+  * Price only models in the built-in table. Unknown models retain complete
+@@ -3962,6 +3985,11 @@ function normalizeTokenUsage(usage) {
+  * @returns {number | undefined}
+  */
+ function estimateReportedCostUsd(model, usage) {
++  if (usage.reportedCostUsd !== undefined) return usage.reportedCostUsd;
++  if (usage.inputBreakdownComplete !== true) return undefined;
++  const accountedInputTokens =
++    usage.freshInputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
++  if (accountedInputTokens !== usage.inputTokens) return undefined;
+   const price = modelTokenPrices(model);
+   if (![price.input, price.output, price.cacheRead, price.cacheWrite].some((value) => value > 0)) return undefined;
+   return estimateCostUsd({
+@@ -3972,6 +4000,79 @@ function estimateReportedCostUsd(model, usage) {
+     cacheWriteTokens: usage.cacheWriteTokens,
+   });
+ }
++
++function createCumulativeAgentUsageState() {
++  let completedUsage = null;
++  let completedCostUsd = 0;
++  let completedPricingComplete = true;
++  let activeUsage = null;
++  let activeModelId = "unknown";
++  const optionalComponents = ["cacheReadTokens", "cacheWriteTokens", "reasoningTokens"];
++  /**
++   * @param {NonNullable<ReturnType<typeof normalizeTokenUsage>> | null} left
++   * @param {NonNullable<ReturnType<typeof normalizeTokenUsage>>} right
++   */
++  const mergeInvocations = (left, right) => {
++    const inputBreakdownComplete =
++      (left === null || left.inputBreakdownComplete === true) && right.inputBreakdownComplete === true;
++    const merged = {
++      inputTokens: (left?.inputTokens ?? 0) + right.inputTokens,
++      outputTokens: (left?.outputTokens ?? 0) + right.outputTokens,
++      ...(inputBreakdownComplete
++        ? { freshInputTokens: (left?.freshInputTokens ?? 0) + right.freshInputTokens }
++        : {}),
++    };
++    for (const component of optionalComponents) {
++      const leftValue = left?.[component];
++      const rightValue = right[component];
++      if ((left === null || leftValue !== undefined) && rightValue !== undefined) {
++        merged[component] = (leftValue ?? 0) + rightValue;
++      }
++    }
++    Object.defineProperty(merged, "inputBreakdownComplete", {
++      value: inputBreakdownComplete,
++      enumerable: false,
++    });
++    return merged;
++  };
++  const finalizeActive = () => {
++    if (!activeUsage) return;
++    const invocationCostUsd = estimateReportedCostUsd(activeModelId, activeUsage);
++    completedUsage = mergeInvocations(completedUsage, activeUsage);
++    if (completedPricingComplete && invocationCostUsd !== undefined) {
++      completedCostUsd += invocationCostUsd;
++    } else {
++      completedPricingComplete = false;
++    }
++    activeUsage = null;
++  };
++  return {
++    begin() {
++      // Progress-only providers still expose a valid last invocation snapshot.
++      finalizeActive();
++      activeModelId = "unknown";
++    },
++    /**
++     * @param {NonNullable<ReturnType<typeof normalizeTokenUsage>>} usage
++     * @param {string} reportedModelId
++     * @param {string} agentId
++     * @param {boolean} finalize
++     */
++    snapshot(usage, reportedModelId, agentId, finalize = false) {
++      activeUsage = usage;
++      activeModelId = reportedModelId;
++      const cumulativeUsage = mergeInvocations(completedUsage, usage);
++      const invocationCostUsd = estimateReportedCostUsd(reportedModelId, usage);
++      const costUsd =
++        completedPricingComplete && invocationCostUsd !== undefined
++          ? completedCostUsd + invocationCostUsd
++          : undefined;
++      const snapshot = { usage: cumulativeUsage, costUsd, reportedModelId, agentId };
++      if (finalize) finalizeActive();
++      return snapshot;
++    },
++  };
++}
+ /**
+  * @param {{ errorJson?: string | null; metaJson?: string | null } | null} [attempt]
+  */
+@@ -5293,17 +5394,7 @@ async function legacyExecuteTask(
+         },
+         "heartbeat:record",
+       );
+-      await eventBus.emitEventQueued({
+-        type: "TaskHeartbeat",
+-        runId,
+-        nodeId: desc.nodeId,
+-        iteration: desc.iteration,
+-        attempt: attemptNo,
+-        hasData: heartbeatDataJson !== null,
+-        dataSizeBytes,
+-        intervalMs: intervalMs ?? undefined,
+-        timestampMs: heartbeatAtMs,
+-      });
++      // ultrafuzz: the fenced attempt row above is the liveness record (#1147).
+     } catch (error) {
+       heartbeatLastWriteSucceeded = false;
+       logWarning(
+@@ -5532,8 +5623,17 @@ async function legacyExecuteTask(
+   // has proved this executor still owns the attempt. Keep this shared by the
+   // primary generation and every schema-repair generation.
+   const pendingOwnershipChecks = new Set();
++  let heartbeatOwnershipCheckInFlight = null;
++  const sharedHeartbeatOwnershipCheck = () => {
++    if (heartbeatOwnershipCheckInFlight) return heartbeatOwnershipCheckInFlight;
++    const check = confirmHeartbeatOwnership().finally(() => {
++      if (heartbeatOwnershipCheckInFlight === check) heartbeatOwnershipCheckInFlight = null;
++    });
++    heartbeatOwnershipCheckInFlight = check;
++    return check;
++  };
+   const afterHeartbeatOwnership = (callback) => {
+-    const check = confirmHeartbeatOwnership()
++    const check = sharedHeartbeatOwnershipCheck()
+       .then((owned) => {
+         if (owned) return callback();
+       })
+@@ -7137,6 +7237,128 @@ async function legacyExecuteTask(
+             hijackCompletionCheckInFlight = false;
+           }
+         };
++        const agentUsageAccumulator = createCumulativeAgentUsageState();
++        const beginAgentUsageInvocation = () => agentUsageAccumulator.begin();
++        let agentUsagePersistence = Promise.resolve();
++        /**
++         * @param {ReturnType<typeof normalizeTokenUsage>} usage
++         * @param {string} reportedModelId
++         * @param {string} agentId
++         * @param {(AgentCliEvent & { model?: unknown, usage?: unknown }) | null} agentEvent
++         * @param {boolean} finalizeInvocation
++         */
++        const persistOwnedAgentUsage = (
++          usage,
++          reportedModelId,
++          agentId,
++          agentEvent = null,
++          finalizeInvocation = false,
++        ) => {
++          if (!usage) return Promise.resolve(false);
++          const timestampMs = nowMs();
++          const snapshot = agentUsageAccumulator.snapshot(
++            usage,
++            reportedModelId,
++            agentId,
++            finalizeInvocation,
++          );
++          const tokenUsageEvent = eventBus.attachCorrelation({
++            type: "TokenUsageReported",
++            runId,
++            nodeId: desc.nodeId,
++            iteration: desc.iteration,
++            attempt: attemptNo,
++            model: snapshot.reportedModelId,
++            agent: snapshot.agentId,
++            ...snapshot.usage,
++            ...(snapshot.costUsd !== undefined ? { costUsd: snapshot.costUsd } : {}),
++            timestampMs,
++          });
++          const persistence = agentUsagePersistence
++            .then(async () => {
++              const stored = await Effect.runPromise(
++                adapter.recordRunTokenUsageOwned({
++                  runId,
++                  nodeId: desc.nodeId,
++                  iteration: desc.iteration ?? 0,
++                  attempt: attemptNo,
++                  runtimeOwnerId: executionOwnerId,
++                  model: snapshot.reportedModelId,
++                  agent: snapshot.agentId,
++                  ...snapshot.usage,
++                  costUsd: snapshot.costUsd,
++                  updatedAtMs: timestampMs,
++                  event: tokenUsageEvent,
++                }),
++              );
++              if (!stored) return false;
++              if (agentEvent) {
++                await eventBus.emitEventQueued({
++                  type: "AgentEvent",
++                  runId,
++                  nodeId: desc.nodeId,
++                  iteration: desc.iteration,
++                  attempt: attemptNo,
++                  engine: agentEvent.engine,
++                  event: agentEvent,
++                  timestampMs,
++                });
++              }
++              // The exact correlated payload committed with the usage row.
++              // Normal publication now supplies listeners, metrics, and the
++              // stream log; its DB insertion is exact-event idempotent.
++              await eventBus.emitEventQueued(tokenUsageEvent);
++              return true;
++            })
++            .catch((error) => {
++              logWarning(
++                "failed to persist owned agent usage",
++                {
++                  runId,
++                  nodeId: desc.nodeId,
++                  iteration: desc.iteration,
++                  attempt: attemptNo,
++                  error: error instanceof Error ? error.message : String(error),
++                },
++                "engine:agent-usage",
++              );
++              return false;
++            });
++          agentUsagePersistence = persistence.then(() => undefined);
++          return persistence;
++        };
++        /**
++         * @param {AgentCliEvent & { model?: unknown, usage?: unknown }} event
++         */
++        const persistAgentUsageProgress = (event) => {
++          const usage = event.type === "usage" ? normalizeTokenUsage(event.usage) : null;
++          if (!usage) return Promise.resolve(false);
++          const reportedModelId =
++            (typeof event.model === "string" && event.model.length > 0 ? event.model : undefined) ??
++            (typeof effectiveAgent.model === "string" ? effectiveAgent.model : undefined) ??
++            "unknown";
++          const agentId =
++            (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
++            effectiveAgent.constructor?.name ??
++            "unknown";
++          return persistOwnedAgentUsage(usage, reportedModelId, agentId, event);
++        };
++        /** @param {unknown} result */
++        const persistAgentResultUsage = (result) => {
++          const usage = normalizeTokenUsage(result?.usage ?? result?.totalUsage);
++          if (!usage) return Promise.resolve(false);
++          const reportedModelId =
++            (typeof result?.response?.modelId === "string" && result.response.modelId.length > 0
++              ? result.response.modelId
++              : undefined) ??
++            (typeof effectiveAgent.model === "string" ? effectiveAgent.model : undefined) ??
++            "unknown";
++          const agentId =
++            (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
++            effectiveAgent.constructor?.name ??
++            "unknown";
++          return persistOwnedAgentUsage(usage, reportedModelId, agentId, null, true);
++        };
+         /**
+          * @param {AgentCliEvent} event
+          */
+@@ -7174,16 +7396,40 @@ async function legacyExecuteTask(
+                 extendToolActivityLease();
+               } else if (event.phase === "completed") activeCliActions.delete(event.action.id);
+             }
+-            void eventBus.emitEventQueued({
+-              type: "AgentEvent",
+-              runId,
+-              nodeId: desc.nodeId,
+-              iteration: desc.iteration,
+-              attempt: attemptNo,
+-              engine: event.engine,
+-              event,
+-              timestampMs: nowMs(),
+-            });
++            if (event.type === "usage" && checkpointWrite) {
++              try {
++                await checkpointWrite;
++                checkpointWrite = null;
++              } catch (error) {
++                logWarning(
++                  "failed to persist CLI session checkpoint",
++                  {
++                    runId,
++                    nodeId: desc.nodeId,
++                    iteration: desc.iteration,
++                    attempt: attemptNo,
++                    engine: event.engine,
++                    error: error instanceof Error ? error.message : String(error),
++                  },
++                  "engine:agent-checkpoint",
++                );
++                return;
++              }
++            }
++            if (event.type === "usage") {
++              await persistAgentUsageProgress(event);
++            } else {
++              void eventBus.emitEventQueued({
++                type: "AgentEvent",
++                runId,
++                nodeId: desc.nodeId,
++                iteration: desc.iteration,
++                attempt: attemptNo,
++                engine: event.engine,
++                event,
++                timestampMs: nowMs(),
++              });
++            }
+             void maybeCompleteHijack(true).catch(() => {});
+             if (checkpointWrite) {
+               try {
+@@ -7483,8 +7729,11 @@ async function legacyExecuteTask(
+                                 prompt: effectivePrompt,
+                               };
+                       const doGenerate = () => {
++                        beginAgentUsageInvocation();
+                         cliTurnCompletion.begin();
+-                        return effectiveAgent.generate({
++                        return effectiveAgent.generate(
++                          {
++                          ultrafuzzTaskRuntime: agentTaskRuntime,
+                           options: undefined,
+                           abortSignal: taskSignal,
+                           ...agentCall,
+@@ -7573,40 +7822,11 @@ async function legacyExecuteTask(
+                   : undefined) ??
+                 (typeof effectiveAgent.model === "string" ? effectiveAgent.model : undefined) ??
+                 "unknown";
+-              const costUsd = estimateReportedCostUsd(reportedModelId, failedUsage);
+-              void eventBus
+-                .emitEventQueued({
+-                  type: "TokenUsageReported",
+-                  runId,
+-                  nodeId: desc.nodeId,
+-                  iteration: desc.iteration,
+-                  attempt: attemptNo,
+-                  model: reportedModelId,
+-                  agent:
+-                    (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
+-                    effectiveAgent.constructor?.name ??
+-                    "unknown",
+-                  ...failedUsage,
+-                  ...(costUsd !== undefined ? { costUsd } : {}),
+-                  timestampMs: nowMs(),
+-                })
+-                .catch(() => {});
+-              await Effect.runPromise(
+-                adapter.recordRunTokenUsage({
+-                  runId,
+-                  nodeId: desc.nodeId,
+-                  iteration: desc.iteration ?? 0,
+-                  attempt: attemptNo,
+-                  model: reportedModelId,
+-                  agent:
+-                    (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
+-                    effectiveAgent.constructor?.name ??
+-                    "unknown",
+-                  ...failedUsage,
+-                  costUsd,
+-                  updatedAtMs: nowMs(),
+-                }),
+-              ).catch(() => {});
++              const agentId =
++                (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
++                effectiveAgent.constructor?.name ??
++                "unknown";
++              await persistOwnedAgentUsage(failedUsage, reportedModelId, agentId, null, true);
+             }
+           } catch {
+             /* token telemetry must not mask the original provider error */
+@@ -7695,53 +7915,11 @@ async function legacyExecuteTask(
+               : undefined) ??
+             (typeof effectiveAgent.model === "string" ? effectiveAgent.model : undefined) ??
+             "unknown";
+-          const costUsd = estimateReportedCostUsd(reportedModelId, usage);
+-          void eventBus.emitEventQueued({
+-            type: "TokenUsageReported",
+-            runId,
+-            nodeId: desc.nodeId,
+-            iteration: desc.iteration,
+-            attempt: attemptNo,
+-            model: reportedModelId,
+-            agent:
+-              (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
+-              effectiveAgent.constructor?.name ??
+-              "unknown",
+-            inputTokens,
+-            freshInputTokens,
+-            outputTokens,
+-            cacheReadTokens,
+-            cacheWriteTokens,
+-            reasoningTokens,
+-            ...(costUsd !== undefined ? { costUsd } : {}),
+-            timestampMs: nowMs(),
+-          });
+-          // Same numbers, persisted as a queryable row. The event log stays
+-          // the audit trail; `_smithers_run_usage` is the authoritative
+-          // per-run total nobody has to replay events to compute (#1464
+-          // AWF-6, #1436). Awaited so the row is durable before the attempt
+-          // settles, but swallowed — usage accounting never fails a task.
+-          await Effect.runPromise(
+-            adapter.recordRunTokenUsage({
+-              runId,
+-              nodeId: desc.nodeId,
+-              iteration: desc.iteration ?? 0,
+-              attempt: attemptNo,
+-              model: reportedModelId,
+-              agent:
+-                (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
+-                effectiveAgent.constructor?.name ??
+-                "unknown",
+-              inputTokens,
+-              freshInputTokens,
+-              outputTokens,
+-              cacheReadTokens,
+-              cacheWriteTokens,
+-              reasoningTokens,
+-              costUsd,
+-              updatedAtMs: nowMs(),
+-            }),
+-          ).catch(() => {});
++          const agentId =
++            (typeof effectiveAgent.id === "string" ? effectiveAgent.id : undefined) ??
++            effectiveAgent.constructor?.name ??
++            "unknown";
++          await persistOwnedAgentUsage(usage, reportedModelId, agentId, null, true);
+         }
+         let output;
+         // Try structured output first (wrapping in try/catch since getters may throw)
+@@ -7920,6 +8098,7 @@ async function legacyExecuteTask(
+               "engine:schema-retry",
+             );
+             const checkpointPublicationBeforeCorrection = checkpointPublicationCount;
++            beginAgentUsageInvocation();
+             cliTurnCompletion.begin();
+             const retryResult = await raceAgentCallAbort(
+               effectiveAgent.generate({
+@@ -7971,6 +8150,7 @@ async function legacyExecuteTask(
+             // emitted by this correction call is visible before the
+             // next iteration decides what to resume.
+             await Promise.all(pendingOwnershipChecks);
++            await persistAgentResultUsage(retryResult);
+             await captureResultCheckpoint(retryResult, "schema-correction");
+             if (
+               checkpointPublicationCount === checkpointPublicationBeforeCorrection &&
+@@ -8286,6 +8466,7 @@ async function legacyExecuteTask(
+       // Append the correction as a user message to the conversation
+       const retryMessages = [...schemaCorrectionMessages, { role: "user", content: schemaRetryPrompt }];
+       const checkpointPublicationBeforeCorrection = checkpointPublicationCount;
++      beginAgentUsageInvocation();
+       cliTurnCompletion.begin();
+       const schemaRetryResult = await raceAgentCallAbort(
+         effectiveAgent.generate({
+@@ -8336,6 +8517,7 @@ async function legacyExecuteTask(
+       // Flush deferred event handlers so a fresh session id emitted by
+       // this correction call is visible to the next iteration.
+       await Promise.all(pendingOwnershipChecks);
++      await persistAgentResultUsage(schemaRetryResult);
+       await captureResultCheckpoint(schemaRetryResult, "schema-correction");
+       if (
+         checkpointPublicationCount === checkpointPublicationBeforeCorrection &&
+@@ -9405,7 +9587,29 @@ async function runWorkflowBodyDriver(workflow, opts) {
+   if (!inputTable) {
+     throw new SmithersError("MISSING_INPUT_TABLE", "Schema must include input table");
+   }
++  // Keep Linux's canonical-path comparison unchanged. Darwin volfs paths cannot
++  // be realpathed, so compare the verified file identities they name instead.
++  const ultrafuzzSameWorkflowFile = (left, right) => {
++    if (process.platform !== "darwin") return realpathSync(left) === realpathSync(right);
++    const a = statSync(left);
++    const b = statSync(right);
++    return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino;
++  };
+   const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;
++  const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
++  const persistedWorkflowPath = opts.workflowPath
++    ? resolve(persistedWorkflowPathValue || opts.workflowPath)
++    : null;
++  if (
++    resolvedWorkflowPath &&
++    persistedWorkflowPath &&
++    !ultrafuzzSameWorkflowFile(resolvedWorkflowPath, persistedWorkflowPath)
++  ) {
++    throw new SmithersError(
++      "INVALID_WORKFLOW_PATH",
++      "Controller workflow path does not match its persisted workflow path",
++    );
++  }
+   const rootDir = resolveRootDir(opts, resolvedWorkflowPath);
+   const logDir = resolveLogDir(rootDir, runId, opts.logDir);
+   // `let`: the slot governor may auto-raise the cap mid-run when the user did
+@@ -9432,7 +9636,11 @@ async function runWorkflowBodyDriver(workflow, opts) {
+   const detachAbort = wireAbortSignal(runAbortController, opts.signal);
+   const detachPause = wireAbortSignal(pauseAbortController, opts.pauseSignal);
+   let stopSupervisor = async () => {};
+-  const runMetadata = await getRunDurabilityMetadata(resolvedWorkflowPath, rootDir);
++  const runMetadata = await getRunDurabilityMetadata(
++    resolvedWorkflowPath,
++    rootDir,
++    persistedWorkflowPath,
++  );
+   const lastSeq = await Effect.runPromise(adapter.getLastEventSeq(runId));
+   const eventBus = new EventBus({
+     db: adapter,
+@@ -11267,7 +11475,7 @@ async function runWorkflowBodyDriver(workflow, opts) {
+           existingRun,
+           existingConfig,
+           runMetadata,
+-          resolvedWorkflowPath,
++          persistedWorkflowPath,
+           {
+             acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,
+           },
+@@ -11355,7 +11563,7 @@ async function runWorkflowBodyDriver(workflow, opts) {
+           runtimeOwnerId,
+           runConfigJson,
+           runMetadata,
+-          resolvedWorkflowPath,
++          persistedWorkflowPath,
+         );
+         runOwnedByCurrentProcess = true;
+       }
+@@ -11449,7 +11657,7 @@ async function runWorkflowBodyDriver(workflow, opts) {
+             owner: opts.ownership?.owner ?? null,
+             app: opts.ownership?.app ?? null,
+             workflowName: "workflow",
+-            workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
++            workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? null,
+             workflowHash: runMetadata.workflowHash,
+             status: "running",
+             createdAtMs: nowMs(),
+@@ -11485,7 +11693,7 @@ async function runWorkflowBodyDriver(workflow, opts) {
+           pauseRequestedAtMs: null,
+           hijackRequestedAtMs: null,
+           hijackTarget: null,
+-          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,
++          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,
+           workflowHash: runMetadata.workflowHash ?? existingRun.workflowHash ?? null,
+           vcsType: runMetadata.vcsType ?? existingRun.vcsType ?? null,
+           vcsRoot: runMetadata.vcsRoot ?? existingRun.vcsRoot ?? null,
+@@ -11614,6 +11822,27 @@ async function runWorkflowBodyDriver(workflow, opts) {
+           }
+           resumeWorkflowNameValidated = true;
+           await startRunRuntime();
++          const durableOutputs = await loadOutputs(db, schema, runId);
++          const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
++          const terminalTaskStates = durableNodes.flatMap((node) => {
++            if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
++            const rows = durableOutputs[node.outputTable];
++            const hasOutput =
++              Array.isArray(rows) &&
++              rows.some((row) => {
++                const rowNodeId = row.nodeId ?? row.node_id;
++                return rowNodeId === node.nodeId && Number(row.iteration ?? 0) === Number(node.iteration ?? 0);
++              });
++            return hasOutput
++              ? [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "finished" }]
++              : [];
++          });
++          await Effect.runPromise(workflowSession.restoreTerminalTaskStates(terminalTaskStates));
++          logInfo(
++            "restored durable terminal tasks into resumed workflow session",
++            { runId, restoredTaskCount: terminalTaskStates.length },
++            "engine:run",
++          );
+         }
+         await workflowVersioning.flush();
+         graph.tasks = applyOptimizationArtifactToTasks(graph.tasks);
+@@ -11778,7 +12007,7 @@ async function runWorkflowBodyDriver(workflow, opts) {
+           schema,
+           inputTable,
+           runId,
+-          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,
++          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,
+           runMetadata,
+           currentFrameNo: frameNo,
+           continuation: {
+diff --git a/src/workflow-hash.js b/src/workflow-hash.js
+index 78a8d892296597d694aef6ba7087cd25de67dee5..ab22c0baed3d7297a431c84478c24569a375fdae 100644
+--- a/src/workflow-hash.js
++++ b/src/workflow-hash.js
+@@ -1,6 +1,6 @@
+ import { existsSync, statSync } from "node:fs";
+ import { readFile } from "node:fs/promises";
+-import { dirname, extname, resolve } from "node:path";
++import { dirname, extname, relative, resolve } from "node:path";
+ import { createHash } from "node:crypto";
+ import { SmithersError } from "@smthrs/errors/SmithersError";
+ 
+@@ -107,16 +107,23 @@ export function resolveWorkflowImport(baseFile, specifier) {
+ 
+ /**
+  * @param {string} workflowPath
++ * @param {string} [identityWorkflowPath]
++ * @param {Set<string>} [visited]
+  * @returns {Promise<string[]>}
+  */
+-async function collectWorkflowModuleHashEntries(workflowPath, visited = new Set()) {
++async function collectWorkflowModuleHashEntries(
++  workflowPath,
++  identityWorkflowPath = workflowPath,
++  visited = new Set(),
++) {
+   const resolvedPath = resolve(workflowPath);
++  const resolvedIdentityPath = resolve(identityWorkflowPath);
+   if (visited.has(resolvedPath)) {
+     return [];
+   }
+   visited.add(resolvedPath);
+   const source = await readFile(resolvedPath, "utf8");
+-  const entries = [`${resolvedPath}:${sha256Hex(source)}`];
++  const entries = [`${resolvedIdentityPath}:${sha256Hex(source)}`];
+   // Only scan loadable modules for further imports. Non-module assets (most
+   // importantly .mdx prompts, which every seeded workflow imports) are hash
+   // leaves: their prose is not an import graph.
+@@ -133,19 +140,29 @@ async function collectWorkflowModuleHashEntries(workflowPath, visited = new Set(
+         { workflowPath: resolvedPath, specifier },
+       );
+     }
+-    entries.push(...(await collectWorkflowModuleHashEntries(importedPath, visited)));
++    const importedIdentityPath = resolve(
++      dirname(resolvedIdentityPath),
++      relative(dirname(resolvedPath), importedPath),
++    );
++    entries.push(
++      ...(await collectWorkflowModuleHashEntries(importedPath, importedIdentityPath, visited)),
++    );
+   }
+   return entries;
+ }
+ 
+ /**
+  * @param {string | null} workflowPath
++ * @param {string | null} [identityWorkflowPath]
+  * @returns {Promise<string | null>}
+  */
+-export async function readWorkflowGraphHash(workflowPath) {
++export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath = workflowPath) {
+   if (!workflowPath) return null;
+   try {
+-    const entries = await collectWorkflowModuleHashEntries(workflowPath);
++    const entries = await collectWorkflowModuleHashEntries(
++      workflowPath,
++      identityWorkflowPath || workflowPath,
++    );
+     return sha256Hex(entries.sort().join("|"));
+   } catch {
+     return null;

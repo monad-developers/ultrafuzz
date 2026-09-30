@@ -7,9 +7,6 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TRIAGE_PANEL_SIZE,
   DEFAULT_TRIAGE_QUORUM,
-  MODAL_NODE_LIFECYCLE_RESERVE_SECONDS,
-  MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS,
-  MODAL_SANDBOX_MAX_LIFETIME_SECONDS,
   REDACTION_PLACEHOLDER,
   applyModelProfileOverrides,
   invariantPropertyPrioritySelection,
@@ -17,8 +14,8 @@ import {
   parseProjectConfigToml,
   redactDiagnostics,
   redactResolvedConfig,
-  resolveExecutionResources,
   resolveConfig,
+  resolveExecutionResources,
   serializeRedactedResolvedConfigToml,
   type ConfigDiagnostic,
   type ProjectConfigInput,
@@ -321,11 +318,46 @@ invariant_testing_smoke_timeout = "10min"
     expect(resolved.value.invariants.invariantTestingSmokeTimeoutSeconds).toBe(900);
   });
 
-  it("resolves provider-neutral cloud resources and logical-node overrides without persisting credentials", () => {
-    const parsed = parseProjectConfigToml(`
+  it("rejects removed per-node cloud execution and still loads the local [execution] table init scaffolds", () => {
+    const cloud = parseProjectConfigToml(`
 [execution]
 mode = "cloud"
 provider = "modal"
+
+[execution.providers.modal]
+app = "node-runs"
+image = "runner:stable"
+credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+`);
+    expect(cloud.ok).toBe(true);
+    if (!cloud.ok) return;
+    expect(resolveConfig({ projectConfig: cloud.value, env: {} })).toEqual({
+      ok: false,
+      diagnostics: [
+        cloudExecutionRemovedDiagnostic('execution.mode = "cloud"', ["execution", "mode"]),
+        cloudExecutionRemovedDiagnostic("execution.provider", ["execution", "provider"]),
+        cloudExecutionRemovedDiagnostic("[execution.providers.modal]", ["execution", "providers", "modal"])
+      ]
+    });
+
+    // `ultrafuzz init` writes exactly this serialization into ultrafuzz.toml.
+    const defaults = resolveConfig({ env: {} });
+    if (!defaults.ok) throw new Error(JSON.stringify(defaults.diagnostics));
+    const scaffold = serializeRedactedResolvedConfigToml(redactResolvedConfig(defaults.value), {
+      omitAuditProfileManagedSettings: true
+    });
+    expect(scaffold).toContain('[execution]\nmode = "local"\nretention_days = 30\n');
+    const scaffolded = parseProjectConfigToml(scaffold);
+    expect(scaffolded.ok).toBe(true);
+    if (!scaffolded.ok) return;
+    expect(resolveConfig({ projectConfig: scaffolded.value, env: {} }).ok).toBe(true);
+  });
+
+  // The inert [execution] table is still validated: `validate` and `run` reject an unknown node
+  // override, and every compiled task records the merged resources in tasks.json.
+  it("merges local [execution] node resource overrides, rejects unknown nodes and bad bounds, and round-trips them", () => {
+    const parsed = parseProjectConfigToml(`
+[execution]
 retention_days = 45
 
 [execution.resources]
@@ -336,23 +368,10 @@ timeout_seconds = 3600
 [execution.nodes.project-discovery.resources]
 cpu = 16
 memory_mib = 32768
-
-[execution.providers.modal]
-app = "node-runs"
-image = "runner:stable"
-region = "region-a"
-credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
-    const resolved = resolveConfig({
-      projectConfig: parsed.value,
-      env: {
-        MODAL_TOKEN_ID: "first-secret-value",
-        MODAL_TOKEN_SECRET: "second-secret-value"
-      }
-    });
-    expect(resolved.ok).toBe(true);
+    const resolved = resolveConfig({ projectConfig: parsed.value, env: {} });
     if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
     expect(resolveExecutionResources(resolved.value, "project-discovery")).toEqual({
       cpu: 16,
@@ -364,155 +383,24 @@ credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
       memoryMiB: 16384,
       timeoutSeconds: 3600
     });
-    const serialized = serializeRedactedResolvedConfigToml(resolved.value);
-    expect(serialized).toContain("[execution.nodes.project-discovery.resources]");
-    expect(serialized).toContain('credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]');
-    expect(serialized).not.toContain("first-secret-value");
-    expect(serialized).not.toContain("second-secret-value");
     expect(validateExecutionNodeOverrides(resolved.value, ["project-discovery"])).toEqual([]);
-    expect(validateExecutionNodeOverrides(resolved.value, ["different-node"])[0]?.code).toBe(
-      "CONFIG_EXECUTION_NODE_UNKNOWN"
-    );
-  });
+    expect(validateExecutionNodeOverrides(resolved.value, ["different-node"])).toEqual([
+      validationDiagnostic(
+        "CONFIG_EXECUTION_NODE_UNKNOWN",
+        "execution resource override references unknown logical topology node `project-discovery`",
+        ["execution", "nodes", "project-discovery"]
+      )
+    ]);
 
-  it("rejects incomplete cloud provider selection, credentials, resources, and misplaced local settings", () => {
-    const missingProvider = resolveConfig({
-      env: {},
-      projectConfig: { execution: { mode: "cloud" } }
-    });
-    expect(missingProvider.ok).toBe(false);
-    if (!missingProvider.ok) {
-      expect(missingProvider.diagnostics.map((entry) => entry.code)).toContain("CONFIG_EXECUTION_PROVIDER_REQUIRED");
-    }
+    const serialized = serializeRedactedResolvedConfigToml(resolved.value);
+    expect(serialized).toContain("[execution.nodes.project-discovery.resources]\ncpu = 16\nmemory_mib = 32768\n");
+    const reparsed = parseProjectConfigToml(serialized);
+    if (!reparsed.ok) throw new Error(JSON.stringify(reparsed.diagnostics, null, 2));
+    const roundTripped = resolveConfig({ projectConfig: reparsed.value, env: {} });
+    if (!roundTripped.ok) throw new Error(JSON.stringify(roundTripped.diagnostics, null, 2));
+    expect(roundTripped.value.execution).toEqual(resolved.value.execution);
 
-    const missingCredential = resolveConfig({
-      env: { MODAL_TOKEN_ID: "available" },
-      projectConfig: {
-        execution: {
-          mode: "cloud",
-          provider: "modal",
-          providers: {
-            modal: {
-              app: "node-runs",
-              image: "runner:stable",
-              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-            }
-          }
-        }
-      }
-    });
-    expect(missingCredential.ok).toBe(false);
-    if (!missingCredential.ok) {
-      expect(missingCredential.diagnostics.map((entry) => entry.code)).toContain("CONFIG_EXECUTION_CREDENTIAL_MISSING");
-      expect(missingCredential.diagnostics.map((entry) => entry.message).join("\n")).not.toContain(
-        "MODAL_TOKEN_SECRET"
-      );
-    }
-
-    const invalidResource = resolveConfig({
-      env: {},
-      projectConfig: { execution: { resources: { cpu: 0 } } }
-    });
-    expect(invalidResource.ok).toBe(false);
-
-    const localProviderSettings = resolveConfig({
-      env: {},
-      projectConfig: {
-        execution: {
-          providers: {
-            modal: {
-              app: "node-runs",
-              image: "runner:stable",
-              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-            }
-          }
-        }
-      }
-    });
-    expect(localProviderSettings.ok).toBe(false);
-    if (!localProviderSettings.ok) {
-      expect(localProviderSettings.diagnostics.map((entry) => entry.code)).toContain(
-        "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS"
-      );
-      expect(localProviderSettings.diagnostics.map((entry) => entry.code)).not.toContain(
-        "CONFIG_POSITIVE_INTEGER_INVALID"
-      );
-    }
-  });
-
-  it("reserves Modal lifecycle time without exceeding the provider's 24-hour sandbox limit", () => {
-    const credentials = {
-      MODAL_TOKEN_ID: "available",
-      MODAL_TOKEN_SECRET: "available"
-    };
-    const execution = {
-      mode: "cloud" as const,
-      provider: "modal" as const,
-      providers: {
-        modal: {
-          app: "node-runs",
-          image: "runner:stable",
-          credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-        }
-      }
-    };
-
-    expect(MODAL_SANDBOX_MAX_LIFETIME_SECONDS).toBe(86_400);
-    expect(MODAL_NODE_LIFECYCLE_RESERVE_SECONDS).toBe(1_800);
-    expect(MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS).toBe(84_600);
-    expect(
-      resolveConfig({
-        env: credentials,
-        projectConfig: {
-          execution: {
-            ...execution,
-            resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS }
-          }
-        }
-      }).ok
-    ).toBe(true);
-
-    const oversizedBase = resolveConfig({
-      env: credentials,
-      projectConfig: {
-        execution: {
-          ...execution,
-          resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS + 1 }
-        }
-      }
-    });
-    expect(oversizedBase.ok).toBe(false);
-    if (!oversizedBase.ok) {
-      expect(oversizedBase.diagnostics).toContainEqual(
-        expect.objectContaining({
-          code: "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
-          path: ["execution", "resources", "timeout_seconds"]
-        })
-      );
-    }
-
-    const oversized = resolveConfig({
-      env: credentials,
-      projectConfig: {
-        execution: {
-          ...execution,
-          nodes: {
-            discovery: {
-              resources: { timeoutSeconds: MODAL_NODE_MAX_INNER_TIMEOUT_SECONDS + 1 }
-            }
-          }
-        }
-      }
-    });
-    expect(oversized.ok).toBe(false);
-    if (!oversized.ok) {
-      expect(oversized.diagnostics).toContainEqual(
-        expect.objectContaining({
-          code: "CONFIG_EXECUTION_MODAL_TIMEOUT_RESERVE",
-          path: ["execution", "nodes", "discovery", "resources", "timeout_seconds"]
-        })
-      );
-    }
+    expect(resolveConfig({ env: {}, projectConfig: { execution: { resources: { cpu: 0 } } } }).ok).toBe(false);
   });
 
   it("applies defaults, project TOML, env, then runtime overrides", () => {
@@ -893,70 +781,13 @@ describe("resolved config named semantic diagnostics", () => {
       ]
     },
     {
-      label: "a cloud provider selected for local execution",
-      projectConfig: {
-        execution: {
-          provider: "modal"
-        }
-      },
-      diagnostics: [
-        validationDiagnostic(
-          "CONFIG_EXECUTION_LOCAL_PROVIDER",
-          "execution.provider is only valid when execution.mode is cloud",
-          ["execution", "provider"]
-        )
-      ]
-    },
-    {
-      label: "cloud provider settings configured for local execution",
-      projectConfig: {
-        execution: {
-          providers: {
-            modal: {
-              app: "node-runs",
-              image: "runner:stable",
-              credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
-            }
-          }
-        }
-      },
-      diagnostics: [
-        validationDiagnostic(
-          "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
-          "cloud provider settings are only valid when execution.mode is cloud",
-          ["execution", "providers", "modal"]
-        )
-      ]
-    },
-    {
-      label: "cloud execution without a provider",
+      label: "removed cloud execution",
       projectConfig: {
         execution: {
           mode: "cloud"
         }
       },
-      diagnostics: [
-        validationDiagnostic("CONFIG_EXECUTION_PROVIDER_REQUIRED", "cloud execution requires an execution provider", [
-          "execution",
-          "provider"
-        ])
-      ]
-    },
-    {
-      label: "cloud execution without selected-provider settings",
-      projectConfig: {
-        execution: {
-          mode: "cloud",
-          provider: "modal"
-        }
-      },
-      diagnostics: [
-        validationDiagnostic(
-          "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
-          "cloud execution requires settings for the selected provider",
-          ["execution", "providers", "modal"]
-        )
-      ]
+      diagnostics: [cloudExecutionRemovedDiagnostic('execution.mode = "cloud"', ["execution", "mode"])]
     }
   ];
 
@@ -1188,6 +1019,14 @@ describe("model profile and triage validation", () => {
     expect(resolved.diagnostics.map((entry) => entry.code)).toContain("CONFIG_TRIAGE_QUORUM_EXCEEDS_PANEL");
   });
 });
+
+function cloudExecutionRemovedDiagnostic(setting: string, path: string[]): ConfigDiagnostic {
+  return validationDiagnostic(
+    "CONFIG_EXECUTION_CLOUD_REMOVED",
+    `${setting} is no longer supported: per-node cloud execution was removed; set [execution] mode = "local" (or delete the table) and remove execution.provider and [execution.providers.*]. Every agentic attempt now runs locally; to use Modal, run the whole campaign inside one sandbox (the ultrafuzz-modal eval runner does this for benchmark rows, see docs/how-to/run-evals-on-modal.md)`,
+    path
+  );
+}
 
 function validationDiagnostic(code: string, message: string, path: string[]): ConfigDiagnostic {
   return {

@@ -270,6 +270,13 @@ function instantiateDynamicTasks(input: {
       dependencyArtifactDirs: template.dependencyArtifactDirs.map((directory) =>
         remapProjectPath(directory, input.group.promptContext.projectRoot, input.projectRoot)
       ),
+      ...(template.optionalDependencyArtifactDirs === undefined
+        ? {}
+        : {
+            optionalDependencyArtifactDirs: template.optionalDependencyArtifactDirs.map((directory) =>
+              remapProjectPath(directory, input.group.promptContext.projectRoot, input.projectRoot)
+            )
+          }),
       renderedPromptPath: path.join(artifactDir, "prompt.rendered.md"),
       promptTemplatePath: remapProjectPath(
         input.group.templatePath,
@@ -332,13 +339,18 @@ function instantiateDynamicGraphNode(input: {
 }
 
 /**
- * Continuation lets independent tasks settle; it does not make a strategy's required inputs
- * optional. Only the review group reconciles partial results, so only its tasks treat a continuing
- * producer's output as optional (#1120). The compiler and dynamic lowering share this one rule; the
- * task-manifest gate checks only that optional inputs come from continuing producers.
+ * Whether `consumer` treats the output of a continuing producer in `producerGroup` as optional.
+ * Consumers outside that group reconcile whichever results succeeded (the review group, and the
+ * property fan-in reading its lenses). Inside the group the output stays required, so a chain within
+ * one group, such as a stateful stage after its setup, never runs without its predecessor (#1120).
+ * The compiler and dynamic lowering share this one rule; the task-manifest gate checks only that
+ * optional inputs come from continuing producers.
  */
-export function reconcilesPartialResults(task: Pick<CompiledSmithersTask, "metadata">): boolean {
-  return task.metadata.node.group === "review";
+export function reconcilesPartialResults(
+  consumer: Pick<CompiledSmithersTask, "metadata">,
+  producerGroup: string | undefined
+): boolean {
+  return consumer.metadata.node.group !== producerGroup;
 }
 
 function lowerTaskDynamicDependencies(
@@ -381,8 +393,12 @@ function lowerTaskDynamicDependencies(
     dependencies.push(...generated.map((candidate) => candidate.attemptId));
     dependencySmithersNodeIds.push(...generated.map((candidate) => candidate.verifierSmithersNodeId));
     dependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
-    if (group.continueOnFail && reconcilesPartialResults(task)) {
-      optionalDependencyArtifactDirs.push(...generated.map((candidate) => candidate.artifactDir));
+    if (group.continueOnFail) {
+      optionalDependencyArtifactDirs.push(
+        ...generated
+          .filter((candidate) => reconcilesPartialResults(task, candidate.metadata.node.group))
+          .map((candidate) => candidate.artifactDir)
+      );
     }
     concreteNodeIds.push(...manifest.items.map((item) => item.node_id));
   }
@@ -522,8 +538,8 @@ function renderReadyRuntimePrompts(input: {
  * Resolves the documented `vulnerability_database_path` and `artifact_schema_dir` core variables
  * against the actual run and project roots.
  *
- * The compiled group stores the digest-bound catalog run-root-relative, so a relocated workspace or
- * a cloud root renders the correct absolute path instead of silently substituting "unavailable".
+ * The compiled group stores the digest-bound catalog run-root-relative, so a relocated workspace
+ * renders the correct absolute path instead of silently substituting "unavailable".
  */
 function resolvedConfigForRuntimeRoot(
   resolvedConfig: CompiledSmithersDynamicGroup["promptContext"]["resolvedConfig"],

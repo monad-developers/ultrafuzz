@@ -452,10 +452,9 @@ schema-bundle digest in run-owned metadata. The launcher MUST verify that
 closure before dispatch, clear ambient Node loader/search injection, and reject
 every non-builtin module whose lexical or physical resolution escapes the
 closure. Ordinary artifact and schema data reads remain outside this module
-boundary. Modal MUST provide the equivalent root-owned,
-read-only entrypoint. Both environments MUST run a real known-valid fixture and
-verify the returned schema ID, schema digest, and bundle digest; the returned
-validator build is provenance and MUST NOT be compared. `command -v` alone is
+boundary. The launcher MUST run a real known-valid fixture and verify the
+returned schema ID, schema digest, and bundle digest; the returned validator
+build is provenance and MUST NOT be compared. `command -v` alone is
 insufficient. A missing, tampered, or stale launcher or closure is a setup
 failure for new model work. It MUST NOT turn historical
 seals or schema identities into resume authorization. A current-controller

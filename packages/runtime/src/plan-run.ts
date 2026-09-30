@@ -293,8 +293,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   }
   if (hooks.enforceDataGovernance === true && hasRuntimeErrors(governance.diagnostics))
     return runtimeFailure<PlanRunValue>(governance.diagnostics);
-  // Authenticate disclosure before provider preflight can create a cloud app
-  // or otherwise contact an external execution environment.
+  // Authenticate disclosure before the pre-materialize preflight runs.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
     preMaterializeDiagnostics =

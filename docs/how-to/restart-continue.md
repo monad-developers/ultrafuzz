@@ -82,6 +82,17 @@ the resumed workflow decides the skip again from the restored task states. It
 stays skipped while the prerequisite is still failed, and runs once a reset lets
 the prerequisite succeed.
 
+Retrying a failed node of a `failure_policy: continue` group does not undo work
+that already ran without it. A task that started before the retried node
+verified keeps the result it produced without that node, and only tasks that
+start afterwards read the new output. The retried node then counts as
+succeeded, so the report's completion can read COMPLETE and a
+`--require-complete` run can succeed, although those earlier tasks never read
+its output. For a property lens, those are the property fan-in and everything
+after it. A retried artifact verifier is different: resetting its agent
+producer also resets every node that started after that producer's attempt, so
+those nodes run again.
+
 ## Replay A Linked Run
 
 Use replay when you want the workflow engine to replay the linked run from the

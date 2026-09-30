@@ -5,8 +5,6 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { SMITHERS_COMPATIBILITY_PATCHES } from "../src/smithers.js";
-import { patchedSmithersRunner } from "./patched-smithers-runner.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 interface Inspection {
@@ -95,17 +93,11 @@ test("a resumed session reopens skipped descendants only once --retry-failed res
   ]);
 });
 
-let sharedRunner: string | undefined;
-
 function startCampaign(prefix: string, sideTask: keyof typeof SIDE_TASKS = "independent") {
   const root = temporaryRoot(prefix);
-  // Ultrafuzz's scheduler patches and resume hydration together decide what a resumed session runs again.
-  const runner = (sharedRunner ??= patchedSmithersRunner(
-    temporaryRoot("ufz-patched-smithers-"),
-    SMITHERS_COMPATIBILITY_PATCHES.filter(
-      (patch) => patch.packageName === "@smthrs/scheduler" || patch.id === "resume_hydration"
-    )
-  ));
+  // The repository install, which pnpm has patched with Ultrafuzz's scheduler
+  // and resume-hydration patches like every other compatibility patch.
+  const runner = fs.realpathSync(path.join(runtimePackageRoot(), "node_modules", "smthrs"));
   const runId = `${path.basename(root)}-${process.pid}`;
   const workflow = path.join(root, ".smithers", "workflows", "reopen.tsx");
   fs.mkdirSync(path.dirname(workflow), { recursive: true });
@@ -159,7 +151,7 @@ function syntheticWorkflowSource(root: string, sideTask: string): string {
     "utf8"
   );
   const start = template.indexOf("type WorkflowTaskStateContext =");
-  const end = template.indexOf("type DependencyVerificationProducer =", start);
+  const end = template.indexOf("const agentPromptTemplate =", start);
   assert.ok(start >= 0 && end > start);
   return `/** @jsxImportSource smthrs */
 import fs from "node:fs";

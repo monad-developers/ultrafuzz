@@ -8,6 +8,11 @@ groups:
   properties:
     label: Properties
     color: "#a16207"
+    defaults:
+      failure_policy: continue
+  property-catalog:
+    label: Property catalog
+    color: "#854d0e"
   goals:
     label: Threat goals
     color: "#be123c"
@@ -426,7 +431,7 @@ nodes:
   - id: property-specification-fanin
     kind: agentic
     prompt: properties/property-specification-fanin.md
-    group: properties
+    group: property-catalog
     depends_on:
       - property-specification-certora
       - property-specification-crytic

@@ -7,7 +7,7 @@
  * merged with all checks green, then failed on main.
  */
 
-/** @typedef {{ lane: string, description: string, gates: string, timeout_minutes: number, build_modal_dependencies?: boolean, build_release_reporter?: boolean, build_cli?: boolean }} ReleaseValidationLane */
+/** @typedef {{ lane: string, description: string, gates: string, timeout_minutes: number, build_modal_dependencies?: boolean, build_cli?: boolean }} ReleaseValidationLane */
 
 /** @type {readonly ReleaseValidationLane[]} */
 export const RELEASE_VALIDATION_LANES = Object.freeze([
@@ -23,12 +23,10 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     lane: "runtime-supporting",
     description: "Node.js 24 runtime support tests and Bun 1.3.14 adapter contracts",
     gates: "runtime-supporting",
-    // Once relocated cloud-worker tests run to completion, this lane also
-    // reaches the subprocess-heavy lifecycle suite. Shared-runner contention
-    // can push that complete pass beyond 75 minutes, so retain a bounded budget
-    // that covers the full fail-closed validation instead of canceling it late.
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    // The subprocess-heavy lifecycle suite can exceed 75 minutes under
+    // shared-runner contention, so retain a bounded budget that covers the
+    // full fail-closed validation instead of canceling it late.
+    timeout_minutes: 120
   },
   {
     lane: "runtime-1",
@@ -36,51 +34,44 @@ export const RELEASE_VALIDATION_LANES = Object.freeze([
     gates: "runtime-1",
     // A slow hosted runner passed 59 of shard 4's 67 tests before the old
     // 75-minute cutoff. Give every shard the same bounded completion budget.
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "runtime-2",
     description: "Node.js 24 runtime integration tests, shard 2/4",
     gates: "runtime-2",
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "runtime-3",
     description: "Node.js 24 runtime integration tests, shard 3/4",
     gates: "runtime-3",
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "runtime-4",
     description: "Node.js 24 runtime integration tests, shard 4/4",
     gates: "runtime-4",
-    timeout_minutes: 120,
-    build_modal_dependencies: true
+    timeout_minutes: 120
   },
   {
     lane: "cli",
     description: "CLI package tests",
     gates: "cli",
     // The complete local CLI suite took 76 minutes before job setup overhead.
-    timeout_minutes: 120,
-    build_release_reporter: true
+    timeout_minutes: 120
   },
   {
     lane: "cli-e2e",
     description: "End-to-end campaign with controller kill and resume on the pinned engine",
     gates: "cli-e2e",
-    timeout_minutes: 60,
-    build_release_reporter: true
+    timeout_minutes: 60
   },
   {
     lane: "benchmark-history-typecheck",
     description: "Benchmark history charts and workspace typecheck",
     gates: "benchmark-history,workspace-typecheck",
     timeout_minutes: 45,
-    build_release_reporter: true,
     build_cli: true
   }
 ]);

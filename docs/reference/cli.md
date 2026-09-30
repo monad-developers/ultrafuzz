@@ -342,13 +342,46 @@ schema bindings, and metadata projections remain provenance for inspection;
 they are not resume authorization. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
-fork completed work. When the run's `smithers/resolved-config.json` parses as
-the current resolved-config schema, agent adapters in the continued workflow
-read the run's `smithers/execution-config.toml` (launch gave them a copy of the
-same file); for a run whose resolved config does not parse, resume sets no
-`ULTRAFUZZ_CONFIG_PATH`. If resume cannot prune stale task-worktree
-registrations, it reports a `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and
-continues.
+fork completed work. The run's `smithers/resolved-config.json` records the
+execution mode its tasks were planned with, so before starting Smithers
+`resume` fails with `WORKFLOW_LIFECYCLE_FAILED` when that file is missing or
+does not parse as the current resolved-config schema, and with
+`WORKFLOW_CLOUD_EXECUTION_REMOVED` when it records `mode = "cloud"`. Agent
+adapters in the continued workflow read the run's
+`smithers/execution-config.toml` (launch gave them a copy of the same file). If
+resume cannot prune stale task-worktree registrations, it reports a
+`WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
+
+`resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
+the committed compatibility patches (`patches/`) to it at install time, so
+resume makes no package-registry request and leaves nothing in the OS
+temporary directory. Launch, resume, replay, and fork also write
+`<run>/trusted-bin/smithers`, which runs that engine for the workflow's own
+`smithers` calls. All four refuse an install that lacks any of those patches,
+such as a plain npm install of the packed packages, and an engine inside the
+target project; launch refuses before it creates the run directory. To fix
+the install, run `pnpm install --frozen-lockfile && pnpm -w build` in the
+Ultrafuzz repository checkout. The build matters because the patch registry
+that checks the installed files is compiled into Ultrafuzz.
+
+Run long campaigns from a dedicated checkout or worktree, and leave its install
+and build alone while they run. The resumed engine and its supervisor run from
+that install, the resumed workflow imports that checkout's built
+`@ultrafuzz/runtime`, and every run's `trusted-bin/smithers` points into it.
+A `pnpm install` there that changes the engine's resolved dependency tree
+moves the engine to a new package directory. A Smithers patch changes that
+tree, and so does a version change anywhere in the engine's dependency graph,
+such as TypeScript or React; a pull or a branch switch often brings both.
+pnpm then deletes the old directory, in that install or a later one: by
+default it clears orphaned package directories during an install once seven
+days have passed since it last did. From then on the running engine can fail
+on its next lazy import, the supervisor's next relaunch of it fails, and so
+does the run's `trusted-bin/smithers`. Run `ultrafuzz resume` again to continue
+the run from the new install; it also rewrites the run's `trusted-bin/smithers`.
+Restart long-lived Ultrafuzz processes, such as the dashboard or
+`ultrafuzz eval run`, after such an install: each resolves the engine once, so
+once that directory is gone their engine commands fail with
+`restart this Ultrafuzz process`.
 
 A run that ends `failed` with no failed durable node was stopped by something
 no durable node owns: a run-level workflow runner error, such as an exception
@@ -615,31 +648,32 @@ non-launching configuration contract unchanged. Doctor reports:
 
 - config, topology, prompt, and reference validation posture;
 - required topology backends, toolchain, and configured agent executable
-  availability in the configured execution environment (the local `PATH` for
-  local runs or a transient probe of the provider image for cloud runs). Only
-  the executables of agents the selected topology can dispatch to, including
-  its `[retry] agents` fallbacks, are required; other configured profiles'
-  executables are listed as not required;
+  availability on the local `PATH`. Only the executables of agents the
+  selected topology can dispatch to, including its `[retry] agents`
+  fallbacks, are required; other configured profiles' executables are listed
+  as not required;
 - the bundled workflow engine version, the version the generated project
-  requires, and the installed project-local version and bin target;
+  requires, and the version and bin target of the engine Ultrafuzz's own
+  install provides;
 - npm's latest published stable engine version when the registry check is
   available;
-- whether the project-local dependency layout passes Ultrafuzz's exact
-  manifest and path validation, and the posture of each compatibility patch in
-  it. Both are informational: a launch installs, patches, and seals its own
-  operator-owned controller;
-- the OS temporary directory, where launch and resume install that controller:
-  its free space and how many `ultrafuzz-controller-*` directories it holds,
-  with their total size. Sizing them stops after about one second, and the
-  size is then reported as `at least` the bytes counted so far. Doctor warns
-  when the directory is a RAM-backed tmpfs or has less than 2 GiB free, and
-  never removes those directories, because a native resume keeps its
-  controller there for the detached engine.
+- whether that installed engine passes Ultrafuzz's version and path checks,
+  and the posture of each compatibility patch in it. Launch, `resume`,
+  `replay`, and `fork` refuse an engine that fails either check, so each
+  failure is reported as an error. Doctor then binds an engine that passes
+  both for the project the way those commands do, and reports it as refused
+  when it lies inside the project (for example, when the Ultrafuzz checkout is
+  under `--project`) or when `bun` is not on `PATH`;
+- the OS temporary directory, where launch installs the controller it seals
+  into the run: its free space and how many `ultrafuzz-controller-*`
+  directories it holds, with their total size. Sizing them stops after about
+  one second, and the size is then reported as `at least` the bytes counted so
+  far. Doctor warns when the directory is a RAM-backed tmpfs or has less than
+  2 GiB free, and never removes those directories, because a native resume
+  from an earlier release kept its controller there for the detached engine.
 
 Doctor does not create project run state or install, upgrade, or repair local
-dependencies. For cloud execution, checking required commands may create the
-configured provider app on first use and uses a transient sandbox so the probe
-runs inside the same image as workflow nodes.
+dependencies.
 
 Diagnostics are stable: `DOCTOR_AGENT_CREDENTIAL_MISSING`,
 `DOCTOR_TOOLCHAIN_MISSING`, `DOCTOR_TOOLCHAIN_PROBE_FAILED`,

@@ -89,7 +89,7 @@ contract used by the CLI and runtime.
 | `dynamic_strategies_enumerator` | Non-negative integer or `"unlimited"` used by dynamic-strategy prompts.    |
 | `[project]`                     | Project paths.                                                             |
 | `[run]`                         | Run output, parallelism, workspace, and timeout settings.                  |
-| `[execution]`                   | Local or provider-backed execution and node resource defaults.             |
+| `[execution]`                   | Validated but no longer affects execution; `mode` must be `local`.         |
 | `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                       |
 | `[retry]`                       | Bounded primary retries and opt-in ordered model fallback.                 |
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.              |
@@ -204,25 +204,20 @@ checked only when run state is synchronized, as described above.
 
 ## Execution
 
-`execution.mode` defaults to `local`. Set it to `cloud`, select a supported
-provider, and configure that provider to place every expanded agentic attempt in
-a fresh sandbox. `retention_days` defaults to `30`. The default resource table
-sets `cpu`, `memory_mib`, and a one-hour `timeout_seconds`; logical topology
-nodes may override any resource in `[execution.nodes.<node-id>.resources]`.
+Every agentic attempt runs locally in its own Git worktree. `ultrafuzz init`
+still scaffolds an `[execution]` table, and it is still accepted and validated
+so existing `ultrafuzz.toml` files and persisted run configs keep loading. None
+of its settings changes how a run executes: `mode` must be `local`, and runs
+only record `retention_days`, `[execution.resources]`, and
+`[execution.nodes.<node-id>.resources]` in their resolved config, plan, and
+task manifest.
 
-Cloud provider configuration names credential variables but never stores their
-values. Missing credentials, unsupported provider/auth combinations, invalid
-resource bounds, and unknown override node IDs fail before workflow launch.
-An inherited cloud resource timeout grows to fit the selected task timeout.
-An explicit global `execution.resources.timeout_seconds` or per-node timeout is
-a cap: the effective cap must contain the complete task or planning fails before
-cloud submission. A per-node cap overrides the global cap. Existing explicit
-caps remain deliberate when switching profiles; remove or increase a short cap
-before running exhaustive's 16,200-second campaign task. Modal adds a further
-1,800-second sandbox lifecycle reserve.
-
-See [Cloud Node Execution](cloud-execution.md) for the Modal configuration,
-handoff, retry, recovery, and cleanup contracts.
+Per-node cloud execution (`mode = "cloud"`, `provider`, and
+`[execution.providers.modal]`) was removed; those settings fail validation with
+`CONFIG_EXECUTION_CLOUD_REMOVED`, and `resume` refuses a run planned with
+`mode = "cloud"` with `WORKFLOW_CLOUD_EXECUTION_REMOVED`. To use Modal, run the
+whole campaign inside one sandbox: the `ultrafuzz-modal` eval runner does this
+for benchmark rows (see [Run Evals on Modal](../how-to/run-evals-on-modal.md)).
 
 ## Model Profiles
 
@@ -255,8 +250,6 @@ topology node or group default.
 
 The effective agent timeout uses this precedence: a topology node or group
 timeout, then the model profile timeout, then `[run].default_timeout_seconds`.
-Keep cloud execution-resource timeouts at least as large as the effective agent
-timeout so the provider sandbox does not end first.
 
 Generated defaults may include `[models] synthesized_default = true` when the
 default profile was synthesized by the scaffold.
@@ -316,11 +309,9 @@ prompt. Each retry uses a fresh session and bounded exponential backoff.
 Benchmark/eval rows reject
 configured fallback so a row cannot silently change models.
 
-Automatic retry chains are currently supported only for local execution. Cloud
-planning requires one effective attempt until every retry rung can receive a
-fresh sandbox and an isolated credential boundary. Local fallback across
-different agent implementations is also rejected when any rung uses API-key
-authentication; profiles on the same agent may safely select different models.
+Fallback across different agent implementations is rejected when any rung uses
+API-key authentication; profiles on the same agent may safely select different
+models.
 
 ## Permissions
 

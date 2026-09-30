@@ -6,7 +6,6 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   assertSmithersTaskManifestMatchesPlannedGraph,
   parseSmithersTaskManifestBytes,
-  referenceArtifactManifestAuthorityForArtifactDir,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestDynamicGroup,
   type SmithersTaskManifestTask
@@ -494,8 +493,9 @@ test("optional task inputs must come from producers that continue on failure", (
   const producer = "/runs/run-1/artifacts/producer";
 
   // Which consumers opt in is compiler policy, so the gate accepts every shape it has emitted: only
-  // the review task opts in (#1120), every consumer opts in (before #1120), or a review task keeps the
-  // input required (dynamic lowering of an empty expansion keeps its source required).
+  // the consumer outside the producer's group opts in (#1198; #1120 allowed only review), every
+  // consumer opts in (before #1120), or a review task keeps the input required (dynamic lowering of
+  // an empty expansion keeps its source required).
   const emittedShapes: Array<[consumerOptional: string[], reviewerOptional: string[]]> = [
     [[], [producer]],
     [[producer], [producer]],
@@ -698,12 +698,9 @@ test("planned-graph joins retain reference dependencies without inventing workfl
     model_fanout: []
   });
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, withReference));
-  assert.deepEqual(referenceArtifactManifestAuthorityForArtifactDir(parsed.tasks[0]!, referenceArtifactDir), {
-    attemptId: "reference-input",
-    artifactDir: referenceArtifactDir,
-    sizeBytes: 123,
-    sha256: SHA256
-  });
+  assert.deepEqual(parsed.tasks[0]?.referenceArtifactManifestAuthorities, [
+    { attemptId: "reference-input", artifactDir: referenceArtifactDir, sizeBytes: 123, sha256: SHA256 }
+  ]);
 
   const missing = structuredClone(parsed);
   delete missing.tasks[0]!.referenceArtifactManifestAuthorities;

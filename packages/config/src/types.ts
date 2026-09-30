@@ -122,7 +122,7 @@ export interface ExecutionConfig {
   provider?: CloudExecutionProvider;
   retentionDays: number;
   resources: ExecutionResources;
-  /** Inherited timeouts may grow to fit a task; explicit resource caps must fit as written. */
+  /** Whether `resources.timeoutSeconds` was set explicitly; serialization omits an inherited default. */
   resourceTimeoutOrigin?: "default" | "project-config" | "runtime-override";
   nodes: Record<string, ExecutionNodeOverride>;
   providers: {

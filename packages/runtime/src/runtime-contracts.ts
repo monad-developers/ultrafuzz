@@ -13,8 +13,6 @@ export const WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:workflow-execution-dependencies:1" as const;
 export const WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:workflow-run-link-journal:1" as const;
-export const CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID =
-  "urn:ultrafuzz:schema:runtime:cloud-execution-generation:1" as const;
 export const SMITHERS_SUBMISSION_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-submission:1" as const;
 export const SMITHERS_RESET_NODE_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:smithers-reset-node:1" as const;
 export const TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:runtime:terminal-report-receipt:1" as const;
@@ -36,7 +34,6 @@ export const INVARIANT_SUITE_HANDOFF_SCHEMA_VERSION = "ultrafuzz.invariant-suite
 export const WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION = "ultrafuzz.workflow-control-integrity.v2" as const;
 export const WORKFLOW_EXECUTION_DEPENDENCIES_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
 export const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
-export const CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION = "ultrafuzz.cloud.execution-generation.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
 export const SMITHERS_RESET_NODE_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
 export const TERMINAL_REPORT_RECEIPT_SCHEMA_VERSION = "ultrafuzz.terminal-report-receipt.v1" as const;
@@ -45,7 +42,6 @@ export const PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION = "ultrafuzz.pinned-submod
 export const PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION = "ultrafuzz.pinned-submodules-expectation.v1" as const;
 
 export const RUNTIME_DOCUMENT_SCHEMA_IDS = Object.freeze([
-  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
   INVARIANT_SUITE_HANDOFF_JSON_SCHEMA_ID,
   INVARIANT_WORKSPACE_SNAPSHOT_JSON_SCHEMA_ID,
@@ -200,13 +196,6 @@ export interface WorkflowRunLinkJournalDocument {
   entries: readonly WorkflowRunLinkJournalEntryDocument[];
 }
 
-export interface CloudExecutionGenerationDocument {
-  schema_version: typeof CLOUD_EXECUTION_GENERATION_SCHEMA_VERSION;
-  generation: string;
-  reset_node: string;
-  applied_at: string;
-}
-
 export interface SmithersSubmissionDocument {
   schema_version: typeof SMITHERS_SUBMISSION_SCHEMA_VERSION;
   smithers_run_id: string;
@@ -298,7 +287,6 @@ export interface RuntimeDocumentBySchemaId {
   [WORKFLOW_CONTROL_INTEGRITY_JSON_SCHEMA_ID]: WorkflowControlIntegrityDocument;
   [WORKFLOW_EXECUTION_DEPENDENCIES_JSON_SCHEMA_ID]: WorkflowExecutionDependenciesDocument;
   [WORKFLOW_RUN_LINK_JOURNAL_JSON_SCHEMA_ID]: WorkflowRunLinkJournalDocument;
-  [CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID]: CloudExecutionGenerationDocument;
   [SMITHERS_SUBMISSION_JSON_SCHEMA_ID]: SmithersSubmissionDocument;
   [SMITHERS_RESET_NODE_JSON_SCHEMA_ID]: SmithersResetNodeDocument;
   [TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID]: TerminalReportReceiptDocument;

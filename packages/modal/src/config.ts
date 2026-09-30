@@ -72,7 +72,7 @@ export function assertModalBenchmarkExecutionBudget(config: ModalBenchmarkConfig
     invariants.invariantTestingSmokeTimeoutSeconds + invariants.invariantTestingFuzzerTimeoutSeconds + 300 + 300;
   if (config.public_benchmark.max_runtime_seconds < minimumSeconds) {
     throw new Error(
-      `MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT: full benchmark row allows ${String(config.public_benchmark.max_runtime_seconds)}s, but the exhaustive campaign alone requires at least ${String(minimumSeconds)}s including smoke, shutdown and artifacts. Use local or per-node Modal execution for the four-hour profile until the paid full-benchmark row/control envelopes are explicitly enlarged.`
+      `MODAL_CAMPAIGN_ENVELOPE_TOO_SHORT: full benchmark row allows ${String(config.public_benchmark.max_runtime_seconds)}s, but the exhaustive campaign alone requires at least ${String(minimumSeconds)}s including smoke, shutdown and artifacts. Run the four-hour profile locally until the paid full-benchmark row/control envelopes are explicitly enlarged.`
     );
   }
 }

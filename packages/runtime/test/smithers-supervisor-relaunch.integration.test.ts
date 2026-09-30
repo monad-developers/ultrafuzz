@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 
 import { BUN_TARGET_CONFIGURATION_GUARD_ARGS } from "../src/smithers-executable-capability.js";
-import { patchedSmithersRunner } from "./patched-smithers-runner.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 interface TaskRecord {
@@ -42,8 +42,10 @@ test("the supervisor relaunch finishes a SIGKILLed engine's run from its launch 
   fs.writeFileSync(path.join(target, ".env"), "TARGET_DOTENV=loaded\n");
   fs.writeFileSync(workflow, relaunchWorkflowSource(records));
 
-  const runner = patchedSmithersRunner(path.join(root, "runner"));
-  const runId = `supervisor-relaunch-${process.pid}`;
+  // The repository install, which pnpm has patched with every compatibility patch.
+  const runner = path.dirname(path.dirname(fs.realpathSync(createRequire(import.meta.url).resolve("smthrs"))));
+  // Unique to this test's root, so the cleanup below matches only this run's processes.
+  const runId = path.basename(root);
   const cli = [...BUN_TARGET_CONFIGURATION_GUARD_ARGS, path.join(runner, "src", "bin", "smithers.js")];
   const smithers = (...args: string[]): string => {
     const result = spawnSync("bun", [...cli, ...args], {
@@ -132,8 +134,8 @@ test("the supervisor relaunch finishes a SIGKILLed engine's run from its launch 
     assert.equal(fs.existsSync(path.join(target, ".smithers", "executions")), false);
   } finally {
     // The supervisor exits once the run ends; a failed run can leave it and a hung engine behind.
-    // Both run the copied CLI below `root`, and `pkill -f` takes a regular expression.
-    spawnSync("pkill", ["-KILL", "-f", root.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&")]);
+    // Both carry the run ID in their arguments, and `pkill -f` takes a regular expression.
+    spawnSync("pkill", ["-KILL", "-f", runId.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&")]);
   }
 });
 

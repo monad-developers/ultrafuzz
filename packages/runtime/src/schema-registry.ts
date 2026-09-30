@@ -15,7 +15,6 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import {
-  CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
   DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,
   DATA_GOVERNANCE_POLICY_JSON_SCHEMA_ID,
   INVARIANT_SUITE_BASELINE_JSON_SCHEMA_ID,
@@ -83,7 +82,6 @@ function loadSchemaDocument(filename: string): Readonly<Record<string, unknown>>
 }
 
 export const cleanAuditJsonSchema = loadSchemaDocument("clean-audit.schema.json");
-export const cloudExecutionGenerationJsonSchema = loadSchemaDocument("cloud-execution-generation.schema.json");
 export const dataDisclosureAcknowledgementsJsonSchema = loadSchemaDocument(
   "data-disclosure-acknowledgements.schema.json"
 );
@@ -108,7 +106,6 @@ export const workspacePatchPreparationJsonSchema = loadSchemaDocument("workspace
 
 export const RUNTIME_SCHEMA_EXPORTS = Object.freeze({
   cleanAuditJsonSchema,
-  cloudExecutionGenerationJsonSchema,
   dataDisclosureAcknowledgementsJsonSchema,
   dataGovernancePolicyJsonSchema,
   invariantSuiteBaselineJsonSchema,
@@ -134,12 +131,6 @@ export const RUNTIME_SCHEMA_METADATA: Readonly<Record<string, RuntimeSchemaMetad
     role: "runtime-state",
     typescriptExport: "cleanAuditJsonSchema",
     semanticGates: Object.freeze(["clean-audit-selection-path-uniqueness", "audit-history-ordering"])
-  },
-  "cloud-execution-generation.schema.json": {
-    id: CLOUD_EXECUTION_GENERATION_JSON_SCHEMA_ID,
-    role: "runtime-state",
-    typescriptExport: "cloudExecutionGenerationJsonSchema",
-    semanticGates: Object.freeze([])
   },
   "data-disclosure-acknowledgements.schema.json": {
     id: DATA_DISCLOSURE_ACKNOWLEDGEMENTS_JSON_SCHEMA_ID,

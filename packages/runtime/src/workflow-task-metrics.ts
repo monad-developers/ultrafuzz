@@ -257,9 +257,9 @@ async function deriveWorkflowSpend(input: {
  * Smithers task runtime.
  *
  * The generated workflow must resolve that runtime from the runner's dependency
- * edge and pass it here. Cloud snapshots source the runner and this Ultrafuzz
- * module from separate installations, whose AsyncLocalStorage singletons cannot
- * safely be interchanged.
+ * edge and pass it here. The runner and this Ultrafuzz module can resolve the
+ * Smithers driver from separate installations, whose AsyncLocalStorage
+ * singletons cannot safely be interchanged.
  */
 export async function deriveCurrentTaskWorkflowMetrics(
   runtime: CurrentTaskWorkflowRuntime

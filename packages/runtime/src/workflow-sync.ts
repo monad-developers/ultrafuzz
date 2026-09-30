@@ -2983,6 +2983,16 @@ async function synchronizeTasks(input: {
     })
   );
   const tasksByAttempt = new Map(input.tasks.map((task) => [task.attemptId, task]));
+  const nodeEvidence = (nodeId: string) => mergeNodeWorkflowEvidence(steps.get(nodeId), eventsByNode.get(nodeId) ?? []);
+  // Admission begins when the consumer's preparation task starts.
+  const verifiedAfterAdmissionOf = (consumer: StoredWorkflowTask) => {
+    const admittedAt = nodeEvidence(consumer.preparationSmithersNodeId)?.startedAt;
+    return (attemptId: string): boolean => {
+      const producer = tasksByAttempt.get(attemptId);
+      const verifiedAt = producer === undefined ? undefined : nodeEvidence(producer.verifierSmithersNodeId)?.finishedAt;
+      return admittedAt !== undefined && verifiedAt !== undefined && Date.parse(verifiedAt) > Date.parse(admittedAt);
+    };
+  };
   let syncedNodes = 0;
   let changed = initialStateChanged;
 
@@ -3012,7 +3022,8 @@ async function synchronizeTasks(input: {
           evidence,
           evidenceSource: attemptEvidence.source,
           tasksByAttempt,
-          control: input.control
+          control: input.control,
+          verifiedAfterAdmission: verifiedAfterAdmissionOf(task)
         })
       : {
           status: previousIsImmutable ? (previous?.status ?? evidence.status) : evidence.status,
@@ -3235,6 +3246,8 @@ async function finalizeTerminalTask(input: {
   evidenceSource: "agent" | "verifier" | "preparation";
   tasksByAttempt: Map<string, StoredWorkflowTask>;
   control: WorkflowSynchronizationControl;
+  /** Whether an optional producer verified after this task's admission began. */
+  verifiedAfterAdmission: (attemptId: string) => boolean;
 }): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
     // Preparation and verification wrappers both enforce the artifact contract
@@ -3331,7 +3344,8 @@ async function finalizeTerminalTask(input: {
       input.layout,
       input.task,
       verifierAuthority.admittedDependencyAttemptIds,
-      input.tasksByAttempt
+      input.tasksByAttempt,
+      input.verifiedAfterAdmission
     );
     prerequisiteManifestAuthority = capturePrerequisiteManifestAuthority(
       input.layout,
@@ -3481,7 +3495,8 @@ async function finalizeTerminalTask(input: {
         input.layout,
         input.task,
         verifierAuthority.admittedDependencyAttemptIds,
-        input.tasksByAttempt
+        input.tasksByAttempt,
+        input.verifiedAfterAdmission
       );
       const currentPrerequisiteManifestAuthority = capturePrerequisiteManifestAuthority(
         input.layout,
@@ -3685,12 +3700,19 @@ function captureReferenceManifestDigest(
  * must persist it in the admitted closure. This prevents a deleted, dangling,
  * or malformed optional marker from turning a previously admitted success into
  * an unauthenticated omission during a later synchronization pass.
+ *
+ * The one exception is a producer that `resume --retry-failed` reruns while its
+ * consumers keep running. A consumer admitted without it ran without it, which
+ * is the omission its verifier recorded, so failing the consumer would stop the
+ * run over bookkeeping. The omission stands while the rerun is in progress, and
+ * after it when the rerun verified only after the consumer's admission began.
  */
 function assertOptionalDependencyAuthoritiesCurrent(
   layout: RunLayout,
   task: StoredWorkflowTask,
   admittedDependencyAttemptIds: readonly string[],
-  tasksByAttempt: ReadonlyMap<string, StoredWorkflowTask>
+  tasksByAttempt: ReadonlyMap<string, StoredWorkflowTask>,
+  verifiedAfterAdmission: (attemptId: string) => boolean
 ): void {
   const optionalArtifactDirs = task.optionalDependencyArtifactDirs ?? [];
   if (optionalArtifactDirs.length === 0) return;
@@ -3711,6 +3733,7 @@ function assertOptionalDependencyAuthoritiesCurrent(
 
     const dependencyStatus = state.nodes[attemptId]?.status;
     const finalizedSuccess = dependencyStatus !== undefined && NODE_RECOVERED_STATUSES.has(dependencyStatus);
+    if (finalizedSuccess && !admitted.has(attemptId) && verifiedAfterAdmission(attemptId)) continue;
     if (finalizedSuccess !== admitted.has(attemptId)) {
       throw new Error(
         finalizedSuccess
@@ -3719,8 +3742,10 @@ function assertOptionalDependencyAuthoritiesCurrent(
       );
     }
     if (!finalizedSuccess) {
-      if (dependencyStatus === undefined || !terminalStatus(dependencyStatus)) {
-        throw new Error(`optional dependency is not terminal for verifier admission ${attemptId}`);
+      // Tasks synchronize in dependency order and start only after their producers settle, so a
+      // producer that is not terminal here is being rerun and was unverified when this task was admitted.
+      if (dependencyStatus === undefined) {
+        throw new Error(`optional dependency has no recorded state for verifier admission ${attemptId}`);
       }
       continue;
     }
@@ -5445,8 +5470,7 @@ function errorText(value: unknown): string | undefined {
  * total and idle timers for agent CLIs. Message, stack, and cause text are not
  * classification input: a validator preflight that failed in 2ms mentions
  * "timeout" in its message, and node ids can contain the word (#1144). A
- * deadline reported only as text, such as the Modal provider's cloud-node
- * deadline, is therefore labelled failed.
+ * deadline reported only as text is therefore labelled failed.
  */
 const WORKFLOW_TIMEOUT_ERROR_CODES: ReadonlySet<string> = new Set([
   "TASK_TIMEOUT",

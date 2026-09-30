@@ -642,10 +642,12 @@ test("a lock file left by a killed materializer blocks neither expansion nor a s
   );
 });
 
-test("runtime materialization preserves required inputs and allows partial review joins", () => {
+test("runtime materialization keeps inputs inside the fan-out's group required and allows partial joins", () => {
+  // The continuing fan-out belongs to `strategies`; a join in any other group reconciles it.
   for (const [count, consumerGroup] of [
     [0, "review"],
     [1, "review"],
+    [1, "catalog"],
     [0, "strategies"],
     [1, "strategies"]
   ] as const) {
@@ -669,6 +671,7 @@ test("runtime materialization preserves required inputs and allows partial revie
     fs.writeFileSync(graphPath, `${JSON.stringify(graph)}\n`, "utf8");
     fs.writeFileSync(tasksPath, `${JSON.stringify({ schema_version: "1.0", run_id: runId, tasks: [] })}\n`, "utf8");
     const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
+    templateTask.metadata.node.group = "strategies";
     const joinTask = compiledTask(projectRoot, runRoot, "join", "join", undefined, ["fanout"]);
     joinTask.metadata.node.group = consumerGroup;
     if (count === 0) joinTask.optionalDependencyArtifactDirs = [path.join(runRoot, "artifacts", "planner")];
@@ -731,7 +734,7 @@ test("runtime materialization preserves required inputs and allows partial revie
       assert.deepEqual(storedJoin.dependencySmithersNodeIds, [generated.verifierSmithersNodeId]);
       assert.deepEqual(
         storedJoin.optionalDependencyArtifactDirs,
-        consumerGroup === "review" ? [generated.artifactDir] : []
+        consumerGroup === "strategies" ? [] : [generated.artifactDir]
       );
       assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /goal 0 using context 0/u);
     }

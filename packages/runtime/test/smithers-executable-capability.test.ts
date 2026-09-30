@@ -10,10 +10,10 @@ import {
   assertExecutableOutsideRoot,
   bindOperatorSmithersExecutableCapability,
   bindSmithersExecutableCapability,
+  BUN_TARGET_CONFIGURATION_GUARD_ARGS,
   smithersExecutableCapability
 } from "../src/smithers-executable-capability.js";
-import { runSmithersInspectionCommand, streamSmithersCommand } from "../src/smithers.js";
-import { BUN_MODULE_CONFINEMENT_SOURCE } from "../src/workflow-integrity.js";
+import { runSmithersInspectionCommand, streamSmithersCommand, writeTrustedSmithersShim } from "../src/smithers.js";
 
 function temporaryDirectory(prefix: string): string {
   return temporaryRoot(prefix);
@@ -185,42 +185,33 @@ test(
 );
 
 test(
-  "operator-owned Bun runners use privately bound startup authority",
+  "the installed Bun runner ignores target startup files and still runs its attested bytes",
   { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
   async () => {
     const root = temporaryDirectory("ufz-operator-runner-"),
       operatorRoot = path.join(root, "operator"),
       targetRoot = path.join(root, "target"),
-      runner = path.join(operatorRoot, "node_modules", "smthrs", "src", "bin", "workflow runner.js"),
+      runner = path.join(operatorRoot, "smthrs", "src", "bin", "workflow runner.js"),
       resultModule = path.join(path.dirname(runner), "result.ts"),
-      controls = path.join(operatorRoot, "controls"),
-      confinement = path.join(controls, "bun-module-confinement.js"),
-      hostileMarker = path.join(root, "hostile-runner-executed");
+      hostileMarker = path.join(root, "hostile-code-ran");
     fs.mkdirSync(path.dirname(runner), { recursive: true });
-    fs.mkdirSync(controls, { recursive: true });
     fs.mkdirSync(targetRoot);
     fs.writeFileSync(resultModule, "export const trusted = true;\n");
     writeExecutable(
       runner,
-      '#!/usr/bin/env bun\nimport { trusted } from "./result.ts"; console.log(JSON.stringify({ trusted }));\n'
+      '#!/usr/bin/env bun\nimport { trusted } from "./result.ts"; console.log(JSON.stringify({ trusted, dotenv: process.env.ULTRAFUZZ_HOSTILE_DOTENV ?? null }));\n'
     );
-    fs.writeFileSync(confinement, BUN_MODULE_CONFINEMENT_SOURCE);
-    fs.writeFileSync(path.join(controls, "bunfig.toml"), "\n");
-    fs.writeFileSync(path.join(controls, "bun-empty.env"), "\n");
-    let current = true;
-    let checks = 0;
-    const env = bindOperatorSmithersExecutableCapability(
-      { ULTRAFUZZ_BUN_MODULE_CONFINEMENT: confinement },
-      runner,
-      operatorRoot,
-      () => {
-        checks += 1;
-        if (!current) throw new Error("operator controller changed during execution");
-      },
-      targetRoot
+    // Every controller command runs with the target as its working directory.
+    fs.writeFileSync(path.join(targetRoot, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+    fs.writeFileSync(
+      path.join(targetRoot, "preload.ts"),
+      `await Bun.write(${JSON.stringify(hostileMarker)}, "preload");\n`
     );
+    fs.writeFileSync(path.join(targetRoot, ".env"), "ULTRAFUZZ_HOSTILE_DOTENV=hostile\n");
+    const env = bindOperatorSmithersExecutableCapability({}, runner, operatorRoot, targetRoot);
     const anchor = acquireSmithersExecutableAnchor(env);
     assert.ok(anchor);
+    assert.deepEqual(anchor.argumentPrefix.slice(0, -1), BUN_TARGET_CONFIGURATION_GUARD_ARGS);
     assert.match(anchor.argumentPrefix.at(-1) ?? "", /^\/proc\/[0-9]+\/fd\/[0-9]+$/u);
     anchor.close();
 
@@ -230,8 +221,8 @@ test(
       env
     });
     assert.equal(result.ok, true, result.error);
-    assert.deepEqual(result.json, { trusted: true });
-    assert.ok(checks >= 4);
+    assert.deepEqual(result.json, { trusted: true, dotenv: null });
+    assert.equal(fs.existsSync(hostileMarker), false);
 
     const replacementAnchor = acquireSmithersExecutableAnchor(env);
     assert.ok(replacementAnchor);
@@ -246,28 +237,24 @@ test(
         [...replacementAnchor.argumentPrefix, "inspect", "fixture", "--format", "json"],
         { cwd: targetRoot, env: process.env, encoding: "utf8" }
       );
-      assert.deepEqual(JSON.parse(stdout), { trusted: true });
+      assert.deepEqual(JSON.parse(stdout), { trusted: true, dotenv: null });
       assert.equal(fs.existsSync(hostileMarker), false);
       assert.throws(() => replacementAnchor.assertCurrent(), /changed at the controller command boundary/u);
     } finally {
       replacementAnchor.close();
     }
-
-    current = false;
-    assert.throws(() => acquireSmithersExecutableAnchor(env), /operator controller changed during execution/u);
   }
 );
 
 test(
-  "native operator continuations resolve target workflows from only the privately bound package root",
+  "continued target workflows resolve bare imports from only the installed runner's dependency root",
   { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
   async () => {
     const root = temporaryDirectory("ufz-native-operator-modules-"),
-      operatorRoot = path.join(root, "operator"),
+      dependencyRoot = path.join(root, "operator", "node_modules"),
       targetRoot = path.join(root, "target"),
-      operatorNodeModules = path.join(operatorRoot, ".smithers", "node_modules"),
-      runner = path.join(operatorNodeModules, "smthrs", "src", "bin", "smithers.js"),
-      trustedPackage = path.join(operatorNodeModules, "native-continuation-dependency"),
+      runner = path.join(dependencyRoot, "smthrs", "src", "bin", "smithers.js"),
+      trustedPackage = path.join(dependencyRoot, "native-continuation-dependency"),
       hostileNodeModules = path.join(root, "hostile-node-modules"),
       hostilePackage = path.join(hostileNodeModules, "native-continuation-dependency"),
       hostileMarker = path.join(root, "hostile-package-ran"),
@@ -295,16 +282,11 @@ test(
       runner,
       "#!/usr/bin/env bun\nconst workflow = await import(process.argv[3]); console.log(JSON.stringify({ dependency: workflow.default, nodePath: process.env.NODE_PATH ?? null }));\n"
     );
-    let checks = 0;
     const env = bindOperatorSmithersExecutableCapability(
       { NODE_PATH: hostileNodeModules },
       runner,
-      operatorRoot,
-      () => {
-        checks += 1;
-      },
-      targetRoot,
-      true
+      dependencyRoot,
+      targetRoot
     );
 
     const result = await runSmithersInspectionCommand({
@@ -315,45 +297,42 @@ test(
     });
 
     assert.equal(result.ok, true, result.error);
-    assert.deepEqual(result.json, { dependency: "trusted", nodePath: operatorNodeModules });
+    assert.deepEqual(result.json, { dependency: "trusted", nodePath: dependencyRoot });
     assert.equal(fs.existsSync(hostileMarker), false);
-    assert.ok(checks >= 3);
   }
 );
 
 test(
-  "native operator continuations run Bun without the target repository's bunfig.toml or .env",
-  { skip: !bunAvailable || process.platform === "win32" || !fs.existsSync("/proc/self/fd") },
+  "installed-runner commands and the run's smithers shim never import the target's Smithers config",
+  { skip: !bunAvailable || process.platform === "win32" },
   async () => {
-    const root = temporaryDirectory("ufz-native-operator-bun-config-"),
-      operatorRoot = path.join(root, "operator"),
+    const root = temporaryDirectory("ufz-installed-runner-config-"),
       targetRoot = path.join(root, "target"),
-      runner = path.join(operatorRoot, ".smithers", "node_modules", "smthrs", "src", "bin", "smithers.js"),
-      preloaded = path.join(root, "target-preload-ran");
-    fs.mkdirSync(path.dirname(runner), { recursive: true });
-    fs.mkdirSync(targetRoot);
-    // Bun reads both files from its working directory, which is the target repository.
-    fs.writeFileSync(path.join(targetRoot, "bunfig.toml"), 'preload = ["./preload.js"]\n');
+      runRoot = path.join(root, "run"),
+      marker = path.join(root, "target-config-ran");
+    fs.mkdirSync(path.join(targetRoot, ".smithers"), { recursive: true });
+    fs.mkdirSync(runRoot);
+    // Smithers imports this to choose its store backend unless one is pinned,
+    // and the installed runner has no module confinement to refuse the import.
     fs.writeFileSync(
-      path.join(targetRoot, "preload.js"),
-      `require("node:fs").writeFileSync(${JSON.stringify(preloaded)}, "");\n`
+      path.join(targetRoot, ".smithers", "smithers.config.ts"),
+      `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(marker)}, "ran");\nexport default {};\n`
     );
-    fs.writeFileSync(path.join(targetRoot, ".env"), "TARGET_DOTENV=loaded\n");
-    writeExecutable(
-      runner,
-      "#!/usr/bin/env bun\nconsole.log(JSON.stringify({ dotenv: process.env.TARGET_DOTENV ?? null }));\n"
-    );
-    const env = bindOperatorSmithersExecutableCapability({}, runner, operatorRoot, () => {}, targetRoot, true);
 
-    const result = await runSmithersInspectionCommand({
-      args: ["inspect", "fixture", "--format", "json"],
-      projectRoot: targetRoot,
-      env
+    const listed = await runSmithersInspectionCommand({
+      args: ["ps", "--all", "--format", "json"],
+      projectRoot: targetRoot
     });
+    assert.equal(listed.ok, true, listed.error);
+    assert.equal(fs.existsSync(marker), false);
 
-    assert.equal(result.ok, true, result.error);
-    assert.deepEqual(result.json, { dotenv: null });
-    assert.equal(fs.existsSync(preloaded), false);
+    const shim = path.join(writeTrustedSmithersShim(runRoot, targetRoot), "smithers");
+    execFileSync(shim, ["ps", "--all", "--format", "json"], {
+      cwd: targetRoot,
+      env: { ...process.env, SMITHERS_BACKEND: undefined },
+      encoding: "utf8"
+    });
+    assert.equal(fs.existsSync(marker), false);
   }
 );
 
@@ -594,6 +573,11 @@ test(
         /interpreter cannot (?:be|resolve) inside the target project/u
       );
     }
+    // Ultrafuzz's own installed runner is held to the same rule as an explicit one.
+    assert.throws(
+      () => bindOperatorSmithersExecutableCapability({}, local, target, target),
+      /workflow runner cannot be inside the target project/u
+    );
     assert.equal(assertExecutableOutsideRoot(external, target), undefined);
     assert.ok(smithersExecutableCapability(bindSmithersExecutableCapability({}, external, target)));
   }
