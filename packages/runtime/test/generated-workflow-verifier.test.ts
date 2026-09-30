@@ -1848,6 +1848,8 @@ function loadVerifyArtifactsHarness(
     onSemanticGate?: () => void;
     onPublishArtifacts?: () => void;
     generatedTestFiles?: (artifactRoot: string, manifest: unknown) => Array<{ path: string; contents: Buffer }>;
+    /** Scan the real process environment before publication; off by default so host variables cannot leak in. */
+    scanProcessEnvironment?: boolean;
   } = {}
 ): {
   captureTaskOutputs: (task: VerifyArtifactsTask) => Array<{
@@ -2135,7 +2137,7 @@ function loadVerifyArtifactsHarness(
     () => undefined,
     createHash,
     assertArtifactPublicationsContainNoSecrets,
-    () => [],
+    options.scanProcessEnvironment === true ? sensitiveEnvironmentValues : () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -2679,6 +2681,37 @@ test("generated Smithers verifier rejects secret-bearing captured bytes before p
     assert.equal(harness.publications.size, 0);
     assert.equal(harness.markerWrites.length, 0);
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generated Smithers verifier refuses to publish the value of a credential-named environment variable", () => {
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-environment-secret-output-"));
+  // The value has no vendor format, so only the scan of the process environment can recognize it,
+  // and only while a variable whose name looks like a credential holds it.
+  const value = "q7Vx2Lm9Rt4Wz8Kp3Nb6Hc1Jd5Fg0Sa";
+  const credentialName = "ULTRAFUZZ_TEST_GATEWAY_API_KEY";
+  const labelName = "ULTRAFUZZ_TEST_GATEWAY_LABEL";
+  const previous = [credentialName, labelName].map((name) => [name, process.env[name]] as const);
+  try {
+    fs.writeFileSync(path.join(root, "result.json"), `analysis ${value}\n`, "utf8");
+    const task = singleOutputVerificationTask(root, "ultrafuzz/text@1");
+
+    process.env[labelName] = value;
+    const unnamed = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
+    unnamed.verifyArtifacts(task, unnamed.captureTaskOutputs(task));
+    assert.equal(unnamed.publications.size, 1, "a value held only under a non-credential name is published");
+
+    process.env[credentialName] = value;
+    const named = loadVerifyArtifactsHarness({ scanProcessEnvironment: true });
+    assert.throws(() => named.verifyArtifacts(task, named.captureTaskOutputs(task)), /contains sensitive data/u);
+    assert.equal(named.publications.size, 0);
+    assert.equal(named.markerWrites.length, 0);
+  } finally {
+    for (const [name, previousValue] of previous) {
+      if (previousValue === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = previousValue;
+    }
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -7950,7 +7983,7 @@ test("a resumed activation's first dispatch carries no stale continuation pointe
   }
 });
 
-test("agent failures redact configured credentials before Smithers can retain them", async () => {
+test("agent failures redact credential-named environment values before Smithers can retain them", async () => {
   const agentCredentialName = "ULTRAFUZZ_TEST_AGENT_CREDENTIAL";
   const agentCredential = "agent credential value that rotated";
   await withEnvironment({ [agentCredentialName]: agentCredential }, async () => {
@@ -8059,7 +8092,7 @@ test("agent failure normalization preserves only validated Smithers recovery con
   });
 });
 
-test("agent preflight failures redact configured credentials without retaining their cause", async () => {
+test("agent preflight failures redact credential-named environment values without retaining their cause", async () => {
   const credentialName = "ULTRAFUZZ_TEST_PREFLIGHT_CREDENTIAL";
   const credential = "preflight credential value that rotated";
   await withEnvironment({ [credentialName]: credential }, async () => {
