@@ -72,8 +72,8 @@ interface PromptRejection {
  *   and the project's current topology and prompts, or the topology is not the one the run launched
  *   with, it changes nothing and returns one warning.
  * - A prompt is applied to every file rendered from it, or to none. One that `run` would reject, that
- *   cannot be rendered for one of its tasks, that would name an artifact authority a task was not
- *   compiled with, or that shares a template copy with a prompt whose new text differs, is not
+ *   cannot be rendered for one of its tasks, that would name an artifact authority a static task was
+ *   not compiled with, or that shares a template copy with a prompt whose new text differs, is not
  *   applied; it returns one warning naming the prompt and the reason.
  * - `prompt-history/<time>-<uuid>/refresh.json` lists every file it rewrites with its old and new
  *   digests before the first one changes, each old file is copied beside it, and each file is
@@ -323,6 +323,9 @@ function refreshStaticPrompts(
  * Runtime prompts: the published prompts of unfinished generated or deferred tasks, rendered as the
  * next publishing render would render them, and the template copies that a later render reads: those
  * of groups that have not expanded, and those of unfinished tasks whose prompt is not published yet.
+ * Their artifact authorities are not checked as a static prompt's are: a task whose prompt is rendered
+ * at runtime is compiled with none (#1234), and the engine's render names whatever its template names,
+ * so that check would reject every edit of the stock review prompts, which name some.
  */
 function refreshRuntimePrompts(
   input: RefreshInput,

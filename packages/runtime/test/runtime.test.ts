@@ -83,6 +83,7 @@ import {
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 import { planDynamicExpansion } from "../src/dynamic-expansion.js";
+import { materializeDynamicRuntime } from "../src/dynamic-runtime.js";
 
 import {
   forkRun as runtimeForkRun,
@@ -108,7 +109,9 @@ import {
   assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
   runSmithersInspectionCommand,
-  runSmithersLifecycleCommand
+  runSmithersLifecycleCommand,
+  type CompiledSmithersDynamicGroup,
+  type CompiledSmithersTask
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
@@ -27330,6 +27333,74 @@ test("resume of a stock run renders its prompts as launch did and refreshes an u
   assert.ok(copy && copy.attempt_id === undefined && copy.path.startsWith("dynamic-prompt-templates/"));
   assert.equal(copy.prompt, ".ultrafuzz/prompts/strategies/goal-hunter.mdx");
   assert.ok(fs.readFileSync(path.join(runRoot, copy.path), "utf8").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("resume applies an edited stock review prompt that names artifact authorities once its groups expanded", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runId = "prompt-refresh-stock-review";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:goal-plan", state: "finished", attempt: 1 }]
+    })
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  // goal-plan's plan, of which the goal groups' expansion reads only these two lists.
+  const goal = {
+    id: "liquidation:overdue",
+    node_id: "dynamic:threat:liquidation:overdue",
+    goal_prompt: "find any vulnerability affecting {{liquidation:overdue}}",
+    replacements: { "liquidation:overdue": "the persisted liquidation threat model" }
+  };
+  const planPath = path.join(runRoot, "artifacts", "goal-plan", "goal-plan.json");
+  fs.mkdirSync(path.dirname(planPath), { recursive: true });
+  fs.writeFileSync(planPath, `${JSON.stringify({ threat_goals: [goal], class_goals: [] }, null, 2)}\n`, "utf8");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const controls = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks: CompiledSmithersTask[];
+    dynamic_groups: CompiledSmithersDynamicGroup[];
+  };
+  // The engine's first render after goal-plan publishes the prompts that wait on both groups.
+  const published = materializeDynamicRuntime({
+    runId,
+    projectRoot: project,
+    runRoot,
+    graphPath: path.join(runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: controls.tasks,
+    groups: controls.dynamic_groups,
+    readyGroupIds: ["threat-goals", "class-goals"]
+  });
+  assert.deepEqual(published.promptRenderFailures, []);
+  // Like dedupe-findings' and aggregate-test-files', the final report's prompt names artifact authorities,
+  // which no task whose prompt is rendered at runtime is compiled with (#1234).
+  const reportPath = path.join(runRoot, "artifacts", "final-report", "prompt.rendered.md");
+  assert.match(fs.readFileSync(reportPath, "utf8"), /ancestor artifact authority JSON/u);
+  const resume = async () => {
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  };
+  // Unedited, they render as the engine published them, so nothing is rejected or replaced.
+  assert.deepEqual(await resume(), []);
+
+  appendProjectPrompt(project, "review/final-report.md", PROMPT_REFRESH_NOTE);
+  const diagnostics = await resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(diagnostics)
+  );
+  assert.match(diagnostics[0]?.message ?? "", /\(final-report\)/u);
+  const report = fs.readFileSync(reportPath, "utf8");
+  assert.ok(report.includes(PROMPT_REFRESH_NOTE), report);
+  assert.match(report, /ancestor artifact authority JSON/u);
 });
 
 test("a prompt file that breaks the prompt catalog skips the refresh with a warning naming the file", async () => {

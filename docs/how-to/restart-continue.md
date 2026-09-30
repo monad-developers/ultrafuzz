@@ -152,10 +152,11 @@ Resume reports what the refresh did, and none of it fails the resume:
   each file there, at the file's path in the run, and replaces it atomically.
 - `PROMPT_REFRESH_REJECTED` (warning) names a prompt it did not apply, and why:
   `ultrafuzz run` would reject it, it does not render for one of its tasks, it
-  names an artifact authority that a task was not compiled with, or it shares
-  a template copy that a later render reads with another prompt whose new text
-  differs. A prompt is applied to every task rendered from it or to none, and
-  the other prompts still apply. Fix it and resume again.
+  names an artifact authority that one of its static tasks was not compiled
+  with, or it shares a template copy that a later render reads with another
+  prompt whose new text differs. A prompt is applied to every task rendered
+  from it or to none, and the other prompts still apply. Fix it and resume
+  again.
 - `PROMPT_REFRESH_SKIPPED` (warning) means it applied nothing, and says why:
   the effective topology file differs from the one the run launched with (any
   edit counts, even to a comment; change the topology only for a new run), a
