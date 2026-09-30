@@ -478,6 +478,75 @@ describe("production dependency advisory policy", () => {
     ).toEqual(auditWith([highAdvisory]));
   });
 
+  it("audits one advisory per GHSA and package across per-range registry entries", () => {
+    // The registry answers with one entry per vulnerable version range, so one
+    // GHSA repeats for a package under distinct ids and severities.
+    const request = { "synthetic-package": ["1.0.0", "2.0.0", "3.0.0"], "other-package": ["1.0.0"] };
+    const ranges = [
+      { ...rawAdvisory(), id: 12345, severity: "moderate", vulnerable_versions: "<1.0.1" },
+      { ...rawAdvisory(), id: 12346, severity: "critical", vulnerable_versions: ">=2.0.0 <2.0.1" },
+      { ...rawAdvisory(), id: 12347, severity: "low", vulnerable_versions: ">=3.0.0 <3.0.1" }
+    ];
+    const otherAdvisory = {
+      ...rawAdvisory(),
+      id: 23456,
+      url: "https://github.com/advisories/GHSA-3456-789c-fghj",
+      severity: "moderate"
+    };
+
+    expect(
+      strictProductionAuditFromBulkResponse(
+        { "synthetic-package": [...ranges, otherAdvisory], "other-package": [{ ...rawAdvisory(), id: 34567 }] },
+        request
+      )
+    ).toEqual(
+      auditWith([
+        { ...highAdvisory, package: "other-package" },
+        { ...highAdvisory, severity: "critical" },
+        { ...highAdvisory, advisory: "GHSA-3456-789c-fghj", severity: "moderate" }
+      ])
+    );
+    expect(
+      strictProductionAuditFromBulkResponse({ "synthetic-package": [...ranges].reverse() }, request).advisories
+    ).toEqual([{ ...highAdvisory, severity: "critical" }]);
+
+    const audit = strictProductionAuditFromBulkResponse(
+      { "synthetic-package": [{ ...rawAdvisory(), id: 12346, severity: "moderate" }, rawAdvisory()] },
+      request
+    );
+    expect(evaluateDependencyAdvisoryPolicy(audit, exceptions([]), "2026-08-17")).toEqual({
+      actionableCount: 1,
+      activeExceptionCount: 0,
+      errors: ["unapproved high production advisory GHSA-2345-6789-cfgh in synthetic-package"]
+    });
+    expect(evaluateDependencyAdvisoryPolicy(audit, exceptions([validException()]), "2026-08-17")).toEqual({
+      actionableCount: 1,
+      activeExceptionCount: 1,
+      errors: []
+    });
+  });
+
+  it("rejects a registry advisory id that appears more than once", () => {
+    const request = { "synthetic-package": ["1.0.0"], "other-package": ["1.0.0"] };
+    const otherGhsa = "https://github.com/advisories/GHSA-3456-789c-fghj";
+
+    expect(() =>
+      strictProductionAuditFromBulkResponse({ "synthetic-package": [rawAdvisory(), rawAdvisory()] }, request)
+    ).toThrow("approved registry advisory synthetic-package[1] duplicates registry advisory id 12345");
+    expect(() =>
+      strictProductionAuditFromBulkResponse(
+        { "synthetic-package": [rawAdvisory(), { ...rawAdvisory(), url: otherGhsa }] },
+        request
+      )
+    ).toThrow("approved registry advisory synthetic-package[1] duplicates registry advisory id 12345");
+    expect(() =>
+      strictProductionAuditFromBulkResponse(
+        { "other-package": [rawAdvisory()], "synthetic-package": [{ ...rawAdvisory(), url: otherGhsa }] },
+        request
+      )
+    ).toThrow("approved registry advisory synthetic-package[0] duplicates registry advisory id 12345");
+  });
+
   it("always posts to the approved endpoint and rejects registry errors", async () => {
     const request = { "synthetic-package": ["1.0.0"] };
     let observedUrl = "";

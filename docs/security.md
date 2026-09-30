@@ -128,7 +128,10 @@ does not honor a configurable package-registry URL for security decisions. The
 raw response is size-bounded and parsed with the repository's strict JSON
 reader before validating every package, advisory ID, GitHub advisory URL,
 severity, range, CWE, and CVSS field. Aliased dependencies are audited under
-their registry package names. Invalid UTF-8 and unknown, missing, duplicate,
+their registry package names. The registry returns one entry per vulnerable
+version range, so entries that share a GHSA for one package are audited as one
+advisory at their highest severity; a registry advisory ID that appears twice
+fails closed. Invalid UTF-8 and unknown, missing, duplicate,
 partial, or error-bearing fields fail closed instead of relying on pnpm
 normalization, which can discard malformed registry records.
 
