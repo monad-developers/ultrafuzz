@@ -45,8 +45,10 @@ Show me the available audit profiles and explain the tradeoffs. Recommend the
 best fit for this target.
 Before installing any dependencies, ask for my confirmation.
 After the campaign starts, use the CLI to monitor its progress. Keep monitoring
-until it finishes. If a node fails, for example because of a cyber-safety
-refusal, resume the campaign from where it stopped.
+until it finishes. If a node fails, inspect its diagnostics and explain the
+cause and the selected release's documented retry or reset options before
+proceeding. An ordinary resume does not retry failed nodes. Stop and report
+any cyber-safety refusal.
 ```
 
 ## Documentation
