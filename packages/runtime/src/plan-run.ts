@@ -86,6 +86,7 @@ import {
 } from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
+import { timeoutShadowingDiagnostics } from "./timeout-shadowing.js";
 import { projectArtifactSchemaDir } from "./init.js";
 import {
   assertLaunchCheckoutRevision,
@@ -194,6 +195,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
 
   let expandedGraph: ExpandedGraph;
   let catalog: PromptCatalog;
+  let timeoutDiagnostics: RuntimeDiagnostic[];
   try {
     const topology = transformTopologyForRun(
       loadTopology(projectRoot, {
@@ -215,6 +217,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       configFingerprint: redactedConfigFingerprint
     });
     assertExpandedGraphRetryChains(resolved.config, expandedGraph);
+    timeoutDiagnostics = timeoutShadowingDiagnostics(topology, expandedGraph, resolved.config);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_PLAN_INVALID")]);
   }
@@ -568,7 +571,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
             }
           })
     },
-    preMaterializeDiagnostics
+    [...timeoutDiagnostics, ...preMaterializeDiagnostics]
   );
 }
 

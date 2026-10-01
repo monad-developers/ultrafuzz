@@ -10154,6 +10154,114 @@ test("force init rejects symlinked config and nested project files before overwr
   assert.equal(fs.readFileSync(path.join(topologyOutside, "topology.yml"), "utf8"), "outside\n");
 });
 
+// #675: a topology `timeout_seconds` pin outranks the profile and run defaults even when it is the
+// shorter window, so raising a default silently does not reach a pinned node.
+const timeoutShadowingWarnings = <T extends { code: string }>(diagnostics: readonly T[]): T[] =>
+  diagnostics.filter((diagnostic) => diagnostic.code === "TOPOLOGY_TIMEOUT_SHADOWS_DEFAULT");
+
+function setRunDefaultTimeout(project: string, seconds: number): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[run\]$/mu);
+  assert.doesNotMatch(config, /^default_timeout_seconds/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[run\]$/mu, `[run]\ndefault_timeout_seconds = ${String(seconds)}`),
+    "utf8"
+  );
+}
+
+test("validate warns when a packaged group timeout pin is below the run default it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+
+  const shipped = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(timeoutShadowingWarnings(shipped.diagnostics), []);
+
+  setRunDefaultTimeout(project, 14_400);
+  const raised = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(raised.diagnostics);
+  assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
+    "groups.goals.defaults.timeout_seconds",
+    "groups.review.defaults.timeout_seconds",
+    "groups.specialists.defaults.timeout_seconds",
+    "groups.strategies.defaults.timeout_seconds"
+  ]);
+  for (const warning of warnings) {
+    assert.equal(warning.severity, "warning");
+    assert.equal(warning.source, "topology");
+    assert.match(warning.message, /pins timeout_seconds=7200, below `run\.default_timeout_seconds`=14400/u);
+  }
+  assert.equal(raised.value?.policy_posture.topology.status, "warn");
+});
+
+test("plan warns about group and node timeout pins below the default they override", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const markdownOutput = `
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true`;
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  pinned:
+    label: Pinned
+    defaults:
+      timeout_seconds: 600
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: grouped
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: pinned
+    depends_on: [__start__]
+    outputs:${markdownOutput}
+  - id: own-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    timeout_seconds: 300
+    depends_on: [grouped]
+    outputs:${markdownOutput}
+  - id: long-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    timeout_seconds: 7200
+    depends_on: [own-pin]
+    outputs:${markdownOutput}
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [long-pin]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "timeout-shadowing", env: {} });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const warnings = timeoutShadowingWarnings(plan.diagnostics);
+  assert.deepEqual(
+    warnings.map((warning) => warning.path),
+    ["groups.pinned.defaults.timeout_seconds", "nodes.own-pin.timeout_seconds"],
+    JSON.stringify(plan.diagnostics)
+  );
+  const [groupWarning, nodeWarning] = warnings;
+  assert.ok(groupWarning && nodeWarning);
+  assert.match(
+    groupWarning.message,
+    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds/u
+  );
+  assert.match(nodeWarning.message, /node `own-pin` pins timeout_seconds=300/u);
+});
+
 test("plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
