@@ -69,19 +69,30 @@ schema digest, and bundle digest, and each reports its validator-build identity.
 Every planned JSON output persists the registered schema filename, `$id`,
 schema SHA-256, owning package's schema-bundle SHA-256, and validator build.
 The expanded graph, run state, `ultrafuzz.artifact-verification.v2` marker, and
-`ultrafuzz.artifact-manifest.v3` repeat that binding. The host validates each
-artifact against the schema content that binding names: the installed schemas
+`ultrafuzz.artifact-manifest.v3` repeat that binding. The host artifact gates,
+synchronization's findings count, and the run's workflow when it verifies a
+task's outputs and admits its inputs validate each artifact against the schema
+content that binding names, in the run's planned bundle: the installed schemas
 when their bundle digest is the planned one, otherwise the bundle sealed in the
-run's execution snapshot. A missing or partial binding, or schema content that
-neither holds, is a host verification failure even when the JSON would match a
-different schema with the same general shape. The validator build is
-provenance: graph reads, host artifact gates, and the validator preflight do not
-compare it with the build doing the checking.
+run's execution snapshot. Task preparation copies that bundle into the task's
+`.ultrafuzz/schemas` directory, replacing a copy that differs. An upgrade that
+changes a schema therefore does not change which schema a running campaign's
+artifacts must satisfy. It can still reject one: code that parses an already
+validated properties, implemented-properties, property-campaign, or campaign
+findings artifact into the reading build's types, such as a semantic context
+or the properties JSON/Markdown parity check, uses the installed schemas, and so
+does the final report's canonical projection. A missing or partial binding, or
+schema content that neither bundle holds, is a verification failure even when
+the JSON would match a different schema with the same general shape. The
+validator build is provenance: graph reads, host artifact gates, and the
+validator preflight do not compare it with the build doing the checking.
 
 Schema-backed producers receive a run-owned trusted launcher ahead of
-target-controlled `PATH` entries. Local and Modal environments use that launcher
-to validate a real known-valid fixture and compare the returned schema and
-bundle identity before model work; the returned validator build is provenance.
+target-controlled `PATH` entries. Before a task with a schema-backed output
+starts its model work, local and Modal environments use that launcher to
+validate a real known-valid fixture and compare the returned schema and bundle
+identity with the run's planned bundle; the returned validator build is
+provenance.
 Local launchers resolve only a verified content-addressed snapshot of the CLI
 and every transitive package, so
 a working-tree rebuild cannot change an active run. Ambient Node loader/search
@@ -93,10 +104,12 @@ cannot re-verify the launcher, it reports a `WORKFLOW_TRUSTED_CLI_UNVERIFIED`
 warning and, if `<run>/trusted-bin/ultrafuzz` exists, keeps it first on `PATH`
 rather than letting tasks reach another `ultrafuzz`. That launcher still
 verifies its closure before every dispatch, so if its metadata or closure is
-damaged, or the Node binary it names is gone, each task's validator preflight
-fails; `resume --refresh-controller` does not repair such a launcher. A current
-controller refresh publishes a new controller path without rewriting the
-historical closure.
+damaged, or the Node binary it names is gone, the validator preflight of each
+task with a schema-backed output fails; `resume --refresh-controller` does not
+repair such a launcher. A current controller refresh publishes a new controller
+path without rewriting the historical closure. It switches the launcher to the
+installed CLI only when that CLI validates with the run's planned bundle, and
+otherwise keeps the run's launcher without a warning.
 
 Exit `0` establishes portable document-shape conformance only. Cross-file
 joins, projected-key uniqueness, filesystem and Git facts, digest relationships,

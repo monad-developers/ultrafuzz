@@ -26,6 +26,7 @@ usage.jsonl
 attempts.jsonl
 plan.json
 prompt-snapshots/
+prompt-history/
 trusted-cli.json
 trusted-bin/
 artifacts/
@@ -141,13 +142,16 @@ every engine hands the agent that file: launch, `resume` (with or without
 `fork`. A static prompt is rendered at plan time. A prompt that waits on a
 dynamic group, a generated child's or a later node's such as the final report,
 is rendered from the run's template copy under `dynamic-prompt-templates/` when
-the group expands, and only while its file is missing. After that, no prompt
-file is re-rendered, compared with a recorded digest, or sealed: an edited file
-is what the task's next attempt receives, and an upgrade that renders templates
-differently leaves published prompts as they are. A runtime prompt that cannot
-be rendered, or a prompt file that is missing, unreadable or not a regular file,
-fails only its task, at the `assert-task-inputs` preparation step, with the
-cause.
+the group expands, and only while its file is missing. No prompt file is
+compared with a recorded digest or sealed, and an edited file is what the
+task's next attempt receives, except that `resume` renders the files of
+unfinished tasks again from the project's current prompts, unless
+`run.refresh_prompts_on_resume = false`, and keeps every file it replaces under
+`prompt-history/` (see
+[Change A Prompt Of A Running Campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign)).
+A runtime prompt that cannot be rendered, or a prompt file that is missing,
+unreadable or not a regular file, fails only its task, at the
+`assert-task-inputs` preparation step, with the cause.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 the launch render of each static prompt (its path and digest) and the path of
@@ -157,8 +161,11 @@ restores a missing static prompt from its copy, as it is; it never replaces a
 prompt file that exists. That recovery concerns runtime-owned task input only;
 it never reconstructs an agent-owned output. `prompt_digest` in `run.json` and
 `plan.json`, like the final report's `run_metadata.prompt_digest`, is the
-digest of the prompt catalog the run launched with; editing a run's prompt
-files does not change it.
+digest of the prompt catalog the run launched with. Neither editing a run's
+prompt files nor a `resume` that applies the project's current prompts changes
+it, an expansion manifest's `template.prompt_sha256` or `plan.json`'s
+`rendered_prompts[].rendered_prompt_digest`: `prompt-history/*/refresh.json` is
+the only record of such a refresh.
 
 `trusted-cli.json` binds the run-owned launcher in `trusted-bin/` to the exact
 CLI entrypoint bytes, validator build, and artifact schema-bundle digest. The
@@ -167,12 +174,15 @@ content-addressed directory under `trusted-cli-closures/`; the launcher verifies
 the manifest, files, and dependency links before dispatch, clears ambient Node
 loader/search injection, confines ESM and CommonJS module resolution to the
 closure, and precedes target-controlled directories on the producer's `PATH`.
-Before model work, Ultrafuzz uses it to validate a real known-valid fixture and
-checks the returned schema ID, schema digest, bundle digest, and build identity.
-A missing, changed, or stale launcher or closure remains a setup failure for
-new schema-backed model work, but its historical identity is not continuation
-authorization. A current-controller continuation may select the current
-launcher and validator packages while retaining the old closure as provenance.
+Before a schema-backed task's model work, Ultrafuzz uses it to validate a real
+known-valid fixture and checks the returned schema ID, schema digest, and bundle
+digest against the run's planned schema bundle; the returned validator build is
+provenance. A missing, changed, or stale launcher or closure remains a setup
+failure for new schema-backed model work, but its historical identity is not
+continuation authorization. A current-controller continuation selects the
+current launcher and validator packages when they validate with the run's
+planned schema bundle, retaining the old closure as provenance, and otherwise
+keeps the run's launcher.
 Modal images provide the equivalent root-owned, read-only
 `/usr/local/bin/ultrafuzz` entrypoint and preflight.
 

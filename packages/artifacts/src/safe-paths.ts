@@ -216,14 +216,23 @@ export function toPosixRelativePath(root: string, candidate: string): string {
   return normalizeSafeRelativePath(relative.split(path.sep).join("/"));
 }
 
-export function writeFileDurable(filePath: string, data: string | Uint8Array, options: { mode?: number } = {}): void {
+/**
+ * Writes through a temporary file renamed over `filePath`. The temporary file
+ * sits beside `filePath` unless `temporaryDirectory`, an existing directory on
+ * the same filesystem, names another place for it.
+ */
+export function writeFileDurable(
+  filePath: string,
+  data: string | Uint8Array,
+  options: { mode?: number; temporaryDirectory?: string } = {}
+): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const mode = options.mode ?? 0o600;
   if (!Number.isSafeInteger(mode) || mode < 0 || mode > 0o777) {
     throw new Error("durable file mode must be an integer between 0000 and 0777");
   }
   const tempPath = path.join(
-    path.dirname(filePath),
+    options.temporaryDirectory ?? path.dirname(filePath),
     `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`
   );
   const fd = fs.openSync(tempPath, "wx", mode);

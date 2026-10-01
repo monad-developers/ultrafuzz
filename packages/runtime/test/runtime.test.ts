@@ -84,6 +84,7 @@ import {
 } from "../src/smithers-package.js";
 import { isTransientNpmRegistryFailure } from "../src/npm-install-retry.js";
 import { planDynamicExpansion } from "../src/dynamic-expansion.js";
+import { materializeDynamicRuntime } from "../src/dynamic-runtime.js";
 
 import {
   forkRun as runtimeForkRun,
@@ -109,7 +110,9 @@ import {
   assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
   runSmithersInspectionCommand,
-  runSmithersLifecycleCommand
+  runSmithersLifecycleCommand,
+  type CompiledSmithersDynamicGroup,
+  type CompiledSmithersTask
 } from "../src/smithers.js";
 import { frictionLogWrapper, resolveFrogBin } from "../src/friction-log.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
@@ -132,6 +135,9 @@ import { writeFakeNpmInstaller } from "./fake-npm-installer.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
 import { writeLocalResolvedConfig } from "./local-resolved-config.js";
+import { underGroupWritableUmask } from "./process-umask.js";
+import { setRefreshPromptsOnResume } from "./prompt-refresh-config.js";
+import { renderedComponents, renderWorkflowInProcess } from "./in-process-workflow.js";
 import {
   shippedReferenceCatalog,
   writeShippedDocumentReferenceCaches,
@@ -1665,6 +1671,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   const deepSeekSource = fs
     .readFileSync(path.join(agentsDir, "deepseek.ts"), "utf8")
     .replace('from "smthrs"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./claude"', 'from "./claude.mjs"')
     .replace('from "./toml"', 'from "./toml.mjs"')
     .replace('from "./strict-json"', 'from "./strict-json.mjs"')
     .replace('from "./environment"', 'from "./environment.mjs"')
@@ -3437,7 +3444,6 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(claudeAgentText, /=\s*createClaudeAgent\(\)/);
   assert.match(claudeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(claudeAgentText, /function readStringTable/);
-  assert.doesNotMatch(claudeAgentText, /JSON\.parse/);
   const deepSeekAgentText = fs.readFileSync(path.join(project, ".smithers/agents/deepseek.ts"), "utf8");
   assert.match(deepSeekAgentText, /DeepSeekClaudeCodeAgent/);
   assert.match(deepSeekAgentText, /createDeepSeekAgent/);
@@ -4603,13 +4609,18 @@ bunAdapterTest(
 bunAdapterTest(
   "generated OpenRouter adapter preserves opaque model IDs and enables the authenticated provider catalogue",
   { timeout: 30_000 },
-  async () => {
+  // The default provider-home root, on Ubuntu's layout under its default umask:
+  // a 0750 home whose ~/.local is 0775.
+  underGroupWritableUmask(async () => {
     const project = tempProject();
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const configPath = path.join(project, "ultrafuzz.toml");
-    const providerHomeRoot = path.join(project, ".ultrafuzz", "provider-homes");
-    const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-test-codex");
+    const home = temporaryRoot("ufz-openrouter-home-");
+    fs.chmodSync(home, 0o750);
+    fs.mkdirSync(path.join(home, ".local", "state"), { recursive: true });
+    fs.chmodSync(path.join(home, ".local"), 0o775);
+    const codexHome = path.join(home, ".ultrafuzz-provider-homes", "openrouter", "openrouter-test-codex");
     fs.writeFileSync(
       configPath,
       fs
@@ -4625,13 +4636,17 @@ bunAdapterTest(
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
       providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
+      home: process.env.HOME,
+      xdgState: process.env.XDG_STATE_HOME,
       openrouter: process.env.OPENROUTER_API_KEY,
       openai: process.env.OPENAI_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
       baseUrl: process.env.OPENAI_BASE_URL
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
-    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    process.env.HOME = home;
+    process.env.XDG_STATE_HOME = path.join(home, ".local", "state");
     process.env.OPENROUTER_API_KEY = "deterministic-openrouter-test-key";
     process.env.OPENAI_API_KEY = "unrelated-openai-key";
     process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
@@ -4683,12 +4698,15 @@ bunAdapterTest(
         ].join("\n")
       );
       assert.equal(providerConfig.includes("deterministic-openrouter-test-key"), false);
-      assert.equal(fs.statSync(codexHome).mode & 0o777, 0o700);
+      for (let current = codexHome; current !== home; current = path.dirname(current))
+        assert.equal(fs.statSync(current).mode & 0o777, 0o700, current);
       assert.equal(fs.statSync(path.join(codexHome, "config.toml")).mode & 0o777, 0o600);
     } finally {
       for (const [name, value] of Object.entries({
         ULTRAFUZZ_CONFIG_PATH: previous.config,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot,
+        HOME: previous.home,
+        XDG_STATE_HOME: previous.xdgState,
         OPENROUTER_API_KEY: previous.openrouter,
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,
@@ -4698,7 +4716,7 @@ bunAdapterTest(
         else process.env[name] = value;
       }
     }
-  }
+  })
 );
 
 bunAdapterTest(
@@ -6988,6 +7006,109 @@ bunAdapterTest(
       if (previous.alias === undefined) delete process.env.MY_ALIAS;
       else process.env.MY_ALIAS = previous.alias;
     }
+  }
+);
+
+bunAdapterTest("generated Claude adapter carries the failure Claude Code states beside the generic error", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const { CompatibleClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+  const bin = path.join(project, "fake-claude-bin");
+  fs.mkdirSync(bin);
+  const failedGeneration = async (
+    result: Record<string, unknown>
+  ): Promise<Error & { code?: string; details?: Record<string, unknown> }> => {
+    // Claude Code 2.1.x prints an is_error result line and exits 1; `result`
+    // is the only place it states an auth or OAuth refresh failure (#1084).
+    const line = JSON.stringify({ type: "result", is_error: true, session_id: "s", ...result });
+    fs.writeFileSync(
+      path.join(bin, "claude"),
+      `#!/bin/sh\n[ "$1" = auth ] && exit 0\nprintf '%s\\n' ${shellQuote(line)}\nexit 1\n`,
+      { mode: 0o755 }
+    );
+    const agent = new CompatibleClaudeCodeAgent({
+      permissionMode: "bypassPermissions",
+      env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` }
+    }) as unknown as { generate(args: Record<string, unknown>): Promise<unknown> };
+    try {
+      await agent.generate({ prompt: "p", rootDir: project });
+    } catch (error) {
+      assert.ok(error instanceof Error, String(error));
+      return error;
+    }
+    return assert.fail("a failed Claude result was reported as success");
+  };
+
+  const stated = "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.";
+  const race = await failedGeneration({ subtype: "success", result: stated });
+  // Smithers classifies the thrown message, so it stays generic and the retry
+  // decision #1171 established is unchanged; the cause rides beside it.
+  assert.match(race.message, /^Claude run failed\b/u);
+  assert.ok(!race.message.includes("OAuth"), race.message);
+  assert.equal(race.code, "AGENT_CLI_ERROR");
+  assert.equal(race.details?.agentStatedFailure, stated);
+
+  // Auth-worded text would disable the agent for the run and end the node if
+  // it reached the message; beside it, it changes nothing Smithers decides.
+  const expired = "API Error: 401 OAuth token has expired. Please run /login.";
+  const expiredFailure = await failedGeneration({ subtype: "success", result: expired });
+  assert.match(expiredFailure.message, /^Claude run failed\b/u);
+  assert.ok(!expiredFailure.message.includes("401"), expiredFailure.message);
+  assert.equal(expiredFailure.code, "AGENT_CLI_ERROR");
+  assert.equal(expiredFailure.details?.agentStatedFailure, expired);
+
+  // A result that states nothing adds nothing.
+  const silent = await failedGeneration({ subtype: "error_during_execution" });
+  assert.match(silent.message, /^Claude run failed\b/u);
+  assert.equal(silent.details?.agentStatedFailure, undefined);
+});
+
+bunAdapterTest(
+  "generated DeepSeek adapter carries the failure Claude Code states beside the generic error",
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const bin = path.join(project, "fake-claude-bin");
+    fs.mkdirSync(bin);
+    const failedGeneration = async (
+      result: Record<string, unknown>
+    ): Promise<Error & { code?: string; details?: Record<string, unknown> }> => {
+      const line = JSON.stringify({ type: "result", is_error: true, session_id: "s", ...result });
+      fs.writeFileSync(
+        path.join(bin, "claude"),
+        `#!/bin/sh\n[ "$1" = auth ] && exit 0\nprintf '%s\\n' ${shellQuote(line)}\nexit 1\n`,
+        { mode: 0o755 }
+      );
+      const agent = new DeepSeekClaudeCodeAgent({
+        permissionMode: "bypassPermissions",
+        ultrafuzzApiKey: "deepseek-test-key",
+        configDir: path.join(project, ".ultrafuzz", "deepseek-claude"),
+        env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` }
+      });
+      try {
+        await agent.generate({ prompt: "p", rootDir: project });
+      } catch (error) {
+        assert.ok(error instanceof Error, String(error));
+        return error;
+      }
+      return assert.fail("a failed DeepSeek result was reported as success");
+    };
+
+    // The same #1084 gap as the Claude adapter: the cause rides beside the
+    // generic message Smithers classifies, never inside it.
+    const stated = "API Error: 401 authentication_error: invalid DeepSeek API key";
+    const failure = await failedGeneration({ subtype: "success", result: stated });
+    assert.match(failure.message, /^Claude run failed\b/u);
+    assert.ok(!failure.message.includes("401"), failure.message);
+    assert.equal(failure.code, "AGENT_CLI_ERROR");
+    assert.equal(failure.details?.agentStatedFailure, stated);
+
+    const silent = await failedGeneration({ subtype: "error_during_execution" });
+    assert.match(silent.message, /^Claude run failed\b/u);
+    assert.equal(silent.details?.agentStatedFailure, undefined);
   }
 );
 
@@ -11174,10 +11295,9 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
   assert.ok(leaf);
   leaf.metadata.node.group = "leaf-continue";
-  const historicalOutput = tasks.tasks
-    .flatMap((task) => task.metadata.artifacts.outputs)
-    .find((output) => output.primary === true);
-  assert.ok(historicalOutput);
+  const historicalTask = tasks.tasks.find((task) => task.metadata.artifacts.outputs.some((output) => output.primary));
+  const historicalOutput = historicalTask?.metadata.artifacts.outputs.find((output) => output.primary);
+  assert.ok(historicalTask && historicalOutput);
   historicalOutput.contract = "ultrafuzz/findings@2";
   historicalOutput.contractDigest = "0".repeat(64);
   historicalOutput.schemaFile = "findings.schema.json";
@@ -11199,7 +11319,6 @@ test("current-controller rendering preserves prompts idempotently and continue p
     expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
   });
   const workflowSource = fs.readFileSync(workflowPath, "utf8");
-  assert.match(workflowSource, /const replacePromptSchemas = true;/u);
   const specsPrefix = "const serializedTaskSpecs = ";
   const specsStart = workflowSource.indexOf(specsPrefix);
   const specsEnd = workflowSource.indexOf(" as const;", specsStart);
@@ -11207,21 +11326,21 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
     attemptId: string;
     continueOnFail: boolean;
-    outputs: Array<{ contract: string; contractDigest: string; schemaBundleSha256?: string; validatorBuild?: string }>;
+    outputs: Array<Record<string, unknown>>;
     promptPath?: string;
   }>;
   assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
-  const reboundOutput = specs
-    .flatMap((task) => task.outputs)
-    .find((output) => output.contract === historicalOutput.contract);
-  assert.equal(
-    reboundOutput?.schemaBundleSha256,
+  // #921: the refreshed controller validates each output against the schema it was planned with, so it
+  // keeps the whole recorded binding instead of rebinding it to this build's bundle (#982). Its markers
+  // then still match the run's plan after an upgrade that changed a schema.
+  const refreshedOutput = specs
+    .find((task) => task.attemptId === historicalTask.attemptId)
+    ?.outputs.find((output) => output.path === historicalOutput.path);
+  assert.deepEqual(refreshedOutput, historicalOutput);
+  assert.notEqual(
+    refreshedOutput?.schemaBundleSha256,
     artifactContractSchemaBinding(historicalOutput.contract)?.schema_bundle_sha256
   );
-  // Only the schema is rebound (#982). The contract digest and validator build are provenance that the
-  // refreshed verifier copies into markers compared with the sealed plan, so they keep the run's values.
-  assert.equal(reboundOutput?.contractDigest, historicalOutput.contractDigest);
-  assert.equal(reboundOutput?.validatorBuild, historicalOutput.validatorBuild);
   const promptPath = promptedTask.renderedPromptPath;
   assert.equal(specs.find((task) => task.attemptId === promptedTask.attemptId)?.promptPath, promptPath);
 
@@ -11267,7 +11386,9 @@ test("--refresh-controller keeps a hand-edited static prompt", async () => {
   const planned = plan.rendered_prompts[0];
   assert.ok(planned);
   // The operator edits the prompt of a task that has not run. The launch copy is edited too: it is
-  // never read while the run's file exists, so it can neither revert nor refuse the edit.
+  // never read while the run's file exists, so it can neither revert nor refuse the edit. A hand edit
+  // survives resume only with the prompt refresh off; otherwise resume renders the project's prompt.
+  setRefreshPromptsOnResume(project, false);
   const edited = `${fs.readFileSync(planned.rendered_prompt_path, "utf8")}\nOperator note: map the entry points first.\n`;
   fs.writeFileSync(planned.rendered_prompt_path, edited, "utf8");
   fs.appendFileSync(path.join(runRoot, planned.rendered_prompt_snapshot_path), "\nAn edited launch copy.\n");
@@ -12148,11 +12269,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
-  assert.match(workflowSource, /const replacePromptSchemas = false;/u);
-  assert.match(
-    workflowSource,
-    /materializePromptSchemas\(schemaDirectory, \{ replaceExisting: replacePromptSchemas \}\)/u
-  );
+  assert.match(workflowSource, /materializePromptSchemas\(schemaDirectory, bundle\)/u);
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.artifactDir, mirroredArtifactDir\(task\)\)/u);
   assert.match(workflowSource, /relocatePromptPath\(prompt, task\.sourceProjectRoot, process\.cwd\(\)\)/u);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
@@ -13691,7 +13808,14 @@ await step("preflight", () => {
   const envelope = execFileSync(path.join(layout.root, "trusted-bin", "ultrafuzz"), ["json", "validate", "--json"], {
     encoding: "utf8"
   });
-  artifacts.parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(envelope, "utf8"));
+  // The rebuild changed only the validator build, so this build's findings binding is the planned one.
+  const findings = artifacts.artifactContractSchemaBinding("ultrafuzz/findings@2");
+  artifacts.parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(envelope, "utf8"), {
+    schemaId: findings.schema_id,
+    schemaSha256: findings.schema_sha256,
+    schemaBundleSha256: findings.schema_bundle_sha256,
+    artifactSha256: artifacts.ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  });
   return "ok";
 });
 await step("resume", async () =>
@@ -14181,46 +14305,162 @@ test("startRun defaults detached admission to five minutes without overriding an
   }
 });
 
-test("startRun injects the configured Forge guard into the workflow environment and metadata", async () => {
+function forgeGuardLaunchFixture(configEdits: ReadonlyArray<readonly [string, string]> = []): {
+  project: string;
+  env: Record<string, string | undefined>;
+  realForge: string;
+  guardLog: string;
+} {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
-  const binDir = path.dirname(env.SMITHERS_BIN!);
-  const realForge = path.join(binDir, "forge");
-  fs.writeFileSync(realForge, "#!/bin/sh\nexit 0\n", "utf8");
-  fs.chmodSync(realForge, 0o755);
+  const realForge = writeForgeBesideFakeRunner(env);
   const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs
-      .readFileSync(configPath, "utf8")
-      .replace("forge_vmem_limit_kb = 12582912", "forge_vmem_limit_kb = 16777216")
-      .replace("forge_rayon_threads = 1", "forge_rayon_threads = 2"),
-    "utf8"
-  );
+  let config = fs.readFileSync(configPath, "utf8");
+  for (const [from, to] of configEdits) {
+    assert.ok(config.includes(from), from);
+    config = config.replace(from, to);
+  }
+  fs.writeFileSync(configPath, config, "utf8");
+  // The fake runner logs `command -v forge` under the engine PATH it was given.
   const guardLog = path.join(project, "forge-guard.log");
   env.SMITHERS_FAKE_FORGE_GUARD_LOG = guardLog;
+  return { project, env, realForge, guardLog };
+}
 
-  const run = await startRun({ projectRoot: project, runId: "forge-guard", env });
+/** A Forge outside the project, on the PATH the fake runner is found on. */
+function writeForgeBesideFakeRunner(env: Record<string, string | undefined>): string {
+  const runner = env.SMITHERS_BIN;
+  assert.ok(runner);
+  const forge = path.join(path.dirname(runner), "forge");
+  fs.writeFileSync(forge, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return forge;
+}
+
+function recordedForgeGuard(runRoot: string): Record<string, unknown> | undefined {
+  return (
+    JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as { forge_guard?: Record<string, unknown> }
+  ).forge_guard;
+}
+
+// Ubuntu's default umask 0002 made the run's safe-bin group writable, so the
+// engine PATH dropped the wrapper while run.json recorded the guard active.
+test(
+  "startRun injects the configured Forge guard into the workflow environment and metadata",
+  underGroupWritableUmask(async () => {
+    const { project, env, guardLog } = forgeGuardLaunchFixture([
+      ["forge_vmem_limit_kb = 12582912", "forge_vmem_limit_kb = 16777216"],
+      ["forge_rayon_threads = 1", "forge_rayon_threads = 2"]
+    ]);
+
+    const run = await startRun({ projectRoot: project, runId: "forge-guard", env });
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+    const wrapper = path.join(runRoot, "safe-bin", "forge");
+    assert.equal(fs.readFileSync(guardLog, "utf8"), `${wrapper}\n`);
+    assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.dirname(wrapper)).mode & 0o777, 0o700);
+    assert.match(
+      fs.readFileSync(path.join(runRoot, "config.resolved.toml"), "utf8"),
+      /forge_vmem_limit_kb = 16777216/u
+    );
+    assert.deepEqual(recordedForgeGuard(runRoot), {
+      enabled: true,
+      active: true,
+      virtual_memory_limit_kb: 16_777_216,
+      rayon_threads: 2
+    });
+    assert.equal(
+      run.diagnostics.some((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE"),
+      false
+    );
+  })
+);
+
+// The engine PATH admits the wrapper only from `.ultrafuzz/runs/<run-id>/safe-bin`.
+test("startRun records the Forge guard inactive and warns when the engine PATH drops its wrapper", async () => {
+  const { project, env, realForge, guardLog } = forgeGuardLaunchFixture([
+    ['output_dir = ".ultrafuzz/runs"', 'output_dir = "audit-runs"']
+  ]);
+
+  const run = await startRun({ projectRoot: project, runId: "forge-guard-dropped", env });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  const wrapper = path.join(run.value!.run_root, "safe-bin", "forge");
-  assert.equal(fs.readFileSync(guardLog, "utf8"), `${wrapper}\n`);
-  assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
-  assert.match(
-    fs.readFileSync(path.join(run.value!.run_root, "config.resolved.toml"), "utf8"),
-    /forge_vmem_limit_kb = 16777216/u
+  assert.ok(run.value);
+  assert.equal(run.value.run_root, path.join(project, "audit-runs", "forge-guard-dropped"));
+  assert.equal(fs.readFileSync(guardLog, "utf8"), `${realForge}\n`);
+  assert.equal(recordedForgeGuard(run.value.run_root)?.active, false);
+  assert.deepEqual(
+    run.diagnostics
+      .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+      .map((diagnostic) => diagnostic.severity),
+    ["warning"]
   );
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    forge_guard?: Record<string, unknown>;
-  };
-  assert.deepEqual(metadata.forge_guard, {
-    enabled: true,
-    active: true,
-    virtual_memory_limit_kb: 16_777_216,
-    rayon_threads: 2
-  });
+});
+
+// Root can remove the entry that makes the guard inactive.
+testWhen(process.getuid?.() !== 0)("resume records the Forge guard of the controller it starts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "resume-forge-guard";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  writeForgeBesideFakeRunner(env);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  assert.equal(recordedForgeGuard(runRoot)?.active, true);
+  // An entry beside the wrapper that resume cannot remove, so the engine
+  // PATH no longer admits the directory.
+  const stuck = path.join(runRoot, "safe-bin", "stuck");
+  fs.mkdirSync(stuck);
+  fs.writeFileSync(path.join(stuck, "entry"), "");
+  fs.chmodSync(stuck, 0o500);
+  let resumed: Awaited<ReturnType<typeof resumeRun>>;
+  try {
+    resumed = await resumeRun({ projectRoot: project, runId, env });
+  } finally {
+    fs.chmodSync(stuck, 0o700);
+  }
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.equal(recordedForgeGuard(runRoot)?.active, false);
+  assert.deepEqual(
+    resumed.diagnostics
+      .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+      .map((diagnostic) => diagnostic.severity),
+    ["warning"]
+  );
+});
+
+test("resume warns about an inactive Forge guard only when it starts a controller", async () => {
+  const { project, env } = forgeGuardLaunchFixture([['output_dir = ".ultrafuzz/runs"', 'output_dir = "audit-runs"']]);
+  const runId = "resume-forge-guard-warning";
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const forgeGuardWarnings = (diagnostics: ReadonlyArray<{ code: string; severity: string }>): string[] =>
+    diagnostics
+      .filter((diagnostic) => diagnostic.code === "FORGE_GUARD_INACTIVE")
+      .map((diagnostic) => diagnostic.severity);
+
+  // The fake runner reports the run live, so this resume only attaches.
+  const attached = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(attached.ok, true, JSON.stringify(attached.diagnostics));
+  assert.equal(attached.value?.submitted, false);
+  assert.deepEqual(forgeGuardWarnings(attached.diagnostics), []);
+
+  setFakeSmithersInspectState(project, "failed");
+  const relaunched = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(relaunched.ok, true, JSON.stringify(relaunched.diagnostics));
+  assert.equal(relaunched.value?.submitted, true);
+  assert.deepEqual(forgeGuardWarnings(relaunched.diagnostics), ["warning"]);
 });
 
 test("startRun forwards configured and explicitly allowed environment variables only", async () => {
@@ -15453,7 +15693,12 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.ok(renderedPrompt.rendered_prompt_path);
   const mutableWorkflow = path.join(project, ...(metadata.workflow?.path ?? "").split("/"));
   fs.writeFileSync(mutableWorkflow, "export default function HostileReplacement() {}\n", "utf8");
-  fs.writeFileSync(path.join(project, "ultrafuzz.toml"), '[project]\nname = "hostile-replacement"\n', "utf8");
+  // The refresh is off, so resume leaves the run's own prompt file as it is.
+  fs.writeFileSync(
+    path.join(project, "ultrafuzz.toml"),
+    '[project]\nname = "hostile-replacement"\n\n[run]\nrefresh_prompts_on_resume = false\n',
+    "utf8"
+  );
   fs.writeFileSync(path.join(project, ".smithers", "agents", "codex.ts"), "export const hostile = true;\n", "utf8");
   fs.writeFileSync(path.join(project, ".smithers", "package.json"), "{}\n", "utf8");
   fs.writeFileSync(renderedPrompt.rendered_prompt_path, "HOSTILE_MUTABLE_PROMPT\n", "utf8");
@@ -15510,7 +15755,12 @@ test("native resume delegates the persisted workflow after mutable project sourc
   assert.match(consumed, /HostileReplacement/u);
   assert.match(consumed, /export const hostile/u);
   assert.doesNotMatch(consumed, /^workflow=\/proc\//mu);
-  // Resume restores only a missing prompt, so the edited bytes are what the resumed task reads.
+  // With the refresh off, resume restores only a missing prompt, so the edited bytes are what the
+  // resumed task reads.
+  assert.deepEqual(
+    resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts"),
+    []
+  );
   assert.equal(fs.readFileSync(renderedPrompt.rendered_prompt_path, "utf8"), "HOSTILE_MUTABLE_PROMPT\n");
 });
 
@@ -22719,6 +22969,59 @@ test("syncRun binds an optional prerequisite digest before a final-boundary mani
   assert.notEqual(optionalManifestSha256, crypto.createHash("sha256").update(swappedManifestBytes).digest("hex"));
 });
 
+test("syncRun shows the failure an agent stated beside its generic error (#1084)", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stated-failure";
+  const stated = "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "Claude run failed", details: { agentStatedFailure: stated } }
+      }
+    ]),
+    attemptSelections: {
+      "node:project-discovery": { 1: { chainIndex: 0, profileId: "default", model: "gpt-5.5" } }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stated-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stated-failure", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+    nodes?: Record<string, { last_error?: string }>;
+  };
+  // The durable text passes the usual secret redaction, which reads
+  // "token: another" as an assignment; the stated cause stays recognisable.
+  const shown = /^Claude run failed: Failed to refresh OAuth token\b.*Claude Code process is refreshing it/u;
+  assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", shown);
+  const ledger = fs
+    .readFileSync(path.join(runRoot, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    ledger.map((entry) => [entry.outcome, entry.failure_category]),
+    [["failed", "executor-error"]]
+  );
+  assert.match(String(ledger[0]?.failure_message), shown);
+});
+
 test("syncRun maps failed workflow nodes into durable failed run state", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -24732,6 +25035,51 @@ test("resume refuses a run planned for removed per-node cloud execution before i
   await assertRefused("missing");
 });
 
+test("a plain resume refuses a workflow rendered before task preparation took the planned schema bundle", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "resume-pre-planned-schema-workflow";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  const fakeLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(fakeLog);
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  const workflowPath = path.join(project, ".smithers", "workflows", `ultrafuzz-${runId}.tsx`);
+  const rendered = fs.readFileSync(workflowPath, "utf8");
+  const current = "materializePromptSchemas(schemaDirectory, bundle)";
+  assert.ok(rendered.includes(current), "the current template no longer materializes the planned bundle this way");
+  const workflowMode = fs.statSync(workflowPath).mode & 0o777;
+
+  // The launch workflows of earlier releases still call the old signature (#983, and before it), which
+  // this release's installed modules reject in every task preparation. Resume stops before Smithers
+  // starts, so no task fails, and names the refresh that renders the current workflow.
+  for (const earlier of [
+    "materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })",
+    "materializePromptSchemas(schemaDirectory)"
+  ]) {
+    fs.chmodSync(workflowPath, 0o600);
+    fs.writeFileSync(workflowPath, rendered.replace(current, earlier), "utf8");
+    fs.chmodSync(workflowPath, workflowMode);
+    fs.writeFileSync(fakeLog, "", "utf8");
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, false, earlier);
+    assert.deepEqual(
+      resumed.diagnostics.map((diagnostic) => diagnostic.code),
+      ["WORKFLOW_CONTROLLER_REFRESH_REQUIRED"],
+      `${earlier}: ${JSON.stringify(resumed.diagnostics)}`
+    );
+    assert.match(
+      resumed.diagnostics[0]?.message ?? "",
+      new RegExp(`ultrafuzz resume ${runId} --refresh-controller`, "u")
+    );
+    assert.equal(fs.readFileSync(fakeLog, "utf8"), "", `${earlier}: no Smithers command runs`);
+  }
+  const refreshed = await resumeRun({ projectRoot: project, runId, refreshController: true, env });
+  assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
+  assert.equal(refreshed.value?.submitted, true);
+});
+
 test("resume refuses a run whose resolved config cannot be read instead of continuing it locally", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -25004,9 +25352,9 @@ test("artifact gates validate a historical bundle through its active sealed sche
   writeRequiredArtifactSet(layout.root, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
 
   const state = readRunState(layout);
-  const currentSnapshot =
-    state.provenance?.workflow.controllerExecutionSnapshot ?? state.provenance?.workflow.executionSnapshot;
-  assert.ok(currentSnapshot);
+  const workflowProvenance = state.provenance?.workflow;
+  const currentSnapshot = workflowProvenance?.executionSnapshot;
+  assert.ok(workflowProvenance && currentSnapshot);
   const historicalSnapshot = `smithers/execution-snapshots/${"e".repeat(64)}`;
   const snapshotsRoot = path.join(layout.root, "smithers", "execution-snapshots");
   const historicalRoot = path.join(layout.root, ...historicalSnapshot.split("/"));
@@ -25053,7 +25401,7 @@ test("artifact gates validate a historical bundle through its active sealed sche
   assert.equal(historicalValidation.status, "valid", JSON.stringify(historicalValidation.diagnostics));
   assert.ok(historicalValidation.schema);
   assert.notEqual(historicalValidation.schema.bundle_sha256, artifactSchemaBundleDigest());
-  state.provenance!.workflow.controllerExecutionSnapshot = historicalSnapshot;
+  workflowProvenance.executionSnapshot = historicalSnapshot;
   writeRunState(layout, state);
 
   const graph = readPlannedGraphDocument(layout.graphPath);
@@ -25085,13 +25433,386 @@ test("artifact gates validate a historical bundle through its active sealed sche
     JSON.stringify(invalid)
   );
 
-  state.provenance!.workflow.controllerExecutionSnapshot = `smithers/execution-snapshots/${"d".repeat(64)}`;
+  workflowProvenance.executionSnapshot = `smithers/execution-snapshots/${"d".repeat(64)}`;
   writeRunState(layout, state);
   const missingAuthority = verifyRequiredArtifactsForAttempt(layout, node, node.id, attemptAuthority);
   assert.equal(missingAuthority.ok, false);
   assert.ok(
     missingAuthority.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_SEALED_SCHEMA_AUTHORITY_INVALID")
   );
+});
+
+/**
+ * A copy of this build's `@ultrafuzz/artifacts` with `edit` applied to its schema directory, the way an
+ * upgrade installs a package whose schemas changed. A resumed engine loads the installed package, not
+ * the one the run was launched with.
+ */
+function upgradedArtifactsModule(edit: (schemaDirectory: string) => void): string {
+  const artifactsRoot = path.dirname(path.dirname(fileURLToPath(import.meta.resolve("@ultrafuzz/artifacts"))));
+  const install = path.join(temporaryRoot("ufz-upgraded-artifacts-"), "node_modules", "@ultrafuzz", "artifacts");
+  fs.mkdirSync(install, { recursive: true });
+  for (const entry of ["package.json", "dist", "schema"]) {
+    fs.cpSync(path.join(artifactsRoot, entry), path.join(install, entry), { recursive: true });
+  }
+  fs.symlinkSync(path.join(artifactsRoot, "node_modules"), path.join(install, "node_modules"), "dir");
+  edit(path.join(install, "schema"));
+  return pathToFileURL(path.join(install, "dist", "index.js")).href;
+}
+
+function editSchemaFile(directory: string, filename: string, change: (schema: Record<string, unknown>) => void): void {
+  const schemaPath = path.join(directory, filename);
+  const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8")) as Record<string, unknown>;
+  change(schema);
+  fs.chmodSync(schemaPath, 0o600);
+  fs.writeFileSync(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, "utf8");
+}
+
+// Resolves every import of `@ultrafuzz/artifacts` in the child process to the upgraded copy.
+const UPGRADED_ARTIFACTS_RESOLVE_HOOKS = String.raw`
+let upgraded;
+export function initialize(data) {
+  upgraded = data.artifactsModule;
+}
+export async function resolve(specifier, context, nextResolve) {
+  return specifier === "@ultrafuzz/artifacts" ? { url: upgraded, shortCircuit: true } : nextResolve(specifier, context);
+}
+`;
+
+/**
+ * Run the ES module `script` in a child process in which `@ultrafuzz/artifacts` is `artifactsModule`,
+ * for this build's runtime and every other package, as after an upgrade installed that package. The
+ * script reads `input` from the JSON file named by `process.argv[2]`; its stdout is parsed as JSON.
+ */
+function runWithInstalledArtifacts(script: string, input: unknown, artifactsModule: string, cwd: string): unknown {
+  const scripts = temporaryRoot("ufz-installed-artifacts-");
+  const hooks = pathToFileURL(path.join(scripts, "hooks.mjs")).href;
+  fs.writeFileSync(path.join(scripts, "hooks.mjs"), UPGRADED_ARTIFACTS_RESOLVE_HOOKS, "utf8");
+  fs.writeFileSync(
+    path.join(scripts, "preload.mjs"),
+    `import { register } from "node:module";\nregister(${JSON.stringify(hooks)}, { data: { artifactsModule: ${JSON.stringify(artifactsModule)} } });\n`,
+    "utf8"
+  );
+  fs.writeFileSync(path.join(scripts, "script.mjs"), script, "utf8");
+  fs.writeFileSync(path.join(scripts, "input.json"), JSON.stringify(input), "utf8");
+  const stdout = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(path.join(scripts, "preload.mjs")).href,
+      path.join(scripts, "script.mjs"),
+      path.join(scripts, "input.json")
+    ],
+    { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 600_000 }
+  );
+  return JSON.parse(stdout) as unknown;
+}
+
+type ResumedWorkflowTask = { id: string; children: (deps?: { agent?: unknown }) => unknown };
+
+/**
+ * A launched run's project workflow rendered in this process the way a native `resume` runs it: that
+ * workflow file, the installed `@ultrafuzz/artifacts` named by `artifactsModule`, and this build's
+ * `@ultrafuzz/runtime`. Returns the rendered tasks by ID; the caller runs their bodies with the
+ * project root as the working directory.
+ */
+async function resumedWorkflowTasks(
+  project: string,
+  runRoot: string,
+  artifactsModule: string
+): Promise<Map<string, ResumedWorkflowTask>> {
+  const tasksDocument = JSON.parse(
+    fs.readFileSync(path.join(runRoot, "smithers", "tasks.json"), "utf8")
+  ) as SmithersTaskManifestDocument;
+  const rendered = await renderWorkflowInProcess({
+    workflowPath: path.join(project, ".smithers", "workflows", `ultrafuzz-${path.basename(runRoot)}.tsx`),
+    projectRoot: project,
+    dispatchInput: JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "input.json"), "utf8")) as unknown,
+    agentRefs: tasksDocument.tasks.flatMap((task) => task.agentChain.map((entry) => entry.agentRef)),
+    artifactsModule,
+    runtimeModule: new URL("../src/index.js", import.meta.url).href
+  });
+  return new Map(
+    renderedComponents(rendered)
+      .filter((entry) => entry.component === "Task")
+      .map((entry) => [entry.props.id as string, entry.props as unknown as ResumedWorkflowTask])
+  );
+}
+
+/** Make a task workspace a Git worktree with one commit, as the engine creates it before preparation. */
+function initTaskWorktree(workspace: string): void {
+  fs.mkdirSync(workspace, { recursive: true });
+  for (const args of [
+    ["init", "-q"],
+    ["commit", "-q", "--allow-empty", "-m", "launch"]
+  ]) {
+    execFileSync("git", ["-c", "user.name=Ultrafuzz", "-c", "user.email=test@ultrafuzz.invalid", ...args], {
+      cwd: workspace,
+      stdio: "ignore"
+    });
+  }
+}
+
+/** Launch a run of `nodes`, a topology's agentic nodes between its start and finish, with the neutral prompt. */
+async function launchedUpgradeFixtureRun(runId: string, nodes: string): Promise<{ project: string; runRoot: string }> {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeNeutralRuntimeFixturePrompt(project);
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "runtime-fixture.md"),
+    REPORT_VOCABULARY_PROMPT_REFERENCES,
+    "utf8"
+  );
+  const ids = [...nodes.matchAll(/^ {2}- id: (\S+)$/gmu)].map((match) => match[1]);
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+${nodes}  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [${ids.join(", ")}]
+`,
+    "utf8"
+  );
+  const launched = await startRun({ projectRoot: project, runId, env: controllerRefreshTerminalEnv(project, runId) });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  return { project, runRoot: launched.value.run_root };
+}
+
+/**
+ * Run `body` with the tasks of a run's workflow rendered as a native `resume` after an upgrade renders
+ * them: against `artifactsModule`, from the project root, with the run's own validator launcher first
+ * on PATH (task preparation runs the launcher launch wrote, not the upgraded CLI).
+ */
+async function withResumedWorkflowTasks(
+  run: { project: string; runRoot: string },
+  artifactsModule: string,
+  body: (task: (id: string) => ResumedWorkflowTask) => void
+): Promise<void> {
+  const previousCwd = process.cwd();
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${path.join(run.runRoot, "trusted-bin")}${path.delimiter}${previousPath ?? ""}`;
+  try {
+    const tasks = await resumedWorkflowTasks(run.project, run.runRoot, artifactsModule);
+    process.chdir(run.project);
+    body((id) => {
+      const found = tasks.get(id);
+      assert.ok(found, `${id} is not among ${[...tasks.keys()].join(", ")}`);
+      return found;
+    });
+  } finally {
+    process.chdir(previousCwd);
+    process.env.PATH = previousPath;
+  }
+}
+
+test("a run resumed after an upgrade changed its schemas finishes its tasks against the schemas it was planned with", async () => {
+  const run = await launchedUpgradeFixtureRun(
+    "resume-after-schema-upgrade",
+    `  - id: summarize
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    depends_on: [__start__]
+    outputs:
+      - path: summary.txt
+        contract: ultrafuzz/text@1
+        primary: true
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@2
+  - id: review
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    depends_on: [project-discovery]
+    outputs:
+      - path: summary.txt
+        contract: ultrafuzz/text@1
+        primary: true
+`
+  );
+  const workspace = (attemptId: string): string => path.join(run.runRoot, "workspaces", attemptId);
+  const mirror = (attemptId: string): string => path.join(workspace(attemptId), "artifacts", attemptId);
+  initTaskWorktree(workspace("summarize"));
+  initTaskWorktree(workspace("review"));
+  // The launch engine had already prepared this task's worktree, with its schema copy, when the run
+  // stopped.
+  initTaskWorktree(workspace("project-discovery"));
+  fs.mkdirSync(path.join(workspace("project-discovery"), ".ultrafuzz"));
+  fs.cpSync(artifactSchemaDirectory(), path.join(workspace("project-discovery"), ".ultrafuzz", "schemas"), {
+    recursive: true
+  });
+
+  // The upgrade adds a comment to one schema, as the #921 measurement did, and changes another both
+  // ways: the installed findings schema then accepts an array of anything, but not an empty one, while
+  // the run was planned with the strict schema, which accepts `[]`.
+  const artifactsModule = upgradedArtifactsModule((schemas) => {
+    editSchemaFile(schemas, "report.schema.json", (schema) => void (schema.$comment = "an upgrade after launch"));
+    editSchemaFile(schemas, "findings.schema.json", (schema) => {
+      schema.items = {};
+      schema.minItems = 1;
+    });
+  });
+  const upgraded = (await import(artifactsModule)) as { artifactSchemaBundleDigest(): string };
+  assert.notEqual(upgraded.artifactSchemaBundleDigest(), artifactSchemaBundleDigest());
+
+  await withResumedWorkflowTasks(run, artifactsModule, (task) => {
+    // #921: the upgrade changed the installed schema bundle, not the run's plan. The validator preflight
+    // used to expect this build's bundle, which the run's own validator does not report, and schema
+    // materialization refused the launch copy in a prepared worktree, on every attempt.
+    assert.deepEqual(task("prepare:summarize").children(), { prepared: true });
+    fs.writeFileSync(path.join(mirror("summarize"), "summary.txt"), "Summary.\n", "utf8");
+    assert.equal(
+      (task("verify:summarize").children({ agent: { completed: true } }) as { primary_artifact: string })
+        .primary_artifact,
+      "summary.txt"
+    );
+    assert.deepEqual(task("prepare:project-discovery").children(), { prepared: true });
+    for (const attemptId of ["summarize", "project-discovery"]) {
+      for (const file of ["report.schema.json", "findings.schema.json"]) {
+        assert.deepEqual(
+          fs.readFileSync(path.join(workspace(attemptId), ".ultrafuzz", "schemas", file)),
+          fs.readFileSync(path.join(artifactSchemaDirectory(), file)),
+          `${attemptId} must see the planned ${file}, not the upgraded one`
+        );
+      }
+    }
+
+    // An output invalid under the planned findings schema still fails, although the upgraded schema
+    // would accept it.
+    const discovery = mirror("project-discovery");
+    fs.mkdirSync(path.join(discovery, "setup"), { recursive: true });
+    fs.writeFileSync(path.join(discovery, GENERIC_RUNTIME_MARKDOWN_PATH), "# Discovery\n", "utf8");
+    fs.writeFileSync(path.join(discovery, "findings.json"), `${JSON.stringify([{ title: "unplanned shape" }])}\n`);
+    assert.throws(
+      () => task("verify:project-discovery").children({ agent: { completed: true } }),
+      /artifact-contract failure for findings\.json \(ultrafuzz\/findings@2\): .*required property/u
+    );
+
+    // A planned-valid output verifies, although the upgraded schema would reject it, and keeps the
+    // binding it was planned with.
+    fs.writeFileSync(path.join(discovery, "findings.json"), "[]\n", "utf8");
+    const verified = task("verify:project-discovery").children({ agent: { completed: true } }) as {
+      artifacts: Array<Record<string, unknown>>;
+    };
+    const planned = artifactContractSchemaBinding("ultrafuzz/findings@2");
+    assert.deepEqual(
+      verified.artifacts.find((artifact) => artifact.path === "findings.json"),
+      {
+        path: "findings.json",
+        contract: "ultrafuzz/findings@2",
+        contract_digest: artifactContractDefinition("ultrafuzz/findings@2").digest,
+        schema_file: planned?.schema_file,
+        schema_id: planned?.schema_id,
+        schema_sha256: planned?.schema_sha256,
+        schema_bundle_sha256: planned?.schema_bundle_sha256,
+        validator_build: planned?.validator_build,
+        sha256: crypto.createHash("sha256").update("[]\n").digest("hex"),
+        primary: false
+      }
+    );
+
+    // A dependent task's admission revalidates the verified findings against the planned schema too.
+    assert.deepEqual(task("prepare:review").children(), { prepared: true });
+  });
+});
+
+test("a run whose plan has no schema-backed output still prepares its tasks after an upgrade changed a schema", async () => {
+  const run = await launchedUpgradeFixtureRun(
+    "text-only-resume-after-schema-upgrade",
+    `  - id: summarize
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    depends_on: [__start__]
+    outputs:
+      - path: summary.txt
+        contract: ultrafuzz/text@1
+        primary: true
+`
+  );
+  initTaskWorktree(path.join(run.runRoot, "workspaces", "summarize"));
+  const artifactsModule = upgradedArtifactsModule((schemas) =>
+    editSchemaFile(schemas, "report.schema.json", (schema) => void (schema.$comment = "an upgrade after launch"))
+  );
+  await withResumedWorkflowTasks(run, artifactsModule, (task) => {
+    // Such a plan names no schema bundle, so its tasks do not run the agent-facing validator preflight,
+    // which expected this build's bundle while the run's own validator reports the launch one.
+    assert.deepEqual(task("prepare:summarize").children(), { prepared: true });
+  });
+});
+
+const UPGRADED_SYNC_OPERATOR = String.raw`
+import fs from "node:fs";
+import path from "node:path";
+const input = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const artifacts = await import("@ultrafuzz/artifacts");
+const runtime = await import(input.runtimeModule);
+const synced = await runtime.syncRun({ projectRoot: input.project, runId: input.runId, env: input.env });
+const state = JSON.parse(fs.readFileSync(path.join(input.runRoot, "state.json"), "utf8"));
+process.stdout.write(
+  JSON.stringify({
+    installedBundle: artifacts.artifactSchemaBundleDigest(),
+    ok: synced.ok,
+    diagnostics: synced.diagnostics.map((diagnostic) => diagnostic.code + ": " + diagnostic.message),
+    node: state.nodes["project-discovery"]
+  })
+);
+`;
+
+test("sync counts an attempt's findings against the schema the run planned them with after an upgrade changed it", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "sync-after-schema-upgrade";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  // #921: the upgrade's findings schema rejects the one finding that the schema the run was planned
+  // with, which the engine's verifier and the artifact gate check, accepts.
+  const artifactsModule = upgradedArtifactsModule((schemas) =>
+    editSchemaFile(schemas, "findings.schema.json", (schema) => void (schema.maxItems = 0))
+  );
+  const synced = runWithInstalledArtifacts(
+    UPGRADED_SYNC_OPERATOR,
+    { project, runId, runRoot, env, runtimeModule: new URL("../src/index.js", import.meta.url).href },
+    artifactsModule,
+    project
+  ) as {
+    installedBundle: string;
+    ok: boolean;
+    diagnostics: string[];
+    node: { status: string; provenance?: { findings_count?: number; terminal_disposition?: unknown } };
+  };
+  const report = JSON.stringify(synced, null, 2);
+  assert.notEqual(synced.installedBundle, artifactSchemaBundleDigest(), "the child must install the upgraded schemas");
+  assert.equal(synced.ok, true, report);
+  assert.equal(synced.node.status, "succeeded", report);
+  assert.equal(synced.node.provenance?.findings_count, 1, report);
+  assert.equal(synced.node.provenance?.terminal_disposition, undefined, report);
 });
 
 test("controller refresh refuses an active workflow without publishing a generation", async () => {
@@ -25309,9 +26030,16 @@ test("a resume that cannot re-verify the trusted CLI leaves tasks on the run's o
     ],
     { encoding: "utf8", env: { ...process.env, PATH: runnerPath } }
   );
-  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
+  parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"), {
+    schemaId: findings.id,
+    schemaSha256: findings.sha256,
+    schemaBundleSha256: artifactSchemaBundleDigest(),
+    artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  });
   const warning = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_TRUSTED_CLI_UNVERIFIED");
   assert.equal(warning?.severity, "warning", JSON.stringify(resumed.diagnostics));
+  // Tasks find the validator launcher there, and no workflow runner CLI.
+  assert.deepEqual(fs.readdirSync(path.dirname(resolved)), ["ultrafuzz"]);
 });
 
 test("native continuation hands generated agents the run's TOML config, so CodexAgent keeps API-key auth", async () => {
@@ -26927,7 +27655,9 @@ test("ordinary resume restores missing static presentation prompts", async () =>
   const snapshotPath = path.join(runRoot, plannedPrompt.rendered_prompt_snapshot_path);
   const expectedPrompt = fs.readFileSync(snapshotPath);
   fs.rmSync(plannedPrompt.rendered_prompt_path);
-  // An operator's edit of the failed task's prompt: restore never overwrites a prompt that exists.
+  // An operator's edit of the failed task's prompt: restore never overwrites a prompt that exists. The
+  // hand edit survives resume only with the prompt refresh off.
+  setRefreshPromptsOnResume(project, false);
   const editedPrompt = plan.rendered_prompts.find((prompt) => prompt.attempt_id === "actors-flows");
   assert.ok(editedPrompt !== undefined, "plan must record the failed node prompt");
   fs.appendFileSync(editedPrompt.rendered_prompt_path, "\nOperator note: follow the withdrawal flow.\n", "utf8");
@@ -26951,6 +27681,465 @@ test("ordinary resume restores missing static presentation prompts", async () =>
     /up .*ultrafuzz-ordinary-resume-prompt-run\.tsx --resume ultrafuzz-ordinary-resume-prompt-run --run-id ultrafuzz-ordinary-resume-prompt-run --detach --accept-workflow-change( --max-concurrency \d+)? --log-dir \S+\/smithers\/logs --format json/u
   );
 });
+
+const PROMPT_REFRESH_NOTE = "Operator note: start from the withdrawal flow.";
+
+function appendProjectPrompt(project: string, prompt: string, text: string): void {
+  fs.appendFileSync(path.join(project, ".ultrafuzz", "prompts", prompt), `\n${text}\n`, "utf8");
+}
+
+/** A launched `writeOutOfOrderTopology` run, `project-discovery` before `actors-flows`, and its prompt files. */
+async function launchPromptRefreshRun(
+  runId: string,
+  steps: Array<{ id: string; state: TestSmithersNodeState; attempt?: number }>,
+  run: { status: TestSmithersRunStatus; state: TestSmithersRunState } = { status: "failed", state: "failed" }
+) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, ...run, steps })
+  });
+  const launched = await startRun({ projectRoot: project, runId, env });
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  const promptPath = (attemptId: string): string => path.join(runRoot, "artifacts", attemptId, "prompt.rendered.md");
+  const prompt = (attemptId: string): string => fs.readFileSync(promptPath(attemptId), "utf8");
+  return {
+    project,
+    runId,
+    runRoot,
+    env,
+    prompt,
+    launchPrompts: { discovery: prompt("project-discovery"), actors: prompt("actors-flows") },
+    resume: async (options: { resetNode?: string; retryFailed?: boolean } = {}) => {
+      const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+      assert.equal(resumed.value?.submitted, true);
+      return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+    }
+  };
+}
+
+test("resume applies an edited project prompt to a task that has not run and keeps a finished task's prompt", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-static", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  // With nothing edited, resume renders the prompts the run already has, so it replaces and records nothing.
+  assert.deepEqual(await run.resume(), []);
+  assert.equal(fs.existsSync(path.join(run.runRoot, "prompt-history")), false);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+
+  // The operator edits the project's prompt of each task, then resumes.
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  const diagnostics = await run.resume();
+
+  const refreshed = diagnostics.find((diagnostic) => diagnostic.code === "PROMPTS_REFRESHED");
+  assert.ok(refreshed?.path, JSON.stringify(diagnostics));
+  assert.equal(refreshed.severity, "info");
+  assert.equal(diagnostics.length, 1, JSON.stringify(diagnostics));
+  // actors-flows has not run, so it receives the edited prompt, rendered as launch rendered it.
+  const actors = run.prompt("actors-flows");
+  assert.ok(actors.includes(PROMPT_REFRESH_NOTE), actors);
+  assert.ok(actors.includes("## Ultrafuzz Output Contract"), actors);
+  // project-discovery finished: its prompt file stays the record of the prompt it ran with.
+  assert.equal(run.prompt("project-discovery"), run.launchPrompts.discovery);
+  // The replaced file is archived under prompt-history/, and refresh.json lists what changed.
+  const entry = path.join(run.runRoot, refreshed.path);
+  assert.equal(
+    fs.readFileSync(path.join(entry, "artifacts", "actors-flows", "prompt.rendered.md"), "utf8"),
+    run.launchPrompts.actors
+  );
+  const sha256 = (text: string): string => crypto.createHash("sha256").update(text).digest("hex");
+  const { refreshed_at: refreshedAt, ...record } = JSON.parse(
+    fs.readFileSync(path.join(entry, "refresh.json"), "utf8")
+  ) as Record<string, unknown>;
+  assert.equal(typeof refreshedAt, "string");
+  assert.deepEqual(record, {
+    schema_version: "ultrafuzz.prompt-refresh.v1",
+    files: [
+      {
+        path: "artifacts/actors-flows/prompt.rendered.md",
+        attempt_id: "actors-flows",
+        prompt: ".ultrafuzz/prompts/setup/actors-flows.md",
+        previous_sha256: sha256(run.launchPrompts.actors),
+        sha256: sha256(actors)
+      }
+    ]
+  });
+
+  // A resume that finds the prompt already applied changes nothing more.
+  assert.deepEqual(await run.resume(), []);
+  assert.deepEqual(fs.readdirSync(path.join(run.runRoot, "prompt-history")), [path.basename(entry)]);
+});
+
+test("run.refresh_prompts_on_resume = false keeps the run's prompts until it is turned back on", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-disabled", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // `resume` reads the key from the project's current ultrafuzz.toml, not from the run's frozen config.
+  setRefreshPromptsOnResume(run.project, false);
+  assert.deepEqual(await run.resume(), []);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  assert.equal(fs.existsSync(path.join(run.runRoot, "prompt-history")), false);
+
+  setRefreshPromptsOnResume(run.project, true);
+  const diagnostics = await run.resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("an edited prompt that does not validate keeps its tasks' prompts, and the resume and other edits go ahead", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-invalid", [
+    { id: "node:project-discovery", state: "failed", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", "Read {{not_a_prompt_variable}} first.");
+
+  const diagnostics = await run.resume();
+
+  const [rejected, ...moreRejected] = diagnostics.filter((diagnostic) => diagnostic.code === "PROMPT_REFRESH_REJECTED");
+  assert.ok(rejected !== undefined && moreRejected.length === 0, JSON.stringify(diagnostics));
+  assert.equal(rejected.severity, "warning");
+  assert.equal(rejected.path, ".ultrafuzz/prompts/setup/actors-flows.md");
+  assert.match(rejected.message, /\.ultrafuzz\/prompts\/setup\/actors-flows\.md.*not_a_prompt_variable/su);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  // Each prompt is validated on its own: the failed task's valid edit still reaches it.
+  assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.code === "PROMPTS_REFRESHED"));
+});
+
+test("an edited prompt that names an artifact authority its task was not compiled with keeps the run's prompt", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-authority", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  // The workflow authorizes only the ancestor outputs a task was compiled with, so a new authority
+  // in the prompt would name outputs its agent is not allowed to read.
+  appendProjectPrompt(
+    run.project,
+    "setup/actors-flows.md",
+    "Read {{ancestor_contract_artifact_authority:ultrafuzz/nonempty-markdown@1}} first."
+  );
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.path]),
+    [["PROMPT_REFRESH_REJECTED", ".ultrafuzz/prompts/setup/actors-flows.md"]]
+  );
+  assert.match(
+    diagnostics[0]?.message ?? "",
+    /names artifact authorities the task was not compiled with: contract ultrafuzz\/nonempty-markdown@1/u
+  );
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+});
+
+test("a topology changed since launch skips the prompt refresh with a warning", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-topology", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  const topologyPath = path.join(run.project, ".ultrafuzz", "topology.yml");
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  fs.writeFileSync(
+    topologyPath,
+    topology.replace(
+      "    prompt: setup/actors-flows.md\n",
+      "    prompt: setup/actors-flows.md\n    timeout_seconds: 1234\n"
+    ),
+    "utf8"
+  );
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
+    [["PROMPT_REFRESH_SKIPPED", "warning"]]
+  );
+  assert.match(diagnostics[0]?.message ?? "", /topology \.ultrafuzz\/topology\.yml changed since the run launched/u);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  assert.equal(fs.existsSync(path.join(run.runRoot, "prompt-history")), false);
+});
+
+test("resume --reset-node applies edited prompts to the finished task it reruns and to its dependents", async () => {
+  const run = await launchPromptRefreshRun(
+    "prompt-refresh-reset",
+    [
+      { id: "node:project-discovery", state: "finished", attempt: 1 },
+      { id: "node:actors-flows", state: "finished", attempt: 1 }
+    ],
+    { status: "finished", state: "succeeded" }
+  );
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // Both tasks finished, so a plain resume keeps both prompts.
+  assert.deepEqual(await run.resume(), []);
+  assert.equal(run.prompt("project-discovery"), run.launchPrompts.discovery);
+
+  // Resetting project-discovery reruns it and actors-flows, which depends on it.
+  const diagnostics = await run.resume({ resetNode: "node:project-discovery" });
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("resume --retry-failed applies edited prompts to the finished producer of a failed verifier and to its dependents", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-retry", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 },
+    { id: "verify:project-discovery", state: "failed", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/project-discovery.md", PROMPT_REFRESH_NOTE);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // A plain resume reruns only the verifier, so the producer, whose agent finished, keeps its prompt.
+  assert.deepEqual(
+    (await run.resume()).map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.equal(run.prompt("project-discovery"), run.launchPrompts.discovery);
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+
+  // Retrying the failed verifier reopens its producer and every task after it.
+  const diagnostics = await run.resume({ retryFailed: true });
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.match(diagnostics[0]?.message ?? "", /1 unfinished task \(project-discovery\)/u);
+  assert.ok(run.prompt("project-discovery").includes(PROMPT_REFRESH_NOTE));
+});
+
+/**
+ * Runs `body` with XDG_CACHE_HOME at a cache seeded with every reference the shipped catalog pins. A
+ * stock launch materializes them, so without it the launch reads the host's reference cache.
+ */
+async function withShippedReferenceCache<T>(project: string, body: () => Promise<T>): Promise<T> {
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    return await body();
+  } finally {
+    if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+  }
+}
+
+test("resume of a stock run renders its prompts as launch did and refreshes an unexpanded group's template copy", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runId = "prompt-refresh-stock";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, status: "failed", state: "failed", steps: [] })
+  });
+  const launched = await withShippedReferenceCache(project, () => startRun({ projectRoot: project, runId, env }));
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  const resume = async () => {
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  };
+  // Nothing is edited and no engine render has republished the dynamic controls launch wrote: every
+  // prompt renders byte for byte as launch rendered it, so nothing is replaced.
+  assert.deepEqual(await resume(), []);
+  assert.equal(fs.existsSync(path.join(runRoot, "prompt-history")), false);
+
+  // Both goal groups render their children from the one template copy of this prompt when they expand.
+  appendProjectPrompt(project, "strategies/goal-hunter.mdx", PROMPT_REFRESH_NOTE);
+  const diagnostics = await resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(diagnostics)
+  );
+  const entry = diagnostics[0]?.path;
+  assert.ok(entry);
+  const record = JSON.parse(fs.readFileSync(path.join(runRoot, entry, "refresh.json"), "utf8")) as {
+    files: Array<{ path: string; attempt_id?: string; prompt: string }>;
+  };
+  assert.equal(record.files.length, 1, JSON.stringify(record.files));
+  const [copy] = record.files;
+  assert.ok(copy && copy.attempt_id === undefined && copy.path.startsWith("dynamic-prompt-templates/"));
+  assert.equal(copy.prompt, ".ultrafuzz/prompts/strategies/goal-hunter.mdx");
+  assert.ok(fs.readFileSync(path.join(runRoot, copy.path), "utf8").includes(PROMPT_REFRESH_NOTE));
+});
+
+test("resume applies an edited stock review prompt that names artifact authorities once its groups expanded", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const runId = "prompt-refresh-stock-review";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:goal-plan", state: "finished", attempt: 1 }]
+    })
+  });
+  const launched = await withShippedReferenceCache(project, () => startRun({ projectRoot: project, runId, env }));
+  assert.equal(launched.ok, true, JSON.stringify(launched.diagnostics));
+  assert.ok(launched.value);
+  const runRoot = launched.value.run_root;
+  // goal-plan's plan, of which the goal groups' expansion reads only these two lists.
+  const goal = {
+    id: "liquidation:overdue",
+    node_id: "dynamic:threat:liquidation:overdue",
+    goal_prompt: "find any vulnerability affecting {{liquidation:overdue}}",
+    replacements: { "liquidation:overdue": "the persisted liquidation threat model" }
+  };
+  const planPath = path.join(runRoot, "artifacts", "goal-plan", "goal-plan.json");
+  fs.mkdirSync(path.dirname(planPath), { recursive: true });
+  fs.writeFileSync(planPath, `${JSON.stringify({ threat_goals: [goal], class_goals: [] }, null, 2)}\n`, "utf8");
+  const tasksPath = path.join(runRoot, "smithers", "tasks.json");
+  const controls = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as {
+    tasks: CompiledSmithersTask[];
+    dynamic_groups: CompiledSmithersDynamicGroup[];
+  };
+  // The engine's first render after goal-plan publishes the prompts that wait on both groups.
+  const published = materializeDynamicRuntime({
+    runId,
+    projectRoot: project,
+    runRoot,
+    graphPath: path.join(runRoot, "graph.json"),
+    tasksPath,
+    baseTasks: controls.tasks,
+    groups: controls.dynamic_groups,
+    readyGroupIds: ["threat-goals", "class-goals"]
+  });
+  assert.deepEqual(published.promptRenderFailures, []);
+  // Like dedupe-findings' and aggregate-test-files', the final report's prompt names artifact authorities,
+  // which no task whose prompt is rendered at runtime is compiled with (#1234).
+  const reportPath = path.join(runRoot, "artifacts", "final-report", "prompt.rendered.md");
+  assert.match(fs.readFileSync(reportPath, "utf8"), /ancestor artifact authority JSON/u);
+  const resume = async () => {
+    const resumed = await resumeRun({ projectRoot: project, runId, env });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    return resumed.diagnostics.filter((diagnostic) => diagnostic.source === "prompts");
+  };
+  // Unedited, they render as the engine published them, so nothing is rejected or replaced.
+  assert.deepEqual(await resume(), []);
+
+  appendProjectPrompt(project, "review/final-report.md", PROMPT_REFRESH_NOTE);
+  const diagnostics = await resume();
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(diagnostics)
+  );
+  assert.match(diagnostics[0]?.message ?? "", /\(final-report\)/u);
+  const report = fs.readFileSync(reportPath, "utf8");
+  assert.ok(report.includes(PROMPT_REFRESH_NOTE), report);
+  assert.match(report, /ancestor artifact authority JSON/u);
+});
+
+test("a prompt file that breaks the prompt catalog skips the refresh with a warning naming the file", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-catalog", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  // The run never uses this file, but `run` would refuse the catalog too: a file that does not parse
+  // could carry any prompt ID.
+  fs.writeFileSync(
+    path.join(run.project, ".ultrafuzz", "prompts", "setup", "unused-variant.md"),
+    "---\nid: [unclosed\n---\n\nA variant.\n",
+    "utf8"
+  );
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity]),
+    [["PROMPT_REFRESH_SKIPPED", "warning"]]
+  );
+  assert.match(
+    diagnostics[0]?.message ?? "",
+    /project prompt setup\/unused-variant\.md: invalid prompt YAML frontmatter/u
+  );
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+});
+
+test("a refresh that cannot create its history entry changes no prompt file and says so", async () => {
+  const run = await launchPromptRefreshRun("prompt-refresh-no-history", [
+    { id: "node:project-discovery", state: "finished", attempt: 1 }
+  ]);
+  appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+  const historyRoot = path.join(run.runRoot, "prompt-history");
+  fs.writeFileSync(historyRoot, "not a directory\n", "utf8");
+
+  const diagnostics = await run.resume();
+
+  assert.deepEqual(
+    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.severity, diagnostic.path]),
+    [["PROMPT_REFRESH_INCOMPLETE", "warning", undefined]]
+  );
+  assert.match(diagnostics[0]?.message ?? "", /after 0 of 1 files: .*; no prompt file changed\./u);
+  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  fs.rmSync(historyRoot);
+  assert.deepEqual(
+    (await run.resume()).map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"]
+  );
+  assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+});
+
+testWhen(process.getuid?.() !== 0)(
+  "a refresh that fails part way has already recorded every file it planned",
+  async () => {
+    const run = await launchPromptRefreshRun("prompt-refresh-partial", [
+      { id: "node:project-discovery", state: "finished", attempt: 1 }
+    ]);
+    appendProjectPrompt(run.project, "setup/actors-flows.md", PROMPT_REFRESH_NOTE);
+    const artifactDir = path.join(run.runRoot, "artifacts", "actors-flows");
+    fs.chmodSync(artifactDir, 0o555);
+    let diagnostics: Awaited<ReturnType<typeof run.resume>>;
+    try {
+      diagnostics = await run.resume();
+    } finally {
+      fs.chmodSync(artifactDir, 0o755);
+    }
+
+    const [incomplete, ...others] = diagnostics;
+    assert.ok(incomplete?.code === "PROMPT_REFRESH_INCOMPLETE" && others.length === 0, JSON.stringify(diagnostics));
+    assert.match(incomplete.message, /after 0 of 1 files: .*EACCES/u);
+    assert.ok(incomplete.path);
+    // refresh.json was published before the first file changed, so it lists the file the refresh
+    // could not replace, which still holds its previous bytes.
+    const { files } = JSON.parse(fs.readFileSync(path.join(run.runRoot, incomplete.path, "refresh.json"), "utf8")) as {
+      files: Array<Record<string, unknown>>;
+    };
+    const sha256 = (text: string): string => crypto.createHash("sha256").update(text).digest("hex");
+    const [planned, ...unplanned] = files;
+    assert.ok(planned !== undefined && unplanned.length === 0, JSON.stringify(files));
+    const { sha256: plannedSha256, ...plannedFile } = planned;
+    assert.deepEqual(plannedFile, {
+      path: "artifacts/actors-flows/prompt.rendered.md",
+      attempt_id: "actors-flows",
+      prompt: ".ultrafuzz/prompts/setup/actors-flows.md",
+      previous_sha256: sha256(run.launchPrompts.actors)
+    });
+    assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+
+    // Once the directory is writable again, the next resume applies the planned bytes.
+    assert.deepEqual(
+      (await run.resume()).map((diagnostic) => diagnostic.code),
+      ["PROMPTS_REFRESHED"]
+    );
+    assert.ok(run.prompt("actors-flows").includes(PROMPT_REFRESH_NOTE));
+    assert.equal(plannedSha256, sha256(run.prompt("actors-flows")));
+  }
+);
 
 test("replay and fork restore a missing static prompt before they start an engine", async () => {
   const project = tempProject();
@@ -28191,6 +29380,68 @@ test("syncRun settles a model the fetched pricing catalog does not list instead 
   };
   assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
   assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["unlisted-model"]);
+});
+
+test("syncRun writes its accounting into run.json as a lifecycle command rewrote it during the pass", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "accounting-beside-lifecycle-write";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 5,
+          costUsd: undefined,
+          model: "listed-model",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    test: { models: { "listed-model": { cost: { input: 1, output: 1 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  writeRequiredArtifactSet(runRoot, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const launchedGuard = recordedForgeGuard(runRoot);
+  assert.ok(launchedGuard);
+  const resumedGuard = { ...launchedGuard, active: !launchedGuard.active };
+  // The pass awaits the pricing catalog after reading run.json. A resume that
+  // records its controller's Forge guard then must keep that record.
+  const fetchDuringResume: typeof fetch = (input, init) => {
+    const metadataPath = path.join(runRoot, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, forge_guard: resumedGuard }, null, 2)}\n`);
+    return testPricingFetch(input, init);
+  };
+
+  const sync = await runtimeSyncRun(
+    { projectRoot: project, runId, env },
+    { pricingFetch: fetchDuringResume, pricingLookupHostname: async () => [{ address: "93.184.216.34", family: 4 }] }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  assert.deepEqual(recordedForgeGuard(runRoot), resumedGuard);
+  const metadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as { accounting?: unknown };
+  assert.notEqual(metadata.accounting, undefined, "the pass wrote no accounting");
 });
 
 test("syncRun warns that a Smithers event stream at the CLI event limit may be truncated", async () => {

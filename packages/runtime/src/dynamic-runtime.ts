@@ -73,15 +73,29 @@ export function materializeDynamicRuntime(input: DynamicRuntimeMaterializeInput)
 export function verifyDynamicRuntimeMaterialization(
   input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
 ): DynamicRuntimeMaterialization {
-  const readyGroupIds = input.groups
+  return deriveDynamicRuntime({ ...input, readyGroupIds: publishedGroupIds(input) }, "verify");
+}
+
+/**
+ * The same derivation from the sealed base controls and the published expansion manifests, as the
+ * next render derives it, without publishing, rendering or comparing anything. `resume` renders the
+ * project's current prompts against it, before any render has republished what launch wrote.
+ */
+export function deriveDynamicRuntimeMaterialization(
+  input: Omit<DynamicRuntimeMaterializeInput, "readyGroupIds">
+): DynamicRuntimeMaterialization {
+  return deriveDynamicRuntime({ ...input, readyGroupIds: publishedGroupIds(input) }, "derive");
+}
+
+function publishedGroupIds(input: Pick<DynamicRuntimeMaterializeInput, "groups" | "runRoot">): string[] {
+  return input.groups
     .map((group) => group.groupNodeId)
     .filter((groupId) => fs.existsSync(path.join(input.runRoot, "dynamic-expansions", `${groupId}.json`)));
-  return deriveDynamicRuntime({ ...input, readyGroupIds }, "verify");
 }
 
 function deriveDynamicRuntime(
   input: DynamicRuntimeMaterializeInput,
-  mode: "publish" | "verify"
+  mode: "publish" | "verify" | "derive"
 ): DynamicRuntimeMaterialization {
   const runId = validateSafeId(input.runId, "run ID");
   const projectRoot = path.resolve(input.projectRoot);
@@ -191,7 +205,7 @@ function deriveDynamicRuntime(
     // renders re-derive exactly the documents already on disk.
     writeJsonDurableIfChanged(tasksPath, runtimeTaskDocument);
     writeJsonDurableIfChanged(graphPath, runtimeGraph);
-  } else {
+  } else if (mode === "verify") {
     const observedTasks = readRecord(tasksPath);
     const observedGraph = readPlannedGraph(graphPath);
     if (jsonFingerprint(observedTasks) !== jsonFingerprint(runtimeTaskDocument)) {
@@ -613,6 +627,7 @@ function promptGraphContext(
 function renderRuntimePrompt(input: {
   task: CompiledSmithersTask;
   promptTemplatePath: string;
+  templateBody?: string; // rendered instead of the template copy's current text
   artifactDir: string;
   groupContext: CompiledSmithersDynamicGroup["promptContext"];
   graphContext: ReturnType<typeof promptGraphContext>;
@@ -627,7 +642,7 @@ function renderRuntimePrompt(input: {
   assertRegularFileInside(input.projectRoot, templatePath, `runtime prompt template for ${task.attemptId}`);
   const workspacePath = remapProjectPath(task.workspacePath, groupContext.projectRoot, input.projectRoot);
   const result = renderPrompt({
-    prompt: fs.readFileSync(templatePath, "utf8"),
+    prompt: input.templateBody ?? fs.readFileSync(templatePath, "utf8"),
     ...(task.dynamicVariables === undefined ? {} : { dynamicVariables: { ...task.dynamicVariables } }),
     graph: input.graphContext,
     node: {
@@ -797,4 +812,45 @@ function unusablePublishedPrompt(
 ): DynamicRuntimeMaterialization["promptRenderFailures"] {
   if (fs.lstatSync(promptPath).isFile()) return [];
   return [{ attemptId, message: `runtime rendered prompt for ${attemptId} is not a regular file: ${promptPath}` }];
+}
+
+/**
+ * Renders the listed runtime tasks' prompts in memory, each from the template body given instead of
+ * its template copy's current text, exactly as a publishing render would and with the same checks.
+ * It writes nothing. `resume` uses it to apply the project's current prompts to published ones.
+ */
+export function renderRuntimePromptsFromTemplates(input: {
+  materialization: Pick<DynamicRuntimeMaterialization, "tasks" | "graph">;
+  groups: readonly CompiledSmithersDynamicGroup[];
+  projectRoot: string;
+  runRoot: string;
+  runId: string;
+  /** Template body per attempt ID. */
+  templates: ReadonlyMap<string, string>;
+}): Map<string, { markdown: string } | { error: string }> {
+  const rendered = new Map<string, { markdown: string } | { error: string }>();
+  const groupContext = input.groups[0]?.promptContext;
+  if (groupContext === undefined) return rendered;
+  const graphContext = promptGraphContext(input.materialization.graph, input.materialization.tasks);
+  for (const task of input.materialization.tasks) {
+    const templateBody = input.templates.get(task.attemptId);
+    if (templateBody === undefined || task.promptTemplatePath === undefined) continue;
+    try {
+      const markdown = renderRuntimePrompt({
+        task,
+        promptTemplatePath: task.promptTemplatePath,
+        templateBody,
+        artifactDir: remapProjectPath(task.artifactDir, groupContext.projectRoot, input.projectRoot),
+        groupContext,
+        graphContext,
+        projectRoot: input.projectRoot,
+        runRoot: input.runRoot,
+        runId: input.runId
+      });
+      rendered.set(task.attemptId, { markdown });
+    } catch (error) {
+      rendered.set(task.attemptId, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return rendered;
 }

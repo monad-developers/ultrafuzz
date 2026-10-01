@@ -41,7 +41,9 @@ import {
   type PromptCatalog,
   type PromptCatalogEntry,
   type PromptConcreteNode,
-  type PromptGraphNode
+  type PromptGraphNode,
+  type PromptRenderInput,
+  type PromptRenderResult
 } from "@ultrafuzz/prompts";
 import { loadReferenceCatalog, materializeReferenceArtifacts, verifyReferencesCached } from "@ultrafuzz/references";
 import {
@@ -94,6 +96,7 @@ import {
 import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import {
   materializeVulnerabilityDatabasePlannerCatalog,
+  VULNERABILITY_DATABASE_CATALOG_PATH,
   VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
   type MaterializedVulnerabilityDatabaseCatalog
 } from "./vulnerability-database.js";
@@ -234,9 +237,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
   // Graph-only checks belong before the run directory exists, so an invalid topology commits nothing.
-  const requiresVulnerabilityDatabase = graph.nodes.some(
-    (node) => node.logical_id === "threat-model" || node.logical_id === "goal-plan"
-  );
+  const requiresVulnerabilityDatabase = graphRequiresVulnerabilityDatabase(graph);
   const vulnerabilityDatabaseReferenceNode = graph.nodes.find(
     (node) => node.logical_id === VULNERABILITY_DATABASE_REFERENCE_NODE_ID && node.kind === "reference"
   );
@@ -975,106 +976,207 @@ function toPlannedGraphNode(
   };
 }
 
-function renderPromptsForPlan(input: {
+interface StaticPromptRenderInput {
   catalog: PromptCatalog;
   graph: PlannedGraph;
   expandedGraph: ExpandedGraph;
-  layout: PlanRunValue["layout"];
+  layout: RunLayout;
   projectRoot: string;
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
   vulnerabilityDatabasePath: string;
-}): RenderedPromptPlan[] {
-  const logicalNodes = promptLogicalNodes(input.expandedGraph, input.graph, input.layout);
-  const concreteNodes = promptConcreteNodes(input.graph, input.layout);
-  const invariantPrioritySelection = invariantPropertyPrioritySelection(
-    input.resolvedConfig.invariants.propertyPriorityThreshold
-  );
-  const rendered: RenderedPromptPlan[] = [];
-  const deferredNodeIds = nodesWithDynamicAncestors(input.graph);
+}
 
+/** A static attempt's prompt rendered in memory, and the record planning keeps of it. */
+interface StaticPromptRender {
+  plan: RenderedPromptPlan;
+  result: PromptRenderResult;
+}
+
+/** A static attempt whose prompt could not be rendered, and why. */
+interface StaticPromptRenderFailure {
+  attemptId: string;
+  message: string;
+}
+
+function renderPromptsForPlan(input: StaticPromptRenderInput): RenderedPromptPlan[] {
+  return renderStaticPrompts(input, { createArtifactDirs: true }).map(({ plan, result }) => {
+    writeRenderedPrompt(result);
+    return plan;
+  });
+}
+
+/**
+ * Renders the static prompts of a launched run's attempts in memory from `catalog`, exactly as the
+ * launch rendered them from its catalog: against the run's sealed expanded graph and resolved config.
+ * It creates and writes nothing. `resume` uses it to apply the project's current prompts. An attempt
+ * whose prompt is not in the catalog, cannot be rendered, or fails the validator-command check is
+ * returned among `failures` instead.
+ */
+export function renderRunStaticPrompts(input: {
+  catalog: PromptCatalog;
+  expandedGraph: ExpandedGraph;
+  layout: RunLayout;
+  projectRoot: string;
+  resolvedConfig: PlanRunValue["resolved_config"];
+  attemptIds: ReadonlySet<string>;
+}): { rendered: StaticPromptRender[]; failures: StaticPromptRenderFailure[] } {
+  const graph = toPlannedGraph(input.expandedGraph);
+  const failures: StaticPromptRenderFailure[] = [];
+  const rendered = renderStaticPrompts(
+    {
+      catalog: input.catalog,
+      graph,
+      expandedGraph: input.expandedGraph,
+      layout: input.layout,
+      projectRoot: input.projectRoot,
+      resolvedConfig: input.resolvedConfig,
+      runId: input.layout.runId,
+      // Launch renders the path of the catalog it materializes for exactly these graphs.
+      vulnerabilityDatabasePath: graphRequiresVulnerabilityDatabase(graph)
+        ? safeResolveInside(input.layout.root, VULNERABILITY_DATABASE_CATALOG_PATH, "vulnerability database catalog")
+        : "unavailable"
+    },
+    { createArtifactDirs: false, attemptIds: input.attemptIds, failures }
+  );
+  return { rendered, failures };
+}
+
+function renderStaticPrompts(
+  input: StaticPromptRenderInput,
+  options: {
+    createArtifactDirs: boolean;
+    /** Render only these attempts. */
+    attemptIds?: ReadonlySet<string>;
+    /** Collect each attempt's failure here instead of throwing the first. */
+    failures?: StaticPromptRenderFailure[];
+  }
+): StaticPromptRender[] {
+  const create = options.createArtifactDirs;
+  const context: StaticPromptContext = {
+    input,
+    logicalNodes: promptLogicalNodes(input.expandedGraph, input.graph, input.layout, create),
+    concreteNodes: promptConcreteNodes(input.graph, input.layout, create)
+  };
+  const rendered: StaticPromptRender[] = [];
+  const deferredNodeIds = nodesWithDynamicAncestors(input.graph);
   for (const node of input.graph.nodes) {
     if (!node.prompt_path || deferredNodeIds.has(node.id)) {
       continue;
     }
-    const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
-    for (const attempt of promptAttemptsForNode(node, input.layout)) {
-      const result = renderPrompt({
-        prompt: {
-          id: promptEntry.id,
-          displayName: promptEntry.displayName,
-          source: promptEntry.source,
-          body: promptEntry.body
-        },
-        graph: {
-          logicalNodes,
-          concreteNodes
-        },
-        node: {
-          logicalId: node.logical_id,
-          concreteId: attempt.attemptId,
-          artifactDir: attempt.artifactDir,
-          workspacePath: attempt.workspacePath,
-          repoPath: path.resolve(input.projectRoot, input.resolvedConfig.project.repo),
-          attemptIndex: attempt.attemptIndex,
-          loopIndex: node.loop.index,
-          loopCount: node.loop.count,
-          agentRef:
-            attempt.agentRef ?? input.resolvedConfig.models.profiles[input.resolvedConfig.models.default]?.agent,
-          modelProfileId: attempt.modelProfileId ?? input.resolvedConfig.models.default,
-          modelName: attempt.modelName,
-          modelIndex: attempt.modelIndex
-        },
-        run: {
-          id: input.runId,
-          artifactsDir: input.layout.artifactsDir,
-          metadataPath: input.layout.runMetadataPath
-        },
-        outputs: {
-          patchPath: path.join(attempt.artifactDir, "patch.diff")
-        },
-        resolvedConfig: {
-          triage: {
-            quorum: input.resolvedConfig.triage.quorum,
-            panelSize: input.resolvedConfig.triage.panelSize
-          },
-          dynamicStrategiesEnumerator: input.resolvedConfig.dynamicStrategiesEnumerator,
-          invariantPropertyPriorityThreshold: input.resolvedConfig.invariants.propertyPriorityThreshold,
-          invariantReferenceExpectationSelection:
-            input.resolvedConfig.invariants.referenceExpectationSelection ?? "mandatory",
-          invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
-          invariantPropertyPriorities: invariantPrioritySelection.priorities,
-          invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,
-          invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds,
-          vulnerabilityDatabasePath: input.vulnerabilityDatabasePath,
-          artifactSchemaDir: projectArtifactSchemaDir(input.projectRoot)
-        }
-      });
-      const expandedNode = input.expandedGraph.nodes.find((candidate) => candidate.id === node.id);
-      if (expandedNode === undefined) {
-        throw new Error(`planned prompt node ${node.id} is missing from the expanded graph`);
+    for (const attempt of promptAttemptsForNode(node, input.layout, create)) {
+      if (options.attemptIds !== undefined && !options.attemptIds.has(attempt.attemptId)) continue;
+      try {
+        rendered.push(renderStaticAttemptPrompt(context, node, attempt));
+      } catch (error) {
+        if (options.failures === undefined) throw error;
+        options.failures.push({
+          attemptId: attempt.attemptId,
+          message: error instanceof Error ? error.message : String(error)
+        });
       }
-      assertRenderedPromptValidatorCommands({
-        attemptId: attempt.attemptId,
-        outputContractMarkdown: result.outputContractMarkdown,
-        schemaBackedOutputCount: producerSchemaBackedOutputCount(expandedNode.outputs)
-      });
-      writeRenderedPrompt(result);
-      rendered.push({
-        node_id: node.id,
-        logical_node_id: node.logical_id,
-        attempt_id: attempt.attemptId,
-        prompt_id: promptEntry.id,
-        prompt_path: promptEntry.relativePath,
-        rendered_prompt_path: result.renderedPromptPath,
-        rendered_prompt_digest: sha256Stable(result.renderedMarkdown),
-        variables_used: result.variablesUsed,
-        artifact_references: result.artifactReferences
-      });
     }
   }
-
   return rendered;
+}
+
+interface StaticPromptContext {
+  input: StaticPromptRenderInput;
+  logicalNodes: PromptGraphNode[];
+  concreteNodes: PromptConcreteNode[];
+}
+
+function renderStaticAttemptPrompt(
+  context: StaticPromptContext,
+  node: PlannedGraphNode,
+  attempt: PromptAttempt
+): StaticPromptRender {
+  const { input } = context;
+  const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
+  const result = renderPrompt({
+    prompt: {
+      id: promptEntry.id,
+      displayName: promptEntry.displayName,
+      source: promptEntry.source,
+      body: promptEntry.body
+    },
+    graph: {
+      logicalNodes: context.logicalNodes,
+      concreteNodes: context.concreteNodes
+    },
+    node: {
+      logicalId: node.logical_id,
+      concreteId: attempt.attemptId,
+      artifactDir: attempt.artifactDir,
+      workspacePath: attempt.workspacePath,
+      repoPath: path.resolve(input.projectRoot, input.resolvedConfig.project.repo),
+      attemptIndex: attempt.attemptIndex,
+      loopIndex: node.loop.index,
+      loopCount: node.loop.count,
+      agentRef: attempt.agentRef ?? input.resolvedConfig.models.profiles[input.resolvedConfig.models.default]?.agent,
+      modelProfileId: attempt.modelProfileId ?? input.resolvedConfig.models.default,
+      modelName: attempt.modelName,
+      modelIndex: attempt.modelIndex
+    },
+    run: {
+      id: input.runId,
+      artifactsDir: input.layout.artifactsDir,
+      metadataPath: input.layout.runMetadataPath
+    },
+    outputs: {
+      patchPath: path.join(attempt.artifactDir, "patch.diff")
+    },
+    resolvedConfig: staticPromptResolvedConfig(input)
+  });
+  const expandedNode = input.expandedGraph.nodes.find((candidate) => candidate.id === node.id);
+  if (expandedNode === undefined) {
+    throw new Error(`planned prompt node ${node.id} is missing from the expanded graph`);
+  }
+  assertRenderedPromptValidatorCommands({
+    attemptId: attempt.attemptId,
+    outputContractMarkdown: result.outputContractMarkdown,
+    schemaBackedOutputCount: producerSchemaBackedOutputCount(expandedNode.outputs)
+  });
+  return {
+    plan: {
+      node_id: node.id,
+      logical_node_id: node.logical_id,
+      attempt_id: attempt.attemptId,
+      prompt_id: promptEntry.id,
+      prompt_path: promptEntry.relativePath,
+      rendered_prompt_path: result.renderedPromptPath,
+      rendered_prompt_digest: sha256Stable(result.renderedMarkdown),
+      variables_used: result.variablesUsed,
+      artifact_references: result.artifactReferences
+    },
+    result
+  };
+}
+
+function staticPromptResolvedConfig(input: StaticPromptRenderInput): PromptRenderInput["resolvedConfig"] {
+  const invariantPrioritySelection = invariantPropertyPrioritySelection(
+    input.resolvedConfig.invariants.propertyPriorityThreshold
+  );
+  return {
+    triage: {
+      quorum: input.resolvedConfig.triage.quorum,
+      panelSize: input.resolvedConfig.triage.panelSize
+    },
+    dynamicStrategiesEnumerator: input.resolvedConfig.dynamicStrategiesEnumerator,
+    invariantPropertyPriorityThreshold: input.resolvedConfig.invariants.propertyPriorityThreshold,
+    invariantReferenceExpectationSelection:
+      input.resolvedConfig.invariants.referenceExpectationSelection ?? "mandatory",
+    invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
+    invariantPropertyPriorities: invariantPrioritySelection.priorities,
+    invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,
+    invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds,
+    vulnerabilityDatabasePath: input.vulnerabilityDatabasePath,
+    artifactSchemaDir: projectArtifactSchemaDir(input.projectRoot)
+  };
+}
+
+function graphRequiresVulnerabilityDatabase(graph: PlannedGraph): boolean {
+  return graph.nodes.some((node) => node.logical_id === "threat-model" || node.logical_id === "goal-plan");
 }
 
 function nodesWithDynamicAncestors(graph: PlannedGraph): Set<string> {
@@ -1110,7 +1212,8 @@ function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], inpu
 function promptLogicalNodes(
   expandedGraph: ExpandedGraph,
   plannedGraph: PlannedGraph,
-  layout: PlanRunValue["layout"]
+  layout: PlanRunValue["layout"],
+  createArtifactDirs: boolean
 ): PromptGraphNode[] {
   const nodes = new Map<string, PromptGraphNode>();
   const expandedNodeById = new Map(expandedGraph.nodes.map((node) => [node.id, node]));
@@ -1131,7 +1234,7 @@ function promptLogicalNodes(
     const artifactDirs = Array.from(
       new Set([
         ...(previous?.artifactDirs ?? []),
-        ...promptAttemptsForNode(node, layout).map((attempt) => attempt.artifactDir)
+        ...promptAttemptsForNode(node, layout, createArtifactDirs).map((attempt) => attempt.artifactDir)
       ])
     ).sort();
     nodes.set(node.logical_id, {
@@ -1156,9 +1259,13 @@ function promptLogicalNodes(
   return Array.from(nodes.values()).sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function promptConcreteNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptConcreteNode[] {
+function promptConcreteNodes(
+  graph: PlannedGraph,
+  layout: PlanRunValue["layout"],
+  createArtifactDirs: boolean
+): PromptConcreteNode[] {
   return graph.nodes.flatMap((node) =>
-    promptAttemptsForNode(node, layout).map((attempt) => ({
+    promptAttemptsForNode(node, layout, createArtifactDirs).map((attempt) => ({
       id: attempt.attemptId,
       logicalId: node.logical_id,
       dependsOn: node.depends_on,
@@ -1184,22 +1291,27 @@ interface PromptAttempt {
   modelName?: string;
 }
 
-function promptAttemptsForNode(node: PlannedGraphNode, layout: PlanRunValue["layout"]): PromptAttempt[] {
+function promptAttemptsForNode(
+  node: PlannedGraphNode,
+  layout: PlanRunValue["layout"],
+  createArtifactDirs: boolean
+): PromptAttempt[] {
   if (node.model_fanout.length === 0) {
-    return [promptAttemptFor(node, undefined, layout)];
+    return [promptAttemptFor(node, undefined, layout, createArtifactDirs)];
   }
-  return node.model_fanout.map((model) => promptAttemptFor(node, model, layout));
+  return node.model_fanout.map((model) => promptAttemptFor(node, model, layout, createArtifactDirs));
 }
 
 function promptAttemptFor(
   node: PlannedGraphNode,
   model: PlannedGraphNode["model_fanout"][number] | undefined,
-  layout: PlanRunValue["layout"]
+  layout: PlanRunValue["layout"],
+  createArtifactDirs: boolean
 ): PromptAttempt {
   const attemptId = model === undefined ? node.id : plannedAttemptId(node, model);
   return {
     attemptId,
-    artifactDir: getNodeArtifactDir(layout, attemptId, { create: true }),
+    artifactDir: getNodeArtifactDir(layout, attemptId, { create: createArtifactDirs }),
     workspacePath: path.join(layout.workspacesDir, attemptId),
     attemptIndex: model?.attempt_index ?? node.loop.attempt_index,
     modelIndex: model?.model_index ?? 0,

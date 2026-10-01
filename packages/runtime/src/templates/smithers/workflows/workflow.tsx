@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { createSmithers, type AgentLike } from "smthrs";
 import { z } from "zod/v4";
-import type { ArtifactValidationWarning } from "@ultrafuzz/artifacts";
+import type { ArtifactSchemaBundle, ArtifactValidationWarning } from "@ultrafuzz/artifacts";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
 // sibling .smithers/agents.ts, which bun's resolution would prefer over the
 // .smithers/agents/ directory this workflow needs.
@@ -39,8 +39,8 @@ const runtimeModule =
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
   new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href;
 const {
-  artifactContractSchemaBinding,
-  artifactSchemaRegistry,
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+  artifactContractSchemaFile,
   artifactValidatorSmokeFixturePath,
   assertArtifactPublicationsContainNoSecrets,
   assertRunMetadataDocument,
@@ -56,6 +56,7 @@ const {
   materializeCanonicalThreatModelMarkdown,
   materializePromptSchemas,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  installedArtifactSchemaBundle,
   MAX_GENERATED_TEST_BUNDLE_BYTES,
   MAX_GENERATED_TEST_BUNDLE_ENTRIES,
   MAX_GENERATED_TEST_COMPANION_BYTES,
@@ -67,6 +68,7 @@ const {
   parseInvariantSuiteManifestBytes,
   parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
+  plannedArtifactSchemaBundle,
   prepareSafeFilePath,
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
@@ -297,7 +299,53 @@ const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
 const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 const maxDynamicNodes = __ULTRAFUZZ_MAX_DYNAMIC_NODES__;
-const replacePromptSchemas = __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__;
+// Every schema-backed output in a run's plan names the one schema bundle the run was planned with.
+const plannedSchemaBundleSha256: string | undefined = [
+  ...compiledBaseTasks,
+  ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)
+]
+  .flatMap((task) => task.metadata.artifacts.outputs)
+  .find((output) => output.schemaBundleSha256 !== undefined)?.schemaBundleSha256;
+let resolvedPlannedSchemaBundle: ArtifactSchemaBundle | undefined;
+
+/**
+ * The schema bundle a run's artifacts are checked against, by this workflow and by the host: the one
+ * its plan names (#921). This process's installed schemas are that bundle unless an upgrade changed a
+ * schema after launch, and then the run's execution snapshot still holds it. A plan without a
+ * schema-backed output names no bundle, and its tasks read this build's schemas.
+ */
+function plannedSchemaBundle(): ArtifactSchemaBundle {
+  if (plannedSchemaBundleSha256 === undefined) return installedArtifactSchemaBundle();
+  resolvedPlannedSchemaBundle ??= plannedArtifactSchemaBundle(dynamicRunRoot, plannedSchemaBundleSha256);
+  return resolvedPlannedSchemaBundle;
+}
+
+/** Whether a declared output's contract is a JSON contract, which its plan binds to a schema. */
+function isSchemaBackedOutput(output: { contract: string }): boolean {
+  return artifactContractSchemaFile(output.contract) !== undefined;
+}
+
+/**
+ * The schema a declared output was planned with, in the run's planned bundle, or undefined for an
+ * output whose contract has no schema. A schema-backed output that does not name its schema in that
+ * bundle is refused, never validated against this build's schema instead.
+ */
+function plannedOutputSchema(output: (typeof taskSpecs)[number]["outputs"][number]) {
+  if (!isSchemaBackedOutput(output)) return undefined;
+  const bundle = plannedSchemaBundle();
+  if (
+    output.schemaFile === undefined ||
+    output.schemaId === undefined ||
+    output.schemaSha256 === undefined ||
+    output.schemaBundleSha256 !== bundle.sha256
+  ) {
+    throw new Error(
+      `artifact-contract failure: ${output.path} does not name its schema in the run's planned schema bundle`
+    );
+  }
+  return { bundle, schemaFile: output.schemaFile, schemaId: output.schemaId, schemaSha256: output.schemaSha256 };
+}
+
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
@@ -2445,7 +2493,7 @@ function artifactAwareAgent(
     // Retain only normalized text and allowlisted scheduler controls.
     const normalizedError = new Error(normalizedFailureMessage ?? fallback) as Error & {
       code?: string;
-      details?: Record<string, boolean | number>;
+      details?: Record<string, boolean | number | string>;
     };
     if (sourceName === "AbortError") {
       Object.defineProperty(normalizedError, "name", {
@@ -2458,7 +2506,7 @@ function artifactAwareAgent(
       normalizedError.code = sourceCode;
     }
     if (sourceDetails !== null && typeof sourceDetails === "object") {
-      const details: Record<string, boolean | number> = {};
+      const details: Record<string, boolean | number | string> = {};
       for (const key of ["failureQuota", "failureRetryable", "discardResumeSession", "discardAgentCheckpoint"]) {
         const value = readProperty(sourceDetails, key);
         if (typeof value === "boolean") details[key] = value;
@@ -2475,6 +2523,15 @@ function artifactAwareAgent(
       if (Number.isSafeInteger(retryAfterMs) && (retryAfterMs as number) >= 0) {
         details.retryAfterMs = retryAfterMs as number;
       }
+      // The failure an agent CLI stated when its thrown message is generic
+      // (#1084). Operator-facing only: Smithers classifies the message and
+      // the control fields above, never this text.
+      const agentStatedFailure = readProperty(sourceDetails, "agentStatedFailure");
+      const normalizedStatedFailure =
+        typeof agentStatedFailure === "string"
+          ? normalizeNodeAttemptFailureMessage(agentStatedFailure, forbiddenSecretValues)
+          : undefined;
+      if (normalizedStatedFailure !== undefined) details.agentStatedFailure = normalizedStatedFailure;
       if (Object.keys(details).length > 0) normalizedError.details = details;
     }
     // Promote an otherwise-unclassified 402 to Smithers' quota control plane so
@@ -2831,7 +2888,12 @@ function verifiedGoalSearchFindingCount(task: (typeof taskSpecs)[number]): numbe
       `artifact-contract failure: output is not a regular file ${findingsOutput.path}`,
       MAX_PRE_AGENT_EVIDENCE_BYTES
     );
-    const validation = validateArtifactContractBytes("ultrafuzz/findings@2", snapshot.bytes, findingsOutput.path);
+    const validation = validateArtifactContractBytes(
+      "ultrafuzz/findings@2",
+      snapshot.bytes,
+      findingsOutput.path,
+      plannedOutputSchema(findingsOutput)
+    );
     return validation.ok && Array.isArray(validation.value) ? validation.value.length : undefined;
   } catch {
     return undefined;
@@ -3064,14 +3126,19 @@ function prepareArtifactMirror(
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
-  preparationStep(task.attemptId, "materialize-prompt-schemas", () =>
-    materializePromptSchemas(schemaDirectory, { replaceExisting: replacePromptSchemas })
-  );
-  preparationStep(task.attemptId, "assert-task-output-schema-bindings", () => assertTaskOutputSchemaBindings(task));
-  // `pinnedSubmodules: "verify"` is the post-agent verify pass. It checks outputs in-process and never
-  // runs the agent-facing CLI, so a CLI cold start there could only fail its zero-retry task.
-  if (options.pinnedSubmodules !== "verify") {
-    preparationStep(task.attemptId, "preflight-json-validator", () => preflightJsonValidator(schemaDirectory));
+  const schemaBundle = preparationStep(task.attemptId, "materialize-prompt-schemas", () => {
+    const bundle = plannedSchemaBundle();
+    materializePromptSchemas(schemaDirectory, bundle);
+    return bundle;
+  });
+  // Only a task with a schema-backed output runs the agent-facing validator; a run whose plan has none
+  // has no planned bundle for that validator to report. `pinnedSubmodules: "verify"` is the post-agent
+  // verify pass. It checks outputs in-process and never runs the agent-facing CLI, so a CLI cold start
+  // there could only fail its zero-retry task.
+  if (options.pinnedSubmodules !== "verify" && task.outputs.some((output) => isSchemaBackedOutput(output))) {
+    preparationStep(task.attemptId, "preflight-json-validator", () =>
+      preflightJsonValidator(schemaDirectory, schemaBundle)
+    );
   }
   preparationStep(task.attemptId, "assert-task-inputs", () =>
     assertTaskInputs(task, workspaceRoot, options.pinnedSubmodules !== "verify")
@@ -3139,25 +3206,6 @@ function prepareArtifactMirror(
   return { prepared: true };
 }
 
-function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void {
-  // The verifier validates with this process's schemas and records the planned binding in its marker,
-  // so the schema content must be the planned one. `validatorBuild` is provenance and is not compared:
-  // a rebuild of the validator modules must not stop an in-flight run (#921).
-  for (const output of task.outputs) {
-    const binding = artifactContractSchemaBinding(
-      output.contract as Parameters<typeof artifactContractSchemaBinding>[0]
-    );
-    if (
-      binding?.schema_file !== output.schemaFile ||
-      binding?.schema_id !== output.schemaId ||
-      binding?.schema_sha256 !== output.schemaSha256 ||
-      binding?.schema_bundle_sha256 !== output.schemaBundleSha256
-    ) {
-      throw new Error(`artifact-contract failure: planned schema binding changed for ${output.path}`);
-    }
-  }
-}
-
 /**
  * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
@@ -3170,17 +3218,15 @@ function assertTaskOutputSchemaBindings(task: (typeof taskSpecs)[number]): void 
  * inside the attempt.
  */
 const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
-// The preflight proves that this process can launch the agent-facing validator, which does not vary
-// by task: `materializePromptSchemas` has already digest-checked each workspace's schema copy. One
-// success per engine process is enough. Re-spawning it in every prepare and attempt reset only
-// added CLI cold starts that could fail an attempt.
+// The preflight proves that this process can launch the agent-facing validator, and that it validates
+// with the run's planned schema bundle, neither of which varies by task: `materializePromptSchemas`
+// has already digest-checked each workspace's schema copy. One success per engine process is enough.
+// Re-spawning it in every prepare and attempt reset only added CLI cold starts that could fail an attempt.
 let jsonValidatorPreflightPassed = false;
 
-function preflightJsonValidator(schemaDirectory: string): void {
+function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaBundle): void {
   if (jsonValidatorPreflightPassed) return;
-  const findings = artifactSchemaRegistry().find(
-    (entry: { filename: string }) => entry.filename === "findings.schema.json"
-  );
+  const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
   if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
   let stdout: string;
   const startedAt = Date.now();
@@ -3205,7 +3251,14 @@ function preflightJsonValidator(schemaDirectory: string): void {
     );
   }
   try {
-    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"));
+    // The run's own validator must report the schema the host checks this run's artifacts against,
+    // the planned bundle's, whatever this build installs.
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(stdout, "utf8"), {
+      schemaId: findings.id,
+      schemaSha256: findings.sha256,
+      schemaBundleSha256: bundle.sha256,
+      artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+    });
   } catch (error) {
     throw new Error("artifact-contract failure: JSON validator preflight returned an invalid success envelope", {
       cause: error
@@ -5043,10 +5096,13 @@ function assertVerifiedDependency(
       const validation = validateArtifactContractBytes(
         entry.contract as Parameters<typeof validateArtifactContractBytes>[0],
         artifactSnapshot.bytes,
-        entry.path
+        entry.path,
+        plannedOutputSchema(expected)
       );
       if (!validation.ok) {
-        throw new Error(`verified dependency artifact is no longer valid ${entry.path}`);
+        throw new Error(
+          `verified dependency artifact is no longer valid ${entry.path}: ${formatSchemaValidationIssues(validation.issues)}`
+        );
       }
       authenticatedArtifacts.set(
         entry.path,
@@ -7270,7 +7326,12 @@ function validateCapturedTaskOutputs(
       throw new Error(`artifact-contract failure: captured output does not match the declaration ${output.path}`);
     }
     const { artifactRoot, file } = captured;
-    const validation = validateArtifactContractBytes(output.contract, file.bytes, output.path);
+    const validation = validateArtifactContractBytes(
+      output.contract,
+      file.bytes,
+      output.path,
+      plannedOutputSchema(output)
+    );
     if (!validation.ok) {
       throw new Error(
         `artifact-contract failure for ${output.path} (${output.contract}): ${formatSchemaValidationIssues(validation.issues)}`

@@ -8,13 +8,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
-  artifactContractSchemaBinding,
   assertRunPlanDocument,
   assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
-  ensureSafeDirectory,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   isArtifactContractId,
@@ -3385,7 +3383,6 @@ export interface CompiledSmithersWorkflow {
   tasks: readonly CompiledSmithersTask[];
   dynamicGroups: readonly CompiledSmithersDynamicGroup[];
   maxDynamicNodes: number;
-  replacePromptSchemas: boolean;
   /** Attempts whose group explicitly quarantines failures from independent branches. */
   nonBlockingAttemptIds: readonly string[];
   projectRoot: string;
@@ -3488,7 +3485,6 @@ export function renderCurrentSmithersController(input: {
     tasks,
     dynamicGroups: baseTaskDocument.dynamic_groups ?? [],
     maxDynamicNodes: input.config.run.maxDynamicNodes,
-    replacePromptSchemas: true,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
     projectRoot,
     runRoot: input.layout.root,
@@ -3750,7 +3746,6 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     tasks,
     dynamicGroups,
     maxDynamicNodes: input.config.run.maxDynamicNodes,
-    replacePromptSchemas: false,
     nonBlockingAttemptIds,
     projectRoot,
     runRoot: input.runLayout.root,
@@ -4815,6 +4810,18 @@ function runEntryExists(filePath: string): boolean {
   }
 }
 
+/** What a resume that starts an engine knows before its first reset. */
+export interface SmithersContinuationContext {
+  /** Each Smithers node's state before this resume; undefined for a run with no Smithers history. */
+  nodeStates: ReadonlyMap<string, SmithersNodeState> | undefined;
+  /** The Smithers nodes this resume resets, and whether each reset also reopens the nodes after it. */
+  resets: ReadonlyArray<{ nodeId: string; dependents: boolean }>;
+  /** The dynamic groups whose published generation this resume withdraws, so that they expand again. */
+  withdrawnGroupIds: readonly string[];
+  /** Smithers still reports the run active, so an engine may be reading its prompt files. */
+  active: boolean;
+}
+
 export async function runSmithersLifecycleCommand(input: {
   action: "resume" | "replay" | "fork";
   smithersRunId: string;
@@ -4829,6 +4836,11 @@ export async function runSmithersLifecycleCommand(input: {
   priorInspection?: SmithersResumeInspection;
   /** Prepare launch authority only after ruling out an idempotent active attach. */
   prepareContinuationEnvironment?: () => Record<string, string | undefined>;
+  /**
+   * Runs once per resume that starts an engine: after it completes an interrupted withdrawal and after
+   * every check that can refuse it before it resets or archives anything, and before its first reset.
+   */
+  beforeContinuation?: (context: SmithersContinuationContext) => Promise<void>;
   relaunchPaths?: {
     runRoot: string;
     inputJson?: string;
@@ -4923,75 +4935,96 @@ export async function runSmithersLifecycleCommand(input: {
   if (input.relaunchPaths !== undefined) {
     finishInterruptedDynamicExpansionRetry({ projectRoot: input.projectRoot, runRoot: input.relaunchPaths.runRoot });
   }
-  if (currentInspection !== undefined && inspection !== undefined) {
-    const failedTasks =
-      input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
-        ? smithersFailedTasks(currentInspection)
-        : [];
-    const retryProducers = failedTasks.flatMap((failedTask) => {
-      const producer = retryProducerForFailedVerifier(currentInspection, failedTask);
-      return producer === undefined ? [] : [producer];
-    });
-    // A reopened dynamic source owns the published expansion generation, which
-    // lives outside Smithers state. Decide and validate its withdrawal before
-    // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
-    // closed while nothing has been reset. The rename itself waits until after
-    // the reset: the dependent set Smithers resolves at reset time must still
-    // see the materialized generation (#1063).
-    const retryArchivePlan =
-      retryProducers.length > 0 && input.relaunchPaths !== undefined
-        ? planDynamicExpansionRetryArchive({
-            projectRoot: input.projectRoot,
-            runRoot: input.relaunchPaths.runRoot,
-            sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
-          })
-        : undefined;
-    if (failedTasks.length > 0) {
-      const resetStderr: string[] = [];
-      for (const failedTask of failedTasks) {
-        const producerTask = retryProducerForFailedVerifier(currentInspection, failedTask);
-        const resetResult = await execSmithersCli({
-          args: [
-            "timetravel",
-            input.workflowPath,
-            "--run-id",
-            input.smithersRunId,
-            "--node-id",
-            producerTask?.nodeId ?? failedTask.nodeId,
-            "--iteration",
-            String(producerTask?.iteration ?? failedTask.iteration),
-            // Generated verifiers deliberately have zero automatic retries. An
-            // explicit retry must reopen their agent-owned artifact producer,
-            // and Smithers must reset its verifier/dependents with it. Ordinary
-            // failed tasks retain the narrow, node-only reset used before.
-            ...(producerTask === undefined ? ["--no-deps"] : []),
-            "--force",
-            "--format",
-            "json"
-          ],
+  // Each failed task `--retry-failed` resets, with the agent-owned artifact producer that its reset
+  // reopens instead when it is a failed generated verifier. Both the resets and the prompt refresh
+  // below read this one list.
+  const retries =
+    currentInspection !== undefined && input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
+      ? smithersFailedTasks(currentInspection).map((failedTask) => ({
+          failedTask,
+          producer: retryProducerForFailedVerifier(currentInspection, failedTask)
+        }))
+      : [];
+  const retryProducers = retries.flatMap(({ producer }) => (producer === undefined ? [] : [producer]));
+  // A reopened dynamic source owns the published expansion generation, which
+  // lives outside Smithers state. Decide and validate its withdrawal before
+  // the first `timetravel`, so an ambiguous or unrecognized manifest set fails
+  // closed while nothing has been reset. The rename itself waits until after
+  // the reset: the dependent set Smithers resolves at reset time must still
+  // see the materialized generation (#1063).
+  const retryArchivePlan =
+    retryProducers.length > 0 && input.relaunchPaths !== undefined
+      ? planDynamicExpansionRetryArchive({
           projectRoot: input.projectRoot,
-          env: input.env,
-          environmentVariableNames: input.environmentVariableNames,
-          keepWorkspaces: input.keepWorkspaces
-        });
-        if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
-      }
-      preResumeStderr = resetStderr.join("\n");
-    }
-    if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
-    if (
-      failedTasks.length === 0 &&
-      input.retryFailed === true &&
-      input.resetNode === undefined &&
-      (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
-      smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
-      !isCompatibleSmithersRunId(input.smithersRunId)
-    ) {
-      throw new Error(
-        `persisted workflow run ID ${JSON.stringify(input.smithersRunId)} is unsupported by the pinned workflow runner; historical runs are not converted or transferred`
-      );
-    }
+          runRoot: input.relaunchPaths.runRoot,
+          sourceNodeIds: retryProducers.map((producer) => producer.nodeId)
+        })
+      : undefined;
+  if (
+    currentInspection !== undefined &&
+    inspection !== undefined &&
+    retries.length === 0 &&
+    input.retryFailed === true &&
+    input.resetNode === undefined &&
+    (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
+    smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED") &&
+    !isCompatibleSmithersRunId(input.smithersRunId)
+  ) {
+    throw new Error(
+      `persisted workflow run ID ${JSON.stringify(input.smithersRunId)} is unsupported by the pinned workflow runner; historical runs are not converted or transferred`
+    );
   }
+  // The checks above refuse the resume before it has reset or archived anything, and an interrupted
+  // withdrawal is already complete, so the hook sees the run as the resets will find it.
+  if (input.action === "resume" && input.beforeContinuation !== undefined) {
+    await input.beforeContinuation({
+      nodeStates:
+        currentInspection === undefined
+          ? undefined
+          : new Map(currentInspection.nodes.map((node) => [node.nodeId, node.state])),
+      resets: [
+        ...retries.map(({ failedTask, producer }) => ({
+          nodeId: producer?.nodeId ?? failedTask.nodeId,
+          dependents: producer !== undefined
+        })),
+        ...(input.resetNode === undefined ? [] : [{ nodeId: input.resetNode, dependents: true }])
+      ],
+      withdrawnGroupIds: retryArchivePlan?.manifests.map((manifest) => manifest.group_node_id) ?? [],
+      active: currentInspection !== undefined && smithersRunStateIsActive(currentInspection)
+    });
+  }
+  if (retries.length > 0) {
+    const resetStderr: string[] = [];
+    for (const { failedTask, producer } of retries) {
+      const resetResult = await execSmithersCli({
+        args: [
+          "timetravel",
+          input.workflowPath,
+          "--run-id",
+          input.smithersRunId,
+          "--node-id",
+          producer?.nodeId ?? failedTask.nodeId,
+          "--iteration",
+          String(producer?.iteration ?? failedTask.iteration),
+          // Generated verifiers deliberately have zero automatic retries. An
+          // explicit retry must reopen their agent-owned artifact producer,
+          // and Smithers must reset its verifier/dependents with it. Ordinary
+          // failed tasks retain the narrow, node-only reset used before.
+          ...(producer === undefined ? ["--no-deps"] : []),
+          "--force",
+          "--format",
+          "json"
+        ],
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
+      });
+      if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
+    }
+    preResumeStderr = resetStderr.join("\n");
+  }
+  if (retryArchivePlan !== undefined) archiveDynamicExpansionsForRetry(retryArchivePlan);
 
   // Every engine this command starts, for resume, replay or fork, renders the prompt of every
   // available task, so a missing static prompt is restored before any of them starts. `timetravel`
@@ -6142,7 +6175,8 @@ export function installedWorkflowRunner(): { executable: string; dependencyRoot:
 /**
  * Binds the installed runner into `env` for a command that runs in
  * `projectRoot`, refusing a runner inside that project. Launch binds it before
- * creating the run, so an install the shim cannot use fails the launch first.
+ * creating the run, so an install that `resume` could not run fails the launch
+ * first.
  */
 export function bindInstalledWorkflowRunner<T extends Record<string, string | undefined>>(
   env: T,
@@ -6190,26 +6224,6 @@ function installedRunnerPackageRoot(): string {
   // Resolve it as ESM: once Bun has loaded that entrypoint, its `require.resolve`
   // returns the bare specifier instead of a path.
   return path.resolve(fs.realpathSync(fileURLToPath(import.meta.resolve(SMITHERS_PACKAGE_NAME))), "..", "..");
-}
-
-/**
- * Writes `<run>/trusted-bin/smithers`, which runs the installed runner under
- * the Bun it resolves to with BUN_TARGET_CONFIGURATION_GUARD_ARGS and the same
- * SQLite backend pin as `smithersCommandEnv`, and returns that directory. The
- * generated workflow shells out to a bare `smithers` (#1143), and the
- * controller PATH otherwise carries no runner; trusted-bin comes first on it.
- */
-export function writeTrustedSmithersShim(runRoot: string, projectRoot: string): string {
-  const capability = smithersExecutableCapability(bindInstalledWorkflowRunner({}, projectRoot));
-  if (capability === undefined) throw new Error("installed workflow runner has no bound interpreter");
-  const quote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
-  const trustedBin = ensureSafeDirectory(runRoot, "trusted-bin");
-  writeFileDurable(
-    path.join(trustedBin, "smithers"),
-    `#!/bin/sh\nexport SMITHERS_BACKEND=sqlite\nexec ${[capability.interpreter.path, ...BUN_TARGET_CONFIGURATION_GUARD_ARGS, capability.runner.path].map(quote).join(" ")} "$@"\n`,
-    { mode: 0o500 }
-  );
-  return trustedBin;
 }
 
 async function ensureSmithersDependencies(
@@ -7905,20 +7919,11 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: ResolvedConfig): string {
-  const controllerTasks = compiled.replacePromptSchemas
-    ? compiled.tasks.map((task) => taskWithCurrentArtifactSchemas(task))
-    : compiled.tasks;
-  const controllerDynamicGroups = compiled.replacePromptSchemas
-    ? compiled.dynamicGroups.map((group) => ({
-        ...group,
-        taskTemplates: group.taskTemplates.map((task) => taskWithCurrentArtifactSchemas(task))
-      }))
-    : compiled.dynamicGroups;
-  const compiledTasks = JSON.stringify(controllerTasks, null, 2);
-  const dynamicGroups = JSON.stringify(controllerDynamicGroups, null, 2);
+  const compiledTasks = JSON.stringify(compiled.tasks, null, 2);
+  const dynamicGroups = JSON.stringify(compiled.dynamicGroups, null, 2);
   const nonBlockingAttemptIds = new Set(compiled.nonBlockingAttemptIds);
   const taskByArtifactDir = new Map<string, CompiledSmithersTask>();
-  for (const task of controllerTasks) {
+  for (const task of compiled.tasks) {
     const artifactDir = path.resolve(task.artifactDir);
     if (taskByArtifactDir.has(artifactDir)) {
       throw new Error(`multiple compiled tasks share artifact directory ${JSON.stringify(artifactDir)}`);
@@ -7926,7 +7931,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     taskByArtifactDir.set(artifactDir, task);
   }
   const taskSpecs = JSON.stringify(
-    controllerTasks.map((task) => ({
+    compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
       smithersNodeId: task.smithersNodeId,
       smithersRunId: compiled.smithersRunId,
@@ -8024,46 +8029,9 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
     __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
-    __ULTRAFUZZ_REPLACE_PROMPT_SCHEMAS__: JSON.stringify(compiled.replacePromptSchemas),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
   });
-}
-
-/**
- * Rebind each declared output's schema to the bundle this build installs into task workspaces (#982).
- * The contract digest and validator build keep their recorded values: they only record the build
- * that planned the output, and the refreshed workflow copies them into its markers (and, for a
- * dynamic run, its runtime task plan), which are compared with the run's sealed plan (#921).
- */
-function taskWithCurrentArtifactSchemas(task: CompiledSmithersTask): CompiledSmithersTask {
-  return {
-    ...task,
-    metadata: {
-      ...task.metadata,
-      artifacts: {
-        ...task.metadata.artifacts,
-        outputs: task.metadata.artifacts.outputs.map((output) => {
-          const binding = artifactContractSchemaBinding(output.contract);
-          return {
-            path: output.path,
-            contract: output.contract,
-            contractDigest: output.contractDigest,
-            primary: output.primary,
-            ...(binding === undefined
-              ? {}
-              : {
-                  schemaFile: binding.schema_file,
-                  schemaId: binding.schema_id,
-                  schemaSha256: binding.schema_sha256,
-                  schemaBundleSha256: binding.schema_bundle_sha256,
-                  validatorBuild: output.validatorBuild ?? binding.validator_build
-                })
-          };
-        })
-      }
-    }
-  };
 }
 
 function dependencyVerificationProducersForTask(

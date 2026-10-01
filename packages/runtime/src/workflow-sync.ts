@@ -32,21 +32,21 @@ import {
   readRunState,
   parseStrictJsonBytes,
   parseSmithersTaskManifestBytes,
+  plannedArtifactSchemaBundle,
   replayUsageEvents,
   safeResolveInside,
   sensitiveEnvironmentValues,
   sha256Bytes,
   sha256File,
   updateNodeState,
+  updateRunMetadataDocument,
   updateRunStatus,
   usageLedgerIdentity,
   validateArtifactContractBytes,
   validateArtifactManifest,
   validateArtifactVerificationMarker,
-  validateFindingsSchema,
   validateSafeId,
   writeArtifactManifest,
-  writeRunMetadataDocument,
   writeRunState,
   type AppendEventInput,
   type AppendNodeAttemptInput,
@@ -66,6 +66,7 @@ import {
   type NodeProvenance,
   type NodeState,
   type NodeStatus,
+  type PlannedArtifactSchema,
   type PrerequisiteManifestDigest,
   type RunLayout,
   type RunMetadataAccounting,
@@ -643,13 +644,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: loaded.diagnostics };
   }
   const previousControlState = structuredClone(readRunState(layout));
-  const forbiddenSecretValues = sensitiveEnvironmentValues(
-    input.env ?? process.env,
-    loaded.tasks.flatMap((task) => [
-      ...task.execution.agentCredentialEnv,
-      ...(task.execution.modal?.credentialEnv ?? [])
-    ])
-  );
+  const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env);
 
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
@@ -1186,12 +1181,7 @@ async function synchronizeWorkflowAccounting(input: {
   budgetDiagnostic?: RuntimeDiagnostic;
 }> {
   const metadata = readRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId);
-  if (metadata.workflow?.run_id !== input.workflowRunId) {
-    throw new Error("run.json workflow does not match the linked Smithers run");
-  }
-  if (metadata.workflow.control_generation !== input.controlGeneration) {
-    throw new Error("run.json workflow control generation does not match the linked Smithers run");
-  }
+  assertAccountedWorkflow(metadata, input.workflowRunId, input.controlGeneration);
   // run.json accounting is a cache derived from usage.jsonl: every pass rebuilds
   // it from the ledger and reads the prior copy only for its cached prices. A
   // pass stopped between the ledger append and the run.json write therefore
@@ -1300,7 +1290,8 @@ async function synchronizeWorkflowAccounting(input: {
     updated_at:
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
-  const nextMetadata = assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
+  // Checked before the ledger append below; the write re-checks the document it lands in.
+  assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
 
   if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
     return { changed: false, available: true };
@@ -1316,9 +1307,29 @@ async function synchronizeWorkflowAccounting(input: {
 
   if (preparedUsage.inputs.length > 0) appendUsageEvents(input.layout, preparedUsage.inputs);
   if (accountingChanged) {
-    writeRunMetadataDocument(input.layout.runMetadataPath, nextMetadata);
+    // A lifecycle command can rewrite run.json while this pass runs, as resume
+    // does to record its controller's Forge guard. Writing back the copy read
+    // above would undo that write, so the accounting goes into the document as
+    // it is now, which must still be bound to the workflow it was computed for.
+    updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
+      assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
+      return { ...current, accounting: nextAccounting };
+    });
   }
   return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
+}
+
+function assertAccountedWorkflow(
+  metadata: RunMetadataDocument,
+  workflowRunId: string,
+  controlGeneration: string
+): void {
+  if (metadata.workflow?.run_id !== workflowRunId) {
+    throw new Error("run.json workflow does not match the linked Smithers run");
+  }
+  if (metadata.workflow.control_generation !== controlGeneration) {
+    throw new Error("run.json workflow control generation does not match the linked Smithers run");
+  }
 }
 
 function accountingFromWorkflowEvents(
@@ -3388,13 +3399,18 @@ async function finalizeTerminalTask(input: {
     if (findingsSnapshot === undefined) continue;
     try {
       assertSynchronizationBudget(input.control);
-      const contract = validateArtifactContractBytes("ultrafuzz/findings@2", findingsSnapshot.bytes, findingsPath);
+      // The findings are counted as validated against the schema the run planned them with, which the
+      // artifact gate above and the engine's verifier checked, not this build's (#921). Both checks read
+      // the verifier-authenticated byte snapshot, never the mutable file twice.
+      const contract = validateArtifactContractBytes(
+        "ultrafuzz/findings@2",
+        findingsSnapshot.bytes,
+        findingsPath,
+        plannedFindingsSchema(input.layout, output)
+      );
       let outputCount: number | undefined;
-      if (!contract.ok || contract.value === undefined) {
+      if (!contract.ok || !Array.isArray(contract.value)) {
         findingsValidationFailed = true;
-        // Both retained-schema checks consume the verifier-authenticated byte
-        // snapshot. They can disagree only if the registered and retained
-        // validators drift, never because the mutable file was read twice.
         if (gate.ok) {
           diagnostics.push({
             code: "FINDINGS_VALIDATION_FAILED",
@@ -3407,23 +3423,9 @@ async function finalizeTerminalTask(input: {
           });
         }
       } else {
-        const result = validateFindingsSchema(contract.value, findingsPath);
-        if (!result.ok || result.value === undefined) {
-          findingsValidationFailed = true;
-          diagnostics.push({
-            code: "FINDINGS_VALIDATION_FAILED",
-            message: `registered findings and retained typed schema disagree: ${result.issues
-              .map((issue) => `${issue.path} ${issue.message}`)
-              .join("; ")}`,
-            severity: "error",
-            source: "findings",
-            details: { issues: result.issues }
-          });
-        } else {
-          outputCount = result.value.length;
-          totalFindings += outputCount;
-          validatedFindingsOutputs += 1;
-        }
+        outputCount = contract.value.length;
+        totalFindings += outputCount;
+        validatedFindingsOutputs += 1;
       }
       events.push({
         eventType: "findings-validated",
@@ -3581,6 +3583,24 @@ async function finalizeTerminalTask(input: {
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
     },
     events
+  };
+}
+
+/** The schema a planned findings output is bound to, in the run's planned schema bundle. */
+function plannedFindingsSchema(layout: RunLayout, output: PlannedGraphNode["outputs"][number]): PlannedArtifactSchema {
+  if (
+    output.schema_file === undefined ||
+    output.schema_id === undefined ||
+    output.schema_sha256 === undefined ||
+    output.schema_bundle_sha256 === undefined
+  ) {
+    throw new Error(`declared findings output ${output.path} has no planned schema binding`);
+  }
+  return {
+    bundle: plannedArtifactSchemaBundle(layout.root, output.schema_bundle_sha256),
+    schemaFile: output.schema_file,
+    schemaId: output.schema_id,
+    schemaSha256: output.schema_sha256
   };
 }
 
@@ -5461,7 +5481,14 @@ function errorText(value: unknown): string | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
-  return stringField(value, "message") ?? stringField(value, "code") ?? stringField(value, "_tag");
+  const text = stringField(value, "message") ?? stringField(value, "code") ?? stringField(value, "_tag");
+  // An agent CLI can report a generic failure while stating the real cause
+  // elsewhere, e.g. Claude Code's "Claude run failed" for an OAuth refresh race
+  // (#1084). The workflow carries that statement beside the message so it is
+  // shown here without ever reaching Smithers' message-based classifiers.
+  const stated = isRecord(value.details) ? stringField(value.details, "agentStatedFailure") : undefined;
+  if (stated === undefined) return text;
+  return text === undefined ? stated : `${text}: ${stated}`;
 }
 
 /**

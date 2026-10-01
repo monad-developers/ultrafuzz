@@ -53,7 +53,8 @@ const RUN_KEYS = [
   "workspace_mode",
   "default_timeout_seconds",
   "workflow_deadline_seconds",
-  "controller_lease_seconds"
+  "controller_lease_seconds",
+  "refresh_prompts_on_resume"
 ] as const;
 const EXECUTION_KEYS = ["mode", "provider", "retention_days", "resources", "nodes", "providers"] as const;
 const EXECUTION_RESOURCE_KEYS = ["cpu", "memory_mib", "timeout_seconds"] as const;
@@ -267,6 +268,13 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "integer",
         assign: (value) => {
           runConfig.controllerLeaseSeconds = value;
+        }
+      },
+      {
+        key: "refresh_prompts_on_resume",
+        type: "boolean",
+        assign: (value) => {
+          runConfig.refreshPromptsOnResume = value;
         }
       }
     ]);

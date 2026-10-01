@@ -243,15 +243,23 @@ Every planned JSON output MUST resolve through the checked-in schema registry.
 The planned and expanded graph representations MUST persist the schema filename,
 fragment-free schema ID, schema SHA-256, package schema-bundle SHA-256, and
 validator build identity. Missing or partial bindings MUST fail planning or host
-verification. Host artifact gates and verified reads MUST validate against the
-schema content a binding names, using the run's sealed schema snapshot when the
-installed bundle differs. The recorded validator build and contract digest are
-provenance: graph reads, host artifact gates, verified reads, task preparation,
-dependency admission, and the validator preflight MUST NOT require them to equal
-the reading build's own. Task preparation and the validator preflight MUST still
-require the schema bundle they validate with to be the planned one. Operators
-declare the versioned contract in topology; they MUST NOT supply these trust
-identities manually in YAML.
+verification. Validating a run's artifact against its contract, in host
+artifact gates, verified reads, synchronization's findings count, and the
+workflow's verifier and dependency admission, MUST use the schema content its
+binding names, in the run's planned schema bundle: the installed schemas when
+their bundle digest is the planned one, otherwise the bundle sealed in the
+run's execution snapshot. Task preparation MUST copy that bundle into the task
+workspace, replacing a copy that differs, and for a task with a schema-backed
+output the validator preflight MUST require the run's validator to report that
+bundle. The recorded validator build and contract digest are provenance: graph
+reads, host artifact gates, verified reads, task preparation, dependency
+admission, and the validator preflight MUST NOT require them to equal the
+reading build's own, nor require the installed schema bundle to be the planned
+one. Readers that parse an already validated artifact into the reading build's
+types, and the final report's canonical projection, which that build derives,
+are outside this rule and use the installed schemas. Operators declare the
+versioned contract in topology; they MUST NOT supply these trust identities
+manually in YAML.
 
 ## Prompts
 
@@ -277,10 +285,17 @@ A static prompt MUST be rendered before workflow launch. A prompt that waits on
 a dynamic group MUST be rendered when the group expands, from the run's own
 template copy. Each rendered prompt MUST be stored as its attempt's
 `artifacts/<attempt-id>/prompt.rendered.md`, and that file is the prompt every
-later attempt of the task receives: it MUST be rendered only while it is
-missing and MUST NOT be re-rendered, compared, or sealed afterwards. A prompt
-that cannot be rendered at runtime MUST fail only its own task. Unknown
-template variables MUST fail validation.
+later attempt of the task receives: it MUST NOT be compared or sealed, and it
+MUST be rendered again only while it is missing or when `resume` applies the
+project's current prompts. `resume` MUST apply them, unless
+`run.refresh_prompts_on_resume` is `false` in the project's current
+`ultrafuzz.toml`, to every task that has not finished and to the template
+copies a later render reads, after the checks that can refuse the resume and
+before it resets or submits anything, and MUST NOT fail because of it: a prompt
+that does not validate or render keeps its tasks' files, and a topology that
+differs from the one the run launched with skips the refresh. A prompt that
+cannot be rendered at runtime MUST fail only its own task. Unknown template
+variables MUST fail validation.
 
 The prompt variable set includes:
 
@@ -458,13 +473,15 @@ closure before dispatch, clear ambient Node loader/search injection, and reject
 every non-builtin module whose lexical or physical resolution escapes the
 closure. Ordinary artifact and schema data reads remain outside this module
 boundary. The launcher MUST run a real known-valid fixture and verify the
-returned schema ID, schema digest, and bundle digest; the returned validator
-build is provenance and MUST NOT be compared. `command -v` alone is
+returned schema ID, schema digest, and bundle digest against the run's planned
+schema bundle; the returned validator build is provenance and MUST NOT be
+compared. `command -v` alone is
 insufficient. A missing, tampered, or stale launcher or closure is a setup
 failure for new model work. It MUST NOT turn historical
 seals or schema identities into resume authorization. A current-controller
-continuation MAY select current validator packages while retaining historical
-source and artifacts as provenance.
+continuation MAY select current validator packages that validate with the run's
+planned schema bundle, while retaining historical source and artifacts as
+provenance, and otherwise keeps the run's launcher.
 
 Before or at launch, each run MUST persist:
 
@@ -480,6 +497,7 @@ Before or at launch, each run MUST persist:
 - `plan.json`
 - `trusted-cli.json`, a run-owned trusted launcher, and content-addressed trusted CLI closures for schema-backed producers
 - launch copies of static rendered prompts under `prompt-snapshots/`, used only to restore a missing static prompt
+- the prompt files `resume` replaced when it applied the project's current prompts, with a `refresh.json` record, under `prompt-history/`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
 - workspace metadata under `workspaces/`

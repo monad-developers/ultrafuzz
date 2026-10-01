@@ -2,6 +2,7 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { isArtifactContractId } from "./artifact-contract-ids.js";
+import { withJournalLock } from "./journal-lock.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import { promptArtifactAuthorityPathSelectorId } from "./prompt-artifact-authority-selectors.js";
 import { writeJsonDurable } from "./safe-paths.js";
@@ -458,6 +459,22 @@ export function writeRunPlanDocument(filePath: string, document: RunPlanDocument
 
 export function writeRunMetadataDocument(filePath: string, document: RunMetadataDocument): void {
   writeJsonDurable(filePath, assertRunMetadataDocument(document));
+}
+
+/**
+ * Writes `update` of the current run.json while holding `run.json.lock`. Run
+ * synchronization and lifecycle commands rewrite different fields of it from
+ * different processes, so each re-reads it under the lock rather than writing
+ * back a copy read before the other's write.
+ */
+export function updateRunMetadataDocument(
+  filePath: string,
+  expectedRunId: string,
+  update: (metadata: RunMetadataDocument) => RunMetadataDocument
+): void {
+  withJournalLock(filePath, () => {
+    writeRunMetadataDocument(filePath, update(readRunMetadataDocument(filePath, expectedRunId)));
+  });
 }
 
 function readStrictDocument(filePath: string): unknown {

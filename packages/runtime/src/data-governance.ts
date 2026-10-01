@@ -364,14 +364,8 @@ function providerHomeRouteConfig(agent: string, config: ResolvedConfig, env: Nod
 function providerHome(agent: string, provider: string, configured: string | undefined, env: NodeJS.ProcessEnv): string {
   const selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(),
     userHome = env.HOME?.trim() || os.homedir();
-  if (configured) {
-    const defaultRoot = path.join(
-      env.XDG_STATE_HOME?.trim() || path.join(userHome, ".local", "state"),
-      "ultrafuzz",
-      "provider-homes"
-    );
-    return path.join(selectedRoot || defaultRoot, provider, configured);
-  }
+  if (configured)
+    return path.join(selectedRoot || path.join(userHome, ".ultrafuzz-provider-homes"), provider, configured);
   if (selectedRoot) return path.join(selectedRoot, provider);
   if (agent === "CodexAgent") return env.CODEX_HOME?.trim() || path.join(userHome, ".codex");
   if (agent === "KimiAgent")

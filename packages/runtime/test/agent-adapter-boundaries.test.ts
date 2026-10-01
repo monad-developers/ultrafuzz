@@ -78,13 +78,21 @@ const TOKEN_ACCOUNTING_SIGNALS = new Set([
 // which orchestrator responsibilities it owns. Only registered adapters may own
 // responsibilities, and each one must link the upstream gap that forces it.
 const adapterPolicies: Record<string, AdapterPolicy> = {
-  "claude.tsx": { purpose: "adapter", responsibilities: [], upstreamIssues: [] },
+  "claude.tsx": {
+    purpose: "adapter",
+    responsibilities: ["output-interpretation"],
+    upstreamIssues: ["https://github.com/monad-developers/ultrafuzz/issues/1084"]
+  },
   "codex.tsx": {
     purpose: "adapter",
     responsibilities: ["argv-construction", "session-handling"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
-  "deepseek.tsx": { purpose: "adapter", responsibilities: [], upstreamIssues: [] },
+  "deepseek.tsx": {
+    purpose: "adapter",
+    responsibilities: ["output-interpretation"],
+    upstreamIssues: ["https://github.com/monad-developers/ultrafuzz/issues/1084"]
+  },
   "environment.tsx": { purpose: "data-governance", responsibilities: [], upstreamIssues: [] },
   "index.tsx": { purpose: "registry", responsibilities: [], upstreamIssues: [] },
   "kimi.tsx": {

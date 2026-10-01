@@ -87,6 +87,8 @@ api_key_env = "OPENAI_API_KEY"
 
 API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
+When `ULTRAFUZZ_PROVIDER_HOME_ROOT` is unset, that root is `~/.ultrafuzz-provider-homes`. `OpenRouterAgent` and `DeepSeekAgent` always keep their homes there, and `ClaudeAgent`, `CodexAgent`, and `KimiAgent` do when they set `config_dir`. The adapters create any missing directory of that path with mode `0700`. `XDG_STATE_HOME` does not move the root. No directory above a provider home may be writable by its group or by others unless it has the sticky bit, so a root you set must not sit below a directory that the default umask `0002` makes `0775`, such as Ubuntu's `~/.local` or a project's `.ultrafuzz`. To log a CLI in before its agent first runs, create its home, such as `~/.ultrafuzz-provider-homes/codex/<config_dir>`, with `(umask 077; mkdir -p <home>)`: under umask `0002` a plain `mkdir -p` leaves the directories it creates `0775`, and Codex refuses a `CODEX_HOME` that does not exist.
+
 ## OpenRouter through Codex
 
 `ultrafuzz init` generates a dedicated `OpenRouterAgent`, which uses the Codex
@@ -444,7 +446,11 @@ forge_rayon_threads = 1
 The wrapper limits only Forge and its child processes. Raise the memory ceiling
 for larger validation jobs or set `forge_guard_enabled = false` to opt out.
 Resolved run config and run metadata record the configured limit and whether
-the wrapper was active.
+the wrapper was active: whether the workflow engine kept it on `PATH`, which
+it does only for runs under the default `.ultrafuzz/runs` output directory, in
+a project whose path has no symbolic links. When it does not, tasks run the
+real Forge and the command that started the controller reports a
+`FORGE_GUARD_INACTIVE` warning.
 
 `ultrafuzz init` may create generated workflow adapter files. Those files are
 implementation plumbing for launching workflows; project configuration should

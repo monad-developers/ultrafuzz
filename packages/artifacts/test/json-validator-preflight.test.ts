@@ -14,7 +14,8 @@ import {
   JSON_VALIDATOR_PREFLIGHT_SUCCESS_SCHEMA_FILENAME,
   parseJsonValidatorPreflightSuccessEnvelope,
   validateRegisteredJsonSchema,
-  VALIDATOR_BUILD_IDENTITY
+  VALIDATOR_BUILD_IDENTITY,
+  type JsonValidatorPreflightExpectedIdentity
 } from "../src/index.js";
 
 function successEnvelope(): Record<string, unknown> {
@@ -53,19 +54,22 @@ function encode(value: unknown): Buffer {
   return Buffer.from(JSON.stringify(value), "utf8");
 }
 
-function identityGate(document: unknown) {
+/** The identity of this build's findings schema and smoke fixture, as a run planned by it expects. */
+function installedIdentity(): JsonValidatorPreflightExpectedIdentity {
   const binding = artifactContractSchemaBinding("ultrafuzz/findings@2");
   assert.ok(binding);
+  return {
+    schemaId: binding.schema_id,
+    schemaSha256: binding.schema_sha256,
+    schemaBundleSha256: binding.schema_bundle_sha256,
+    artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+  };
+}
+
+function identityGate(document: unknown) {
   return executeSchemaSemanticGates(JSON_VALIDATOR_PREFLIGHT_SUCCESS_SCHEMA_FILENAME, {
     document,
-    context: {
-      validatorPreflight: {
-        schemaId: binding.schema_id,
-        schemaSha256: binding.schema_sha256,
-        schemaBundleSha256: binding.schema_bundle_sha256,
-        artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
-      }
-    }
+    context: { validatorPreflight: installedIdentity() }
   })[0];
 }
 
@@ -73,7 +77,7 @@ test("validator preflight parser accepts only the exact non-transforming success
   const value = successEnvelope();
   const before = structuredClone(value);
   const structural = validateRegisteredJsonSchema(JSON_VALIDATOR_PREFLIGHT_SUCCESS_JSON_SCHEMA_ID, value);
-  const parsed = parseJsonValidatorPreflightSuccessEnvelope(encode(value));
+  const parsed = parseJsonValidatorPreflightSuccessEnvelope(encode(value), installedIdentity());
 
   assert.equal(structural.ok, true, JSON.stringify(structural.issues));
   assert.equal(identityGate(value)?.status, "passed");
@@ -91,11 +95,24 @@ test("validator preflight parser accepts the same schemas reported by another va
   const value = successEnvelope();
   objectField(objectField(value, "data"), "schema").validator_build = `ultrafuzz-json-validator.v1:${"9".repeat(64)}`;
 
-  assert.deepEqual(parseJsonValidatorPreflightSuccessEnvelope(encode(value)), value);
+  assert.deepEqual(parseJsonValidatorPreflightSuccessEnvelope(encode(value), installedIdentity()), value);
   assert.equal(identityGate(value)?.status, "passed");
   objectField(objectField(value, "data"), "schema").sha256 = "0".repeat(64);
-  assert.throws(() => parseJsonValidatorPreflightSuccessEnvelope(encode(value)), /mismatched identity/u);
+  assert.throws(
+    () => parseJsonValidatorPreflightSuccessEnvelope(encode(value), installedIdentity()),
+    /mismatched identity/u
+  );
   assert.equal(identityGate(value)?.status, "failed");
+});
+
+test("validator preflight parser compares the reported identity with the caller's, not this build's", () => {
+  // #921: a run planned before an upgrade changed a schema still validates with the bundle it was
+  // planned with. Its preflight names that bundle, and this build's own identity is then a mismatch.
+  const value = successEnvelope();
+  const planned = { ...installedIdentity(), schemaBundleSha256: "1".repeat(64) };
+  assert.throws(() => parseJsonValidatorPreflightSuccessEnvelope(encode(value), planned), /mismatched identity/u);
+  objectField(objectField(value, "data"), "schema").bundle_sha256 = planned.schemaBundleSha256;
+  assert.deepEqual(parseJsonValidatorPreflightSuccessEnvelope(encode(value), planned), value);
 });
 
 test("validator preflight parser can authenticate a sealed historical identity explicitly", () => {
@@ -221,7 +238,10 @@ for (const { name, structurallyValid, mutate } of contractMutations) {
       `${name}: unexpected registered JSON Schema result ${JSON.stringify(structural.issues)}`
     );
     if (structurallyValid === true) assert.equal(identityGate(value)?.status, "failed", name);
-    assert.throws(() => parseJsonValidatorPreflightSuccessEnvelope(encode(value)), /invalid|mismatched/u);
+    assert.throws(
+      () => parseJsonValidatorPreflightSuccessEnvelope(encode(value), installedIdentity()),
+      /invalid|mismatched/u
+    );
   });
 }
 
@@ -231,10 +251,14 @@ test("validator preflight parser rejects malformed, duplicate-key, and invalid-U
     '{"schema_version":"ultrafuzz.cli.result.v2","schema_version":'
   );
 
-  assert.throws(() => parseJsonValidatorPreflightSuccessEnvelope(Buffer.from('{"schema_version":', "utf8")));
+  assert.throws(() =>
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from('{"schema_version":', "utf8"), installedIdentity())
+  );
   assert.throws(
-    () => parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(duplicate, "utf8")),
+    () => parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(duplicate, "utf8"), installedIdentity()),
     /duplicate property name/u
   );
-  assert.throws(() => parseJsonValidatorPreflightSuccessEnvelope(Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x7d])));
+  assert.throws(() =>
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x7d]), installedIdentity())
+  );
 });

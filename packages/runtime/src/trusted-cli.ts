@@ -183,7 +183,14 @@ export function prepareTrustedCliEnvironment(input: {
     if (currentLauncher && currentClosure === undefined && rotation === undefined) {
       throw new Error("trusted Ultrafuzz CLI launcher changed without authenticated rotation evidence");
     }
-    if (input.allowIdentityRotation === true) {
+    // A CLI that validates with other schemas than the run's cannot replace its launcher: the candidate
+    // preflight below would refuse it. After an upgrade that changed a schema, a refresh therefore keeps
+    // a sealed launcher that needs no repair, which still validates with the run's planned bundle (#921).
+    const keepsSealedLauncher =
+      currentClosure !== undefined &&
+      rotation === undefined &&
+      artifactContractSchemaBinding("ultrafuzz/findings@2")?.schema_bundle_sha256 !== metadata.schema_bundle_sha256;
+    if (input.allowIdentityRotation === true && !keepsSealedLauncher) {
       const candidate = prepareTrustedCliClosure({
         layout: input.layout,
         cliEntrypoint: input.cliEntrypoint,

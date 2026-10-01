@@ -242,7 +242,7 @@ export interface ProjectConfigInput {
   strategyLoops?: number;
   dynamicStrategiesEnumerator?: DynamicStrategiesEnumerator;
   project?: Partial<ProjectConfig>;
-  run?: Partial<RunConfig>;
+  run?: RunConfigInput;
   execution?: ExecutionConfigInput;
   models?: {
     default?: string;
@@ -255,6 +255,14 @@ export interface ProjectConfigInput {
   invariants?: Partial<InvariantConfig>;
   triage?: Partial<TriageConfig>;
   eval?: EvalConfigInput;
+}
+
+export interface RunConfigInput extends Partial<RunConfig> {
+  /**
+   * `run.refresh_prompts_on_resume`. `resume` reads it from the project's current `ultrafuzz.toml`,
+   * so it never enters a run's resolved config, which is frozen at launch.
+   */
+  refreshPromptsOnResume?: boolean;
 }
 
 export interface ExecutionConfigInput {

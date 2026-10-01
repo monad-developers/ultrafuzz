@@ -10,8 +10,46 @@ type ClaudeAuthOptions = { apiKey?: string; configDir?: string; env?: Record<str
 export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 type ClaudeCommandParams = Parameters<SmithersClaudeCodeAgent["buildCommand"]>[0];
 type ClaudeCommand = Awaited<ReturnType<SmithersClaudeCodeAgent["buildCommand"]>>;
+type ClaudeOutputInterpreter = ReturnType<SmithersClaudeCodeAgent["createOutputInterpreter"]>;
+type ClaudeGenerateOptions = Parameters<SmithersClaudeCodeAgent["generate"]>[0];
+
+export const GENERIC_CLAUDE_FAILURE = "Claude run failed";
 
 export class CompatibleClaudeCodeAgent extends SmithersClaudeCodeAgent {
+  // Smithers reports a failed result without an `error` field as "Claude run
+  // failed" and drops the `result` text in which Claude Code states the cause,
+  // such as a contended OAuth refresh (#1084). Smithers classifies the thrown
+  // message (quota park, auth disable, session loss), so the stated cause
+  // travels only as `details.agentStatedFailure`, which operators read and no
+  // scheduler decision does. The workflow builds one agent per task and runs
+  // its generations one at a time, so one field per instance is enough.
+  private statedFailure: string | undefined;
+
+  override createOutputInterpreter(): ClaudeOutputInterpreter {
+    const base = super.createOutputInterpreter();
+    return {
+      ...base,
+      onStdoutLine: (line) => {
+        const events = base?.onStdoutLine?.(line);
+        const list = events === undefined || events === null ? [] : Array.isArray(events) ? events : [events];
+        if (list.some((event) => event.type === "completed" && event.error === GENERIC_CLAUDE_FAILURE)) {
+          this.statedFailure = claudeResultText(line);
+        }
+        return events;
+      }
+    };
+  }
+
+  override async generate(options?: ClaudeGenerateOptions): ReturnType<SmithersClaudeCodeAgent["generate"]> {
+    this.statedFailure = undefined;
+    try {
+      return await super.generate(options);
+    } catch (error) {
+      if (this.statedFailure !== undefined && error instanceof Error) attachStatedFailure(error, this.statedFailure);
+      throw error;
+    }
+  }
+
   override async buildCommand(params: ClaudeCommandParams): Promise<ClaudeCommand> {
     this.opts.settingSources = "user";
     const command = await super.buildCommand(params);
@@ -75,6 +113,28 @@ function readClaudeAuthConfig(): ClaudeAuthConfig {
     api_key_env: stringField(claude, "api_key_env"),
     config_dir: stringField(claude, "config_dir")
   };
+}
+
+export function claudeResultText(line: string): string | undefined {
+  try {
+    const result: unknown = JSON.parse(line)?.result;
+    return typeof result === "string" && result.trim() !== "" ? result.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function attachStatedFailure(error: Error, stated: string): void {
+  try {
+    const details: unknown = Reflect.get(error, "details");
+    Reflect.set(error, "details", {
+      ...(details !== null && typeof details === "object" ? details : {}),
+      agentStatedFailure: stated
+    });
+  } catch {
+    // A frozen or exotic error keeps its original shape; the cause stays in
+    // the session transcript as before.
+  }
 }
 
 function requiredEnv(name: string): string {
