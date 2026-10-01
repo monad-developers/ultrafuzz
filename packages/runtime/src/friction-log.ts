@@ -16,6 +16,28 @@ const PUBLISHING_ENVIRONMENT_VARIABLES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_AP
 // inside the target repository. Without the ceiling, Frog would write into the
 // target's root and validate entries against the target's issue forms.
 const GIT_DISCOVERY_ENVIRONMENT_VARIABLES = ["GIT_DIR", "GIT_WORK_TREE"] as const;
+// incur, the CLI framework Frog is built on, acts on these wherever they appear
+// in argv (extractBuiltinFlags, incur 0.4.25), even where an option value
+// belongs: `log x --body --mcp` would start Frog's MCP server, which serves
+// `publish`. So none of them is accepted as an option value either.
+const INCUR_BUILTIN_FLAGS = [
+  "--full-output",
+  "--llms",
+  "--llms-full",
+  "--mcp",
+  "--help",
+  "-h",
+  "--update",
+  "--incur-update-check",
+  "--version",
+  "--schema",
+  "--json",
+  "--format",
+  "--filter-output",
+  "--token-limit",
+  "--token-offset",
+  "--token-count"
+] as const;
 
 /** The pinned Frog CLI's executable, resolved from Ultrafuzz's own install. */
 export function resolveFrogBin(): string {
@@ -53,6 +75,9 @@ value=
 for argument in "$@"; do
   if [ -n "$value" ]; then
     value=
+    case "$argument" in
+      ${INCUR_BUILTIN_FLAGS.join(" | ")}) refuse "$argument is not available inside a run" ;;
+    esac
     continue
   fi
   case "$command $argument" in
@@ -60,7 +85,7 @@ for argument in "$@"; do
       value=1
       continue
       ;;
-    "log --body="* | "log --severity="* | "log --label="* | "log --force" | "log --format="* | "list --format="*)
+    "log --body="* | "log --severity="* | "log --label="* | "log --force")
       continue
       ;;
   esac

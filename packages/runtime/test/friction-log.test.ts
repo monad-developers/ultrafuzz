@@ -54,7 +54,7 @@ test("the friction log command records and lists entries with the pinned Frog in
     assert.match(entry, /^---\ntitle: 'forge guard aborts - on darwin'\nseverity: 'major'\n/u);
     assert.match(entry, /## Minimal Reproducible Example\nforge test/u);
 
-    // A value that starts with a dash is data, not an option.
+    // A value that starts with a dash is data, not an option. Only incur's own flags are refused as values.
     const dashed = run(fixture, ["log", "second problem", "-s", "minor", "-b", `- first bullet\n${BODY}`]);
     assert.equal(dashed.status, 0, dashed.stderr + dashed.stdout);
 
@@ -90,6 +90,13 @@ test("the friction log command refuses every Frog surface beyond local log and l
       [["log", "x", "--body", BODY, "-t", "viem"], /-t is not available/u],
       [["log", "x", "--body", BODY, "--token", "t"], /--token is not available/u],
       [["log", "--", "x"], /-- is not available/u],
+      // incur acts on its own flags anywhere in argv, so they are refused where a value belongs too.
+      [["log", "x", "--body", "--llms"], /--llms is not available/u],
+      [["log", "x", "-s", "--schema"], /--schema is not available/u],
+      [["log", "x", "--label", "--help"], /--help is not available/u],
+      [["log", "x", "--body", "--mcp"], /--mcp is not available/u],
+      // incur reads --format only with a separate value.
+      [["list", "--format=json"], /--format=json is not available/u],
       // A trailing value-taking option cannot consume anything Ultrafuzz passes after it.
       [["log", "x", "--body", BODY, "--label"], /the last option is missing its value/u]
     ];
