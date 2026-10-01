@@ -21,8 +21,13 @@ const BODY = [
 ].join("\n");
 
 // A target repository with a run root inside it, as Ultrafuzz lays one out.
-function runFixture(): { target: string; runRoot: string; command: string; entries: string } {
-  const target = fs.realpathSync(temporaryRoot("ultrafuzz-friction-target-"));
+function runFixture(prefix = "ultrafuzz-friction-target-"): {
+  target: string;
+  runRoot: string;
+  command: string;
+  entries: string;
+} {
+  const target = fs.realpathSync(temporaryRoot(prefix));
   spawnSync("git", ["init", "-q", target], { stdio: "ignore" });
   const runRoot = path.join(target, ".ultrafuzz", "runs", "run-1");
   const command = path.join(runRoot, ...FRICTION_LOG_COMMAND_PATH.split("/"));
@@ -75,6 +80,22 @@ test("the friction log command records and lists entries with the pinned Frog in
   }
 });
 
+test("the friction log command keeps entries in the run when the run root contains a colon", () => {
+  // GIT_CEILING_DIRECTORIES is a `:`-separated list, so a ceiling at this run root let Frog find the target.
+  const fixture = runFixture("ultrafuzz-friction-a:b-target-");
+  try {
+    const logged = run(fixture, ["log", "colon in the run root", "--body", BODY]);
+    assert.equal(logged.status, 0, logged.stderr + logged.stdout);
+    assert.equal(fs.readdirSync(fixture.entries).length, 1);
+    const listed = run(fixture, ["list", "--format", "json"]);
+    assert.equal(listed.status, 0, listed.stderr + listed.stdout);
+    assert.match(listed.stdout, /colon in the run root/u);
+    assert.deepEqual(fs.readdirSync(fixture.target).sort(), [".git", ".ultrafuzz"]);
+  } finally {
+    fs.rmSync(fixture.target, { recursive: true, force: true });
+  }
+});
+
 test("the friction log command refuses every Frog surface beyond local log and list", () => {
   const fixture = runFixture();
   try {
@@ -120,7 +141,7 @@ test("the friction log wrapper is identical for every run and pins its paths fro
     wrapper,
     /exec '\/usr\/bin\/node' '\/opt\/frog\/bin\.js' "\$command" --cwd "\$run_root\/friction" "\$@"\n$/u
   );
-  assert.match(wrapper, /\nunset GITHUB_TOKEN GH_TOKEN GITHUB_API_URL GIT_DIR GIT_WORK_TREE\n/u);
-  assert.match(wrapper, /\nGIT_CEILING_DIRECTORIES=\$run_root\nexport GIT_CEILING_DIRECTORIES\n/u);
+  assert.match(wrapper, /\nunset GITHUB_TOKEN GH_TOKEN GITHUB_API_URL GIT_WORK_TREE\n/u);
+  assert.match(wrapper, /\nGIT_DIR=\$run_root\/friction-bin\/no-git\nexport GIT_DIR\n/u);
   assert.match(frictionLogWrapper("/it's/node", "/opt/frog/bin.js"), /exec '\/it'\\''s\/node'/u);
 });

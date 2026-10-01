@@ -4,18 +4,21 @@ import { fileURLToPath } from "node:url";
 
 // Run-relative locations. Entries sit in the only friction path agents may write,
 // `<run>/friction/.agents/friction-log/<id>/friction.md`, where Frog anchors them
-// once Git discovery stops at the run root. The wrapper sits beside it, outside
+// once Git discovery is fenced off. The wrapper sits beside it, outside
 // every agent-writable directory, so an agent cannot replace it.
 export const FRICTION_LOG_ENTRIES_PATH = "friction";
 export const FRICTION_LOG_COMMAND_PATH = "friction-bin/ultrafuzz-friction-log";
+// Frog anchors its log at `git rev-parse --show-toplevel`, and run roots sit
+// inside the target repository, so unfenced discovery makes Frog write into the
+// target's root and validate entries against the target's issue forms. With
+// GIT_DIR set, Git does no discovery, and it fails when GIT_DIR names nothing,
+// so Frog uses `--cwd` as its root. GIT_CEILING_DIRECTORIES is no fence: it is a
+// `:`-separated list, so a run root containing `:` is split and is no ceiling.
+const FRICTION_LOG_NO_GIT_DIR_PATH = `${path.posix.dirname(FRICTION_LOG_COMMAND_PATH)}/no-git`;
 
 // Frog publishes with these. Removing them keeps every entry local to the run
 // until an operator reviews it; target findings must never reach GitHub.
 const PUBLISHING_ENVIRONMENT_VARIABLES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"] as const;
-// Frog anchors its log at `git rev-parse --show-toplevel`, and run roots sit
-// inside the target repository. Without the ceiling, Frog would write into the
-// target's root and validate entries against the target's issue forms.
-const GIT_DISCOVERY_ENVIRONMENT_VARIABLES = ["GIT_DIR", "GIT_WORK_TREE"] as const;
 // incur, the CLI framework Frog is built on, acts on these wherever they appear
 // in argv (extractBuiltinFlags, incur 0.4.25), even where an option value
 // belongs: `log x --body --mcp` would start Frog's MCP server, which serves
@@ -95,9 +98,9 @@ for argument in "$@"; do
 done
 [ -z "$value" ] || refuse "the last option is missing its value"
 run_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, ...GIT_DISCOVERY_ENVIRONMENT_VARIABLES].join(" ")}
-GIT_CEILING_DIRECTORIES=$run_root
-export GIT_CEILING_DIRECTORIES
+unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, "GIT_WORK_TREE"].join(" ")}
+GIT_DIR=$run_root/${FRICTION_LOG_NO_GIT_DIR_PATH}
+export GIT_DIR
 exec ${shellQuote(nodePath)} ${shellQuote(frogBin)} "$command" --cwd "$run_root/${FRICTION_LOG_ENTRIES_PATH}" "$@"
 `;
 }
