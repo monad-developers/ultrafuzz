@@ -5488,7 +5488,7 @@ function errorText(value: unknown): string | undefined {
   // shown here without ever reaching Smithers' message-based classifiers.
   const stated = isRecord(value.details) ? stringField(value.details, "agentStatedFailure") : undefined;
   if (stated === undefined) return text;
-  return text === undefined ? stated : `${text}: ${stated}`;
+  return text === undefined ? stated : `${text} (agent stated: ${stated})`;
 }
 
 /**

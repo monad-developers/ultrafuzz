@@ -22958,7 +22958,11 @@ test("syncRun shows the failure an agent stated beside its generic error (#1084)
         type: "NodeFailed",
         nodeId: "node:project-discovery",
         attempt: 1,
-        error: { message: "Claude run failed", details: { agentStatedFailure: stated } }
+        // SmithersError appends its docs link to the generic Claude failure.
+        error: {
+          message: "Claude run failed See https://smithers.sh/reference/errors",
+          details: { agentStatedFailure: stated }
+        }
       }
     ]),
     attemptSelections: {
@@ -22978,7 +22982,8 @@ test("syncRun shows the failure an agent stated beside its generic error (#1084)
   };
   // The durable text passes the usual secret redaction, which reads
   // "token: another" as an assignment; the stated cause stays recognisable.
-  const shown = /^Claude run failed: Failed to refresh OAuth token\b.*Claude Code process is refreshing it/u;
+  const shown =
+    /^Claude run failed See https:\/\/smithers\.sh\/reference\/errors \(agent stated: Failed to refresh OAuth token\b.*Claude Code process is refreshing it or exited mid-refresh\.\)$/u;
   assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", shown);
   const ledger = fs
     .readFileSync(path.join(runRoot, "attempts.jsonl"), "utf8")
