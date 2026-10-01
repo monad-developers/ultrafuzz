@@ -10,7 +10,7 @@ import {
   type GroundTruthSubject
 } from "@ultrafuzz/evals";
 import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
-import { MODAL_PUBLIC_BENCHMARK_ENV, readFailedProducersStartedConsumersOmitted } from "@ultrafuzz/runtime";
+import { MODAL_PUBLIC_BENCHMARK_ENV, readRetainedFailureStateIds } from "@ultrafuzz/runtime";
 
 import { runnerApiKeySourceEnv } from "./auth.js";
 
@@ -313,11 +313,7 @@ async function resumeExistingEvaluation(
   let disposition = await terminalDispositionForState(workspace, state);
   const checkpoint = await readWorkerCheckpoint(workspace.target);
   const retainedFailures = isTerminalRunStatus(state.status)
-    ? new Set(
-        readFailedProducersStartedConsumersOmitted(
-          path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId)
-        ).keys()
-      )
+    ? readRetainedFailureStateIds(path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId))
     : undefined;
   if (modalDurableRunNeedsResume(state, checkpoint.counts, disposition, retainedFailures)) {
     const stateBeforeResume = state;

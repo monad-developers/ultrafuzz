@@ -4967,6 +4967,15 @@ export async function runSmithersLifecycleCommand(input: {
       .filter((task) => retainedFailures.has(task.attemptId))
       .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
   );
+  // `--reset-node` reruns its target anyway, so that task is not reported as left failed.
+  for (const task of input.tasks ?? []) {
+    if (
+      input.resetNode !== undefined &&
+      [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId].includes(input.resetNode)
+    ) {
+      retainedFailures.delete(task.attemptId);
+    }
+  }
   const retries =
     currentInspection === undefined
       ? []

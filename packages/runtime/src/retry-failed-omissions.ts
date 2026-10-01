@@ -62,21 +62,66 @@ export function failedProducersStartedConsumersOmittedInWorkflow(
 
 const RUN_FAILED_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]);
 const RUN_STARTED_STATUSES = new Set<NodeStatus>(["running", "succeeded", "failed", "timed-out"]);
+const RUN_SUCCEEDED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
 
 /**
- * {@link failedProducersStartedConsumersOmitted}, judged from a run's synchronized state. Modal reads
- * it to tell a terminal run whose only failures `--retry-failed` leaves alone from one it can rerun.
+ * The run state entries of the failed producers {@link failedProducersStartedConsumersOmitted}
+ * names, judged from a run's synchronized state. Modal reads it to tell a terminal run whose only
+ * failures `--retry-failed` leaves alone from one it can rerun.
+ *
+ * Synchronization also records entries that roll up others: a node that fans out over several
+ * models has one under its storage ID beside its attempts, and an expanded dynamic group has one
+ * for its generated nodes. Such an entry is included when every entry under it that did not
+ * succeed is, so it does not stand in for a failure `--retry-failed` would rerun.
  */
-export function readFailedProducersStartedConsumersOmitted(runRoot: string): Map<string, string[]> {
+export function readRetainedFailureStateIds(runRoot: string): Set<string> {
   const layout = layoutForRunRoot(runRoot);
   const state = readRunState(layout);
   const manifest = parseSmithersTaskManifestBytes(
     readRegularFileSnapshot(path.join(layout.root, "smithers", "tasks.json"), 128 * 1024 * 1024)
   );
-  const statusOf = (task: SmithersTaskManifestTask) => state.nodes[task.attemptId]?.status;
-  return failedProducersStartedConsumersOmitted(
-    manifest.tasks,
-    (task) => RUN_FAILED_STATUSES.has(statusOf(task) as NodeStatus),
-    (task) => RUN_STARTED_STATUSES.has(statusOf(task) as NodeStatus)
+  const statusOf = (stateId: string) => state.nodes[stateId]?.status;
+  const retained = new Set(
+    failedProducersStartedConsumersOmitted(
+      manifest.tasks,
+      (task) => RUN_FAILED_STATUSES.has(statusOf(task.attemptId) as NodeStatus),
+      (task) => RUN_STARTED_STATUSES.has(statusOf(task.attemptId) as NodeStatus)
+    ).keys()
   );
+  const rollUpIfRetained = (stateId: string, children: readonly string[]) => {
+    const status = statusOf(stateId);
+    if (status === undefined || RUN_SUCCEEDED_STATUSES.has(status) || children.length === 0) return;
+    const unsucceeded = children.filter((child) => !RUN_SUCCEEDED_STATUSES.has(statusOf(child) as NodeStatus));
+    if (unsucceeded.length > 0 && unsucceeded.every((child) => retained.has(child))) retained.add(stateId);
+  };
+
+  const tasksByConcreteNode = new Map<string, SmithersTaskManifestTask[]>();
+  for (const task of manifest.tasks) {
+    tasksByConcreteNode.set(task.concreteNodeId, [...(tasksByConcreteNode.get(task.concreteNodeId) ?? []), task]);
+  }
+  // The entry that stands for a concrete node: its aggregate when synchronization keeps one.
+  const concreteStateIds = new Map<string, string[]>();
+  for (const [concreteNodeId, tasks] of tasksByConcreteNode) {
+    const attemptIds = tasks.map((task) => task.attemptId);
+    const aggregateId = tasks[0]?.metadata.node.storageId ?? concreteNodeId;
+    if (attemptIds.length === 1 && attemptIds[0] === aggregateId) {
+      concreteStateIds.set(concreteNodeId, attemptIds);
+      continue;
+    }
+    rollUpIfRetained(aggregateId, attemptIds);
+    concreteStateIds.set(concreteNodeId, state.nodes[aggregateId] === undefined ? attemptIds : [aggregateId]);
+  }
+  const generatedByGroup = new Map<string, Set<string>>();
+  for (const task of manifest.tasks) {
+    const groupNodeId = task.metadata.node.dynamic?.groupNodeId;
+    if (groupNodeId === undefined) continue;
+    generatedByGroup.set(groupNodeId, (generatedByGroup.get(groupNodeId) ?? new Set()).add(task.concreteNodeId));
+  }
+  for (const [groupNodeId, concreteNodeIds] of generatedByGroup) {
+    rollUpIfRetained(
+      groupNodeId,
+      [...concreteNodeIds].flatMap((concreteNodeId) => concreteStateIds.get(concreteNodeId) ?? [])
+    );
+  }
+  return retained;
 }
