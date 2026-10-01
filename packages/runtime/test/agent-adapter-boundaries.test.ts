@@ -78,6 +78,10 @@ const TOKEN_ACCOUNTING_SIGNALS = new Set([
 // which orchestrator responsibilities it owns. Only registered adapters may own
 // responsibilities, and each one must link the upstream gap that forces it.
 const adapterPolicies: Record<string, AdapterPolicy> = {
+  // #1084 tracks the gap: @smthrs/agents' ClaudeCodeAgent builds a failed
+  // result's error as `limitBannerText || resultError || "Claude run failed"`
+  // and drops `payload.result`, so the adapter overrides createOutputInterpreter
+  // and generate.
   "claude.tsx": {
     purpose: "adapter",
     responsibilities: ["output-interpretation"],
@@ -88,6 +92,7 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
     responsibilities: ["argv-construction", "session-handling"],
     upstreamIssues: ["https://github.com/smithersai/smithers/issues/1622"]
   },
+  // Inherited from claude.tsx's StatedFailureClaudeCodeAgent, so not detected here.
   "deepseek.tsx": {
     purpose: "adapter",
     responsibilities: ["output-interpretation"],

@@ -477,8 +477,11 @@ hashed ledger/evaluation linkage; it excludes sandbox IDs, paths, logs,
 prompts, findings, and provider output. The diagnostic contains only row
 identities, terminal states, report-presence flags, diagnostic codes, exact
 launch lineage, and a bounded failed-node projection (node ID, status, timeout
-flag, and allowlisted failure category or code). It never contains messages,
-paths, findings, or provider output.
+flag, allowlisted failure category or code, and failure message). The failure
+message is the node's last error, redacted and cut to at most 1,000 bytes. It
+can name paths and quote agent or provider output, such as the failure an agent
+CLI states about a rejected API key. No other field carries messages, paths,
+findings, or provider output.
 This preserves useful lifecycle evidence from failed runs without repeating
 paid model work. Investigate arbitrary sensitive run data on the
 private volume under the repository's normal access controls. Collection validates each contract and
