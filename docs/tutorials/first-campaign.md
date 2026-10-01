@@ -75,6 +75,20 @@ Generated workflow plumbing may also be created, but it is not the stable
 operator API. Edit `ultrafuzz.toml`, `.ultrafuzz/topology.yml`, and
 `.ultrafuzz/prompts/**` when changing campaign behavior.
 
+`init` also adds a managed block to the target's `.gitignore` for the state
+runs generate (`.ultrafuzz/runs/`, `.ultrafuzz/workspaces/`, `.ultrafuzz/cache/`
+and the engine's files), and refreshes that block when you rerun it. Commit
+what `init` created, including `.gitignore`, before you start a campaign:
+
+```bash
+git -C /path/to/target-protocol add -A
+git -C /path/to/target-protocol commit -m "Add Ultrafuzz project files"
+```
+
+Campaigns are private by default, and a private run requires a clean Git
+target. Until these files are committed, `run` fails with
+`DATA_GOVERNANCE_PRIVATE_TARGET_UNBOUND`.
+
 ## Review And Validate
 
 Agents run under a trusted local execution model. Repository mutation limits

@@ -636,3 +636,90 @@ test("Codex CLI bookkeeping in config.toml does not change the acknowledged rout
   // Codex ignores an empty openai_base_url, so that config keeps the default.
   assert.equal(route('openai_base_url = ""\n'), "model:openai");
 });
+// #1226: a private campaign needs a clean Git target. `init` ignores the generated state Ultrafuzz
+// and its engine write, and says to commit the project files it creates, which stay part of the
+// recorded identity.
+test("init ignores generated state, so a committed project stays a clean private target through a run", () => {
+  const root = repository();
+  fs.writeFileSync(path.join(root, ".gitignore"), "build/\n");
+  execFileSync("git", ["add", ".gitignore"], { cwd: root });
+  execFileSync("git", ["commit", "-qm", "target ignores"], { cwd: root });
+  const owned = controllerOwnedGovernancePaths(root, path.join(root, ".ultrafuzz", "runs", "first-run"));
+  const status = () => execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
+
+  const initialized = initProject({ projectRoot: root });
+  assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+  assert.ok(initialized.value?.overwritten.includes(".gitignore"));
+  const advice = initialized.diagnostics.find(({ code }) => code === "INIT_COMMIT_PROJECT_FILES");
+  assert.equal(advice?.severity, "info");
+  const gitignore = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
+  assert.ok(gitignore.startsWith("build/\n\n# BEGIN Ultrafuzz generated state"), gitignore);
+  for (const entry of ["/.ultrafuzz/runs/", "/.smithers/node_modules/", "/smithers.db"]) {
+    assert.ok(gitignore.split("\n").includes(entry), entry);
+  }
+  // The project files are inputs to the run, so they keep the target dirty until they are committed.
+  assert.equal(targetIdentity(root, owned).dirty, true);
+  assert.match(status(), /^\?\? ultrafuzz\.toml$/mu);
+
+  execFileSync("git", ["add", "-A"], { cwd: root });
+  execFileSync("git", ["commit", "-qm", "ultrafuzz init"], { cwd: root });
+  const committed = targetIdentity(root, owned);
+  assert.equal(committed.dirty, false);
+
+  // What a run, an evaluation and `clean` write leaves both the identity and `git status` unchanged.
+  for (const relative of [
+    ".ultrafuzz/runs/first-run/state.json",
+    ".ultrafuzz/workspaces/first-run/task/file",
+    ".ultrafuzz/cache/reference.tar",
+    ".ultrafuzz/evals/runs/eval/eval.json",
+    ".ultrafuzz/clean-audit.jsonl",
+    ".smithers/node_modules/smthrs/package.json",
+    ".smithers/workflows/first-run.tsx",
+    ".smithers/logs/supervisor.log",
+    ".smithers/executions/first-run/logs/stream.ndjson",
+    "smithers.db",
+    "smithers.db-wal"
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
+    fs.writeFileSync(path.join(root, relative), "generated\n");
+  }
+  assert.equal(status(), "");
+  assert.deepEqual(targetIdentity(root, owned), committed);
+
+  // Initializing again leaves a current block alone.
+  const again = initProject({ projectRoot: root });
+  assert.ok(again.value?.preserved.includes(".gitignore"));
+  assert.equal(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), gitignore);
+  assert.equal(status(), "");
+});
+
+test("init refreshes an outdated generated-state block in place and keeps the lines around it", () => {
+  const root = repository();
+  fs.writeFileSync(
+    path.join(root, ".gitignore"),
+    "build/\n# BEGIN Ultrafuzz generated state (managed by `ultrafuzz init`)\n/.ultrafuzz/runs/\n# END Ultrafuzz generated state\nout/\n"
+  );
+
+  assert.equal(initProject({ projectRoot: root }).ok, true);
+
+  const lines = fs.readFileSync(path.join(root, ".gitignore"), "utf8").split("\n");
+  assert.equal(lines[0], "build/");
+  assert.ok(lines.includes("/smithers.db"));
+  assert.equal(lines.filter((line) => line.startsWith("# BEGIN Ultrafuzz")).length, 1);
+  assert.deepEqual(lines.slice(-3), ["# END Ultrafuzz generated state", "out/", ""]);
+});
+
+test("init warns instead of following a symlinked .gitignore", () => {
+  const root = repository();
+  const outside = path.join(temporaryRoot("ufz-gitignore-outside-"), "gitignore");
+  fs.writeFileSync(outside, "outside\n");
+  fs.symlinkSync(outside, path.join(root, ".gitignore"));
+
+  const initialized = initProject({ projectRoot: root });
+
+  assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
+  const warning = initialized.diagnostics.find(({ code }) => code === "INIT_GITIGNORE_NOT_UPDATED");
+  assert.equal(warning?.severity, "warning");
+  assert.match(warning?.message ?? "", /rerun init$/u);
+  assert.equal(fs.readFileSync(outside, "utf8"), "outside\n");
+});

@@ -18,7 +18,7 @@ import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
 import { STOCK_CONTROLLER_SOURCE_TEMPLATES } from "./controller-source.js";
 import { loadRuntimeTemplate } from "./runtime-template.js";
 import { migrateStockSmithers032PackageManifest, renderSmithersPackageJson } from "./smithers-package.js";
-import type { InitProjectInput, InitProjectResult } from "./types.js";
+import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
 const DEFAULT_TOPOLOGY = fs.readFileSync(packagedTopology("default").path, "utf8");
@@ -195,12 +195,103 @@ export function initProject(input: InitProjectInput) {
     preserved.push(toProjectRelative(projectRoot, absolutePath));
   }
 
-  return runtimeResult(true, {
-    project_root: projectRoot,
-    created: publicInitPaths(created),
-    preserved: publicInitPaths(preserved),
-    overwritten: publicInitPaths(overwritten)
+  const diagnostics: RuntimeDiagnostic[] = [];
+  try {
+    ignoreGeneratedState(projectRoot, created, preserved, overwritten);
+  } catch (error) {
+    diagnostics.push({
+      code: "INIT_GITIGNORE_NOT_UPDATED",
+      message: `init could not add Ultrafuzz's generated-state block to .gitignore (${error instanceof Error ? error.message : String(error)}), so a run will leave the target dirty and a private campaign will fail; make .gitignore a regular file and rerun init`,
+      severity: "warning",
+      source: "runtime",
+      path: ".gitignore"
+    });
+  }
+  diagnostics.push({
+    code: "INIT_COMMIT_PROJECT_FILES",
+    message:
+      "commit everything init created, including ultrafuzz.toml, .ultrafuzz/ and .gitignore, before a private campaign: a private run requires a clean Git target, and these project files are part of its recorded identity (git status lists them)",
+    severity: "info",
+    source: "runtime"
   });
+
+  return runtimeResult(
+    true,
+    {
+      project_root: projectRoot,
+      created: publicInitPaths(created),
+      preserved: publicInitPaths(preserved),
+      overwritten: publicInitPaths(overwritten)
+    },
+    diagnostics
+  );
+}
+
+/**
+ * Generated state Ultrafuzz and its workflow engine write into the project (#1226). Ignoring it keeps
+ * a target clean after `init` and after every run, which a private campaign's target identity
+ * requires. The project files `init` creates are not listed: they are inputs to the run and must be
+ * committed, so they stay part of that identity.
+ */
+const GENERATED_STATE_IGNORE_ENTRIES = [
+  "/.ultrafuzz/runs/",
+  "/.ultrafuzz/workspaces/",
+  "/.ultrafuzz/cache/",
+  "/.ultrafuzz/evals/runs/",
+  "/.ultrafuzz/modal/results/",
+  "/.ultrafuzz/*-audit.jsonl",
+  "/.smithers/node_modules/",
+  "/.smithers/workflows/",
+  "/.smithers/continuations/",
+  "/.smithers/logs/",
+  "/.smithers/executions/",
+  "/smithers.db",
+  "/smithers.db-shm",
+  "/smithers.db-wal"
+] as const;
+const GENERATED_STATE_IGNORE_BEGIN = "# BEGIN Ultrafuzz generated state (managed by `ultrafuzz init`)";
+const GENERATED_STATE_IGNORE_END = "# END Ultrafuzz generated state";
+const MAX_GITIGNORE_BYTES = 1024 * 1024;
+
+/**
+ * Add, or refresh, the managed block of {@link GENERATED_STATE_IGNORE_ENTRIES} in the project's root
+ * `.gitignore`. A root file rather than one inside `.ultrafuzz/`, because `smithers.db` lives in the
+ * project root and a task worktree writes its own `.ultrafuzz/.gitignore` (#1227). Lines outside the
+ * block are kept byte for byte, and a block that is already current leaves the file untouched.
+ */
+function ignoreGeneratedState(
+  projectRoot: string,
+  created: string[],
+  preserved: string[],
+  overwritten: string[]
+): void {
+  const relativePath = ".gitignore";
+  const filePath = path.join(projectRoot, relativePath);
+  const block = [GENERATED_STATE_IGNORE_BEGIN, ...GENERATED_STATE_IGNORE_ENTRIES, GENERATED_STATE_IGNORE_END].join(
+    "\n"
+  );
+  const existing =
+    lstatIfPresent(filePath) === undefined
+      ? undefined
+      : readStableInitReviewFile(projectRoot, filePath, MAX_GITIGNORE_BYTES, "project .gitignore").toString("utf8");
+  let contents: string;
+  if (existing === undefined) {
+    contents = `${block}\n`;
+  } else {
+    const begin = existing.indexOf(GENERATED_STATE_IGNORE_BEGIN);
+    const end = begin < 0 ? -1 : existing.indexOf(GENERATED_STATE_IGNORE_END, begin);
+    if (begin >= 0 && end >= 0) {
+      contents = `${existing.slice(0, begin)}${block}${existing.slice(end + GENERATED_STATE_IGNORE_END.length)}`;
+    } else {
+      const separator = existing === "" ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
+      contents = `${existing}${separator}${block}\n`;
+    }
+    if (contents === existing) {
+      preserved.push(relativePath);
+      return;
+    }
+  }
+  writeProjectFile(projectRoot, relativePath, contents, true, created, preserved, overwritten);
 }
 
 function prepareStockSmithers032PackageMigration(projectRoot: string): string | undefined {

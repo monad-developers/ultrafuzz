@@ -118,6 +118,19 @@ requires the rest of the manifest to match the current generated document. Use
 `--force` to replace the other existing generated files with the current
 templates.
 
+`init` also adds a block between `# BEGIN Ultrafuzz generated state` and
+`# END Ultrafuzz generated state` to the target's root `.gitignore`, creating
+the file if needed, for the state runs generate: `.ultrafuzz/runs/`,
+`.ultrafuzz/workspaces/`, `.ultrafuzz/cache/`, `.ultrafuzz/evals/runs/`,
+`.ultrafuzz/modal/results/`, `.ultrafuzz/*-audit.jsonl`, the workflow engine's
+generated directories and its database. Every `init`, with or without `--force`,
+refreshes that block in place and keeps the rest of the file. If it cannot, for
+example because `.gitignore` is a symbolic link, `init` reports
+`INIT_GITIGNORE_NOT_UPDATED` and still succeeds. The project files `init`
+creates are not ignored. `init` reports `INIT_COMMIT_PROJECT_FILES` because a
+private campaign requires a clean Git target: commit them, with `.gitignore`,
+before the first private `run`.
+
 ## Validate
 
 ```bash
