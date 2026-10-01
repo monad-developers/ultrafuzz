@@ -28,6 +28,9 @@ const PUBLISHING_ENVIRONMENT_VARIABLES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_AP
 // FROG_DATABASE_URL makes `log` and `list` use that Postgres database instead of
 // the run's files.
 const STORE_ENVIRONMENT_VARIABLES = ["FROG_DATABASE_URL", "FROG_NAMESPACE", "FROG_SCHEMA"] as const;
+// While COMPLETE is set, incur prints shell completions instead of running the
+// command, so `log` would exit 0 without writing an entry.
+const INCUR_COMPLETION_VARIABLE = "COMPLETE";
 // incur, the CLI framework Frog is built on, acts on these wherever they appear
 // in argv (extractBuiltinFlags, incur 0.4.25), even where an option value
 // belongs: `log x --body --mcp` would start Frog's MCP server, which serves
@@ -118,7 +121,7 @@ for argument in "$@"; do
 done
 [ -z "$value" ] || refuse "the last option is missing its value"
 run_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, ...STORE_ENVIRONMENT_VARIABLES, "GIT_WORK_TREE"].join(" ")}
+unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, ...STORE_ENVIRONMENT_VARIABLES, INCUR_COMPLETION_VARIABLE, "GIT_WORK_TREE"].join(" ")}
 GIT_DIR=$run_root/${FRICTION_LOG_NO_GIT_DIR_PATH}
 GH_CONFIG_DIR=$run_root/${FRICTION_LOG_NO_GH_CONFIG_PATH}
 NO_UPDATE_NOTIFIER=1

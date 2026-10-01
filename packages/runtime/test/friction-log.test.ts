@@ -50,10 +50,12 @@ function run(fixture: { target: string; command: string }, args: string[], env: 
 test("the friction log command records and lists entries with the pinned Frog inside the run only", () => {
   const fixture = runFixture();
   try {
-    // An inherited Frog store would send the entry to Postgres, and fail to reach this one.
+    // An inherited Frog store would send the entry to Postgres, and fail to reach this one; an
+    // inherited COMPLETE would print shell completions and write no entry.
     const logged = run(fixture, ["log", "forge guard aborts - on darwin", "--severity", "major", "--body", BODY], {
       GITHUB_TOKEN: "must-not-publish",
-      FROG_DATABASE_URL: "postgres://127.0.0.1:9/frog"
+      FROG_DATABASE_URL: "postgres://127.0.0.1:9/frog",
+      COMPLETE: "bash"
     });
     assert.equal(logged.status, 0, logged.stderr + logged.stdout);
     const [id] = fs.readdirSync(fixture.entries);
@@ -194,6 +196,7 @@ test("the friction log wrapper hands Frog its run's paths, a fenced environment 
         FROG_DATABASE_URL: "postgres://127.0.0.1:9/frog",
         FROG_NAMESPACE: "namespace",
         FROG_SCHEMA: "schema",
+        COMPLETE: "bash",
         GIT_WORK_TREE: root
       };
       const result = spawnSync(command, ["log", "x", "--body", "b"], {

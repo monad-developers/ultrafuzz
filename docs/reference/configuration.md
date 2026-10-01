@@ -215,8 +215,9 @@ anywhere on the command line. It points Frog at `<run>/friction` and sets
 `GIT_DIR` to a path that does not exist, so Git discovery never reaches the
 target repository and Frog writes entries to
 `<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md`. It
-unsets `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_API_URL` and Frog's Postgres store
-settings (`FROG_DATABASE_URL`, `FROG_NAMESPACE`, `FROG_SCHEMA`), sets
+unsets `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_API_URL`, Frog's Postgres store
+settings (`FROG_DATABASE_URL`, `FROG_NAMESPACE`, `FROG_SCHEMA`) and `COMPLETE`,
+which makes incur print shell completions instead of running the command, sets
 `NO_UPDATE_NOTIFIER=1` so incur skips its update check, and gives Frog
 `/dev/null` as stdin, so Frog never prompts or opens an editor.
 
