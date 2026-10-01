@@ -64,6 +64,7 @@ describe("agent preamble MDX", () => {
     // Frog refuses every later entry once one entry is malformed.
     expect(fragment).toMatch(/if either command fails, continue without it/u);
     expect(fragment).toContain(`Never create, edit, or delete anything under \`${directory}\` yourself.`);
+    expect(fragment).toContain("Never publish entries; an operator reviews them first.");
     const sections = [
       "Expected Behavior",
       "Current Behavior",
