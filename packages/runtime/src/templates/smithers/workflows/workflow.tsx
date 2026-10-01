@@ -815,13 +815,15 @@ function renderAgentPrompt(values: {
   frictionLog: { directory: string; command: string } | undefined;
 }): string {
   // The friction instructions follow the fixed boundary. Every task in a run shares one run root,
-  // so they stay inside the prefix all of the run's prompts share.
+  // so they stay inside the prefix all of the run's prompts share. The paths are inserted through
+  // replacer functions, so `$&` or `$$` in a run root is never expanded.
+  const friction = values.frictionLog;
   const frictionLogContext =
-    frictionLog === null || values.frictionLog === undefined
+    frictionLog === null || friction === undefined
       ? ""
       : `\n\n${frictionLog.instructions
-          .replaceAll("{{friction_log_command}}", `'${values.frictionLog.command.replaceAll("'", "'\\''")}'`)
-          .replaceAll("{{friction_log_directory}}", values.frictionLog.directory)}`;
+          .replaceAll("{{friction_log_command}}", () => `'${friction.command.replaceAll("'", "'\\''")}'`)
+          .replaceAll("{{friction_log_directory}}", () => friction.directory)}`;
   const replacements = new Map([
     ["authorized_defensive_security_context", authorizedDefensiveSecurityContext],
     ["untrusted_content_boundary", untrustedContentBoundary + frictionLogContext],

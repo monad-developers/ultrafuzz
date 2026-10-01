@@ -6916,6 +6916,14 @@ test("generated agent prompt places the run friction log after the trust boundar
   // The command is shell-quoted, so a run root with a quote cannot break out of it.
   const quoted = render({ ...values, frictionLog: { directory, command: "/it's/ultrafuzz-friction-log" } });
   assert.match(quoted, /'\/it'\\''s\/ultrafuzz-friction-log' list/u);
+  // A run root is inserted as it is: `$$` and `$&` are not replacement patterns here.
+  const dollars = "/runs/a$$b$&c";
+  const literal = render({
+    ...values,
+    frictionLog: { directory: `${dollars}/friction`, command: `${dollars}/friction-bin/ultrafuzz-friction-log` }
+  });
+  assert.ok(literal.includes(`'${dollars}/friction-bin/ultrafuzz-friction-log' list`), literal);
+  assert.ok(literal.includes(`under \`${dollars}/friction\` yourself`), literal);
   // A task without a friction log renders exactly what a disabled run renders.
   assert.equal(render(values), loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"))(values));
 });
