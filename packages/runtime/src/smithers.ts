@@ -82,6 +82,7 @@ import {
 } from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
 import { retryChainAttemptCount, retryFallbackProfileIds } from "./retry-chain.js";
+import { failedProducersStartedConsumersOmittedInWorkflow } from "./retry-failed-omissions.js";
 import { assertRunSourceRevision, captureRunSourceRevision, type RunSourceRevision } from "./source-revision.js";
 import { topologyRuntimeBudgetForTimeout } from "./topology-runtime-budget.js";
 import {
@@ -4839,6 +4840,8 @@ export async function runSmithersLifecycleCommand(input: {
   resetNode?: string;
   force?: boolean;
   retryFailed?: boolean;
+  /** The run's tasks, so `retryFailed` can leave a producer that started consumers already omitted. */
+  tasks?: readonly SmithersTaskManifestTask[];
   label?: string;
   priorInspection?: SmithersResumeInspection;
   /** Prepare launch authority only after ruling out an idempotent active attach. */
@@ -4863,6 +4866,8 @@ export async function runSmithersLifecycleCommand(input: {
   command: string[];
   workflowRunId?: string;
   alreadyRunning?: boolean;
+  /** Each failed producer `retryFailed` left failed, with the started consumers that omitted it. */
+  retainedFailures?: ReadonlyMap<string, readonly string[]>;
 }> {
   // Every `up` invocation has to name the run-scoped log directory. Without `--log-dir` the
   // orchestrator falls back to `<projectRoot>/.smithers/executions/<runId>/logs`, so a relaunched
@@ -4945,13 +4950,32 @@ export async function runSmithersLifecycleCommand(input: {
   // Each failed task `--retry-failed` resets, with the agent-owned artifact producer that its reset
   // reopens instead when it is a failed generated verifier. Both the resets and the prompt refresh
   // below read this one list.
-  const retries =
+  const failedTasks =
     currentInspection !== undefined && input.retryFailed === true && !smithersRunStateIsActive(currentInspection)
-      ? smithersFailedTasks(currentInspection).map((failedTask) => ({
-          failedTask,
-          producer: retryProducerForFailedVerifier(currentInspection, failedTask)
-        }))
+      ? smithersFailedTasks(currentInspection)
       : [];
+  // A failed producer that a started consumer already ran without stays failed (#1231).
+  const retainedFailures =
+    currentInspection === undefined || failedTasks.length === 0
+      ? new Map<string, string[]>()
+      : failedProducersStartedConsumersOmittedInWorkflow(
+          input.tasks ?? [],
+          new Map(currentInspection.nodes.map((node) => [node.nodeId, node.state]))
+        );
+  const retainedNodeIds = new Set(
+    (input.tasks ?? [])
+      .filter((task) => retainedFailures.has(task.attemptId))
+      .flatMap((task) => [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId])
+  );
+  const retries =
+    currentInspection === undefined
+      ? []
+      : failedTasks
+          .filter((failedTask) => !retainedNodeIds.has(failedTask.nodeId))
+          .map((failedTask) => ({
+            failedTask,
+            producer: retryProducerForFailedVerifier(currentInspection, failedTask)
+          }));
   const retryProducers = retries.flatMap(({ producer }) => (producer === undefined ? [] : [producer]));
   // A reopened dynamic source owns the published expansion generation, which
   // lives outside Smithers state. Decide and validate its withdrawal before
@@ -4970,7 +4994,7 @@ export async function runSmithersLifecycleCommand(input: {
   if (
     currentInspection !== undefined &&
     inspection !== undefined &&
-    retries.length === 0 &&
+    failedTasks.length === 0 &&
     input.retryFailed === true &&
     input.resetNode === undefined &&
     (currentInspection.runState === "failed" || currentInspection.runState === "stale") &&
@@ -5129,7 +5153,8 @@ export async function runSmithersLifecycleCommand(input: {
     }
     return {
       ...resumeResult,
-      stderr: [resetStderr, resumeResult.stderr].filter((value) => value.length > 0).join("\n")
+      stderr: [resetStderr, resumeResult.stderr].filter((value) => value.length > 0).join("\n"),
+      ...(retainedFailures.size === 0 ? {} : { retainedFailures })
     };
   }
 
@@ -5236,7 +5261,8 @@ export async function runSmithersLifecycleCommand(input: {
   return {
     ...result,
     stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
-    ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
+    ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {}),
+    ...(retainedFailures.size === 0 ? {} : { retainedFailures })
   };
 }
 

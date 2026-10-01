@@ -274,6 +274,23 @@ describe("Modal durable evaluation resume", () => {
     expect(fs.readFileSync(malformedRunRoot, "utf8")).toBe("not a directory\n");
   });
 
+  it("does not resume a terminal run whose only failures a started consumer already ran without", () => {
+    const state = {
+      run_id: "durable-run-one",
+      status: "succeeded",
+      nodes: { lens: { status: "failed" }, catalog: { status: "succeeded" }, strategy: { status: "failed" } }
+    };
+    const counts = { succeeded: 1, failed: 2, remaining: 0 };
+    expect(modalDurableRunNeedsResume(state, counts, undefined, new Set(["lens", "strategy"]))).toBe(false);
+    // `--retry-failed` still reruns the strategy.
+    expect(modalDurableRunNeedsResume(state, counts, undefined, new Set(["lens"]))).toBe(true);
+    expect(modalDurableRunNeedsResume(state, counts)).toBe(true);
+    // Unfinished work is resumed whatever the failures.
+    expect(
+      modalDurableRunNeedsResume(state, { ...counts, remaining: 1 }, undefined, new Set(["lens", "strategy"]))
+    ).toBe(true);
+  });
+
   it("resumes operational checkpoints but never retries a terminal task outcome", () => {
     expect(
       modalDurableRunNeedsResume(

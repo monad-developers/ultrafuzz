@@ -96,6 +96,7 @@ import {
   loadCurrentFinalReportSnapshot,
   planRun,
   pauseRun,
+  readFailedProducersStartedConsumersOmitted,
   readLinkedWorkflowEvidence,
   readReportPublicationStatus,
   replayRun as runtimeReplayRun,
@@ -22809,6 +22810,8 @@ test("syncRun finalizes consumers admitted without an optional prerequisite whos
   assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
   assert.equal(nodeStatus("lens"), "failed");
   assert.equal(nodeStatus("catalog"), "succeeded");
+  // `resume --retry-failed` would leave the lens failed now that the catalog ran without it (#1231).
+  assert.deepEqual([...readFailedProducersStartedConsumersOmitted(runRoot)], [["lens", ["catalog"]]]);
 
   // The retried lens is still running when dedupe and triage finish without it.
   writeArtifacts("dedupe", { "findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
@@ -27494,6 +27497,70 @@ test("resume retries failed tasks reported inside a successful terminal workflow
     /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
   );
 });
+
+// A consumer admits a failed continuing producer as an optional omission. Rerunning the producer
+// once that consumer has started cannot reach the consumer's output, so the run would report
+// COMPLETE over a consumer that never read it (#1231). `--retry-failed` leaves such a producer
+// failed and still retries one whose consumers have not started.
+for (const fixture of [
+  { kind: "lens", producer: "lens", consumer: "catalog", other: "dedupe" },
+  { kind: "strategy", producer: "optional-specialist", consumer: "final-report", other: "direct-strategy" }
+] as const) {
+  for (const consumerStarted of [true, false]) {
+    test(`resume --retry-failed ${consumerStarted ? "leaves" : "retries"} a failed continuing ${fixture.kind} ${consumerStarted ? "a started consumer already ran without" : "whose consumers have not started"}`, async () => {
+      let project: string;
+      if (fixture.kind === "lens") project = writeRetriedLensReviewProject();
+      else {
+        project = tempProject();
+        initProject({ projectRoot: project, force: true });
+        writeOptionalSpecialistTopology(project);
+      }
+      const runId = `retry-omitted-${fixture.kind}-${consumerStarted ? "started" : "pending"}`;
+      const workflowRunId = `ultrafuzz-${runId}`;
+      const env = fakeLifecycleSmithersEnv(project, {
+        inspect: workflowInspect({
+          workflowRunId,
+          status: "failed",
+          state: "failed",
+          steps: [
+            { id: `node:${fixture.producer}`, state: "failed", attempt: 1 },
+            ...(consumerStarted
+              ? [
+                  { id: `prepare:${fixture.consumer}`, state: "finished" as const, attempt: 1 },
+                  { id: `node:${fixture.consumer}`, state: "finished" as const, attempt: 1 },
+                  { id: `node:${fixture.other}`, state: "failed" as const, attempt: 1 }
+                ]
+              : [
+                  { id: `prepare:${fixture.consumer}`, state: "pending" as const, attempt: 0 },
+                  { id: `node:${fixture.consumer}`, state: "pending" as const, attempt: 0 }
+                ])
+          ]
+        })
+      });
+      const run = await startRun({ projectRoot: project, runId, env });
+      assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+      fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+      const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+      const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+      const producerReset = new RegExp(`^timetravel .* --node-id node:${fixture.producer} `, "mu");
+      const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+      if (consumerStarted) {
+        assert.doesNotMatch(commands, producerReset);
+        // Another failed task is still retried.
+        assert.match(commands, new RegExp(`^timetravel .* --node-id node:${fixture.other} `, "mu"));
+        assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+        assert.equal(skipped.severity, "warning");
+        assert.match(skipped.message, new RegExp(`${fixture.producer}.*${fixture.consumer}`, "u"));
+      } else {
+        assert.match(commands, producerReset);
+        assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+      }
+    });
+  }
+}
 
 test("resume continues a run-level render failure in place without a no-op rewind", async () => {
   const project = tempProject();

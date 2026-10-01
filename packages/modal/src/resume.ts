@@ -14,6 +14,7 @@ import {
 
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
 import type { TerminalDisposition } from "./terminal-disposition.js";
+import { CHECKPOINT_FAILED_STATUSES } from "./worker-result.js";
 import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
 
 export interface ModalResumeWorkspace {
@@ -55,14 +56,25 @@ export function modalDurableResumeCommand(cliPath: string, runId: string, projec
   return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--retry-failed", "--json"];
 }
 
+/**
+ * `retainedFailures` names the failed tasks `resume --retry-failed` leaves failed because a started
+ * consumer already ran without them (#1231). A terminal run whose only failures are those has
+ * nothing a resume would rerun, and `waitForTerminalRun` would wait for a change that never comes.
+ */
 export function modalDurableRunNeedsResume(
   state: ModalResumeRunState,
   counts: ModalResumeCheckpointCounts,
-  disposition?: TerminalDisposition
+  disposition?: TerminalDisposition,
+  retainedFailures: ReadonlySet<string> = new Set()
 ): boolean {
   if (disposition?.kind === "genuine-task-failures") return false;
   if (!isTerminalRunStatus(state.status)) return true;
-  return counts.failed > 0 || counts.remaining > 0;
+  if (counts.remaining > 0) return true;
+  if (counts.failed === 0) return false;
+  const failedNodeIds = Object.entries(state.nodes ?? {})
+    .filter(([, node]) => node.status !== undefined && CHECKPOINT_FAILED_STATUSES.has(node.status))
+    .map(([nodeId]) => nodeId);
+  return failedNodeIds.length === 0 || failedNodeIds.some((nodeId) => !retainedFailures.has(nodeId));
 }
 
 export function modalDurableRunAdvanced(before: ModalResumeRunState, after: ModalResumeRunState): boolean {

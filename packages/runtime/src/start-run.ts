@@ -655,6 +655,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
+      tasks,
       priorInspection: refreshInspection,
       // Applies the project's current prompts to the unfinished tasks; never fails the resume.
       beforeContinuation: async (context) => {
@@ -693,6 +694,14 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // so it must not re-record status, lease, deadline or Forge guard, or warn
     // about a guard no controller runs with; the resume that starts the next
     // controller does.
+    for (const [producer, consumers] of result.retainedFailures ?? []) {
+      diagnostics.push({
+        code: "WORKFLOW_RETRY_SKIPPED",
+        message: `resume did not retry failed task ${producer}: ${consumers.join(", ")} already ran without it, so a rerun could not reach their outputs and the run stays partial`,
+        severity: "warning",
+        source: "runtime"
+      });
+    }
     if (result.alreadyRunning !== true) {
       diagnostics.push(...forgeGuard.diagnostics);
       recordNativeContinuationState({
