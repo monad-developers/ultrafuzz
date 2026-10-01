@@ -751,7 +751,7 @@ function shouldSkipWorkflowTask(
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
-// Null unless run.friction_log_enabled is set. Agents record entries only through
+// Null unless run.friction_log_enabled is set. Agents are told to record entries only through
 // the generated Frog wrapper, which pins the entry directory and refuses publishing.
 const frictionLog: { instructions: string; entriesPath: string; commandPath: string; wrapper: string } | null =
   __ULTRAFUZZ_FRICTION_LOG__;
@@ -778,8 +778,8 @@ function frictionLogAddDir(task: (typeof taskSpecs)[number]): string[] {
 /**
  * Best effort: a friction log that cannot be prepared is reported, never a preparation failure.
  * Every preparation stages the wrapper and renames it into place, so tasks preparing in parallel
- * never see a partial file and whatever sits at its path, such as a symlink, is replaced rather
- * than followed or left to run.
+ * never see a partial file and any file or symlink at its path is replaced rather than followed
+ * or left to run.
  */
 function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
   const paths = frictionLogPaths(task);

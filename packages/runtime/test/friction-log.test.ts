@@ -93,6 +93,8 @@ test("the friction log command keeps entries in the run when the run root contai
     assert.equal(listed.status, 0, listed.stderr + listed.stdout);
     assert.match(listed.stdout, /colon in the run root/u);
     assert.deepEqual(fs.readdirSync(fixture.target).sort(), [".git", ".ultrafuzz"]);
+    // Frog's Git commands fail against the GIT_DIR the wrapper names; nothing creates it.
+    assert.deepEqual(fs.readdirSync(path.dirname(fixture.command)), ["ultrafuzz-friction-log"]);
   } finally {
     fs.rmSync(fixture.target, { recursive: true, force: true });
   }
@@ -187,7 +189,6 @@ test("the friction log wrapper hands Frog its run's paths, a fenced environment 
       // Git and gh are pointed at paths that do not exist.
       assert.equal(seen.env.GIT_DIR, path.join(runRoot, "friction-bin", "no-git"));
       assert.equal(seen.env.GH_CONFIG_DIR, path.join(runRoot, "friction-bin", "no-gh"));
-      assert.deepEqual(fs.readdirSync(path.dirname(command)), ["ultrafuzz-friction-log"]);
       for (const name of Object.keys(inherited)) assert.equal(seen.env[name], undefined, name);
     }
   } finally {

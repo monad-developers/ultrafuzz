@@ -67,7 +67,7 @@ export function resolveFrogBin(): string {
 
 /**
  * The agent-facing friction log command. It runs the pinned Frog CLI and
- * accepts only `log` and `list` with their local options, so it cannot be used
+ * accepts only `log` and `list` with a few local options, so it cannot be used
  * to publish, update Frog, start its MCP server, or point Frog elsewhere. That
  * guards against misuse by mistake and enforces nothing: an agent can run Frog,
  * or anything else, directly. It pins `--cwd` ahead of every agent argument, so
