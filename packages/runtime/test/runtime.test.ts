@@ -27208,34 +27208,36 @@ test("a pending lifecycle link reconciles split source and target projections fr
 
 // #1258: a run ID the engine already has a run for is refused before planning builds the plan and the
 // execution snapshot, instead of at submission minutes later with a partial run directory left behind.
-test("run refuses a run ID the workflow engine already records before planning anything", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeSmallTopology(project);
-  const runId = "engine-known-run";
-  const env = fakeLifecycleSmithersEnv(project, {
-    inspect: workflowInspect({
+// The pinned runner prints a found run's `inspect --format json` bare; the full-output envelope wraps it.
+for (const shape of ["bare", "enveloped"] as const) {
+  test(`run refuses a run ID the workflow engine already records before planning anything (${shape} inspection)`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `engine-known-run-${shape}`;
+    const inspection = workflowInspect({
       workflowRunId: `ultrafuzz-${runId}`,
       status: "finished",
       state: "succeeded",
       steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    })
+    }) as { data: unknown };
+    const env = fakeLifecycleSmithersEnv(project, { inspect: shape === "bare" ? inspection.data : inspection });
+    // The engine keeps its run records here; `clean` removed the run directory but not the record.
+    fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+    const refused = await startRun({ projectRoot: project, runId, env });
+
+    assert.equal(refused.ok, false);
+    const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+    assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
+    assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
+    assert.doesNotMatch(diagnostic.message, /smithers/iu);
+    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
+    assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
+    assert.doesNotMatch(commands, /^up /mu);
   });
-  // The engine keeps its run records here; `clean` removed the run directory but not the record.
-  fs.writeFileSync(path.join(project, "smithers.db"), "");
-
-  const refused = await startRun({ projectRoot: project, runId, env });
-
-  assert.equal(refused.ok, false);
-  const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
-  assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
-  assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
-  assert.doesNotMatch(diagnostic.message, /smithers/iu);
-  assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
-  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
-  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
-  assert.doesNotMatch(commands, /^up /mu);
-});
+}
 
 test("run asks the engine about its run ID only once the engine has records, and launches a new one", async () => {
   const project = tempProject();
