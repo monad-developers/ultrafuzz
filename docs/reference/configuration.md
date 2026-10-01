@@ -223,7 +223,7 @@ which makes incur print shell completions instead of running the command, sets
 
 The command guards against an agent misusing Frog by mistake and enforces
 nothing. Agents run unsandboxed (see [Security](../security.md)), so
-`<run>/friction` is where agents are told to write, not a boundary, and an
+`<run>/friction` is where the command writes entries, not a boundary, and an
 agent can run Frog, or anything else, directly. Nor does the command remove
 GitHub credentials: Frog falls back to `gh auth token`, and although the
 command points `GH_CONFIG_DIR` at a path that does not exist, gh still reads a

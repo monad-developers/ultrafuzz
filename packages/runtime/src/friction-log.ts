@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 // Run-relative locations. Frog writes entries to
 // `<run>/friction/.agents/friction-log/<id>/friction.md` once Git discovery is
-// fenced off; that is the one run directory agents are told to write. The
+// fenced off, and agents are told to leave that directory to the command. The
 // wrapper sits beside it, and preparation rewrites it before every task.
 // Neither placement stops an agent: agents run unsandboxed (docs/security.md).
 export const FRICTION_LOG_ENTRIES_PATH = "friction";
