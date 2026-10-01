@@ -58,7 +58,12 @@ including Smithers' safety contracts; Ultrafuzz does not inspect provider error
 text. Repeated identical failures do not end the planned chain early; Smithers
 still stops it at a failure it classifies as non-retryable, such as a CLI
 configuration or authentication error, and pauses the run on a provider quota
-limit. Dependency admission is not retried: it re-reads the same producer files,
+limit. A quota-limited attempt, such as a Claude subscription's usage limit, does
+not count against the retry budget; once every attempt in the chain is blocked,
+the run waits as `waiting-quota`, and the run's supervisor resumes it after the
+provider's reset time. `ultrafuzz status` and `ultrafuzz why` name the parked
+nodes and the reset time; a park without one, such as exhausted credit, needs
+`ultrafuzz resume` once credit is restored. Dependency admission is not retried: it re-reads the same producer files,
 so an admission failure, including a file-system or validator error while
 reading them, fails the task without a retry or fallback. The planned chain and
 actual producer are recorded in the task manifest, attempt ledger, and final

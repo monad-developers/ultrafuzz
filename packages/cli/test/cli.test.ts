@@ -2090,8 +2090,10 @@ test("status surfaces quota parking with preserved attempts and the resume remed
   assert.equal(scheduled.code, 0, `${scheduled.stderr}\n${scheduled.stdout}`);
   assert.match(
     scheduled.stdout,
-    /^Quota: 1 node\(s\) parked \(attempts preserved\) — node:erc20-invariants; earliest provider reset 2027-01-15T08:00:00\.000Z$/mu
+    /^Quota: 1 node\(s\) parked \(attempts preserved\) — node:erc20-invariants; earliest provider reset 2027-01-15T08:00:00\.000Z \(in \d+ days\); the run resumes on its own after it$/mu
   );
+  // The parked node runs again after the reset, so progress calls it pending (#82).
+  assert.match(scheduled.stdout, /^Progress: .* \d+ pending \(1 quota-parked\) \/ 0 failed /mu);
   assert.doesNotMatch(scheduled.stdout, /restore credit/u);
 
   // A run with nothing parked renders no Quota line at all.

@@ -348,11 +348,32 @@ export async function getRunHealth(input: {
         throughput: health.throughput,
         state,
         runStartedAt: base.started_at,
-        nowMs: Date.now()
+        nowMs: Date.now(),
+        quotaParked: health.quota?.parked_count ?? 0
       })
     },
     diagnostics
   );
+}
+
+/**
+ * The runner's quota-parking summary for a linked run: `null` when nothing is parked, `undefined`
+ * when the runner's status could not be read. The runner's `why` names no quota state, so `why`
+ * reads it from here (#82).
+ */
+export async function readWorkflowQuota(input: {
+  projectRoot: string;
+  runId: string;
+  evidence: LinkedWorkflowEvidence;
+  env?: Record<string, string | undefined>;
+}): Promise<RunHealthValue["quota"] | undefined> {
+  const snapshot = await runSmithersInspectionCommand({
+    args: ["status", input.evidence.smithersRunId, "--format", "json", "--full-output"],
+    projectRoot: input.projectRoot,
+    env: linkedWorkflowExecutionEnvironment(input.evidence, input.env)
+  });
+  if (!snapshot.ok) return undefined;
+  return parseRunHealth(snapshot.json, input.evidence.smithersRunId, input.runId)?.quota;
 }
 
 /**

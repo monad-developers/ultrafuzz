@@ -952,6 +952,7 @@
                   "waiting-timer",
                   "retry-backoff",
                   "retries-exhausted",
+                  "quota-parked",
                   "stalled",
                   "dependency-failed",
                   "stale-heartbeat",

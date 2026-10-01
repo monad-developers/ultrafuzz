@@ -24,12 +24,14 @@ import {
   type SmithersStreamResult
 } from "./smithers.js";
 import { linkedWorkflowExecutionEnvironment, readLinkedWorkflowEvidence } from "./start-run.js";
+import { readWorkflowQuota } from "./state-export.js";
 import type {
   CancelRunInput,
   CancelRunValue,
   DiagnoseRunValue,
   RunBlocker,
   RunBlockerKind,
+  RunHealthValue,
   RunSnapshot,
   RunSnapshotsValue,
   RunTimelineBranch,
@@ -344,30 +346,88 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
     ]);
   }
   const failed = diagnosis.status === "failed";
-  return runtimeResult<DiagnoseRunValue>(
-    true,
-    {
-      run_id: input.runId,
-      workflow_run_id: evidence.smithersRunId,
-      run_status: runStatus,
-      workflow_status: diagnosis.status,
-      summary: publicRecoveryText(diagnosis.summary, input.runId, failed),
-      current_node_id: diagnosis.currentNodeId,
-      // An unblocker is one whole runner command.
-      blockers: diagnosis.blockers.map((row) =>
-        adaptBlocker(row, ultrafuzzRecoveryCommand(row.unblocker, input.runId, failed))
-      ),
-      // The runner renders `warnings` and `information` in the same operator
-      // section of `why`, so they land in the same public `notes` list rather
-      // than a new field nothing downstream reads. Warnings lead, matching the
-      // runner's own ordering.
-      notes: [...diagnosis.warnings, ...diagnosis.information].map((note) =>
-        publicRecoveryText(note, input.runId, failed)
-      ),
-      generated_at: timestampFromMs(diagnosis.generatedAtMs)
-    },
-    syncDiagnostics
-  );
+  const value: DiagnoseRunValue = {
+    run_id: input.runId,
+    workflow_run_id: evidence.smithersRunId,
+    run_status: runStatus,
+    workflow_status: diagnosis.status,
+    summary: publicRecoveryText(diagnosis.summary, input.runId, failed),
+    current_node_id: diagnosis.currentNodeId,
+    // An unblocker is one whole runner command.
+    blockers: diagnosis.blockers.map((row) =>
+      adaptBlocker(row, ultrafuzzRecoveryCommand(row.unblocker, input.runId, failed))
+    ),
+    // The runner renders `warnings` and `information` in the same operator
+    // section of `why`, so they land in the same public `notes` list rather
+    // than a new field nothing downstream reads. Warnings lead, matching the
+    // runner's own ordering.
+    notes: [...diagnosis.warnings, ...diagnosis.information].map((note) =>
+      publicRecoveryText(note, input.runId, failed)
+    ),
+    generated_at: timestampFromMs(diagnosis.generatedAtMs)
+  };
+  if (diagnosis.status !== "waiting-quota") {
+    return runtimeResult<DiagnoseRunValue>(true, value, syncDiagnostics);
+  }
+  const quota = await readWorkflowQuota({ projectRoot, runId: input.runId, evidence, env: input.env });
+  return runtimeResult<DiagnoseRunValue>(true, describeQuotaParking(value, quota, Date.now()), syncDiagnostics);
+}
+
+/**
+ * Rewrites the runner's diagnosis of a quota-parked run (#82). The runner names no quota state: it
+ * reports each parked node as `retries-exhausted` at its last attempt and suggests a resume, though
+ * the node keeps its attempts and the run's supervisor resumes it once the provider quota resets.
+ * `quota` is the runner's parking summary, `undefined` when it could not be read.
+ */
+export function describeQuotaParking(
+  value: DiagnoseRunValue,
+  quota: RunHealthValue["quota"] | undefined,
+  nowMs: number
+): DiagnoseRunValue {
+  if (value.workflow_status !== "waiting-quota") return value;
+  const parked = new Set(quota?.parked_node_ids ?? []);
+  const resetAtMs = quota?.reset_at_ms ?? null;
+  const resume = `ultrafuzz resume ${value.run_id}`;
+  const until =
+    quota === undefined
+      ? "The provider reset time could not be read; `ultrafuzz status` reports it."
+      : resetAtMs === null
+        ? `The provider reported no reset time, as when credit is exhausted: restore it, then run \`${resume}\`.`
+        : `The run resumes on its own after the provider reset at ${new Date(resetAtMs).toISOString()} (${untilQuotaReset(resetAtMs - nowMs)}).`;
+  const blockers = value.blockers.map((blocker): RunBlocker => {
+    if (blocker.kind !== "retries-exhausted" || (parked.size > 0 && !parked.has(blocker.node_id))) {
+      return blocker;
+    }
+    const lastError = /^All retries exhausted\.\s*(?:Last error: )?(.*)$/su.exec(blocker.reason)?.[1] ?? blocker.reason;
+    return {
+      ...blocker,
+      kind: "quota-parked",
+      reason: `Parked on a provider usage limit with its attempts preserved. ${until}${
+        lastError === "" ? "" : ` Last error: ${lastError}`
+      }`,
+      unblocker: quota !== undefined && resetAtMs !== null ? null : resume,
+      // Quota-limited attempts do not count against the retry budget.
+      attempt: null,
+      max_attempts: null
+    };
+  });
+  const parkedNodes = blockers.filter((blocker) => blocker.kind === "quota-parked").map((blocker) => blocker.node_id);
+  const count = quota?.parked_count ?? parkedNodes.length;
+  return {
+    ...value,
+    summary: `Run is paused on a provider usage limit: ${String(count)} node(s) parked with their attempts preserved. ${until}`,
+    current_node_id: quota?.parked_node_ids[0] ?? parkedNodes[0] ?? value.current_node_id,
+    blockers
+  };
+}
+
+/** How long until a provider quota reset, for operator text. */
+export function untilQuotaReset(ms: number): string {
+  if (ms <= 0) return "already passed";
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `in ${String(minutes)} min`;
+  if (minutes < 48 * 60) return `in ${String(Math.floor(minutes / 60))} h ${String(minutes % 60)} min`;
+  return `in ${String(Math.floor(minutes / (24 * 60)))} days`;
 }
 
 export async function getRunTimeline(input: WorkflowRunQueryInput & { tree?: boolean }) {

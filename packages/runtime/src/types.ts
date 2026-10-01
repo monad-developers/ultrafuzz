@@ -587,14 +587,17 @@ export type RunBlockerKind =
   | "stale-heartbeat"
   | "engine-busy"
   | "approval-decided-resume-required"
-  | "side-effect-boundary-crossed";
+  | "side-effect-boundary-crossed"
+  // Ultrafuzz's own kind: the runner reports a quota-parked node as `retries-exhausted` (#82).
+  | "quota-parked";
 
 export interface RunBlocker {
   kind: RunBlockerKind;
   node_id: string;
   iteration: number | null;
   reason: string;
-  unblocker: string;
+  /** The command that unblocks the node; null when it unblocks on its own. */
+  unblocker: string | null;
   waiting_since: string;
   attempt: number | null;
   max_attempts: number | null;

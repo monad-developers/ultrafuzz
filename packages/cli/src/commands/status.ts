@@ -1,6 +1,6 @@
 import { Args, Command, Flags } from "@oclif/core";
 import { TERMINAL_RUN_STATE_STATUSES } from "@ultrafuzz/artifacts";
-import { getRunHealth, isLiveWorkflowRunStatus, type RunHealthValue } from "@ultrafuzz/runtime";
+import { getRunHealth, isLiveWorkflowRunStatus, untilQuotaReset, type RunHealthValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
@@ -96,7 +96,7 @@ function renderHealth(value: RunHealthValue): string {
     ...renderReportStatusLines(value),
     ...lifecycleDivergenceLines(value),
     `Reason: ${value.reason}`,
-    `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,
+    `Progress: ${String(progress.percent)}% (${String(progress.finished)} finished / ${String(progress.in_progress)} running / ${String(progress.pending)} pending${quotaParkedNote(value)} / ${String(progress.failed)} failed${extraBuckets(value)} / ${String(progress.total)} total)`,
     `ETA: ${renderEta(value.eta)}`,
     `Time on current step: ${renderCurrentStep(value.current_step)}`,
     `Pace: ${value.throughput.recent_finished} finished in the last ${Math.max(1, Math.round(value.throughput.window_ms / 60_000))}m`
@@ -116,15 +116,22 @@ function renderHealth(value: RunHealthValue): string {
 
 const QUOTA_PARKED_NODE_SAMPLE = 3;
 
-/** Parked nodes hold their attempts; say how the operator un-parks them (#677). */
-function renderQuota(quota: NonNullable<RunHealthValue["quota"]>, runId: string): string {
+/** Quota-parked nodes run again after the reset, so the progress line counts them as pending (#82). */
+function quotaParkedNote(value: RunHealthValue): string {
+  return value.quota === null || value.quota.parked_count === 0
+    ? ""
+    : ` (${String(value.quota.parked_count)} quota-parked)`;
+}
+
+/** Parked nodes hold their attempts; say how the operator un-parks them (#677, #82). */
+function renderQuota(quota: NonNullable<RunHealthValue["quota"]>, runId: string, nowMs = Date.now()): string {
   const sample = quota.parked_node_ids.slice(0, QUOTA_PARKED_NODE_SAMPLE);
   const omitted = quota.parked_node_ids.length - sample.length;
   const nodes = sample.length === 0 ? "" : ` — ${sample.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`;
   const remediation =
     quota.reset_at_ms === null
       ? `no provider reset time — provider credit exhausted; restore credit, then run \`ultrafuzz resume ${runId}\``
-      : `earliest provider reset ${new Date(quota.reset_at_ms).toISOString()}`;
+      : `earliest provider reset ${new Date(quota.reset_at_ms).toISOString()} (${untilQuotaReset(quota.reset_at_ms - nowMs)}); the run resumes on its own after it`;
   return `Quota: ${quota.parked_count} node(s) parked (attempts preserved)${nodes}; ${remediation}`;
 }
 

@@ -151,6 +151,33 @@ test("summarizeRunProgress counts failed and skipped nodes as settled progress",
   assert.equal(partial.progress.remaining, 132);
 });
 
+test("summarizeRunProgress counts quota-parked nodes as pending, not failed or settled", () => {
+  // The runner counts a node parked on a provider quota as failed, though it runs again after the
+  // reset (#82). Only parked failures move; a real failure beside them stays failed.
+  const summary = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: 4, failed: 2, pending: 3, total: 9 }),
+    throughput: throughput({ recent_finished: 4, total_finished: 4 }),
+    runStartedAt: "2026-07-31T11:50:00.000Z",
+    nowMs: NOW_MS,
+    quotaParked: 1
+  });
+  assert.equal(summary.progress.failed, 1);
+  assert.equal(summary.progress.pending, 4);
+  assert.equal(summary.progress.remaining, 4);
+  assert.equal(summary.progress.percent, 55);
+  // A parked count larger than the failed count cannot make failures negative.
+  const clamped = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: 2, pending: 3, total: 5 }),
+    throughput: throughput(),
+    nowMs: NOW_MS,
+    quotaParked: 4
+  });
+  assert.equal(clamped.progress.failed, 0);
+  assert.equal(clamped.progress.pending, 3);
+});
+
 test("summarizeRunProgress clamps an inconsistent engine snapshot", () => {
   // Counts arrive from the engine and are only checked for finiteness.
   const over = summarizeRunProgress({

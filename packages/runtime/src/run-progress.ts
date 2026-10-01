@@ -24,8 +24,10 @@ export function summarizeRunProgress(input: {
   state?: RunState;
   runStartedAt?: string;
   nowMs: number;
+  /** Nodes the runner parked on a provider quota limit. */
+  quotaParked?: number;
 }): RunProgressSummary {
-  const progress = runProgress(input.counts);
+  const progress = runProgress(input.counts, input.quotaParked ?? 0);
   const terminal = TERMINAL_RUN_STATE_STATUSES.some((status) => status === input.runStatus);
   return {
     progress,
@@ -42,8 +44,12 @@ export function summarizeRunProgress(input: {
   };
 }
 
-function runProgress(counts: RunHealthCounts): RunHealthProgress {
-  const settled = counts.finished + counts.failed + counts.skipped;
+function runProgress(counts: RunHealthCounts, quotaParked: number): RunHealthProgress {
+  // The runner counts a quota-parked node as failed, but it keeps its attempts and runs again once
+  // the provider quota resets (#82). It is still to do, so it counts as pending, not as settled.
+  const parked = Math.min(Math.max(0, quotaParked), counts.failed);
+  const failed = counts.failed - parked;
+  const settled = counts.finished + failed + counts.skipped;
   const remaining = Math.max(0, counts.total - settled);
   return {
     // Percent and `remaining` must agree on what "done" means: a run whose last
@@ -54,8 +60,8 @@ function runProgress(counts: RunHealthCounts): RunHealthProgress {
     percent: counts.total > 0 ? Math.min(100, Math.max(0, Math.floor((settled / counts.total) * 100))) : 0,
     finished: counts.finished,
     in_progress: counts.in_progress,
-    pending: counts.pending,
-    failed: counts.failed,
+    pending: counts.pending + parked,
+    failed,
     skipped: counts.skipped,
     remaining,
     total: counts.total
