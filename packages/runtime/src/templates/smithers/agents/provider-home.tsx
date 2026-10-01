@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
@@ -8,12 +8,14 @@ const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
     kimi: { env: ["KIMI_CODE_HOME", "KIMI_SHARE_DIR"], relative: ".kimi-code" }
   };
 export function resolveProviderHome(provider: string, configured?: string): string {
-  const selectedRoot = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim();
+  const selectedRoot = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(),
+    // As data-governance.ts reads it. Bun's os.homedir() keeps the HOME its process started with.
+    home = process.env.HOME?.trim() || os.homedir();
   if (configured === undefined && !selectedRoot) {
     const canonical = CANONICAL_HOMES[provider];
     if (canonical !== undefined) {
       const envHome = canonical.env.map((name) => process.env[name]?.trim()).find(Boolean);
-      return prepareProviderHome(envHome ?? path.join(os.homedir(), canonical.relative));
+      return prepareProviderHome(envHome ?? path.join(home, canonical.relative));
     }
   }
   const relative = configured ?? "",
@@ -27,7 +29,8 @@ export function resolveProviderHome(provider: string, configured?: string): stri
       components.some((component) => component === "." || component === ".." || !SAFE_COMPONENT.test(component)))
   )
     throw new Error("agent config_dir must be a safe relative path beneath the Ultrafuzz provider-home root");
-  const root = selectedRoot || defaultProviderRoot();
+  // Directly under HOME: Ubuntu's umask leaves ~/.local, and a project's ~/.ultrafuzz, group writable (#1236).
+  const root = selectedRoot || path.join(home, ".ultrafuzz-provider-homes");
   if (!path.isAbsolute(root)) throw new Error("ULTRAFUZZ_PROVIDER_HOME_ROOT must be an absolute operator-owned path");
   return prepareProviderHome(path.join(prepareProviderHome(root), provider, ...components));
 }
@@ -42,6 +45,7 @@ function prepareProviderHome(candidate: string): string {
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       mkdirSync(current, { mode: 0o700 });
+      chmodSync(current, 0o700);
       assertSafeDirectory(current, false);
     }
   }
@@ -57,8 +61,3 @@ function assertSafeDirectory(candidate: string, checkPermissions = true): void {
   if (checkPermissions && (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0)
     throw new Error("provider-home ancestors cannot be group/world writable");
 }
-const defaultProviderRoot = (): string =>
-  path.join(
-    process.env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state"),
-    "ultrafuzz/provider-homes"
-  );
