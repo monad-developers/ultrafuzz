@@ -7904,6 +7904,7 @@ test("only the preparation before the agent checks its prompt, never the verify 
       "verifyPinnedSubmodulesFromExecutionSnapshot",
       "hydratePinnedSubmodulesFromExecutionSnapshot",
       "preservePinnedSourceProof",
+      "ignoreWorkspaceRuntimeRoots",
       "plannedSchemaBundle",
       "materializePromptSchemas",
       "isSchemaBackedOutput",
