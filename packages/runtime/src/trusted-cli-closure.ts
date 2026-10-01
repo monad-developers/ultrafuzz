@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { isRecord, parseStrictJsonBytes, readRegularFileSnapshot, type RunLayout } from "@ultrafuzz/artifacts";
 
+import { FROG_PACKAGE_NAME } from "./friction-log.js";
 import { SMITHERS_PACKAGE_NAME } from "./smithers-package.js";
 
 const CLOSURE_SCHEMA_VERSION = "ultrafuzz.trusted-cli-closure.v1" as const;
@@ -279,8 +280,14 @@ function collectPackageClosure(cliRoot: string, snapshotModules: ReadonlyMap<str
     const issuer = packages[index]!;
     for (const dependency of packageDependencies(issuer.manifest)) {
       // First-party packages depend on the workflow runner only for lifecycle
-      // commands; the validator launcher never loads it, so it stays out.
-      if (issuer.manifest.name.startsWith("@ultrafuzz/") && dependency.name === SMITHERS_PACKAGE_NAME) continue;
+      // commands; the validator launcher never loads it, so it stays out. So
+      // does Frog: the friction log command runs the Frog of the install that
+      // rendered the workflow, never a copy in the run.
+      if (
+        issuer.manifest.name.startsWith("@ultrafuzz/") &&
+        (dependency.name === SMITHERS_PACKAGE_NAME || dependency.name === FROG_PACKAGE_NAME)
+      )
+        continue;
       const preferred = snapshotModules.get(dependency.name);
       const dependencyRoot = preferred ?? resolvePackageDependency(issuer.root, dependency.name);
       if (dependencyRoot === undefined) {

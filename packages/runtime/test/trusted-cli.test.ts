@@ -845,8 +845,10 @@ test("trusted CLI confines ESM, CommonJS, ancestor, and preload module resolutio
 
 // @ultrafuzz/runtime depends on the workflow runner so lifecycle commands can run
 // the installed one. The validator launcher never loads it, and copying the
-// engine's closure into every run would dwarf the CLI's own.
-test("the trusted CLI closure leaves out the workflow runner a first-party package depends on", () => {
+// engine's closure into every run would dwarf the CLI's own. Frog is the same:
+// the friction log command runs the Frog of the install that rendered the
+// workflow, so a copy, with everything only Frog needs, would never run.
+test("the trusted CLI closure leaves out the workflow runner and Frog a first-party package depends on", () => {
   const root = temporaryRoot("ultrafuzz-trusted-cli-");
   const layout = createRunLayout({ projectRoot: root, runId: "runner-dependency" });
   const source = fakeTransitiveCli(root, JSON.stringify(preflightEnvelope()));
@@ -855,11 +857,17 @@ test("the trusted CLI closure leaves out the workflow runner a first-party packa
   const cliManifest = JSON.parse(fs.readFileSync(cliManifestPath, "utf8")) as { dependencies: Record<string, string> };
   fs.writeFileSync(
     cliManifestPath,
-    `${JSON.stringify({ ...cliManifest, name: "@ultrafuzz/fake-cli", dependencies: { ...cliManifest.dependencies, smthrs: "0.35.0" } })}\n`
+    `${JSON.stringify({ ...cliManifest, name: "@ultrafuzz/fake-cli", dependencies: { ...cliManifest.dependencies, smthrs: "0.35.0", frog: "1.1.0" } })}\n`
   );
-  const runnerRoot = path.join(cliRoot, "node_modules", "smthrs");
-  fs.mkdirSync(runnerRoot, { recursive: true });
-  fs.writeFileSync(path.join(runnerRoot, "package.json"), `${JSON.stringify({ name: "smthrs", version: "0.35.0" })}\n`);
+  for (const manifest of [
+    { name: "smthrs", version: "0.35.0" },
+    { name: "frog", version: "1.1.0", dependencies: { incur: "0.4.25" } },
+    { name: "incur", version: "0.4.25" }
+  ]) {
+    const packageRoot = path.join(cliRoot, "node_modules", manifest.name);
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify(manifest)}\n`);
+  }
 
   prepareTrustedCliEnvironment({ layout, cliEntrypoint: source.entrypoint });
 

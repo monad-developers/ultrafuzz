@@ -68,6 +68,7 @@ import { isPreparedForgeGuardBin } from "./forge-guard.js";
 import {
   FRICTION_LOG_COMMAND_PATH,
   FRICTION_LOG_ENTRIES_PATH,
+  FROG_PACKAGE_NAME,
   frictionLogWrapper,
   resolveFrogBin
 } from "./friction-log.js";
@@ -4097,7 +4098,13 @@ function collectWorkflowExecutionDependencies(input: {
       // A first-party module depends on the runner only for host commands, which
       // run the installed one (installedWorkflowRunner). The sealed engine runs the
       // root runner, so the snapshot never carries a second copy of the engine.
-      if (issuer.id.startsWith("module:") && dependency.name === SMITHERS_PACKAGE_NAME) continue;
+      // Frog likewise: the friction log command runs the installed one
+      // (resolveFrogBin), so a copy here would never run.
+      if (
+        issuer.id.startsWith("module:") &&
+        (dependency.name === SMITHERS_PACKAGE_NAME || dependency.name === FROG_PACKAGE_NAME)
+      )
+        continue;
       const module = modulesByName.get(dependency.name);
       if (module !== undefined) {
         dependencies[dependency.name] = module.id;

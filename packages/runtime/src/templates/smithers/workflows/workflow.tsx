@@ -751,7 +751,7 @@ function shouldSkipWorkflowTask(
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
-// Null unless run.friction_log_enabled is set. Agents record entries only through
+// Null unless run.friction_log_enabled is set. Agents are told to record entries only through
 // the generated Frog wrapper, which pins the entry directory and refuses publishing.
 const frictionLog: { instructions: string; entriesPath: string; commandPath: string; wrapper: string } | null =
   __ULTRAFUZZ_FRICTION_LOG__;
@@ -777,8 +777,9 @@ function frictionLogAddDir(task: (typeof taskSpecs)[number]): string[] {
 
 /**
  * Best effort: a friction log that cannot be prepared is reported, never a preparation failure.
- * The wrapper is replaced atomically, so tasks preparing in parallel never see a partial file, and
- * a wrapper path that is not a regular file is left alone rather than followed.
+ * Every preparation stages the wrapper and renames it into place, so tasks preparing in parallel
+ * never see a partial file and any file or symlink at its path is replaced rather than followed
+ * or left to run.
  */
 function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
   const paths = frictionLogPaths(task);
@@ -786,14 +787,14 @@ function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
   try {
     mkdirSync(paths.directory, { recursive: true, mode: 0o700 });
     mkdirSync(path.dirname(paths.command), { recursive: true, mode: 0o700 });
-    const existing = lstatSync(paths.command, { throwIfNoEntry: false });
-    if (existing !== undefined && !existing.isFile()) {
-      throw new Error("friction log command is not a regular file");
-    }
-    if (existing === undefined || readFileSync(paths.command, "utf8") !== frictionLog.wrapper) {
-      const staged = `${paths.command}.${process.pid}.${randomUUID()}.tmp`;
-      writeFileSync(staged, frictionLog.wrapper, { mode: 0o700, flag: "wx" });
+    const staged = `${paths.command}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(staged, frictionLog.wrapper, { mode: 0o700, flag: "wx" });
+    try {
       renameSync(staged, paths.command);
+    } catch (error) {
+      // A directory at the wrapper path cannot be replaced; leave no staged copy per attempt.
+      rmSync(staged, { force: true });
+      throw error;
     }
   } catch (error) {
     process.stderr.write(
@@ -814,13 +815,15 @@ function renderAgentPrompt(values: {
   frictionLog: { directory: string; command: string } | undefined;
 }): string {
   // The friction instructions follow the fixed boundary. Every task in a run shares one run root,
-  // so they stay inside the prefix all of the run's prompts share.
+  // so they stay inside the prefix all of the run's prompts share. The paths are inserted through
+  // replacer functions, so `$&` or `$$` in a run root is never expanded.
+  const friction = values.frictionLog;
   const frictionLogContext =
-    frictionLog === null || values.frictionLog === undefined
+    frictionLog === null || friction === undefined
       ? ""
       : `\n\n${frictionLog.instructions
-          .replaceAll("{{friction_log_command}}", `'${values.frictionLog.command.replaceAll("'", "'\\''")}'`)
-          .replaceAll("{{friction_log_directory}}", values.frictionLog.directory)}`;
+          .replaceAll("{{friction_log_command}}", () => `'${friction.command.replaceAll("'", "'\\''")}'`)
+          .replaceAll("{{friction_log_directory}}", () => friction.directory)}`;
   const replacements = new Map([
     ["authorized_defensive_security_context", authorizedDefensiveSecurityContext],
     ["untrusted_content_boundary", untrustedContentBoundary + frictionLogContext],

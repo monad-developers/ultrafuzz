@@ -2,20 +2,61 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Run-relative locations. Entries sit in the only friction path agents may write,
-// `<run>/friction/.agents/friction-log/<id>/friction.md`, where Frog anchors them
-// once Git discovery stops at the run root. The wrapper sits beside it, outside
-// every agent-writable directory, so an agent cannot replace it.
+// Run-relative locations. Frog writes entries to
+// `<run>/friction/.agents/friction-log/<id>/friction.md` once Git discovery is
+// fenced off, and agents are told to leave that directory to the command. The
+// wrapper sits beside it, and preparation rewrites it before every task.
+// Neither placement stops an agent: agents run unsandboxed (docs/security.md).
 export const FRICTION_LOG_ENTRIES_PATH = "friction";
 export const FRICTION_LOG_COMMAND_PATH = "friction-bin/ultrafuzz-friction-log";
-
-// Frog publishes with these. Removing them keeps every entry local to the run
-// until an operator reviews it; target findings must never reach GitHub.
-const PUBLISHING_ENVIRONMENT_VARIABLES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"] as const;
 // Frog anchors its log at `git rev-parse --show-toplevel`, and run roots sit
-// inside the target repository. Without the ceiling, Frog would write into the
-// target's root and validate entries against the target's issue forms.
-const GIT_DISCOVERY_ENVIRONMENT_VARIABLES = ["GIT_DIR", "GIT_WORK_TREE"] as const;
+// inside the target repository, so unfenced discovery makes Frog write into the
+// target's root and validate entries against the target's issue forms. With
+// GIT_DIR set, Git does no discovery, and it fails when GIT_DIR names nothing,
+// so Frog uses `--cwd` as its root. GIT_CEILING_DIRECTORIES is no fence: it is a
+// `:`-separated list, so a run root containing `:` is split and is no ceiling.
+const FRICTION_LOG_NO_GIT_DIR_PATH = `${path.posix.dirname(FRICTION_LOG_COMMAND_PATH)}/no-git`;
+// Frog's last GitHub credential source is `gh auth token`. A GH_CONFIG_DIR that
+// names nothing hides a token gh keeps in its config file, but gh also reads
+// the system keyring, so neither this nor unsetting the variables below removes
+// a credential. Frog keeps entries local because no command the wrapper accepts
+// publishes or reads from GitHub.
+const FRICTION_LOG_NO_GH_CONFIG_PATH = `${path.posix.dirname(FRICTION_LOG_COMMAND_PATH)}/no-gh`;
+
+// Frog publishes with these.
+const PUBLISHING_ENVIRONMENT_VARIABLES = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_API_URL"] as const;
+// FROG_DATABASE_URL makes `log` and `list` use that Postgres database instead of
+// the run's files.
+const STORE_ENVIRONMENT_VARIABLES = ["FROG_DATABASE_URL", "FROG_NAMESPACE", "FROG_SCHEMA"] as const;
+// While COMPLETE is set, incur prints shell completions instead of running the
+// command, so `log` would exit 0 without writing an entry.
+const INCUR_COMPLETION_VARIABLE = "COMPLETE";
+// incur, the CLI framework Frog is built on, acts on these wherever they appear
+// in argv (extractBuiltinFlags, incur 0.4.25), even where an option value
+// belongs: `log x --body --mcp` would start Frog's MCP server, which serves
+// `publish`. So none of them is accepted as an option value either.
+const INCUR_BUILTIN_FLAGS = [
+  "--full-output",
+  "--llms",
+  "--llms-full",
+  "--mcp",
+  "--help",
+  "-h",
+  "--update",
+  "--incur-update-check",
+  "--version",
+  "--schema",
+  "--json",
+  "--format",
+  "--filter-output",
+  "--token-limit",
+  "--token-offset",
+  "--token-count"
+] as const;
+
+// The friction log command runs the Frog of the Ultrafuzz install that renders a
+// workflow, so the trusted CLI closure and the execution snapshot skip Frog.
+export const FROG_PACKAGE_NAME = "frog";
 
 /** The pinned Frog CLI's executable, resolved from Ultrafuzz's own install. */
 export function resolveFrogBin(): string {
@@ -29,11 +70,18 @@ export function resolveFrogBin(): string {
 
 /**
  * The agent-facing friction log command. It runs the pinned Frog CLI and
- * accepts only `log` and `list` with their local options, so agents cannot
- * publish, update Frog, start its MCP server, or point it elsewhere. It pins
- * `--cwd` ahead of every agent argument, so no argument can consume or replace
- * it, and it finds the entry directory from its own location, so its bytes are
- * identical for every run and it never depends on inherited environment.
+ * accepts only `log` and `list` with a few local options, so it cannot be used
+ * to publish, update Frog, start its MCP server, or point Frog elsewhere. That
+ * guards against misuse by mistake and enforces nothing: an agent can run Frog,
+ * or anything else, directly. It pins `--cwd` ahead of every agent argument, so
+ * no argument can consume or replace it, and it finds the run from its own
+ * location, so its bytes are identical for every run.
+ *
+ * Frog reads /dev/null as stdin: with a terminal on stdin and stderr, `log`
+ * prompts for a missing title or severity and, without --body, opens $EDITOR
+ * on the entry. incur's update check, which runs when stdout is a terminal,
+ * fetches Frog's latest version from the npm registry in a detached process;
+ * NO_UPDATE_NOTIFIER turns it off.
  */
 export function frictionLogWrapper(nodePath: string, frogBin: string): string {
   return `#!/bin/sh
@@ -53,6 +101,9 @@ value=
 for argument in "$@"; do
   if [ -n "$value" ]; then
     value=
+    case "$argument" in
+      ${INCUR_BUILTIN_FLAGS.join(" | ")}) refuse "$argument is not available inside a run" ;;
+    esac
     continue
   fi
   case "$command $argument" in
@@ -60,7 +111,7 @@ for argument in "$@"; do
       value=1
       continue
       ;;
-    "log --body="* | "log --severity="* | "log --label="* | "log --force" | "log --format="* | "list --format="*)
+    "log --body="* | "log --severity="* | "log --label="* | "log --force")
       continue
       ;;
   esac
@@ -70,10 +121,12 @@ for argument in "$@"; do
 done
 [ -z "$value" ] || refuse "the last option is missing its value"
 run_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, ...GIT_DISCOVERY_ENVIRONMENT_VARIABLES].join(" ")}
-GIT_CEILING_DIRECTORIES=$run_root
-export GIT_CEILING_DIRECTORIES
-exec ${shellQuote(nodePath)} ${shellQuote(frogBin)} "$command" --cwd "$run_root/${FRICTION_LOG_ENTRIES_PATH}" "$@"
+unset ${[...PUBLISHING_ENVIRONMENT_VARIABLES, ...STORE_ENVIRONMENT_VARIABLES, INCUR_COMPLETION_VARIABLE, "GIT_WORK_TREE"].join(" ")}
+GIT_DIR=$run_root/${FRICTION_LOG_NO_GIT_DIR_PATH}
+GH_CONFIG_DIR=$run_root/${FRICTION_LOG_NO_GH_CONFIG_PATH}
+NO_UPDATE_NOTIFIER=1
+export GIT_DIR GH_CONFIG_DIR NO_UPDATE_NOTIFIER
+exec ${shellQuote(nodePath)} ${shellQuote(frogBin)} "$command" --cwd "$run_root/${FRICTION_LOG_ENTRIES_PATH}" "$@" </dev/null
 `;
 }
 

@@ -202,31 +202,61 @@ exits through the normal task command path, so its diagnostics remain task
 evidence without applying the limit to the workflow controller.
 
 The friction log is disabled by default. With `friction_log_enabled = true`,
-every agent task may record Ultrafuzz, tooling, or instruction roadblocks with
-[Frog](https://github.com/wevm/frog), pinned as a dependency of
-`@ultrafuzz/runtime`. Agents run `<run>/friction-bin/ultrafuzz-friction-log`,
-which accepts only `frog log` and `frog list` with their local options and
-refuses publishing, `--update`, `--mcp`, `--cwd`, and `--target`. It pins
-Frog's directory to `<run>/friction` and stops Git discovery at the run root,
-so entries land under
-`<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md` and
-never in the target repository. It also removes `GITHUB_TOKEN`, `GH_TOKEN`,
-and `GITHUB_API_URL` before Frog runs.
+every agent task is told to record Ultrafuzz, tooling, or instruction
+roadblocks with [Frog](https://github.com/wevm/frog), pinned as a dependency of
+`@ultrafuzz/runtime`, through `<run>/friction-bin/ultrafuzz-friction-log`. That
+command runs the Frog of the Ultrafuzz install that rendered the workflow. It
+accepts only `frog log`, with `--body`, `--severity`, `--label`, `--force` and
+`--format`, and `frog list`, with `--format`, and refuses every other command
+and option, such as publishing, `--update`, `--mcp`, `--cwd` and `--target`.
+It also refuses the built-in flags of incur, Frog's CLI framework, such as
+`--mcp` and `--help`, where an option value belongs, because incur acts on them
+anywhere on the command line. It points Frog at `<run>/friction` and sets
+`GIT_DIR` to a path that does not exist, so Git discovery never reaches the
+target repository and Frog writes entries to
+`<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md`. It
+unsets `GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_API_URL`, Frog's Postgres store
+settings (`FROG_DATABASE_URL`, `FROG_NAMESPACE`, `FROG_SCHEMA`) and `COMPLETE`,
+which makes incur print shell completions instead of running the command, sets
+`NO_UPDATE_NOTIFIER=1` so incur skips its update check, and gives Frog
+`/dev/null` as stdin, so Frog never prompts or opens an editor.
 
-Each task resolves both paths from its own run root and creates them during
-preparation. Agents get write access to `<run>/friction` only, never to the
-command's directory. A friction log that cannot be prepared is reported on the
-workflow's stderr and never fails the task. Agents are told to continue their
-task when a `frog` command fails and never to edit entries by hand, because
-Frog refuses every later entry while one entry is malformed.
+The command guards against an agent misusing Frog by mistake and enforces
+nothing. Agents run unsandboxed (see [Security](../security.md)), so
+`<run>/friction` is where the command writes entries, not a boundary, and an
+agent can run Frog, or anything else, directly. Nor does the command remove
+GitHub credentials: Frog falls back to `gh auth token`, and although the
+command points `GH_CONFIG_DIR` at a path that does not exist, gh still reads a
+token kept in the system keyring. What keeps entries unpublished is that no
+command the wrapper accepts publishes or reads from GitHub, and that agents are
+told never to publish them.
 
-Frog is installed and sealed with the runtime whether or not the friction log
-is enabled. A disabled run renders byte-identical prompts.
+Every task preparation creates `<run>/friction` and rewrites the command,
+replacing any file or symlink at its path. A friction log that cannot be
+prepared is reported on the workflow's stderr and never fails the task.
+Agents are told to continue their task when a command fails, and never to
+create, edit, or delete anything under `<run>/friction` themselves.
 
-Entries stay local. Review them before publishing anything, because they can
-describe private targets. List them with
-`GIT_CEILING_DIRECTORIES=<run> npx frog list --cwd <run>/friction`, or read the
-Markdown files directly.
+Frog is installed with the runtime whether or not the friction log is
+enabled, but runs never copy it: the trusted CLI closure and the execution
+snapshot leave it out. A disabled run renders byte-identical prompts.
+
+Ultrafuzz never publishes entries. They are free-form agent text that the
+artifact secret scan does not cover, and they can describe private targets, so
+check them for credentials, such as RPC URLs with API keys, before publishing
+anything. Read the Markdown files under `<run>/friction/.agents/friction-log/`
+directly. To list them with Frog, run the Frog pinned in the Ultrafuzz
+checkout, not one from the target checkout, with Git discovery fenced off:
+
+```bash
+GIT_DIR=/nonexistent node /path/to/ultrafuzz/packages/runtime/node_modules/frog/dist/bin.js \
+  list --cwd /path/to/target/.ultrafuzz/runs/<run-id>/friction
+```
+
+Never use a bare `npx frog`, which can run the target's own
+`node_modules/.bin/frog` or fetch an unpinned Frog. Frog refuses every `log`
+and `list` while one entry is malformed, for example after an edit by hand; to
+recover, delete that entry's directory.
 
 The agent instructions are one paragraph appended after the shared trust
 boundary. Their only variables are the command and entry directory, which are

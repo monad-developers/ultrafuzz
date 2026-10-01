@@ -11623,11 +11623,14 @@ nodes:
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  // A disabled friction log must leave every rendered prompt byte-identical.
-  assert.match(
-    workflowSource,
-    /const frictionLog: \{ instructions: string; entriesPath: string; commandPath: string; wrapper: string \} \| null =\s*null;/u
-  );
+  // The friction log value the compiler sealed into a workflow.
+  const sealedFrictionLog = (source: string): unknown => {
+    const value = /\nconst frictionLog\b[^=]*=\s*(null|\{.*\});/u.exec(source)?.[1];
+    assert.ok(value !== undefined, "the workflow seals no friction log value");
+    return JSON.parse(value) as unknown;
+  };
+  // A disabled run seals none, so its prompts carry no friction instructions.
+  assert.equal(sealedFrictionLog(workflowSource), null);
   const frictionPlan = await planRun({ projectRoot: project, runId: "group-timeout-friction", env: {} });
   assert.ok(frictionPlan.ok && frictionPlan.value !== undefined, JSON.stringify(frictionPlan.diagnostics));
   const frictionRun = frictionPlan.value;
@@ -11639,20 +11642,16 @@ nodes:
     workflowName: "ultrafuzz-group-timeout",
     renderedPrompts: frictionRun.rendered_prompts
   });
-  const frictionLog =
-    /const frictionLog: \{ instructions: string; entriesPath: string; commandPath: string; wrapper: string \} \| null =\s*(\{.*\});/u.exec(
-      fs.readFileSync(frictionCompiled.workflowPath, "utf8")
-    )?.[1];
-  assert.ok(frictionLog !== undefined);
+  const frictionLog = sealedFrictionLog(fs.readFileSync(frictionCompiled.workflowPath, "utf8")) as { wrapper: string };
   // The sealed workflow carries the instructions, run-relative paths and the pinned Frog wrapper,
   // never a run's absolute path: each task resolves both paths from its own run root.
-  assert.deepEqual(JSON.parse(frictionLog), {
+  assert.deepEqual(frictionLog, {
     instructions: loadAgentPreambleTemplate("friction-log"),
     entriesPath: "friction",
     commandPath: "friction-bin/ultrafuzz-friction-log",
     wrapper: frictionLogWrapper(process.execPath, resolveFrogBin())
   });
-  assert.ok(!(JSON.parse(frictionLog) as { wrapper: string }).wrapper.includes(frictionRun.layout.root));
+  assert.ok(!frictionLog.wrapper.includes(frictionRun.layout.root));
   // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
   // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock
   // but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted deadline
@@ -12262,10 +12261,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{skipAgent \? undefined : agentForTask\(task, fullTaskPrompt\)\}/);
-  assert.match(
-    workflowSource,
-    /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs, \.\.\.frictionLogAddDir\(task\)\]/u
-  );
+  assert.match(workflowSource, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\b/u);
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
@@ -19111,13 +19107,19 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
   assert.equal(fs.existsSync(injectedMarker), false);
   // `@ultrafuzz/runtime` depends on the runner only for host commands, which run
   // the installed one; following that edge would seal a second engine closure.
+  // Frog likewise runs only from the install that rendered the workflow.
   assert.ok(run.value);
   const dependencyMap = JSON.parse(
     fs.readFileSync(path.join(run.value.run_root, "smithers", "execution-dependencies.json"), "utf8")
-  ) as { issuers: Array<{ id: string; dependencies: Record<string, string> }> };
+  ) as { packages: Array<{ name: string }>; issuers: Array<{ id: string; dependencies: Record<string, string> }> };
   const runtimeIssuer = dependencyMap.issuers.find((issuer) => issuer.id === "module:@ultrafuzz/runtime");
   assert.ok(runtimeIssuer, JSON.stringify(dependencyMap.issuers.map((issuer) => issuer.id)));
   assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "smthrs"), false);
+  assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "frog"), false);
+  assert.equal(
+    dependencyMap.packages.some((entry) => entry.name === "frog"),
+    false
+  );
   {
     const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
       missing = await startRun({
