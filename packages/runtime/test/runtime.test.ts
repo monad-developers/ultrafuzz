@@ -3563,7 +3563,11 @@ test("non-force init refreshes historical and customized adapters to the package
   const refreshed = initProject({ projectRoot: project });
 
   assert.equal(refreshed.ok, true, JSON.stringify(refreshed.diagnostics));
-  assert.deepEqual(refreshed.diagnostics, []);
+  // Only the advice to commit the project files (#1226): no warning or error.
+  assert.deepEqual(
+    refreshed.diagnostics.map(({ code, severity }) => [code, severity]),
+    [["INIT_COMMIT_PROJECT_FILES", "info"]]
+  );
   // Plan admits only the packaged closure, so plain init restores all of it
   // while every project-owned file keeps its customization.
   assert.doesNotThrow(() => inspectControllerSource(project));
