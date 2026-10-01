@@ -8534,6 +8534,8 @@ test("agent failure normalization preserves only validated Smithers recovery con
 });
 
 test("agent failure normalization keeps an agent's stated failure beside the message, redacted", async () => {
+  // The normalizer redacts the values of credential-named variables in its
+  // environment, such as this one, and never reads a task's agentCredentialEnv.
   const credentialName = "ULTRAFUZZ_TEST_STATED_FAILURE_CREDENTIAL";
   const credential = "stated failure credential value";
   await withEnvironment({ [credentialName]: credential }, async () => {
@@ -8542,8 +8544,7 @@ test("agent failure normalization keeps an agent's stated failure beside the mes
       Object.assign(new Error("Claude run failed"), {
         code: "AGENT_CLI_ERROR",
         details: { agentStatedFailure: stated }
-      }),
-      { agentChain: [{}], execution: { agentCredentialEnv: [credentialName] } }
+      })
     );
     assert.equal(normalized.message, "Claude run failed");
     assert.equal("code" in normalized, false);
