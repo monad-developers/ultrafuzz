@@ -14,8 +14,6 @@ type ClaudeOutputInterpreter = ReturnType<SmithersClaudeCodeAgent["createOutputI
 type ClaudeGenerateOptions = Parameters<SmithersClaudeCodeAgent["generate"]>[0];
 
 const GENERIC_CLAUDE_FAILURE = "Claude run failed";
-// Bounds the controller's redaction, which scans the whole text before its 1,000-byte cap.
-const MAX_STATED_FAILURE_LENGTH = 16_384;
 
 // Shared by ClaudeAgent and DeepSeekAgent, which both run Claude Code.
 export class StatedFailureClaudeCodeAgent extends SmithersClaudeCodeAgent {
@@ -124,23 +122,10 @@ function claudeResultText(line: string): string | undefined {
   try {
     const result: unknown = JSON.parse(line)?.result;
     const text = typeof result === "string" ? result.trim() : "";
-    return text === "" ? undefined : boundedStatedFailure(text);
+    return text === "" ? undefined : text;
   } catch {
     return undefined;
   }
-}
-
-// The controller redacts only the text it receives, and part of a secret may
-// no longer match its pattern there. So the cut drops the token it would split
-// and a PEM block it leaves without an END line.
-function boundedStatedFailure(text: string): string | undefined {
-  if (text.length <= MAX_STATED_FAILURE_LENGTH) return text;
-  let kept = text.slice(0, MAX_STATED_FAILURE_LENGTH);
-  if (/\S/u.test(text.charAt(MAX_STATED_FAILURE_LENGTH))) kept = kept.replace(/(?<!\S)\S+$/u, "");
-  const block = kept.lastIndexOf("-----BEGIN");
-  if (block >= 0 && !/-----END [A-Z0-9 ]+-----/u.test(kept.slice(block))) kept = kept.slice(0, block);
-  kept = kept.trimEnd();
-  return kept === "" ? undefined : kept;
 }
 
 function attachStatedFailure(error: Error, stated: string): void {
