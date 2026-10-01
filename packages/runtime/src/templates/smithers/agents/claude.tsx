@@ -13,9 +13,10 @@ type ClaudeCommand = Awaited<ReturnType<SmithersClaudeCodeAgent["buildCommand"]>
 type ClaudeOutputInterpreter = ReturnType<SmithersClaudeCodeAgent["createOutputInterpreter"]>;
 type ClaudeGenerateOptions = Parameters<SmithersClaudeCodeAgent["generate"]>[0];
 
-export const GENERIC_CLAUDE_FAILURE = "Claude run failed";
+const GENERIC_CLAUDE_FAILURE = "Claude run failed";
 
-export class CompatibleClaudeCodeAgent extends SmithersClaudeCodeAgent {
+// Shared by ClaudeAgent and DeepSeekAgent, which both run Claude Code.
+export class StatedFailureClaudeCodeAgent extends SmithersClaudeCodeAgent {
   // Smithers reports a failed result without an `error` field as "Claude run
   // failed" and drops the `result` text in which Claude Code states the cause,
   // such as a contended OAuth refresh (#1084). Smithers classifies the thrown
@@ -49,7 +50,9 @@ export class CompatibleClaudeCodeAgent extends SmithersClaudeCodeAgent {
       throw error;
     }
   }
+}
 
+export class CompatibleClaudeCodeAgent extends StatedFailureClaudeCodeAgent {
   override async buildCommand(params: ClaudeCommandParams): Promise<ClaudeCommand> {
     this.opts.settingSources = "user";
     const command = await super.buildCommand(params);
@@ -115,7 +118,7 @@ function readClaudeAuthConfig(): ClaudeAuthConfig {
   };
 }
 
-export function claudeResultText(line: string): string | undefined {
+function claudeResultText(line: string): string | undefined {
   try {
     const result: unknown = JSON.parse(line)?.result;
     return typeof result === "string" && result.trim() !== "" ? result.trim() : undefined;
@@ -124,7 +127,7 @@ export function claudeResultText(line: string): string | undefined {
   }
 }
 
-export function attachStatedFailure(error: Error, stated: string): void {
+function attachStatedFailure(error: Error, stated: string): void {
   try {
     const details: unknown = Reflect.get(error, "details");
     Reflect.set(error, "details", {
