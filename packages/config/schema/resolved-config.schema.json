@@ -131,6 +131,9 @@
         "forgeGuardEnabled": {
           "type": "boolean"
         },
+        "frictionLogEnabled": {
+          "type": "boolean"
+        },
         "forgeVmemLimitKb": {
           "$ref": "#/$defs/positiveInteger"
         },

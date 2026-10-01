@@ -65,6 +65,12 @@ import {
   loadPackagedControllerSource
 } from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
+import {
+  FRICTION_LOG_COMMAND_PATH,
+  FRICTION_LOG_ENTRIES_PATH,
+  frictionLogWrapper,
+  resolveFrogBin
+} from "./friction-log.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
 import {
@@ -7997,6 +8003,20 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       renderAgentPreambleTemplate("authorized-defensive-security-context")
     ),
     __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
+    // Null unless run.friction_log_enabled is set. The workflow resolves the entry
+    // directory and the Frog wrapper from each task's own run root, so continuation
+    // never depends on inherited environment and a disabled run renders
+    // byte-identical prompts.
+    __ULTRAFUZZ_FRICTION_LOG__: JSON.stringify(
+      config.run.frictionLogEnabled === true
+        ? {
+            instructions: loadAgentPreambleTemplate("friction-log"),
+            entriesPath: FRICTION_LOG_ENTRIES_PATH,
+            commandPath: FRICTION_LOG_COMMAND_PATH,
+            wrapper: frictionLogWrapper(process.execPath, resolveFrogBin())
+          }
+        : null
+    ),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
     __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),

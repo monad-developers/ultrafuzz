@@ -27,6 +27,7 @@ keep_workspaces = false
 forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912
 forge_rayon_threads = 1
+friction_log_enabled = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
 workflow_deadline_seconds = 86400
@@ -121,6 +122,7 @@ empty path components, and dot components fail validation.
 | `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
 | `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
 | `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
+| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local friction log.           |
 | `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
 | `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
 | `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).    |
@@ -198,6 +200,38 @@ a `FORGE_GUARD_INACTIVE` warning. Set
 `forge_vmem_limit_kb` for intentionally larger jobs. A limited Forge process
 exits through the normal task command path, so its diagnostics remain task
 evidence without applying the limit to the workflow controller.
+
+The friction log is disabled by default. With `friction_log_enabled = true`,
+every agent task may record Ultrafuzz, tooling, or instruction roadblocks with
+[Frog](https://github.com/wevm/frog), pinned as a dependency of
+`@ultrafuzz/runtime`. Agents run `<run>/friction-bin/ultrafuzz-friction-log`,
+which accepts only `frog log` and `frog list` with their local options and
+refuses publishing, `--update`, `--mcp`, `--cwd`, and `--target`. It pins
+Frog's directory to `<run>/friction` and stops Git discovery at the run root,
+so entries land under
+`<run>/friction/.agents/friction-log/<YYYYMMDDHHMMSS>-<slug>/friction.md` and
+never in the target repository. It also removes `GITHUB_TOKEN`, `GH_TOKEN`,
+and `GITHUB_API_URL` before Frog runs.
+
+Each task resolves both paths from its own run root and creates them during
+preparation. Agents get write access to `<run>/friction` only, never to the
+command's directory. A friction log that cannot be prepared is reported on the
+workflow's stderr and never fails the task. Agents are told to continue their
+task when a `frog` command fails and never to edit entries by hand, because
+Frog refuses every later entry while one entry is malformed.
+
+Frog is installed and sealed with the runtime whether or not the friction log
+is enabled. A disabled run renders byte-identical prompts.
+
+Entries stay local. Review them before publishing anything, because they can
+describe private targets. List them with
+`GIT_CEILING_DIRECTORIES=<run> npx frog list --cwd <run>/friction`, or read the
+Markdown files directly.
+
+The agent instructions are one paragraph appended after the shared trust
+boundary. Their only variables are the command and entry directory, which are
+the same for every task in a run, so enabled runs keep them inside the prompt
+prefix all of the run's tasks share.
 
 Every submitted workflow starts a run-scoped recovery supervisor. The
 supervisor renews controller ownership through runner heartbeats and uses an

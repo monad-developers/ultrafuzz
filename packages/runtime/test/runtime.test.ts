@@ -61,6 +61,7 @@ import {
   resolveConfig,
   serializeResolvedConfigJsonBytes
 } from "@ultrafuzz/config";
+import { loadAgentPreambleTemplate } from "@ultrafuzz/prompts";
 import {
   CACHE_MANIFEST_FILE,
   REFERENCE_CACHE_SCHEMA_VERSION,
@@ -113,6 +114,7 @@ import {
   type CompiledSmithersDynamicGroup,
   type CompiledSmithersTask
 } from "../src/smithers.js";
+import { frictionLogWrapper, resolveFrogBin } from "../src/friction-log.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import {
@@ -11621,6 +11623,36 @@ nodes:
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  // A disabled friction log must leave every rendered prompt byte-identical.
+  assert.match(
+    workflowSource,
+    /const frictionLog: \{ instructions: string; entriesPath: string; commandPath: string; wrapper: string \} \| null =\s*null;/u
+  );
+  const frictionPlan = await planRun({ projectRoot: project, runId: "group-timeout-friction", env: {} });
+  assert.ok(frictionPlan.ok && frictionPlan.value !== undefined, JSON.stringify(frictionPlan.diagnostics));
+  const frictionRun = frictionPlan.value;
+  const frictionCompiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: { ...frictionRun.resolved_config, run: { ...frictionRun.resolved_config.run, frictionLogEnabled: true } },
+    graph: frictionRun.expanded_graph,
+    runLayout: frictionRun.layout,
+    workflowName: "ultrafuzz-group-timeout",
+    renderedPrompts: frictionRun.rendered_prompts
+  });
+  const frictionLog =
+    /const frictionLog: \{ instructions: string; entriesPath: string; commandPath: string; wrapper: string \} \| null =\s*(\{.*\});/u.exec(
+      fs.readFileSync(frictionCompiled.workflowPath, "utf8")
+    )?.[1];
+  assert.ok(frictionLog !== undefined);
+  // The sealed workflow carries the instructions, run-relative paths and the pinned Frog wrapper,
+  // never a run's absolute path: each task resolves both paths from its own run root.
+  assert.deepEqual(JSON.parse(frictionLog), {
+    instructions: loadAgentPreambleTemplate("friction-log"),
+    entriesPath: "friction",
+    commandPath: "friction-bin/ultrafuzz-friction-log",
+    wrapper: frictionLogWrapper(process.execPath, resolveFrogBin())
+  });
+  assert.ok(!(JSON.parse(frictionLog) as { wrapper: string }).wrapper.includes(frictionRun.layout.root));
   // The exact bytes matter twice over: this block is sealed into the generated workflow, and the
   // deadline recipe is the only thing that makes the budget checkable by an agent that has no clock
   // but does have a shell (#672/#677). Asserting the literal keeps a reworded or deleted deadline
@@ -12230,7 +12262,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{skipAgent \? undefined : agentForTask\(task, fullTaskPrompt\)\}/);
-  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.dependencyArtifactDirs\]/);
+  assert.match(
+    workflowSource,
+    /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs, \.\.\.frictionLogAddDir\(task\)\]/u
+  );
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);

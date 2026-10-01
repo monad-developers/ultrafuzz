@@ -4,7 +4,7 @@
 // project-agents: .smithers/agents
 /** @jsxImportSource smthrs */
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -12,9 +12,11 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
-  unlinkSync
+  unlinkSync,
+  writeFileSync
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -749,15 +751,79 @@ function shouldSkipWorkflowTask(
 const agentPromptTemplate = __ULTRAFUZZ_AGENT_PROMPT_TEMPLATE__;
 const authorizedDefensiveSecurityContext = __ULTRAFUZZ_AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT__;
 const untrustedContentBoundary = __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__;
+// Null unless run.friction_log_enabled is set. Agents record entries only through
+// the generated Frog wrapper, which pins the entry directory and refuses publishing.
+const frictionLog: { instructions: string; entriesPath: string; commandPath: string; wrapper: string } | null =
+  __ULTRAFUZZ_FRICTION_LOG__;
+
+/**
+ * The run friction log's entry directory and command for a task, derived from the task's own run
+ * root rather than inherited environment so every continuation resolves the same paths.
+ */
+function frictionLogPaths(task: (typeof taskSpecs)[number]): { directory: string; command: string } | undefined {
+  if (frictionLog === null) return undefined;
+  const runRoot = path.resolve(process.cwd(), task.runRoot);
+  return {
+    directory: path.join(runRoot, ...frictionLog.entriesPath.split("/")),
+    command: path.join(runRoot, ...frictionLog.commandPath.split("/"))
+  };
+}
+
+/** The friction entry directory as an agent write root; the command's directory is never one. */
+function frictionLogAddDir(task: (typeof taskSpecs)[number]): string[] {
+  const paths = frictionLogPaths(task);
+  return paths === undefined ? [] : [paths.directory];
+}
+
+/**
+ * Best effort: a friction log that cannot be prepared is reported, never a preparation failure.
+ * The wrapper is replaced atomically, so tasks preparing in parallel never see a partial file, and
+ * a wrapper path that is not a regular file is left alone rather than followed.
+ */
+function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
+  const paths = frictionLogPaths(task);
+  if (frictionLog === null || paths === undefined) return;
+  try {
+    mkdirSync(paths.directory, { recursive: true, mode: 0o700 });
+    mkdirSync(path.dirname(paths.command), { recursive: true, mode: 0o700 });
+    const existing = lstatSync(paths.command, { throwIfNoEntry: false });
+    if (existing !== undefined && !existing.isFile()) {
+      throw new Error("friction log command is not a regular file");
+    }
+    if (existing === undefined || readFileSync(paths.command, "utf8") !== frictionLog.wrapper) {
+      const staged = `${paths.command}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(staged, frictionLog.wrapper, { mode: 0o700, flag: "wx" });
+      renameSync(staged, paths.command);
+    }
+  } catch (error) {
+    process.stderr.write(
+      `ultrafuzz: friction log unavailable for ${task.attemptId}: ${error instanceof Error ? error.message : String(error)}\n`
+    );
+  }
+}
+
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
 const governedSource = readGovernedSource();
 
-function renderAgentPrompt(values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }): string {
+function renderAgentPrompt(values: {
+  runtimeContext: string;
+  operatorPrompt: string;
+  taskPrompt: string;
+  frictionLog: { directory: string; command: string } | undefined;
+}): string {
+  // The friction instructions follow the fixed boundary. Every task in a run shares one run root,
+  // so they stay inside the prefix all of the run's prompts share.
+  const frictionLogContext =
+    frictionLog === null || values.frictionLog === undefined
+      ? ""
+      : `\n\n${frictionLog.instructions
+          .replaceAll("{{friction_log_command}}", `'${values.frictionLog.command.replaceAll("'", "'\\''")}'`)
+          .replaceAll("{{friction_log_directory}}", values.frictionLog.directory)}`;
   const replacements = new Map([
     ["authorized_defensive_security_context", authorizedDefensiveSecurityContext],
-    ["untrusted_content_boundary", untrustedContentBoundary],
+    ["untrusted_content_boundary", untrustedContentBoundary + frictionLogContext],
     ["runtime_context", values.runtimeContext],
     ["operator_prompt", values.operatorPrompt],
     ["task_prompt", values.taskPrompt]
@@ -2321,8 +2387,9 @@ function baseAgentForProfile(
     // authority remains in controller memory or the run's selection record.
     // Dependency roots are admitted only after preparation has authenticated
     // their verifier markers. The metadata-only instance created while the
-    // workflow is rendered receives no dependency access.
-    addDir: [task.artifactDir, ...dependencyArtifactDirs]
+    // workflow is rendered receives no dependency access. The run friction log,
+    // when enabled, is the only run-level root and holds no task inputs.
+    addDir: [task.artifactDir, ...dependencyArtifactDirs, ...frictionLogAddDir(task)]
   });
   if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
     throw new Error(`agent factory returned no agents: ${profile.agentRef}`);
@@ -3109,6 +3176,7 @@ function prepareArtifactMirror(
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
   preparationStep(task.attemptId, "create-artifact-mirror", () => mkdirSync(candidate, { recursive: true }));
+  prepareFrictionLog(task);
   const mirrorRoot = preparationStep(task.attemptId, "resolve-artifact-mirror", () => realpathSync(candidate));
   if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
@@ -9104,7 +9172,8 @@ export default smithers((ctx) => {
           const fullTaskPrompt = renderAgentPrompt({
             runtimeContext: task.runtimeContext,
             operatorPrompt,
-            taskPrompt: promptForTask(task, inputTask)
+            taskPrompt: promptForTask(task, inputTask),
+            frictionLog: frictionLogPaths(task)
           });
           const baseBranch = worktreeBaseBranch(task);
           return (

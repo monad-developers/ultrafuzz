@@ -134,6 +134,7 @@ export default tseslint.config(
           "AUTHORIZED_DEFENSIVE_SECURITY_CONTEXT",
           "COMPILED_TASKS",
           "DYNAMIC_GROUPS",
+          "FRICTION_LOG",
           "MAX_DYNAMIC_NODES",
           "RUN_ID_LITERAL",
           "RUN_ROOT_RELATIVE",

@@ -299,6 +299,7 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
         forgeGuardEnabled: z.boolean(),
         forgeVmemLimitKb: positiveIntegerSchema,
         forgeRayonThreads: positiveIntegerSchema,
+        frictionLogEnabled: z.boolean().optional(),
         workspaceMode: z.literal("git-worktree"),
         defaultTimeoutSeconds: timeoutSecondsSchema,
         workflowDeadlineSeconds: workflowDeadlineSecondsSchema,
