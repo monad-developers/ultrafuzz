@@ -92,12 +92,23 @@ interface StubConfig {
   holdPath: string;
   holdNode: string;
   promptMarker: string;
+  /** Fail the first `calls` calls for `node` the way Codex does when its provider stream drops (#676). */
+  streamDisconnect?: { node: string; calls: number; message: string };
 }
+
+/**
+ * What codex-cli 0.144.4 prints under `exec --json` when its provider stream drops and stays down:
+ * one `Reconnecting... n/5` error per stream retry (`stream_max_retries` defaults to 5), the final
+ * error, and `turn.failed`, after which it exits 1. Captured from the real binary against a local
+ * Responses endpoint that cut each stream after `response.created`.
+ */
+const CODEX_STREAM_DISCONNECT =
+  "stream disconnected before completion: Transport error: network error: error decoding response body";
 
 interface AgentCall {
   node: string;
   pid: number;
-  event: "started" | "held" | "completed" | "failed";
+  event: "started" | "held" | "completed" | "failed" | "disconnected";
   error?: string;
   /** Whether the prompt the engine delivered carries `PROMPT_EDIT_MARKER`. */
   edited?: boolean;
@@ -108,9 +119,10 @@ interface AgentCall {
  * -`, prompt on stdin). It writes the `text@1` and `report@3` outputs that the prompt's output
  * contract names, renders the final report's markdown with the `ultrafuzz report render` command
  * the prompt gives, and prints the Codex JSONL the engine parses. While `holdPath` exists, it holds
- * `holdNode` open for up to 10 minutes, so the test can kill the controller in the middle of it. It
- * fails, and logs why, when the prompt no longer has the shape it parses. The function is
- * serialized into the binary, so it may use only globals.
+ * `holdNode` open for up to 10 minutes, so the test can kill the controller in the middle of it. With
+ * `streamDisconnect`, it leaves partial work in the worktree and then fails that node's first calls as
+ * Codex does when its provider stream drops. It fails, and logs why, when the prompt no longer has the
+ * shape it parses. The function is serialized into the binary, so it may use only globals.
  */
 function stubCodex(config: StubConfig): void {
   const fs = process.getBuiltinModule("node:fs");
@@ -123,6 +135,29 @@ function stubCodex(config: StubConfig): void {
   const log = (event: AgentCall["event"], error?: string): void =>
     fs.appendFileSync(config.logPath, `${JSON.stringify({ node, pid: process.pid, event, error, edited })}\n`);
   log("started");
+  const disconnect = config.streamDisconnect;
+  if (disconnect !== undefined && node === disconnect.node) {
+    const calls = fs
+      .readFileSync(config.logPath, "utf8")
+      .split("\n")
+      .filter((line) => line !== "" && (JSON.parse(line) as AgentCall).node === node)
+      .filter((line) => (JSON.parse(line) as AgentCall).event === "started").length;
+    if (calls <= disconnect.calls) {
+      // Work the agent did before the drop, which a retry would have to redo.
+      fs.writeFileSync(`partial-work-${node}.txt`, "reasoning done before the stream dropped\n");
+      const emit = (event: object): boolean => process.stdout.write(`${JSON.stringify(event)}\n`);
+      emit({ type: "thread.started", thread_id: `stub-${node}-${process.pid}` });
+      emit({ type: "turn.started" });
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        emit({ type: "error", message: `Reconnecting... ${attempt}/5 (${disconnect.message})` });
+      }
+      emit({ type: "error", message: disconnect.message });
+      emit({ type: "turn.failed", error: { message: disconnect.message } });
+      log("disconnected", disconnect.message);
+      process.exitCode = 1;
+      return;
+    }
+  }
   if (node === config.holdNode && fs.existsSync(config.holdPath)) {
     log("held");
     setTimeout(() => process.exit(1), 10 * 60_000);
@@ -223,7 +258,7 @@ interface WorkflowEvent {
   node_id: string | null;
 }
 
-function prepareCampaign(): Campaign {
+function prepareCampaign(scenario: Pick<StubConfig, "streamDisconnect"> = {}): Campaign {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-e2e-"));
   const project = path.join(root, "target");
   const bin = path.join(root, "bin");
@@ -259,7 +294,8 @@ function prepareCampaign(): Campaign {
     logPath: campaign.logPath,
     holdPath: campaign.holdPath,
     holdNode: INTERRUPTED_NODE,
-    promptMarker: PROMPT_EDIT_MARKER
+    promptMarker: PROMPT_EDIT_MARKER,
+    ...scenario
   };
   const stub = `#!/usr/bin/env node\n(${String(stubCodex)})(${JSON.stringify(stubConfig)});\n`;
   fs.writeFileSync(path.join(bin, "codex"), stub, { mode: 0o755 });
@@ -326,8 +362,9 @@ function commandLine(pid: number | string): string | undefined {
   }
 }
 
-/** Linux PIDs whose command line mentions `needle`. */
+/** Linux PIDs whose command line mentions `needle`; none where there is no `/proc`. */
 function processesMentioning(needle: string): number[] {
+  if (!fs.existsSync("/proc")) return [];
   return fs.readdirSync("/proc").flatMap((entry) => {
     if (!/^\d+$/u.test(entry) || Number(entry) === process.pid) return [];
     return commandLine(entry)?.includes(needle) === true ? [Number(entry)] : [];
@@ -389,7 +426,8 @@ async function heldCall(campaign: Campaign, workflowRunId: string, label: string
  * Launches the campaign and SIGKILLs its detached engine while `INTERRUPTED_NODE` runs. Once the
  * supervisor has relaunched the engine and the node runs again, SIGKILLs the whole controller.
  */
-async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void): Promise<void> {
+/** Initializes the campaign's project on the stub's subscription auth with `topology`. */
+async function initializeCampaign(campaign: Campaign, topology: string): Promise<void> {
   await ultrafuzz(campaign, ["init"], 2 * MINUTE);
   const configPath = path.join(campaign.project, "ultrafuzz.toml");
   const generated = fs.readFileSync(configPath, "utf8");
@@ -400,7 +438,11 @@ async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void
   );
   assert.notEqual(config, generated, "init no longer writes an [agents.CodexAgent] table");
   fs.writeFileSync(configPath, config);
-  fs.writeFileSync(path.join(campaign.project, ".ultrafuzz", "topology.yml"), TOPOLOGY);
+  fs.writeFileSync(path.join(campaign.project, ".ultrafuzz", "topology.yml"), topology);
+}
+
+async function interruptMidRun(campaign: Campaign, mark: (phase: string) => void): Promise<void> {
+  await initializeCampaign(campaign, TOPOLOGY);
   fs.writeFileSync(campaign.holdPath, "");
 
   const launched = await ultrafuzz<{ status: string; workflow_ids: string[] }>(
@@ -586,6 +628,66 @@ test(
     } finally {
       process.removeListener("SIGINT", interrupted);
       process.removeListener("SIGTERM", interrupted);
+      process.removeListener("exit", cleanUp);
+      cleanUp();
+    }
+  }
+);
+
+// #676: a provider stream that drops and stays down fails the node outright, and a retry restarts it
+// from scratch. Codex has already spent its own stream retries by then, so the node has nothing left
+// to resume. The node here has one attempt, as the default profile had when the issue was filed, so
+// the drop fails the run. The test is marked pending until a fix reconnects, resumes, or retries
+// such a drop without losing the node; unmarked, it then guards that fix.
+const DISCONNECTED_NODE = "summarize";
+
+test(
+  "a provider stream disconnect mid-node does not fail the node",
+  {
+    timeout: 30 * MINUTE,
+    todo: "#676: a stream disconnect fails the node outright and a retry restarts it from scratch"
+  },
+  async (t) => {
+    const campaign = prepareCampaign({
+      streamDisconnect: { node: DISCONNECTED_NODE, calls: 1, message: CODEX_STREAM_DISCONNECT }
+    });
+    const cleanUp = (): void => {
+      for (const pid of [...processesMentioning(campaign.root), ...processesMentioning(campaign.runId)]) kill(pid);
+      removeTree(campaign.root);
+    };
+    process.once("exit", cleanUp);
+    try {
+      const topology = TOPOLOGY.replace(
+        `  - id: ${DISCONNECTED_NODE}\n    kind: agentic\n`,
+        `  - id: ${DISCONNECTED_NODE}\n    kind: agentic\n    max_attempts: 1\n`
+      );
+      assert.notEqual(topology, TOPOLOGY, `the topology has no ${DISCONNECTED_NODE} node`);
+      await initializeCampaign(campaign, topology);
+      await ultrafuzz(campaign, ["run", "--run-id", campaign.runId], 20 * MINUTE);
+
+      const ended = ["RunFinished", "RunFailed", "RunCancelled"];
+      const events = await waitFor("the workflow to end", 20 * MINUTE, async () => {
+        const current = await ultrafuzz<{ events: WorkflowEvent[] }>(campaign, ["events", campaign.runId]);
+        return current.events.some((event) => ended.includes(event.category)) ? current : undefined;
+      });
+      const calls = agentCalls(campaign);
+      t.diagnostic(`agent calls: ${JSON.stringify(calls)}`);
+      // The stub did drop the stream, so a pass below is the fix and not a scenario that never ran.
+      assert.ok(
+        calls.some((call) => call.node === DISCONNECTED_NODE && call.event === "disconnected"),
+        "the stub never dropped the stream"
+      );
+      const stats = await ultrafuzz<StatsValue>(campaign, ["stats", campaign.runId]);
+      t.diagnostic(
+        `nodes: ${JSON.stringify(stats.nodes.map((node) => [node.node_id, node.status, node.failure_categories]))}`
+      );
+      assert.equal(
+        events.events.find((event) => ended.includes(event.category))?.category,
+        "RunFinished",
+        `agent calls: ${JSON.stringify(calls)}`
+      );
+      assert.equal(stats.nodes.find((node) => node.node_id === DISCONNECTED_NODE)?.status, "succeeded");
+    } finally {
       process.removeListener("exit", cleanUp);
       cleanUp();
     }
