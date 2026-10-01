@@ -47,8 +47,7 @@ Before installing any dependencies, ask for my confirmation.
 After the campaign starts, use the CLI to monitor its progress. Keep monitoring
 until it finishes. If a node fails, inspect its diagnostics and explain the
 cause and the selected release's documented retry or reset options before
-proceeding. An ordinary resume does not retry failed nodes. Stop and report
-any cyber-safety refusal.
+proceeding. An ordinary resume does not retry failed nodes.
 ```
 
 ## Documentation
