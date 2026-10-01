@@ -7093,9 +7093,18 @@ for (const adapter of ["Claude", "DeepSeek"] as const) {
     assert.match(explicit.message, /^API Error: 500 Internal server error\b/u);
     assert.equal(explicit.details?.agentStatedFailure, undefined);
 
-    // The controller redacts the whole statement before capping it, so the
-    // adapter keeps only its first 16,384 characters.
-    assert.equal(await statedFailure(`${"y".repeat(16_384)}tail`), "y".repeat(16_384));
+    // The controller redacts the whole statement before its 1,000-byte cap, so
+    // the adapter keeps at most 16,384 characters. Part of a secret may no
+    // longer match its redaction pattern, so a token or a PEM block that
+    // crosses the cut is dropped whole.
+    const words = "line ".repeat(4_000);
+    assert.equal(await statedFailure(words), words.slice(0, 16_384));
+    assert.equal(await statedFailure(`${"line ".repeat(3_276)}${"x".repeat(64)}`), "line ".repeat(3_276).trimEnd());
+    const keyLines = Array.from({ length: 16 }, (_, index) => String(index).padEnd(64, "Q"));
+    const pem = ["-----BEGIN PRIVATE KEY-----", ...keyLines, "-----END PRIVATE KEY-----"].join("\n");
+    assert.equal(await statedFailure(`${"line ".repeat(3_200)}${pem}`), "line ".repeat(3_200).trimEnd());
+    // A block that ends before the cut is kept whole, for the controller to redact.
+    assert.ok(String(await statedFailure(`${"line ".repeat(3_000)}${pem}\n${words}`)).includes(pem));
 
     // A result that states nothing adds nothing.
     const silent = await failedGeneration({ result: { subtype: "error_during_execution" } });
