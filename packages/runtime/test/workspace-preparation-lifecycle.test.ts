@@ -100,7 +100,7 @@ function preparationHarness(
     assertWorkspaceSourceRevision: () => undefined,
     preservePinnedSourceProof: () => undefined,
     preflightJsonValidator: () => options.onPreflight?.(),
-    assertTaskOutputSchemaBindings: () => undefined,
+    plannedSchemaBundle: () => undefined,
     materializePromptSchemas: (root: string) => {
       fs.mkdirSync(root, { recursive: true });
       for (const name of ["property-lens.schema.json", "properties.schema.json"])
@@ -118,7 +118,7 @@ function preparationHarness(
     if (!ts.isVariableStatement(statement)) return [];
     const names = statement.declarationList.declarations.map((entry) => entry.name.getText(source));
     const included = names.every((name) =>
-      /^(?:INVARIANT_|MAX_INVARIANT_|WORKSPACE_|MAX_PRE_AGENT_|MAX_VERIFIED_|ARTIFACT_VERIFICATION_|invariantSuite.*(?:Snapshots|Ids|Tombstones)$|workspacePatch.*Trees$|dependencyArtifactAdmissionsByTask$|authenticatedAggregationSourcesByTask$)/u.test(
+      /^(?:INVARIANT_|MAX_INVARIANT_|WORKSPACE_|MAX_PRE_AGENT_|MAX_VERIFIED_|ARTIFACT_VERIFICATION_|invariantSuite.*(?:Snapshots|Ids|Tombstones)$|workspacePatch.*Trees$|dependencyArtifactAdmissionsByTask$|authenticatedAggregationSourcesByTask$|runtimePromptRenderFailures$|taskPromptReadFailures$)/u.test(
         name
       )
     );
@@ -148,7 +148,6 @@ function preparationHarness(
       }
     },
     taskSpecs: tasks,
-    replacePromptSchemas: true,
     hydratePinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>
       options.onPinnedSubmodules?.("hydrate", input.expectation),
     verifyPinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>

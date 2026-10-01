@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   ARTIFACT_VERIFICATION_SCHEMA_VERSION,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
@@ -115,7 +116,16 @@ test("json validate emits the exact shared preflight success envelope", async ()
 
   assert.equal(captureResult.code, 0);
   assert.equal(captureResult.stderr, "");
-  assert.doesNotThrow(() => parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(captureResult.stdout, "utf8")));
+  const findings = artifactContractSchemaBinding("ultrafuzz/findings@2");
+  assert.ok(findings);
+  assert.doesNotThrow(() =>
+    parseJsonValidatorPreflightSuccessEnvelope(Buffer.from(captureResult.stdout, "utf8"), {
+      schemaId: findings.schema_id,
+      schemaSha256: findings.schema_sha256,
+      schemaBundleSha256: findings.schema_bundle_sha256,
+      artifactSha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256
+    })
+  );
 });
 
 test("json validate shared success envelope admits an unregistered schema with a null ID", async () => {

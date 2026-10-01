@@ -8,12 +8,8 @@ import {
   type JsonFileValidationDiagnostic,
   type JsonFileValidationResult
 } from "./json-file-validator.js";
-import {
-  artifactSchemaBundleDigest,
-  artifactSchemaDirectory,
-  artifactSchemaRegistry,
-  VALIDATOR_BUILD_IDENTITY
-} from "./schema-registry.js";
+import { installedArtifactSchemaBundle, type ArtifactSchemaBundle } from "./schema-bundle.js";
+import { artifactSchemaBundleDigest, artifactSchemaRegistry, VALIDATOR_BUILD_IDENTITY } from "./schema-registry.js";
 import { parseStrictJsonBytes, StrictJsonError } from "./strict-json.js";
 import {
   WORKFLOW_CONTRACT_DESCRIPTIONS,
@@ -53,6 +49,14 @@ export interface ArtifactContractSchemaBinding {
   schema_sha256: string;
   schema_bundle_sha256: string;
   validator_build: string;
+}
+
+/** The schema a planned JSON output is bound to, in the schema bundle its run was planned with. */
+export interface PlannedArtifactSchema {
+  bundle: ArtifactSchemaBundle;
+  schemaFile: string;
+  schemaId: string;
+  schemaSha256: string;
 }
 const existingJsonContracts = {
   "ultrafuzz/findings@2": {
@@ -198,14 +202,18 @@ export function validateArtifactContract(
     return validateTextContract(contract, contents, artifactPath);
   }
 
-  return validateJsonContractBytes(contract, Buffer.from(contents, "utf8"), artifactPath);
+  return validateJsonContractBytes(contract, Buffer.from(contents, "utf8"), artifactPath, undefined);
 }
 
-/** Validate the exact immutable artifact bytes, including their UTF-8 encoding. */
+/**
+ * Validate the exact immutable artifact bytes, including their UTF-8 encoding: a JSON contract against
+ * `planned`, the schema its plan names, or else against this build's schema for the contract.
+ */
 export function validateArtifactContractBytes(
   contract: ArtifactContractId,
   contents: Uint8Array,
-  artifactPath = "$"
+  artifactPath = "$",
+  planned?: PlannedArtifactSchema
 ): ArtifactContractValidationResult {
   if (contract === "ultrafuzz/nonempty-markdown@1" || contract === "ultrafuzz/text@1") {
     let text: string;
@@ -221,7 +229,7 @@ export function validateArtifactContractBytes(
     return validateTextContract(contract, text, artifactPath);
   }
 
-  return validateJsonContractBytes(contract, contents, artifactPath);
+  return validateJsonContractBytes(contract, contents, artifactPath, planned);
 }
 
 function validateTextContract(
@@ -240,21 +248,54 @@ function validateTextContract(
 function validateJsonContractBytes(
   contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">,
   contents: Uint8Array,
-  artifactPath: string
+  artifactPath: string,
+  planned: PlannedArtifactSchema | undefined
 ): ArtifactContractValidationResult {
-  const schemaFile = ARTIFACT_CONTRACT_SCHEMA_FILES[contract];
-  if (schemaFile === undefined) {
+  const expected = planned ?? installedContractSchema(contract);
+  if (expected === undefined) {
     return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `No JSON Schema is registered for ${contract}`, artifactPath);
   }
-  const binding = artifactContractSchemaBinding(contract);
-  if (binding === undefined) {
-    return failure("ARTIFACT_SCHEMA_UNAVAILABLE", `Registered schema is unavailable: ${schemaFile}`, artifactPath);
+  if (!sealedBundleAccepted(expected, contents)) {
+    const rejection = validatorRejection(contract, contents, artifactPath, expected);
+    if (rejection !== undefined) return rejection;
   }
-  const validation = validateRegisteredJsonBytesSync({
-    schemaPath: path.join(artifactSchemaDirectory(), binding.schema_file),
-    instanceBytes: contents
-  });
-  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, binding)) {
+
+  // The isolated worker is the sole shape-acceptance boundary. Parse the same
+  // immutable bytes only after it succeeds so callers can run semantic gates
+  // without serializing, repairing, or otherwise changing the artifact.
+  try {
+    return { ok: true, issues: [], value: parseStrictJsonBytes(contents) };
+  } catch (error) {
+    return strictJsonFailure(error, artifactPath);
+  }
+}
+
+function installedContractSchema(
+  contract: Exclude<ArtifactContractId, "ultrafuzz/nonempty-markdown@1" | "ultrafuzz/text@1">
+): PlannedArtifactSchema | undefined {
+  const binding = artifactContractSchemaBinding(contract);
+  if (binding === undefined) return undefined;
+  return {
+    bundle: installedArtifactSchemaBundle(),
+    schemaFile: binding.schema_file,
+    schemaId: binding.schema_id,
+    schemaSha256: binding.schema_sha256
+  };
+}
+
+function validatorRejection(
+  contract: ArtifactContractId,
+  contents: Uint8Array,
+  artifactPath: string,
+  expected: PlannedArtifactSchema
+): ArtifactContractValidationResult | undefined {
+  const sealed = expected.bundle.registry !== artifactSchemaRegistry();
+  const validation = validateJsonBytesAgainstBundleSync(
+    expected.bundle,
+    path.join(expected.bundle.directory, expected.schemaFile),
+    contents
+  );
+  if (validation.schema !== null && !sameSchemaIdentity(validation.schema, expected)) {
     return failure(
       "ARTIFACT_VALIDATOR_IDENTITY_MISMATCH",
       `Registered validator identity does not match ${contract}`,
@@ -271,27 +312,67 @@ function validateJsonContractBytes(
       artifactPath
     );
   }
-
-  // The isolated worker is the sole shape-acceptance boundary. Parse the same
-  // immutable bytes only after it succeeds so callers can run semantic gates
-  // without serializing, repairing, or otherwise changing the artifact.
-  try {
-    return { ok: true, issues: [], value: parseStrictJsonBytes(contents) };
-  } catch (error) {
-    return strictJsonFailure(error, artifactPath);
-  }
+  if (sealed) rememberSealedBundleAcceptance(expected, contents);
+  return undefined;
 }
 
+// A bundle other than this build's, such as the one sealed for a run planned before an upgrade, has no
+// long-lived validator isolate: each validation starts a worker that compiles the whole bundle, which
+// takes a few hundred milliseconds idle and seconds under load. It gets the longest deadline the
+// validator allows, and the bytes it accepted against a schema are remembered for that bundle's
+// registry, so re-checking an unchanged artifact, as dependency admission does before and after every
+// agent attempt, starts no worker. Only acceptances are remembered: a failure, such as a timeout, is
+// validated again next time.
+const SEALED_BUNDLE_VALIDATION_DEADLINE_MS = 30_000;
+const MAX_REMEMBERED_SEALED_ACCEPTANCES = 4_096;
+const sealedBundleAcceptances = new WeakMap<ArtifactSchemaBundle["registry"], Set<string>>();
+
+/**
+ * Validate JSON bytes against the schema at `schemaPath` in `bundle`, with the deadline that bundle needs.
+ * The workflow's contract checks and the host's artifact gate both validate this way, so the host does not
+ * reject, for a slow compile, an artifact that the run's verifier accepted.
+ */
+export function validateJsonBytesAgainstBundleSync(
+  bundle: ArtifactSchemaBundle,
+  schemaPath: string,
+  instanceBytes: Uint8Array
+): JsonFileValidationResult {
+  return validateRegisteredJsonBytesSync({
+    schemaPath,
+    instanceBytes,
+    schemaRegistry: bundle.registry,
+    schemaBundleSha256: bundle.sha256,
+    ...(bundle.registry === artifactSchemaRegistry() ? {} : { deadlineMs: SEALED_BUNDLE_VALIDATION_DEADLINE_MS })
+  });
+}
+
+function sealedBundleAcceptance(expected: PlannedArtifactSchema, contents: Uint8Array): string {
+  const artifactSha256 = crypto.createHash("sha256").update(contents).digest("hex");
+  return [expected.schemaFile, expected.schemaId, expected.schemaSha256, artifactSha256].join("\0");
+}
+
+function sealedBundleAccepted(expected: PlannedArtifactSchema, contents: Uint8Array): boolean {
+  const acceptances = sealedBundleAcceptances.get(expected.bundle.registry);
+  return acceptances !== undefined && acceptances.has(sealedBundleAcceptance(expected, contents));
+}
+
+function rememberSealedBundleAcceptance(expected: PlannedArtifactSchema, contents: Uint8Array): void {
+  const acceptances = sealedBundleAcceptances.get(expected.bundle.registry) ?? new Set<string>();
+  if (acceptances.size >= MAX_REMEMBERED_SEALED_ACCEPTANCES) acceptances.clear();
+  acceptances.add(sealedBundleAcceptance(expected, contents));
+  sealedBundleAcceptances.set(expected.bundle.registry, acceptances);
+}
+
+// The validator build the worker reports is provenance (#921), so only the schema content binds.
 function sameSchemaIdentity(
   actual: NonNullable<JsonFileValidationResult["schema"]>,
-  expected: ArtifactContractSchemaBinding
+  expected: PlannedArtifactSchema
 ): boolean {
   return (
     actual.registered &&
-    actual.id === expected.schema_id &&
-    actual.sha256 === expected.schema_sha256 &&
-    actual.bundle_sha256 === expected.schema_bundle_sha256 &&
-    actual.validator_build === expected.validator_build
+    actual.id === expected.schemaId &&
+    actual.sha256 === expected.schemaSha256 &&
+    actual.bundle_sha256 === expected.bundle.sha256
   );
 }
 

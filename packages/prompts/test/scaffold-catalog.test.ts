@@ -115,6 +115,23 @@ describe("prompt scaffold and catalog", () => {
     expect(entry?.body).toContain("Local");
   });
 
+  it("names the prompt file that breaks the catalog, and both files of a duplicate id", () => {
+    const project = tempProject();
+    const setup = path.join(project, ".ultrafuzz", "prompts", "setup");
+    mkdirSync(setup, { recursive: true });
+    writeFileSync(path.join(setup, "broken.md"), "---\nid: [unclosed\n---\n\nBody\n", "utf8");
+    expect(() => loadPromptCatalog({ projectRoot: project })).toThrow(
+      /^project prompt setup\/broken\.md: invalid prompt YAML frontmatter: /u
+    );
+
+    rmSync(path.join(setup, "broken.md"));
+    writeFileSync(path.join(setup, "first.md"), "---\nid: variant\n---\n\nFirst\n", "utf8");
+    writeFileSync(path.join(setup, "second.md"), "---\nid: variant\n---\n\nSecond\n", "utf8");
+    expect(() => loadPromptCatalog({ projectRoot: project })).toThrow(
+      "duplicate project prompt id `variant` at setup/first.md and setup/second.md"
+    );
+  });
+
   it("discovers built-in prompt filenames from the prompt filesystem", () => {
     const discovered = builtInPromptRelativePaths();
 

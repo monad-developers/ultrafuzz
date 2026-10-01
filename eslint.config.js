@@ -135,7 +135,6 @@ export default tseslint.config(
           "COMPILED_TASKS",
           "DYNAMIC_GROUPS",
           "MAX_DYNAMIC_NODES",
-          "REPLACE_PROMPT_SCHEMAS",
           "RUN_ID_LITERAL",
           "RUN_ROOT_RELATIVE",
           "SOURCE_PROJECT_ROOT",

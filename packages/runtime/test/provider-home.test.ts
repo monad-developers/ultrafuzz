@@ -5,7 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
+import { modelDestination } from "../src/data-governance.js";
 import { loadRuntimeTemplate } from "../src/runtime-template.js";
+import { underGroupWritableUmask } from "./process-umask.js";
 type ResolveProviderHome = (provider: string, configured?: string) => string;
 async function loadProviderHome(): Promise<ResolveProviderHome> {
   const fixture = temporaryRoot("ufz-provider-home-module-"),
@@ -17,6 +19,57 @@ async function loadProviderHome(): Promise<ResolveProviderHome> {
   return ((await import(pathToFileURL(modulePath).href)) as { resolveProviderHome: ResolveProviderHome })
     .resolveProviderHome;
 }
+// Ubuntu's layout under its default umask 0002: a 0750 home whose ~/.local is 0775, and whose
+// ~/.ultrafuzz is 0775 too when `ultrafuzz init` made the home a project.
+test(
+  "the default provider-home root is a private directory directly under HOME that XDG_STATE_HOME does not move",
+  underGroupWritableUmask(async () => {
+    const resolve = await loadProviderHome(),
+      home = temporaryRoot("ufz-provider-home-default-"),
+      xdgState = path.join(home, ".local", "state"),
+      root = path.join(home, ".ultrafuzz-provider-homes");
+    fs.chmodSync(home, 0o750);
+    fs.mkdirSync(xdgState, { recursive: true });
+    fs.chmodSync(path.join(home, ".local"), 0o775);
+    fs.mkdirSync(path.join(home, ".ultrafuzz"), { mode: 0o775 });
+    const previous = Object.fromEntries(
+      ["HOME", "XDG_STATE_HOME", "ULTRAFUZZ_PROVIDER_HOME_ROOT"].map((name) => [name, process.env[name]])
+    );
+    process.env.HOME = home;
+    process.env.XDG_STATE_HOME = xdgState;
+    delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    try {
+      assert.equal(resolve("openrouter"), path.join(root, "openrouter"));
+      const codex = resolve("codex", "teams/codex");
+      assert.equal(codex, path.join(root, "codex", "teams", "codex"));
+      for (let current = codex; current !== home; current = path.dirname(current))
+        assert.equal(fs.statSync(current).mode & 0o777, 0o700, current);
+      // Data governance reads a configured provider's route from the same home.
+      fs.writeFileSync(path.join(codex, "config.toml"), 'model_provider = "gateway"\n');
+      const config = { agents: { CodexAgent: { configDir: "teams/codex" } } } as never;
+      assert.match(
+        modelDestination("CodexAgent", config, { HOME: home, XDG_STATE_HOME: xdgState }),
+        /^model:codex-route-/u
+      );
+      // The umask can only clear mkdir's mode bits; chmod restores 0700 when it clears the owner's.
+      process.umask(0o277);
+      try {
+        assert.equal(resolve("deepseek"), path.join(root, "deepseek"));
+      } finally {
+        process.umask(0o002);
+      }
+      assert.equal(fs.statSync(path.join(root, "deepseek")).mode & 0o777, 0o700);
+      // An explicit root keeps the ancestor check, so the old default beneath ~/.local is refused.
+      process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = path.join(xdgState, "ultrafuzz", "provider-homes");
+      assert.throws(() => resolve("openrouter"), /provider-home ancestors cannot be group\/world writable/u);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  })
+);
 test("provider homes are private, operator-owned, and link-free", async () => {
   const resolve = await loadProviderHome(),
     fixture = temporaryRoot("ufz-provider-home-root-"),
@@ -59,3 +112,25 @@ test("provider homes are private, operator-owned, and link-free", async () => {
     }
   }
 });
+// The adapter creates each missing provider-home component itself with an
+// explicit private mode, so the next call's ancestor check passes on a host
+// whose umask leaves new directories group writable.
+test(
+  "provider homes created under a group-writable umask pass the ancestor check on reuse",
+  underGroupWritableUmask(async () => {
+    const resolve = await loadProviderHome(),
+      fixture = temporaryRoot("ufz-provider-home-umask-"),
+      root = path.join(fixture, "operator-state");
+    const previous = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = root;
+    try {
+      const selected = resolve("codex", "teams/codex");
+      assert.equal(resolve("codex", "teams/codex"), selected);
+      for (let current = selected; current !== fixture; current = path.dirname(current))
+        assert.equal(fs.statSync(current).mode & 0o777, 0o700, current);
+    } finally {
+      if (previous === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous;
+    }
+  })
+);

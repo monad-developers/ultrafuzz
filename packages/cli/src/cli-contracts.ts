@@ -167,6 +167,7 @@ interface CliPublicRunMetadata {
   mode: "run" | "resume" | "replay" | "fork";
   workflow_ids: string[];
   redacted_config_fingerprint: string;
+  /** Digest of the prompt catalog the run launched with; editing the run's prompt files does not change it. */
   prompt_digest?: string;
   audit_profile?: RunMetadataAuditProfile;
   forge_guard: {

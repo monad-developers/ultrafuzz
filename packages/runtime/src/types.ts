@@ -493,6 +493,13 @@ export interface CleanGeneratedInput {
   selections: string[];
   confirmed?: boolean;
   dryRun?: boolean;
+  /**
+   * Receives the CLEAN_CLOUD_STORAGE_RETAINED warnings just before the first
+   * deletion, while the run plans that name that storage still exist, so a
+   * caller can show them even when clean never returns. The result carries
+   * them too. A dry run deletes nothing and does not call it.
+   */
+  onRetainedStorage?: (warnings: readonly RuntimeDiagnostic[]) => void;
 }
 
 export interface CleanGeneratedValue {

@@ -13,8 +13,13 @@ import { z } from "zod/v4";
 import { loadAgentPreambleTemplate } from "@ultrafuzz/prompts";
 
 import {
+  ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
   artifactContractDefinition,
   artifactContractSchemaBinding,
+  artifactContractSchemaFile,
+  artifactSchemaBundleDigest,
+  artifactSchemaRegistry,
+  artifactSchemaRegistryFromDirectory,
   assertArtifactPublicationsContainNoSecrets,
   assertRegularFileInside,
   assertRunMetadataDocument,
@@ -23,10 +28,13 @@ import {
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  installedArtifactSchemaBundle,
+  materializePromptSchemas,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILE_BYTES,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_TOTAL_BYTES,
   normalizeNodeAttemptFailureMessage,
+  parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
   promptArtifactAuthorityPathSelectorId,
   prepareSafeFilePath,
@@ -34,6 +42,7 @@ import {
   publishFileDurableExclusive,
   readRegularFileSnapshot,
   RUN_METADATA_SCHEMA_VERSION,
+  schemaRegistryBundleDigest,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
   SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
@@ -425,7 +434,23 @@ function loadPromptWithAuthoritativeFinalReportPromptAuthority(): (
   )("UNTRUSTED CONTENT BOUNDARY") as ReturnType<typeof loadPromptWithAuthoritativeFinalReportPromptAuthority>;
 }
 
-function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: string } = {}): {
+/** The schema bundle this build installs, as the generated workflow's planned-bundle helpers see it. */
+function installedBundle(): { directory: string; registry: ReturnType<typeof artifactSchemaRegistry>; sha256: string } {
+  return {
+    directory: path.join(path.sep, "fixture", "schemas"),
+    registry: artifactSchemaRegistry(),
+    sha256: artifactSchemaBundleDigest()
+  };
+}
+
+function loadJsonValidatorPreflight(
+  options: {
+    failure?: unknown;
+    stdout?: string;
+    parse?: typeof parseJsonValidatorPreflightSuccessEnvelope;
+    bundle?: ReturnType<typeof installedBundle>;
+  } = {}
+): {
   preflight(): void;
   observedTimeoutMs(): number | undefined;
   spawnCount(): number;
@@ -441,7 +466,7 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
   let observedTimeout: number | undefined;
   let spawns = 0;
   const loaded = new Function(
-    "artifactSchemaRegistry",
+    "ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256",
     "artifactValidatorSmokeFixturePath",
     "execFileSync",
     "parseJsonValidatorPreflightSuccessEnvelope",
@@ -451,7 +476,7 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
       budgetMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS
     };`
   )(
-    () => [{ filename: "findings.schema.json" }],
+    ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
     (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
       spawns += 1;
@@ -459,11 +484,11 @@ function loadJsonValidatorPreflight(options: { failure?: unknown; stdout?: strin
       if (options.failure !== undefined) throw options.failure;
       return options.stdout ?? "{}";
     },
-    () => undefined,
+    options.parse ?? (() => undefined),
     path
-  ) as { preflight(schemaDirectory: string): void; budgetMs: number };
+  ) as { preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): void; budgetMs: number };
   return {
-    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas")),
+    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas"), options.bundle ?? installedBundle()),
     observedTimeoutMs: () => observedTimeout,
     spawnCount: () => spawns,
     budgetMs: loaded.budgetMs
@@ -807,11 +832,9 @@ function loadWorkflowControlPathResolvers(): {
     persistedWorkflowPath: string | undefined;
     persistedExecutionSnapshotRoot: string | undefined;
   }) => {
-    promptExecutionSnapshotRoot: string | undefined;
     workflowPath: string | undefined;
     executionSnapshotRoot: string | undefined;
   };
-  sealedTaskPromptPath: (attemptId: string, snapshotRoot: string | undefined) => string | undefined;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("type AdmittedWorkflowControls");
@@ -828,7 +851,7 @@ function loadWorkflowControlPathResolvers(): {
     "path",
     "existsSync",
     "realpathSync",
-    `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath };`
+    `${helper}; return { admitWorkflowControls, taskWorkflowControlPaths };`
   )(path, fs.existsSync, fs.realpathSync) as ReturnType<typeof loadWorkflowControlPathResolvers>;
 }
 
@@ -1984,6 +2007,7 @@ function loadVerifyArtifactsHarness(
     "decodeStrictUtf8Snapshot",
     "artifactContractDefinition",
     "parseStrictJsonSnapshot",
+    "plannedOutputSchema",
     "validateArtifactContractBytes",
     "dependencyArtifactAdmission",
     "assertDependencyArtifactAdmissionCurrent",
@@ -2061,6 +2085,9 @@ function loadVerifyArtifactsHarness(
         throw new Error(`${failureMessage}: file is not strict JSON`, { cause: error });
       }
     },
+    // Every harness task is planned with this build's schemas, which the validator uses when no other
+    // planned schema is named.
+    () => undefined,
     (contract: Parameters<typeof validateArtifactContractBytes>[0], contents: Uint8Array, artifactPath: string) =>
       validateArtifactContractBytes(contract, contents, artifactPath),
     dependencyAdmissionFor,
@@ -5946,7 +5973,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
   assert.match(
     source,
-    /preflightJsonValidator\(schemaDirectory\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot\)/u
+    /preflightJsonValidator\(schemaDirectory, schemaBundle\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
   );
   assert.match(
     source,
@@ -6612,48 +6639,171 @@ test("generated dependency admission retains one exact snapshot epoch and never 
   assert.doesNotMatch(hydration, /readBoundedRegularArtifactSnapshot|readFileSync|resolveRegularArtifactFile/u);
 });
 
-test("generated task preparation binds output schema content but not the validator build", () => {
+test("the generated workflow validates a declared output against its schema in the run's planned bundle, never this build's", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const start = source.indexOf("function assertTaskOutputSchemaBindings");
-  const end = source.indexOf("\n}\n", start) + 2;
-  assert.ok(start >= 0 && end > start, source);
-  const helper = ts.transpileModule(source.slice(start, end), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
-  const planned = artifactContractSchemaBinding("ultrafuzz/findings@2");
-  assert.ok(planned);
-  let current = planned;
-  const assertTaskOutputSchemaBindings = new Function(
-    "artifactContractSchemaBinding",
-    `${helper}; return assertTaskOutputSchemaBindings;`
-  )(() => current) as (task: unknown) => void;
-  const task = {
-    outputs: [
-      {
-        path: "findings.json",
-        contract: "ultrafuzz/findings@2",
-        schemaFile: planned.schema_file,
-        schemaId: planned.schema_id,
-        schemaSha256: planned.schema_sha256,
-        schemaBundleSha256: planned.schema_bundle_sha256,
-        validatorBuild: planned.validator_build
-      }
-    ]
+  const helpers = ts.transpileModule(
+    templateSlice(source, "function isSchemaBackedOutput", "\n\nconst serializedTaskSpecs"),
+    {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+    }
+  ).outputText;
+  const installed = installedBundle();
+  const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  // The bundle a launch sealed before an upgrade added a `$comment` to the findings schema.
+  const sealedFindings = { ...findings, sha256: "1".repeat(64) };
+  const sealed = {
+    ...installed,
+    registry: installed.registry.map((entry) => (entry === findings ? sealedFindings : entry)),
+    sha256: "2".repeat(64)
   };
-  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
-  // #921: a rebuild after launch changed only the validator modules. The schemas the verifier will
-  // use are still the planned ones, so preparation proceeds.
-  current = { ...planned, validator_build: `ultrafuzz-json-validator.v1:${"9".repeat(64)}` };
-  assert.doesNotThrow(() => assertTaskOutputSchemaBindings(task));
-  // The installed schema content, including the whole bundle, must still be the planned one.
-  for (const field of ["schema_file", "schema_id", "schema_sha256", "schema_bundle_sha256"] as const) {
-    current = { ...planned, [field]: `changed-${field}` };
+  const plannedOutputSchema = new Function(
+    "artifactContractSchemaFile",
+    "plannedSchemaBundle",
+    `${helpers}; return plannedOutputSchema;`
+  )(artifactContractSchemaFile, () => sealed) as (output: Record<string, unknown>) => unknown;
+  const findingsOutput = (binding: Record<string, unknown> = {}) => ({
+    path: "findings.json",
+    contract: "ultrafuzz/findings@2",
+    schemaFile: sealedFindings.filename,
+    schemaId: sealedFindings.id,
+    schemaSha256: sealedFindings.sha256,
+    schemaBundleSha256: sealed.sha256,
+    validatorBuild: "ultrafuzz-json-validator.v1:launch",
+    ...binding
+  });
+
+  assert.equal(plannedOutputSchema({ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }), undefined);
+  // #921: the run keeps validating with the bundle it was planned with, and its validator build is provenance.
+  assert.deepEqual(plannedOutputSchema(findingsOutput({ validatorBuild: "ultrafuzz-json-validator.v1:rebuilt" })), {
+    bundle: sealed,
+    schemaFile: "findings.schema.json",
+    schemaId: findings.id,
+    schemaSha256: sealedFindings.sha256
+  });
+  // A schema-backed output that does not name its schema in that bundle is refused, instead of being
+  // validated against this build's schema for the contract.
+  for (const binding of [
+    { schemaBundleSha256: installed.sha256 },
+    { schemaBundleSha256: undefined },
+    { schemaFile: undefined },
+    { schemaId: undefined },
+    { schemaSha256: undefined }
+  ]) {
     assert.throws(
-      () => assertTaskOutputSchemaBindings(task),
-      /planned schema binding changed for findings\.json/u,
-      field
+      () => plannedOutputSchema(findingsOutput(binding)),
+      /findings\.json does not name its schema in the run's planned schema bundle/u,
+      JSON.stringify(binding)
     );
   }
+});
+
+test("the generated goal-search census counts a lane's findings validated against the run's planned schema", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const emitted = ts.transpileModule(
+    [
+      templateSlice(source, "function isSchemaBackedOutput", "\n\nconst serializedTaskSpecs"),
+      templateSlice(source, "function verifiedGoalSearchFindingCount", "\n\nconst goalSearchCoverageSignatures")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  const root = fs.realpathSync(temporaryRoot("ufz-goal-search-count-"));
+  // The bundle the run was planned with, whose findings schema accepts any array; this build's does not.
+  const directory = path.join(root, "sealed-schemas");
+  materializePromptSchemas(directory, installedArtifactSchemaBundle());
+  const findingsSchemaPath = path.join(directory, "findings.schema.json");
+  const findingsSchema = JSON.parse(fs.readFileSync(findingsSchemaPath, "utf8")) as Record<string, unknown>;
+  findingsSchema.items = {};
+  fs.chmodSync(findingsSchemaPath, 0o600);
+  fs.writeFileSync(findingsSchemaPath, `${JSON.stringify(findingsSchema, null, 2)}\n`, "utf8");
+  const registry = artifactSchemaRegistryFromDirectory(directory);
+  const sealed = { directory, registry, sha256: schemaRegistryBundleDigest(registry) };
+  const sealedFindings = registry.find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(sealedFindings);
+  const findingCount = new Function(
+    "artifactContractSchemaFile",
+    "plannedSchemaBundle",
+    "realpathSync",
+    "resolveRegularArtifactFile",
+    "readBoundedRegularArtifactSnapshot",
+    "MAX_PRE_AGENT_EVIDENCE_BYTES",
+    "validateArtifactContractBytes",
+    "path",
+    "process",
+    `${emitted}; return verifiedGoalSearchFindingCount;`
+  )(
+    artifactContractSchemaFile,
+    () => sealed,
+    fs.realpathSync,
+    (_artifactDir: string, candidate: string) => candidate,
+    (_artifactDir: string, candidate: string) => ({ bytes: fs.readFileSync(candidate) }),
+    1024 * 1024,
+    validateArtifactContractBytes,
+    path,
+    process
+  ) as (task: unknown) => number | undefined;
+  const artifactDir = path.join(root, "artifacts", "goal-1");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const findings = Buffer.from(`${JSON.stringify([{ title: "planned shape" }])}\n`, "utf8");
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), findings);
+  assert.equal(validateArtifactContractBytes("ultrafuzz/findings@2", findings, "findings.json").ok, false);
+
+  assert.equal(
+    findingCount({
+      metadata: { artifacts: { dir: artifactDir } },
+      outputs: [
+        {
+          path: "findings.json",
+          contract: "ultrafuzz/findings@2",
+          primary: true,
+          schemaFile: sealedFindings.filename,
+          schemaId: sealedFindings.id,
+          schemaSha256: sealedFindings.sha256,
+          schemaBundleSha256: sealed.sha256
+        }
+      ]
+    }),
+    1
+  );
+});
+
+test("generated validator preflight expects the run's planned schema identity, not this build's", () => {
+  const installed = installedBundle();
+  const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
+  assert.ok(findings);
+  const envelope = (schema: { sha256: string; bundle_sha256: string }) =>
+    JSON.stringify({
+      schema_version: "ultrafuzz.cli.result.v2",
+      command: "json validate",
+      ok: true,
+      diagnostics: [],
+      data: {
+        status: "valid",
+        diagnostics: [],
+        schema: { id: findings.id, ...schema, validator_build: "ultrafuzz-json-validator.v1:launch", registered: true },
+        artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+        truncated: false
+      }
+    });
+  // #921: the run was planned with the bundle its launch sealed, and its own validator reports that one.
+  const sealedFindings = { ...findings, sha256: "1".repeat(64) };
+  const sealed = {
+    ...installed,
+    registry: installed.registry.map((entry) => (entry === findings ? sealedFindings : entry)),
+    sha256: "2".repeat(64)
+  };
+  const launchValidator = envelope({ sha256: sealedFindings.sha256, bundle_sha256: sealed.sha256 });
+  const preflight = (stdout: string) =>
+    loadJsonValidatorPreflight({ stdout, bundle: sealed, parse: parseJsonValidatorPreflightSuccessEnvelope });
+  assert.doesNotThrow(() => preflight(launchValidator).preflight());
+  // A validator reporting this build's bundle does not validate with the schemas the host checks.
+  assert.throws(
+    () => preflight(envelope({ sha256: findings.sha256, bundle_sha256: installed.sha256 })).preflight(),
+    (error: unknown) =>
+      error instanceof Error &&
+      /invalid success envelope/u.test(error.message) &&
+      /mismatched identity/u.test(String((error.cause as Error | undefined)?.message))
+  );
 });
 
 test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
@@ -6817,10 +6967,12 @@ test("a task prompt comes from its relocatable prompt path before the dispatch i
   const promptEnd = source.indexOf("\n\nconst promptArtifactAuthoritySnapshotsByTask", promptStart);
   assert.ok(promptStart >= 0 && promptEnd > promptStart, source);
   const promptForTask = new Function(
-    "readFileSync",
+    "readRegularFileSnapshot",
+    "MAX_TASK_PROMPT_BYTES",
+    "taskPromptReadFailures",
     "mirroredArtifactDir",
     `${ts.transpileModule(source.slice(promptStart, promptEnd), { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }).outputText}; return promptForTask;`
-  )(fs.readFileSync, (task: { artifactDir: string }) => task.artifactDir) as (
+  )(readRegularFileSnapshot, 64 * 1024 * 1024, new Map(), (task: { artifactDir: string }) => task.artifactDir) as (
     task: { prompt: string; promptPath?: string; sourceProjectRoot: string; artifactDir: string },
     inputTask?: { prompt?: string; prompt_path?: string }
   ) => string;
@@ -7190,25 +7342,20 @@ test(
     assert.ok(projectionEnd > projectionStart, source);
     const projection = source.slice(projectionStart, projectionEnd);
     assert.match(projection, /const controlPaths = taskWorkflowControlPaths\(admittedWorkflowControls\)/u);
-    assert.match(projection, /sealedTaskPromptPath\(task\.attemptId, controlPaths\.promptExecutionSnapshotRoot\)/u);
     assert.match(projection, /workflowPath: controlPaths\.workflowPath \?\?/u);
     assert.match(projection, /executionSnapshotRoot: controlPaths\.executionSnapshotRoot/u);
 
-    const { admitWorkflowControls, taskWorkflowControlPaths, sealedTaskPromptPath } =
-      loadWorkflowControlPathResolvers();
+    const { admitWorkflowControls, taskWorkflowControlPaths } = loadWorkflowControlPathResolvers();
     const snapshotsRoot = temporaryRoot("ultrafuzz-detached-task-paths-");
     const generationRoot = path.join(snapshotsRoot, "a".repeat(64));
     const workflowRelativePath = path.join(".smithers", "workflows", "detached-paths.tsx");
     const persistedWorkflowPath = path.join(generationRoot, workflowRelativePath);
-    const promptRoot = path.join(generationRoot, "controls", "rendered-prompts");
-    const persistedPromptPath = path.join(promptRoot, "project-discovery.md");
     fs.mkdirSync(path.dirname(persistedWorkflowPath), { recursive: true });
     fs.mkdirSync(path.join(generationRoot, "dependencies"), { recursive: true });
-    fs.mkdirSync(promptRoot, { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "controls"), { recursive: true });
     fs.writeFileSync(persistedWorkflowPath, "export default function Workflow() {}\n", "utf8");
     fs.writeFileSync(path.join(generationRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
     fs.writeFileSync(path.join(generationRoot, "controls", "plan.json"), "{}\n", "utf8");
-    fs.writeFileSync(persistedPromptPath, "SEALED DETACHED PROMPT\n", "utf8");
 
     let descriptor: number | undefined;
     try {
@@ -7217,20 +7364,15 @@ test(
       const loadedWorkflowPath = path.join(descriptorRoot, workflowRelativePath);
       const admitted = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
       const localControls = taskWorkflowControlPaths(admitted);
-      const localPromptPath = sealedTaskPromptPath("project-discovery", localControls.promptExecutionSnapshotRoot);
 
       assert.equal(admitted.loadedExecutionSnapshotRoot, descriptorRoot);
-      assert.equal(localControls.promptExecutionSnapshotRoot, generationRoot);
       assert.equal(localControls.workflowPath, persistedWorkflowPath);
       assert.equal(localControls.executionSnapshotRoot, generationRoot);
-      assert.equal(localPromptPath, persistedPromptPath);
       assert.doesNotMatch(JSON.stringify(localControls), /\/proc\/(?:self|[1-9][0-9]*)\/fd\//u);
 
       fs.closeSync(descriptor);
       descriptor = undefined;
       assert.throws(() => fs.readFileSync(loadedWorkflowPath), /ENOENT|no such file/u);
-      assertRegularFileInside(promptRoot, localPromptPath!, "detached rendered prompt");
-      assert.equal(fs.readFileSync(localPromptPath!, "utf8"), "SEALED DETACHED PROMPT\n");
 
       descriptor = fs.openSync(generationRoot, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
       const replacedLoadedWorkflowPath = path.join(`/proc/self/fd/${descriptor}`, workflowRelativePath);
@@ -7286,7 +7428,6 @@ test("generated workflow controls admit the same persisted native workflow outsi
     assert.equal(admitted.loadedExecutionSnapshotRoot, undefined);
     assert.equal(admitted.persistedExecutionSnapshotRoot, undefined);
     assert.deepEqual(taskWorkflowControlPaths(admitted), {
-      promptExecutionSnapshotRoot: undefined,
       workflowPath: undefined,
       executionSnapshotRoot: undefined
     });
@@ -7298,6 +7439,362 @@ test("generated workflow controls admit the same persisted native workflow outsi
       () => admitWorkflowControls(snapshotWorkflowPath, nativeAliasPath),
       /persisted workflow path does not identify the loaded execution snapshot/u
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function templateSlice(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0, `the template has no ${startMarker}`);
+  assert.ok(end > start, `the template has no ${endMarker} after ${startMarker}`);
+  return source.slice(start, end);
+}
+
+type PromptBoundTask = { attemptId: string; promptPath?: string; artifactDir: string };
+
+/**
+ * The template's task-spec projections, executed against given workflow controls: `hydrateTaskSpec`
+ * for the compiled literal, and `taskSpecsFromCompiled` for the tasks a dynamic render publishes.
+ */
+function loadTaskSpecProjections(input: {
+  admittedWorkflowControls: unknown;
+  sourceProjectRoot: string;
+  cwd: string;
+  serializedTaskSpecs: readonly unknown[];
+}): {
+  hydrateTaskSpec: (task: unknown) => PromptBoundTask;
+  taskSpecsFromCompiled: (tasks: readonly unknown[]) => PromptBoundTask[];
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helpers = ts.transpileModule(
+    [
+      templateSlice(source, "type AdmittedWorkflowControls", "\n\nfunction workflowExecutionSnapshotRoot"),
+      templateSlice(source, "function hydrateTaskSpec", "\nlet taskSpecs ="),
+      templateSlice(source, "const INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS", "\n\n/** Validates the dispatch document"),
+      templateSlice(source, "function currentProjectPath", "\n\nfunction dynamicallyAvailableTaskSpecs")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "path",
+    "process",
+    "admittedWorkflowControls",
+    "serializedTaskSpecs",
+    "sourceProjectRoot",
+    "dynamicGroupSpecs",
+    "topologyRuntimeContextForTimeout",
+    "topologyRuntimeBudgetForTimeout",
+    "__ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__",
+    "__ULTRAFUZZ_RUN_ROOT_RELATIVE__",
+    "__ULTRAFUZZ_RUN_ID_LITERAL__",
+    `${helpers}; return { hydrateTaskSpec, taskSpecsFromCompiled };`
+  )(
+    path,
+    { cwd: () => input.cwd },
+    input.admittedWorkflowControls,
+    input.serializedTaskSpecs,
+    input.sourceProjectRoot,
+    [],
+    () => ({}),
+    () => ({ finalizationReserveSeconds: 0 }),
+    ".smithers/workflows/ultrafuzz-prompt-paths.tsx",
+    ".ultrafuzz/runs/prompt-paths",
+    "prompt-paths"
+  ) as ReturnType<typeof loadTaskSpecProjections>;
+}
+
+test("every engine binds an attempt's own prompt file, launched from an execution snapshot or not", () => {
+  const root = temporaryRoot("ultrafuzz-task-prompt-paths-");
+  try {
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "prompt-paths");
+    const artifactDir = path.join(runRoot, "artifacts", "project-discovery");
+    const runPrompt = path.join(artifactDir, "prompt.rendered.md");
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(runPrompt, "Edited run prompt.\n", "utf8");
+    // A snapshot of an earlier release still carries a sealed copy; no engine may read it.
+    const generationRoot = path.join(runRoot, "smithers", "execution-snapshots", "a".repeat(64));
+    const snapshotWorkflowPath = path.join(generationRoot, ".smithers", "workflows", "ultrafuzz-prompt-paths.tsx");
+    fs.mkdirSync(path.dirname(snapshotWorkflowPath), { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "dependencies"), { recursive: true });
+    fs.mkdirSync(path.join(generationRoot, "controls", "rendered-prompts"), { recursive: true });
+    fs.writeFileSync(snapshotWorkflowPath, "export default function Workflow() {}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "dependencies", "manifest.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "controls", "plan.json"), "{}\n", "utf8");
+    fs.writeFileSync(path.join(generationRoot, "controls", "rendered-prompts", "project-discovery.md"), "Sealed.\n");
+
+    const { admitWorkflowControls } = loadWorkflowControlPathResolvers();
+    const nativeWorkflowPath = path.join(root, ".smithers", "workflows", "ultrafuzz-prompt-paths.tsx");
+    fs.mkdirSync(path.dirname(nativeWorkflowPath), { recursive: true });
+    fs.writeFileSync(nativeWorkflowPath, "export default function Workflow() {}\n", "utf8");
+    const serializedTask = {
+      id: "node:project-discovery",
+      smithersRunId: "ultrafuzz-prompt-paths",
+      attemptId: "project-discovery",
+      promptPath: runPrompt,
+      sourceTaskManifestPath: path.join(runRoot, "smithers", "tasks.json"),
+      workflowPath: nativeWorkflowPath,
+      workspacePath: path.join(runRoot, "workspaces", "project-discovery"),
+      artifactDir,
+      dependencyArtifactDirs: [],
+      optionalDependencyArtifactDirs: [],
+      referenceArtifactDirs: []
+    };
+    const compiledTask = {
+      attemptId: "project-discovery",
+      smithersNodeId: "node:project-discovery",
+      verifierSmithersNodeId: "verify:project-discovery",
+      logicalNodeId: "project-discovery",
+      dependencySmithersNodeIds: [],
+      agentRef: "CodexAgent",
+      agentChain: [],
+      renderedPromptPath: runPrompt,
+      workspacePath: path.join(runRoot, "workspaces", "project-discovery"),
+      artifactDir,
+      dependencyArtifactDirs: [],
+      timeoutMs: 60_000,
+      heartbeatTimeoutMs: 30_000,
+      retries: 1,
+      retryPolicy: {},
+      metadata: {
+        node: {},
+        dependencies: { attemptIds: [], smithersNodeIds: [] },
+        workspace: { path: path.join(runRoot, "workspaces", "project-discovery") },
+        artifacts: { dir: artifactDir, manifestPath: path.join(artifactDir, "artifact-manifest.json"), outputs: [] },
+        timeout: { seconds: 60 }
+      }
+    };
+    const taskPromptPathForArtifactReset = loadTaskPromptPathForArtifactReset();
+    for (const [engine, workflowPath] of [
+      ["launch, replay or fork", snapshotWorkflowPath],
+      ["native resume", nativeWorkflowPath]
+    ] as const) {
+      const projections = loadTaskSpecProjections({
+        admittedWorkflowControls: admitWorkflowControls(workflowPath, workflowPath),
+        sourceProjectRoot: root,
+        cwd: root,
+        serializedTaskSpecs: [serializedTask]
+      });
+      const hydrated = projections.hydrateTaskSpec(serializedTask);
+      const [published] = projections.taskSpecsFromCompiled([compiledTask]);
+      for (const task of [hydrated, published]) {
+        assert.equal(task?.promptPath, runPrompt, engine);
+        // The attempt reset keeps that file, edits included.
+        assert.equal(taskPromptPathForArtifactReset(task.artifactDir, task.promptPath), runPrompt, engine);
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** The template's prompt read and its preparation check, with the latest render's failures. */
+function loadTaskPromptInputHarness(
+  runtimePromptRenderFailures: ReadonlyMap<string, string>,
+  cwd: string
+): {
+  promptForTask: (task: Record<string, unknown>) => string;
+  assertTaskPromptInput: (task: Record<string, unknown>) => void;
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helpers = ts.transpileModule(
+    [
+      templateSlice(source, "function promptForTask", "\nconst promptArtifactAuthoritySnapshotsByTask"),
+      templateSlice(source, "function assertTaskPromptInput", "\n\nfunction assertTaskDependencyInputs")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  return new Function(
+    "path",
+    "process",
+    "readFileSync",
+    "readRegularFileSnapshot",
+    "MAX_TASK_PROMPT_BYTES",
+    "lstatSync",
+    "assertRegularFileInside",
+    "isMissingPathError",
+    "mirroredArtifactDir",
+    "runtimePromptRenderFailures",
+    "taskPromptReadFailures",
+    `${helpers}; return { promptForTask, assertTaskPromptInput };`
+  )(
+    path,
+    { cwd: () => cwd },
+    fs.readFileSync,
+    readRegularFileSnapshot,
+    64 * 1024 * 1024,
+    fs.lstatSync,
+    assertRegularFileInside,
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    (task: { artifactDir: string }) => task.artifactDir,
+    runtimePromptRenderFailures,
+    new Map<string, string>()
+  ) as ReturnType<typeof loadTaskPromptInputHarness>;
+}
+
+test("a missing or unrenderable prompt fails only its own task at assert-task-inputs", () => {
+  const root = temporaryRoot("ultrafuzz-task-prompt-input-");
+  try {
+    const artifactDir = path.join(root, "run", "artifacts", "summarize");
+    const promptPath = path.join(artifactDir, "prompt.rendered.md");
+    fs.mkdirSync(artifactDir, { recursive: true });
+    const failures = new Map<string, string>();
+    const { promptForTask, assertTaskPromptInput } = loadTaskPromptInputHarness(failures, root);
+    const task = { attemptId: "summarize", prompt: "", promptPath, sourceProjectRoot: root, artifactDir };
+
+    // Every render builds the prompt of every available task, so a missing file reads as an empty
+    // prompt; the task itself then fails when it prepares, with the cause and the recovery.
+    assert.equal(promptForTask(task), "");
+    const missing =
+      /^Error: rendered prompt for summarize is missing; ultrafuzz resume restores static prompts from prompt-snapshots\/$/u;
+    assert.throws(() => assertTaskPromptInput(task), missing);
+    const notDirectory = path.join(root, "run", "a-file");
+    fs.writeFileSync(notDirectory, "not a directory\n", "utf8");
+    const underFile = { ...task, promptPath: path.join(notDirectory, "prompt.rendered.md") };
+    assert.equal(promptForTask(underFile), "");
+    assert.throws(() => assertTaskPromptInput(underFile), missing);
+
+    fs.writeFileSync(promptPath, "Summarize the discovery notes.\n", "utf8");
+    assert.equal(promptForTask(task), "Summarize the discovery notes.\n");
+    assert.doesNotThrow(() => assertTaskPromptInput(task));
+
+    // A runtime prompt the latest render could not publish fails its task with the renderer's message.
+    failures.set("summarize", "unknown prompt template variable: artifact_pth:fanout");
+    assert.throws(
+      () => assertTaskPromptInput(task),
+      /^Error: rendered prompt for summarize could not be rendered: unknown prompt template variable: artifact_pth:fanout$/u
+    );
+    failures.clear();
+
+    // Nor does any other entry that is not a readable regular file stop the render: it reads as an
+    // empty prompt and fails its own task, and a symlink is never followed to the bytes it names.
+    const outside = path.join(root, "outside.md");
+    fs.writeFileSync(outside, "Text outside the run.\n", "utf8");
+    const cases: Array<{ name: string; corrupt: () => void; cause: RegExp }> = [
+      { name: "directory", corrupt: () => fs.mkdirSync(promptPath), cause: /must be a regular file/u },
+      { name: "symlink", corrupt: () => fs.symlinkSync(outside, promptPath), cause: /cannot be a symlink/u },
+      {
+        name: "dangling symlink",
+        corrupt: () => fs.symlinkSync(path.join(root, "absent.md"), promptPath),
+        cause: /cannot be a symlink/u
+      }
+    ];
+    if (process.getuid?.() !== 0) {
+      cases.push({
+        name: "unreadable file",
+        corrupt: () => {
+          fs.writeFileSync(promptPath, "Summarize the discovery notes.\n", "utf8");
+          fs.chmodSync(promptPath, 0o000);
+        },
+        cause: /^Error: rendered prompt for summarize could not be read: cannot open regular file .*EACCES/u
+      });
+    }
+    for (const { name, corrupt, cause } of cases) {
+      fs.rmSync(promptPath, { recursive: true, force: true });
+      corrupt();
+      assert.equal(promptForTask(task), "", name);
+      assert.throws(() => assertTaskPromptInput(task), cause, name);
+      // Once the file is a readable regular file again, the next render reads it and the task runs.
+      fs.rmSync(promptPath, { recursive: true, force: true });
+      fs.writeFileSync(promptPath, "Summarize the discovery notes.\n", "utf8");
+      assert.equal(promptForTask(task), "Summarize the discovery notes.\n", name);
+      assert.doesNotThrow(() => assertTaskPromptInput(task), name);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("only the preparation before the agent checks its prompt, never the verify pass after it", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const emitted = ts.transpileModule(
+    [
+      templateSlice(source, "function prepareArtifactMirror", "\n\n/**\n * How long the validator preflight"),
+      templateSlice(source, "function assertTaskInputs", "\n\nfunction assertTaskDependencyInputs")
+    ].join("\n"),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-verify-pass-prompt-"));
+  try {
+    const workspacePath = path.join(root, "workspace");
+    const schemaRoot = path.join(workspacePath, ".ultrafuzz", "schemas");
+    fs.mkdirSync(schemaRoot, { recursive: true });
+    for (const schema of ["property-lens.schema.json", "properties.schema.json"]) {
+      fs.writeFileSync(path.join(schemaRoot, schema), "{}\n", "utf8");
+    }
+    const artifactDir = path.join(root, "run", "artifacts", "summarize");
+    fs.mkdirSync(artifactDir, { recursive: true });
+    const task = {
+      attemptId: "summarize",
+      promptPath: path.join(artifactDir, "prompt.rendered.md"),
+      workspacePath,
+      outputs: []
+    };
+    const steps = [
+      "assertWorkspaceSourceRevision",
+      "replaceSupersededWorkspacePreparation",
+      "restorePersistedWorkspacePatchPreparationBeforeReplay",
+      "verifyPinnedSubmodulesFromExecutionSnapshot",
+      "hydratePinnedSubmodulesFromExecutionSnapshot",
+      "preservePinnedSourceProof",
+      "plannedSchemaBundle",
+      "materializePromptSchemas",
+      "isSchemaBackedOutput",
+      "preflightJsonValidator",
+      "materializeWorkspacePatchDependencies",
+      "requireInvariantSuiteWorkspaceSnapshot",
+      "restoreInvariantSuiteWorkspaceSnapshot",
+      "materializeInvariantSuiteFromDependencies",
+      "captureInvariantSuiteWorkspaceSnapshot",
+      "requireInvariantSuiteDependencyHandoff",
+      "captureInvariantSuiteBaseline",
+      "verifyInvariantSuiteBaseline",
+      "assertTaskDependencyInputs",
+      "isMissingTaskPromptError"
+    ];
+    const renderFailures = new Map<string, string>();
+    const harness = new Function(
+      "path",
+      "realpathSync",
+      "mkdirSync",
+      "lstatSync",
+      "assertRegularFileInside",
+      "isStrictlyInsideDirectory",
+      "preparationStep",
+      "renderFailures",
+      ...steps,
+      `${emitted}; runtimePromptRenderFailures = renderFailures; return prepareArtifactMirror;`
+    );
+    const prepareArtifactMirror = harness(
+      path,
+      fs.realpathSync,
+      fs.mkdirSync,
+      fs.lstatSync,
+      assertRegularFileInside,
+      (parent: string, candidate: string) => candidate.startsWith(`${parent}${path.sep}`),
+      (_attemptId: string, _step: string, run: () => unknown) => run(),
+      renderFailures,
+      ...steps.map((step) =>
+        step === "isMissingTaskPromptError"
+          ? (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT"
+          : () => undefined
+      )
+    ) as (candidate: typeof task, options?: Record<string, unknown>) => unknown;
+    const verifyPass = { replayWorkspacePatches: false, evidenceMode: "require", pinnedSubmodules: "verify" };
+    const firstGenerationReset = { replayWorkspacePatches: false, evidenceMode: "require" };
+
+    // The agent's prompt was deleted, by the agent itself or by hand, after it was handed over.
+    const missing = /rendered prompt for summarize is missing/u;
+    assert.throws(() => prepareArtifactMirror(task), missing);
+    assert.throws(() => prepareArtifactMirror(task, firstGenerationReset), missing);
+    assert.deepEqual(prepareArtifactMirror(task, verifyPass), { prepared: true });
+
+    // A render failure recorded after the agent ran does not fail its completed work either.
+    fs.writeFileSync(task.promptPath, "Summarize the discovery notes.\n", "utf8");
+    renderFailures.set("summarize", "unknown prompt template variable: artifact_pth:fanout");
+    assert.throws(() => prepareArtifactMirror(task), /could not be rendered/u);
+    assert.deepEqual(prepareArtifactMirror(task, verifyPass), { prepared: true });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -8721,50 +9218,43 @@ test("final-report provenance seals the planned retry chain, failed attempts, an
   assert.doesNotMatch(firstAttemptPrompt, /gpt55-xhigh|failed_attempts/u);
 });
 
-test("retry cleanup preserves only a task-owned prompt and accepts a sealed snapshot prompt", () => {
+test("retry cleanup preserves the task's own prompt file and never removes a prompt outside it", () => {
   const root = temporaryRoot("ultrafuzz-retry-prompt-");
   try {
     const artifactDir = path.join(root, "run", "artifacts", "final-report");
     const taskPrompt = path.join(artifactDir, "prompt.rendered.md");
-    const sealedPrompt = path.join(
-      root,
-      "run",
-      "smithers",
-      "execution-snapshots",
-      "sealed",
-      "controls",
-      "rendered-prompts",
-      "final-report.md"
-    );
+    // A prompt path outside the artifact root, such as a launch copy in `prompt-snapshots/`, is not
+    // the task's own file: the reset neither preserves nor removes it.
+    const launchCopy = path.join(root, "run", "prompt-snapshots", "final-report.md");
     fs.mkdirSync(path.dirname(taskPrompt), { recursive: true });
-    fs.mkdirSync(path.dirname(sealedPrompt), { recursive: true });
-    fs.writeFileSync(taskPrompt, "legacy prompt\n");
-    fs.writeFileSync(sealedPrompt, "sealed prompt\n");
+    fs.mkdirSync(path.dirname(launchCopy), { recursive: true });
+    fs.writeFileSync(taskPrompt, "edited task prompt\n");
+    fs.writeFileSync(launchCopy, "launch copy\n");
 
     const taskPromptPathForArtifactReset = loadTaskPromptPathForArtifactReset();
     const resetCanonicalArtifacts = loadCanonicalTaskArtifactRetryReset();
     assert.equal(taskPromptPathForArtifactReset(artifactDir, taskPrompt), taskPrompt);
-    assert.equal(taskPromptPathForArtifactReset(artifactDir, sealedPrompt), undefined);
+    assert.equal(taskPromptPathForArtifactReset(artifactDir, launchCopy), undefined);
     assert.equal(taskPromptPathForArtifactReset(artifactDir, path.join(artifactDir, "nested", "prompt.md")), undefined);
 
     fs.writeFileSync(path.join(artifactDir, "stale-report.json"), "{}\n");
     resetCanonicalArtifacts(artifactDir, "final-report", taskPrompt);
-    assert.equal(fs.readFileSync(taskPrompt, "utf8"), "legacy prompt\n");
+    assert.equal(fs.readFileSync(taskPrompt, "utf8"), "edited task prompt\n");
     assert.equal(fs.existsSync(path.join(artifactDir, "stale-report.json")), false);
 
     fs.mkdirSync(path.join(artifactDir, "stale", "nested"), { recursive: true });
     fs.writeFileSync(path.join(artifactDir, "stale", "nested", "report.md"), "stale\n");
-    resetCanonicalArtifacts(artifactDir, "final-report", sealedPrompt);
+    resetCanonicalArtifacts(artifactDir, "final-report", launchCopy);
     assert.deepEqual(fs.readdirSync(artifactDir), []);
-    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+    assert.equal(fs.readFileSync(launchCopy, "utf8"), "launch copy\n");
 
     const linkedPrompt = path.join(artifactDir, "prompt.rendered.md");
-    fs.symlinkSync(sealedPrompt, linkedPrompt);
+    fs.symlinkSync(launchCopy, linkedPrompt);
     assert.throws(
       () => resetCanonicalArtifacts(artifactDir, "final-report", linkedPrompt),
       /unsafe canonical task input final-report/u
     );
-    assert.equal(fs.readFileSync(sealedPrompt, "utf8"), "sealed prompt\n");
+    assert.equal(fs.readFileSync(launchCopy, "utf8"), "launch copy\n");
     fs.unlinkSync(linkedPrompt);
 
     // The reset runs before every attempt's first generation, attempt 1 included, and the preparation
@@ -9290,6 +9780,7 @@ test("generated Smithers dependency verification fails closed before descendant 
     "assertArtifactVerificationMarkerSemantics",
     "artifactContractDefinition",
     "artifactContractSchemaBinding",
+    "plannedOutputSchema",
     "validateArtifactContractBytes",
     "createHash",
     "invariantSuiteNodeIds",
@@ -9323,6 +9814,7 @@ test("generated Smithers dependency verification fails closed before descendant 
       format: contract === "ultrafuzz/text@1" ? "text" : "json"
     }),
     (contract: string) => (contract === "ultrafuzz/text@1" ? undefined : currentSchemaBinding),
+    () => undefined,
     (contract: string, contents: Uint8Array) => ({
       ok: true,
       issues: [],
@@ -9728,7 +10220,7 @@ test("generated Smithers preparation names its failing step and carries a retry 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function preparationStep");
   const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const preparationEnd = source.indexOf("\n\nfunction assertTaskOutputSchemaBindings", preparationStart);
+  const preparationEnd = source.indexOf("\n\n/**\n * How long the validator preflight", preparationStart);
 
   assert.ok(helperStart >= 0, source);
   assert.ok(preparationStart > helperStart, source);
@@ -9751,7 +10243,6 @@ test("generated Smithers preparation names its failing step and carries a retry 
     "hydrate-pinned-submodules",
     "preserve-pinned-source-proof",
     "materialize-prompt-schemas",
-    "assert-task-output-schema-bindings",
     "preflight-json-validator",
     "assert-task-inputs",
     "materialize-workspace-patch-dependencies",

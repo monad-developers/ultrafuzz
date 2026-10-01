@@ -43,6 +43,29 @@ function fakeCliEntrypoint(root: string, fixedOutput?: string): string {
   return entrypoint;
 }
 
+/** A validator CLI whose success envelope is whatever `envelopePath` holds when it runs. */
+function envelopeReadingCliEntrypoint(root: string, envelopePath: string): string {
+  const packageRoot = path.join(root, "envelope-reading-validator-cli");
+  const entrypoint = path.join(packageRoot, "dist", "validator-cli.mjs");
+  fs.mkdirSync(path.dirname(entrypoint), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    `${JSON.stringify({ name: "envelope-reading-validator-cli", version: "1.0.0", type: "module" })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    entrypoint,
+    [
+      'import fs from "node:fs";',
+      `process.stdout.write(fs.readFileSync(${JSON.stringify(envelopePath)}, "utf8"));`,
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(entrypoint, 0o500);
+  return entrypoint;
+}
+
 function countingCliEntrypoint(root: string, counterPath: string): string {
   const packageRoot = path.join(root, "counting-validator-cli");
   const entrypoint = path.join(packageRoot, "dist", "validator-cli.mjs");
@@ -712,6 +735,43 @@ test("active trusted CLI stays on its sealed transitive build; refresh adopts a 
   });
   assert.notDeepEqual(fs.readdirSync(closuresRoot).sort(), closuresBefore);
   runTrustedJsonValidatorPreflight({ layout, trusted: refreshed });
+});
+
+test("controller refresh keeps a sealed launcher that validates with the run's schemas after this build's changed", () => {
+  const root = temporaryRoot("ultrafuzz-trusted-cli-");
+  const layout = createRunLayout({ projectRoot: root, runId: "refresh-after-schema-upgrade" });
+  const reportedEnvelope = path.join(root, "reported-envelope.json");
+  fs.writeFileSync(reportedEnvelope, JSON.stringify(preflightEnvelope()), "utf8");
+  const launched = prepareTrustedCliEnvironment({
+    layout,
+    cliEntrypoint: envelopeReadingCliEntrypoint(root, reportedEnvelope)
+  });
+  // #921: the run was planned with a schema bundle this build no longer installs, and the launcher its
+  // launch sealed still validates with that bundle.
+  const plannedBundle = "1".repeat(64);
+  const metadataPath = path.join(layout.root, "trusted-cli.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
+  metadata.schema_bundle_sha256 = plannedBundle;
+  const metadataMode = fs.statSync(metadataPath).mode & 0o777;
+  fs.chmodSync(metadataPath, 0o600);
+  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  fs.chmodSync(metadataPath, metadataMode);
+  const envelope = preflightEnvelope() as { data: { schema: Record<string, unknown> } };
+  envelope.data.schema.bundle_sha256 = plannedBundle;
+  fs.writeFileSync(reportedEnvelope, JSON.stringify(envelope), "utf8");
+  const metadataBefore = fs.readFileSync(metadataPath);
+
+  // The installed CLI validates with this build's schemas, so refresh does not try to rotate to it, a
+  // rotation its preflight would refuse, and keeps the run's own launcher.
+  const refreshed = prepareTrustedCliEnvironment({
+    layout,
+    cliEntrypoint: fakeCliEntrypoint(path.join(root, "installed")),
+    allowIdentityRotation: true
+  });
+  assert.deepEqual(fs.readFileSync(metadataPath), metadataBefore);
+  assert.equal(refreshed.launcherPath, launched.launcherPath);
+  assert.equal(refreshed.env.ULTRAFUZZ_SCHEMA_BUNDLE_SHA256, plannedBundle);
+  assert.doesNotThrow(() => runTrustedJsonValidatorPreflight({ layout, trusted: refreshed }));
 });
 
 test("trusted CLI closure prefers the authenticated execution generation for workspace dependencies", () => {

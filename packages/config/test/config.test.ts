@@ -12,11 +12,13 @@ import {
   invariantPropertyPrioritySelection,
   loadProjectConfig,
   parseProjectConfigToml,
+  parseResolvedConfigJsonBytes,
   redactDiagnostics,
   redactResolvedConfig,
   resolveConfig,
   resolveExecutionResources,
   serializeRedactedResolvedConfigToml,
+  serializeResolvedConfigJsonBytes,
   type ConfigDiagnostic,
   type ProjectConfigInput,
   validateAgentConfigs,
@@ -480,6 +482,34 @@ default = "mock"
     expect(parsed.diagnostics.map((entry) => entry.code)).toEqual(
       expect.arrayContaining(["CONFIG_FIELD_TYPE_INVALID", "CONFIG_UNKNOWN_FIELD"])
     );
+  });
+
+  it("reads run.refresh_prompts_on_resume without freezing it into the resolved config", () => {
+    const parsed = parseProjectConfigToml(`
+schema_version = "ultrafuzz.config.v2"
+
+[run]
+refresh_prompts_on_resume = false
+`);
+    if (!parsed.ok) throw new Error(JSON.stringify(parsed.diagnostics, null, 2));
+    expect(parsed.value.run?.refreshPromptsOnResume).toBe(false);
+    // `resume` reads the key from the current file. A run's resolved config is frozen at launch and
+    // parsed strictly on every resume, so the key never enters it: older runs' configs still parse.
+    const resolved = resolveConfig({ projectConfig: parsed.value, env: {} });
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
+    expect(resolved.value.run).not.toHaveProperty("refreshPromptsOnResume");
+    expect(parseResolvedConfigJsonBytes(serializeResolvedConfigJsonBytes(resolved.value)).run).toEqual(
+      resolved.value.run
+    );
+
+    const invalid = parseProjectConfigToml(`
+[run]
+refresh_prompts_on_resume = "no"
+`);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.diagnostics).toEqual([
+      expect.objectContaining({ code: "CONFIG_FIELD_TYPE_INVALID", path: ["run", "refresh_prompts_on_resume"] })
+    ]);
   });
 
   it("rejects the removed run.max_parallel_nodes key outright", () => {

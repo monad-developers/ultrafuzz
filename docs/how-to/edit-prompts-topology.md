@@ -16,7 +16,10 @@ workflow prompt and its role before choosing what to customize.
 
 Runs use these project copies, and `ultrafuzz init` keeps them unless you pass
 `--force`, which also overwrites `ultrafuzz.toml` and the topology. After an
-upgrade a copy therefore keeps the text of the release that scaffolded it.
+upgrade a copy therefore keeps the text of the release that scaffolded it. A run
+renders them when it launches, and every `resume` applies their current text to
+the tasks of the run that have not finished; see
+[Change A Prompt Of A Running Campaign](restart-continue.md#change-a-prompt-of-a-running-campaign).
 `ultrafuzz validate` warns about every project prompt that differs from the
 built-in prompt at the same path. To take the built-in version of a prompt,
 delete your copy and rerun `ultrafuzz init`.

@@ -40,7 +40,7 @@ export default class Resume extends Command {
     const commandResult = commandFromRuntime("resume", result, (value) =>
       value.submitted
         ? `Submitted ${value.action}: ${value.workflow_run_id}\n`
-        : `Run already active: ${value.workflow_run_id}; no new controller was started. If a pause is still draining, resume again once status reports paused; if its controller process just exited, resume again after 30 seconds.\n`
+        : `Run already active: ${value.workflow_run_id}; no new controller was started. If a pause is still draining, resume again once status reports paused; if its controller process just exited, resume again after 30 seconds. This resume applied none of the project's current prompts; only a resume that starts a controller does.\n`
     );
     emitCommandResult(this, "resume", commandResult, flags.json);
   }

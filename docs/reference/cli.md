@@ -339,14 +339,21 @@ rejected before the run directory is created.
 Smithers run IDs and automatically accepts changed workflow source. Control
 seals, link journals, controller generations, graph fingerprints, current
 schema bindings, and metadata projections remain provenance for inspection;
-they are not resume authorization. Smithers decides which finished rows can be
+they are not resume authorization. The resumed tasks keep the schemas the run
+was planned with: after an upgrade that changed a schema, task preparation
+copies, and the verifier and dependency admission validate against, the bundle
+sealed in the run's execution snapshot. Smithers decides which finished rows can be
 reused and which newly rendered or unfinished tasks run. Ultrafuzz does not
 rewrite historical artifacts or automatically reset, replay, timetravel, or
 fork completed work. The run's `smithers/resolved-config.json` records the
 execution mode its tasks were planned with, so before starting Smithers
 `resume` fails with `WORKFLOW_LIFECYCLE_FAILED` when that file is missing or
 does not parse as the current resolved-config schema, and with
-`WORKFLOW_CLOUD_EXECUTION_REMOVED` when it records `mode = "cloud"`. Agent
+`WORKFLOW_CLOUD_EXECUTION_REMOVED` when it records `mode = "cloud"`. A plain
+`resume` of a run whose launch workflow predates planned schema bundles fails
+with `WORKFLOW_CONTROLLER_REFRESH_REQUIRED`, also before starting Smithers,
+because that workflow cannot prepare a task with this release; continue such a
+run with `resume --refresh-controller`, every time. Agent
 adapters in the continued workflow read the run's
 `smithers/execution-config.toml` (launch gave them a copy of the same file). If
 resume cannot prune stale task-worktree registrations, it reports a
@@ -355,19 +362,19 @@ resume cannot prune stale task-worktree registrations, it reports a
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so
 resume makes no package-registry request and leaves nothing in the OS
-temporary directory. Launch, resume, replay, and fork also write
-`<run>/trusted-bin/smithers`, which runs that engine for the workflow's own
-`smithers` calls. All four refuse an install that lacks any of those patches,
-such as a plain npm install of the packed packages, and an engine inside the
-target project; launch refuses before it creates the run directory. To fix
-the install, run `pnpm install --frozen-lockfile && pnpm -w build` in the
-Ultrafuzz repository checkout. The build matters because the patch registry
-that checks the installed files is compiled into Ultrafuzz.
+temporary directory. Resume refuses an install that lacks any of those
+patches, such as a plain npm install of the packed packages, and an engine
+inside the target project. Launch refuses the same install before it creates
+the run directory, because the run could not be resumed; `replay` and `fork`
+run the run's sealed engine instead. To fix the install, run
+`pnpm install --frozen-lockfile && pnpm -w build` in the Ultrafuzz repository
+checkout. The build matters because the patch registry that checks the
+installed files is compiled into Ultrafuzz.
 
 Run long campaigns from a dedicated checkout or worktree, and leave its install
 and build alone while they run. The resumed engine and its supervisor run from
-that install, the resumed workflow imports that checkout's built
-`@ultrafuzz/runtime`, and every run's `trusted-bin/smithers` points into it.
+that install, and the resumed workflow imports that checkout's built
+`@ultrafuzz/runtime`.
 A `pnpm install` there that changes the engine's resolved dependency tree
 moves the engine to a new package directory. A Smithers patch changes that
 tree, and so does a version change anywhere in the engine's dependency graph,
@@ -375,13 +382,23 @@ such as TypeScript or React; a pull or a branch switch often brings both.
 pnpm then deletes the old directory, in that install or a later one: by
 default it clears orphaned package directories during an install once seven
 days have passed since it last did. From then on the running engine can fail
-on its next lazy import, the supervisor's next relaunch of it fails, and so
-does the run's `trusted-bin/smithers`. Run `ultrafuzz resume` again to continue
-the run from the new install; it also rewrites the run's `trusted-bin/smithers`.
+on its next lazy import, and the supervisor's next relaunch of it fails. Run
+`ultrafuzz resume` again to continue the run from the new install.
 Restart long-lived Ultrafuzz processes, such as the dashboard or
 `ultrafuzz eval run`, after such an install: each resolves the engine once, so
 once that directory is gone their engine commands fail with
 `restart this Ultrafuzz process`.
+
+Every task of a resumed run, with or without `--refresh-controller`,
+`--retry-failed` or `--reset-node`, and of a `replay` or `fork`, receives the
+run's own `artifacts/<attempt-id>/prompt.rendered.md`. Unless
+`run.refresh_prompts_on_resume = false`, `resume` first renders that file again
+from the project's current prompts for every task that has not finished;
+`replay` and `fork` never do. Before any of these commands starts an engine, it
+restores a missing static prompt from its launch copy in `prompt-snapshots/`,
+never over an existing file. A prompt that is still missing or cannot be read,
+or a runtime prompt that no longer renders, fails only its task. See
+[Change a prompt of a running campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 A run that ends `failed` with no failed durable node was stopped by something
 no durable node owns: a run-level workflow runner error, such as an exception
@@ -396,10 +413,14 @@ again.
 `resume --refresh-controller` first renders the currently installed Ultrafuzz
 controller and stock adapters beside the historical source, then delegates to
 that same Smithers run. It does not publish or authenticate a historical
-controller generation. The refreshed workflow rebinds each declared output to
-the installed schema bundle but keeps its recorded contract digest and validator
-build, so after a rebuild that changed only the validator build its verification
-markers still match the run's sealed plan. Refresh rejects an actively owned
+controller generation. The refreshed workflow keeps each declared output's
+recorded schema binding, contract digest, and validator build, so its
+verification markers still match the run's sealed plan after a rebuild or an
+upgrade that changed a schema. After such an upgrade the refresh also keeps the
+run's own validator launcher, which validates with the run's planned schemas,
+instead of switching to the installed CLI, which validates with other ones. It
+reports `WORKFLOW_TRUSTED_CLI_UNVERIFIED` when it cannot verify the launcher it
+keeps or the installed CLI it switches to. Refresh rejects an actively owned
 workflow. Because Smithers admits changed workflow source, replay determinism is
 the operator's responsibility; inspect the retained source and Smithers workflow
 hash when auditing a continuation.
@@ -573,8 +594,9 @@ matches the current build's artifact contracts after a rebuild, can therefore
 still be paused or cancelled; `status` reports the divergence. They start the
 workflow runner from the run's published execution snapshot, so, like
 `status`, they still refuse a run whose sealed execution files changed: the
-files the control seal lists in that snapshot, such as the run plan, prompts,
-agent adapters, and the runtime packages and their dependencies.
+files the control seal lists in that snapshot, such as the run plan, agent
+adapters, and the runtime packages and their dependencies. A run's prompt files
+are not among them.
 
 Because they take no lock, `pause` and `cancel` issued while a launch is still
 preparing fail without changing the run; retry once `ultrafuzz run` has
@@ -658,9 +680,9 @@ non-launching configuration contract unchanged. Doctor reports:
 - npm's latest published stable engine version when the registry check is
   available;
 - whether that installed engine passes Ultrafuzz's version and path checks,
-  and the posture of each compatibility patch in it. Launch, `resume`,
-  `replay`, and `fork` refuse an engine that fails either check, so each
-  failure is reported as an error. Doctor then binds an engine that passes
+  and the posture of each compatibility patch in it. Launch and `resume`
+  refuse an engine that fails either check, so each failure is reported as an
+  error. Doctor then binds an engine that passes
   both for the project the way those commands do, and reports it as refused
   when it lies inside the project (for example, when the Ultrafuzz checkout is
   under `--project`) or when `bun` is not on `PATH`;
@@ -733,6 +755,13 @@ ultrafuzz clean <run-id> \
 
 Without `--select`, `clean` selects `runs/<run-id>`. Selections are relative to
 `.ultrafuzz/` and must name generated run, artifact, or workspace directories.
+For a selected run that an earlier release planned for per-node Modal
+execution, `clean`, including `--dry-run`, reports a
+`CLEAN_CLOUD_STORAGE_RETAINED` warning, which text output prints before
+anything is removed. The warning names the run's Modal app, the volume and
+sandbox `run` tag the removed provider derived from its run ID, and the
+`modal volume delete` command. `clean` no longer removes that storage, and
+still deletes the run.
 
 ## Dashboard
 

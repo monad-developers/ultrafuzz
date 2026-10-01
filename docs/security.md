@@ -25,8 +25,10 @@ The rest of this page describes what Ultrafuzz does and does not enforce
 once it is running. None of it substitutes for the host being disposable.
 
 Ultrafuzz uses a trusted local execution model. Agents run as the project
-configures them, and the product boundary is prompt review before launch plus
-explicit artifact review before materialization.
+configures them, and the product boundary is review of the prompts before
+launch, of the project's prompts before each resume, which applies them to the
+run's unfinished tasks, and of any prompt file you edit in a run, plus explicit
+artifact review before materialization.
 
 Agent adapters are intentionally allowed to use their unrestricted execution
 modes, including `--dangerously-skip-permissions` and
@@ -59,12 +61,37 @@ Ultrafuzz does not enforce a deterministic repository mutation policy across
 agent behavior. Instructions not to commit, push, open pull requests, submit
 external findings, stage changes, or merge are expressed in agent prompts and
 depend on user acknowledgement plus the trusted local execution model. Review
-prompts before launch, review artifacts before materialization, and use normal
-repository review tools such as `git status` before publishing.
+prompts before launch and before a resume, and any prompt file you edit in a
+run, review artifacts before materialization, and use normal repository review
+tools such as `git status` before publishing.
 
 Ultrafuzz does not maintain an agent command allowlist, network allowlist, or
 sandbox approval flow. Treat agent execution as trusted local execution, not as
 an isolation boundary.
+
+Ultrafuzz does not integrity-check a run's prompt files after launch:
+
+- each attempt's `artifacts/<attempt-id>/prompt.rendered.md`, which the attempt
+  receives as the file is when it starts;
+- the template copies under `dynamic-prompt-templates/`, from which every
+  prompt rendered after launch, such as a generated child's or the final
+  report's, is rendered;
+- the launch copies under `prompt-snapshots/`, which restore a missing static
+  prompt.
+
+Nothing compares these files with a launch digest or seals a copy, and the
+digests that name some of them are launch provenance only. Unless
+`run.refresh_prompts_on_resume = false`, each `resume` renders the files of the
+unfinished tasks, and the template copies a later render reads, again from the
+project's current `.ultrafuzz/prompts/**` and packaged built-ins, and keeps
+every file it replaces under `prompt-history/`. The vulnerability-database catalog digest is
+checked only when a prompt is rendered. A process running as the operator,
+including an agent in another task, can therefore change the prompt of a task
+that has not run, in the run's files or in the project's prompts. Nothing flags
+such a change; a resume only lists, in `PROMPTS_REFRESHED` and `refresh.json`,
+the prompts it rendered again. This is within the trusted local execution model
+above: such a process can already change the run's workflow source, which
+native resume runs as it is.
 
 ## Campaign data governance
 
@@ -85,10 +112,13 @@ Put reviewed acknowledgement records in
 `ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS` as an array that matches the
 canonical
 [data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
-Acknowledgements bind the policy, effective inputs, prompt, routes, and
-Git/worktree identity. A runtime semantic gate rejects more than one
-acknowledgement for the same destination. Any change makes an acknowledgement
-stale. Credential values are never persisted. Private standalone Modal evals
+Acknowledgements bind the policy, effective inputs, the prompt catalog at
+launch, routes, and Git/worktree identity. Any change to these bound inputs
+before launch makes an acknowledgement stale; neither a prompt file edited in a
+run after launch nor a prompt that `resume` applies is acknowledged again. A
+runtime semantic gate rejects more than one acknowledgement for the same
+destination. Credential values are never
+persisted. Private standalone Modal evals
 remain fail-closed pending the separate R-26 disclosure authorization. Public
 Modal runs record `cloud:modal`. These controls are not a sandbox or egress
 filter: YOLO agents remain unrestricted.
@@ -207,11 +237,22 @@ closure are copied into a run-owned content-addressed, read-only generation;
 the launcher verifies that closure before every invocation, removes ambient Node
 loader/search injection, and rejects ESM or CommonJS modules resolved outside
 it. Module confinement does not prevent the validator from reading the artifact
-or schema paths it was asked to check. Its pinned CLI, schema-bundle, and
-validator identity are preflighted with a real fixture before model work, and
-every registered schema path is checked against its pinned digest. This keeps
-the producer and host on the same contract; it does not turn same-UID local
-agent execution into an OS security boundary.
+or schema paths it was asked to check. Before a schema-backed task's model work,
+its pinned CLI is preflighted with a real fixture and must report the run's
+planned schema bundle, which the host artifact gates and the workflow's verifier
+check the run's artifacts against even after an upgrade changed a schema; the
+validator build it reports is provenance. Every registered schema path is
+checked against its pinned digest. This keeps the producer and host on the same
+contract; it does not turn same-UID local agent execution into an OS security
+boundary.
+
+A task's `.ultrafuzz/schemas` copy is not tamper-evident: every preparation
+rewrites a file that differs from the run's planned bundle, without refusing or
+recording the difference. It is only the agent's view of the schemas. The run's
+own validator rejects a schema file whose bytes are not the planned ones, and
+after an upgrade that changed a schema the engine reads the planned bundle from
+the run's execution snapshot, which the run directory's same-UID trust covers
+like the rest of the run.
 
 The workflow engine is installed by the controller rather than from the target
 repository. At launch, Ultrafuzz verifies the complete closure of its exact npm
@@ -219,15 +260,13 @@ dependency, copies that closure into the target-specific private controller
 directory, and makes every copied directory and file read-only. It checks the
 closure before and after the script-disabled, registry-pinned install and again
 before cache reuse. `resume`, `ps`, the `--refresh-controller` ownership
-inspection, commands on a run without a sealed runner, and each run's
-`trusted-bin/smithers` shim instead run the engine from Ultrafuzz's own pnpm
-install, which pnpm patches at install time from the committed `patches/`
-files. That engine is not sealed. For each command Ultrafuzz runs, only its
-entrypoint and the Bun that runs it are digest-anchored, and the
-`trusted-bin/smithers` shim checks neither again: it executes the two paths it
-recorded when it was written. The engine's package closure is not hashed, and
-it runs without the Bun module confinement a sealed runner has. Ultrafuzz refuses
-it when it lacks any compatibility patch or lies inside the target project. It
+inspection, and commands on a run without a sealed runner instead run the
+engine from Ultrafuzz's own pnpm install, which pnpm patches at install time
+from the committed `patches/` files. That engine is not sealed. For each
+command Ultrafuzz runs, only its entrypoint and the Bun that runs it are
+digest-anchored. The engine's package closure is not hashed, and it runs
+without the Bun module confinement a sealed runner has. Ultrafuzz refuses it
+when it lacks any compatibility patch or lies inside the target project. It
 starts the engine's command process with
 `--config=/dev/null --no-env-file --no-install --no-addons`, so that process
 does not load the target's `bunfig.toml` or `.env`, and the compatibility
@@ -236,10 +275,9 @@ spawns, and to the supervisor's relaunch of a dead engine. Every engine process
 also gets `SMITHERS_BACKEND=sqlite`, which stops Smithers from importing the
 target's `.smithers/smithers.config.ts` to choose a store. The runner toolcache
 npm and `ULTRAFUZZ_TRUSTED_BIN` are not npm authority; the latter remains only
-the run-owned directory holding the validator launcher and the `smithers` shim.
-Tasks inherit that directory first on `PATH`, so an agent can also drive its
-own run through `smithers` (for example `ps`, `cancel`, or `signal`); a
-same-UID agent could already run the engine by its path.
+the run-owned validator launcher directory. The workflow Ultrafuzz renders
+runs no engine CLI, and Ultrafuzz adds none to the task `PATH`; an agent
+running as the same user can still run the engine by its path.
 
 Workflows that intentionally need additional variables can opt in explicitly:
 

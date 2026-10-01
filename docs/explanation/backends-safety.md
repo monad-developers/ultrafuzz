@@ -47,7 +47,7 @@ configuration as product behavior.
 
 The durable product boundary is:
 
-- review prompts before launch;
+- review prompts before launch, and any prompt file you edit in a run;
 - fetch references only through explicit `references sync` or update actions;
 - persist graph, prompt, config, event, workspace, and artifact evidence;
 - review findings and reports before acting on them;

@@ -33,7 +33,6 @@ export function effectiveAuditPolicy(input: {
   const projectRoot = path.resolve(input.projectRoot);
   const catalog = loadAuditProfileCatalog();
   const profile = auditProfile(input.config.auditProfile, catalog);
-  const profileTopologyPath = packagedTopologyPath(profile, catalog);
   const effectiveSettings = { ...input.config.auditProfileResolution.effectiveSettings };
   const settingOrigins = { ...input.config.auditProfileResolution.settingOrigins };
   const overriddenSettings = new Set(input.config.auditProfileResolution.overriddenSettings);
@@ -43,26 +42,11 @@ export function effectiveAuditPolicy(input: {
     if (profile.settings.strategy_loops !== undefined) overriddenSettings.add("strategy_loops");
   }
 
-  let effectiveTopologyPath: string;
-  let effectiveTopologyDisplayPath: string;
-  let topologyPathOrigin: TopologyPathOrigin;
-  if (input.runtimeTopologyPath !== undefined) {
-    effectiveTopologyPath = resolveProjectOrAbsolutePath(projectRoot, input.runtimeTopologyPath);
-    effectiveTopologyDisplayPath = portablePath(projectRoot, effectiveTopologyPath);
-    topologyPathOrigin = "runtime-override";
-  } else if (input.config.topologyPath !== undefined) {
-    effectiveTopologyPath = resolveProjectOrAbsolutePath(projectRoot, input.config.topologyPath);
-    effectiveTopologyDisplayPath = input.config.topologyPath;
-    topologyPathOrigin = "project-config";
-  } else if (profileTopologyPath !== undefined) {
-    effectiveTopologyPath = profileTopologyPath;
-    effectiveTopologyDisplayPath = profile.topologyPath!;
-    topologyPathOrigin = "audit-profile";
-  } else {
-    effectiveTopologyPath = resolveTopologyPath(projectRoot);
-    effectiveTopologyDisplayPath = ".ultrafuzz/topology.yml";
-    topologyPathOrigin = "project-default";
-  }
+  const {
+    path: effectiveTopologyPath,
+    displayPath: effectiveTopologyDisplayPath,
+    origin: topologyPathOrigin
+  } = selectTopologyPath(projectRoot, input.config, input.runtimeTopologyPath, profileTopology(profile, catalog));
 
   if (input.runtimeStrategyLoops === undefined && input.config.strategyLoops === undefined) {
     const topology = loadTopology(projectRoot, { topologyPath: effectiveTopologyPath, requirePromptFiles: false });
@@ -88,6 +72,56 @@ export function effectiveAuditPolicy(input: {
       ? {}
       : { strategyLoops: input.runtimeStrategyLoops ?? input.config.strategyLoops })
   };
+}
+
+/**
+ * The topology file a run plans from, as `effectiveAuditPolicy` selects it, without loading the
+ * topology: `resume` rebuilds a run's plan from it.
+ */
+export function effectiveTopologyPath(input: {
+  projectRoot: string;
+  config: ResolvedConfig;
+  runtimeTopologyPath?: string;
+}): string {
+  const catalog = loadAuditProfileCatalog();
+  const profile = auditProfile(input.config.auditProfile, catalog);
+  return selectTopologyPath(
+    path.resolve(input.projectRoot),
+    input.config,
+    input.runtimeTopologyPath,
+    profileTopology(profile, catalog)
+  ).path;
+}
+
+function profileTopology(
+  profile: ReturnType<typeof auditProfile>,
+  catalog: ReturnType<typeof loadAuditProfileCatalog>
+): { path: string; displayPath: string } | undefined {
+  const topologyPath = packagedTopologyPath(profile, catalog);
+  return topologyPath === undefined || profile.topologyPath === undefined
+    ? undefined
+    : { path: topologyPath, displayPath: profile.topologyPath };
+}
+
+function selectTopologyPath(
+  projectRoot: string,
+  config: ResolvedConfig,
+  runtimeTopologyPath: string | undefined,
+  packaged: { path: string; displayPath: string } | undefined
+): { path: string; displayPath: string; origin: TopologyPathOrigin } {
+  if (runtimeTopologyPath !== undefined) {
+    const topologyPath = resolveProjectOrAbsolutePath(projectRoot, runtimeTopologyPath);
+    return { path: topologyPath, displayPath: portablePath(projectRoot, topologyPath), origin: "runtime-override" };
+  }
+  if (config.topologyPath !== undefined) {
+    return {
+      path: resolveProjectOrAbsolutePath(projectRoot, config.topologyPath),
+      displayPath: config.topologyPath,
+      origin: "project-config"
+    };
+  }
+  if (packaged !== undefined) return { ...packaged, origin: "audit-profile" };
+  return { path: resolveTopologyPath(projectRoot), displayPath: ".ultrafuzz/topology.yml", origin: "project-default" };
 }
 
 function resolveProjectOrAbsolutePath(projectRoot: string, value: string): string {

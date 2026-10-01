@@ -217,10 +217,10 @@ export async function diagnoseProject(input: DoctorInput) {
 
 /**
  * The install and patch checks of the runner Ultrafuzz's install provides.
- * Launch, `resume`, `replay` and `fork` bind that runner for the target project
- * before they write its shim, and refuse one inside the project or one whose
- * Bun cannot be resolved, so a runner that passes both checks is bound here the
- * same way. A missing patch is left to the patches check.
+ * Launch and `resume` bind that runner for the target project, and refuse one
+ * inside the project or one whose Bun cannot be resolved, so a runner that
+ * passes both checks is bound here the same way. A missing patch is left to
+ * the patches check.
  */
 function workflowEngineChecks(
   installation: SmithersInstallationPosture,
@@ -234,8 +234,8 @@ function workflowEngineChecks(
     installation.layout_error !== null
       ? `the installed workflow engine cannot run (see the workflow engine layout detail); ${WORKFLOW_RUNNER_REINSTALL_HINT}`
       : refusal !== null
-        ? `launch, resume, replay and fork refuse the installed workflow engine for this project: ${refusal}`
-        : `resume, ps and each run's smithers shim run the installed workflow engine ${String(installation.installed_version)}`;
+        ? `launch and resume refuse the installed workflow engine for this project: ${refusal}`
+        : `resume and ps run the installed workflow engine ${String(installation.installed_version)}`;
   return {
     layoutDetail: installation.layout_error ?? refusal,
     checks: [

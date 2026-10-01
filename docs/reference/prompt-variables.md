@@ -10,12 +10,18 @@ Markdown and MDX files are treated as Markdown-compatible prompt text with YAML
 frontmatter and `{{variable}}` placeholders. MDX imports, exports, and JSX are
 not evaluated.
 
-Ultrafuzz renders prompts before workflow launch and writes each rendered prompt
-to the node or attempt artifact directory as:
+Ultrafuzz renders a static prompt before workflow launch, and a prompt that
+waits on a dynamic group when the group expands, and writes each rendered
+prompt to its attempt's artifact directory as:
 
 ```text
 prompt.rendered.md
 ```
+
+That file is the prompt every later attempt of the task receives. It is
+rendered again only while it is missing, or when `resume` applies the project's
+current prompts to a task that has not finished. See
+[Change A Prompt Of A Running Campaign](../how-to/restart-continue.md#change-a-prompt-of-a-running-campaign).
 
 Unknown template variables fail validation.
 
