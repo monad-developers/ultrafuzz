@@ -14,6 +14,8 @@ type ClaudeOutputInterpreter = ReturnType<SmithersClaudeCodeAgent["createOutputI
 type ClaudeGenerateOptions = Parameters<SmithersClaudeCodeAgent["generate"]>[0];
 
 const GENERIC_CLAUDE_FAILURE = "Claude run failed";
+// Bounds the controller's redaction, which scans the whole text before its 1,000-byte cap.
+const MAX_STATED_FAILURE_LENGTH = 16_384;
 
 // Shared by ClaudeAgent and DeepSeekAgent, which both run Claude Code.
 export class StatedFailureClaudeCodeAgent extends SmithersClaudeCodeAgent {
@@ -121,7 +123,8 @@ function readClaudeAuthConfig(): ClaudeAuthConfig {
 function claudeResultText(line: string): string | undefined {
   try {
     const result: unknown = JSON.parse(line)?.result;
-    return typeof result === "string" && result.trim() !== "" ? result.trim() : undefined;
+    const text = typeof result === "string" ? result.trim() : "";
+    return text === "" ? undefined : text.slice(0, MAX_STATED_FAILURE_LENGTH);
   } catch {
     return undefined;
   }

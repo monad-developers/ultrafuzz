@@ -7056,6 +7056,11 @@ bunAdapterTest("generated Claude adapter carries the failure Claude Code states 
   assert.equal(expiredFailure.code, "AGENT_CLI_ERROR");
   assert.equal(expiredFailure.details?.agentStatedFailure, expired);
 
+  // The controller redacts the whole statement before capping it, so the
+  // adapter keeps only its first 16,384 characters.
+  const oversized = await failedGeneration({ subtype: "success", result: `${"y".repeat(16_384)}tail` });
+  assert.equal(oversized.details?.agentStatedFailure, "y".repeat(16_384));
+
   // A result that states nothing adds nothing.
   const silent = await failedGeneration({ subtype: "error_during_execution" });
   assert.match(silent.message, /^Claude run failed\b/u);
