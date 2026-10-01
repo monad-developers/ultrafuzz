@@ -10195,6 +10195,44 @@ test("validate warns when a packaged group timeout pin is below the run default 
   assert.equal(raised.value?.policy_posture.topology.status, "warn");
 });
 
+// The default a pin overrides is the model profile's own `timeout_seconds` when it has one, which
+// task compilation prefers to the run default, so the warning names the profile's value.
+test("validate warns when a packaged group timeout pin is below the model profile timeout it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[models\.default\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[models\.default\]$/mu, "[models.default]\ntimeout_seconds = 10800"),
+    "utf8"
+  );
+
+  const raised = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(raised.diagnostics);
+  assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
+    "groups.goals.defaults.timeout_seconds",
+    "groups.review.defaults.timeout_seconds",
+    "groups.specialists.defaults.timeout_seconds",
+    "groups.strategies.defaults.timeout_seconds"
+  ]);
+  for (const warning of warnings) {
+    assert.match(warning.message, /pins timeout_seconds=7200, below model profile `default` `timeout_seconds`=10800/u);
+  }
+
+  // A longer run default does not apply to a profile with its own timeout, so the warning keeps
+  // naming the profile.
+  setRunDefaultTimeout(project, 14_400);
+  const both = await validateProject({ projectRoot: project, env: {} });
+  const bothWarnings = timeoutShadowingWarnings(both.diagnostics);
+  assert.equal(bothWarnings.length, 4, JSON.stringify(both.diagnostics));
+  for (const warning of bothWarnings) {
+    assert.match(warning.message, /below model profile `default` `timeout_seconds`=10800/u);
+    assert.doesNotMatch(warning.message, /14400/u);
+  }
+});
+
 test("plan warns about group and node timeout pins below the default they override", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
