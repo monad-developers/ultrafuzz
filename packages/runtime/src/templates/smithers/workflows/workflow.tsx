@@ -3129,7 +3129,10 @@ function prepareArtifactMirror(
     );
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
-  ignoreWorkspaceRuntimeRoots(workspaceRoot);
+  ignoreWorkspaceRuntimeRoots(workspaceRoot, {
+    attemptId: task.attemptId,
+    outputPaths: task.outputs.map((output) => output.path)
+  });
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   const schemaBundle = preparationStep(task.attemptId, "materialize-prompt-schemas", () => {
     const bundle = plannedSchemaBundle();
