@@ -45,6 +45,40 @@ describe("agent preamble MDX", () => {
     ).toBe(`${mandatoryPrefix}${operatorPrompt}\n\n${taskPrompt}`);
   });
 
+  it("tells agents to record friction only through the run's Frog command", () => {
+    const template = loadAgentPreambleTemplate("friction-log");
+    // The command and directory are the only variables: nothing reaches the agent through the environment.
+    expect(new Set([...template.matchAll(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/gu)].map((match) => match[1]))).toEqual(
+      new Set(["friction_log_command", "friction_log_directory"])
+    );
+    expect(template).not.toMatch(/ULTRAFUZZ_FRICTION_LOG|\$[A-Z_]{3,}/u);
+    const command = "'/runs/example/friction-bin/ultrafuzz-friction-log'";
+    const directory = "/runs/example/friction";
+    const fragment = renderAgentPreambleTemplate("friction-log", {
+      friction_log_command: command,
+      friction_log_directory: directory
+    });
+    expect(fragment).toContain(`${command} list`);
+    expect(fragment).toContain(`${command} log '<one specific line>' --severity <blocker|major|minor> --body`);
+    // A failing command never stops the task, and agents never touch entries directly, because
+    // Frog refuses every later entry once one entry is malformed.
+    expect(fragment).toMatch(/if either command fails, continue without it/u);
+    expect(fragment).toContain(`Never create, edit, or delete anything under \`${directory}\` yourself.`);
+    expect(fragment).toContain("Never publish entries; an operator reviews them first.");
+    const sections = [
+      "Expected Behavior",
+      "Current Behavior",
+      "Possible Solution",
+      "Minimal Reproducible Example",
+      "Context"
+    ];
+    const positions = sections.map((section) => fragment.indexOf(`## ${section}`));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((left, right) => left - right)).toEqual(positions);
+    expect(fragment).toMatch(/Never include target source, findings/u);
+    expect(Buffer.byteLength(fragment, "utf8")).toBeLessThanOrEqual(1_536);
+  });
+
   it("treats inserted values as data", () => {
     // The inserted value names another bound variable; a second expansion pass would turn it into 1500.
     const rendered = renderAgentPreambleTemplate("topology-runtime-context", {

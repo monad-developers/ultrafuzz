@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -495,9 +495,17 @@ function loadJsonValidatorPreflight(
   };
 }
 
-type AgentPromptRenderer = (values: { runtimeContext: string; operatorPrompt: string; taskPrompt: string }) => string;
+type AgentPromptRenderer = (values: {
+  runtimeContext: string;
+  operatorPrompt: string;
+  taskPrompt: string;
+  frictionLog?: { directory: string; command: string };
+}) => string;
 
-function loadAgentPromptRenderer(template: string): AgentPromptRenderer {
+function loadAgentPromptRenderer(
+  template: string,
+  frictionLog: { instructions: string; entriesPath: string; commandPath: string; wrapper: string } | null = null
+): AgentPromptRenderer {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function renderAgentPrompt");
   const helperEnd = source.indexOf("\nfunction sourceUsesPinnedBranch", helperStart);
@@ -509,8 +517,9 @@ function loadAgentPromptRenderer(template: string): AgentPromptRenderer {
     "agentPromptTemplate",
     "authorizedDefensiveSecurityContext",
     "untrustedContentBoundary",
+    "frictionLog",
     `${helper}; return renderAgentPrompt;`
-  )(template, "SECURITY CONTEXT", "UNTRUSTED BOUNDARY") as AgentPromptRenderer;
+  )(template, "SECURITY CONTEXT", "UNTRUSTED BOUNDARY", frictionLog) as AgentPromptRenderer;
 }
 
 function loadFinalReportPromptAuthorityHarness(maxAuthorityBytes = 128 * 1024 * 1024): {
@@ -5991,7 +6000,10 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
     taskProjection,
     /optionalDependencyArtifactDirs: task\.optionalDependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
   );
-  assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\]/u);
+  assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\b/u);
+  // The friction log paths come from the task's own run root, never from inherited
+  // environment that a continuation can blank.
+  assert.doesNotMatch(source, /process\.env\.ULTRAFUZZ_FRICTION/u);
   assert.doesNotMatch(baseAgent, /taskManifestPath|executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
@@ -6149,6 +6161,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
     const producerAttemptId = "dependency-producer";
     const producerDir = path.join(runRoot, "artifacts", producerAttemptId);
     const consumerDir = path.join(runRoot, "artifacts", "dependency-consumer");
+    const frictionDir = path.join(runRoot, "friction");
     fs.mkdirSync(producerDir, { recursive: true });
     fs.mkdirSync(consumerDir, { recursive: true });
     const markerBytes = Buffer.from("verified-marker\n", "utf8");
@@ -6202,6 +6215,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "agentFactories",
         "assertGovernedWorkspaceSource",
         "artifactAwareAgent",
+        "frictionLogAddDir",
         `${emitted}; return {
           prepare(task) {
             prepareArtifactMirror(task);
@@ -6284,7 +6298,9 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         ) => ({
           preflight: async (args: unknown) => admittedAgent().preflight?.(args),
           generate: async () => ({ summary: "ok" })
-        })
+        }),
+        // An enabled friction log's entry directory reaches every agent instance, after its other roots.
+        () => [frictionDir]
       ) as {
         prepare(task: ReturnType<typeof makeTaskSpecs>["consumer"]): void;
         agent(task: ReturnType<typeof makeTaskSpecs>["consumer"]): {
@@ -6317,7 +6333,10 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
     await rehydratedAgent.preflight({});
     assert.equal(firstRender.counters.preparations, 1, "an ordinary rerender must not replace the prepared epoch");
     assert.ok(firstRender.counters.authentications >= 2, "preflight must recheck the admitted snapshot");
-    assert.deepEqual(firstRender.factoryAddDirs, [[consumerDir], [consumerDir, producerDir]]);
+    assert.deepEqual(firstRender.factoryAddDirs, [
+      [consumerDir, frictionDir],
+      [consumerDir, producerDir, frictionDir]
+    ]);
 
     firstRender.counters.replaceArtifact = true;
     const replacementCheck = firstRender.module.agent(reconciledConsumer!);
@@ -6352,7 +6371,10 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
 
     assert.equal(freshRender.counters.preparations, 1);
     assert.ok(freshRender.counters.authentications >= 2, "admission and currentness must both authenticate");
-    assert.deepEqual(freshRender.factoryAddDirs, [[consumerDir], [consumerDir, producerDir]]);
+    assert.deepEqual(freshRender.factoryAddDirs, [
+      [consumerDir, frictionDir],
+      [consumerDir, producerDir, frictionDir]
+    ]);
   } finally {
     fs.rmSync(runRoot, { recursive: true, force: true });
   }
@@ -6869,6 +6891,150 @@ test("generated agent prompt inserts literal braces from task and operator promp
     () => unbound({ runtimeContext: "context", operatorPrompt: "", taskPrompt: "task" }),
     /agent prompt template contains an unresolved variable: retry_failure$/u
   );
+});
+
+test("generated agent prompt places the run friction log after the trust boundary", () => {
+  const instructions = loadAgentPreambleTemplate("friction-log");
+  const render = loadAgentPromptRenderer(loadAgentPreambleTemplate("agent-prompt"), {
+    instructions,
+    entriesPath: "friction",
+    commandPath: "friction-bin/ultrafuzz-friction-log",
+    wrapper: "#!/bin/sh\n"
+  });
+  const directory = "/project/.ultrafuzz/runs/run-1/friction";
+  const command = "/project/.ultrafuzz/runs/run-1/friction-bin/ultrafuzz-friction-log";
+  const values = { runtimeContext: "## Topology Runtime Context", operatorPrompt: "", taskPrompt: "# Task\n" };
+  const withLog = render({ ...values, frictionLog: { directory, command } });
+  const expectedFragment = instructions
+    .replaceAll("{{friction_log_command}}", `'${command}'`)
+    .replaceAll("{{friction_log_directory}}", directory);
+  assert.ok(
+    withLog.startsWith(`SECURITY CONTEXT\n\nUNTRUSTED BOUNDARY\n\n${expectedFragment}\n\n## Topology Runtime Context`),
+    withLog
+  );
+  assert.doesNotMatch(withLog, /\{\{friction_log_(?:command|directory)\}\}/u);
+  // The command is shell-quoted, so a run root with a quote cannot break out of it.
+  const quoted = render({ ...values, frictionLog: { directory, command: "/it's/ultrafuzz-friction-log" } });
+  assert.match(quoted, /'\/it'\\''s\/ultrafuzz-friction-log' list/u);
+  // A run root is inserted as it is: `$$` and `$&` are not replacement patterns here.
+  const dollars = "/runs/a$$b$&c";
+  const literal = render({
+    ...values,
+    frictionLog: { directory: `${dollars}/friction`, command: `${dollars}/friction-bin/ultrafuzz-friction-log` }
+  });
+  assert.ok(literal.includes(`'${dollars}/friction-bin/ultrafuzz-friction-log' list`), literal);
+  assert.ok(literal.includes(`under \`${dollars}/friction\` yourself`), literal);
+});
+
+function loadFrictionLogPreparation(frictionLog: {
+  instructions: string;
+  entriesPath: string;
+  commandPath: string;
+  wrapper: string;
+}): {
+  prepare(task: { attemptId: string; runRoot: string }): void;
+  addDir(task: { attemptId: string; runRoot: string }): string[];
+} {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const start = source.indexOf("function frictionLogPaths");
+  const end = source.indexOf("\nconst pinnedSourceBranch", start);
+  assert.ok(start >= 0 && end > start, source);
+  const emitted = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  return new Function(
+    "frictionLog",
+    "path",
+    "mkdirSync",
+    "writeFileSync",
+    "renameSync",
+    "rmSync",
+    "randomUUID",
+    `${emitted}; return { prepare: prepareFrictionLog, addDir: frictionLogAddDir };`
+  )(frictionLog, path, fs.mkdirSync, fs.writeFileSync, fs.renameSync, fs.rmSync, randomUUID) as ReturnType<
+    typeof loadFrictionLogPreparation
+  >;
+}
+
+test("generated friction log preparation installs the Frog wrapper outside the agent write root and never fails a task", () => {
+  const runRoot = fs.realpathSync(temporaryRoot("ultrafuzz-friction-log-"));
+  const stderr = process.stderr.write;
+  const reported: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    reported.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const frictionLog = {
+      instructions: "",
+      entriesPath: "friction",
+      commandPath: "friction-bin/ultrafuzz-friction-log",
+      wrapper: "#!/bin/sh\necho first\n"
+    };
+    const task = { attemptId: "task-1", runRoot };
+    const command = path.join(runRoot, "friction-bin", "ultrafuzz-friction-log");
+    const preparation = loadFrictionLogPreparation(frictionLog);
+    preparation.prepare(task);
+    assert.equal(fs.readFileSync(command, "utf8"), frictionLog.wrapper);
+    assert.equal(fs.statSync(command).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.join(runRoot, "friction")).mode & 0o777, 0o700);
+    // Agents may write entries, never the directory that holds the command.
+    assert.deepEqual(preparation.addDir(task), [path.join(runRoot, "friction")]);
+    // The paths come from the task's own run root, resolved against the working directory like its other paths.
+    assert.deepEqual(preparation.addDir({ attemptId: "task-1", runRoot: "relative/run" }), [
+      path.resolve("relative/run", "friction")
+    ]);
+
+    // Every preparation rewrites the wrapper, and leaves no staging file behind.
+    fs.writeFileSync(command, "#!/bin/sh\necho edited\n");
+    preparation.prepare(task);
+    assert.equal(fs.readFileSync(command, "utf8"), frictionLog.wrapper);
+    assert.deepEqual(fs.readdirSync(path.dirname(command)), ["ultrafuzz-friction-log"]);
+
+    // A symlink planted at the wrapper path is replaced, never followed or left to run.
+    const decoy = path.join(runRoot, "decoy");
+    fs.writeFileSync(decoy, "decoy\n");
+    fs.rmSync(command);
+    fs.symlinkSync(decoy, command);
+    preparation.prepare(task);
+    assert.equal(fs.lstatSync(command).isFile(), true);
+    assert.equal(fs.readFileSync(command, "utf8"), frictionLog.wrapper);
+    assert.equal(fs.readFileSync(decoy, "utf8"), "decoy\n");
+    assert.deepEqual(reported, []);
+
+    // A directory there cannot be replaced: that is reported, leaves no staged copy, and never fails the task.
+    fs.rmSync(command);
+    fs.mkdirSync(path.join(command, "planted"), { recursive: true });
+    assert.doesNotThrow(() => preparation.prepare(task));
+    assert.match(reported.join(""), /friction log unavailable for task-1:/u);
+    assert.deepEqual(fs.readdirSync(path.dirname(command)), ["ultrafuzz-friction-log"]);
+
+    // An unwritable run root is reported, never thrown.
+    const blocked = { attemptId: "task-2", runRoot: path.join(decoy, "not-a-directory") };
+    assert.doesNotThrow(() => preparation.prepare(blocked));
+    assert.match(reported.join(""), /friction log unavailable for task-2:/u);
+
+    // A disabled run prepares nothing and grants no extra write root.
+    const disabled = new Function(
+      "frictionLog",
+      `${
+        ts.transpileModule(
+          (() => {
+            const source = fs.readFileSync(workflowTemplatePath, "utf8");
+            return source.slice(
+              source.indexOf("function frictionLogPaths"),
+              source.indexOf("\n/**\n * Best effort: a friction log")
+            );
+          })(),
+          { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+        ).outputText
+      }; return frictionLogAddDir;`
+    )(null) as (task: { runRoot: string }) => string[];
+    assert.deepEqual(disabled({ runRoot }), []);
+  } finally {
+    process.stderr.write = stderr;
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers verification publishes its exact workspace patch baseline snapshot", () => {
@@ -7751,7 +7917,8 @@ test("only the preparation before the agent checks its prompt, never the verify 
       "captureInvariantSuiteBaseline",
       "verifyInvariantSuiteBaseline",
       "assertTaskDependencyInputs",
-      "isMissingTaskPromptError"
+      "isMissingTaskPromptError",
+      "prepareFrictionLog"
     ];
     const renderFailures = new Map<string, string>();
     const harness = new Function(

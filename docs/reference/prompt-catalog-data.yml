@@ -7,6 +7,9 @@ prompts:
   - path: _templates/agent-preamble/authorized-defensive-security-context.mdx
     category: Shared preamble
     description: Establishes that every task is an authorized local defensive security review.
+  - path: _templates/agent-preamble/friction-log.mdx
+    category: Runtime control
+    description: When run.friction_log_enabled is set, tells agents to record tooling roadblocks with the run's pinned Frog command.
   - path: _templates/agent-preamble/topology-runtime-context.mdx
     category: Runtime control
     description: Injects timeout, working-budget, deadline, and finalization-reserve instructions into every node.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,6 +87,7 @@ function preparationHarness(
     rejectAdmission?: boolean;
     onPreflight?: () => void;
     onPinnedSubmodules?: (step: "hydrate" | "verify", expectation: unknown) => void;
+    frictionLog?: { instructions: string; entriesPath: string; commandPath: string; wrapper: string };
   } = {}
 ) {
   const source = ts.createSourceFile(
@@ -133,9 +134,11 @@ function preparationHarness(
     ...artifacts,
     ...runtime,
     ...replacements,
+    frictionLog: options.frictionLog ?? null,
     path,
     z,
     createHash,
+    randomUUID,
     Buffer,
     process,
     execFileSync,
@@ -621,4 +624,19 @@ test("the post-agent verify pass checks the task's pinned submodules and does no
       ["hydrate", pinnedSubmodules],
       ["verify", pinnedSubmodules]
     ]);
+  }));
+
+test("preparation installs an enabled run friction log before the agent runs", () =>
+  lifecycleFixture((fixture) => {
+    const frictionLog = {
+      instructions: "",
+      entriesPath: "friction",
+      commandPath: "friction-bin/ultrafuzz-friction-log",
+      wrapper: "#!/bin/sh\nexit 0\n"
+    };
+    assert.deepEqual(preparationHarness(fixture.tasks, { frictionLog }).prepare(fixture.task), { prepared: true });
+    assert.equal(fs.statSync(path.join(fixture.task.runRoot, "friction")).isDirectory(), true);
+    const command = path.join(fixture.task.runRoot, "friction-bin", "ultrafuzz-friction-log");
+    assert.equal(fs.readFileSync(command, "utf8"), frictionLog.wrapper);
+    assert.equal(fs.statSync(command).mode & 0o777, 0o700);
   }));

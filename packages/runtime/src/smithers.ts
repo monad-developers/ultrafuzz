@@ -65,6 +65,13 @@ import {
   loadPackagedControllerSource
 } from "./controller-source.js";
 import { isPreparedForgeGuardBin } from "./forge-guard.js";
+import {
+  FRICTION_LOG_COMMAND_PATH,
+  FRICTION_LOG_ENTRIES_PATH,
+  FROG_PACKAGE_NAME,
+  frictionLogWrapper,
+  resolveFrogBin
+} from "./friction-log.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
 import {
@@ -4091,7 +4098,13 @@ function collectWorkflowExecutionDependencies(input: {
       // A first-party module depends on the runner only for host commands, which
       // run the installed one (installedWorkflowRunner). The sealed engine runs the
       // root runner, so the snapshot never carries a second copy of the engine.
-      if (issuer.id.startsWith("module:") && dependency.name === SMITHERS_PACKAGE_NAME) continue;
+      // Frog likewise: the friction log command runs the installed one
+      // (resolveFrogBin), so a copy here would never run.
+      if (
+        issuer.id.startsWith("module:") &&
+        (dependency.name === SMITHERS_PACKAGE_NAME || dependency.name === FROG_PACKAGE_NAME)
+      )
+        continue;
       const module = modulesByName.get(dependency.name);
       if (module !== undefined) {
         dependencies[dependency.name] = module.id;
@@ -7997,6 +8010,20 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       renderAgentPreambleTemplate("authorized-defensive-security-context")
     ),
     __ULTRAFUZZ_UNTRUSTED_CONTENT_BOUNDARY__: JSON.stringify(renderAgentPreambleTemplate("untrusted-content-boundary")),
+    // Null unless run.friction_log_enabled is set. The workflow resolves the entry
+    // directory and the Frog wrapper from each task's own run root, so continuation
+    // never depends on inherited environment and a disabled run renders
+    // byte-identical prompts.
+    __ULTRAFUZZ_FRICTION_LOG__: JSON.stringify(
+      config.run.frictionLogEnabled === true
+        ? {
+            instructions: loadAgentPreambleTemplate("friction-log"),
+            entriesPath: FRICTION_LOG_ENTRIES_PATH,
+            commandPath: FRICTION_LOG_COMMAND_PATH,
+            wrapper: frictionLogWrapper(process.execPath, resolveFrogBin())
+          }
+        : null
+    ),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
     __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),

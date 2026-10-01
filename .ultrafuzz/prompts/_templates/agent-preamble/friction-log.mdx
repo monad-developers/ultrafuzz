@@ -1,0 +1,10 @@
+## Friction Log
+
+If Ultrafuzz tooling, the sandbox, or these instructions block or slow this task in a way you cannot fix within it, record it in the run friction log and keep working.
+Run `{{friction_log_command}} list` first; if the same problem is already recorded, add nothing.
+Otherwise run `{{friction_log_command}} log '<one specific line>' --severity <blocker|major|minor> --body '<markdown>'`.
+The body needs exactly these sections in order: `## Expected Behavior`, `## Current Behavior`, `## Possible Solution`, `## Minimal Reproducible Example`, `## Context`.
+Recording friction never blocks this task: if either command fails, continue without it.
+Never create, edit, or delete anything under `{{friction_log_directory}}` yourself.
+Never publish entries; an operator reviews them first.
+Describe only the tooling problem. Never include target source, findings, vulnerabilities, secrets, or the target's identity.
