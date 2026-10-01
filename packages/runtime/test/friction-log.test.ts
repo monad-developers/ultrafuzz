@@ -49,8 +49,10 @@ function run(fixture: { target: string; command: string }, args: string[], env: 
 test("the friction log command records and lists entries with the pinned Frog inside the run only", () => {
   const fixture = runFixture();
   try {
+    // An inherited Frog store would send the entry to Postgres, and fail to reach this one.
     const logged = run(fixture, ["log", "forge guard aborts - on darwin", "--severity", "major", "--body", BODY], {
-      GITHUB_TOKEN: "must-not-publish"
+      GITHUB_TOKEN: "must-not-publish",
+      FROG_DATABASE_URL: "postgres://127.0.0.1:9/frog"
     });
     assert.equal(logged.status, 0, logged.stderr + logged.stdout);
     const [id] = fs.readdirSync(fixture.entries);
@@ -132,16 +134,63 @@ test("the friction log command refuses every Frog surface beyond local log and l
   }
 });
 
-test("the friction log wrapper is identical for every run and pins its paths from its own location", () => {
-  const wrapper = frictionLogWrapper("/usr/bin/node", "/opt/frog/bin.js");
-  assert.equal(wrapper, frictionLogWrapper("/usr/bin/node", "/opt/frog/bin.js"));
-  assert.match(wrapper, /run_root=\$\(CDPATH= cd -- "\$\(dirname -- "\$0"\)\/\.\." && pwd -P\)/u);
-  // --cwd precedes every agent argument, so no argument can consume or replace it.
-  assert.match(
-    wrapper,
-    /exec '\/usr\/bin\/node' '\/opt\/frog\/bin\.js' "\$command" --cwd "\$run_root\/friction" "\$@"\n$/u
-  );
-  assert.match(wrapper, /\nunset GITHUB_TOKEN GH_TOKEN GITHUB_API_URL GIT_WORK_TREE\n/u);
-  assert.match(wrapper, /\nGIT_DIR=\$run_root\/friction-bin\/no-git\nexport GIT_DIR\n/u);
-  assert.match(frictionLogWrapper("/it's/node", "/opt/frog/bin.js"), /exec '\/it'\\''s\/node'/u);
+// Stands in for Frog and records what the wrapper hands it.
+const RECORDER = `import fs from "node:fs";
+fs.writeFileSync(
+  process.env.FRICTION_RECORD,
+  JSON.stringify({ argv: process.argv.slice(2), env: process.env, stdin: fs.readFileSync(0, "utf8") })
+);
+`;
+
+test("the friction log wrapper hands Frog its run's paths, a fenced environment and no stdin", () => {
+  const root = fs.realpathSync(temporaryRoot("ultrafuzz-friction-wrapper-"));
+  try {
+    const recorder = path.join(root, "recorder.mjs");
+    fs.writeFileSync(recorder, RECORDER);
+    // The node path is shell-quoted, so a quote in it cannot break out.
+    const node = path.join(root, "it's", "node");
+    fs.mkdirSync(path.dirname(node));
+    fs.symlinkSync(process.execPath, node);
+    const wrapper = frictionLogWrapper(node, recorder);
+    // The same bytes serve every run: the wrapper finds its run from its own location.
+    for (const runRoot of [path.join(root, "run-1"), path.join(root, "a:b", "run-2")]) {
+      const command = path.join(runRoot, ...FRICTION_LOG_COMMAND_PATH.split("/"));
+      fs.mkdirSync(path.dirname(command), { recursive: true });
+      fs.writeFileSync(command, wrapper, { mode: 0o700 });
+      const record = path.join(runRoot, "record.json");
+      const inherited = {
+        GITHUB_TOKEN: "token",
+        GH_TOKEN: "token",
+        GITHUB_API_URL: "https://github.example.invalid",
+        FROG_DATABASE_URL: "postgres://127.0.0.1:9/frog",
+        FROG_NAMESPACE: "namespace",
+        FROG_SCHEMA: "schema",
+        GIT_WORK_TREE: root
+      };
+      const result = spawnSync(command, ["log", "x", "--body", "b"], {
+        cwd: root,
+        encoding: "utf8",
+        input: "piped input",
+        env: { ...process.env, ...inherited, GIT_DIR: path.join(root, ".git"), FRICTION_RECORD: record }
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const seen = JSON.parse(fs.readFileSync(record, "utf8")) as {
+        argv: string[];
+        env: Record<string, string | undefined>;
+        stdin: string;
+      };
+      // --cwd precedes every agent argument, so no argument can consume or replace it.
+      assert.deepEqual(seen.argv, ["log", "--cwd", path.join(runRoot, "friction"), "x", "--body", "b"]);
+      // With /dev/null on stdin Frog cannot prompt or open an editor; NO_UPDATE_NOTIFIER stops incur's update check.
+      assert.equal(seen.stdin, "");
+      assert.equal(seen.env.NO_UPDATE_NOTIFIER, "1");
+      // Git and gh are pointed at paths that do not exist.
+      assert.equal(seen.env.GIT_DIR, path.join(runRoot, "friction-bin", "no-git"));
+      assert.equal(seen.env.GH_CONFIG_DIR, path.join(runRoot, "friction-bin", "no-gh"));
+      assert.deepEqual(fs.readdirSync(path.dirname(command)), ["ultrafuzz-friction-log"]);
+      for (const name of Object.keys(inherited)) assert.equal(seen.env[name], undefined, name);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
