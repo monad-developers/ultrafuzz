@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
 
@@ -116,15 +117,41 @@ test("the friction log command refuses every Frog surface beyond local log and l
       [["log", "x", "--body", BODY, "--token", "t"], /--token is not available/u],
       [["log", "--", "x"], /-- is not available/u],
       // incur acts on its own flags anywhere in argv, so they are refused where a value belongs too.
-      [["log", "x", "--body", "--llms"], /--llms is not available/u],
       [["log", "x", "-s", "--schema"], /--schema is not available/u],
       [["log", "x", "--label", "--help"], /--help is not available/u],
-      [["log", "x", "--body", "--mcp"], /--mcp is not available/u],
       // incur reads --format only with a separate value.
       [["list", "--format=json"], /--format=json is not available/u],
       // A trailing value-taking option cannot consume anything Ultrafuzz passes after it.
       [["log", "x", "--body", BODY, "--label"], /the last option is missing its value/u]
     ];
+    // Every built-in flag of incur 0.4.25 (extractBuiltinFlags), the incur the pinned Frog runs. As a
+    // value, `--update` would install the latest Frog globally and `--mcp` would serve `publish`.
+    // Another incur needs this list, and the wrapper's, checked again.
+    const incurEntry = createRequire(path.join(resolveFrogBin(), "..", "..", "package.json")).resolve("incur");
+    const incur = JSON.parse(fs.readFileSync(path.join(incurEntry, "..", "..", "package.json"), "utf8")) as {
+      version: string;
+    };
+    assert.equal(incur.version, "0.4.25");
+    for (const flag of [
+      "--full-output",
+      "--llms",
+      "--llms-full",
+      "--mcp",
+      "--help",
+      "-h",
+      "--update",
+      "--incur-update-check",
+      "--version",
+      "--schema",
+      "--json",
+      "--format",
+      "--filter-output",
+      "--token-limit",
+      "--token-offset",
+      "--token-count"
+    ]) {
+      refused.push([["log", "x", "--body", flag], new RegExp(`${flag} is not available`, "u")]);
+    }
     for (const [args, message] of refused) {
       const result = run(fixture, args);
       assert.equal(result.status, 2, `${args.join(" ")}: ${result.stderr}${result.stdout}`);
