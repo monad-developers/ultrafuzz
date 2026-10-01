@@ -1,13 +1,13 @@
 ---
 name: ultrafuzz-release-skill
-description: Publish Ultrafuzz GitHub releases from main and verify the published result. Use when asked to prepare release notes, identify merged pull requests since the previous release, publish the next v0.0.x release, or audit an Ultrafuzz release.
+description: Publish Ultrafuzz GitHub releases from unstable and verify the published result. Use when asked to prepare release notes, identify merged pull requests since the previous release, publish the next v0.0.x release, or audit an Ultrafuzz release.
 ---
 
 # Ultrafuzz Release
 
 ## Core Rule
 
-Publish a non-draft, non-prerelease GitHub release from `main`. Inspect the
+Publish a non-draft, non-prerelease GitHub release from `unstable`. Inspect the
 existing releases first and match their tag and title conventions. Use the
 release-note structure defined below even when older releases use a flat list.
 Publish only after the user explicitly asks to publish.
@@ -17,13 +17,13 @@ Publish only after the user explicitly asks to publish.
 1. Verify the repository and target.
    - Confirm the remote is the intended Ultrafuzz repository and GitHub CLI is
      authenticated.
-   - Fetch `origin/main` and tags. Do not release from a stale local branch.
+   - Fetch `origin/unstable` and tags. Do not release from a stale local branch.
    - Identify the latest published release and its tagged commit.
    - Use the version requested by the user, or propose the next patch version.
      Confirm that its tag and release do not already exist.
 
 2. Build the complete change set.
-   - List commits on `origin/main` after the previous release tag.
+   - List commits on `origin/unstable` after the previous release tag.
    - Resolve every merged pull request in that range and inspect its title,
      body, and changed files when needed to understand its feature category.
    - Include each user-facing pull request exactly once. Call out any commit
@@ -61,7 +61,7 @@ Publish only after the user explicitly asks to publish.
      not to preserve their older flat-list structure.
 
 4. Verify release readiness.
-   - Resolve `origin/main` to the exact target commit and confirm the intended
+   - Resolve `origin/unstable` to the exact target commit and confirm the intended
      pull requests are merged into it.
    - Require all remote CI checks for that exact commit to complete
      successfully before publishing. Use `gh run list --commit "$TARGET_SHA"`
@@ -74,7 +74,7 @@ Publish only after the user explicitly asks to publish.
 
 5. Publish the release.
    - Use the version for both tag and title.
-   - Target the verified `main` commit.
+   - Target the verified `unstable` commit.
    - Publish immediately; do not pass draft or prerelease flags.
    - Supply the reviewed notes from a file so Markdown and newlines are
      preserved exactly.
@@ -92,6 +92,6 @@ Publish only after the user explicitly asks to publish.
 - Never publish, edit, delete, or retarget a release without explicit user
   authorization.
 - Never omit a pull request merely because it is hard to categorize.
-- Never create the release from an unverified local `main` or feature branch.
+- Never create the release from an unverified local `unstable` or feature branch.
 - Never use automatically generated notes without reviewing and converting
   them to the Ultrafuzz editorial format above.

@@ -51,8 +51,8 @@ eight at a time. They run their tests under `eatmydata`, which turns `fsync`
 into a no-op in the test processes but not in the Smithers engine processes
 those tests launch. Feature branches are validated only by the pull-request
 event, avoiding a duplicate push run. A newer push to a pull request cancels
-that pull request's older run; a push to `main` never cancels another run. On
-`main`, the lane results are merged into one JSON report in stable gate order.
+that pull request's older run; a push to `unstable` never cancels another run. On
+`unstable`, the lane results are merged into one JSON report in stable gate order.
 
 ## Package Checks
 

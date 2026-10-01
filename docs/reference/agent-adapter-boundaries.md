@@ -7,11 +7,11 @@ Ultrafuzz credential and data-governance policy, but it must not silently grow
 a second orchestration layer.
 
 The release-hardening audit in [#700](https://github.com/monad-developers/ultrafuzz/issues/700)
-originally measured `release/v0.1.0`. This policy deliberately targets `main`,
+originally measured `release/v0.1.0`. This policy deliberately targets `unstable`,
 whose inventory at the reviewed `fe0922ea` baseline differs from that release
-branch: `main` registers OpenRouter, while the current release branch registers
+branch: `unstable` registers OpenRouter, while the current release branch registers
 OpenCode and Pi instead. This page does not classify the release-branch
-inventory. For this main-target gate, the checked-out registry is authoritative,
+inventory. For this `unstable`-target gate, the checked-out registry is authoritative,
 and the gate requires an explicit policy for every adapter actually registered
 in `agentFactories`, including a factory imported under an alias or registered
 without a matching re-export.

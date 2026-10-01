@@ -23,6 +23,11 @@ local dashboard plus final report for review.
 > has not necessarily undergone a complete security audit. Its implementation may
 > contain unknown or undiscovered vulnerabilities.
 >
+> For campaigns, we recommend using a [published release](https://github.com/monad-developers/ultrafuzz/releases)
+> that has been available for some time, for example at least seven days, rather
+> than the `unstable` branch. Check out the release tag and review its source and
+> prompts before installing dependencies or running Ultrafuzz.
+>
 > Review the checked-in `.ultrafuzz/prompts/` before launching a campaign. See
 > [Security](docs/security.md) for the full posture.
 
@@ -31,11 +36,17 @@ local dashboard plus final report for review.
 Tell your agent:
 
 ```text
-Run Ultrafuzz on my project and monitor it from start to finish.
-If any node fails, for example, due to cyber refusals, resume from where it left off.
-Use the same authentication method we're using, and the best model at its highest reasoning effort,
-high concurrency limits, and the default audit profile.
-If you need to install any dependencies, ask for my approval first.
+Your task is to launch an Ultrafuzz campaign on this project and make sure it
+succeeds from start to finish.
+Use a published Ultrafuzz release that has been available for some time, for
+example at least seven days, rather than the unstable branch. Check out its tag
+and tell me which release you selected.
+Show me the available audit profiles and explain the tradeoffs. Recommend the
+best fit for this target.
+Before installing any dependencies, ask for my confirmation.
+After the campaign starts, use the CLI to monitor its progress. Keep monitoring
+until it finishes. If a node fails, for example because of a cyber-safety
+refusal, resume the campaign from where it stopped.
 ```
 
 ## Documentation
