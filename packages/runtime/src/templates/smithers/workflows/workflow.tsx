@@ -777,8 +777,9 @@ function frictionLogAddDir(task: (typeof taskSpecs)[number]): string[] {
 
 /**
  * Best effort: a friction log that cannot be prepared is reported, never a preparation failure.
- * The wrapper is replaced atomically, so tasks preparing in parallel never see a partial file, and
- * a wrapper path that is not a regular file is left alone rather than followed.
+ * Every preparation stages the wrapper and renames it into place, so tasks preparing in parallel
+ * never see a partial file and whatever sits at its path, such as a symlink, is replaced rather
+ * than followed or left to run.
  */
 function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
   const paths = frictionLogPaths(task);
@@ -786,14 +787,14 @@ function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
   try {
     mkdirSync(paths.directory, { recursive: true, mode: 0o700 });
     mkdirSync(path.dirname(paths.command), { recursive: true, mode: 0o700 });
-    const existing = lstatSync(paths.command, { throwIfNoEntry: false });
-    if (existing !== undefined && !existing.isFile()) {
-      throw new Error("friction log command is not a regular file");
-    }
-    if (existing === undefined || readFileSync(paths.command, "utf8") !== frictionLog.wrapper) {
-      const staged = `${paths.command}.${process.pid}.${randomUUID()}.tmp`;
-      writeFileSync(staged, frictionLog.wrapper, { mode: 0o700, flag: "wx" });
+    const staged = `${paths.command}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(staged, frictionLog.wrapper, { mode: 0o700, flag: "wx" });
+    try {
       renameSync(staged, paths.command);
+    } catch (error) {
+      // A directory at the wrapper path cannot be replaced; leave no staged copy per attempt.
+      rmSync(staged, { force: true });
+      throw error;
     }
   } catch (error) {
     process.stderr.write(

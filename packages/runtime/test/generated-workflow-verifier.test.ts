@@ -6940,22 +6940,14 @@ function loadFrictionLogPreparation(frictionLog: {
     "frictionLog",
     "path",
     "mkdirSync",
-    "lstatSync",
-    "readFileSync",
     "writeFileSync",
     "renameSync",
+    "rmSync",
     "randomUUID",
     `${emitted}; return { prepare: prepareFrictionLog, addDir: frictionLogAddDir };`
-  )(
-    frictionLog,
-    path,
-    fs.mkdirSync,
-    fs.lstatSync,
-    fs.readFileSync,
-    fs.writeFileSync,
-    fs.renameSync,
-    randomUUID
-  ) as ReturnType<typeof loadFrictionLogPreparation>;
+  )(frictionLog, path, fs.mkdirSync, fs.writeFileSync, fs.renameSync, fs.rmSync, randomUUID) as ReturnType<
+    typeof loadFrictionLogPreparation
+  >;
 }
 
 test("generated friction log preparation installs the Frog wrapper outside the agent write root and never fails a task", () => {
@@ -6983,22 +6975,29 @@ test("generated friction log preparation installs the Frog wrapper outside the a
     // Agents may write entries, never the directory that holds the command.
     assert.deepEqual(preparation.addDir(task), [path.join(runRoot, "friction")]);
 
-    // An unchanged wrapper is left in place; a changed one is replaced without a staging file behind.
-    const unchanged = fs.statSync(command).ino;
+    // Every preparation rewrites the wrapper, and leaves no staging file behind.
+    fs.writeFileSync(command, "#!/bin/sh\necho edited\n");
     preparation.prepare(task);
-    assert.equal(fs.statSync(command).ino, unchanged);
-    loadFrictionLogPreparation({ ...frictionLog, wrapper: "#!/bin/sh\necho second\n" }).prepare(task);
-    assert.equal(fs.readFileSync(command, "utf8"), "#!/bin/sh\necho second\n");
+    assert.equal(fs.readFileSync(command, "utf8"), frictionLog.wrapper);
     assert.deepEqual(fs.readdirSync(path.dirname(command)), ["ultrafuzz-friction-log"]);
 
-    // A replaced command is reported and left alone rather than followed, and preparation still succeeds.
+    // A symlink planted at the wrapper path is replaced, never followed or left to run.
     const decoy = path.join(runRoot, "decoy");
     fs.writeFileSync(decoy, "decoy\n");
     fs.rmSync(command);
     fs.symlinkSync(decoy, command);
-    assert.doesNotThrow(() => preparation.prepare(task));
+    preparation.prepare(task);
+    assert.equal(fs.lstatSync(command).isFile(), true);
+    assert.equal(fs.readFileSync(command, "utf8"), frictionLog.wrapper);
     assert.equal(fs.readFileSync(decoy, "utf8"), "decoy\n");
-    assert.match(reported.join(""), /friction log unavailable for task-1: friction log command is not a regular file/u);
+    assert.deepEqual(reported, []);
+
+    // A directory there cannot be replaced: that is reported, leaves no staged copy, and never fails the task.
+    fs.rmSync(command);
+    fs.mkdirSync(path.join(command, "planted"), { recursive: true });
+    assert.doesNotThrow(() => preparation.prepare(task));
+    assert.match(reported.join(""), /friction log unavailable for task-1:/u);
+    assert.deepEqual(fs.readdirSync(path.dirname(command)), ["ultrafuzz-friction-log"]);
 
     // An unwritable run root is reported, never thrown.
     const blocked = { attemptId: "task-2", runRoot: path.join(decoy, "not-a-directory") };
