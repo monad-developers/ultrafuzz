@@ -7007,55 +7007,11 @@ bunAdapterTest(
   }
 );
 
-bunAdapterTest("generated Claude adapter carries the failure Claude Code states beside the generic error", async () => {
-  const project = tempProject();
-  const init = initProject({ projectRoot: project, force: true });
-  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-  const { CompatibleClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-  const bin = path.join(project, "fake-claude-bin");
-  fs.mkdirSync(bin);
-  const failedGeneration = async (
-    result: Record<string, unknown>
-  ): Promise<Error & { code?: string; details?: Record<string, unknown> }> => {
-    // Claude Code 2.1.x prints an is_error result line and exits 1; `result`
-    // is the only place it states an auth or OAuth refresh failure (#1084).
-    const line = JSON.stringify({ type: "result", is_error: true, session_id: "s", ...result });
-    fs.writeFileSync(
-      path.join(bin, "claude"),
-      `#!/bin/sh\n[ "$1" = auth ] && exit 0\nprintf '%s\\n' ${shellQuote(line)}\nexit 1\n`,
-      { mode: 0o755 }
-    );
-    const agent = new CompatibleClaudeCodeAgent({
-      permissionMode: "bypassPermissions",
-      env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` }
-    }) as unknown as { generate(args: Record<string, unknown>): Promise<unknown> };
-    try {
-      await agent.generate({ prompt: "p", rootDir: project });
-    } catch (error) {
-      assert.ok(error instanceof Error, String(error));
-      return error;
-    }
-    return assert.fail("a failed Claude result was reported as success");
-  };
-
-  // Auth-worded text would disable the agent for the run and end the node if
-  // it reached the message; beside it, it changes nothing Smithers decides.
-  const expired = "API Error: 401 OAuth token has expired. Please run /login.";
-  const expiredFailure = await failedGeneration({ subtype: "success", result: expired });
-  assert.match(expiredFailure.message, /^Claude run failed\b/u);
-  assert.ok(!expiredFailure.message.includes("401"), expiredFailure.message);
-  assert.equal(expiredFailure.code, "AGENT_CLI_ERROR");
-  assert.equal(expiredFailure.details?.agentStatedFailure, expired);
-
-  // The controller redacts the whole statement before capping it, so the
-  // adapter keeps only its first 16,384 characters.
-  const oversized = await failedGeneration({ subtype: "success", result: `${"y".repeat(16_384)}tail` });
-  assert.equal(oversized.details?.agentStatedFailure, "y".repeat(16_384));
-});
-
-// The workflow builds one adapter per task and reuses it for every attempt
-// (`executionAgent ??= admittedAgent()`), so a statement must reach only the
-// generation that printed it, and only beside the generic `Claude run failed`.
+// The workflow can run several attempts of a task on one adapter: a retry that
+// Smithers schedules before the workflow re-renders reuses the wrapper's
+// `executionAgent` (`executionAgent ??= admittedAgent()`). So a statement must
+// reach only the generation that printed it, and only beside the generic
+// `Claude run failed`.
 for (const adapter of ["Claude", "DeepSeek"] as const) {
   bunAdapterTest(`generated ${adapter} adapter attaches a stated failure only to its own generation`, async () => {
     const project = tempProject();
@@ -7074,7 +7030,8 @@ for (const adapter of ["Claude", "DeepSeek"] as const) {
           env
         })) as unknown as { generate(args: Record<string, unknown>): Promise<unknown> };
     // Each generation runs a fake `claude` that prints an is_error result
-    // line, a stderr line, or both, and exits 1.
+    // line, a stderr line, or both, and exits 1. Claude Code 2.1.x states an
+    // auth or OAuth refresh failure only in that line's `result` (#1084).
     const failedGeneration = async (output: {
       result?: Record<string, unknown>;
       stderr?: string;
@@ -7093,19 +7050,30 @@ for (const adapter of ["Claude", "DeepSeek"] as const) {
       }
       return assert.fail(`a failed ${adapter} generation was reported as success`);
     };
+    const statedFailure = async (result: string): Promise<unknown> =>
+      (await failedGeneration({ result: { subtype: "success", result } })).details?.agentStatedFailure;
 
-    // ClaudeAgent's contended OAuth refresh (#1084), and the rejected key
-    // Claude Code reported from DeepSeek's endpoint (#1225).
-    const stated =
+    // ClaudeAgent's contended OAuth refresh (#1084) and an expired login, and
+    // the rejected key Claude Code reported from DeepSeek's endpoint (#1225).
+    // Smithers classifies the thrown message, and auth-worded text such as a
+    // 401 there would disable the agent for the run, so the message stays
+    // generic and the retry decision #1171 established is unchanged; the cause
+    // rides beside it.
+    const statements =
       adapter === "Claude"
-        ? "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh."
-        : "Failed to authenticate. API Error: 401 Authentication Fails, Your api key: ****robe is invalid (request_id: …)";
-    const statedFailure = await failedGeneration({ result: { subtype: "success", result: stated } });
-    // Smithers classifies the thrown message, so it stays generic and the retry
-    // decision #1171 established is unchanged; the cause rides beside it.
-    assert.equal(statedFailure.message, "Claude run failed See https://smithers.sh/reference/errors");
-    assert.equal(statedFailure.code, "AGENT_CLI_ERROR");
-    assert.equal(statedFailure.details?.agentStatedFailure, stated);
+        ? [
+            "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh.",
+            "API Error: 401 OAuth token has expired. Please run /login."
+          ]
+        : [
+            "Failed to authenticate. API Error: 401 Authentication Fails, Your api key: ****robe is invalid (request_id: …)"
+          ];
+    for (const stated of statements) {
+      const failure = await failedGeneration({ result: { subtype: "success", result: stated } });
+      assert.equal(failure.message, "Claude run failed See https://smithers.sh/reference/errors");
+      assert.equal(failure.code, "AGENT_CLI_ERROR");
+      assert.equal(failure.details?.agentStatedFailure, stated);
+    }
 
     // A crash that prints no result line must not inherit that statement.
     const crash = await failedGeneration({ stderr: "claude: fatal: unexpected end of input" });
@@ -7124,6 +7092,10 @@ for (const adapter of ["Claude", "DeepSeek"] as const) {
     });
     assert.match(explicit.message, /^API Error: 500 Internal server error\b/u);
     assert.equal(explicit.details?.agentStatedFailure, undefined);
+
+    // The controller redacts the whole statement before capping it, so the
+    // adapter keeps only its first 16,384 characters.
+    assert.equal(await statedFailure(`${"y".repeat(16_384)}tail`), "y".repeat(16_384));
 
     // A result that states nothing adds nothing.
     const silent = await failedGeneration({ result: { subtype: "error_during_execution" } });
