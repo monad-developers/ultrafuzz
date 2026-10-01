@@ -111,7 +111,13 @@ function writePrompt(project: string, relativePath: string, id: string, body: st
 }
 
 /** `twinJoin` adds a second join whose prompt launches with the join's text, so both share one template copy. */
-function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup = false, twinJoin = false): void {
+function writeDynamicProject(
+  project: string,
+  modelFanout: boolean,
+  emptyGroup = false,
+  twinJoin = false,
+  joinPrompt = "Summarize completed work in {{artifact_path}}/report.md."
+): void {
   initProject({ projectRoot: project, force: true });
   // The fake runner never heartbeats, so a sync that runs one lease after launch parks every open node
   // as a lost controller. Slow CI setup alone can take longer than the default 30 s lease.
@@ -126,7 +132,7 @@ function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup =
     "dynamic-worker",
     "Your /goal is {{item.goal_prompt}} using threat model threat {{liquidation:overdue}}.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
   );
-  writePrompt(project, "dynamic/join.md", "dynamic-join", "Summarize completed work in {{artifact_path}}/report.md.");
+  writePrompt(project, "dynamic/join.md", "dynamic-join", joinPrompt);
   if (twinJoin) {
     writePrompt(
       project,
@@ -316,12 +322,13 @@ async function createDynamicFixture(input: {
   goals?: Array<Record<string, unknown>>;
   modelFanout?: boolean;
   twinJoin?: boolean;
+  joinPrompt?: string;
   /** Runs after launch and before the fixture's render expands the group. */
   beforeExpansion?: (project: string, groups: readonly CompiledSmithersDynamicGroup[]) => void;
 }): Promise<DynamicFixture> {
   const project = tempProject();
   const emptyGroup = input.goals !== undefined && input.goals.length === 0;
-  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup, input.twinJoin ?? false);
+  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup, input.twinJoin ?? false, input.joinPrompt);
   const lifecycle = lifecycleEnvironment(project);
   const started = await startRun({
     projectRoot: project,
@@ -1058,6 +1065,27 @@ test("a re-running dynamic source keeps published controls admissible and observ
   fs.writeFileSync(sourcePath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
   const rewritten = await readLinkedWorkflowEvidence(fixture.project, fixture.runId);
   assert.equal(rewritten.ok, true, "diagnostics" in rewritten ? JSON.stringify(rewritten.diagnostics) : "");
+});
+
+// Issue #1234: a planned task behind a dynamic ancestor has its prompt rendered at runtime, not plan
+// time, so it is compiled without authority selectors. Its prompt still tells the agent to read the
+// task-local authority file, which `materializePromptArtifactAuthority` then never writes.
+test("a runtime-rendered prompt that names an artifact authority file gets authority selectors", async () => {
+  const fixture = await createDynamicFixture({
+    runId: "dynamic-deferred-authority",
+    joinPrompt:
+      "Summarize completed work in {{artifact_path}}/report.md.\n{{ancestor_artifact_path_authority:plan.json}}"
+  });
+  const joinTask = fixture.joinTask;
+  assert.ok((joinTask.deferredPromptGroups ?? []).length > 0, "the join must be a deferred-prompt planned task");
+  assert.ok(joinTask.renderedPromptPath);
+  const rendered = fs.readFileSync(joinTask.renderedPromptPath, "utf8");
+  const authorityPath = `.ultrafuzz/authorities/${joinTask.attemptId}.json`;
+  assert.ok(rendered.includes(authorityPath), "the runtime-rendered prompt names the authority file");
+  assert.ok(
+    (joinTask.promptArtifactAuthoritySelectors ?? []).length > 0,
+    "the task that the prompt points at an authority file must carry the selectors that write it"
+  );
 });
 
 test("current-controller rendering accepts runtime-materialized dynamic prompts", async () => {
