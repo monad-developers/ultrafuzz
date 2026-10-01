@@ -48,7 +48,7 @@ import {
   serializeResolvedConfigToml,
   type ResolvedConfig
 } from "@ultrafuzz/config";
-import { loadAgentPreambleTemplate, renderAgentPreambleTemplate } from "@ultrafuzz/prompts";
+import { extractPromptVariables, loadAgentPreambleTemplate, renderAgentPreambleTemplate } from "@ultrafuzz/prompts";
 import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -3636,6 +3636,10 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       .map((attempt) => {
         const renderedPrompt = renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id);
         const ancestorNodeIds = artifactAncestorNodeIds(node.id, input.graph.nodes);
+        const promptTemplatePath =
+          dynamicAncestorGroupsForNode(node, nodeById).length === 0
+            ? undefined
+            : snapshotPromptTemplate(input.runLayout, input.graph, node);
         return compileTask({
           config: input.config,
           graph: input.graph,
@@ -3646,13 +3650,15 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           sourceRef: source?.ref,
           workflowName,
           renderedPromptPath: renderedPrompt?.rendered_prompt_path,
-          promptTemplatePath:
-            dynamicAncestorGroupsForNode(node, nodeById).length === 0
-              ? undefined
-              : snapshotPromptTemplate(input.runLayout, input.graph, node),
+          promptTemplatePath,
           dynamicDependencies: node.dependsOn.filter((dependency) => dynamicNodeIds.has(dependency)),
           deferredPromptGroups: dynamicAncestorGroupsForNode(node, nodeById),
-          promptArtifactAuthoritySelectors: promptArtifactAuthoritySelectorsFor(renderedPrompt),
+          // A prompt deferred behind a dynamic group is rendered only at runtime, so its selectors
+          // come from the sealed template copy that render reads (#1234).
+          promptArtifactAuthoritySelectors:
+            renderedPrompt === undefined && promptTemplatePath !== undefined
+              ? promptArtifactAuthoritySelectorsForTemplate(fs.readFileSync(promptTemplatePath, "utf8"))
+              : promptArtifactAuthoritySelectorsFor(renderedPrompt),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) =>
             dynamicNodeIds.has(dependency) ? [] : (attemptsByNodeId.get(dependency) ?? [])
           ),
@@ -7591,6 +7597,31 @@ function compileTask(input: {
     execution,
     metadata
   };
+}
+
+/** The selectors a runtime render of this template will name, keyed exactly as a rendered prompt keys them. */
+function promptArtifactAuthoritySelectorsForTemplate(
+  template: string
+): SmithersTaskManifestPromptArtifactAuthoritySelector[] | undefined {
+  const selectors = new Map<string, SmithersTaskManifestPromptArtifactAuthoritySelector>();
+  for (const variable of extractPromptVariables(template, { allowDynamicItemVariables: true })) {
+    if (variable.argument === undefined) continue;
+    if (variable.name === "ancestor_contract_artifact_authority") {
+      if (!isArtifactContractId(variable.argument)) {
+        throw new Error(
+          `deferred prompt template uses an unknown prompt artifact authority contract ${JSON.stringify(variable.argument)}`
+        );
+      }
+      const selector = { kind: "contract", contract: variable.argument } as const;
+      selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
+    } else if (variable.name === "ancestor_artifact_path_authority") {
+      const paths = variable.argument.split(",");
+      const selector = { kind: "path", id: promptArtifactAuthorityPathSelectorId(paths), paths } as const;
+      selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
+    }
+  }
+  if (selectors.size === 0) return undefined;
+  return [...selectors].sort(([left], [right]) => (left < right ? -1 : 1)).map(([, selector]) => selector);
 }
 
 function promptArtifactAuthoritySelectorsFor(

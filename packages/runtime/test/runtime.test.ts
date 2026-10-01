@@ -28022,10 +28022,17 @@ test("resume applies an edited stock review prompt that names artifact authoriti
     readyGroupIds: ["threat-goals", "class-goals"]
   });
   assert.deepEqual(published.promptRenderFailures, []);
-  // Like dedupe-findings' and aggregate-test-files', the final report's prompt names artifact authorities,
-  // which no task whose prompt is rendered at runtime is compiled with (#1234).
+  // Like dedupe-findings' and aggregate-test-files', the final report's prompt is rendered at runtime and
+  // names artifact authorities, so the task is compiled with the selectors that write them (#1234).
   const reportPath = path.join(runRoot, "artifacts", "final-report", "prompt.rendered.md");
   assert.match(fs.readFileSync(reportPath, "utf8"), /ancestor artifact authority JSON/u);
+  const selectorCounts = Object.fromEntries(
+    ["dedupe-findings", "aggregate-test-files", "final-report"].map((attemptId) => [
+      attemptId,
+      controls.tasks.find((task) => task.attemptId === attemptId)?.promptArtifactAuthoritySelectors?.length
+    ])
+  );
+  assert.deepEqual(selectorCounts, { "dedupe-findings": 3, "aggregate-test-files": 1, "final-report": 2 });
   const resume = async () => {
     const resumed = await resumeRun({ projectRoot: project, runId, env });
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
