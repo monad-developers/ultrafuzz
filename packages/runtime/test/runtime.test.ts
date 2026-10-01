@@ -19111,13 +19111,19 @@ test("startRun installs, seals, and revalidates operator-owned Smithers", async 
   assert.equal(fs.existsSync(injectedMarker), false);
   // `@ultrafuzz/runtime` depends on the runner only for host commands, which run
   // the installed one; following that edge would seal a second engine closure.
+  // Frog likewise runs only from the install that rendered the workflow.
   assert.ok(run.value);
   const dependencyMap = JSON.parse(
     fs.readFileSync(path.join(run.value.run_root, "smithers", "execution-dependencies.json"), "utf8")
-  ) as { issuers: Array<{ id: string; dependencies: Record<string, string> }> };
+  ) as { packages: Array<{ name: string }>; issuers: Array<{ id: string; dependencies: Record<string, string> }> };
   const runtimeIssuer = dependencyMap.issuers.find((issuer) => issuer.id === "module:@ultrafuzz/runtime");
   assert.ok(runtimeIssuer, JSON.stringify(dependencyMap.issuers.map((issuer) => issuer.id)));
   assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "smthrs"), false);
+  assert.equal(Object.hasOwn(runtimeIssuer.dependencies, "frog"), false);
+  assert.equal(
+    dependencyMap.packages.some((entry) => entry.name === "frog"),
+    false
+  );
   {
     const requiredInstaller = writeFakeNpmInstaller(project, { count: 0, stderr: [], required: injectedName }),
       missing = await startRun({

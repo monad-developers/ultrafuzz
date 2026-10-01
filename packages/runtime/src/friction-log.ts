@@ -51,6 +51,10 @@ const INCUR_BUILTIN_FLAGS = [
   "--token-count"
 ] as const;
 
+// The friction log command runs the Frog of the Ultrafuzz install that renders a
+// workflow, so the trusted CLI closure and the execution snapshot skip Frog.
+export const FROG_PACKAGE_NAME = "frog";
+
 /** The pinned Frog CLI's executable, resolved from Ultrafuzz's own install. */
 export function resolveFrogBin(): string {
   const entrypoint = fileURLToPath(import.meta.resolve("frog"));
