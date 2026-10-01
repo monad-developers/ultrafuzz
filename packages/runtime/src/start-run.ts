@@ -694,7 +694,14 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // so it must not re-record status, lease, deadline or Forge guard, or warn
     // about a guard no controller runs with; the resume that starts the next
     // controller does.
+    // `--reset-node` reruns its target anyway, so that task is not reported as left failed.
+    const resetAttemptId = tasks.find(
+      (task) =>
+        input.resetNode !== undefined &&
+        [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId].includes(input.resetNode)
+    )?.attemptId;
     for (const [producer, consumers] of result.retainedFailures ?? []) {
+      if (producer === resetAttemptId) continue;
       // A lens is an optional input to every task after the property fan-in, so name only a few.
       const named = consumers.slice(0, 3).join(", ");
       const ranWithout = consumers.length > 3 ? `${named} and ${String(consumers.length - 3)} more tasks` : named;
