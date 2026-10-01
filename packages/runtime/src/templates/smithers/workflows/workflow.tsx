@@ -98,6 +98,7 @@ const {
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
   hydratePinnedSubmodulesFromExecutionSnapshot,
   hasPendingWorkspacePreparationReplacement,
+  ignoreWorkspaceRuntimeRoots,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
@@ -3128,6 +3129,7 @@ function prepareArtifactMirror(
     );
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
+  ignoreWorkspaceRuntimeRoots(workspaceRoot);
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
   const schemaBundle = preparationStep(task.attemptId, "materialize-prompt-schemas", () => {
     const bundle = plannedSchemaBundle();

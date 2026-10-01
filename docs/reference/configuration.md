@@ -182,7 +182,10 @@ Workflow-side enforcement is tracked in
 
 Successful runs remove their generated workspaces by default. Setting
 `keep_workspaces = true` retains them; dirty or unpushed workspaces are always
-preserved by the workflow runner.
+preserved by the workflow runner. The `.ultrafuzz/` and `artifacts/` directories
+Ultrafuzz writes into a workspace each get a `.gitignore` of `*`, so they do not
+count as dirty; any other file a task leaves there, such as a test an agent
+wrote, still keeps the workspace.
 
 The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
 resolves the real executable before launch, writes an executable wrapper under
