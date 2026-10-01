@@ -695,9 +695,12 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // about a guard no controller runs with; the resume that starts the next
     // controller does.
     for (const [producer, consumers] of result.retainedFailures ?? []) {
+      // A lens is an optional input to every task after the property fan-in, so name only a few.
+      const named = consumers.slice(0, 3).join(", ");
+      const ranWithout = consumers.length > 3 ? `${named} and ${String(consumers.length - 3)} more tasks` : named;
       diagnostics.push({
         code: "WORKFLOW_RETRY_SKIPPED",
-        message: `resume did not retry failed task ${producer}: ${consumers.join(", ")} already ran without it, so a rerun could not reach their outputs and the run stays partial`,
+        message: `resume did not retry failed task ${producer}: ${ranWithout} already ran without it, so a rerun could not reach their outputs and the run stays partial`,
         severity: "warning",
         source: "runtime"
       });

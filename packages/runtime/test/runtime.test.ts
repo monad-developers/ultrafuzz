@@ -27539,12 +27539,14 @@ for (const fixture of [
       });
       const run = await startRun({ projectRoot: project, runId, env });
       assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-      fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+      const commandLog = env.SMITHERS_FAKE_LOG;
+      assert.ok(commandLog);
+      fs.writeFileSync(commandLog, "", "utf8");
 
       const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
 
       assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-      const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+      const commands = fs.readFileSync(commandLog, "utf8");
       const producerReset = new RegExp(`^timetravel .* --node-id node:${fixture.producer} `, "mu");
       const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
       if (consumerStarted) {
