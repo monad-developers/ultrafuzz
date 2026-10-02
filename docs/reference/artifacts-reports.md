@@ -1001,8 +1001,10 @@ from the same source:
 1. the validated `run.json#spend_estimate`, when a synchronization has written
    one;
 2. for a run without a source run, a live estimate of the run's Smithers usage
-   made by the same estimator, with Smithers attempts that reported no usage
-   imputed;
+   made by the same estimator, with attempts that Smithers' usage totals count
+   but whose usage events are missing imputed: at what remains of Smithers'
+   total cost when every attempt and usage event recorded one, and at the mean
+   of accounted attempts otherwise;
 3. for a continuation whose current workflow has no synchronized estimate yet,
    the source run's persisted estimate plus the live estimate of the current
    run.
@@ -1036,7 +1038,16 @@ accounting and writes both in the same `run.json` update. It also writes one
 when `usage.jsonl` is empty but the current workflow ran agent attempts;
 accounting then stays absent. The estimate is labelled derived accounting: it
 never writes to `usage.jsonl` or to accounting v4 fields, and a pass that would
-change only its `updated_at` leaves `run.json` untouched.
+change only its `updated_at` leaves `run.json` untouched. A run with neither
+usage nor an executed agent attempt has no estimate, and a stale one is
+removed.
+
+Accounting v4 and the estimate synchronize independently. When accounting v4
+fails, for example because a source run has no accounting, the pass reports
+`WORKFLOW_ACCOUNTING_FAILED` and still writes the estimate. When the estimate
+cannot be computed, the pass reports a `WORKFLOW_SPEND_ESTIMATE_FAILED` warning,
+still writes accounting, and removes the stored estimate rather than leave it
+to disagree with that accounting.
 
 For the latest usage event of each attempt (the same attempt dedupe accounting
 v4 uses), the estimator applies the first rule that fits:
@@ -1052,11 +1063,16 @@ v4 uses), the estimator applies the first rule that fits:
    (`component-rate-missing`). A model with no catalog price at all is priced
    entirely at fallback rates, recording `catalog-unavailable`,
    `catalog-disabled`, or `model-not-in-route-catalog` from accounting v4's
-   `pricing_catalog.status`. When the usage breakdown is unavailable, for
-   example an unknown cache-read count or a contradictory breakdown,
-   provider-inclusive input is priced at the uncached input rate and output at
-   the output rate, from the catalog when known and the fallback table
-   otherwise (`usage-breakdown-estimated`).
+   `pricing_catalog.status`, or `zero-catalog-rate-ignored` when its route
+   lists it only at zero rates. A zero-rate price that accounting v4 stored
+   for such a model before these routes existed is ignored the same way. When
+   the usage breakdown is unavailable, for example an unknown cache-read count
+   or a contradictory breakdown, provider-inclusive input is priced at the
+   uncached input rate and output (or the reasoning count, when it exceeds
+   output) at the output rate, from the catalog when known and the fallback
+   table otherwise (`usage-breakdown-estimated`). Cache reads split from input
+   by `ULTRAFUZZ_CACHE_READ_RATIO` keep their price but also record
+   `usage-breakdown-estimated`.
 
 Two further contributions complete the estimate:
 
@@ -1066,10 +1082,14 @@ Two further contributions complete the estimate:
    model, else the mean of all accounted attempts, else the default attempt
    usage at the model's catalog rates when known and fallback rates otherwise
    (`unaccounted-attempt-imputed`, plus `default-attempt-usage` for the last).
+   Synchronization imputes default usage only before any usage is recorded,
+   when it has no catalog prices, so there it always uses fallback rates.
 5. Each source run contributes its persisted `spend_estimate.estimated_spend_usd`
    and its completeness. A source run without `spend_estimate` contributes its
-   accounting v4 `accounting.cumulative.estimated_spend_usd`, or `0`, and makes
-   the estimate incomplete (`source-run-estimate-unavailable`).
+   accounting v4 `accounting.cumulative.estimated_spend_usd` (or `0`), and one
+   with neither contributes what its own source run would, so its lineage
+   survives; either makes the estimate incomplete
+   (`source-run-estimate-unavailable`).
 
 Catalog routes depend only on the model ID. One leading `openrouter/` is
 stripped. An ID that contains `/` or starts with `~` is looked up only in the
@@ -1079,15 +1099,17 @@ only `openai`; `deepseek` only `deepseek`; and `kimi` or `moonshot` only
 `moonshotai`. Any other ID has no catalog route and is priced at fallback
 rates. A trailing context alias, such as `[1m]` in `claude-opus-4-8[1m]`, is
 stripped for the lookup only. A catalog entry whose input and output rates are
-both zero counts as unpriced unless the ID ends in `:free`. Accounting v4
-reuses its stored `model_prices`, so these routes change v4 only for models it
-has not priced before.
+both zero counts as unpriced unless the ID ends in `:free`. When no model to
+price has a route, no catalog is downloaded. Accounting v4 reuses its stored
+`model_prices`, so these routes change v4 only for models it has not priced
+before.
 
 The fallback table `ultrafuzz.fallback-pricing.2026-10-01` is in USD per
 million tokens, anchored to first-party models.dev list prices fetched on
 2026-10-02 for each family's current-generation flagship. A model ID matches a
-family after `openrouter/`, `~`, a `vendor/` prefix, and a trailing `[...]` are
-stripped:
+family, ignoring case, after `openrouter/`, `~`, a `vendor/` prefix, and a
+trailing `[...]` are stripped; a Claude ID that puts its version first, such as
+`claude-3-5-sonnet`, matches its family too:
 
 | Family                                      | Input | Output | Cache read | Cache write |
 | ------------------------------------------- | ----- | ------ | ---------- | ----------- |
@@ -1102,9 +1124,11 @@ stripped:
 
 The default attempt usage `ultrafuzz.default-attempt-usage.v1`, used only when
 a run has no accounted attempt to take a mean from, is 200,000 uncached input,
-1,800,000 cache-read, and 40,000 output tokens. The fallback rates used for a
-model are saved in `models[].fallback_rates` and reused for that model on later
-passes, so a later table version does not reprice a run.
+1,800,000 cache-read, and 40,000 output tokens. The fallback rates used for an
+accounted model are saved in `models[].fallback_rates` and reused for that
+model on later passes, so a later table version does not reprice its accounted
+attempts. Default-usage imputations have no model entry to save rates in, so
+they use the table of the build that synchronizes.
 
 `run.json#spend_estimate` (`ultrafuzz.spend-estimate.v1`) is optional and
 requires `workflow`. Its fields:
@@ -1118,14 +1142,18 @@ requires `workflow`. Its fields:
 - `basis_usd`: `recorded`, `catalog`, `fallback`, `imputed`, and `source_runs`,
   which sum to `estimated_spend_usd`;
 - `accounted_attempts`, the attempts priced from usage evidence;
-- `models`, one entry per model, sorted: `attempts`, `estimated_spend_usd`,
-  `price_source` (`recorded`, `catalog`, `fallback`, or `mixed`),
-  `catalog_provider` and `catalog_model_id` when catalog-priced, and
-  `fallback_family` and `fallback_rates` when a fallback rate was used;
+- `models`, one entry per model of the accounted attempts, sorted: `attempts`,
+  `estimated_spend_usd`, `price_source` (`recorded`, `catalog`, `fallback`, or
+  `mixed`; a snapshot without activity costs nothing and counts toward
+  `catalog` or `fallback` only when the model has no other source),
+  `catalog_provider` and `catalog_model_id` naming the route-catalog entry
+  when one prices the model, and `fallback_family` and `fallback_rates` when a
+  fallback rate was used;
 - `assumptions`, sorted entries with `code`, `count`, and an optional `model`;
 - `unaccounted_attempts`: `count`, `imputed_spend_usd`, `omitted`, and up to
-  256 `entries`, each naming `node_id`, `iteration`, `attempt`, `model_name`,
-  and `imputation` (`same-model-mean`, `run-mean`, or `default-usage`);
+  256 `entries`, each naming `node_id` (the Smithers task ID that usage events
+  name), `iteration`, `attempt`, `model_name`, and `imputation`
+  (`same-model-mean`, `run-mean`, or `default-usage`);
 - `source_run_ids`; and
 - `updated_at`, which change detection ignores.
 

@@ -32,6 +32,7 @@ export * from "./semantic-gates.js";
 export * from "./smithers.js";
 export * from "./smithers-package.js";
 export * from "./smithers-attempt-authority.js";
+export * from "./spend-estimate.js";
 export * from "./start-run.js";
 export * from "./trusted-cli.js";
 export * from "./state-export.js";
