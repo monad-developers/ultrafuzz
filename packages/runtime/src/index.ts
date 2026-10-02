@@ -22,6 +22,7 @@ export * from "./pinned-submodules.js";
 export * from "./prompt-artifact-authority.js";
 export * from "./references.js";
 export * from "./retry-chain.js";
+export * from "./retry-failed-omissions.js";
 export * from "./run-progress.js";
 export * from "./runtime-contracts.js";
 export * from "./runtime-document-codec.js";

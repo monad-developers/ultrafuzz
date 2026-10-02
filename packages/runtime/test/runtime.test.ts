@@ -96,6 +96,7 @@ import {
   loadCurrentFinalReportSnapshot,
   planRun,
   pauseRun,
+  readRetainedFailureStateIds,
   readLinkedWorkflowEvidence,
   readReportPublicationStatus,
   replayRun as runtimeReplayRun,
@@ -22906,6 +22907,66 @@ nodes:
   return project;
 }
 
+// A continuing lens that fans out over two models also has an aggregate state entry beside its
+// attempts. Modal must not read that entry as a failure `--retry-failed` would rerun (#1231).
+test("readRetainedFailureStateIds rolls a fanned-out lens's aggregate entry up with its retained attempts", async () => {
+  const project = writeRetriedLensReviewProject();
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  const fannedOut = topology.replace(
+    "    group: properties\n    depends_on: [__start__]\n",
+    "    group: properties\n    model_profiles: [default, claude]\n    depends_on: [__start__]\n"
+  );
+  assert.notEqual(fannedOut, topology);
+  fs.writeFileSync(topologyPath, fannedOut, "utf8");
+  const runId = "retained-aggregate";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, status: "running", steps: [] })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  // Synchronization creates the per-attempt state entries.
+  const synced = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  const tasks = (
+    JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "tasks.json"), "utf8")) as {
+      tasks: Array<{ attemptId: string; concreteNodeId: string; metadata: { node: { storageId?: string } } }>;
+    }
+  ).tasks;
+  const lensTasks = tasks.filter((task) => task.concreteNodeId === "lens");
+  assert.equal(lensTasks.length, 2);
+  const aggregateId = lensTasks[0]?.metadata.node.storageId ?? "lens";
+  assert.ok(lensTasks.every((task) => task.attemptId !== aggregateId));
+
+  const statePath = path.join(runRoot, "state.json");
+  const setStatuses = (statuses: Record<string, string>) => {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as { nodes: Record<string, { status: string }> };
+    for (const [stateId, status] of Object.entries(statuses)) {
+      const node = state.nodes[stateId];
+      assert.ok(node, `state has no entry ${stateId}`);
+      node.status = status;
+    }
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  };
+  const [first, second] = lensTasks;
+  assert.ok(first && second);
+  setStatuses({ [first.attemptId]: "failed", [second.attemptId]: "failed", [aggregateId]: "failed" });
+  // No consumer has started, so `--retry-failed` reruns both attempts.
+  assert.deepEqual([...readRetainedFailureStateIds(runRoot)], []);
+
+  setStatuses({ catalog: "succeeded" });
+  assert.deepEqual(
+    [...readRetainedFailureStateIds(runRoot)].sort(),
+    [first.attemptId, second.attemptId, aggregateId].sort()
+  );
+
+  // One attempt succeeded and the other was retained: the aggregate stands for no rerun either.
+  setStatuses({ [first.attemptId]: "succeeded" });
+  assert.deepEqual([...readRetainedFailureStateIds(runRoot)].sort(), [second.attemptId, aggregateId].sort());
+});
+
 // A sync pass can run while `resume --retry-failed` still reruns a failed optional producer, as
 // Modal's `ultrafuzz inspect` poll does. A consumer that ran without the producer must finalize in
 // that pass too: while it reads failed, the host gate of a dependent that reads its outputs fails,
@@ -22955,6 +23016,8 @@ test("syncRun finalizes consumers admitted without an optional prerequisite whos
   assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
   assert.equal(nodeStatus("lens"), "failed");
   assert.equal(nodeStatus("catalog"), "succeeded");
+  // `resume --retry-failed` would leave the lens failed now that the catalog ran without it (#1231).
+  assert.deepEqual([...readRetainedFailureStateIds(runRoot)], ["lens"]);
 
   // The retried lens is still running when dedupe and triage finish without it.
   writeArtifacts("dedupe", { "findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
@@ -27713,6 +27776,117 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   assert.match(
     commands,
     /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
+  );
+});
+
+// A consumer admits a failed continuing producer as an optional omission. Rerunning the producer
+// once that consumer has started cannot reach the consumer's output, so the run would report
+// COMPLETE over a consumer that never read it (#1231). `--retry-failed` leaves such a producer
+// failed and still retries one whose consumers have not started.
+for (const fixture of [
+  { kind: "lens", producer: "lens", consumer: "catalog", other: "dedupe" },
+  { kind: "strategy", producer: "optional-specialist", consumer: "final-report", other: "direct-strategy" }
+] as const) {
+  for (const consumerStarted of [true, false]) {
+    test(`resume --retry-failed ${consumerStarted ? "leaves" : "retries"} a failed continuing ${fixture.kind} ${consumerStarted ? "a started consumer already ran without" : "whose consumers have not started"}`, async () => {
+      let project: string;
+      if (fixture.kind === "lens") project = writeRetriedLensReviewProject();
+      else {
+        project = tempProject();
+        initProject({ projectRoot: project, force: true });
+        writeOptionalSpecialistTopology(project);
+      }
+      const runId = `retry-omitted-${fixture.kind}-${consumerStarted ? "started" : "pending"}`;
+      const workflowRunId = `ultrafuzz-${runId}`;
+      const env = fakeLifecycleSmithersEnv(project, {
+        inspect: workflowInspect({
+          workflowRunId,
+          status: "failed",
+          state: "failed",
+          steps: [
+            { id: `node:${fixture.producer}`, state: "failed", attempt: 1 },
+            ...(consumerStarted
+              ? [
+                  { id: `prepare:${fixture.consumer}`, state: "finished" as const, attempt: 1 },
+                  { id: `node:${fixture.consumer}`, state: "finished" as const, attempt: 1 },
+                  { id: `node:${fixture.other}`, state: "failed" as const, attempt: 1 }
+                ]
+              : [
+                  { id: `prepare:${fixture.consumer}`, state: "pending" as const, attempt: 0 },
+                  { id: `node:${fixture.consumer}`, state: "pending" as const, attempt: 0 }
+                ])
+          ]
+        })
+      });
+      const run = await startRun({ projectRoot: project, runId, env });
+      assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+      const commandLog = env.SMITHERS_FAKE_LOG;
+      assert.ok(commandLog);
+      fs.writeFileSync(commandLog, "", "utf8");
+
+      const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+      const commands = fs.readFileSync(commandLog, "utf8");
+      const producerReset = new RegExp(`^timetravel .* --node-id node:${fixture.producer} `, "mu");
+      const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+      if (consumerStarted) {
+        assert.doesNotMatch(commands, producerReset);
+        // Another failed task is still retried.
+        assert.match(commands, new RegExp(`^timetravel .* --node-id node:${fixture.other} `, "mu"));
+        assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+        assert.equal(skipped.severity, "warning");
+        assert.match(skipped.message, new RegExp(`${fixture.producer}.*${fixture.consumer}`, "u"));
+      } else {
+        assert.match(commands, producerReset);
+        assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+      }
+    });
+  }
+}
+
+// `--reset-node` reruns a failed continuing task even when `--retry-failed` would leave it, so the
+// resume does not also report that task as left failed.
+test("resume --retry-failed --reset-node does not report the reset task as skipped", async () => {
+  const project = writeRetriedLensReviewProject();
+  const runId = "retry-omitted-lens-reset";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:lens", state: "failed", attempt: 1 },
+        { id: "prepare:catalog", state: "finished", attempt: 1 },
+        { id: "node:catalog", state: "finished", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    resetNode: "node:lens",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const resets = fs
+    .readFileSync(commandLog, "utf8")
+    .split("\n")
+    .filter((line) => /^timetravel .* --node-id node:lens /u.test(line));
+  assert.equal(resets.length, 1, resets.join("\n"));
+  assert.equal(
+    resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED"),
+    undefined,
+    JSON.stringify(resumed.diagnostics)
   );
 });
 

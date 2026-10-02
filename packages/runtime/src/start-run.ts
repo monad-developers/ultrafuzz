@@ -659,6 +659,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
+      tasks,
       priorInspection: refreshInspection,
       // Applies the project's current prompts to the unfinished tasks; never fails the resume.
       beforeContinuation: async (context) => {
@@ -697,6 +698,24 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // so it must not re-record status, lease, deadline or Forge guard, or warn
     // about a guard no controller runs with; the resume that starts the next
     // controller does.
+    // `--reset-node` reruns its target anyway, so that task is not reported as left failed.
+    const resetAttemptId = tasks.find(
+      (task) =>
+        input.resetNode !== undefined &&
+        [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId].includes(input.resetNode)
+    )?.attemptId;
+    for (const [producer, consumers] of result.retainedFailures ?? []) {
+      if (producer === resetAttemptId) continue;
+      // A lens is an optional input to every task after the property fan-in, so name only a few.
+      const named = consumers.slice(0, 3).join(", ");
+      const ranWithout = consumers.length > 3 ? `${named} and ${String(consumers.length - 3)} more tasks` : named;
+      diagnostics.push({
+        code: "WORKFLOW_RETRY_SKIPPED",
+        message: `resume did not retry failed task ${producer}: ${ranWithout} already ran without it, so a rerun could not reach their outputs and the run stays partial`,
+        severity: "warning",
+        source: "runtime"
+      });
+    }
     if (result.alreadyRunning !== true) {
       diagnostics.push(...forgeGuard.diagnostics);
       recordNativeContinuationState({

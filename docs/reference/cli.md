@@ -367,6 +367,15 @@ adapters in the continued workflow read the run's
 resume cannot prune stale task-worktree registrations, it reports a
 `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
 
+`resume --retry-failed` reruns every failed task except a failed task in a
+`failure_policy: continue` group that a started task already ran without. That
+task was admitted while the failed one had no output, and a rerun cannot reach
+the outputs it already produced, so the run would read as complete over work
+that never used the rerun's output. `resume` leaves such a task failed, reports
+a `WORKFLOW_RETRY_SKIPPED` warning that names it and the tasks that ran without
+it, and the final report stays partial. The Modal benchmark worker does not
+resume a finished run whose only failures are such tasks.
+
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so
 resume makes no package-registry request and leaves nothing in the OS
