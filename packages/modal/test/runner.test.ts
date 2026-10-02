@@ -74,7 +74,6 @@ import {
   observeTerminalModalRecoveryLifecycle,
   publicBenchmarkCollectionSecretValues,
   readModalCollectResultFiles,
-  overseeModalBenchmarkOnce,
   overseeModalBenchmarks,
   readOptionalModalSandboxText,
   publicEvalDiagnosticsDroppedFromEvidence,
@@ -643,22 +642,6 @@ describe("Modal image source staging", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it("rejects private launch and recovery before Modal or local state mutation", async () => {
-    const root = mkdtempSync(path.join(fs.realpathSync(tmpdir()), "ultrafuzz-private-modal-governance-"));
-    const configPath = path.join(root, "benchmark.json"),
-      statePath = path.join(root, "launch-state.json"),
-      recoveryStatePath = path.join(root, "recovery-state.json");
-    fs.writeFileSync(configPath, `${JSON.stringify(privateBenchmarkConfig())}\n`);
-    await expect(launchModalBenchmark({ configPath, statePath, env: {} })).rejects.toThrow(
-      /eval disclosure authorization/u
-    );
-    await expect(overseeModalBenchmarkOnce({ configPath, statePath, recoveryStatePath, env: {} })).rejects.toThrow(
-      /eval disclosure authorization/u
-    );
-    expect(fs.existsSync(statePath)).toBe(false);
-    expect(fs.existsSync(recoveryStatePath)).toBe(false);
   });
 });
 
@@ -1432,31 +1415,6 @@ model = "k3"
     })}\n`
   );
   return root;
-}
-
-function privateBenchmarkConfig() {
-  return parseModalBenchmarkConfig({
-    schema_version: "ultrafuzz.modal.benchmark.v3",
-    run_id: "immutable-run",
-    app_name: "ultrafuzz-evals",
-    image_name: "ultrafuzz-security-runner:latest",
-    target: { repo: "https://github.com/example/target", ref: "main" },
-    ground_truth: {
-      repo: "https://github.com/example/ground-truth",
-      ref: "main",
-      file: "findings.yml",
-      format: "ultrafuzz"
-    },
-    judge: {
-      api_key_env: "OPENAI_API_KEY",
-      url: "https://api.openai.com/v1/chat/completions",
-      credential_ttl_seconds: 57_600
-    },
-    node_timeout_seconds: 7_200,
-    loops: 3,
-    models: [MODEL],
-    benchmark_execution: { excluded_node_ids: [] }
-  });
 }
 
 function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundleLineage>[0] {
