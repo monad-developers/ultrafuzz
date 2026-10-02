@@ -168,6 +168,7 @@ function canonicalReport(issues: unknown[]): Record<string, unknown> {
       run_id: "generated-run",
       source_run_id: "generated-run",
       repository: "https://example.com/target-a",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "10s",
       models_used: ["gpt-test"],
       tokens_used: "123",

@@ -1287,6 +1287,7 @@ function currentReport(runId: string, overrides: Record<string, unknown> = {}): 
       run_id: runId,
       source_run_id: runId,
       repository: ".",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "0s",
       models_used: [],
       tokens_used: "0",

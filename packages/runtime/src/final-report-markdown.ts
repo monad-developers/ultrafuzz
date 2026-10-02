@@ -41,6 +41,7 @@ const PARTIAL_EMPTY_FINDINGS_NOTICE =
   "No production issues were reported from the available verified results. This partial report is not a clean result and does not establish that uncompleted work found no issues. See [Run completion](#run-completion).";
 const UNCHECKED_PARTIAL_REPORT_WARNING =
   "> **PARTIAL REPORT — verification not checked.** This report contains the saved report-agent output. Task counts and results could not be fully verified. Missing or uncertain results are coverage gaps, and an empty findings list is not a clean result. See [Run completion](#run-completion).";
+const UNRECORDED_COMMIT_SUMMARY = "- Commit: `none` (no Git commit was recorded for the evaluated target)";
 const UNCHECKED_EMPTY_FINDINGS_NOTICE =
   "No final findings are included in this agent-written report. This partial report is not a clean result and does not establish that unfinished or unchecked work found no issues. See [Run completion](#run-completion).";
 const REPORT_VERIFICATION_REASON_TEXT: Record<ReportVerification["reason_codes"][number], string> = {
@@ -86,10 +87,14 @@ export function loadGoalSearchCoverageSnapshot(runRoot: string): unknown | undef
 
 type JsonRecord = Record<string, unknown>;
 
+/**
+ * The Run summary bullets, in order. Lineage (`source_run_id`, `source_run_ids`) stays in report.json
+ * only; `Commit` names the evaluated target's commit (`target_commit`).
+ */
 const reportSummaryFields = [
   ["Run ID", "run_id"],
-  ["Source run ID", "source_run_id"],
   ["Repository", "repository"],
+  ["Commit", "target_commit"],
   ["Elapsed time", "elapsed_time"],
   ["Models used", "models_used"],
   ["Tokens used", "tokens_used"],
@@ -241,6 +246,8 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (!markdown.startsWith(opening) || !markdown.includes("\n## Run summary\n")) {
     return "missing report title or run summary";
   }
+  const runSummaryViolation = runSummaryLabelsViolation(markdown);
+  if (runSummaryViolation !== undefined) return runSummaryViolation;
   const completionViolation = completionMarkdownViolation(markdown, report, completion, observed, verification);
   if (completionViolation !== undefined) return completionViolation;
   if (!markdown.includes("\n## Property implementation coverage\n")) {
@@ -294,6 +301,18 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   })
     ? undefined
     : "an issue is missing severity or proof-of-concept ordering";
+}
+
+/**
+ * The Run summary bullets carry exactly the summary labels, in order, so a stale row (such as the
+ * former `Source run ID`) or a dropped `Commit` row cannot pass as the current report shape.
+ */
+function runSummaryLabelsViolation(markdown: string): string | undefined {
+  const [, summary, ...repeated] = markdownOutsideFencedCode(markdown).split("\n## Run summary\n\n");
+  if (summary === undefined || repeated.length > 0) return "missing or repeated run summary";
+  const labels = (summary.split("\n\n")[0] ?? "").split("\n").map((line) => /^- ([^:\n]+): /u.exec(line)?.[1]);
+  const expected = reportSummaryFields.map(([label]) => label);
+  return isDeepStrictEqual(labels, expected) ? undefined : "run summary labels do not match the report contract";
 }
 
 function completionMarkdownViolation(
@@ -929,11 +948,11 @@ function appendCampaignOutcome(lines: string[], campaignOutcome: unknown): boole
 
 function appendRunSummary(lines: string[], metadata: JsonRecord): void {
   for (const [label, key] of reportSummaryFields) {
-    let value = metadata[key];
-    if (key === "source_run_id" && !isAvailable(value)) {
-      value = "none";
+    if (key === "target_commit" && metadata[key] === null) {
+      lines.push(UNRECORDED_COMMIT_SUMMARY);
+      continue;
     }
-    lines.push(`- ${label}: \`${inlineValue(value)}\``);
+    lines.push(`- ${label}: \`${inlineValue(metadata[key])}\``);
   }
 }
 
@@ -1511,11 +1530,16 @@ function redactSecrets(value: string, mode: SecretScanMode = "all"): string {
  * bounded eval run IDs (`ci-<run>-1-smoke-...-<16 hex>`), which breaks that lineage check, so these
  * fields scan positive-only: a vendor-format credential or URL credential in the slot is still
  * redacted (and the bundle then fails closed on lineage), while a high-entropy safe ID is kept.
+ *
+ * `run_metadata.target_commit` is a schema-checked lowercase Git object ID or null. The generic
+ * 40-hex rule would redact a SHA-1 commit to the placeholder, which the report contract rejects, so
+ * it scans positive-only too: the published commit is the evaluated target's identity, not a secret.
  */
 function secretScanModeForPath(keyPath: readonly string[]): SecretScanMode {
   const isRetainedIdentifier =
     keyPath.length === 2 &&
-    ((keyPath[0] === "run_metadata" && (keyPath[1] === "run_id" || keyPath[1] === "source_run_id")) ||
+    ((keyPath[0] === "run_metadata" &&
+      (keyPath[1] === "run_id" || keyPath[1] === "source_run_id" || keyPath[1] === "target_commit")) ||
       (keyPath[0] === "completion" && keyPath[1] === "run_id"));
   return isRetainedIdentifier ? "positive-only" : "all";
 }
@@ -1554,7 +1578,7 @@ function containsUnredactedSecretInMarkdown(markdown: string, report: JsonRecord
 function retainedIdentifierValues(report: JsonRecord): string[] {
   const metadata = recordField(report, "run_metadata");
   const completion = recordField(report, "completion");
-  return [metadata?.run_id, metadata?.source_run_id, completion?.run_id].filter(
+  return [metadata?.run_id, metadata?.source_run_id, metadata?.target_commit, completion?.run_id].filter(
     (value): value is string => typeof value === "string" && value !== ""
   );
 }

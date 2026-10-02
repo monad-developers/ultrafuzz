@@ -17,6 +17,7 @@ export const CONFIG_REDACTIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:
 export const RUN_PLAN_SCHEMA_VERSION = "ultrafuzz.run-plan.v3" as const;
 export const RUN_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-plan:3" as const;
 export const RUN_METADATA_SCHEMA_VERSION = "ultrafuzz.run-metadata.v2" as const;
+export const SPEND_ESTIMATE_SCHEMA_VERSION = "ultrafuzz.spend-estimate.v1" as const;
 
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const RUN_SOURCE_REF = /^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u;
@@ -271,6 +272,68 @@ export interface RunMetadataAccounting {
   updated_at: string;
 }
 
+export type SpendEstimateAssumptionCode =
+  | "catalog-unavailable"
+  | "catalog-disabled"
+  | "model-not-in-route-catalog"
+  | "zero-catalog-rate-ignored"
+  | "zero-recorded-cost-repriced"
+  | "component-rate-missing"
+  | "usage-breakdown-estimated"
+  | "unaccounted-attempt-imputed"
+  | "default-attempt-usage"
+  | "source-run-estimate-unavailable";
+
+export type SpendEstimateFallbackFamily =
+  "claude-fable" | "claude-opus" | "claude-sonnet" | "claude-haiku" | "gpt" | "deepseek" | "kimi" | "generic";
+
+export interface RunSpendEstimateModel {
+  model: string;
+  attempts: number;
+  estimated_spend_usd: number;
+  price_source: "recorded" | "catalog" | "fallback" | "mixed";
+  catalog_provider?: string;
+  catalog_model_id?: string;
+  fallback_family?: SpendEstimateFallbackFamily;
+  /** The fallback rates first used for this model, reused on later passes so a table change never reprices it. */
+  fallback_rates?: RunModelPricing;
+}
+
+export interface RunSpendEstimateUnaccountedAttempt {
+  node_id: string;
+  iteration: number;
+  attempt: number;
+  model_name?: string;
+  imputation: "same-model-mean" | "run-mean" | "default-usage";
+}
+
+/**
+ * Labelled, derived spend estimate for the whole run lineage. It is accounting, not product state:
+ * it never feeds the usage ledger or the v4 accounting fields, and `complete: false` means some of
+ * it was priced from fallback rates or imputed for attempts without usage evidence.
+ */
+export interface RunSpendEstimate {
+  schema_version: typeof SPEND_ESTIMATE_SCHEMA_VERSION;
+  workflow_run_id: string;
+  estimated_spend_usd: number;
+  estimated_spend: string;
+  complete: boolean;
+  fallback_pricing_table: string;
+  basis_usd: Record<"recorded" | "catalog" | "fallback" | "imputed" | "source_runs", number>;
+  accounted_attempts: number;
+  models: RunSpendEstimateModel[];
+  assumptions: Array<{ code: SpendEstimateAssumptionCode; count: number; model?: string }>;
+  unaccounted_attempts: {
+    count: number;
+    imputed_spend_usd: number;
+    omitted: number;
+    entries: RunSpendEstimateUnaccountedAttempt[];
+  };
+  source_run_ids: string[];
+  /** Excluded from change detection, so a pass that changes nothing else never rewrites run.json. */
+  updated_at: string;
+}
+
 export interface RunMetadataDocument {
   schema_version: typeof RUN_METADATA_SCHEMA_VERSION;
   run_id: string;
@@ -294,6 +357,26 @@ export interface RunMetadataDocument {
   };
   workflow?: RunMetadataWorkflow;
   accounting?: RunMetadataAccounting;
+  spend_estimate?: RunSpendEstimate;
+}
+
+/**
+ * Formats a spend estimate for every human surface and for `estimated_spend` labels: two decimals
+ * from one cent up (and for exactly zero), otherwise enough decimals (four to ten) to show the
+ * leading significant digits, so a nonzero amount never reads as `$0.00`. There is never a `+` or
+ * `unavailable` suffix; incompleteness is reported separately.
+ *
+ * `toFixed` rounds the exact binary value, so decimal ties that binary cannot represent may round
+ * either way (`12.345` is stored just above the tie and formats as `$12.35`; `1.005` is stored just
+ * below it and formats as `$1.00`). Amounts of `1e21` or more are rejected because `toFixed` would
+ * switch to exponent notation.
+ */
+export function formatEstimatedSpendUsd(value: number): string {
+  if (!Number.isFinite(value) || value < 0 || value >= 1e21) {
+    throw new Error("spend estimate is outside the supported range");
+  }
+  if (value === 0 || value >= 0.01) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(Math.min(10, Math.max(4, 1 - Math.floor(Math.log10(value)))))}`;
 }
 
 export const sourceRunJsonSchema = loadSchemaDocument("source-run.schema.json");
@@ -409,7 +492,65 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
       throw new Error("run metadata accounting does not match the active workflow run");
     }
   }
+  if (document.spend_estimate !== undefined) assertSpendEstimateSemantics(document.spend_estimate, document.workflow);
   return document;
+}
+
+/** Tolerance for the basis sum; it only absorbs floating-point addition order, never a missing basis. */
+const SPEND_ESTIMATE_BASIS_TOLERANCE_USD = 1e-9;
+
+function assertSpendEstimateSemantics(estimate: RunSpendEstimate, workflow: RunMetadataWorkflow | undefined): void {
+  if (workflow === undefined || estimate.workflow_run_id !== workflow.run_id) {
+    throw new Error("run metadata spend estimate does not match the active workflow run");
+  }
+  if (estimate.estimated_spend !== formatEstimatedSpendUsd(estimate.estimated_spend_usd)) {
+    throw new Error("run metadata spend estimate label does not format its USD amount");
+  }
+  const basis = Object.values(estimate.basis_usd).reduce((total, amount) => total + amount, 0);
+  if (Math.abs(basis - estimate.estimated_spend_usd) > SPEND_ESTIMATE_BASIS_TOLERANCE_USD) {
+    throw new Error("run metadata spend estimate basis does not sum to its USD amount");
+  }
+  if (!strictlyAscending(estimate.models.map(({ model }) => [model]))) {
+    throw new Error("run metadata spend estimate models must be unique and sorted by model");
+  }
+  // An assumption without a model sorts before the same code with one; the schema forbids an empty model.
+  if (!strictlyAscending(estimate.assumptions.map(({ code, model }) => [code, model ?? ""]))) {
+    throw new Error("run metadata spend estimate assumptions must be unique and sorted by code and model");
+  }
+  const unaccounted = estimate.unaccounted_attempts;
+  const attemptKeys = new Set(
+    unaccounted.entries.map(({ node_id, iteration, attempt }) => JSON.stringify([node_id, iteration, attempt]))
+  );
+  if (attemptKeys.size !== unaccounted.entries.length) {
+    throw new Error("run metadata spend estimate unaccounted attempts must be unique by node, iteration, and attempt");
+  }
+  if (unaccounted.count !== unaccounted.entries.length + unaccounted.omitted) {
+    throw new Error("run metadata spend estimate unaccounted-attempt count does not match its entries");
+  }
+  if (
+    estimate.complete &&
+    (estimate.assumptions.length > 0 ||
+      unaccounted.count > 0 ||
+      estimate.basis_usd.fallback > 0 ||
+      estimate.basis_usd.imputed > 0)
+  ) {
+    throw new Error("run metadata spend estimate claims completeness with fallback or imputed spend");
+  }
+}
+
+/**
+ * Whether the keys are strictly ascending, compared element by element in code-unit order, so the
+ * order (and the run.json bytes) never depends on the host locale and a repeated key is rejected.
+ */
+function strictlyAscending(keys: ReadonlyArray<readonly string[]>): boolean {
+  return keys.every((key, index) => {
+    const previous = keys[index - 1];
+    if (previous === undefined) return true;
+    const differing = key.findIndex((part, partIndex) => part !== previous[partIndex]);
+    const previousPart = previous[differing];
+    const part = key[differing];
+    return differing !== -1 && previousPart !== undefined && part !== undefined && previousPart < part;
+  });
 }
 
 function assertSourceRevisionPair(

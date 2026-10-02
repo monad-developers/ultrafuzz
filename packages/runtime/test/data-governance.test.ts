@@ -17,6 +17,7 @@ import {
   parseAcknowledgements,
   parseDataGovernancePolicy,
   prepareDataGovernance,
+  readFinalReportTargetCommit,
   type DataGovernancePolicy,
   targetIdentity
 } from "../src/data-governance.js";
@@ -529,6 +530,52 @@ test("planning persists digest-bound governance and sealing detects tamper", asy
     () => assertSealedDataGovernance(sealed, reference, planned.value!.run_id),
     /differs from the authenticated launch decision/u
   );
+});
+test("the final-report target commit is the sealed record's commit, null without one, and never a placeholder", () => {
+  const root = repository(),
+    notGit = temporaryRoot("ufz-governance-not-git-"),
+    governancePath = path.join(temporaryRoot("ufz-governance-sealed-"), DATA_GOVERNANCE_PROVENANCE_PATH),
+    env = { ULTRAFUZZ_DATA_GOVERNANCE_PATH: governancePath },
+    seal = (value: unknown) => fs.writeFileSync(governancePath, `${JSON.stringify(value)}\n`),
+    publicPolicy = { [DATA_GOVERNANCE_POLICY_ENV]: policy({ sensitivity: "public" }) };
+  const recorded = prepare(root, publicPolicy).provenance;
+  seal(recorded);
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  assert.equal(readFinalReportTargetCommit(env), head);
+  const unrecorded = prepare(notGit, publicPolicy).provenance;
+  assert.equal(unrecorded.target.commit, null);
+  seal(unrecorded);
+  assert.equal(readFinalReportTargetCommit(env), null);
+  seal({ ...recorded, target: { ...recorded.target, commit: "a".repeat(64), tree: "b".repeat(64) } });
+  assert.equal(readFinalReportTargetCommit(env), "a".repeat(64));
+
+  for (const [label, missing] of [
+    ["unset", {}],
+    ["empty", { ULTRAFUZZ_DATA_GOVERNANCE_PATH: "" }]
+  ] as const)
+    assert.throws(() => readFinalReportTargetCommit(missing), /target commit authority is unavailable/u, label);
+  assert.throws(
+    () => readFinalReportTargetCommit({ ULTRAFUZZ_DATA_GOVERNANCE_PATH: DATA_GOVERNANCE_PROVENANCE_PATH }),
+    /target commit authority path must be absolute/u
+  );
+  assert.throws(
+    () => readFinalReportTargetCommit({ ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(notGit, "absent.json") }),
+    /target commit authority is unreadable/u
+  );
+  fs.writeFileSync(governancePath, '{"schema_version":');
+  assert.throws(() => readFinalReportTargetCommit(env), /target commit authority is unreadable/u);
+  for (const [label, record] of [
+    ["historical schema", { ...recorded, schema_version: "ultrafuzz.data-governance-provenance.v0" }],
+    ["no target", { ...recorded, target: undefined }],
+    ["placeholder commit", { ...recorded, target: { ...recorded.target, commit: "unavailable" } }],
+    ["uppercase commit", { ...recorded, target: { ...recorded.target, commit: head.toUpperCase() } }],
+    ["41-digit commit", { ...recorded, target: { ...recorded.target, commit: `${head}a` } }],
+    ["commit without tree", { ...recorded, target: { ...recorded.target, tree: null } }],
+    ["tree without commit", { ...recorded, target: { ...recorded.target, commit: null } }]
+  ] as const) {
+    seal(record);
+    assert.throws(() => readFinalReportTargetCommit(env), /target commit authority is invalid/u, label);
+  }
 });
 test("target identity rejects Git content filters before execution", () => {
   const root = repository(),

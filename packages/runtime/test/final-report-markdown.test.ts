@@ -62,11 +62,14 @@ test("public warning companions redact private context and retain the original d
   );
 });
 
+const TARGET_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
 function runMetadata(runId: string): Record<string, unknown> {
   return {
     run_id: runId,
     source_run_id: runId,
     repository: "example/repository",
+    target_commit: TARGET_COMMIT,
     elapsed_time: "1m",
     models_used: ["model-a"],
     tokens_used: "100",
@@ -625,12 +628,93 @@ test("public final-report projection keeps machine-generated run IDs the entropy
   assert.equal(metadata.run_id, runId);
   assert.equal(metadata.source_run_id, sourceRunId);
   assert.match(published.markdown, /^- Run ID: `ci-33918585561-1-smoke-ultrafuzz-benc-3e994a685ad7bf44`$/mu);
-  assert.match(published.markdown, /^- Source run ID: `ci-33918585561-1-smoke-ultrafuzz-benc-7d622d2207767a8d`$/mu);
+  // Lineage stays in report.json only; the Markdown summary names the evaluated commit instead.
+  assert.equal(published.markdown.includes(sourceRunId), false);
+  assert.match(published.markdown, new RegExp(`^- Commit: \`${TARGET_COMMIT}\`$`, "mu"));
   assert.match(JSON.stringify(published.report), /token=REDACTED/u, "every other field still scans in full");
   assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
   assert.deepEqual(projectCanonicalFinalReport(published.report), published);
   assertPublicProjectionFixedPoint(published);
 });
+
+test("the Run summary names the evaluated commit and keeps run lineage in report.json only", () => {
+  const sha256Commit = "0123456789abcdef".repeat(4);
+  assert.notEqual(
+    redactSecretsInText(TARGET_COMMIT, "REDACTED", [], "all"),
+    TARGET_COMMIT,
+    "a bare SHA-1 commit must be a generic-hex redaction candidate for this test to mean anything"
+  );
+  for (const commit of [TARGET_COMMIT, sha256Commit]) {
+    const input = renderableReport();
+    input.run_metadata = {
+      ...runMetadata("commit-run"),
+      source_run_id: "commit-source-run",
+      source_run_ids: ["commit-source-run"],
+      target_commit: commit
+    };
+    const before = structuredClone(input);
+    const projection = projectCanonicalFinalReport(input);
+    assert.deepEqual(projection.report, before);
+    assert.ok(projection.markdown.includes(`\n## Run summary\n\n${summaryBullets(commit)}\n\n`), projection.markdown);
+    assert.doesNotMatch(projection.markdown, /Source run ID|commit-source-run/u);
+
+    const published = projectPublicCanonicalFinalReport(input);
+    assert.deepEqual(input, before);
+    const metadata = published.report.run_metadata as Record<string, unknown>;
+    assert.equal(metadata.target_commit, commit, "the public projection must not redact the evaluated commit");
+    assert.equal(metadata.source_run_id, "commit-source-run");
+    assert.deepEqual(metadata.source_run_ids, ["commit-source-run"]);
+    assert.match(published.markdown, new RegExp(`^- Commit: \`${commit}\`$`, "mu"));
+    assert.doesNotMatch(published.markdown, /Source run ID|commit-source-run/u);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+    assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+    assertPublicProjectionFixedPoint(published);
+  }
+});
+
+test("the Run summary states when no Git commit was recorded for the evaluated target", () => {
+  const input = renderableReport();
+  input.run_metadata = { ...runMetadata("no-commit-run"), target_commit: null };
+  const projection = projectCanonicalFinalReport(input);
+  assert.match(projection.markdown, /^- Commit: `none` \(no Git commit was recorded for the evaluated target\)$/mu);
+  assert.equal(projection.markdown.match(/^- Commit: /gmu)?.length, 1);
+  assert.equal((projection.report.run_metadata as Record<string, unknown>).target_commit, null);
+  const published = projectPublicCanonicalFinalReport(input);
+  assert.equal((published.report.run_metadata as Record<string, unknown>).target_commit, null);
+  assert.match(published.markdown, /^- Commit: `none` \(no Git commit was recorded for the evaluated target\)$/mu);
+  assertPublicProjectionFixedPoint(published);
+});
+
+test("the Run summary rejects a stale Source run ID row, a missing Commit row, and reordered rows", () => {
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const commitRow = `- Commit: \`${TARGET_COMMIT}\`\n`;
+  const repositoryRow = "- Repository: `example/repository`\n";
+  assert.ok(projection.markdown.includes(`${repositoryRow}${commitRow}`));
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  for (const markdown of [
+    projection.markdown.replace(repositoryRow, `- Source run ID: \`projection-test\`\n${repositoryRow}`),
+    projection.markdown.replace(commitRow, "- Source run ID: `projection-test`\n"),
+    projection.markdown.replace(commitRow, ""),
+    projection.markdown.replace(`${repositoryRow}${commitRow}`, `${commitRow}${repositoryRow}`),
+    projection.markdown.replace(commitRow, `${commitRow}- Dirty: \`false\`\n`)
+  ]) {
+    assert.notEqual(markdown, projection.markdown);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false, markdown);
+  }
+});
+
+function summaryBullets(commit: string): string {
+  return [
+    "- Run ID: `commit-run`",
+    "- Repository: `example/repository`",
+    `- Commit: \`${commit}\``,
+    "- Elapsed time: `1m`",
+    "- Models used: `model-a`",
+    "- Tokens used: `100`",
+    "- Estimated spend: `$0.01`",
+    "- Audit profile: `exhaustive`"
+  ].join("\n");
+}
 
 test("public final-report projection still redacts a vendor-format credential in a run ID slot", () => {
   const credentialId = "sk-abcdefghijklmnopqrstuvwx"; // gitleaks:allow -- fake credential fixture for the redaction tests
@@ -647,7 +731,8 @@ test("public final-report projection still redacts a vendor-format credential in
   assert.equal(JSON.stringify(published.report).includes(credentialId), false);
   assert.equal(published.markdown.includes(credentialId), false);
   assert.match(published.markdown, /^- Run ID: `REDACTED`$/mu);
-  assert.match(published.markdown, /^- Source run ID: `REDACTED`$/mu);
+  assert.doesNotMatch(published.markdown, /Source run ID/u);
+  assert.equal(metadata.target_commit, TARGET_COMMIT);
   assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
   assertPublicProjectionFixedPoint(published);
 });

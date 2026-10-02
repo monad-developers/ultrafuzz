@@ -63,6 +63,7 @@ function agentReport(): Record<string, unknown> {
       run_id: RUN_ID,
       source_run_id: RUN_ID,
       repository: "example/repository",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "2m",
       models_used: ["example-model"],
       tokens_used: "100",
@@ -327,4 +328,36 @@ test("terminal projection restates whole-run accounting instead of the report-st
     "- Estimated spend: `unavailable`"
   ]);
   assert.equal((unpriced.report.run_metadata as Record<string, unknown>).partial_pricing, true);
+});
+
+test("terminal projection keeps the report's target commit while it restates whole-run accounting", () => {
+  const commits = [
+    ["0123456789abcdef0123456789abcdef01234567", "- Commit: `0123456789abcdef0123456789abcdef01234567`"],
+    [
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "- Commit: `0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`"
+    ],
+    [null, "- Commit: `none` (no Git commit was recorded for the evaluated target)"]
+  ] as const;
+  for (const [targetCommit, commitRow] of commits) {
+    const agent = agentReport();
+    Object.assign(agent.run_metadata as Record<string, unknown>, { target_commit: targetCommit });
+    const result = projectTerminalReport({
+      completion: completion(),
+      state: { ...terminalState(), finished_at: "2026-09-01T06:02:00.000Z" },
+      metadata: metadataWithAccounting(),
+      agentReport: agent
+    });
+    const runMetadata = result.report.run_metadata as Record<string, unknown>;
+    // run.json has no commit field, so the restated summary never replaces the report-start commit.
+    assert.equal(runMetadata.tokens_used, "12,345,678", String(targetCommit));
+    assert.equal(JSON.stringify(runMetadata.target_commit), JSON.stringify(targetCommit));
+    assert.equal(
+      result.markdown
+        .split("\n")
+        .filter((line) => line.startsWith("- Commit:"))
+        .join("\n"),
+      commitRow
+    );
+  }
 });

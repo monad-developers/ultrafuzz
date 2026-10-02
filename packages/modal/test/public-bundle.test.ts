@@ -1009,6 +1009,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
         run_id: row.run_id,
         source_run_id: "none",
         repository: row.target.repo,
+        target_commit: "0123456789abcdef0123456789abcdef01234567",
         elapsed_time: "0s",
         models_used: [TEST_MODEL],
         tokens_used: "0",

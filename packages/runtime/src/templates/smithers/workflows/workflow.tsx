@@ -102,6 +102,7 @@ const {
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
+  readFinalReportTargetCommit,
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
@@ -1442,6 +1443,7 @@ type FinalReportRunMetadataProjection = {
   run_id: string;
   source_run_id: string;
   repository: string;
+  target_commit: string | null;
   elapsed_time: string;
   models_used: string[];
   tokens_used: string;
@@ -1795,6 +1797,8 @@ function deriveAuthoritativeFinalReportRunMetadata(
     run_id: task.metadata.run.ultrafuzzRunId,
     source_run_id: finalReportOptionalString(metadata.source_run_id, "source run ID"),
     repository: normalizeFinalReportGitHubRepository(task),
+    // The sealed governance record names the commit every task worktree was created from.
+    target_commit: readFinalReportTargetCommit(),
     elapsed_time: elapsedTime,
     models_used: models.length === 0 ? (directWorkflowMetrics?.models_used ?? []) : models,
     tokens_used: finalReportAvailableLabel(tokensUsed) ?? directWorkflowMetrics?.tokens_used ?? "unavailable",

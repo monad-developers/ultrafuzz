@@ -696,6 +696,7 @@ function currentReport(
       run_id: runId,
       source_run_id: "none",
       repository: "unavailable",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "unavailable",
       models_used: [],
       tokens_used: "unavailable",

@@ -9,6 +9,7 @@ import {
   assertRunMetadataDocument,
   assertRunPlanDocument,
   assertSourceRunDocument,
+  formatEstimatedSpendUsd,
   readConfigRedactionsDocument,
   readRunMetadataDocument,
   readRunPlanDocument,
@@ -25,6 +26,7 @@ import {
   type RunAccountingSummary,
   type RunMetadataDocument,
   type RunPlanDocument,
+  type RunSpendEstimate,
   type SourceRunDocument
 } from "../src/index.js";
 
@@ -241,6 +243,76 @@ function canonicalRunMetadata(): RunMetadataDocument {
   };
 }
 
+function canonicalSpendEstimate(): RunSpendEstimate {
+  return {
+    schema_version: "ultrafuzz.spend-estimate.v1",
+    workflow_run_id: "workflow-current",
+    estimated_spend_usd: 12.3456,
+    estimated_spend: "$12.35",
+    complete: false,
+    fallback_pricing_table: "ultrafuzz.fallback-pricing.2026-10-01",
+    basis_usd: { recorded: 1.2, catalog: 0.0456, fallback: 3.1, imputed: 8, source_runs: 0 },
+    accounted_attempts: 3,
+    models: [
+      {
+        model: "anthropic/claude-opus-4.8",
+        attempts: 2,
+        estimated_spend_usd: 1.2456,
+        price_source: "mixed",
+        catalog_provider: "openrouter",
+        catalog_model_id: "anthropic/claude-opus-4.8"
+      },
+      {
+        model: "claude-opus-4-8[1m]",
+        attempts: 2,
+        estimated_spend_usd: 11.1,
+        price_source: "fallback",
+        fallback_family: "claude-opus",
+        fallback_rates: {
+          inputUsdPerMillion: 5,
+          cachedInputUsdPerMillion: 0.5,
+          cacheWriteUsdPerMillion: 6.25,
+          outputUsdPerMillion: 25
+        }
+      }
+    ],
+    assumptions: [
+      { code: "model-not-in-route-catalog", count: 1, model: "claude-opus-4-8[1m]" },
+      { code: "unaccounted-attempt-imputed", count: 1 }
+    ],
+    unaccounted_attempts: {
+      count: 1,
+      imputed_spend_usd: 8,
+      omitted: 0,
+      entries: [
+        {
+          node_id: "node-a-0",
+          iteration: 0,
+          attempt: 2,
+          model_name: "claude-opus-4-8[1m]",
+          imputation: "same-model-mean"
+        }
+      ]
+    },
+    source_run_ids: [],
+    updated_at: CREATED_AT
+  };
+}
+
+function at<T>(values: readonly T[], index: number): T {
+  const value = values[index];
+  assert.ok(value !== undefined, `fixture has no entry ${String(index)}`);
+  return value;
+}
+
+function runMetadataWithSpendEstimate(
+  update: (estimate: RunSpendEstimate) => void = () => undefined
+): RunMetadataDocument {
+  const estimate = canonicalSpendEstimate();
+  update(estimate);
+  return { ...canonicalRunMetadata(), spend_estimate: estimate };
+}
+
 test("canonical runtime documents round-trip through their validated writers and strict readers", (t) => {
   const root = temporaryDirectory();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -446,6 +518,188 @@ test("run metadata current accounting must exactly equal its final segment", () 
     () => assertRunMetadataDocument(metadata),
     /current accounting does not equal the final accounting segment/u
   );
+});
+
+test("run metadata round-trips a spend estimate and accepts one without v4 accounting", (t) => {
+  const root = temporaryDirectory();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const metadataPath = path.join(root, "run.json");
+  const metadata = runMetadataWithSpendEstimate();
+  writeRunMetadataDocument(metadataPath, metadata);
+  assert.deepEqual(readRunMetadataDocument(metadataPath, metadata.run_id), metadata);
+
+  // Executed agent attempts without any usage evidence produce an estimate while v4 accounting stays absent.
+  const { accounting: _accounting, ...withoutAccounting } = metadata;
+  assert.doesNotThrow(() => assertRunMetadataDocument(withoutAccounting));
+});
+
+test("run metadata spend estimates are closed and require the workflow they describe", () => {
+  const { workflow: _workflow, ...unlinked } = runMetadataWithSpendEstimate();
+  const { accounting: _accounting, ...unlinkedWithoutAccounting } = unlinked;
+  assert.throws(
+    () => assertRunMetadataDocument({ ...unlinkedWithoutAccounting, workflow_ids: [] }),
+    /schema-invalid: \/ must have property workflow when property spend_estimate is present/u
+  );
+  const invalidShapes: Array<[string, (estimate: RunSpendEstimate) => void]> = [
+    ["unknown property", (estimate) => Object.assign(estimate, { unexpected: true })],
+    ["unknown basis", (estimate) => Object.assign(estimate.basis_usd, { estimated: 0 })],
+    ["negative basis", (estimate) => (estimate.basis_usd.source_runs = -1)],
+    ["suffixed label", (estimate) => (estimate.estimated_spend = "$12.35+")],
+    ["unavailable label", (estimate) => (estimate.estimated_spend = "unavailable")],
+    ["unknown fallback table", (estimate) => (estimate.fallback_pricing_table = "ultrafuzz.fallback-pricing.v1")],
+    ["unknown price source", (estimate) => Object.assign(at(estimate.models, 0), { price_source: "estimated" })],
+    ["unknown fallback family", (estimate) => Object.assign(at(estimate.models, 1), { fallback_family: "opus" })],
+    ["fallback family without its rates", (estimate) => delete at(estimate.models, 1).fallback_rates],
+    ["catalog provider without its model ID", (estimate) => delete at(estimate.models, 0).catalog_model_id],
+    [
+      "report-production imputation code",
+      (estimate) => Object.assign(at(estimate.assumptions, 0), { code: "report-attempt-imputed" })
+    ],
+    [
+      "unknown imputation",
+      (estimate) => Object.assign(at(estimate.unaccounted_attempts.entries, 0), { imputation: "guess" })
+    ],
+    [
+      "unbounded unaccounted entries",
+      (estimate) => {
+        const template = at(estimate.unaccounted_attempts.entries, 0);
+        estimate.unaccounted_attempts.entries = Array.from({ length: 257 }, (_entry, attempt) => ({
+          ...template,
+          attempt
+        }));
+        estimate.unaccounted_attempts.count = 257;
+      }
+    ]
+  ];
+  for (const [label, update] of invalidShapes) {
+    assert.throws(() => assertRunMetadataDocument(runMetadataWithSpendEstimate(update)), /schema-invalid/u, label);
+  }
+});
+
+test("run metadata spend estimates must agree with their workflow, label, basis, and attempt census", () => {
+  const invalidSemantics: Array<[RegExp, (estimate: RunSpendEstimate) => void]> = [
+    [/does not match the active workflow run/u, (estimate) => (estimate.workflow_run_id = "workflow-other")],
+    [/label does not format its USD amount/u, (estimate) => (estimate.estimated_spend = "$12.3456")],
+    [/label does not format its USD amount/u, (estimate) => (estimate.estimated_spend = "$12.34")],
+    [/basis does not sum to its USD amount/u, (estimate) => (estimate.basis_usd.source_runs = 0.01)],
+    [/basis does not sum to its USD amount/u, (estimate) => (estimate.basis_usd.imputed = 7.999)],
+    [/models must be unique and sorted by model/u, (estimate) => estimate.models.reverse()],
+    [
+      /models must be unique and sorted by model/u,
+      (estimate) => (at(estimate.models, 1).model = at(estimate.models, 0).model)
+    ],
+    [/assumptions must be unique and sorted by code and model/u, (estimate) => estimate.assumptions.reverse()],
+    [
+      // Distinct counts keep these entries apart for the schema's uniqueItems, but they repeat one key.
+      /assumptions must be unique and sorted by code and model/u,
+      (estimate) =>
+        (estimate.assumptions = [
+          { code: "catalog-unavailable", count: 1 },
+          { code: "catalog-unavailable", count: 2 }
+        ])
+    ],
+    [
+      /assumptions must be unique and sorted by code and model/u,
+      (estimate) =>
+        (estimate.assumptions = [
+          { code: "model-not-in-route-catalog", count: 1, model: "claude-opus-4-8[1m]" },
+          { code: "model-not-in-route-catalog", count: 1 }
+        ])
+    ],
+    [
+      /unaccounted attempts must be unique by node, iteration, and attempt/u,
+      (estimate) => {
+        const entry = at(estimate.unaccounted_attempts.entries, 0);
+        estimate.unaccounted_attempts.entries.push({ ...entry, imputation: "run-mean" });
+        estimate.unaccounted_attempts.count = 2;
+      }
+    ],
+    [/unaccounted-attempt count does not match its entries/u, (estimate) => (estimate.unaccounted_attempts.count = 2)],
+    [/claims completeness/u, (estimate) => (estimate.complete = true)]
+  ];
+  for (const [message, update] of invalidSemantics) {
+    assert.throws(() => assertRunMetadataDocument(runMetadataWithSpendEstimate(update)), message, String(message));
+  }
+  // A code without a model sorts before the same code with one, and one node may have several unaccounted attempts.
+  assert.doesNotThrow(() =>
+    assertRunMetadataDocument(
+      runMetadataWithSpendEstimate((estimate) => {
+        estimate.assumptions = [
+          { code: "model-not-in-route-catalog", count: 1 },
+          { code: "model-not-in-route-catalog", count: 1, model: "claude-opus-4-8[1m]" },
+          { code: "unaccounted-attempt-imputed", count: 2 }
+        ];
+        const entry = at(estimate.unaccounted_attempts.entries, 0);
+        estimate.unaccounted_attempts.entries.push({ ...entry, attempt: 3 }, { ...entry, iteration: 1 });
+        estimate.unaccounted_attempts.count = 3;
+      })
+    )
+  );
+  // Entries beyond the bounded list are counted as omitted.
+  assert.doesNotThrow(() =>
+    assertRunMetadataDocument(
+      runMetadataWithSpendEstimate((estimate) => {
+        estimate.unaccounted_attempts.count = 3;
+        estimate.unaccounted_attempts.omitted = 2;
+      })
+    )
+  );
+  // A complete estimate has no fallback, imputed or assumed spend.
+  assert.doesNotThrow(() =>
+    assertRunMetadataDocument(
+      runMetadataWithSpendEstimate((estimate) => {
+        Object.assign(estimate, {
+          complete: true,
+          estimated_spend_usd: 1.2456,
+          estimated_spend: "$1.25",
+          basis_usd: { recorded: 1.2, catalog: 0.0456, fallback: 0, imputed: 0, source_runs: 0 },
+          models: [at(estimate.models, 0)],
+          assumptions: [],
+          unaccounted_attempts: { count: 0, imputed_spend_usd: 0, omitted: 0, entries: [] }
+        });
+      })
+    )
+  );
+});
+
+test("spend estimates format without suffixes and keep a nonzero amount visible", () => {
+  const label = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u;
+  const expected: Array<[number, string]> = [
+    [0, "$0.00"],
+    [0.01, "$0.01"],
+    [0.125, "$0.13"],
+    // toFixed rounds the exact binary value: 12.345 is stored just above the tie and 1.005 just below it.
+    [12.345, "$12.35"],
+    [1.005, "$1.00"],
+    [12.3456, "$12.35"],
+    [123_456_789.999, "$123456790.00"],
+    [0.0099, "$0.0099"],
+    [0.009995, "$0.0100"],
+    [0.005, "$0.0050"],
+    [1.65e-5, "$0.000017"],
+    [1.23456e-5, "$0.000012"],
+    [1e-10, "$0.0000000001"],
+    [4e-11, "$0.0000000000"],
+    [Number.MIN_VALUE, "$0.0000000000"]
+  ];
+  for (const [value, formatted] of expected) {
+    assert.equal(formatEstimatedSpendUsd(value), formatted, String(value));
+    assert.match(formatEstimatedSpendUsd(value), label, String(value));
+  }
+  for (const value of [
+    -0.01,
+    -Number.MIN_VALUE,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    1e21
+  ]) {
+    assert.throws(
+      () => formatEstimatedSpendUsd(value),
+      /spend estimate is outside the supported range/u,
+      String(value)
+    );
+  }
 });
 
 test("a malformed present document fails differently from a genuinely missing document", (t) => {

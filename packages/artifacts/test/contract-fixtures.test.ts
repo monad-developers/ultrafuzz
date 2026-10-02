@@ -1535,6 +1535,43 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   assert.deepEqual(mismatches, [], `Zod accepted JSON-Schema-invalid unique arrays: ${mismatches.join("; ")}`);
 });
 
+test("report target commits are exact lowercase SHA-1 or SHA-256 object IDs or null in Ajv and Zod", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "report.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const fixture = contractFixtures["ultrafuzz/report@3"];
+  assert.ok(fixture !== undefined);
+  const withTargetCommit = (targetCommit: unknown): Record<string, unknown> => {
+    const report = structuredClone(fixture.valid) as {
+      run_metadata: Record<string, unknown>;
+    };
+    if (targetCommit === undefined) delete report.run_metadata.target_commit;
+    else report.run_metadata.target_commit = targetCommit;
+    return report;
+  };
+  const cases: Array<[string, unknown, boolean]> = [
+    ["null", null, true],
+    ["SHA-1", "0123456789abcdef0123456789abcdef01234567", true],
+    ["SHA-256", "0123456789abcdef".repeat(4), true],
+    ["missing", undefined, false],
+    ["unavailable", "unavailable", false],
+    ["none", "none", false],
+    ["empty", "", false],
+    ["uppercase hex", "0123456789ABCDEF0123456789ABCDEF01234567", false],
+    ["41 hex digits", "a".repeat(41), false],
+    ["63 hex digits", "a".repeat(63), false],
+    ["65 hex digits", "a".repeat(65), false],
+    ["abbreviated", "a".repeat(12), false],
+    ["number", 0, false]
+  ];
+  for (const [label, targetCommit, accepted] of cases) {
+    const report = withTargetCommit(targetCommit);
+    assert.equal(validateRegisteredJsonSchema(entry.id, report).ok, accepted, `Ajv ${label}`);
+    assert.equal(parser.safeParse(report).success, accepted, `Zod ${label}`);
+    assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, accepted, label);
+  }
+});
+
 test("portable generated-test paths and implementation selection uniqueness agree bidirectionally", () => {
   const generatedEntry = artifactSchemaRegistry().find(
     (candidate) => candidate.filename === "generated-tests.schema.json"

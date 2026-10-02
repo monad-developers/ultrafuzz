@@ -50,6 +50,7 @@ function writeAgentReport(root: string, status = "succeeded"): string {
         run_id: runId,
         source_run_id: runId,
         repository: "example/repository",
+        target_commit: "0123456789abcdef0123456789abcdef01234567",
         elapsed_time: "1m",
         models_used: [],
         tokens_used: "unavailable",
@@ -373,6 +374,47 @@ test("unchecked reports restate whole-run accounting from run.json", () => {
   assert.match(report.markdown, /^- Estimated spend: `\$3\.00`$/mu);
   assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, false);
   assertReportSnapshotRemainedCurrent(report);
+});
+
+test("unchecked reports keep the agent's target commit while they restate whole-run accounting", () => {
+  const commits = [
+    ["full-commit", "0123456789abcdef0123456789abcdef01234567"],
+    ["sha256-commit", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+    ["no-commit", null]
+  ] as const;
+  for (const [name, targetCommit] of commits) {
+    const root = reportRun(name);
+    const file = writeAgentReport(root);
+    const agent = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { target_commit: string | null } };
+    agent.run_metadata.target_commit = targetCommit;
+    fs.writeFileSync(file, JSON.stringify(agent));
+    fs.writeFileSync(
+      path.join(root, "run.json"),
+      JSON.stringify({
+        run_id: path.basename(root),
+        created_at: "2026-09-01T00:00:00.000Z",
+        accounting: {
+          cumulative: { models: ["model-a"], tokens_used: "4,321", estimated_spend: "$3.00", partial_pricing: false }
+        }
+      })
+    );
+    const report = loadReportSnapshot(root);
+    assert.equal(report.verification, "not-checked", name);
+    assert.match(report.markdown, /^- Tokens used: `4,321`$/mu, name);
+    assert.equal(
+      JSON.stringify(reportSchema.parse(report.json).run_metadata.target_commit),
+      JSON.stringify(targetCommit)
+    );
+    assert.deepEqual(
+      report.markdown.split("\n").filter((line) => line.startsWith("- Commit:")),
+      [
+        targetCommit === null
+          ? "- Commit: `none` (no Git commit was recorded for the evaluated target)"
+          : `- Commit: \`${targetCommit}\``
+      ],
+      name
+    );
+  }
 });
 
 test("unchecked reports render the run's goal-search census", () => {

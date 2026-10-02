@@ -41,12 +41,15 @@ import {
   parseJsonValidatorPreflightSuccessEnvelope,
   parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
+  readRunMetadataDocument,
   readRunState,
   promptArtifactAuthorityPathSelectorId,
   replayEvents,
+  SPEND_ESTIMATE_SCHEMA_VERSION,
   threatModelJsonSchema,
   validateRegisteredJsonBytesSync,
   VALIDATOR_BUILD_IDENTITY,
+  writeRunMetadataDocument,
   writeRunState,
   type RunState,
   type SmithersTaskManifestDocument,
@@ -2652,6 +2655,7 @@ function writeEmptyFinalReportArtifactSet(runRoot: string, runId: string) {
       run_id: runId,
       source_run_id: runId,
       repository: "example/repository",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "1m",
       models_used: ["gpt-5.5"],
       tokens_used: "100",
@@ -28177,6 +28181,63 @@ test("replay and fork restore a missing static prompt before they start an engin
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.equal(fs.lstatSync(planned.rendered_prompt_path).isSymbolicLink(), true);
   assert.equal(fs.existsSync(path.join(runRoot, "absent-prompt.md")), false);
+});
+
+test("a replacement workflow run drops the spend estimate bound to the run it replaces", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  // The fake runner names the replayed run after this run ID.
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  const metadata = readRunMetadataDocument(metadataPath, run.value.run_id);
+  const replacedWorkflowRunId = metadata.workflow?.run_id;
+  assert.equal(replacedWorkflowRunId, "ultrafuzz-lifecycle-run");
+  writeRunMetadataDocument(metadataPath, {
+    ...metadata,
+    spend_estimate: {
+      schema_version: SPEND_ESTIMATE_SCHEMA_VERSION,
+      workflow_run_id: replacedWorkflowRunId,
+      estimated_spend_usd: 0.5,
+      estimated_spend: "$0.50",
+      complete: false,
+      fallback_pricing_table: "ultrafuzz.fallback-pricing.2026-10-01",
+      basis_usd: { recorded: 0, catalog: 0, fallback: 0.5, imputed: 0, source_runs: 0 },
+      accounted_attempts: 1,
+      models: [
+        {
+          model: "gpt-5.6-sol",
+          attempts: 1,
+          estimated_spend_usd: 0.5,
+          price_source: "fallback",
+          fallback_family: "gpt",
+          fallback_rates: {
+            inputUsdPerMillion: 5,
+            cachedInputUsdPerMillion: 0.5,
+            cacheWriteUsdPerMillion: 5,
+            outputUsdPerMillion: 30
+          }
+        }
+      ],
+      assumptions: [{ code: "model-not-in-route-catalog", count: 1, model: "gpt-5.6-sol" }],
+      unaccounted_attempts: { count: 0, imputed_spend_usd: 0, omitted: 0, entries: [] },
+      source_run_ids: [],
+      updated_at: new Date().toISOString()
+    }
+  });
+
+  // Rebinding run.json to the replacement keeps no estimate that names the replaced run, which
+  // run.json's own contract would reject; the next synchronization estimates the replacement.
+  const replayed = await replayRun({ projectRoot: project, runId: run.value.run_id, env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run-replayed");
+  const rebound = readRunMetadataDocument(metadataPath, run.value.run_id);
+  assert.equal(rebound.workflow?.run_id, "ultrafuzz-lifecycle-run-replayed");
+  assert.notEqual(rebound.spend_estimate?.workflow_run_id, replacedWorkflowRunId);
+  assert.notEqual(rebound.accounting?.workflow_run_id, replacedWorkflowRunId);
 });
 
 test("a static prompt that cannot be read no longer stops the whole workflow render", async () => {

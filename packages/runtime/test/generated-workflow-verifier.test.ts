@@ -62,6 +62,7 @@ import {
   canonicalPropertiesMarkdownParityIssues,
   invariantLedgerMarkdownParityIssues
 } from "../src/canonical-properties-markdown.js";
+import { readFinalReportTargetCommit } from "../src/data-governance.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import {
   derivePromptArtifactAuthority,
@@ -619,7 +620,9 @@ function loadFinalReportRunMetadataAuthorityHarness(
     estimated_spend?: string;
     partial_pricing: boolean;
   },
-  admissions: ReadonlyMap<string, unknown> = new Map()
+  admissions: ReadonlyMap<string, unknown> = new Map(),
+  // The controller environment the sealed governance record is read from; see finalReportGovernanceEnvironment.
+  controllerEnvironment: NodeJS.ProcessEnv = {}
 ): {
   normalize(remoteValue: string): string;
   latestElapsedThrough(...values: unknown[]): string | undefined;
@@ -690,6 +693,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "deriveCurrentTaskWorkflowMetrics",
     "dependencyArtifactAdmissionsByTask",
     "boundArtifactValidationWarnings",
+    "readFinalReportTargetCommit",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
       latestElapsedThrough: finalReportLatestElapsedThrough,
@@ -741,8 +745,30 @@ function loadFinalReportRunMetadataAuthorityHarness(
     },
     async () => workflowMetrics,
     admissions,
-    boundArtifactValidationWarnings
+    boundArtifactValidationWarnings,
+    () => readFinalReportTargetCommit(controllerEnvironment)
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
+}
+
+const FINAL_REPORT_TARGET_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+/** Writes a sealed data-governance record under `root` and returns the controller environment naming it. */
+function finalReportGovernanceEnvironment(
+  root: string,
+  commit: string | null = FINAL_REPORT_TARGET_COMMIT
+): NodeJS.ProcessEnv {
+  const governancePath = path.join(root, "controls", "data-governance.json");
+  fs.mkdirSync(path.dirname(governancePath), { recursive: true });
+  const target =
+    commit === null
+      ? { commit: null, tree: null, dirty: true, worktree_digest: null }
+      : { commit, tree: "f".repeat(commit.length), dirty: false, worktree_digest: "e".repeat(64) };
+  fs.writeFileSync(
+    governancePath,
+    `${JSON.stringify({ schema_version: "ultrafuzz.data-governance-provenance.v1", target })}\n`,
+    "utf8"
+  );
+  return { ULTRAFUZZ_DATA_GOVERNANCE_PATH: governancePath };
 }
 
 function loadTaskPromptPathForArtifactReset(): (
@@ -9029,7 +9055,12 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
         { path: "custom/report.md", contract: "ultrafuzz/nonempty-markdown@1" }
       ]
     };
-    const authority = loadFinalReportRunMetadataAuthorityHarness();
+    const authority = loadFinalReportRunMetadataAuthorityHarness(
+      undefined,
+      undefined,
+      undefined,
+      finalReportGovernanceEnvironment(root)
+    );
     await authority.materialize(task);
 
     const relativePath = ".ultrafuzz/authorities/final-report.final-report-run-metadata.json";
@@ -9040,6 +9071,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       run_id: "run-1",
       source_run_id: "source-run",
       repository: "https://github.com/example/project",
+      target_commit: FINAL_REPORT_TARGET_COMMIT,
       elapsed_time: "unavailable",
       models_used: [],
       tokens_used: "unavailable",
@@ -9093,6 +9125,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       run_id: "run-1",
       source_run_id: "unavailable",
       repository: "https://github.com/example/project",
+      target_commit: FINAL_REPORT_TARGET_COMMIT,
       elapsed_time: "unavailable",
       models_used: [],
       tokens_used: "unavailable",
@@ -9115,6 +9148,59 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
 
     const wrongRunTask = { ...task, metadata: { run: { ultrafuzzRunId: "other-run" } } };
     assert.throws(() => authority.derive(wrongRunTask), /final-report run metadata has the wrong run ID/u);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("final-report Run summary names the sealed governance commit, null without one, and fails without the record", async () => {
+  const root = temporaryRoot("ultrafuzz-final-report-target-commit-");
+  try {
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
+    const workspacePath = path.join(runRoot, "workspaces", "final-report");
+    fs.mkdirSync(workspacePath, { recursive: true });
+    fs.writeFileSync(path.join(runRoot, "run.json"), `${JSON.stringify({ run_id: "run-1" })}\n`, "utf8");
+    const task = {
+      attemptId: "final-report",
+      runRoot,
+      workspacePath,
+      metadata: { run: { ultrafuzzRunId: "run-1" } },
+      outputs: [
+        { path: "report.json", contract: "ultrafuzz/report@3" },
+        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
+      ]
+    };
+    // The harness binds the reader to a test environment; the template reads the controller's own.
+    assert.match(
+      fs.readFileSync(workflowTemplatePath, "utf8"),
+      /\n {4}target_commit: readFinalReportTargetCommit\(\),\n/u
+    );
+    const sha256Commit = "0123456789abcdef".repeat(4);
+    for (const commit of [FINAL_REPORT_TARGET_COMMIT, sha256Commit, null]) {
+      const authority = loadFinalReportRunMetadataAuthorityHarness(
+        undefined,
+        undefined,
+        undefined,
+        finalReportGovernanceEnvironment(root, commit)
+      );
+      await authority.materialize(task);
+      assert.equal((authority.authoritative(task) as Record<string, unknown>).target_commit, commit);
+      assert.equal((authority.derive(task) as Record<string, unknown>).target_commit, commit);
+    }
+
+    // No sealed record is a contract failure at report start, never a placeholder commit.
+    const unsealed = loadFinalReportRunMetadataAuthorityHarness();
+    assert.throws(() => unsealed.derive(task), /artifact-contract failure: final-report target commit authority/u);
+    await assert.rejects(
+      unsealed.materialize(task),
+      /artifact-contract failure: final-report target commit authority is unavailable/u
+    );
+    const governance = finalReportGovernanceEnvironment(root);
+    fs.writeFileSync(path.join(root, "controls", "data-governance.json"), '{"schema_version":', "utf8");
+    assert.throws(
+      () => loadFinalReportRunMetadataAuthorityHarness(undefined, undefined, undefined, governance).derive(task),
+      /artifact-contract failure: final-report target commit authority is unreadable/u
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -9166,13 +9252,19 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
       ]
     };
-    const full = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
-      elapsed_through: "2026-08-20T01:00:00.000Z",
-      models_used: ["model-a", "model-b"],
-      tokens_used: "1,234",
-      estimated_spend: "$0.46",
-      partial_pricing: false
-    });
+    const governance = finalReportGovernanceEnvironment(root);
+    const full = loadFinalReportRunMetadataAuthorityHarness(
+      "https://github.com/example/project.git\n",
+      {
+        elapsed_through: "2026-08-20T01:00:00.000Z",
+        models_used: ["model-a", "model-b"],
+        tokens_used: "1,234",
+        estimated_spend: "$0.46",
+        partial_pricing: false
+      },
+      undefined,
+      governance
+    );
     assert.equal(
       full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
       "2026-08-20T01:00:00.000Z",
@@ -9196,13 +9288,18 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
     assert.equal(fullProjection.estimated_spend, "$0.46");
     assert.equal(fullProjection.partial_pricing, false);
 
-    const partial = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
-      elapsed_through: "2026-08-20T00:01:30.000Z",
-      models_used: ["model-priced", "model-unpriced"],
-      tokens_used: "300",
-      estimated_spend: "$0.05+",
-      partial_pricing: true
-    });
+    const partial = loadFinalReportRunMetadataAuthorityHarness(
+      "https://github.com/example/project.git\n",
+      {
+        elapsed_through: "2026-08-20T00:01:30.000Z",
+        models_used: ["model-priced", "model-unpriced"],
+        tokens_used: "300",
+        estimated_spend: "$0.05+",
+        partial_pricing: true
+      },
+      undefined,
+      governance
+    );
     await partial.materialize(task);
     const partialProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
     assert.equal(partialProjection.elapsed_time, "1m 30s");
@@ -9211,7 +9308,7 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
     assert.equal(partialProjection.estimated_spend, "$0.05+");
     assert.equal(partialProjection.partial_pricing, true);
 
-    const unavailable = loadFinalReportRunMetadataAuthorityHarness();
+    const unavailable = loadFinalReportRunMetadataAuthorityHarness(undefined, undefined, undefined, governance);
     await unavailable.materialize(task);
     const unavailableProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
     assert.equal(unavailableProjection.elapsed_time, "unavailable");
@@ -9229,13 +9326,18 @@ test("final-report Run summary uses full, partial, and unavailable workflow metr
       })}\n`,
       "utf8"
     );
-    const lineage = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
-      elapsed_through: "2026-08-20T01:00:00.000Z",
-      models_used: ["current-run-model"],
-      tokens_used: "1,234",
-      estimated_spend: "$0.46",
-      partial_pricing: false
-    });
+    const lineage = loadFinalReportRunMetadataAuthorityHarness(
+      "https://github.com/example/project.git\n",
+      {
+        elapsed_through: "2026-08-20T01:00:00.000Z",
+        models_used: ["current-run-model"],
+        tokens_used: "1,234",
+        estimated_spend: "$0.46",
+        partial_pricing: false
+      },
+      undefined,
+      governance
+    );
     await lineage.materialize(task);
     const lineageProjection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
     assert.equal(lineageProjection.elapsed_time, "1h 00m");
@@ -9535,6 +9637,7 @@ const FINAL_REPORT_RUN_METADATA_FIXTURE = {
   run_id: "run-1",
   source_run_id: "none",
   repository: "https://github.com/example/project",
+  target_commit: FINAL_REPORT_TARGET_COMMIT,
   elapsed_time: "1m 00s",
   models_used: ["model-a"],
   tokens_used: "100",
