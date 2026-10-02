@@ -970,10 +970,11 @@ scope fails the final report with `REPORT_COVERAGE_EVIDENCE_UNPLANNED`. With a
 planned producer, missing finalized producer authority fails with
 `REPORT_COVERAGE_EVIDENCE_UNAVAILABLE`, and a `report.json.coverage_evidence`
 that differs from the handoff fails with `REPORT_COVERAGE_EVIDENCE_MISMATCH`.
-When the planned evidence matches, the final report fails with
-`REPORT_COVERAGE_EVIDENCE_MARKDOWN_UNEXPECTED` if `report.md` contains a
-`## Scoped coverage evidence` heading line, including one inside a container
-such as `<details>`, or a visible coverage score that names an exact scope.
+A `## Scoped coverage evidence` heading line in `report.md`, including one
+inside a comment or a container such as `<details>`, fails the final report
+with `REPORT_COVERAGE_EVIDENCE_MARKDOWN_UNEXPECTED` whether or not a producer
+was planned. When the planned evidence matches, a visible `report.md` coverage
+score that names an exact scope fails with the same code.
 
 Current-run `report.md` contains source-node provenance for each production
 issue and does not link to other run files. Detailed threat analysis stays in
