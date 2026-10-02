@@ -129,7 +129,7 @@ export function createOpenRouterAgent(options: OpenRouterTaskOptions = {}): Open
 }
 
 export class OpenRouterCodexAgent extends CompatibleCodexAgent {
-  protected override workflowDataGovernanceAgent(): "OpenRouterAgent" {
+  protected override workflowCredentialAgent(): "OpenRouterAgent" {
     return "OpenRouterAgent";
   }
 

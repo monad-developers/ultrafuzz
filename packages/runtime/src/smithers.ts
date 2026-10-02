@@ -8,7 +8,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
-  assertRunPlanDocument,
   assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -31,7 +30,6 @@ import {
   SMITHERS_TASK_METADATA_SCHEMA_VERSION as REGISTERED_SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   writeFileDurable,
   type RunLayout,
-  type RunDataGovernanceReference,
   type SmithersTaskManifestAgentChainEntry,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestDynamicGroup,
@@ -52,7 +50,6 @@ import { loadAgentPreambleTemplate, renderAgentPreambleTemplate } from "@ultrafu
 import { isPathInside, redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
-import { DATA_GOVERNANCE_PROVENANCE_PATH } from "./data-governance.js";
 import {
   archiveDynamicExpansionsForRetry,
   finishInterruptedDynamicExpansionRetry,
@@ -3268,7 +3265,6 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CONFIG_PATH",
-  "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
   "ULTRAFUZZ_RUNTIME_MODULE",
   ULTRAFUZZ_SCHEMA_BUNDLE_SHA256_ENV,
   ULTRAFUZZ_TRUSTED_BIN_ENV,
@@ -3356,7 +3352,6 @@ export interface SmithersCompileInput {
   operatorPrompt?: string;
   operatorInput?: unknown;
   controllerSourceDigest?: string;
-  dataGovernance?: RunDataGovernanceReference;
   vulnerabilityDatabase?: { relative_path: string; sha256: string };
 }
 
@@ -3403,7 +3398,6 @@ export interface CompiledSmithersWorkflow {
   pinnedSubmodules?: PinnedSubmoduleExpectation;
   productionSourceRoots?: string[];
   controllerSourceDigest: string;
-  dataGovernance?: RunDataGovernanceReference;
 }
 
 /**
@@ -3763,7 +3757,6 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     logsDir,
     productionSourceRoots: input.config.permissions.productionSourceRoots,
     controllerSourceDigest: input.controllerSourceDigest ?? inspectControllerSource(projectRoot).digest,
-    ...(input.dataGovernance === undefined ? {} : { dataGovernance: input.dataGovernance }),
     ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules })
   };
   writePreparedWorkflowFile(
@@ -3929,15 +3922,6 @@ export async function smithersExecutionControlFiles(
     add(dynamicBaseGraphPath, "controls/runtime-base-graph.json");
     add(dynamicBaseTasksPath, "controls/runtime-base-tasks.json");
   }
-  const plan = readRunPlanDocument(planPath, layout.runId);
-  const governancePath = (() => {
-    const candidate = path.join(layout.root, plan.data_governance.path),
-      bytes = readRegularFileSnapshot(candidate, 1024 * 1024);
-    if (sha256Bytes(bytes) !== plan.data_governance.sha256)
-      throw new Error("campaign data-governance provenance does not match the immutable run plan");
-    return candidate;
-  })();
-  add(governancePath, `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
   // Prompt files are not execution controls. Every engine reads each attempt's own
   // `artifacts/<attempt>/prompt.rendered.md` and uses it as it is, so a run's prompts can be edited
   // after launch; `prompt-snapshots/` keeps the launch copy that resume, replay and fork restore a
@@ -4010,22 +3994,6 @@ export async function smithersExecutionControlFiles(
   return [...files.values()].sort((left, right) =>
     compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath)
   );
-}
-
-export function assertSealedDataGovernance(
-  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
-  expected: RunDataGovernanceReference,
-  runId: string
-): void {
-  const planFile = executionFiles.find((file) => file.snapshotPath === "controls/plan.json"),
-    governanceFile = executionFiles.find((file) => file.snapshotPath === `controls/${DATA_GOVERNANCE_PROVENANCE_PATH}`);
-  if (planFile === undefined || governanceFile === undefined) throw new Error("sealed data governance is incomplete");
-  const plan = assertRunPlanDocument(parseStrictJsonBytes(planFile.contents), runId);
-  if (
-    JSON.stringify(plan.data_governance) !== JSON.stringify(expected) ||
-    sha256Bytes(governanceFile.contents) !== expected.sha256
-  )
-    throw new Error("sealed data governance differs from the authenticated launch decision");
 }
 
 interface WorkflowPackageManifest {
@@ -4844,8 +4812,6 @@ export async function runSmithersLifecycleCommand(input: {
   tasks?: readonly SmithersTaskManifestTask[];
   label?: string;
   priorInspection?: SmithersResumeInspection;
-  /** Prepare launch authority only after ruling out an idempotent active attach. */
-  prepareContinuationEnvironment?: () => Record<string, string | undefined>;
   /**
    * Runs once per resume that starts an engine: after it completes an interrupted withdrawal and after
    * every check that can refuse it before it resets or archives anything, and before its first reset.
@@ -4938,9 +4904,6 @@ export async function runSmithersLifecycleCommand(input: {
       command: inspection.command,
       alreadyRunning: true
     };
-  }
-  if (input.action === "resume" && input.prepareContinuationEnvironment !== undefined) {
-    input.env = input.prepareContinuationEnvironment();
   }
   // Once Smithers has reset a retried source, nothing plans its withdrawal again, so one that an
   // earlier `--retry-failed` began and did not finish is completed before any engine starts.

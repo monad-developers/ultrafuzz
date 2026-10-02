@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ultrafuzz:schema:artifacts:run-plan:3",
+  "$id": "urn:ultrafuzz:schema:artifacts:run-plan:4",
   "title": "Ultrafuzz immutable run plan",
   "type": "object",
   "additionalProperties": false,
@@ -17,12 +17,11 @@
     "rendered_prompts",
     "policy_posture",
     "prompt_digest",
-    "audit_profile",
-    "data_governance"
+    "audit_profile"
   ],
   "properties": {
     "schema_version": {
-      "const": "ultrafuzz.run-plan.v3"
+      "const": "ultrafuzz.run-plan.v4"
     },
     "run_id": {
       "$ref": "#/$defs/safeId"
@@ -185,9 +184,6 @@
           "type": "boolean"
         }
       }
-    },
-    "data_governance": {
-      "$ref": "urn:ultrafuzz:schema:artifacts:run-metadata:2#/$defs/dataGovernance"
     }
   },
   "$defs": {

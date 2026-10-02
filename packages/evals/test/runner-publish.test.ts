@@ -39,7 +39,7 @@ function writeRunPlanPolicyFixture(runRoot: string, runId: string): void {
   fs.writeFileSync(
     path.join(runRoot, "plan.json"),
     `${JSON.stringify({
-      schema_version: "ultrafuzz.run-plan.v3",
+      schema_version: "ultrafuzz.run-plan.v4",
       run_id: runId,
       mode: "run",
       graph_fingerprint: digestA,
@@ -67,15 +67,6 @@ function writeRunPlanPolicyFixture(runRoot: string, runId: string): void {
         setting_origins: {},
         overridden_settings: [],
         topology_overridden: false
-      },
-      data_governance: {
-        schema_version: "ultrafuzz.data-governance-provenance.v1",
-        path: "data-governance.json",
-        sha256: digestA,
-        policy_digest: digestB,
-        input_digest: digestA,
-        sensitivity: "private",
-        acknowledgement_status: "approved"
       },
       rendered_prompts: [],
       policy_posture: {
@@ -817,7 +808,7 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       evalRunId: "missing-backend-eval",
       row,
       suite,
-      env: { PATH: path.join(project, "empty-bin"), ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1" }
+      env: { PATH: path.join(project, "empty-bin") }
     });
 
     expect(record.status).toBe("failed");

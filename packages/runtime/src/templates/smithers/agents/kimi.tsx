@@ -262,12 +262,7 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     let env: Record<string, string>;
     try {
       env = workflowControlChildEnvironment(kimiCommandEnv(command.env, runtimeHome, apiKey), process.env, {
-        agent: "KimiAgent",
-        // API-key mode executes a generated isolated config, never the
-        // operator provider-home config used for subscription auth.
-        ...(auth.ultrafuzzAuthMode === "subscription" && configuredSourceDir !== undefined
-          ? { configDir: configuredSourceDir }
-          : {})
+        agent: "KimiAgent"
       });
     } catch (error) {
       await cleanup();

@@ -438,7 +438,6 @@ export async function launchModalBenchmark(input: {
   const configPath = path.resolve(input.configPath);
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const config = loadModalBenchmarkConfig(configPath);
-  assertStandaloneModalBenchmarkAllowed(config);
   assertModalBenchmarkExecutionBudget(config);
   const candidateRevision = sourceRevision(repoRoot).toLowerCase();
   if (isPublicModalBenchmarkConfig(config) && candidateRevision !== config.public_benchmark.candidate_commit) {
@@ -1620,7 +1619,6 @@ export async function overseeModalBenchmarkOnce(
   if (isPublicModalBenchmarkConfig(config)) {
     throw new Error("public Modal benchmarks do not permit post-model recovery");
   }
-  assertStandaloneModalBenchmarkAllowed(config);
   assertModalBenchmarkExecutionBudget(config);
   const now = input.now ?? Date.now;
   const env = input.env ?? process.env;
@@ -3165,13 +3163,6 @@ function sourceRevision(repoRoot: string): string {
   } catch {
     return "unknown";
   }
-}
-
-function assertStandaloneModalBenchmarkAllowed(config: ModalBenchmarkConfig): void {
-  if (!isPublicModalBenchmarkConfig(config))
-    throw new Error(
-      "private standalone Modal benchmarks require the separate eval disclosure authorization tracked by R-26"
-    );
 }
 
 async function requiredLaunchStateForInspection(

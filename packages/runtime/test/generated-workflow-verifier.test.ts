@@ -6213,7 +6213,6 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "assertVerifiedDependency",
         "sameImmutableFileIdentity",
         "agentFactories",
-        "assertGovernedWorkspaceSource",
         "artifactAwareAgent",
         "frictionLogAddDir",
         `${emitted}; return {
@@ -6288,7 +6287,6 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
             };
           }
         },
-        () => undefined,
         (
           _task: unknown,
           _chainIndex: number,
@@ -8103,33 +8101,27 @@ test("runtime task reconstruction preserves source identity and rejects undefine
       sourceRevision?: string | null;
       sourceRef?: string | null;
     },
-    pinned: boolean,
-    governedCommit?: string
+    pinned: boolean
   ): string | undefined =>
-    new Function(
-      "task",
-      "usesPinnedSource",
-      "pinnedSourceBranch",
-      "governedSource",
-      `${baseSource}; return worktreeBaseBranch(task);`
-    )(task, pinned, "ultrafuzz-pinned", governedCommit === undefined ? undefined : { commit: governedCommit });
+    new Function("task", "usesPinnedSource", "pinnedSourceBranch", `${baseSource}; return worktreeBaseBranch(task);`)(
+      task,
+      pinned,
+      "ultrafuzz-pinned"
+    );
 
   assert.equal(resolveBase({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }, false), revision);
   assert.equal(
     resolveBase({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }, true),
     "ultrafuzz-pinned"
   );
-  assert.equal(
-    resolveBase({ attemptId: "dynamic-one", sourceRevision: null, sourceRef: null }, false, "b".repeat(40)),
-    "b".repeat(40)
-  );
+  assert.equal(resolveBase({ attemptId: "dynamic-one", sourceRevision: null, sourceRef: null }, false), undefined);
   assert.throws(() => resolveBase({ attemptId: "dynamic-one" }, false), /unnormalized source identity/u);
 });
 
 test("recorded source identity, not later ref creation, selects pinned worktree mode", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function sourceUsesPinnedBranch");
-  const helperEnd = source.indexOf("\nfunction readGovernedSource", helperStart);
+  const helperEnd = source.indexOf("\nfunction assertWorkspaceSourceRevision", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {

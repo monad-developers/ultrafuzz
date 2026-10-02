@@ -66,27 +66,6 @@ nodes:
       - final-report
 `;
 
-// A public campaign needs no disclosure acknowledgement. CodexAgent routes to model:openai.
-const PUBLIC_DATA_GOVERNANCE_POLICY = {
-  schema_version: "ultrafuzz.data-governance-policy.v1",
-  sensitivity: "public",
-  source_destinations: ["model:openai"],
-  artifact_destinations: [],
-  destination_policies: [
-    {
-      destination: "model:openai",
-      processor: "stub codex",
-      region: "local",
-      retention_policy: "test fixture",
-      training_policy: "none",
-      dpa_status: "not-required",
-      minimization_policy: "synthetic fixture only",
-      data_handling_basis: "public test fixture"
-    }
-  ],
-  openrouter_model_allowlist: []
-};
-
 interface StubConfig {
   logPath: string;
   holdPath: string;
@@ -247,7 +226,6 @@ function prepareCampaign(): Campaign {
       CODEX_HOME: codexHome,
       // Keeps the operator controller that each engine command installs inside the fixture root.
       TMPDIR: tmp,
-      ULTRAFUZZ_DATA_GOVERNANCE_POLICY: JSON.stringify(PUBLIC_DATA_GOVERNANCE_POLICY),
       ULTRAFUZZ_PRICING_CATALOG_URL: "off"
     }
   };
