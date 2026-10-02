@@ -2541,6 +2541,19 @@ function sourceRunSpendEstimate(
   return contribution;
 }
 
+/**
+ * A continuation's source-run contribution to the spend estimate, read and validated exactly as
+ * synchronization reads it, for the report-start projection of a run whose own estimate has not
+ * been synchronized yet.
+ */
+export function readSourceRunSpendEstimate(
+  runRoot: string,
+  runId: string,
+  sourceRunId: string
+): SpendEstimateSourceRun {
+  return sourceRunSpendEstimate(layoutForRunRoot(runRoot, runId), sourceRunId);
+}
+
 function accountingSourceRunContribution(accounting: {
   summary: AccountingSummary;
   sourceRunIds: string[];

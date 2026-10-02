@@ -778,6 +778,36 @@ test("the Run summary rejects a stale Source run ID row, a missing Commit row, a
   }
 });
 
+test("the Run summary renders the spend as a numeric estimate and rejects a + or unavailable spend", () => {
+  for (const estimatedSpend of ["$0.00", "$0.0042", "$12.35", "$1234567.1234567891"]) {
+    const input = renderableReport();
+    input.run_metadata = { ...runMetadata("spend-run"), estimated_spend: estimatedSpend, partial_pricing: true };
+    const projection = projectCanonicalFinalReport(input);
+    assert.match(projection.markdown, new RegExp(`^- Estimated spend: \`\\${estimatedSpend}\`$`, "mu"));
+    // partial_pricing stays in report.json and is never rendered.
+    assert.doesNotMatch(projection.markdown, /partial.pricing/iu);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  }
+  for (const estimatedSpend of ["$1.00+", "unavailable", "$1", "1.00", "$01.00"]) {
+    const input = renderableReport();
+    input.run_metadata = { ...runMetadata("spend-run"), estimated_spend: estimatedSpend };
+    assert.throws(() => projectCanonicalFinalReport(input), /estimated_spend/u, estimatedSpend);
+  }
+  // The Markdown directive complements the schema: a hand-edited spend row cannot pass either.
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const spendRow = "- Estimated spend: `$0.01`\n";
+  assert.ok(projection.markdown.includes(spendRow));
+  for (const replacement of [
+    "- Estimated spend: `$0.01+`\n",
+    "- Estimated spend: `unavailable`\n",
+    "- Estimated spend: $0.01\n",
+    "- Estimated spend: `$0.01` (partial)\n"
+  ]) {
+    const markdown = projection.markdown.replace(spendRow, replacement);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false, replacement);
+  }
+});
+
 function summaryBullets(commit: string): string {
   return [
     "- Run ID: `commit-run`",

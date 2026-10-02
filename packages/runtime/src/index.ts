@@ -9,6 +9,7 @@ export * from "./doctor.js";
 export * from "./dynamic-expansion.js";
 export * from "./dynamic-runtime.js";
 export * from "./final-report-markdown.js";
+export * from "./final-report-run-summary.js";
 export * from "./terminal-report.js";
 export * from "./unverified-report.js";
 export * from "./report-publication-status.js";

@@ -717,16 +717,22 @@ ultrafuzz report <run-id> [--project <path>] [--json]
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.json
 ```
 
-If run metadata contains populated cumulative accounting or a spend estimate,
-`report --json` emits diagnostics when `report.md` or `report.json.run_metadata`
-leaves `Tokens used` or `Estimated spend` unavailable, when `Tokens used` is
-not positive or exceeds the current cumulative metadata, or when
-`Estimated spend` is not a numeric USD estimate such as `$12.35`; a `+` suffix
-is never accepted. In a runtime presentation (`verified-runtime-report` or
-`unverified-runtime-report`), `Estimated spend` must also equal
-`run.json#spend_estimate.estimated_spend`. The agent's report-start snapshot
-only needs the numeric form and has no upper bound, because the estimate can
-fall when a catalog price replaces a fallback rate.
+`report --json` emits `REPORT_ACCOUNTING_MISMATCH` warnings when `report.md`
+or `report.json.run_metadata` does not preserve the run's accounting. When
+`run.json` `accounting.cumulative` records a token count, `Tokens used` must be
+a positive integer no greater than it. When `run.json` has `spend_estimate`,
+`Estimated spend` must be a numeric USD estimate such as `$12.35` or `$0.0042`,
+never `unavailable` or `+`-suffixed. In a runtime presentation
+(`verified-runtime-report` or `unverified-runtime-report`), which restates the
+spend from `run.json`, it must also equal `spend_estimate.estimated_spend`;
+both checks then use the `run.json` the presentation was built from, not a
+later copy that a synchronization has rewritten. The agent's report-start
+snapshot (`verified-agent-report`) is checked against the current `run.json`,
+needs only the numeric form and has no bound, because the estimate can rise
+with later usage or fall when a catalog price replaces a fallback rate.
+Accounting v4's spend label sets no expectation. When that `run.json` cannot be
+read or is invalid, `report` warns with `REPORT_ACCOUNTING_UNAVAILABLE`, and
+`--require-verified` fails instead.
 
 ## Materialize
 

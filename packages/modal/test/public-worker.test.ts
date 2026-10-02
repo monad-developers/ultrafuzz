@@ -2277,7 +2277,7 @@ it("rejects a schema-valid report whose current semantic gates fail", () => {
     elapsed_time: "0s",
     models_used: ["fixture-model"],
     tokens_used: "0",
-    estimated_spend: "0",
+    estimated_spend: "$0.00",
     partial_pricing: false,
     strategy_loops: 0,
     audit_profile: "exhaustive",

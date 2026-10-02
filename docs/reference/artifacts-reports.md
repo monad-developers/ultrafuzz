@@ -742,7 +742,15 @@ The `## Run summary` section of `report.md` lists exactly `Run ID`,
 code. The report task receives these values as a host-generated projection
 when it starts. The agent copies the complete projection into
 `report.json.run_metadata`, adding only `agent_execution`, and verification
-requires the copy to equal the projection exactly.
+requires the copy to equal the projection exactly. The workflow also records
+the projection in `smithers/final-report-run-metadata/<attempt-id>.json` under
+the run directory, outside the agent's worktree and artifact roots. A verifier
+in a restarted controller compares the report with that record instead of
+deriving the projection again from a `run.json` whose accounting has moved
+since the report task started; without the record, verification fails with an
+`artifact-contract` failure that names the
+`ultrafuzz resume <run-id> --refresh-controller --reset-node <node>` command
+that reruns the producer.
 
 `Commit` renders the required `run_metadata.target_commit`: the 40- or
 64-character lowercase hex commit of the evaluated target, taken from the
@@ -996,25 +1004,33 @@ the assumptions recorded there live only in structured artifacts; `report.md`
 never renders them.
 
 The final-report producer receives its run summary when its task starts. The
-snapshot takes its spend from the first source that applies, and its tokens
-from the same source:
+snapshot takes its spend from the first source that applies, and its tokens as
+that item states:
 
 1. the validated `run.json#spend_estimate`, when a synchronization has written
-   one;
+   one, with tokens from the `accounting.cumulative` written beside it (for a
+   run without a source run, the live Smithers token count when accounting has
+   none);
 2. for a run without a source run, a live estimate of the run's Smithers usage
    made by the same estimator, with attempts that Smithers' usage totals count
    but whose usage events are missing imputed: at what remains of Smithers'
    total cost when every attempt and usage event recorded one, and at the mean
-   of accounted attempts otherwise;
+   of accounted attempts otherwise; tokens are the live Smithers count;
 3. for a continuation whose current workflow has no synchronized estimate yet,
-   the source run's persisted estimate plus the live estimate of the current
-   run.
+   the source run's contribution, read as synchronization reads it (step 5 of
+   the method below) and counted as zero when the source cannot be read, plus
+   the live estimate of the current run. Tokens then come only from
+   `accounting.cumulative`, because the current run's live count would
+   undercount the lineage, and are `unavailable` without it.
 
-The projection then adds one imputed attempt for the report task itself, on
-its first configured model: the mean of accounted attempts on that model, else
-the mean of all accounted attempts, else the default attempt usage below. The
-snapshot's `partial_pricing` is therefore always `true`. The agent's
-`report.json` and `report.md` keep that snapshot.
+Accounting v4's `estimated_spend` label and `partial_pricing` never reach the
+snapshot. The projection then adds one imputed attempt for the report task
+itself, on its first configured model: the mean of accounted attempts on that
+model, else the mean of all accounted attempts, else the default attempt usage
+below, at the route-catalog rates stored in `run.json` when they price that
+model and at its fallback rates otherwise. The snapshot's `partial_pricing` is
+therefore always `true`, and its spend is never `$0.00` unless every price it
+used is zero. The agent's `report.json` and `report.md` keep that snapshot.
 
 Runtime presentations (the verified terminal publication and unchecked reports)
 restate the run summary instead: elapsed time from `run.json#created_at` to

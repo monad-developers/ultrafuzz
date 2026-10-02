@@ -1291,7 +1291,7 @@ function currentReport(runId: string, overrides: Record<string, unknown> = {}): 
       elapsed_time: "0s",
       models_used: [],
       tokens_used: "0",
-      estimated_spend: "$0",
+      estimated_spend: "$0.00",
       partial_pricing: false,
       strategy_loops: 1,
       audit_profile: "exhaustive",

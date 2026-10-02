@@ -129,6 +129,7 @@ import {
 import { linkedWorkflowExecutionEnvironment } from "../src/start-run.js";
 import { verifyRequiredArtifactSchemaBinding, verifyRequiredArtifactsForAttempt } from "../src/artifact-gates.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
+import { finalReportRunSummaryAccounting, readFinalReportSourceRunSpendUsd } from "../src/final-report-run-summary.js";
 import { loadReportSnapshot } from "../src/unverified-report.js";
 import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
 import { inspectControllerSource } from "../src/controller-source.js";
@@ -19960,12 +19961,23 @@ test("syncRun publishes a report after a resumed report agent succeeds", async (
   assert.equal(recoveredReport.completion?.counts.succeeded, 1);
   assert.equal(recoveredReport.completion?.counts.failed, 0);
   assert.doesNotMatch(recoveredReport.markdown, /^# Ultrafuzz report — PARTIAL/u);
-  // The run summary restates elapsed time from run.json and state.json; all review content is the agent's.
+  // The run summary restates elapsed time from run.json and state.json, and the spend from the
+  // terminal synchronization's estimate, which imputed both executed report attempts because they
+  // reported no usage; all review content is the agent's.
   const elapsed = (recoveredReport.json as { run_metadata: { elapsed_time: string } }).run_metadata.elapsed_time;
   assert.match(elapsed, /^(?:\d+\.\ds|\d+m \d{2}s)$/u);
+  const spendEstimate = readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId).spend_estimate;
+  assert.ok(spendEstimate);
+  assert.equal(spendEstimate.unaccounted_attempts.count, 2);
+  assert.equal(spendEstimate.estimated_spend, "$6.20");
   assert.deepEqual(recoveredReport.json, {
     ...finalReport.report,
-    run_metadata: { ...(finalReport.report.run_metadata as Record<string, unknown>), elapsed_time: elapsed },
+    run_metadata: {
+      ...(finalReport.report.run_metadata as Record<string, unknown>),
+      elapsed_time: elapsed,
+      estimated_spend: spendEstimate.estimated_spend,
+      partial_pricing: !spendEstimate.complete
+    },
     completion: recoveredReport.completion
   });
 });
@@ -22359,6 +22371,54 @@ test("syncRun adds the source run's persisted spend estimate to a continuation's
     { code: "source-run-estimate-unavailable", count: 1 }
   ]);
   assert.deepEqual(fallback.metadata.spend_estimate?.source_run_ids, ["estimate-source"]);
+});
+
+test("the report-start projection prices a continuation from its source run before and after synchronization", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const source = await recordedUsageRun({ project, runId: "report-start-source", costUsd: 0.5 });
+  await source.sync();
+  const continuation = await recordedUsageRun({
+    project,
+    runId: "report-start-continuation",
+    costUsd: 0.25,
+    sourceRunId: "report-start-source"
+  });
+  const runRoot = fs.realpathSync(continuation.runRoot);
+  const sourceRunSpendUsd = (sourceRunId: string) =>
+    readFinalReportSourceRunSpendUsd(runRoot, "report-start-continuation", sourceRunId);
+  // The validated lineage reader synchronization uses; an unreadable source is undefined, not a throw.
+  assert.equal(sourceRunSpendUsd("report-start-source"), 0.5);
+  assert.equal(sourceRunSpendUsd("missing-source"), undefined);
+  assert.equal(sourceRunSpendUsd("../escape"), undefined);
+
+  // Before the continuation's first synchronization: the source's persisted $0.50 plus the report
+  // attempt at the default usage on gpt fallback rates ($3.10).
+  const unsynchronized = readRunMetadataDocument(continuation.metadataPath, "report-start-continuation");
+  assert.equal(unsynchronized.spend_estimate, undefined);
+  assert.deepEqual(
+    finalReportRunSummaryAccounting({ metadata: unsynchronized, sourceRunSpendUsd, reportModelName: "gpt-5.5" }),
+    { models_used: [], tokens_used: "unavailable", estimated_spend: "$3.60", partial_pricing: true }
+  );
+
+  // After it: the synchronized $0.75 already holds the source, and the report attempt takes
+  // gpt-5.5's mean ($0.25); tokens come from the same synchronization's cumulative accounting.
+  const synchronized = (await continuation.sync()).metadata;
+  assert.equal(synchronized.spend_estimate?.estimated_spend, "$0.75");
+  assert.deepEqual(
+    finalReportRunSummaryAccounting({
+      metadata: synchronized,
+      sourceRunSpendUsd: () => assert.fail("a synchronized estimate already holds the source run"),
+      reportModelName: "gpt-5.5"
+    }),
+    {
+      models_used: synchronized.accounting?.cumulative.models,
+      tokens_used: synchronized.accounting?.cumulative.tokens_used,
+      estimated_spend: "$1.00",
+      partial_pricing: true
+    }
+  );
 });
 
 test("syncRun estimates a continuation whose source run has no accounting v4 while v4 fails", async () => {

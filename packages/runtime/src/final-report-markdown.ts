@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   assertRegularFileInside,
   artifactValidationWarningsSchema,
+  ESTIMATED_SPEND_PATTERN,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   reportCompletionSchema,
@@ -380,14 +381,20 @@ function coverageEvidenceNotice(value: unknown): string | undefined {
 
 /**
  * The Run summary bullets carry exactly the summary labels, in order, so a stale row (such as the
- * former `Source run ID`) or a dropped `Commit` row cannot pass as the current report shape.
+ * former `Source run ID`) or a dropped `Commit` row cannot pass as the current report shape. The
+ * spend is a numeric estimate, so a `+`-suffixed or `unavailable` spend cannot render either.
  */
 function runSummaryLabelsViolation(markdown: string): string | undefined {
   const [, summary, ...repeated] = markdownOutsideFencedCode(markdown).split("\n## Run summary\n\n");
   if (summary === undefined || repeated.length > 0) return "missing or repeated run summary";
-  const labels = (summary.split("\n\n")[0] ?? "").split("\n").map((line) => /^- ([^:\n]+): /u.exec(line)?.[1]);
+  const bullets = (summary.split("\n\n")[0] ?? "").split("\n");
+  const labels = bullets.map((line) => /^- ([^:\n]+): /u.exec(line)?.[1]);
   const expected = reportSummaryFields.map(([label]) => label);
-  return isDeepStrictEqual(labels, expected) ? undefined : "run summary labels do not match the report contract";
+  if (!isDeepStrictEqual(labels, expected)) return "run summary labels do not match the report contract";
+  const spend = /^- Estimated spend: `([^`]*)`$/u.exec(bullets[labels.indexOf("Estimated spend")] ?? "")?.[1];
+  return spend !== undefined && ESTIMATED_SPEND_PATTERN.test(spend)
+    ? undefined
+    : "run summary estimated spend is not a numeric USD estimate";
 }
 
 function completionMarkdownViolation(

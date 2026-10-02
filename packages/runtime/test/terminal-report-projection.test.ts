@@ -5,10 +5,12 @@ import {
   createInitialRunState,
   type ReportCompletion,
   type RunMetadataDocument,
+  type RunSpendEstimate,
   type RunState
 } from "@ultrafuzz/artifacts";
 
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
+import { buildSpendEstimate } from "../src/spend-estimate.js";
 import { projectTerminalReport } from "../src/terminal-report-projection.js";
 
 const RUN_ID = "terminal-report-test";
@@ -200,9 +202,10 @@ test("terminal projection enforces bounded and internally consistent completion 
 
 /**
  * A valid run.json whose cumulative accounting already includes the report task's own usage. When
- * `priced` is false the usage ledger priced no event, so the whole-run spend is unavailable.
+ * `priced` is false the usage ledger priced no event, so accounting v4's spend is unavailable. The
+ * spend estimate, when given, is the one the terminal synchronization wrote beside it.
  */
-function metadataWithAccounting(priced = true): RunMetadataDocument {
+function metadataWithAccounting(priced = true, spendEstimate?: RunSpendEstimate): RunMetadataDocument {
   const unpricedModels = priced ? ["model-b"] : ["model-a", "model-b"];
   const summary = {
     uncached_input_tokens: 9_000_000,
@@ -291,8 +294,37 @@ function metadataWithAccounting(priced = true): RunMetadataDocument {
         model_prices: priced ? { "model-a": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 } } : {}
       },
       updated_at: FINISHED_AT
-    }
+    },
+    ...(spendEstimate === undefined ? {} : { spend_estimate: spendEstimate })
   };
+}
+
+/**
+ * The terminal synchronization's estimate for workflow-1: one recorded attempt per `[node, model, USD]`
+ * row, and the attempts in `unaccounted` imputed because they reported no usage.
+ */
+function terminalSpendEstimate(
+  recorded: Array<[string, string, number]>,
+  unaccounted: Array<[string, string]> = []
+): RunSpendEstimate {
+  const estimate = buildSpendEstimate({
+    workflowRunId: "workflow-1",
+    events: recorded.map(([, model, usd]) => ({
+      model,
+      recordedCostUsd: usd,
+      components: { uncached_input: 1_000, cache_read: 0, cache_write: 0, output: 100 },
+      reasoningTokens: 0,
+      providerInputTokens: 1_000,
+      usageUnavailable: false,
+      usageEstimated: false,
+      catalogComponentCostsUsd: { uncached_input: 0, cache_read: 0, cache_write: 0, output: 0 },
+      missingRateComponents: []
+    })),
+    routes: new Map(),
+    prices: new Map(),
+    unaccountedAttempts: unaccounted.map(([node_id, model_name]) => ({ node_id, iteration: 0, attempt: 0, model_name }))
+  });
+  return { ...estimate, updated_at: FINISHED_AT };
 }
 
 function runSummaryLines(markdown: string): string[] {
@@ -301,11 +333,18 @@ function runSummaryLines(markdown: string): string[] {
     .filter((line) => /^- (?:Elapsed time|Models used|Tokens used|Estimated spend):/u.test(line));
 }
 
-test("terminal projection restates whole-run accounting instead of the report-start snapshot", () => {
+test("terminal projection restates the whole-run spend estimate instead of the report-start snapshot", () => {
   const input = {
     completion: completion(),
     state: { ...terminalState(), finished_at: "2026-09-01T06:02:00.000Z" },
-    metadata: metadataWithAccounting(),
+    // The report task's own usage was recorded after it started, so only run.json counts it.
+    metadata: metadataWithAccounting(
+      true,
+      terminalSpendEstimate([
+        ["review", "model-a", 41.2],
+        ["final-report", "model-b", 1.87]
+      ])
+    ),
     agentReport: agentReport()
   };
   const result = projectTerminalReport(input);
@@ -313,21 +352,50 @@ test("terminal projection restates whole-run accounting instead of the report-st
     "- Elapsed time: `6h 02m`",
     "- Models used: `model-a, model-b`",
     "- Tokens used: `12,345,678`",
-    "- Estimated spend: `$41.20+`"
+    "- Estimated spend: `$43.07`"
   ]);
-  assert.equal((result.report.run_metadata as Record<string, unknown>).partial_pricing, true);
+  // A complete estimate is not partial, whatever accounting v4 or the agent's snapshot said.
+  assert.equal((result.report.run_metadata as Record<string, unknown>).partial_pricing, false);
   assert.deepEqual(result.report.issues, agentReport().issues);
 
-  // A ledger that priced nothing makes the whole-run spend unavailable. The agent's report-start
-  // spend covers only part of the run, so it is not shown next to whole-run tokens.
-  const unpriced = projectTerminalReport({ ...input, metadata: metadataWithAccounting(false) });
-  assert.deepEqual(runSummaryLines(unpriced.markdown), [
+  // Accounting v4 priced nothing, so its spend is `unavailable`; the estimate is still numeric,
+  // shown with every significant digit rather than as a silent `$0.00`, and partial because the
+  // report attempt that reported no usage is imputed at its model's mean.
+  const imputed = projectTerminalReport({
+    ...input,
+    metadata: metadataWithAccounting(
+      false,
+      terminalSpendEstimate([["review", "model-a", 0.003]], [["final-report", "model-a"]])
+    )
+  });
+  assert.deepEqual(runSummaryLines(imputed.markdown), [
     "- Elapsed time: `6h 02m`",
     "- Models used: `model-a, model-b`",
     "- Tokens used: `12,345,678`",
-    "- Estimated spend: `unavailable`"
+    "- Estimated spend: `$0.0060`"
   ]);
-  assert.equal((unpriced.report.run_metadata as Record<string, unknown>).partial_pricing, true);
+  assert.equal((imputed.report.run_metadata as Record<string, unknown>).partial_pricing, true);
+  for (const projection of [result, imputed]) {
+    assert.doesNotMatch(projection.markdown, /Estimated spend: `(?:[^`]*\+|unavailable|\$0\.00)`/u);
+  }
+});
+
+test("terminal projection keeps the agent's numeric spend, tokens, and partial pricing without a spend estimate", () => {
+  const result = projectTerminalReport({
+    completion: completion(),
+    state: { ...terminalState(), finished_at: "2026-09-01T06:02:00.000Z" },
+    metadata: metadataWithAccounting(false),
+    agentReport: agentReport()
+  });
+  // Accounting v4's `unavailable` never replaces the agent's numeric copy; tokens, spend, and
+  // partial pricing stay together, while elapsed time and models are still restated.
+  assert.deepEqual(runSummaryLines(result.markdown), [
+    "- Elapsed time: `6h 02m`",
+    "- Models used: `model-a, model-b`",
+    "- Tokens used: `100`",
+    "- Estimated spend: `$0.01`"
+  ]);
+  assert.equal((result.report.run_metadata as Record<string, unknown>).partial_pricing, false);
 });
 
 test("terminal projection keeps the report's target commit while it restates whole-run accounting", () => {
@@ -345,7 +413,7 @@ test("terminal projection keeps the report's target commit while it restates who
     const result = projectTerminalReport({
       completion: completion(),
       state: { ...terminalState(), finished_at: "2026-09-01T06:02:00.000Z" },
-      metadata: metadataWithAccounting(),
+      metadata: metadataWithAccounting(true, terminalSpendEstimate([["review", "model-a", 41.2]])),
       agentReport: agent
     });
     const runMetadata = result.report.run_metadata as Record<string, unknown>;
