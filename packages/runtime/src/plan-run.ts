@@ -79,11 +79,6 @@ import {
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { assertControllerSourceDigest, inspectControllerSource } from "./controller-source.js";
-import {
-  controllerOwnedGovernancePaths,
-  DATA_GOVERNANCE_PROVENANCE_PATH,
-  prepareDataGovernance
-} from "./data-governance.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import { assertExpandedGraphRetryChains } from "./retry-chain.js";
 import { timeoutShadowingDiagnostics } from "./timeout-shadowing.js";
@@ -106,7 +101,6 @@ import { assertRenderedPromptValidatorCommands, producerSchemaBackedOutputCount 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 
 interface PlanRunHooks {
-  enforceDataGovernance?: boolean;
   afterSourceCapture?(source: ReturnType<typeof captureLaunchSourceRevision>): Promise<void> | void;
   beforeMaterialize?(context: {
     resolvedConfig: PlanRunValue["resolved_config"];
@@ -259,7 +253,7 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
   );
   if (referenceIds.length > 0) {
     // Materialization reads these caches after the run directory exists. Checking them here, before
-    // governance and provider preflight, means a missing or stale cache leaves no run behind.
+    // provider preflight, means a missing or stale cache leaves no run behind.
     try {
       verifyReferencesCached(loadReferenceCatalog(projectRoot), referenceIds);
     } catch (error) {
@@ -273,31 +267,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_UNTRUSTED")]);
   }
   const graphFingerprint = fingerprintGraph(expandedGraph);
-  const governanceConfig = resolved.config;
-  const prepareGovernance = () =>
-    prepareDataGovernance({
-      projectRoot,
-      config: governanceConfig,
-      graph,
-      graphFingerprint,
-      configFingerprint,
-      promptDigest,
-      sourceRunId: input.sourceRunId,
-      referenceExpectationsDigest: referenceExpectationsSource?.sourceDigest,
-      operatorPrompt: input.prompt,
-      workflowInput: input.workflowInput,
-      env: input.env,
-      controllerOwnedPaths: controllerOwnedGovernancePaths(projectRoot, runRoot)
-    });
-  let governance: ReturnType<typeof prepareDataGovernance>;
-  try {
-    governance = prepareGovernance();
-  } catch (error) {
-    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POLICY_INVALID")]);
-  }
-  if (hooks.enforceDataGovernance === true && hasRuntimeErrors(governance.diagnostics))
-    return runtimeFailure<PlanRunValue>(governance.diagnostics);
-  // Authenticate disclosure before the pre-materialize preflight runs.
   let preMaterializeDiagnostics: RuntimeDiagnostic[];
   try {
     preMaterializeDiagnostics =
@@ -315,39 +284,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       diagnosticFromError(error, "runtime", "CONTROLLER_SOURCE_CHANGED_DURING_PREFLIGHT")
     ]);
   }
-  if (hooks.enforceDataGovernance === true && hooks.beforeMaterialize !== undefined) {
-    let current: ReturnType<typeof prepareDataGovernance>;
-    try {
-      current = prepareGovernance();
-    } catch (error) {
-      return runtimeFailure<PlanRunValue>([
-        diagnosticFromError(error, "governance", "DATA_GOVERNANCE_POST_PREFLIGHT_INVALID")
-      ]);
-    }
-    if (
-      current.provenance.policy_digest !== governance.provenance.policy_digest ||
-      current.provenance.input_digest !== governance.provenance.input_digest
-    ) {
-      const changed = new Error(
-        "campaign policy or effective input changed during preflight; review and acknowledge it again"
-      );
-      return runtimeFailure<PlanRunValue>([
-        diagnosticFromError(changed, "governance", "DATA_GOVERNANCE_INPUT_CHANGED_DURING_PREFLIGHT")
-      ]);
-    }
-    if (hasRuntimeErrors(current.diagnostics)) return runtimeFailure<PlanRunValue>(current.diagnostics);
-    governance = current;
-  }
-  const governanceBytes = Buffer.from(`${JSON.stringify(governance.provenance, null, 2)}\n`, "utf8");
-  const governanceReference = {
-    schema_version: governance.provenance.schema_version,
-    path: DATA_GOVERNANCE_PROVENANCE_PATH,
-    sha256: sha256Bytes(governanceBytes),
-    policy_digest: governance.provenance.policy_digest,
-    input_digest: governance.provenance.input_digest,
-    sensitivity: governance.provenance.policy.sensitivity,
-    acknowledgement_status: governance.provenance.acknowledgement_status
-  };
   const createdAt = new Date().toISOString();
   const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
     id: node.id,
@@ -420,7 +356,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       }
     });
     hooks.afterLayoutCreated?.(layout);
-    writeFileDurable(path.join(layout.root, DATA_GOVERNANCE_PROVENANCE_PATH), governanceBytes);
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
   }
@@ -516,7 +451,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
         overridden_settings: auditPolicy.overriddenSettings,
         topology_overridden: auditPolicy.topologyOverridden
       },
-      data_governance: governanceReference,
       rendered_prompts: persistedRenderedPrompts,
       policy_posture: Object.fromEntries(
         Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
@@ -554,7 +488,6 @@ export async function planRun(input: PlanRunInput, hooks: PlanRunHooks = {}) {
       config_fingerprint: configFingerprint,
       redacted_config_fingerprint: redactedConfigFingerprint,
       prompt_digest: promptDigest,
-      data_governance: governanceReference,
       controller_source_digest: controllerSource.digest,
       output_root: outputRoot,
       state_nodes: stateNodes,

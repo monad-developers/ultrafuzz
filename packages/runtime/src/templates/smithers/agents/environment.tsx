@@ -1,29 +1,17 @@
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseStrictJsonBytes, readRegularFileSnapshot } from "./strict-json";
 
 export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
   "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
 
-// The controller computes acknowledged route IDs and credential ownership
-// with these @ultrafuzz/runtime functions. Use the same functions, loaded from
-// the module the rendered workflow imports, rather than copies that have to be
-// kept in step with them.
-const {
-  isCredentialLikeEnvironmentVariableName,
-  providerRouteDestination,
-  routeOwnsCredentialLikeEnvironmentVariable
-} = (await import(
+// Credential classification and ownership come from these @ultrafuzz/runtime
+// functions, loaded from the module the rendered workflow imports, rather than
+// from copies kept in step with them.
+const { isCredentialLikeEnvironmentVariableName, routeOwnsCredentialLikeEnvironmentVariable } = (await import(
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
     new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href
 )) as {
   isCredentialLikeEnvironmentVariableName: (name: string) => boolean;
-  providerRouteDestination: (
-    agent: string,
-    env: Record<string, string | undefined>,
-    routeConfig?: Uint8Array
-  ) => string;
   routeOwnsCredentialLikeEnvironmentVariable: (agent: string, name: string) => boolean;
 };
 
@@ -34,10 +22,6 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_BUN_MODULE_CONFINEMENT",
   "ULTRAFUZZ_CONFIG_PATH",
-  "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
-  "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
-  "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-  "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
   "ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
@@ -73,7 +57,7 @@ const BUILT_IN_PROVIDER_HOME_ENVIRONMENT_VARIABLES = [
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 type WorkflowRouteAgent = "ClaudeAgent" | "CodexAgent" | "DeepSeekAgent" | "KimiAgent" | "OpenRouterAgent";
-type WorkflowDataRoute = { agent: WorkflowRouteAgent; configDir?: string };
+type WorkflowCredentialRoute = { agent: WorkflowRouteAgent };
 
 /**
  * Smithers agents inherit the controller environment by default. Remove every
@@ -83,7 +67,7 @@ type WorkflowDataRoute = { agent: WorkflowRouteAgent; configDir?: string };
 export function workflowControlChildEnvironment(
   additions: Record<string, string | undefined> = {},
   source: Record<string, string | undefined> = process.env,
-  route?: WorkflowDataRoute
+  route?: WorkflowCredentialRoute
 ): Record<string, string> {
   const child: Record<string, string> = Object.fromEntries(
     [
@@ -111,7 +95,6 @@ export function workflowControlChildEnvironment(
   for (const [name, value] of Object.entries(child)) {
     if (aliasesControl(name, value)) child[name] = "";
   }
-  if (route !== undefined) assertWorkflowDataRoute(route, { ...source, ...child }, source);
   return child;
 }
 
@@ -203,49 +186,6 @@ function restoreRouteScopedAllowlistedCredentials(
       if (value !== undefined) child[name] = value;
     }
   }
-}
-
-function assertWorkflowDataRoute(
-  route: WorkflowDataRoute,
-  effectiveEnvironment: Record<string, string | undefined>,
-  authorityEnvironment: Record<string, string | undefined>
-): void {
-  const governancePath = authorityEnvironment.ULTRAFUZZ_DATA_GOVERNANCE_PATH?.trim();
-  if (!governancePath) {
-    if (authorityEnvironment.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH)
-      throw new Error("sealed workflow is missing data-governance authority");
-    return;
-  }
-  if (!path.isAbsolute(governancePath)) throw new Error("sealed data-governance path must be absolute");
-  const governance = parseStrictJsonBytes(readRegularFileSnapshot(governancePath, 1024 * 1024), {
-    maxBytes: 1024 * 1024,
-    maxDepth: 32,
-    maxItems: 4096,
-    maxProperties: 4096
-  });
-  const record = governance !== null && typeof governance === "object" && !Array.isArray(governance) ? governance : {},
-    required = (record as { required_source_destinations?: unknown }).required_source_destinations;
-  if (!Array.isArray(required) || required.some((entry) => typeof entry !== "string"))
-    throw new Error("sealed data-governance authority is invalid");
-  const configPath =
-    route.configDir === undefined || route.agent === "OpenRouterAgent"
-      ? undefined
-      : path.join(route.configDir, route.agent === "ClaudeAgent" ? "settings.json" : "config.toml");
-  const effective = providerRouteDestination(
-    route.agent,
-    {
-      ...effectiveEnvironment,
-      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: authorityEnvironment.ULTRAFUZZ_AGENT_ENV_ALLOWLIST,
-      // The Codex adapter derives OPENAI_BASE_URL from the provider config,
-      // which the config part of the route already covers.
-      ...(route.agent === "CodexAgent" && !authorityEnvironment.OPENAI_BASE_URL?.trim()
-        ? { OPENAI_BASE_URL: undefined }
-        : {})
-    },
-    configPath !== undefined && existsSync(configPath) ? readRegularFileSnapshot(configPath, 1024 * 1024) : undefined
-  );
-  if (!required.includes(effective))
-    throw new Error(`effective ${route.agent} provider route changed after disclosure acknowledgement`);
 }
 
 export function workflowControlCredentialValue(

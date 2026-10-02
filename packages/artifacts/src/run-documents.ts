@@ -14,8 +14,8 @@ export const SOURCE_RUN_SCHEMA_VERSION = "ultrafuzz.source-run.v2" as const;
 export const SOURCE_RUN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:source-run:2" as const;
 export const CONFIG_REDACTIONS_SCHEMA_VERSION = "ultrafuzz.config-redactions.v2" as const;
 export const CONFIG_REDACTIONS_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:config-redactions:2" as const;
-export const RUN_PLAN_SCHEMA_VERSION = "ultrafuzz.run-plan.v3" as const;
-export const RUN_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-plan:3" as const;
+export const RUN_PLAN_SCHEMA_VERSION = "ultrafuzz.run-plan.v4" as const;
+export const RUN_PLAN_JSON_SCHEMA_ID = "urn:ultrafuzz:schema:artifacts:run-plan:4" as const;
 export const RUN_METADATA_SCHEMA_VERSION = "ultrafuzz.run-metadata.v2" as const;
 
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
@@ -118,16 +118,6 @@ export interface RunMetadataAuditProfile extends Omit<RunAuditProfileSummary, "i
   declared_topology_path?: string;
 }
 
-export interface RunDataGovernanceReference {
-  schema_version: "ultrafuzz.data-governance-provenance.v1";
-  path: "data-governance.json";
-  sha256: string;
-  policy_digest: string;
-  input_digest: string;
-  sensitivity: "public" | "private";
-  acknowledgement_status: "approved" | "not-required" | "pending";
-}
-
 export interface RunPlanDocument {
   schema_version: typeof RUN_PLAN_SCHEMA_VERSION;
   run_id: string;
@@ -150,7 +140,6 @@ export interface RunPlanDocument {
     required_commands: string[];
   };
   audit_profile: RunAuditProfileSummary;
-  data_governance: RunDataGovernanceReference;
   rendered_prompts: RunPlanRenderedPrompt[];
   policy_posture: Record<"config" | "topology" | "prompts" | "paths" | "agents" | "trust", "pass" | "warn" | "fail">;
 }

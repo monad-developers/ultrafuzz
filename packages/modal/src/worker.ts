@@ -10,7 +10,7 @@ import {
   type GroundTruthSubject
 } from "@ultrafuzz/evals";
 import { REFERENCE_GITHUB_TOKEN_ENV } from "@ultrafuzz/references";
-import { MODAL_PUBLIC_BENCHMARK_ENV, readRetainedFailureStateIds } from "@ultrafuzz/runtime";
+import { readRetainedFailureStateIds } from "@ultrafuzz/runtime";
 
 import { runnerApiKeySourceEnv } from "./auth.js";
 
@@ -95,7 +95,6 @@ const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const RUN_ID = requiredEnv("ULTRAFUZZ_MODAL_RUN_ID");
 const CONFIG = loadModalBenchmarkConfig(REMOTE_CONFIG_PATH);
-if (isPublicModalBenchmarkConfig(CONFIG)) process.env[MODAL_PUBLIC_BENCHMARK_ENV] = "1";
 const LINEAGE = readModalWorkerLineage(REMOTE_LINEAGE_PATH);
 const MODEL = modelForModalWorkerLineage(CONFIG, LINEAGE);
 const RESOLVED_VOLUME_ROOT = realpathSync.native("/data");

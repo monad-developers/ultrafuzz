@@ -6,7 +6,6 @@ import type {
   PlannedGraphDocument,
   PlannedGraphNodeDocument,
   PlannedGraphOutput,
-  RunDataGovernanceReference,
   RunLayout,
   RunMetadataAuditProfile,
   RunState,
@@ -164,7 +163,6 @@ export interface PlanRunValue {
   config_fingerprint: string;
   redacted_config_fingerprint: string;
   prompt_digest: string;
-  data_governance: RunDataGovernanceReference;
   controller_source_digest: string;
   output_root: string;
   state_nodes: NodeStateInput[];
