@@ -7,7 +7,10 @@ export default class Doctor extends Command {
   static override summary = "Report configuration, toolchain, and workflow engine install posture";
   static override flags = {
     ...globalFlags,
-    "topology-path": Flags.string({ summary: "Override the selected topology path" })
+    "topology-path": Flags.string({ summary: "Override the selected topology path" }),
+    fix: Flags.boolean({
+      summary: "Tighten selected agents' provider-home directories you own to mode 0700 before checking"
+    })
   };
 
   async run(): Promise<void> {
@@ -15,7 +18,8 @@ export default class Doctor extends Command {
     const result = await diagnoseProject({
       projectRoot: projectRoot(flags),
       env: cliIo().env,
-      topologyPath: flags["topology-path"]
+      topologyPath: flags["topology-path"],
+      fix: flags.fix
     });
     emitCommandResult(this, "doctor", commandFromRuntime("doctor", result, renderDoctor), flags.json === true);
   }

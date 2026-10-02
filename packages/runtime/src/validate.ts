@@ -24,6 +24,7 @@ import type {
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
+import { providerHomeDiagnostics, providerHomeProblems } from "./provider-home-preflight.js";
 import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
@@ -56,7 +57,13 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config, resolved.configuredAgentRefs ?? []);
+    const policy = evaluatePolicies(
+      projectRoot,
+      resolved.config,
+      resolved.configuredAgentRefs ?? [],
+      topologyCheck.selectedAgentRefs,
+      input.env ?? {}
+    );
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -350,15 +357,26 @@ export function activeTopologyAgentRefs(projectRoot: string, config: ResolvedCon
 function evaluatePolicies(
   projectRoot: string,
   config: ResolvedConfig,
-  configuredAgentRefs: readonly string[]
+  configuredAgentRefs: readonly string[],
+  selectedAgentRefs: readonly string[],
+  env: Record<string, string | undefined>
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
   const agentRegistry = validateAgentReferences(projectRoot, config, configuredAgentRefs);
+  // The adapters refuse an unsafe provider home only once the engine renders the workflow, after
+  // planning and the execution snapshot (#1265). Refusing it here fails `run` before either.
+  const providerHomes = providerHomeDiagnostics(providerHomeProblems(selectedAgentRefs, config, env));
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
-      agents: postureFromDiagnostics("agents", "agent references resolve before launch", agentRegistry),
+      agents: postureFromDiagnostics(
+        "agents",
+        providerHomes.length === 0
+          ? "agent references resolve before launch"
+          : "agent references resolve, but an agent's provider home would be refused at launch",
+        [...agentRegistry, ...providerHomes]
+      ),
       trust: postureFromDiagnostics(
         "trust",
         "agents run with skip-permissions; repository mutation limits are prompt instructions",

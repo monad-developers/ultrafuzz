@@ -33,7 +33,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 | `ultrafuzz node <run-id> <node-id>`     | Show one workflow node's status, attempts, retries, timing, and output metadata.                               |
 | `ultrafuzz snapshots <run-id>`          | List durability and workspace checkpoints for recovery and time-travel diagnosis.                              |
 | `ultrafuzz cancel <run-id>`             | Cancel an active run; cancellation is terminal, unlike pause.                                                  |
-| `ultrafuzz doctor`                      | Report validation, toolchain, and engine posture without changing project or run state.                        |
+| `ultrafuzz doctor`                      | Report validation, toolchain, and engine posture; `--fix` tightens unsafe agent provider homes.                |
 | `ultrafuzz resume <run-id>`             | Delegate resume for the linked workflow run after product checks.                                              |
 | `ultrafuzz replay <run-id>`             | Delegate replay for the linked workflow run after product checks.                                              |
 | `ultrafuzz fork <run-id>`               | Delegate fork for the linked workflow run after product checks.                                                |
@@ -662,7 +662,7 @@ contract as `events --watch`.
 ## Doctor
 
 ```bash
-ultrafuzz doctor [--project <path>] [--json]
+ultrafuzz doctor [--project <path>] [--fix] [--json]
 ```
 
 `doctor` is the operational superset of `validate`; `validate` keeps its
@@ -694,8 +694,20 @@ non-launching configuration contract unchanged. Doctor reports:
   2 GiB free, and never removes those directories, because a native resume
   from an earlier release kept its controller there for the detached engine.
 
+- the provider home of each agent the selected topology can dispatch to
+  (`provider-homes`). Agents refuse a provider home that is not a private
+  directory the operator owns (mode `0700`) below directories only the
+  operator can write. Claude Code and Codex create `~/.claude` and `~/.codex`
+  from the umask, usually `0755` or `0775`, so a home either CLI created is
+  refused. `validate`, and so `run`, report such a home as
+  `PROVIDER_HOME_UNSAFE`, with the directory and the fix, before planning.
+
 Doctor does not create project run state or install, upgrade, or repair local
-dependencies.
+dependencies. `doctor --fix` makes one repair: it sets each such provider
+home that is a real directory the operator owns to mode `0700`, reports each
+change as `PROVIDER_HOME_FIXED`, and then runs the checks. It never changes a
+directory above a provider home; fix one of those yourself, or set
+`ULTRAFUZZ_PROVIDER_HOME_ROOT` to a private directory.
 
 Diagnostics are stable: `DOCTOR_AGENT_CREDENTIAL_MISSING`,
 `DOCTOR_TOOLCHAIN_MISSING`, `DOCTOR_TOOLCHAIN_PROBE_FAILED`,
