@@ -99,11 +99,12 @@ Ultrafuzz sends the target's source code, the rendered prompts, and the
 artifacts agents read and write to the inference providers your configured
 agents call, such as OpenAI, Anthropic, OpenRouter, DeepSeek, or Moonshot, and
 through them to any gateway or upstream model they route to. An eval run on
-Modal also places the target and its run in Modal sandboxes and volumes.
-Ultrafuzz does not record, restrict, or verify where this data goes. How long
-each provider retains it, whether it trains on it, which region processes it,
-and whether a data processing agreement (DPA) covers it are trust assumptions
-about the providers you choose. Before you run a campaign on code you cannot
+Modal also places the target and its run in Modal sandboxes and volumes, and
+`ultrafuzz eval score --llm-judge` sends findings and ground truth to
+`ULTRAFUZZ_EVAL_JUDGE_URL`. Ultrafuzz does not record, restrict, or verify
+where agents send this data. How long each provider retains it, whether it
+trains on it, which region processes it, and whether a data processing
+agreement (DPA) covers it are trust assumptions about the providers you choose. Before you run a campaign on code you cannot
 share, review the data-handling terms of every provider you configure.
 
 ## Production dependency advisories
