@@ -373,8 +373,12 @@ task was admitted while the failed one had no output, and a rerun cannot reach
 the outputs it already produced, so the run would read as complete over work
 that never used the rerun's output. `resume` leaves such a task failed, reports
 a `WORKFLOW_RETRY_SKIPPED` warning that names it and the tasks that ran without
-it, and the final report stays partial. The Modal benchmark worker does not
-resume a finished run whose only failures are such tasks.
+it, and the final report stays partial. A task whose preparation failed has not
+started: its preparation, which admits its inputs, reruns after the failed task,
+so both are retried. A task whose agent or verifier failed reruns at once,
+without waiting for the failed task, so it counts as started. The Modal
+benchmark worker does not resume a finished run whose only failures are such
+tasks and the tasks skipped because one of them failed.
 
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so

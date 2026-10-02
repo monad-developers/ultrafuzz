@@ -27845,6 +27845,66 @@ for (const fixture of [
   }
 }
 
+// A consumer admits its optional inputs in its preparation, which waits for its producers. A failed
+// preparation reruns behind the producer's rerun and can read it, so the producer is retried too. A
+// failed agent or verifier reruns at once on the preparation that already ran without the producer,
+// so the producer stays failed (#1231).
+for (const fixture of [
+  { failed: "prepare:catalog", state: "failed", reset: "prepare:catalog", producerRetried: true },
+  { failed: "prepare:catalog", state: "stalled", reset: "prepare:catalog", producerRetried: true },
+  { failed: "node:catalog", state: "failed", reset: "node:catalog", producerRetried: false },
+  { failed: "verify:catalog", state: "failed", reset: "node:catalog", producerRetried: false }
+] as const) {
+  test(`resume --retry-failed ${fixture.producerRetried ? "retries" : "leaves"} a failed continuing lens when its consumer's ${fixture.failed} is ${fixture.state}`, async () => {
+    const project = writeRetriedLensReviewProject();
+    const runId = `retry-omitted-lens-${fixture.failed.replace(":", "-")}-${fixture.state}`;
+    const preparationFailed = fixture.failed === "prepare:catalog";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId: `ultrafuzz-${runId}`,
+        status: "failed",
+        state: "failed",
+        steps: [
+          { id: "node:lens", state: "failed", attempt: 1 },
+          { id: "prepare:catalog", state: preparationFailed ? fixture.state : "finished", attempt: 1 },
+          ...(preparationFailed
+            ? [
+                { id: "node:catalog", state: "skipped" as const, attempt: 0 },
+                { id: "verify:catalog", state: "skipped" as const, attempt: 0 }
+              ]
+            : fixture.failed === "node:catalog"
+              ? [{ id: "node:catalog", state: fixture.state, attempt: 1 }]
+              : [
+                  { id: "node:catalog", state: "finished" as const, attempt: 1 },
+                  { id: "verify:catalog", state: fixture.state, attempt: 1 }
+                ])
+        ]
+      })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const commandLog = env.SMITHERS_FAKE_LOG;
+    assert.ok(commandLog);
+    fs.writeFileSync(commandLog, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const commands = fs.readFileSync(commandLog, "utf8");
+    assert.match(commands, new RegExp(`^timetravel .* --node-id ${fixture.reset} `, "mu"));
+    const producerReset = /^timetravel .* --node-id node:lens /mu;
+    const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+    if (fixture.producerRetried) {
+      assert.match(commands, producerReset);
+      assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+    } else {
+      assert.doesNotMatch(commands, producerReset);
+      assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+      assert.match(skipped.message, /lens: catalog already ran without it/u);
+    }
+  });
+}
+
 // `--reset-node` reruns a failed continuing task even when `--retry-failed` would leave it, so the
 // resume does not also report that task as left failed.
 test("resume --retry-failed --reset-node does not report the reset task as skipped", async () => {
