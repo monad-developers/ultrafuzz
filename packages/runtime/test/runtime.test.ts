@@ -10196,6 +10196,15 @@ test("validate warns when a packaged group timeout pin is below the run default 
   assert.equal(raised.value?.policy_posture.topology.status, "warn");
 });
 
+test("validate stays silent when a timeout pin equals the default it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  setRunDefaultTimeout(project, 7_200);
+
+  const equal = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(timeoutShadowingWarnings(equal.diagnostics), []);
+});
+
 // The default a pin overrides is the model profile's own `timeout_seconds` when it has one, which
 // task compilation prefers to the run default, so the warning names the profile's value.
 test("validate warns when a packaged group timeout pin is below the model profile timeout it overrides", async () => {
@@ -10234,6 +10243,66 @@ test("validate warns when a packaged group timeout pin is below the model profil
   }
 });
 
+// A node fanned out to several model profiles is reported once, against the longest timeout of
+// its profiles.
+test("validate reports a fanned-out node timeout pin against its longest model profile timeout", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[models\.claude\]$/mu);
+  assert.match(config, /^\[models\.deepseek\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config
+      .replace(/^\[models\.claude\]$/mu, "[models.claude]\ntimeout_seconds = 5400")
+      .replace(/^\[models\.deepseek\]$/mu, "[models.deepseek]\ntimeout_seconds = 10800"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: fanned
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    model_profiles: [claude, deepseek, default]
+    timeout_seconds: 1800
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [fanned]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+
+  const result = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(result.diagnostics);
+  assert.deepEqual(
+    warnings.map((warning) => warning.path),
+    ["nodes.fanned.timeout_seconds"],
+    JSON.stringify(result.diagnostics)
+  );
+  const [warning] = warnings;
+  assert.ok(warning);
+  assert.match(
+    warning.message,
+    /node `fanned` pins timeout_seconds=1800, below model profile `deepseek` `timeout_seconds`=10800; the pin wins, so fanned time out after 1800 seconds/u
+  );
+});
+
 test("plan warns about group and node timeout pins below the default they override", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -10251,6 +10320,10 @@ groups:
     label: Pinned
     defaults:
       timeout_seconds: 600
+  long:
+    label: Long
+    defaults:
+      timeout_seconds: 7200
 nodes:
   - id: __start__
     kind: meta
@@ -10274,10 +10347,17 @@ nodes:
     timeout_seconds: 7200
     depends_on: [own-pin]
     outputs:${markdownOutput}
+  - id: grouped-own-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: long
+    timeout_seconds: 3000
+    depends_on: [long-pin]
+    outputs:${markdownOutput}
   - id: __finish__
     kind: meta
     role: finish
-    depends_on: [long-pin]
+    depends_on: [grouped-own-pin]
 `,
     "utf8"
   );
@@ -10289,16 +10369,28 @@ nodes:
   const warnings = timeoutShadowingWarnings(plan.diagnostics);
   assert.deepEqual(
     warnings.map((warning) => warning.path),
-    ["groups.pinned.defaults.timeout_seconds", "nodes.own-pin.timeout_seconds"],
+    [
+      "groups.pinned.defaults.timeout_seconds",
+      "nodes.own-pin.timeout_seconds",
+      "nodes.grouped-own-pin.timeout_seconds"
+    ],
     JSON.stringify(plan.diagnostics)
   );
-  const [groupWarning, nodeWarning] = warnings;
-  assert.ok(groupWarning && nodeWarning);
+  const [groupWarning, nodeWarning, groupedNodeWarning] = warnings;
+  assert.ok(groupWarning && nodeWarning && groupedNodeWarning);
   assert.match(
     groupWarning.message,
-    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds/u
+    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds\. Raise or remove the pin to use the longer default\.$/u
   );
-  assert.match(nodeWarning.message, /node `own-pin` pins timeout_seconds=300/u);
+  assert.match(
+    nodeWarning.message,
+    /node `own-pin` pins timeout_seconds=300.* Raise or remove the pin to use the longer default\.$/u
+  );
+  // Removing a node pin inside a group that pins falls back to the group's pin, not the default.
+  assert.match(
+    groupedNodeWarning.message,
+    /node `grouped-own-pin` pins timeout_seconds=3000, below `run\.default_timeout_seconds`=3600; .* Raise the pin, or remove it to fall back to `groups\.long\.defaults\.timeout_seconds`=7200\.$/u
+  );
 });
 
 test("plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission", async () => {
