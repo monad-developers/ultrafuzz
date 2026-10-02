@@ -231,6 +231,14 @@ replacement model.
 `--audit-profile` selects a profile for one command, while `--topology-path`
 atomically replaces the project or profile topology for that command.
 
+A run ID must be new to the project. `run` fails with `RUN_ALREADY_EXISTS`
+before it plans anything when the run directory exists, or when the workflow
+engine already records a run with that ID. The second case happens after
+`ultrafuzz clean <run>`, which removes the run directory but not the engine's
+record. Choose another `--run-id`, or continue a run whose directory still
+exists with `ultrafuzz resume <run-id>`. `run` asks the engine only once the
+project has engine records, so a project's first launch skips the query.
+
 ## Audit Profiles and Packaged Topologies
 
 ```bash

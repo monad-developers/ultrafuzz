@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   appendEvent,
+  isRecord,
   assertRunPlanDocument,
   assertPlannedGraph,
   assertPlannedGraphSemantics,
@@ -72,6 +73,7 @@ import {
   assertSmithersControllerRefreshable,
   renderCurrentSmithersController,
   requestSmithersPause,
+  runSmithersInspectionCommand,
   runSmithersLifecycleCommand,
   type SmithersResumeInspection,
   assertSealedDataGovernance,
@@ -189,6 +191,8 @@ function controllerRefreshInspectionEnvironment(
 }
 
 export async function startRun(input: StartRunInput) {
+  const knownRun = await workflowRunAlreadyRecorded(input);
+  if (knownRun !== undefined) return runtimeFailure<StartRunValue>([knownRun]);
   let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
     enforceDataGovernance: true,
@@ -739,6 +743,46 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
   } finally {
     await releaseLifecycleLock?.();
   }
+}
+
+/**
+ * Refuse a run ID the workflow engine already has a run for, before planning builds the run's plan and
+ * execution snapshot (#1258). The engine rejects such a launch only at submission, with `RUN_EXISTS`,
+ * after minutes of preparation and with a partial run directory left behind; `clean` removes the run
+ * directory but not the engine's record. The engine creates its database in the project root on the
+ * first launch, so a project without one has no runs to collide with and is not asked. Any answer
+ * other than the engine reporting this exact run lets the launch go ahead, as before: submission
+ * still rejects a duplicate.
+ */
+async function workflowRunAlreadyRecorded(input: StartRunInput): Promise<RuntimeDiagnostic | undefined> {
+  if (input.runId === undefined) return undefined;
+  let runId: string;
+  try {
+    runId = validateSafeId(input.runId, "run ID");
+  } catch {
+    // Planning reports the invalid ID.
+    return undefined;
+  }
+  const projectRoot = path.resolve(input.projectRoot);
+  if (!fs.existsSync(path.join(projectRoot, "smithers.db"))) return undefined;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const inspected = await runSmithersInspectionCommand({
+    args: ["inspect", workflowRunId, "--format", "json"],
+    projectRoot,
+    env: input.env
+  });
+  // The runner prints a found run's inspection bare, and the full-output envelope wraps it in `data`.
+  const report = inspected.json;
+  const data = isRecord(report) && report.ok === true ? report.data : report;
+  const run = inspected.ok && isRecord(data) ? data.run : undefined;
+  if (!isRecord(run) || run.id !== workflowRunId) return undefined;
+  const status = typeof run.status === "string" ? ` (${run.status})` : "";
+  return {
+    code: "RUN_ALREADY_EXISTS",
+    message: `run ${runId} already exists in the workflow engine's records${status}, so it cannot be launched again; choose another run ID, or continue the existing run with \`ultrafuzz resume ${runId}\` if its run directory still exists`,
+    severity: "error",
+    source: "runtime"
+  };
 }
 
 // A missing or unreadable config fails the resume: without it the run's execution mode is unknown.

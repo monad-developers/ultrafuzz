@@ -10155,6 +10155,152 @@ test("force init rejects symlinked config and nested project files before overwr
   assert.equal(fs.readFileSync(path.join(topologyOutside, "topology.yml"), "utf8"), "outside\n");
 });
 
+// #675: a topology `timeout_seconds` pin outranks the profile and run defaults even when it is the
+// shorter window, so raising a default silently does not reach a pinned node.
+const timeoutShadowingWarnings = <T extends { code: string }>(diagnostics: readonly T[]): T[] =>
+  diagnostics.filter((diagnostic) => diagnostic.code === "TOPOLOGY_TIMEOUT_SHADOWS_DEFAULT");
+
+function setRunDefaultTimeout(project: string, seconds: number): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[run\]$/mu);
+  assert.doesNotMatch(config, /^default_timeout_seconds/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[run\]$/mu, `[run]\ndefault_timeout_seconds = ${String(seconds)}`),
+    "utf8"
+  );
+}
+
+test("validate warns when a packaged group timeout pin is below the run default it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+
+  const shipped = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(timeoutShadowingWarnings(shipped.diagnostics), []);
+
+  setRunDefaultTimeout(project, 14_400);
+  const raised = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(raised.diagnostics);
+  assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
+    "groups.goals.defaults.timeout_seconds",
+    "groups.review.defaults.timeout_seconds",
+    "groups.specialists.defaults.timeout_seconds",
+    "groups.strategies.defaults.timeout_seconds"
+  ]);
+  for (const warning of warnings) {
+    assert.equal(warning.severity, "warning");
+    assert.equal(warning.source, "topology");
+    assert.match(warning.message, /pins timeout_seconds=7200, below `run\.default_timeout_seconds`=14400/u);
+  }
+  assert.equal(raised.value?.policy_posture.topology.status, "warn");
+});
+
+// The default a pin overrides is the model profile's own `timeout_seconds` when it has one, which
+// task compilation prefers to the run default, so the warning names the profile's value.
+test("validate warns when a packaged group timeout pin is below the model profile timeout it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[models\.default\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[models\.default\]$/mu, "[models.default]\ntimeout_seconds = 10800"),
+    "utf8"
+  );
+
+  const raised = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(raised.diagnostics);
+  assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
+    "groups.goals.defaults.timeout_seconds",
+    "groups.review.defaults.timeout_seconds",
+    "groups.specialists.defaults.timeout_seconds",
+    "groups.strategies.defaults.timeout_seconds"
+  ]);
+  for (const warning of warnings) {
+    assert.match(warning.message, /pins timeout_seconds=7200, below model profile `default` `timeout_seconds`=10800/u);
+  }
+
+  // A longer run default does not apply to a profile with its own timeout, so the warning keeps
+  // naming the profile.
+  setRunDefaultTimeout(project, 14_400);
+  const both = await validateProject({ projectRoot: project, env: {} });
+  const bothWarnings = timeoutShadowingWarnings(both.diagnostics);
+  assert.equal(bothWarnings.length, 4, JSON.stringify(both.diagnostics));
+  for (const warning of bothWarnings) {
+    assert.match(warning.message, /below model profile `default` `timeout_seconds`=10800/u);
+    assert.doesNotMatch(warning.message, /14400/u);
+  }
+});
+
+test("plan warns about group and node timeout pins below the default they override", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const markdownOutput = `
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true`;
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  pinned:
+    label: Pinned
+    defaults:
+      timeout_seconds: 600
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: grouped
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: pinned
+    depends_on: [__start__]
+    outputs:${markdownOutput}
+  - id: own-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    timeout_seconds: 300
+    depends_on: [grouped]
+    outputs:${markdownOutput}
+  - id: long-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    timeout_seconds: 7200
+    depends_on: [own-pin]
+    outputs:${markdownOutput}
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [long-pin]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "timeout-shadowing", env: {} });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const warnings = timeoutShadowingWarnings(plan.diagnostics);
+  assert.deepEqual(
+    warnings.map((warning) => warning.path),
+    ["groups.pinned.defaults.timeout_seconds", "nodes.own-pin.timeout_seconds"],
+    JSON.stringify(plan.diagnostics)
+  );
+  const [groupWarning, nodeWarning] = warnings;
+  assert.ok(groupWarning && nodeWarning);
+  assert.match(
+    groupWarning.message,
+    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds/u
+  );
+  assert.match(nodeWarning.message, /node `own-pin` pins timeout_seconds=300/u);
+});
+
 test("plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -27267,6 +27413,81 @@ test("a pending lifecycle link reconciles split source and target projections fr
     entries?: Array<{ phase?: string }>;
   };
   assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
+});
+
+// #1258: a run ID the engine already has a run for is refused before planning builds the plan and the
+// execution snapshot, instead of at submission minutes later with a partial run directory left behind.
+// The pinned runner prints a found run's `inspect --format json` bare; the full-output envelope wraps it.
+for (const shape of ["bare", "enveloped"] as const) {
+  test(`run refuses a run ID the workflow engine already records before planning anything (${shape} inspection)`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `engine-known-run-${shape}`;
+    const inspection = workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "finished",
+      state: "succeeded",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }) as { data: unknown };
+    const env = fakeLifecycleSmithersEnv(project, { inspect: shape === "bare" ? inspection.data : inspection });
+    // The engine keeps its run records here; `clean` removed the run directory but not the record.
+    fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+    const refused = await startRun({ projectRoot: project, runId, env });
+
+    assert.equal(refused.ok, false);
+    const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+    assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
+    assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
+    assert.doesNotMatch(diagnostic.message, /smithers/iu);
+    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
+    assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
+    assert.doesNotMatch(commands, /^up /mu);
+  });
+}
+
+test("run asks the engine about its run ID only once the engine has records, and launches a new one", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-new-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: {
+      ok: false,
+      error: { code: "RUN_NOT_FOUND", message: `Run not found: ultrafuzz-${runId}` },
+      meta: { command: "inspect", duration: "1ms" }
+    }
+  });
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+  const launched = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(
+    launched.diagnostics.some(({ code }) => code === "RUN_ALREADY_EXISTS"),
+    false,
+    JSON.stringify(launched.diagnostics)
+  );
+  const commands = fs.readFileSync(commandLog, "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
+  assert.match(commands, /^up /mu);
+
+  // Without engine records there is nothing to collide with, and the engine is not asked.
+  const fresh = tempProject();
+  initProject({ projectRoot: fresh, force: true });
+  writeSmallTopology(fresh);
+  const freshEnv = fakeLifecycleSmithersEnv(fresh, {
+    inspect: workflowInspect({ workflowRunId: "ultrafuzz-fresh-run", status: "running", steps: [] })
+  });
+  const started = await startRun({ projectRoot: fresh, runId: "fresh-run", env: freshEnv });
+  assert.equal(started.ok, true, JSON.stringify(started.diagnostics));
+  assert.doesNotMatch(
+    fs.readFileSync(freshEnv.SMITHERS_FAKE_LOG ?? "", "utf8"),
+    /^inspect ultrafuzz-fresh-run --format json$/mu
+  );
 });
 
 test("ordinary resume checks active-run ownership before detached preflight", async () => {

@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - unstable
   pull_request:
     types:
       - opened
@@ -18,7 +18,7 @@ permissions:
 
 # A new push to a pull request cancels that pull request's older run. Every
 # other run gets its own group: a shared group would still cancel a queued run
-# on main whenever another push arrived.
+# on unstable whenever another push arrived.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
