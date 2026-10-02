@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { fixProviderHomes, providerHomeProblems } from "./provider-home-preflight.js";
 import { referencesStatus } from "./references.js";
 import {
   bindInstalledWorkflowRunner,
@@ -64,20 +63,6 @@ const AGENT_EXECUTABLES: Record<string, string> = {
 export async function diagnoseProject(input: DoctorInput) {
   const projectRoot = path.resolve(input.projectRoot);
   const env = input.env ?? process.env;
-  // `--fix` repairs what it can before validation, so the report describes the repaired state.
-  const fixDiagnostics: RuntimeDiagnostic[] = [];
-  if (input.fix === true) {
-    const before = await loadResolvedProject({ projectRoot, env });
-    if (before.config !== undefined) {
-      const agentRefs = activeTopologyAgentRefs(projectRoot, before.config, input.topologyPath);
-      // The check stops at a home's first problem, so a root and the home below it take two passes.
-      for (let pass = 0; pass < 3; pass += 1) {
-        const fixed = fixProviderHomes(providerHomeProblems(agentRefs, before.config, env));
-        fixDiagnostics.push(...fixed);
-        if (!fixed.some(({ code }) => code === "PROVIDER_HOME_FIXED")) break;
-      }
-    }
-  }
   const validation = await validateProject({ projectRoot, env, topologyPath: input.topologyPath });
   const resolved = await loadResolvedProject({ projectRoot, env });
   const references = referencesStatus({ projectRoot });
@@ -85,7 +70,7 @@ export async function diagnoseProject(input: DoctorInput) {
   const latest = input.offline === true ? undefined : await latestPublishedSmithersVersion(projectRoot, env);
 
   const checks: DoctorCheck[] = [];
-  const diagnostics: RuntimeDiagnostic[] = [...fixDiagnostics];
+  const diagnostics: RuntimeDiagnostic[] = [];
 
   const validationStatus = doctorStatus(validation.ok, hasWarnings(validation.diagnostics));
   checks.push({
@@ -107,18 +92,6 @@ export async function diagnoseProject(input: DoctorInput) {
   const openRouterCredential = openRouterSelected ? resolved.config?.agents.OpenRouterAgent?.apiKeyEnv : undefined;
   const openRouterCredentialReady =
     !openRouterSelected || (openRouterCredential !== undefined && (env[openRouterCredential] ?? "").trim() !== "");
-  const providerHomes =
-    resolved.config === undefined ? [] : providerHomeProblems(selectedAgentRefs, resolved.config, env);
-  checks.push({
-    name: "provider-homes",
-    status: providerHomes.length === 0 ? "ok" : "error",
-    summary:
-      providerHomes.length === 0
-        ? "selected agents' provider homes are private directories the operator owns"
-        : `${providerHomes.map((problem) => problem.directory).join(", ")} would be refused at launch; ${
-            providerHomes.some((problem) => problem.fixable) ? "run ultrafuzz doctor --fix" : "see the diagnostics"
-          }`
-  });
   checks.push({
     name: "agent-credentials",
     status: openRouterCredentialReady ? "ok" : "error",

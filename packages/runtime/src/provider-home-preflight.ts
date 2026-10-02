@@ -24,8 +24,8 @@ export interface ProviderHomeProblem {
   /** The directory that fails, the home itself or one of its ancestors. */
   directory: string;
   reason: string;
-  /** `doctor --fix` can tighten it: the provider home itself, a real directory the operator owns. */
-  fixable: boolean;
+  /** What the operator should do: the exact command where one fixes it. */
+  remedy: string;
 }
 
 interface ProviderHomeLayout {
@@ -95,7 +95,7 @@ export function providerHomeProblems(
         home: layout.home,
         directory: layout.invalidRoot,
         reason: "is not an absolute path, which ULTRAFUZZ_PROVIDER_HOME_ROOT must be",
-        fixable: false
+        remedy: "set ULTRAFUZZ_PROVIDER_HOME_ROOT to an absolute path"
       });
       continue;
     }
@@ -123,22 +123,36 @@ function directoryProblem(
       const code = error instanceof Error && "code" in error ? String(error.code) : "unknown error";
       return code === "ENOENT"
         ? undefined
-        : { directory: current, reason: `could not be inspected (${code})`, fixable: false };
+        : {
+            directory: current,
+            reason: `could not be inspected (${code})`,
+            remedy: `make ${current} readable by you, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
+          };
     }
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      return { directory: current, reason: "is not a real directory", fixable: false };
+      return {
+        directory: current,
+        reason: "is not a real directory",
+        remedy: `replace ${current} with a real directory, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
+      };
     }
     const mode = stat.mode & 0o777;
     const owned = typeof process.getuid !== "function" || stat.uid === process.getuid();
     if (privateDirectories.has(current) && (mode !== 0o700 || !owned)) {
-      return {
-        directory: current,
-        reason: owned ? `has mode ${mode.toString(8)}` : "is owned by another user",
-        fixable: owned
-      };
+      return owned
+        ? { directory: current, reason: `has mode ${mode.toString(8)}`, remedy: `run \`chmod 700 ${current}\`` }
+        : {
+            directory: current,
+            reason: "is owned by another user",
+            remedy: "set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory you own"
+          };
     }
     if ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) {
-      return { directory: current, reason: `is group- or world-writable (mode ${mode.toString(8)})`, fixable: false };
+      return {
+        directory: current,
+        reason: `is group- or world-writable (mode ${mode.toString(8)})`,
+        remedy: `run \`chmod go-w ${current}\`, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
+      };
     }
   }
   return undefined;
@@ -151,80 +165,9 @@ export function providerHomeDiagnostics(problems: readonly ProviderHomeProblem[]
     message:
       `${problem.agentRef} would use ${problem.home} as its provider home, but ${problem.directory} ${problem.reason}; ` +
       "agents refuse a provider home that is not a private directory you own (mode 0700) under directories only you can write, " +
-      (problem.fixable
-        ? `so run \`ultrafuzz doctor --fix\` or \`chmod 700 ${problem.directory}\``
-        : `so fix ${problem.directory} yourself, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`),
+      `so ${problem.remedy}`,
     severity: "error",
     source: "agents",
     path: problem.directory
   }));
-}
-
-/**
- * Tighten each fixable directory to 0700, once per directory, reporting only real changes. The
- * directory is opened without following a link and changed through that descriptor, and only if it
- * is still the directory that was checked, so a directory swapped in after the check is not changed.
- * A directory its owner cannot read cannot be opened; it is changed by path instead, right after
- * confirming it is still the same directory.
- */
-export function fixProviderHomes(problems: readonly ProviderHomeProblem[]): RuntimeDiagnostic[] {
-  const diagnostics: RuntimeDiagnostic[] = [];
-  const seen = new Set<string>();
-  for (const problem of problems) {
-    if (!problem.fixable || seen.has(problem.directory)) continue;
-    seen.add(problem.directory);
-    try {
-      const before = fs.lstatSync(problem.directory);
-      if (before.isSymbolicLink() || !before.isDirectory() || !ownedByOperator(before)) continue;
-      if ((before.mode & 0o777) === 0o700) continue;
-      tightenDirectory(problem.directory, before);
-      diagnostics.push({
-        code: "PROVIDER_HOME_FIXED",
-        message: `tightened ${problem.directory} from mode ${(before.mode & 0o777).toString(8)} to 700 for ${problem.agentRef}`,
-        severity: "info",
-        source: "doctor",
-        path: problem.directory
-      });
-    } catch (error) {
-      diagnostics.push({
-        code: "PROVIDER_HOME_FIX_FAILED",
-        message: `could not tighten ${problem.directory}: ${error instanceof Error ? error.message : String(error)}`,
-        severity: "warning",
-        source: "doctor",
-        path: problem.directory
-      });
-    }
-  }
-  return diagnostics;
-}
-
-function ownedByOperator(stat: fs.Stats): boolean {
-  return typeof process.getuid !== "function" || stat.uid === process.getuid();
-}
-
-function sameDirectory(left: fs.Stats, right: fs.Stats): boolean {
-  return right.isDirectory() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino;
-}
-
-function tightenDirectory(directory: string, checked: fs.Stats): void {
-  let descriptor: number;
-  try {
-    descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "EACCES")) throw error;
-    if (!sameDirectory(checked, fs.lstatSync(directory))) {
-      throw new Error("the directory changed while it was checked", { cause: error });
-    }
-    fs.chmodSync(directory, 0o700);
-    return;
-  }
-  try {
-    const opened = fs.fstatSync(descriptor);
-    if (!sameDirectory(checked, opened) || !ownedByOperator(opened)) {
-      throw new Error("the directory changed while it was checked");
-    }
-    fs.fchmodSync(descriptor, 0o700);
-  } finally {
-    fs.closeSync(descriptor);
-  }
 }

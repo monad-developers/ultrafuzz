@@ -790,8 +790,6 @@ export interface DoctorInput {
   env?: Record<string, string | undefined>;
   /** Skips the registry lookup; the latest version is reported as `unknown`. */
   offline?: boolean;
-  /** Tighten each selected agent's provider home that is the operator's own directory to mode 0700. */
-  fix?: boolean;
   /** Execution-provider probe override for embedders and isolated tests. */
   requiredCommandProbe?: StartRunInput["requiredCommandProbe"];
 }

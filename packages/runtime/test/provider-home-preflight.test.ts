@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { ResolvedConfig } from "@ultrafuzz/config";
 
 import { initProject } from "../src/init.js";
-import { fixProviderHomes, predictedProviderHome, providerHomeProblems } from "../src/provider-home-preflight.js";
+import { predictedProviderHome, providerHomeProblems } from "../src/provider-home-preflight.js";
 import { validateProject } from "../src/validate.js";
 import { temporaryRoot } from "./temporary-root.js";
 
@@ -74,7 +74,7 @@ test("providerHomeProblems refuses what the adapters refuse and accepts private 
       home: codex,
       directory: codex,
       reason,
-      fixable: true
+      remedy: `run \`chmod 700 ${codex}\``
     });
   }
 
@@ -82,44 +82,37 @@ test("providerHomeProblems refuses what the adapters refuse and accepts private 
   const elsewhere = path.join(temporaryRoot("ufz-provider-home-target-"), "codex");
   fs.mkdirSync(elsewhere, { mode: 0o700 });
   fs.symlinkSync(elsewhere, codex);
-  assert.deepEqual(
-    { reason: problem()?.reason, fixable: problem()?.fixable },
-    { reason: "is not a real directory", fixable: false }
-  );
+  assert.equal(problem()?.reason, "is not a real directory");
+  assert.doesNotMatch(problem()?.remedy ?? "", /chmod/u, "chmod would follow the link");
 
-  // A group-writable ancestor is refused but left for the operator.
+  // A group-writable ancestor is refused, with a remedy that removes only the write bits.
   const shared = path.join(home, "shared");
   fs.mkdirSync(shared);
   fs.chmodSync(shared, 0o775);
   const nested = providerHomeProblems(["CodexAgent"], config(), { HOME: home, CODEX_HOME: path.join(shared, "codex") });
   assert.deepEqual(
-    nested.map(({ directory, fixable }) => [directory, fixable]),
-    [[shared, false]]
+    nested.map(({ directory, remedy }) => [directory, remedy.startsWith(`run \`chmod go-w ${shared}\``)]),
+    [[shared, true]]
   );
 });
 
-test("fixProviderHomes tightens only the operator's own provider home", () => {
+// The adapters require the provider-home root itself to be private too, not only the home below it.
+test("providerHomeProblems checks the provider-home root above a home", () => {
   const home = privateHome();
-  const codex = path.join(home, ".codex");
-  fs.mkdirSync(codex);
-  fs.chmodSync(codex, 0o755);
-  const shared = path.join(home, "shared");
-  fs.mkdirSync(shared);
-  fs.chmodSync(shared, 0o775);
-  const problems = [
-    ...providerHomeProblems(["CodexAgent"], config(), { HOME: home }),
-    ...providerHomeProblems(["ClaudeAgent"], config(), { HOME: home, CLAUDE_CONFIG_DIR: path.join(shared, "claude") })
-  ];
-
-  const diagnostics = fixProviderHomes(problems);
-
+  const root = path.join(home, ".ultrafuzz-provider-homes");
+  fs.mkdirSync(path.join(root, "deepseek"), { recursive: true, mode: 0o700 });
+  fs.chmodSync(path.join(root, "deepseek"), 0o700);
+  fs.chmodSync(root, 0o755);
   assert.deepEqual(
-    diagnostics.map(({ code, path: directory }) => [code, directory]),
-    [["PROVIDER_HOME_FIXED", codex]]
+    providerHomeProblems(["DeepSeekAgent"], config(), { HOME: home }).map(({ directory, reason, remedy }) => [
+      directory,
+      reason,
+      remedy
+    ]),
+    [[root, "has mode 755", `run \`chmod 700 ${root}\``]]
   );
-  assert.equal(fs.statSync(codex).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(shared).mode & 0o777, 0o775, "an ancestor is never changed");
-  assert.deepEqual(providerHomeProblems(["CodexAgent"], config(), { HOME: home }), []);
+  fs.chmodSync(root, 0o700);
+  assert.deepEqual(providerHomeProblems(["DeepSeekAgent"], config(), { HOME: home }), []);
 });
 
 test("validate refuses a project whose agent would get an unsafe provider home, before any launch", async () => {
@@ -136,8 +129,7 @@ test("validate refuses a project whose agent would get an unsafe provider home, 
   const diagnostic = refused.diagnostics.find(({ code }) => code === "PROVIDER_HOME_UNSAFE");
   assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
   assert.equal(diagnostic.path, codex);
-  assert.ok(diagnostic.message.includes(`chmod 700 ${codex}`));
-  assert.match(diagnostic.message, /ultrafuzz doctor --fix/u);
+  assert.ok(diagnostic.message.endsWith(`so run \`chmod 700 ${codex}\``), diagnostic.message);
   assert.doesNotMatch(diagnostic.message, /smithers/iu);
   assert.equal(refused.value?.policy_posture.agents.status, "fail");
 
@@ -187,27 +179,6 @@ test(
   }
 );
 
-// The adapters require the provider-home root itself to be private too, not only the home below it.
-test("providerHomeProblems checks the provider-home root, and repeated fixes tighten root and home", () => {
-  const home = privateHome();
-  const root = path.join(home, ".ultrafuzz-provider-homes");
-  const deepseek = path.join(root, "deepseek");
-  fs.mkdirSync(deepseek, { recursive: true });
-  fs.chmodSync(root, 0o755);
-  fs.chmodSync(deepseek, 0o755);
-  const problems = () => providerHomeProblems(["DeepSeekAgent"], config(), { HOME: home });
-
-  assert.deepEqual(
-    problems().map(({ directory, reason, fixable }) => [directory, reason, fixable]),
-    [[root, "has mode 755", true]]
-  );
-  // As `doctor --fix` does: fix, then check again until nothing fixable is left.
-  for (let pass = 0; pass < 3 && problems().length > 0; pass += 1) fixProviderHomes(problems());
-  assert.deepEqual(problems(), []);
-  assert.equal(fs.statSync(root).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(deepseek).mode & 0o777, 0o700);
-});
-
 test(
   "providerHomeProblems reports a relative provider-home root and an uninspectable directory",
   { skip: process.getuid?.() === 0 ? "root can search a mode-000 directory" : false },
@@ -215,9 +186,9 @@ test(
     const home = privateHome();
     assert.deepEqual(
       providerHomeProblems(["CodexAgent"], config(), { HOME: home, ULTRAFUZZ_PROVIDER_HOME_ROOT: "relative/root" }).map(
-        ({ directory, fixable }) => [directory, fixable]
+        ({ directory, remedy }) => [directory, remedy]
       ),
-      [["relative/root", false]]
+      [["relative/root", "set ULTRAFUZZ_PROVIDER_HOME_ROOT to an absolute path"]]
     );
 
     // A parent the operator cannot search hides the home; the adapter fails there, so does the check.
@@ -231,50 +202,9 @@ test(
       });
       assert.equal(problems.length, 1, JSON.stringify(problems));
       assert.match(problems[0]?.reason ?? "", /could not be inspected \(EACCES\)/u);
-      assert.equal(problems[0]?.fixable, false);
+      assert.doesNotMatch(problems[0]?.remedy ?? "", /chmod 700/u);
     } finally {
       fs.chmodSync(locked, 0o700);
     }
-  }
-);
-
-test("fixProviderHomes changes a shared root once and reports only real changes", () => {
-  const home = privateHome();
-  const root = path.join(home, ".ultrafuzz-provider-homes");
-  fs.mkdirSync(root);
-  fs.chmodSync(root, 0o755);
-  const agents = { ClaudeAgent: { auth: "subscription" as const, configDir: "work" } };
-  const problems = providerHomeProblems(["ClaudeAgent", "DeepSeekAgent"], config(agents), { HOME: home });
-  assert.deepEqual(
-    problems.map(({ agentRef, directory }) => [agentRef, directory]),
-    [
-      ["ClaudeAgent", root],
-      ["DeepSeekAgent", root]
-    ]
-  );
-
-  const fixed = fixProviderHomes(problems);
-
-  assert.deepEqual(
-    fixed.map(({ code, message }) => [code, message.includes("from mode 755 to 700")]),
-    [["PROVIDER_HOME_FIXED", true]]
-  );
-  assert.deepEqual(fixProviderHomes(problems), [], "a directory already at 700 is not reported again");
-});
-
-test(
-  "fixProviderHomes tightens a provider home its owner cannot read",
-  { skip: process.getuid?.() === 0 ? "root can open a mode-300 directory" : false },
-  () => {
-    const home = privateHome();
-    const codex = path.join(home, ".codex");
-    fs.mkdirSync(codex);
-    fs.chmodSync(codex, 0o300);
-    const fixed = fixProviderHomes(providerHomeProblems(["CodexAgent"], config(), { HOME: home }));
-    assert.deepEqual(
-      fixed.map(({ code }) => code),
-      ["PROVIDER_HOME_FIXED"]
-    );
-    assert.equal(fs.statSync(codex).mode & 0o777, 0o700);
   }
 );
