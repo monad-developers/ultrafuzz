@@ -95,5 +95,11 @@ For each finding you might act on:
 4. Keep protocol-specific edits separate from the raw generated artifact so the
    review trail stays clear.
 
+Each production issue in `report.md` ends with `### Remediation`. It shows the
+`recommendation` the finding's producer recorded, copied unchanged, or a fixed
+sentence saying that none was recorded; Ultrafuzz never infers one. Treat a
+recorded remediation as a starting point for your own fix, not as a reviewed
+patch.
+
 Only materialize files after review, and treat copied files as ordinary
 unstaged working-tree changes.

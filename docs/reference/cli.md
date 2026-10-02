@@ -717,10 +717,16 @@ ultrafuzz report <run-id> [--project <path>] [--json]
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.json
 ```
 
-If run metadata contains populated cumulative accounting, `report --json`
-emits diagnostics when `report.md` or `report.json.run_metadata` leaves
-`Tokens used` or `Estimated spend` unavailable, non-positive, missing the
-partial-pricing `+` marker, or greater than the current cumulative metadata.
+If run metadata contains populated cumulative accounting or a spend estimate,
+`report --json` emits diagnostics when `report.md` or `report.json.run_metadata`
+leaves `Tokens used` or `Estimated spend` unavailable, when `Tokens used` is
+not positive or exceeds the current cumulative metadata, or when
+`Estimated spend` is not a numeric USD estimate such as `$12.35`; a `+` suffix
+is never accepted. In a runtime presentation (`verified-runtime-report` or
+`unverified-runtime-report`), `Estimated spend` must also equal
+`run.json#spend_estimate.estimated_spend`. The agent's report-start snapshot
+only needs the numeric form and has no upper bound, because the estimate can
+fall when a catalog price replaces a fallback rate.
 
 ## Materialize
 
