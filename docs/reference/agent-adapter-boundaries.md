@@ -3,7 +3,7 @@
 Ultrafuzz agent adapters should map configuration onto Smithers constructor
 options. Token accounting, output interpretation, session lifecycle, command
 construction, and filesystem discovery belong upstream. Local code may enforce
-Ultrafuzz credential and data-governance policy, but it must not silently grow
+Ultrafuzz credential and environment policy, but it must not silently grow
 a second orchestration layer.
 
 The release-hardening audit in [#700](https://github.com/monad-developers/ultrafuzz/issues/700)

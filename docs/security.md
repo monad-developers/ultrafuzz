@@ -93,60 +93,18 @@ the prompts it rendered again. This is within the trusted local execution model
 above: such a process can already change the run's workflow source, which
 native resume runs as it is.
 
-## Campaign data governance
+## Inference provider data handling
 
-Campaigns default to `private`. Set `ULTRAFUZZ_DATA_GOVERNANCE_POLICY`
-to a complete strict JSON document that matches the canonical
-[data-governance policy schema](../packages/runtime/schema/data-governance-policy.schema.json).
-The policy needs one `destination_policies` row for every declared source or
-artifact destination. The first failed private launch reports the exact route
-IDs and the policy and input digests.
-
-The schema validates the portable document shape. Runtime semantic gates also
-require unique destination-policy rows, exact coverage of the declared
-destination union, and ascending array order. Text values cannot have leading
-or trailing whitespace. Ultrafuzz rejects noncanonical input instead of
-silently trimming or reordering it.
-
-Put reviewed acknowledgement records in
-`ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS` as an array that matches the
-canonical
-[data-disclosure acknowledgements schema](../packages/runtime/schema/data-disclosure-acknowledgements.schema.json).
-Acknowledgements bind the policy, effective inputs, the prompt catalog at
-launch, routes, and Git/worktree identity. Any change to these bound inputs
-before launch makes an acknowledgement stale; neither a prompt file edited in a
-run after launch nor a prompt that `resume` applies is acknowledged again. A
-runtime semantic gate rejects more than one acknowledgement for the same
-destination. Credential values are never
-persisted. Private standalone Modal evals
-remain fail-closed pending the separate R-26 disclosure authorization. Public
-Modal runs record `cloud:modal`. These controls are not a sandbox or egress
-filter: YOLO agents remain unrestricted.
-
-A model destination is `model:<provider>`, or `model:<agent>-route-<digest>`
-when route input is present. The digest covers:
-
-- every non-credential environment variable with the agent's provider prefix
-  (`ANTHROPIC_` and `CLAUDE_CODE_USE_` for Claude, `OPENAI_` and
-  `AZURE_OPENAI_` for Codex, `KIMI_` and `MOONSHOT_` for Kimi), including ones
-  that do not route traffic, such as `ANTHROPIC_LOG`;
-- Claude's `AWS_`, `GOOGLE_`/`CLOUD_ML_`, and `AZURE_`/`FOUNDRY_` variables, only
-  while a `CLAUDE_CODE_USE_*` flag for that platform is set to `1`, `true`,
-  `yes`, or `on` (any case) in the environment or in `settings.json` `env`;
-- the provider a Codex `config.toml` selects through `model_provider` (its id,
-  `base_url`, `wire_api`, and `env_key`), plus the top-level `openai_base_url`
-  when that provider is the built-in `openai` one. Codex also uses that
-  provider when no `model_provider` is set, so a non-empty `openai_base_url`
-  counts on its own;
-- Claude `settings.json` credential helpers, and its `env` entries under the
-  same rules as the environment;
-- for Kimi subscription auth, the whole Kimi `config.toml`.
-
-Proxy variables and a CLI's own rewrites of other config sections do not change
-the route. Each time the Claude, Codex, DeepSeek, Kimi, or OpenRouter adapter
-starts its CLI in a run, it recomputes the destination with the same runtime
-function and fails if it no longer matches an acknowledged one. Pi and OpenCode
-destinations are checked only when the run is planned.
+Ultrafuzz sends the target's source code, the rendered prompts, and the
+artifacts agents read and write to the inference providers your configured
+agents call, such as OpenAI, Anthropic, OpenRouter, DeepSeek, or Moonshot, and
+through them to any gateway or upstream model they route to. An eval run on
+Modal also places the target and its run in Modal sandboxes and volumes.
+Ultrafuzz does not record, restrict, or verify where this data goes. How long
+each provider retains it, whether it trains on it, which region processes it,
+and whether a data processing agreement (DPA) covers it are trust assumptions
+about the providers you choose. Before you run a campaign on code you cannot
+share, review the data-handling terms of every provider you configure.
 
 ## Production dependency advisories
 
