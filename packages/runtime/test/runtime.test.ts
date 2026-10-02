@@ -27352,6 +27352,81 @@ test("a pending lifecycle link reconciles split source and target projections fr
   assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
 });
 
+// #1258: a run ID the engine already has a run for is refused before planning builds the plan and the
+// execution snapshot, instead of at submission minutes later with a partial run directory left behind.
+// The pinned runner prints a found run's `inspect --format json` bare; the full-output envelope wraps it.
+for (const shape of ["bare", "enveloped"] as const) {
+  test(`run refuses a run ID the workflow engine already records before planning anything (${shape} inspection)`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `engine-known-run-${shape}`;
+    const inspection = workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "finished",
+      state: "succeeded",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }) as { data: unknown };
+    const env = fakeLifecycleSmithersEnv(project, { inspect: shape === "bare" ? inspection.data : inspection });
+    // The engine keeps its run records here; `clean` removed the run directory but not the record.
+    fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+    const refused = await startRun({ projectRoot: project, runId, env });
+
+    assert.equal(refused.ok, false);
+    const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+    assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
+    assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
+    assert.doesNotMatch(diagnostic.message, /smithers/iu);
+    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
+    assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
+    assert.doesNotMatch(commands, /^up /mu);
+  });
+}
+
+test("run asks the engine about its run ID only once the engine has records, and launches a new one", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-new-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: {
+      ok: false,
+      error: { code: "RUN_NOT_FOUND", message: `Run not found: ultrafuzz-${runId}` },
+      meta: { command: "inspect", duration: "1ms" }
+    }
+  });
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+  const launched = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(
+    launched.diagnostics.some(({ code }) => code === "RUN_ALREADY_EXISTS"),
+    false,
+    JSON.stringify(launched.diagnostics)
+  );
+  const commands = fs.readFileSync(commandLog, "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
+  assert.match(commands, /^up /mu);
+
+  // Without engine records there is nothing to collide with, and the engine is not asked.
+  const fresh = tempProject();
+  initProject({ projectRoot: fresh, force: true });
+  writeSmallTopology(fresh);
+  const freshEnv = fakeLifecycleSmithersEnv(fresh, {
+    inspect: workflowInspect({ workflowRunId: "ultrafuzz-fresh-run", status: "running", steps: [] })
+  });
+  const started = await startRun({ projectRoot: fresh, runId: "fresh-run", env: freshEnv });
+  assert.equal(started.ok, true, JSON.stringify(started.diagnostics));
+  assert.doesNotMatch(
+    fs.readFileSync(freshEnv.SMITHERS_FAKE_LOG ?? "", "utf8"),
+    /^inspect ultrafuzz-fresh-run --format json$/mu
+  );
+});
+
 test("ordinary resume checks active-run ownership before detached preflight", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
