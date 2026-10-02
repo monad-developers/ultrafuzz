@@ -231,6 +231,14 @@ replacement model.
 `--audit-profile` selects a profile for one command, while `--topology-path`
 atomically replaces the project or profile topology for that command.
 
+A run ID must be new to the project. `run` fails with `RUN_ALREADY_EXISTS`
+before it plans anything when the run directory exists, or when the workflow
+engine already records a run with that ID. The second case happens after
+`ultrafuzz clean <run>`, which removes the run directory but not the engine's
+record. Choose another `--run-id`, or continue a run whose directory still
+exists with `ultrafuzz resume <run-id>`. `run` asks the engine only once the
+project has engine records, so a project's first launch skips the query.
+
 ## Audit Profiles and Packaged Topologies
 
 ```bash
@@ -358,6 +366,15 @@ adapters in the continued workflow read the run's
 `smithers/execution-config.toml` (launch gave them a copy of the same file). If
 resume cannot prune stale task-worktree registrations, it reports a
 `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
+
+`resume --retry-failed` reruns every failed task except a failed task in a
+`failure_policy: continue` group that a started task already ran without. That
+task was admitted while the failed one had no output, and a rerun cannot reach
+the outputs it already produced, so the run would read as complete over work
+that never used the rerun's output. `resume` leaves such a task failed, reports
+a `WORKFLOW_RETRY_SKIPPED` warning that names it and the tasks that ran without
+it, and the final report stays partial. The Modal benchmark worker does not
+resume a finished run whose only failures are such tasks.
 
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so

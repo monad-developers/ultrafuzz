@@ -104,7 +104,13 @@ export interface WorkerResultContract {
 type TerminalCompletionCategory = Extract<OperationalDispositionCategory, "finished" | "genuine-evaluation-failure">;
 
 const SUCCEEDED_STATUSES = new Set(["succeeded", "reused-from-prior-run"]);
-const FAILED_STATUSES = new Set(["failed", "timed-out", "invalidated", "skipped"]);
+/** The node statuses a checkpoint counts as failed. */
+export const CHECKPOINT_FAILED_STATUSES: ReadonlySet<string> = new Set([
+  "failed",
+  "timed-out",
+  "invalidated",
+  "skipped"
+]);
 const EMPTY_SNAPSHOT: WorkerCheckpointSnapshot = {
   counts: { succeeded: 0, failed: 0, remaining: 0 },
   checkpoint: { age_ms: null, digest: null },
@@ -436,7 +442,7 @@ function aggregateCounts(nodes: RunState["nodes"]): AggregateCounts {
   let failed = 0;
   let remaining = 0;
   for (const statuses of logical.values()) {
-    if (statuses.some((status) => FAILED_STATUSES.has(status))) failed += 1;
+    if (statuses.some((status) => CHECKPOINT_FAILED_STATUSES.has(status))) failed += 1;
     else if (statuses.every((status) => SUCCEEDED_STATUSES.has(status))) succeeded += 1;
     else remaining += 1;
   }
