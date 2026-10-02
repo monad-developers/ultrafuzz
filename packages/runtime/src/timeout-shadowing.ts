@@ -8,10 +8,10 @@ import type { RuntimeDiagnostic } from "./types.js";
  *
  * A node's timeout resolves to its own pin, then its group's pin, then its model profile's
  * `timeout_seconds`, then `run.default_timeout_seconds`. A pin therefore wins even when it is the
- * shorter window, so raising the profile or run default silently does not reach a pinned node: the
- * packaged `goals` and `strategies` pins kept high-reasoning goal nodes at 2h after #645 raised the
- * profile default. Each pin is reported once, with the largest default it overrides and the
- * agentic nodes it applies to.
+ * shorter window, so raising the profile or run default silently does not reach a pinned node, as
+ * when #645 raised the profile default and the packaged `goals` and `strategies` group pins kept
+ * those nodes at 7200 seconds. Each pin is reported once, with the largest default it overrides and
+ * the agentic nodes it applies to.
  */
 export function timeoutShadowingDiagnostics(
   topology: ProjectTopology,
@@ -21,23 +21,38 @@ export function timeoutShadowingDiagnostics(
   const topologyNodes = new Map(topology.nodes.map((node) => [node.id, node]));
   const pins = new Map<
     string,
-    { label: string; path: string; seconds: number; shadowed: { seconds: number; source: string }; nodes: Set<string> }
+    {
+      label: string;
+      path: string;
+      fallback: string | undefined;
+      seconds: number;
+      shadowed: { seconds: number; source: string };
+      nodes: Set<string>;
+    }
   >();
   for (const node of expanded.nodes) {
     const pinned = node.timeoutSeconds;
     const declared = topologyNodes.get(node.logicalId);
     if (node.kind !== "agentic" || pinned === undefined || declared === undefined) continue;
+    const groupPin =
+      declared.group === undefined ? undefined : topology.groups?.[declared.group]?.defaults?.timeout_seconds;
     const pin =
       declared.timeout_seconds === undefined && declared.group !== undefined
         ? {
             key: `group:${declared.group}`,
             label: `group \`${declared.group}\``,
-            path: `groups.${declared.group}.defaults.timeout_seconds`
+            path: `groups.${declared.group}.defaults.timeout_seconds`,
+            fallback: undefined
           }
         : {
             key: `node:${declared.id}`,
             label: `node \`${declared.id}\``,
-            path: `nodes.${declared.id}.timeout_seconds`
+            path: `nodes.${declared.id}.timeout_seconds`,
+            // Removing a node pin inside a group that pins falls back to the group's pin, not the default.
+            fallback:
+              declared.group === undefined || groupPin === undefined
+                ? undefined
+                : `\`groups.${declared.group}.defaults.timeout_seconds\`=${String(groupPin)}`
           };
     // The default task compilation would apply without the pin: the profile's own timeout, else the
     // run default. Expansion folds the run default into each fan-out entry, so read the profile itself.
@@ -59,9 +74,13 @@ export function timeoutShadowingDiagnostics(
     const nodes = [...pin.nodes].sort();
     const named = nodes.slice(0, 3).join(", ");
     const applies = nodes.length > 3 ? `${named} and ${String(nodes.length - 3)} more nodes` : named;
+    const remedy =
+      pin.fallback === undefined
+        ? "Raise or remove the pin to use the longer default."
+        : `Raise the pin, or remove it to fall back to ${pin.fallback}.`;
     return {
       code: "TOPOLOGY_TIMEOUT_SHADOWS_DEFAULT",
-      message: `topology ${pin.label} pins timeout_seconds=${String(pin.seconds)}, below ${pin.shadowed.source}=${String(pin.shadowed.seconds)}; the pin wins, so ${applies} time out after ${String(pin.seconds)} seconds. Raise or remove the pin to use the longer default.`,
+      message: `topology ${pin.label} pins timeout_seconds=${String(pin.seconds)}, below ${pin.shadowed.source}=${String(pin.shadowed.seconds)}; the pin wins, so ${applies} time out after ${String(pin.seconds)} seconds. ${remedy}`,
       severity: "warning",
       source: "topology",
       path: pin.path
