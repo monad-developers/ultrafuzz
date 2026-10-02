@@ -23,6 +23,7 @@ import type {
   ValidateProjectResult
 } from "./types.js";
 import { effectiveAuditPolicy } from "./audit-profile-policy.js";
+import { timeoutShadowingDiagnostics } from "./timeout-shadowing.js";
 import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
 import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import {
@@ -304,6 +305,7 @@ function validateTopologySurface(
       modelProfiles: config ? modelProfilesForTopology(config) : undefined,
       defaultModelProfileId: config?.retry.agents[0] ?? config?.models.default
     });
+    const timeoutDiagnostics = config === undefined ? [] : timeoutShadowingDiagnostics(topology, expanded, config);
     const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
     for (const model of expanded.nodes.flatMap((node) => node.modelFanout)) {
       if (config === undefined) continue;
@@ -316,8 +318,10 @@ function validateTopologySurface(
     return {
       posture: postureFromDiagnostics(
         "topology",
-        "YAML topology v1 loads, validates, and expands",
-        executionDiagnostics
+        timeoutDiagnostics.length === 0
+          ? "YAML topology v1 loads, validates, and expands"
+          : "YAML topology v1 loads, validates, and expands, but a timeout_seconds pin is below the default it overrides",
+        [...executionDiagnostics, ...timeoutDiagnostics]
       ),
       selectedAgentRefs: [...selectedAgents].sort(),
       summary: {
