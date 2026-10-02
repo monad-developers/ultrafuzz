@@ -704,8 +704,10 @@ non-launching configuration contract unchanged. Doctor reports:
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies. `doctor --fix` makes one repair: it sets each such provider
-home that is a real directory the operator owns to mode `0700`, reports each
-change as `PROVIDER_HOME_FIXED`, and then runs the checks. It never changes a
+home, and the Ultrafuzz provider-home root (`~/.ultrafuzz-provider-homes` or
+`ULTRAFUZZ_PROVIDER_HOME_ROOT`) when the home is below it, to mode `0700` if
+it is a real directory the operator owns. It reports each change as
+`PROVIDER_HOME_FIXED`, and then runs the checks. It never changes any other
 directory above a provider home; fix one of those yourself, or set
 `ULTRAFUZZ_PROVIDER_HOME_ROOT` to a private directory.
 

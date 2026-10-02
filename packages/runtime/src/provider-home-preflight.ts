@@ -161,29 +161,26 @@ export function providerHomeDiagnostics(problems: readonly ProviderHomeProblem[]
 }
 
 /**
- * Tighten each fixable directory to 0700. The directory is opened without following a link and
- * changed through that descriptor, and only if it is still the directory that was checked, so a
- * directory swapped in after the check is never changed.
+ * Tighten each fixable directory to 0700, once per directory, reporting only real changes. The
+ * directory is opened without following a link and changed through that descriptor, and only if it
+ * is still the directory that was checked, so a directory swapped in after the check is not changed.
+ * A directory its owner cannot read cannot be opened; it is changed by path instead, right after
+ * confirming it is still the same directory.
  */
 export function fixProviderHomes(problems: readonly ProviderHomeProblem[]): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
+  const seen = new Set<string>();
   for (const problem of problems) {
-    if (!problem.fixable) continue;
-    let descriptor: number | undefined;
+    if (!problem.fixable || seen.has(problem.directory)) continue;
+    seen.add(problem.directory);
     try {
       const before = fs.lstatSync(problem.directory);
-      if (before.isSymbolicLink() || !before.isDirectory()) continue;
-      descriptor = fs.openSync(
-        problem.directory,
-        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
-      );
-      const opened = fs.fstatSync(descriptor);
-      const owned = typeof process.getuid !== "function" || opened.uid === process.getuid();
-      if (!opened.isDirectory() || opened.dev !== before.dev || opened.ino !== before.ino || !owned) continue;
-      fs.fchmodSync(descriptor, 0o700);
+      if (before.isSymbolicLink() || !before.isDirectory() || !ownedByOperator(before)) continue;
+      if ((before.mode & 0o777) === 0o700) continue;
+      tightenDirectory(problem.directory, before);
       diagnostics.push({
         code: "PROVIDER_HOME_FIXED",
-        message: `tightened ${problem.directory} from mode ${(opened.mode & 0o777).toString(8)} to 700 for ${problem.agentRef}`,
+        message: `tightened ${problem.directory} from mode ${(before.mode & 0o777).toString(8)} to 700 for ${problem.agentRef}`,
         severity: "info",
         source: "doctor",
         path: problem.directory
@@ -196,9 +193,38 @@ export function fixProviderHomes(problems: readonly ProviderHomeProblem[]): Runt
         source: "doctor",
         path: problem.directory
       });
-    } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
     }
   }
   return diagnostics;
+}
+
+function ownedByOperator(stat: fs.Stats): boolean {
+  return typeof process.getuid !== "function" || stat.uid === process.getuid();
+}
+
+function sameDirectory(left: fs.Stats, right: fs.Stats): boolean {
+  return right.isDirectory() && !right.isSymbolicLink() && left.dev === right.dev && left.ino === right.ino;
+}
+
+function tightenDirectory(directory: string, checked: fs.Stats): void {
+  let descriptor: number;
+  try {
+    descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EACCES")) throw error;
+    if (!sameDirectory(checked, fs.lstatSync(directory))) {
+      throw new Error("the directory changed while it was checked", { cause: error });
+    }
+    fs.chmodSync(directory, 0o700);
+    return;
+  }
+  try {
+    const opened = fs.fstatSync(descriptor);
+    if (!sameDirectory(checked, opened) || !ownedByOperator(opened)) {
+      throw new Error("the directory changed while it was checked");
+    }
+    fs.fchmodSync(descriptor, 0o700);
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }

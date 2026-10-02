@@ -237,3 +237,44 @@ test(
     }
   }
 );
+
+test("fixProviderHomes changes a shared root once and reports only real changes", () => {
+  const home = privateHome();
+  const root = path.join(home, ".ultrafuzz-provider-homes");
+  fs.mkdirSync(root);
+  fs.chmodSync(root, 0o755);
+  const agents = { ClaudeAgent: { auth: "subscription" as const, configDir: "work" } };
+  const problems = providerHomeProblems(["ClaudeAgent", "DeepSeekAgent"], config(agents), { HOME: home });
+  assert.deepEqual(
+    problems.map(({ agentRef, directory }) => [agentRef, directory]),
+    [
+      ["ClaudeAgent", root],
+      ["DeepSeekAgent", root]
+    ]
+  );
+
+  const fixed = fixProviderHomes(problems);
+
+  assert.deepEqual(
+    fixed.map(({ code, message }) => [code, message.includes("from mode 755 to 700")]),
+    [["PROVIDER_HOME_FIXED", true]]
+  );
+  assert.deepEqual(fixProviderHomes(problems), [], "a directory already at 700 is not reported again");
+});
+
+test(
+  "fixProviderHomes tightens a provider home its owner cannot read",
+  { skip: process.getuid?.() === 0 ? "root can open a mode-300 directory" : false },
+  () => {
+    const home = privateHome();
+    const codex = path.join(home, ".codex");
+    fs.mkdirSync(codex);
+    fs.chmodSync(codex, 0o300);
+    const fixed = fixProviderHomes(providerHomeProblems(["CodexAgent"], config(), { HOME: home }));
+    assert.deepEqual(
+      fixed.map(({ code }) => code),
+      ["PROVIDER_HOME_FIXED"]
+    );
+    assert.equal(fs.statSync(codex).mode & 0o777, 0o700);
+  }
+);
