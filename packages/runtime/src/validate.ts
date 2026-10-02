@@ -62,7 +62,8 @@ export async function validateProject(input: ValidateProjectInput) {
       resolved.config,
       resolved.configuredAgentRefs ?? [],
       topologyCheck.selectedAgentRefs,
-      input.env ?? {}
+      // A caller that passes no environment launches the engine with the process's own.
+      input.env ?? process.env
     );
     Object.assign(posture, policy.posture);
   } else {

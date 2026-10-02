@@ -186,3 +186,54 @@ test(
     }
   }
 );
+
+// The adapters require the provider-home root itself to be private too, not only the home below it.
+test("providerHomeProblems checks the provider-home root, and repeated fixes tighten root and home", () => {
+  const home = privateHome();
+  const root = path.join(home, ".ultrafuzz-provider-homes");
+  const deepseek = path.join(root, "deepseek");
+  fs.mkdirSync(deepseek, { recursive: true });
+  fs.chmodSync(root, 0o755);
+  fs.chmodSync(deepseek, 0o755);
+  const problems = () => providerHomeProblems(["DeepSeekAgent"], config(), { HOME: home });
+
+  assert.deepEqual(
+    problems().map(({ directory, reason, fixable }) => [directory, reason, fixable]),
+    [[root, "has mode 755", true]]
+  );
+  // As `doctor --fix` does: fix, then check again until nothing fixable is left.
+  for (let pass = 0; pass < 3 && problems().length > 0; pass += 1) fixProviderHomes(problems());
+  assert.deepEqual(problems(), []);
+  assert.equal(fs.statSync(root).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(deepseek).mode & 0o777, 0o700);
+});
+
+test(
+  "providerHomeProblems reports a relative provider-home root and an uninspectable directory",
+  { skip: process.getuid?.() === 0 ? "root can search a mode-000 directory" : false },
+  () => {
+    const home = privateHome();
+    assert.deepEqual(
+      providerHomeProblems(["CodexAgent"], config(), { HOME: home, ULTRAFUZZ_PROVIDER_HOME_ROOT: "relative/root" }).map(
+        ({ directory, fixable }) => [directory, fixable]
+      ),
+      [["relative/root", false]]
+    );
+
+    // A parent the operator cannot search hides the home; the adapter fails there, so does the check.
+    const locked = path.join(home, "locked");
+    fs.mkdirSync(path.join(locked, "codex"), { recursive: true });
+    fs.chmodSync(locked, 0o000);
+    try {
+      const problems = providerHomeProblems(["CodexAgent"], config(), {
+        HOME: home,
+        CODEX_HOME: path.join(locked, "codex")
+      });
+      assert.equal(problems.length, 1, JSON.stringify(problems));
+      assert.match(problems[0]?.reason ?? "", /could not be inspected \(EACCES\)/u);
+      assert.equal(problems[0]?.fixable, false);
+    } finally {
+      fs.chmodSync(locked, 0o700);
+    }
+  }
+);

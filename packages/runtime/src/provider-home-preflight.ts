@@ -28,6 +28,36 @@ export interface ProviderHomeProblem {
   fixable: boolean;
 }
 
+interface ProviderHomeLayout {
+  home: string;
+  /** The provider-home root, when the home is below one; the adapters require it to be private too. */
+  root?: string;
+  /** A root the adapters reject outright. */
+  invalidRoot?: string;
+}
+
+function providerHomeLayout(
+  agentRef: string,
+  config: ResolvedConfig,
+  env: Record<string, string | undefined>
+): ProviderHomeLayout | undefined {
+  const rules = PROVIDER_HOMES[agentRef];
+  const home = env.HOME?.trim();
+  if (rules === undefined || !home) return undefined;
+  const configDir = config.agents[agentRef]?.configDir;
+  const selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim();
+  if (configDir === undefined && !selectedRoot && rules.relative !== undefined) {
+    const envHome = (rules.env ?? []).map((name) => env[name]?.trim()).find(Boolean);
+    return { home: path.resolve(envHome ?? path.join(home, rules.relative)) };
+  }
+  const root = selectedRoot || path.join(home, ".ultrafuzz-provider-homes");
+  const layout = {
+    home: path.resolve(root, rules.provider, ...(configDir === undefined ? [] : configDir.split("/"))),
+    root: path.resolve(root)
+  };
+  return path.isAbsolute(root) ? layout : { ...layout, invalidRoot: root };
+}
+
 /**
  * The directory an agent adapter will use as its provider home, or undefined for an agent without
  * one. It is resolved from the launch environment's `HOME`, as the engine sees it, and is undefined
@@ -38,24 +68,15 @@ export function predictedProviderHome(
   config: ResolvedConfig,
   env: Record<string, string | undefined>
 ): string | undefined {
-  const rules = PROVIDER_HOMES[agentRef];
-  const home = env.HOME?.trim();
-  if (rules === undefined || !home) return undefined;
-  const configDir = config.agents[agentRef]?.configDir;
-  const selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim();
-  if (configDir === undefined && !selectedRoot && rules.relative !== undefined) {
-    const envHome = (rules.env ?? []).map((name) => env[name]?.trim()).find(Boolean);
-    return path.resolve(envHome ?? path.join(home, rules.relative));
-  }
-  const root = selectedRoot || path.join(home, ".ultrafuzz-provider-homes");
-  return path.resolve(root, rules.provider, ...(configDir === undefined ? [] : configDir.split("/")));
+  return providerHomeLayout(agentRef, config, env)?.home;
 }
 
 /**
  * The provider-home directories the adapters would refuse, checked as `prepareProviderHome` checks
  * them: every existing component must be a real directory that is not group- or world-writable
- * (unless sticky), and the home itself must be the operator's own with mode 0700. A component that
- * does not exist yet is fine, because the adapter creates it with mode 0700.
+ * (unless sticky), and the provider-home root and the home itself must be the operator's own with
+ * mode 0700. A component that does not exist yet is fine, because the adapter creates it with mode
+ * 0700; any other failure to inspect one is not.
  */
 export function providerHomeProblems(
   agentRefs: readonly string[],
@@ -65,39 +86,58 @@ export function providerHomeProblems(
   const problems: ProviderHomeProblem[] = [];
   const checked = new Set<string>();
   for (const agentRef of [...new Set(agentRefs)].sort()) {
-    const home = predictedProviderHome(agentRef, config, env);
-    if (home === undefined || checked.has(home)) continue;
-    checked.add(home);
-    const problem = directoryProblem(home);
-    if (problem !== undefined) problems.push({ agentRef, home, ...problem });
+    const layout = providerHomeLayout(agentRef, config, env);
+    if (layout === undefined || checked.has(layout.home)) continue;
+    checked.add(layout.home);
+    if (layout.invalidRoot !== undefined) {
+      problems.push({
+        agentRef,
+        home: layout.home,
+        directory: layout.invalidRoot,
+        reason: "is not an absolute path, which ULTRAFUZZ_PROVIDER_HOME_ROOT must be",
+        fixable: false
+      });
+      continue;
+    }
+    const problem = directoryProblem(
+      layout.home,
+      new Set([layout.home, ...(layout.root === undefined ? [] : [layout.root])])
+    );
+    if (problem !== undefined) problems.push({ agentRef, home: layout.home, ...problem });
   }
   return problems;
 }
 
-function directoryProblem(home: string): Omit<ProviderHomeProblem, "agentRef" | "home"> | undefined {
+function directoryProblem(
+  home: string,
+  privateDirectories: ReadonlySet<string>
+): Omit<ProviderHomeProblem, "agentRef" | "home"> | undefined {
   let current = path.parse(home).root;
   for (const component of home.slice(current.length).split(path.sep).filter(Boolean)) {
     current = path.join(current, component);
     let stat: fs.Stats;
     try {
       stat = fs.lstatSync(current);
-    } catch {
-      return undefined;
+    } catch (error) {
+      // The adapter creates a missing directory, and fails on anything else it cannot inspect.
+      const code = error instanceof Error && "code" in error ? String(error.code) : "unknown error";
+      return code === "ENOENT"
+        ? undefined
+        : { directory: current, reason: `could not be inspected (${code})`, fixable: false };
     }
-    const isHome = current === home;
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       return { directory: current, reason: "is not a real directory", fixable: false };
     }
     const mode = stat.mode & 0o777;
     const owned = typeof process.getuid !== "function" || stat.uid === process.getuid();
-    if (isHome && (mode !== 0o700 || !owned)) {
+    if (privateDirectories.has(current) && (mode !== 0o700 || !owned)) {
       return {
         directory: current,
         reason: owned ? `has mode ${mode.toString(8)}` : "is owned by another user",
         fixable: owned
       };
     }
-    if (!isHome && (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) {
+    if ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) {
       return { directory: current, reason: `is group- or world-writable (mode ${mode.toString(8)})`, fixable: false };
     }
   }
@@ -120,19 +160,30 @@ export function providerHomeDiagnostics(problems: readonly ProviderHomeProblem[]
   }));
 }
 
-/** Tighten each fixable provider home to 0700, rechecking it right before the change. */
+/**
+ * Tighten each fixable directory to 0700. The directory is opened without following a link and
+ * changed through that descriptor, and only if it is still the directory that was checked, so a
+ * directory swapped in after the check is never changed.
+ */
 export function fixProviderHomes(problems: readonly ProviderHomeProblem[]): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   for (const problem of problems) {
     if (!problem.fixable) continue;
+    let descriptor: number | undefined;
     try {
       const before = fs.lstatSync(problem.directory);
-      const owned = typeof process.getuid !== "function" || before.uid === process.getuid();
-      if (before.isSymbolicLink() || !before.isDirectory() || !owned) continue;
-      fs.chmodSync(problem.directory, 0o700);
+      if (before.isSymbolicLink() || !before.isDirectory()) continue;
+      descriptor = fs.openSync(
+        problem.directory,
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+      );
+      const opened = fs.fstatSync(descriptor);
+      const owned = typeof process.getuid !== "function" || opened.uid === process.getuid();
+      if (!opened.isDirectory() || opened.dev !== before.dev || opened.ino !== before.ino || !owned) continue;
+      fs.fchmodSync(descriptor, 0o700);
       diagnostics.push({
         code: "PROVIDER_HOME_FIXED",
-        message: `tightened ${problem.directory} from mode ${(before.mode & 0o777).toString(8)} to 700 for ${problem.agentRef}`,
+        message: `tightened ${problem.directory} from mode ${(opened.mode & 0o777).toString(8)} to 700 for ${problem.agentRef}`,
         severity: "info",
         source: "doctor",
         path: problem.directory
@@ -145,6 +196,8 @@ export function fixProviderHomes(problems: readonly ProviderHomeProblem[]): Runt
         source: "doctor",
         path: problem.directory
       });
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
     }
   }
   return diagnostics;

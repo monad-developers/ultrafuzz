@@ -70,7 +70,12 @@ export async function diagnoseProject(input: DoctorInput) {
     const before = await loadResolvedProject({ projectRoot, env });
     if (before.config !== undefined) {
       const agentRefs = activeTopologyAgentRefs(projectRoot, before.config, input.topologyPath);
-      fixDiagnostics.push(...fixProviderHomes(providerHomeProblems(agentRefs, before.config, env)));
+      // The check stops at a home's first problem, so a root and the home below it take two passes.
+      for (let pass = 0; pass < 3; pass += 1) {
+        const fixed = fixProviderHomes(providerHomeProblems(agentRefs, before.config, env));
+        fixDiagnostics.push(...fixed);
+        if (!fixed.some(({ code }) => code === "PROVIDER_HOME_FIXED")) break;
+      }
     }
   }
   const validation = await validateProject({ projectRoot, env, topologyPath: input.topologyPath });
