@@ -799,8 +799,13 @@ Remediation) is collapsed to one line and rendered as text, except that a
 single- or double-backtick span renders as inline code, so `` `totalAssets` ``
 reads as code. A span whose content contains `<` or `>`, a run of three or more
 backticks, and an unmatched backtick are escaped, as are emphasis, link, image,
-heading, list, and HTML syntax. Issue index links use GitHub-compatible anchors
-of the visible heading text.
+heading, quote, and HTML syntax. List, table, setext, and link-definition syntax
+is escaped where the prose starts a Markdown block (a description, a Proof of
+Concept step, or Remediation), not inside a title or rationale. In a table cell
+(the issue index, Property provenance, and non-production outcomes), a span
+whose content contains `\|` is also rendered as escaped text, since a GFM cell
+cannot keep that pipe inside inline code. Issue index links use
+GitHub-compatible anchors of the visible heading text.
 
 ### Whole-run completion contract
 
