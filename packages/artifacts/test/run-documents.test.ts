@@ -286,6 +286,8 @@ function canonicalSpendEstimate(): RunSpendEstimate {
       omitted: 0,
       entries: [
         {
+          workflow_run_id: "workflow-current",
+          source_event_sequence: 7,
           node_id: "node-a-0",
           iteration: 0,
           attempt: 2,
@@ -560,12 +562,20 @@ test("run metadata spend estimates are closed and require the workflow they desc
       (estimate) => Object.assign(at(estimate.unaccounted_attempts.entries, 0), { imputation: "guess" })
     ],
     [
+      "unaccounted entry without its attempt-ledger sequence",
+      (estimate) => Reflect.deleteProperty(at(estimate.unaccounted_attempts.entries, 0), "source_event_sequence")
+    ],
+    [
+      "unaccounted entry without its workflow run",
+      (estimate) => Reflect.deleteProperty(at(estimate.unaccounted_attempts.entries, 0), "workflow_run_id")
+    ],
+    [
       "unbounded unaccounted entries",
       (estimate) => {
         const template = at(estimate.unaccounted_attempts.entries, 0);
-        estimate.unaccounted_attempts.entries = Array.from({ length: 257 }, (_entry, attempt) => ({
+        estimate.unaccounted_attempts.entries = Array.from({ length: 257 }, (_entry, sequence) => ({
           ...template,
-          attempt
+          source_event_sequence: sequence
         }));
         estimate.unaccounted_attempts.count = 257;
       }
@@ -607,10 +617,10 @@ test("run metadata spend estimates must agree with their workflow, label, basis,
         ])
     ],
     [
-      /unaccounted attempts must be unique by node, iteration, and attempt/u,
+      /unaccounted attempts must be unique by workflow run and source event sequence/u,
       (estimate) => {
         const entry = at(estimate.unaccounted_attempts.entries, 0);
-        estimate.unaccounted_attempts.entries.push({ ...entry, imputation: "run-mean" });
+        estimate.unaccounted_attempts.entries.push({ ...entry, attempt: 3, imputation: "run-mean" });
         estimate.unaccounted_attempts.count = 2;
       }
     ],
@@ -620,7 +630,8 @@ test("run metadata spend estimates must agree with their workflow, label, basis,
   for (const [message, update] of invalidSemantics) {
     assert.throws(() => assertRunMetadataDocument(runMetadataWithSpendEstimate(update)), message, String(message));
   }
-  // A code without a model sorts before the same code with one, and one node may have several unaccounted attempts.
+  // A code without a model sorts before the same code with one. One node may have several unaccounted
+  // occurrences, even of one attempt number after a reset or in another workflow run of the same run.
   assert.doesNotThrow(() =>
     assertRunMetadataDocument(
       runMetadataWithSpendEstimate((estimate) => {
@@ -630,7 +641,10 @@ test("run metadata spend estimates must agree with their workflow, label, basis,
           { code: "unaccounted-attempt-imputed", count: 2 }
         ];
         const entry = at(estimate.unaccounted_attempts.entries, 0);
-        estimate.unaccounted_attempts.entries.push({ ...entry, attempt: 3 }, { ...entry, iteration: 1 });
+        estimate.unaccounted_attempts.entries.push(
+          { ...entry, source_event_sequence: 12 },
+          { ...entry, workflow_run_id: "workflow-replaced" }
+        );
         estimate.unaccounted_attempts.count = 3;
       })
     )

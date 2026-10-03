@@ -14,6 +14,7 @@ import {
   spendEstimateRoutes,
   type SpendEstimateDocument,
   type SpendEstimateInput,
+  type SpendEstimateUnaccountedAttemptInput,
   type SpendEstimateUsageEvidence
 } from "../src/spend-estimate.js";
 import { spendEstimateUsageEvidence } from "../src/workflow-sync.js";
@@ -28,6 +29,15 @@ const GPT_PRICES: ModelPricing = {
   outputUsdPerMillion: 30
 };
 const KIMI_PRICES: ModelPricing = { inputUsdPerMillion: 3, cachedInputUsdPerMillion: 0.3, outputUsdPerMillion: 15 };
+
+/** An executed agent attempt occurrence without usage, named by its attempt-ledger sequence in the current run. */
+function unaccounted(
+  sourceEventSequence: number,
+  attempt: Omit<SpendEstimateUnaccountedAttemptInput, "workflow_run_id" | "source_event_sequence">,
+  workflowRunId = WORKFLOW_RUN_ID
+): SpendEstimateUnaccountedAttemptInput {
+  return { workflow_run_id: workflowRunId, source_event_sequence: sourceEventSequence, ...attempt };
+}
 
 function runMetadata(): RunMetadataDocument {
   return {
@@ -464,10 +474,10 @@ test("unaccounted attempts are imputed from the same-model mean, then the run me
       usage("claude-sonnet-4-6", { input_tokens: 10, cache_read_tokens: 0, output_tokens: 1, recorded_cost_usd: 8 })
     ],
     unaccountedAttempts: [
-      { node_id: "node-c", iteration: 0, attempt: 1 },
-      { node_id: "node-b", iteration: 0, attempt: 2, model_name: "claude-opus-4-8" },
-      { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" },
-      { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" }
+      unaccounted(9, { node_id: "node-c", iteration: 0, attempt: 1 }),
+      unaccounted(7, { node_id: "node-b", iteration: 0, attempt: 2, model_name: "claude-opus-4-8" }),
+      unaccounted(5, { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" }),
+      unaccounted(5, { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" })
     ]
   });
 
@@ -479,9 +489,15 @@ test("unaccounted attempts are imputed from the same-model mean, then the run me
     imputed_spend_usd: 10,
     omitted: 0,
     entries: [
-      { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5", imputation: "same-model-mean" },
-      { node_id: "node-b", iteration: 0, attempt: 2, model_name: "claude-opus-4-8", imputation: "run-mean" },
-      { node_id: "node-c", iteration: 0, attempt: 1, imputation: "run-mean" }
+      {
+        ...unaccounted(5, { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" }),
+        imputation: "same-model-mean"
+      },
+      {
+        ...unaccounted(7, { node_id: "node-b", iteration: 0, attempt: 2, model_name: "claude-opus-4-8" }),
+        imputation: "run-mean"
+      },
+      { ...unaccounted(9, { node_id: "node-c", iteration: 0, attempt: 1 }), imputation: "run-mean" }
     ]
   });
   assert.deepEqual(document.assumptions, [
@@ -497,9 +513,9 @@ test("without an accounted attempt, unaccounted attempts are imputed at the defa
       ["gpt-5.5", { inputUsdPerMillion: 1.25, cachedInputUsdPerMillion: 0.125, outputUsdPerMillion: 10 }]
     ]),
     unaccountedAttempts: [
-      { node_id: "node-a", iteration: 0, attempt: 1, model_name: "claude-opus-4-8" },
-      { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" },
-      { node_id: "node-c", iteration: 0, attempt: 1 }
+      unaccounted(1, { node_id: "node-a", iteration: 0, attempt: 1, model_name: "claude-opus-4-8" }),
+      unaccounted(3, { node_id: "node-b", iteration: 0, attempt: 1, model_name: "gpt-5.5" }),
+      unaccounted(5, { node_id: "node-c", iteration: 0, attempt: 1 })
     ]
   });
 
@@ -522,14 +538,69 @@ test("without an accounted attempt, unaccounted attempts are imputed at the defa
   ]);
 });
 
+test("occurrences that share an attempt number are each imputed and listed by their ledger identity", () => {
+  // A reset restarts the attempt numbering in one workflow run, and a replaced workflow run can
+  // repeat the node, iteration, and attempt of the run that replaced it.
+  const attempt = { node_id: "node:project-discovery", iteration: 0, attempt: 1, model_name: "gpt-5.5" };
+  const document = estimate({
+    unaccountedAttempts: [
+      unaccounted(4, attempt),
+      unaccounted(1, attempt),
+      unaccounted(1, attempt, "workflow-replaced")
+    ]
+  });
+
+  // Three default-usage imputations at the gpt fallback rates.
+  assert.equal(document.estimated_spend_usd, 9.3);
+  assert.deepEqual(document.unaccounted_attempts, {
+    count: 3,
+    imputed_spend_usd: 9.3,
+    omitted: 0,
+    entries: [
+      { ...unaccounted(1, attempt), imputation: "default-usage" },
+      { ...unaccounted(4, attempt), imputation: "default-usage" },
+      { ...unaccounted(1, attempt, "workflow-replaced"), imputation: "default-usage" }
+    ]
+  });
+  assert.deepEqual(document.assumptions, [
+    { code: "default-attempt-usage", count: 3, model: "gpt-5.5" },
+    { code: "unaccounted-attempt-imputed", count: 3, model: "gpt-5.5" }
+  ]);
+});
+
+test("default attempt usage is priced at a tiered model's base catalog rates", () => {
+  // The 2,000,000-token default total spans many requests of unknown size, so it never selects the
+  // 272k tier that a single long request would bill at.
+  const tiered: ModelPricing = {
+    ...GPT_PRICES,
+    contextTiers: [
+      {
+        contextTokens: 272_000,
+        inputUsdPerMillion: 10,
+        cachedInputUsdPerMillion: 1,
+        cacheWriteUsdPerMillion: 12.5,
+        outputUsdPerMillion: 45
+      }
+    ]
+  };
+  const prices = new Map([["gpt-5.5", tiered]]);
+  const empty = { accounted_attempts: 0, models: [] };
+  // 200k input at $5, 1.8M cache reads at $0.50, and 40k output at $30; the tier would give $5.60.
+  assert.deepEqual(imputeAttemptSpendUsd(empty, "gpt-5.5", prices), { usd: 3.1, imputation: "default-usage" });
+
+  const document = estimate({
+    prices,
+    unaccountedAttempts: [unaccounted(2, { node_id: "node-a", iteration: 0, attempt: 1, model_name: "gpt-5.5" })]
+  });
+  assert.equal(document.basis_usd.imputed, 3.1);
+});
+
 test("unaccounted attempts beyond the entry bound and unidentified attempts are counted as omitted", () => {
   const document = estimate({
     events: [usage("gpt-5.5", { input_tokens: 10, cache_read_tokens: 0, output_tokens: 1, recorded_cost_usd: 0.5 })],
-    unaccountedAttempts: Array.from({ length: 300 }, (_, index) => ({
-      node_id: `node-${String(index).padStart(3, "0")}`,
-      iteration: 0,
-      attempt: 1
-    })),
+    unaccountedAttempts: Array.from({ length: 300 }, (_, index) =>
+      unaccounted(index, { node_id: `node-${String(index).padStart(3, "0")}`, iteration: 0, attempt: 1 })
+    ),
     unidentifiedUnaccountedAttempts: 2
   });
 

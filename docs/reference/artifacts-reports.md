@@ -1027,10 +1027,11 @@ Accounting v4's `estimated_spend` label and `partial_pricing` never reach the
 snapshot. The projection then adds one imputed attempt for the report task
 itself, on its first configured model: the mean of accounted attempts on that
 model, else the mean of all accounted attempts, else the default attempt usage
-below, at the route-catalog rates stored in `run.json` when they price that
-model and at its fallback rates otherwise. The snapshot's `partial_pricing` is
-therefore always `true`, and its spend is never `$0.00` unless every price it
-used is zero. The agent's `report.json` and `report.md` keep that snapshot.
+below, at the base route-catalog rates stored in `run.json` when they price
+that model and at its fallback rates otherwise. The snapshot's
+`partial_pricing` is therefore always `true`, and its spend is never `$0.00`
+unless every price it used is zero. The agent's `report.json` and `report.md`
+keep that snapshot.
 
 Runtime presentations (the verified terminal publication and unchecked reports)
 restate the run summary instead: elapsed time from `run.json#created_at` to
@@ -1052,7 +1053,7 @@ can be `unavailable`, so it can differ from the report's figure. Use
 
 Every workflow synchronization computes `run.json#spend_estimate` after
 accounting and writes both in the same `run.json` update. It also writes one
-when `usage.jsonl` is empty but the current workflow ran agent attempts;
+when `usage.jsonl` is empty but the run's workflows ran agent attempts;
 accounting then stays absent. The estimate is labelled derived accounting: it
 never writes to `usage.jsonl` or to accounting v4 fields, and a pass that would
 change only its `updated_at` leaves `run.json` untouched. A run with neither
@@ -1066,8 +1067,15 @@ cannot be computed, the pass reports a `WORKFLOW_SPEND_ESTIMATE_FAILED` warning,
 still writes accounting, and removes the stored estimate rather than leave it
 to disagree with that accounting.
 
-For the latest usage event of each attempt (the same attempt dedupe accounting
-v4 uses), the estimator applies the first rule that fits:
+For the latest usage event of each attempt occurrence, the estimator applies the
+first rule that fits. An occurrence is an `attempts.jsonl` entry, and a usage
+event belongs to the entry of its workflow run, Smithers task, iteration, and
+attempt whose start and terminal events span its sequence. A reset
+(`resume --retry-failed`, `--reset-node`) restarts attempt numbering in the same
+workflow run, so unlike accounting v4, which keeps only the latest snapshot of
+each attempt number, the estimate prices each occurrence. Usage that no
+recorded occurrence spans, such as that of an attempt still running, is priced
+from the latest event of its attempt number.
 
 1. A recorded cost (the adapter's `costUsd`, stored as `recorded_cost_usd`) is
    used as is when it is positive, when the event has no component activity, or
@@ -1093,12 +1101,17 @@ v4 uses), the estimator applies the first rule that fits:
 
 Two further contributions complete the estimate:
 
-4. Each executed agent attempt of the current workflow run with no usage-ledger
-   entry (an attempt-ledger entry with `reuse.status` `executed` and agent
-   provenance) is imputed from the mean of accounted attempts on the same
-   model, else the mean of all accounted attempts, else the default attempt
-   usage at the model's catalog rates when known and fallback rates otherwise
-   (`unaccounted-attempt-imputed`, plus `default-attempt-usage` for the last).
+4. Each executed agent attempt occurrence (an attempt-ledger entry with
+   `reuse.status` `executed` and agent provenance) that no usage event belongs
+   to is imputed, in every one of the run's workflow runs: a replay or fork
+   rebinds the run to a new workflow run, and the replaced run's attempts stay
+   in the estimate beside its usage. The ledger names the strategy attempt,
+   whose Smithers task ID is `node:<strategy_attempt_id>` in every task
+   manifest. Each occurrence is imputed from the mean of accounted attempts on
+   the same model, else the mean of all accounted attempts, else the default
+   attempt usage at the model's base catalog rates when known and fallback
+   rates otherwise (`unaccounted-attempt-imputed`, plus
+   `default-attempt-usage` for the last).
    Synchronization imputes default usage only before any usage is recorded,
    when it has no catalog prices, so there it always uses fallback rates.
 5. Each source run contributes its persisted `spend_estimate.estimated_spend_usd`
@@ -1141,11 +1154,13 @@ trailing `[...]` are stripped; a Claude ID that puts its version first, such as
 
 The default attempt usage `ultrafuzz.default-attempt-usage.v1`, used only when
 a run has no accounted attempt to take a mean from, is 200,000 uncached input,
-1,800,000 cache-read, and 40,000 output tokens. The fallback rates used for an
-accounted model are saved in `models[].fallback_rates` and reused for that
-model on later passes, so a later table version does not reprice its accounted
-attempts. Default-usage imputations have no model entry to save rates in, so
-they use the table of the build that synchronizes.
+1,800,000 cache-read, and 40,000 output tokens. It is a whole attempt's total
+across requests of unknown size, so a catalog price for it uses the model's base
+rates and never a context tier. The fallback rates used for an accounted model
+are saved in `models[].fallback_rates` and reused for that model on later
+passes, so a later table version does not reprice its accounted attempts.
+Default-usage imputations have no model entry to save rates in, so they use the
+table of the build that synchronizes.
 
 `run.json#spend_estimate` (`ultrafuzz.spend-estimate.v1`) is optional and
 requires `workflow`. Its fields:
@@ -1158,7 +1173,7 @@ requires `workflow`. Its fields:
 - `fallback_pricing_table`, the fallback table version;
 - `basis_usd`: `recorded`, `catalog`, `fallback`, `imputed`, and `source_runs`,
   which sum to `estimated_spend_usd`;
-- `accounted_attempts`, the attempts priced from usage evidence;
+- `accounted_attempts`, the attempt occurrences priced from usage evidence;
 - `models`, one entry per model of the accounted attempts, sorted: `attempts`,
   `estimated_spend_usd`, `price_source` (`recorded`, `catalog`, `fallback`, or
   `mixed`; a snapshot without activity costs nothing and counts toward
@@ -1168,9 +1183,11 @@ requires `workflow`. Its fields:
   fallback rate was used;
 - `assumptions`, sorted entries with `code`, `count`, and an optional `model`;
 - `unaccounted_attempts`: `count`, `imputed_spend_usd`, `omitted`, and up to
-  256 `entries`, each naming `node_id` (the Smithers task ID that usage events
-  name), `iteration`, `attempt`, `model_name`, and `imputation`
-  (`same-model-mean`, `run-mean`, or `default-usage`);
+  256 `entries`, unique by the occurrence's attempt-ledger identity
+  `workflow_run_id` and `source_event_sequence`, each also naming `node_id` (the
+  Smithers task ID that usage events name), `iteration`, `attempt`,
+  `model_name`, and `imputation` (`same-model-mean`, `run-mean`, or
+  `default-usage`);
 - `source_run_ids`; and
 - `updated_at`, which change detection ignores.
 

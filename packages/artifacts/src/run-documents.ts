@@ -299,7 +299,13 @@ export interface RunSpendEstimateModel {
   fallback_rates?: RunModelPricing;
 }
 
+/**
+ * One imputed attempt occurrence, named by its attempt-ledger identity (`workflow_run_id`,
+ * `source_event_sequence`), so occurrences that share an attempt number after a reset stay distinct.
+ */
 export interface RunSpendEstimateUnaccountedAttempt {
+  workflow_run_id: string;
+  source_event_sequence: number;
   node_id: string;
   iteration: number;
   attempt: number;
@@ -526,10 +532,14 @@ function assertSpendEstimateSemantics(estimate: RunSpendEstimate, workflow: RunM
   }
   const unaccounted = estimate.unaccounted_attempts;
   const attemptKeys = new Set(
-    unaccounted.entries.map(({ node_id, iteration, attempt }) => JSON.stringify([node_id, iteration, attempt]))
+    unaccounted.entries.map(({ workflow_run_id, source_event_sequence }) =>
+      JSON.stringify([workflow_run_id, source_event_sequence])
+    )
   );
   if (attemptKeys.size !== unaccounted.entries.length) {
-    throw new Error("run metadata spend estimate unaccounted attempts must be unique by node, iteration, and attempt");
+    throw new Error(
+      "run metadata spend estimate unaccounted attempts must be unique by workflow run and source event sequence"
+    );
   }
   if (unaccounted.count !== unaccounted.entries.length + unaccounted.omitted) {
     throw new Error("run metadata spend estimate unaccounted-attempt count does not match its entries");

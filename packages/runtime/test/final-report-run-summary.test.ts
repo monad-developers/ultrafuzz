@@ -60,6 +60,8 @@ function synchronizedEstimate(rows: Array<[string, number]>, unaccountedModels: 
     routes: new Map(),
     prices: new Map(),
     unaccountedAttempts: unaccountedModels.map((model, index) => ({
+      workflow_run_id: WORKFLOW_RUN_ID,
+      source_event_sequence: index,
       node_id: `node-unaccounted-${String(index)}`,
       iteration: 0,
       attempt: 1,

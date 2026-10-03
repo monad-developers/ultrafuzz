@@ -1021,8 +1021,23 @@
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["node_id", "iteration", "attempt", "imputation"],
+                "required": [
+                  "workflow_run_id",
+                  "source_event_sequence",
+                  "node_id",
+                  "iteration",
+                  "attempt",
+                  "imputation"
+                ],
                 "properties": {
+                  "workflow_run_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "source_event_sequence": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
                   "node_id": {
                     "type": "string",
                     "minLength": 1

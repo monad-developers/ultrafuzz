@@ -21444,12 +21444,15 @@ test("syncRun applies context-tier pricing from the live catalog", async () => {
   const sync = await syncRun({ projectRoot: project, runId: "tiered-accounting", env });
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: { current?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean } };
-  };
-  assert.equal(metadata.accounting?.current?.tokens_used, "310,000");
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$3.45");
-  assert.equal(metadata.accounting?.current?.partial_pricing, false);
+  const runRoot = run.value?.run_root;
+  assert.ok(runRoot);
+  const metadata = readRunMetadataDocument(path.join(runRoot, "run.json"), "tiered-accounting");
+  assert.equal(metadata.accounting?.current.tokens_used, "310,000");
+  assert.equal(metadata.accounting?.current.estimated_spend, "$3.45");
+  assert.equal(metadata.accounting?.current.partial_pricing, false);
+  // An accounted snapshot keeps accounting v4's tier, so the estimate's catalog basis is v4's price.
+  assert.equal(metadata.spend_estimate?.estimated_spend, "$3.45");
+  assert.equal(metadata.spend_estimate?.basis_usd.catalog, metadata.accounting?.current.estimated_spend_usd);
 });
 
 test("syncRun publishes complete DeepSeek V4 telemetry at first-party list rates", async () => {
@@ -22180,6 +22183,9 @@ async function syncRetriedAgentAttempts(runId: string, firstAttemptUsage?: { mod
   assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
   const metadataPath = path.join(run.value.run_root, "run.json");
   return {
+    project,
+    env,
+    metadataPath,
     metadata: readRunMetadataDocument(metadataPath, runId),
     resync: async () => {
       const before = fs.readFileSync(metadataPath);
@@ -22206,7 +22212,12 @@ test("syncRun estimates executed agent attempts that reported no usage while acc
     count: 2,
     imputed_spend_usd: 6.2,
     omitted: 0,
-    entries: [1, 2].map((attempt) => ({
+    entries: [
+      [1, 1],
+      [2, 4]
+    ].map(([attempt, sourceEventSequence]) => ({
+      workflow_run_id: "ultrafuzz-attempts-without-usage",
+      source_event_sequence: sourceEventSequence,
       node_id: "node:project-discovery",
       iteration: 0,
       attempt,
@@ -22229,6 +22240,8 @@ test("syncRun imputes an attempt without usage from the same-model mean, else th
   assert.equal(sameModel.metadata.spend_estimate?.estimated_spend, "$1.00");
   assert.deepEqual(sameModel.metadata.spend_estimate?.unaccounted_attempts.entries, [
     {
+      workflow_run_id: "ultrafuzz-same-model-imputation",
+      source_event_sequence: 5,
       node_id: "node:project-discovery",
       iteration: 0,
       attempt: 2,
@@ -22257,6 +22270,208 @@ test("syncRun imputes an attempt without usage from the same-model mean, else th
   assert.deepEqual(runMean.metadata.spend_estimate?.assumptions, [
     { code: "unaccounted-attempt-imputed", count: 1, model: "gpt-5.5" }
   ]);
+});
+
+/**
+ * A project-discovery attempt 1 that failed and was synchronized, then reset and run again as a new
+ * attempt 1 in the same workflow run, as `resume --retry-failed` or `--reset-node` does, and
+ * synchronized again. `usage` names the recorded cost each occurrence reported, if any.
+ */
+async function syncResetAgentAttempt(runId: string, usage: { first?: number; replacement?: number } = {}) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const occurrence = (costUsd: number | undefined) => [
+    { type: "RunStarted" },
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    ...(costUsd === undefined
+      ? []
+      : [
+          {
+            type: "TokenUsageReported",
+            nodeId,
+            attempt: 1,
+            extra: {
+              iteration: 0,
+              inputTokens: 1_000,
+              outputTokens: 100,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd,
+              model: "gpt-5.5",
+              agent: "codex"
+            }
+          }
+        ]),
+    { type: "NodeFailed", nodeId, attempt: 1, error: { message: "agent exited" } }
+  ];
+  const first = workflowEvents(workflowRunId, occurrence(usage.first));
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: first
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const sync = async () => {
+    const result = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code.startsWith("WORKFLOW_SPEND_ESTIMATE")));
+  };
+  await sync();
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(workflowRunId, [...occurrence(usage.first), ...occurrence(usage.replacement)]),
+    "utf8"
+  );
+  await sync();
+  const ledger = fs
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          source_event_sequence: number;
+          iteration: number;
+          attempt: number;
+          reuse: { status: string };
+          agent?: { model_name?: string };
+        }
+    );
+  return { metadata: readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId), ledger };
+}
+
+test("syncRun imputes each occurrence of an attempt number that a reset reused", async () => {
+  const { metadata, ledger } = await syncResetAgentAttempt("reset-without-usage");
+
+  // Both occurrences are executed agent attempts that share node, iteration, and attempt; the
+  // attempt ledger tells them apart by their terminal event sequence.
+  assert.deepEqual(
+    ledger.map((entry) => [
+      entry.source_event_sequence,
+      entry.iteration,
+      entry.attempt,
+      entry.reuse.status,
+      entry.agent?.model_name
+    ]),
+    [
+      [2, 0, 1, "executed", "gpt-5.5"],
+      [5, 0, 1, "executed", "gpt-5.5"]
+    ]
+  );
+  // Two default-usage imputations at the gpt fallback rates, never one for the shared attempt number.
+  assert.equal(metadata.spend_estimate?.estimated_spend, "$6.20");
+  assert.equal(metadata.spend_estimate?.complete, false);
+  assert.deepEqual(
+    metadata.spend_estimate?.unaccounted_attempts.entries.map((entry) => [
+      entry.workflow_run_id,
+      entry.source_event_sequence,
+      entry.attempt,
+      entry.imputation
+    ]),
+    [
+      ["ultrafuzz-reset-without-usage", 2, 1, "default-usage"],
+      ["ultrafuzz-reset-without-usage", 5, 1, "default-usage"]
+    ]
+  );
+  assert.equal(metadata.spend_estimate?.unaccounted_attempts.count, 2);
+});
+
+test("syncRun matches usage to the reset occurrence whose events span it", async () => {
+  // Only the occurrence before the reset reported usage, so the replacement is still imputed.
+  const replacementUnreported = await syncResetAgentAttempt("reset-first-reported", { first: 0.5 });
+  const firstEstimate = replacementUnreported.metadata.spend_estimate;
+  assert.equal(firstEstimate?.estimated_spend, "$1.00");
+  assert.equal(firstEstimate?.complete, false);
+  assert.equal(firstEstimate?.accounted_attempts, 1);
+  assert.deepEqual(
+    firstEstimate?.unaccounted_attempts.entries.map((entry) => [entry.source_event_sequence, entry.imputation]),
+    [[6, "same-model-mean"]]
+  );
+
+  // Only the replacement reported usage, so the occurrence before the reset is imputed.
+  const firstUnreported = await syncResetAgentAttempt("reset-replacement-reported", { replacement: 0.5 });
+  const replacementEstimate = firstUnreported.metadata.spend_estimate;
+  assert.equal(replacementEstimate?.estimated_spend, "$1.00");
+  assert.equal(replacementEstimate?.complete, false);
+  assert.deepEqual(
+    replacementEstimate?.unaccounted_attempts.entries.map((entry) => [entry.source_event_sequence, entry.imputation]),
+    [[2, "same-model-mean"]]
+  );
+
+  // Each occurrence is priced from its own snapshot. Accounting v4 keeps only the latest snapshot of
+  // the shared attempt coordinate, which the estimate does not inherit.
+  const bothReported = await syncResetAgentAttempt("reset-both-reported", { first: 0.5, replacement: 0.25 });
+  assert.equal(bothReported.metadata.accounting?.cumulative.estimated_spend, "$0.25");
+  const bothEstimate = bothReported.metadata.spend_estimate;
+  assert.equal(bothEstimate?.estimated_spend, "$0.75");
+  assert.equal(bothEstimate?.complete, true);
+  assert.equal(bothEstimate?.accounted_attempts, 2);
+  assert.equal(bothEstimate?.unaccounted_attempts.count, 0);
+});
+
+test("syncRun keeps imputing the attempts of a workflow run that a fork replaced", async () => {
+  const forkedEstimate = async (runId: string, firstAttemptUsage?: { model: string; costUsd: number }) => {
+    const retried = await syncRetriedAgentAttempts(runId, firstAttemptUsage);
+    const forked = await forkRun({
+      projectRoot: retried.project,
+      runId,
+      forkFrame: 0,
+      env: { ...retried.env, SMITHERS_FAKE_FORKED_RUN_ID: `ultrafuzz-${runId}-fork` }
+    });
+    assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+    const forkedWorkflowRunId = `ultrafuzz-${runId}-fork`;
+    assert.equal(readRunMetadataDocument(retried.metadataPath, runId).workflow?.run_id, forkedWorkflowRunId);
+    // The runner now reports the fork, which has started but run no attempt yet.
+    fs.writeFileSync(
+      path.join(retried.project, "fake-smithers-inspect.json"),
+      `${JSON.stringify(
+        workflowInspect({
+          workflowRunId: forkedWorkflowRunId,
+          status: "running",
+          state: "running",
+          steps: [{ id: "node:project-discovery", state: "pending" }]
+        })
+      )}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(retried.project, "fake-smithers-events.ndjson"),
+      workflowEvents(forkedWorkflowRunId, [{ type: "RunStarted" }]),
+      "utf8"
+    );
+    const sync = await syncRun({ projectRoot: retried.project, runId, env: retried.env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    return { before: retried.metadata.spend_estimate, after: readRunMetadataDocument(retried.metadataPath, runId) };
+  };
+
+  // The replaced run's usage stays in the estimate, and so does its attempt that reported none.
+  const withUsage = await forkedEstimate("fork-partial-usage", { model: "gpt-5.5", costUsd: 0.5 });
+  assert.equal(withUsage.before?.estimated_spend, "$1.00");
+  const estimate = withUsage.after.spend_estimate;
+  assert.equal(estimate?.workflow_run_id, "ultrafuzz-fork-partial-usage-fork");
+  assert.equal(estimate?.estimated_spend, "$1.00");
+  assert.equal(estimate?.complete, false);
+  assert.deepEqual(
+    estimate?.unaccounted_attempts.entries.map((entry) => [entry.workflow_run_id, entry.attempt, entry.imputation]),
+    [["ultrafuzz-fork-partial-usage", 2, "same-model-mean"]]
+  );
+
+  // A replaced run whose attempts reported no usage still has an estimate with an empty usage ledger.
+  const withoutUsage = await forkedEstimate("fork-without-usage");
+  assert.equal(withoutUsage.before?.estimated_spend, "$6.20");
+  assert.equal(withoutUsage.after.accounting, undefined);
+  assert.equal(withoutUsage.after.spend_estimate?.workflow_run_id, "ultrafuzz-fork-without-usage-fork");
+  assert.equal(withoutUsage.after.spend_estimate?.estimated_spend, "$6.20");
+  assert.equal(withoutUsage.after.spend_estimate?.unaccounted_attempts.count, 2);
 });
 
 /** A one-attempt run in `project` whose usage records `costUsd`, optionally continuing `sourceRunId`. */

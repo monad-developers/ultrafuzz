@@ -322,7 +322,14 @@ function terminalSpendEstimate(
     })),
     routes: new Map(),
     prices: new Map(),
-    unaccountedAttempts: unaccounted.map(([node_id, model_name]) => ({ node_id, iteration: 0, attempt: 0, model_name }))
+    unaccountedAttempts: unaccounted.map(([node_id, model_name], index) => ({
+      workflow_run_id: "workflow-1",
+      source_event_sequence: index,
+      node_id,
+      iteration: 0,
+      attempt: 0,
+      model_name
+    }))
   });
   return { ...estimate, updated_at: FINISHED_AT };
 }

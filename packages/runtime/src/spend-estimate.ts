@@ -9,12 +9,11 @@ import {
   type SpendEstimateFallbackFamily
 } from "@ultrafuzz/artifacts";
 
-import {
-  pricingForContext,
-  type ModelPricing,
-  type ModelPricingProvenance,
-  type PricingCatalogMetadata,
-  type PricingCatalogResult
+import type {
+  ModelPricing,
+  ModelPricingProvenance,
+  PricingCatalogMetadata,
+  PricingCatalogResult
 } from "./model-pricing.js";
 import { isFreeModelId, isZeroRatePricing } from "./model-pricing-catalog.js";
 
@@ -79,8 +78,8 @@ export interface SpendEstimateModelRoute {
 }
 
 /**
- * One attempt's latest usage snapshot, normalized and priced against its route catalog exactly as
- * accounting v4 prices it (`spendEstimateUsageEvidence` in workflow-sync builds it).
+ * One attempt occurrence's latest usage snapshot, normalized and priced against its route catalog
+ * exactly as accounting v4 prices it (`spendEstimateUsageEvidence` in workflow-sync builds it).
  */
 export interface SpendEstimateUsageEvidence {
   model: string;
@@ -102,7 +101,10 @@ export interface SpendEstimateUsageEvidence {
   missingRateComponents: SpendEstimateComponent[];
 }
 
+/** An executed agent attempt occurrence without usage evidence, named by its attempt-ledger identity. */
 export interface SpendEstimateUnaccountedAttemptInput {
+  workflow_run_id: string;
+  source_event_sequence: number;
   node_id: string;
   iteration: number;
   attempt: number;
@@ -131,12 +133,12 @@ export interface SpendEstimateImputationBasis {
 
 export interface SpendEstimateInput {
   workflowRunId: string;
-  /** The latest usage snapshot of each accounted attempt. */
+  /** The latest usage snapshot of each accounted attempt occurrence. */
   events: readonly SpendEstimateUsageEvidence[];
   routes: ReadonlyMap<string, SpendEstimateModelRoute>;
-  /** Route-catalog rates by model, for imputing default usage. */
+  /** Route-catalog rates by model, whose base rates price imputed default usage. */
   prices: ReadonlyMap<string, ModelPricing>;
-  /** Executed agent attempts with no usage evidence. */
+  /** Executed agent attempt occurrences with no usage evidence. */
   unaccountedAttempts: readonly SpendEstimateUnaccountedAttemptInput[];
   /** Attempts known to lack usage evidence whose identity is unknown; they are imputed but not listed. */
   unidentifiedUnaccountedAttempts?: number;
@@ -247,7 +249,9 @@ export function spendEstimatePrices(prices: ReadonlyMap<string, ModelPricing>): 
 /**
  * The imputed spend of one attempt that has no usage evidence: the mean of the accounted attempts on
  * the same model, else the mean of all accounted attempts, else the default attempt usage at the
- * model's route-catalog rates when known and its fallback rates otherwise.
+ * model's route-catalog rates when known and its fallback rates otherwise. Catalog rates are the
+ * base rates: a context tier applies per request, and the default usage is a whole attempt's total
+ * across requests of unknown size, so it never selects a tier.
  */
 export function imputeAttemptSpendUsd(
   estimate: SpendEstimateImputationBasis,
@@ -264,13 +268,7 @@ export function imputeAttemptSpendUsd(
   }
   const fallback = sameModel?.fallback_rates ?? FALLBACK_PRICING[fallbackPricingFamily(modelName ?? "")];
   const catalog = modelName === undefined ? undefined : prices?.get(modelName);
-  const rates =
-    catalog === undefined
-      ? fallback
-      : pricingForContext(
-          catalog,
-          DEFAULT_ATTEMPT_USAGE.uncached_input + DEFAULT_ATTEMPT_USAGE.cache_read + DEFAULT_ATTEMPT_USAGE.cache_write
-        );
+  const rates = catalog ?? fallback;
   const usd = SPEND_ESTIMATE_COMPONENTS.reduce(
     (total, component) =>
       addUsd(
@@ -477,15 +475,21 @@ function imputedAttempts(
   imputationBasis: SpendEstimateImputationBasis,
   assumptions: Map<string, { code: SpendEstimateAssumptionCode; count: number; model?: string }>
 ): RunSpendEstimate["unaccounted_attempts"] {
+  // Occurrences are unique by their attempt-ledger identity: a reset reuses an attempt number, and
+  // another workflow run of the same run can reuse a node, iteration, and attempt.
   const unique = new Map(
     input.unaccountedAttempts.map((attempt) => [
-      JSON.stringify([attempt.node_id, attempt.iteration, attempt.attempt]),
+      JSON.stringify([attempt.workflow_run_id, attempt.source_event_sequence]),
       attempt
     ])
   );
   const attempts = [...unique.values()].sort(
     (left, right) =>
-      compareCodeUnits(left.node_id, right.node_id) || left.iteration - right.iteration || left.attempt - right.attempt
+      compareCodeUnits(left.node_id, right.node_id) ||
+      left.iteration - right.iteration ||
+      left.attempt - right.attempt ||
+      compareCodeUnits(left.workflow_run_id, right.workflow_run_id) ||
+      left.source_event_sequence - right.source_event_sequence
   );
   const unidentified = input.unidentifiedUnaccountedAttempts ?? 0;
   let imputedSpendUsd = 0;
@@ -497,6 +501,8 @@ function imputedAttempts(
     return imputed.imputation;
   };
   const entries = attempts.map((attempt) => ({
+    workflow_run_id: attempt.workflow_run_id,
+    source_event_sequence: attempt.source_event_sequence,
     node_id: attempt.node_id,
     iteration: attempt.iteration,
     attempt: attempt.attempt,

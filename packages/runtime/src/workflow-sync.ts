@@ -835,7 +835,6 @@ export async function synchronizeLinkedWorkflowRun(
       workflowRunId: evidence.smithersRunId,
       controlGeneration: evidence.controlGeneration,
       events: tokenEvents,
-      tasks: loaded.tasks,
       control,
       env: input.env ?? process.env
     });
@@ -1186,8 +1185,6 @@ async function synchronizeWorkflowAccounting(input: {
   workflowRunId: string;
   controlGeneration: string;
   events: WorkflowEvent[];
-  /** The linked workflow's tasks, which name the Smithers task each attempt-ledger entry ran as. */
-  tasks: readonly StoredWorkflowTask[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<WorkflowAccountingSynchronization> {
@@ -1283,7 +1280,6 @@ async function synchronizeWorkflowAccounting(input: {
       layout: input.layout,
       metadata,
       workflowRunId: input.workflowRunId,
-      tasks: input.tasks,
       usageEntries: preparedUsage.entries,
       pricing: estimatePricing.prices,
       routes: synchronizedSpendEstimateRoutes({
@@ -1454,7 +1450,6 @@ function synchronizeUnaccountedSpendEstimate(input: {
   metadata: RunMetadataDocument;
   workflowRunId: string;
   controlGeneration: string;
-  tasks: readonly StoredWorkflowTask[];
   control: WorkflowSynchronizationControl;
 }): WorkflowAccountingSynchronization {
   const spendEstimate = settledSpendEstimate(input.layout, input.metadata, () =>
@@ -1487,24 +1482,19 @@ function synchronizedSpendEstimate(input: {
   layout: RunLayout;
   metadata: RunMetadataDocument;
   workflowRunId: string;
-  tasks: readonly StoredWorkflowTask[];
   usageEntries: readonly UsageLedgerEntry[];
   pricing: ReadonlyMap<string, ModelPricing>;
   routes: ReadonlyMap<string, SpendEstimateModelRoute>;
   cacheReadRatio: number | undefined;
 }): { estimate?: RunSpendEstimate; changed: boolean } {
-  const unaccountedAttempts = unaccountedAgentAttempts(
-    input.layout,
-    input.workflowRunId,
-    input.tasks,
-    input.usageEntries
-  );
+  const occurrences = spendEstimateAttemptOccurrences(replayNodeAttempts(input.layout).entries, input.usageEntries);
+  const unaccountedAttempts = occurrences.unaccounted;
   const previous = input.metadata.spend_estimate;
   if (input.usageEntries.length === 0 && unaccountedAttempts.length === 0) return { changed: previous !== undefined };
   const sourceRunId = input.metadata.source_run_id;
   const next = buildSpendEstimate({
     workflowRunId: input.workflowRunId,
-    events: latestUsageLedgerEntriesByAttempt(input.usageEntries).map((entry) =>
+    events: occurrences.snapshots.map((entry) =>
       spendEstimateUsageEvidence({
         usage: entry.usage,
         modelPricing: input.pricing,
@@ -1531,39 +1521,77 @@ function withSpendEstimate(metadata: RunMetadataDocument, estimate: RunSpendEsti
 }
 
 /**
- * Executed agent attempts of the linked workflow run with no usage-ledger entry. The attempt ledger
- * names an attempt by its planned node and strategy attempt, while usage names the Smithers task
- * that ran it, so each entry is joined to usage through its task's Smithers node ID; both ledgers
- * carry Smithers' own iteration and attempt numbers.
+ * The usage snapshots the spend estimate prices and the executed agent attempts it imputes, per
+ * attempt occurrence across every workflow run of this run (a replay or fork rebinds the run to a
+ * new workflow run while the replaced run's usage stays in the ledger).
+ *
+ * An occurrence is an attempt-ledger entry, identified by (workflow_run_id, source_event_sequence):
+ * a reset (`resume --retry-failed`, `--reset-node`) restarts Smithers' attempt numbering in the
+ * same workflow run, so one (node, iteration, attempt) can name several occurrences. Smithers
+ * records a usage event only while its attempt is in progress, so the event's sequence falls
+ * between the occurrence's start and terminal events. Each occurrence is priced from its own
+ * latest snapshot, and an executed agent occurrence with no usage event in its window is
+ * unaccounted. Usage that no recorded occurrence spans, such as that of an attempt still running,
+ * is priced per attempt from its latest snapshot. Accounting v4 looks up prices only for the
+ * models of each attempt's latest snapshot, so a model that only an earlier occurrence names is
+ * priced at fallback rates.
+ *
+ * The attempt ledger names the planned strategy attempt, while usage names the Smithers task that
+ * ran it: `node:<strategy attempt ID>`, which every task manifest enforces, whatever its control
+ * generation.
  */
-function unaccountedAgentAttempts(
-  layout: RunLayout,
-  workflowRunId: string,
-  tasks: readonly StoredWorkflowTask[],
+function spendEstimateAttemptOccurrences(
+  attempts: readonly NodeAttemptLedgerEntry[],
   usageEntries: readonly UsageLedgerEntry[]
-): SpendEstimateUnaccountedAttemptInput[] {
-  const smithersNodeIds = new Map(tasks.map((task) => [task.attemptId, task.smithersNodeId] as const));
-  const accounted = new Set(
-    usageEntries.map((entry) => JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]))
-  );
-  const unaccounted = new Map<string, SpendEstimateUnaccountedAttemptInput>();
-  for (const entry of replayNodeAttempts(layout).entries) {
-    if (entry.workflow_run_id !== workflowRunId || entry.reuse.status !== "executed" || entry.agent === undefined) {
-      continue;
-    }
-    const nodeId = smithersNodeIds.get(entry.strategy_attempt_id);
-    if (nodeId === undefined) continue;
-    const identity = JSON.stringify([entry.workflow_run_id, nodeId, entry.iteration, entry.attempt]);
-    if (accounted.has(identity)) continue;
-    const modelName = entry.agent.model_name;
-    unaccounted.set(identity, {
-      node_id: nodeId,
-      iteration: entry.iteration,
-      attempt: entry.attempt,
-      ...(modelName === undefined ? {} : { model_name: modelName })
-    });
+): { snapshots: UsageLedgerEntry[]; unaccounted: SpendEstimateUnaccountedAttemptInput[] } {
+  const occurrencesByAttempt = new Map<string, NodeAttemptLedgerEntry[]>();
+  for (const entry of attempts) {
+    const key = usageAttemptKey(entry.workflow_run_id, `node:${entry.strategy_attempt_id}`, entry);
+    occurrencesByAttempt.set(key, [...(occurrencesByAttempt.get(key) ?? []), entry]);
   }
-  return [...unaccounted.values()];
+  // Latest snapshots keyed by occurrence identity, or by attempt for usage no occurrence spans; the
+  // two keys never collide, since they encode arrays of different lengths.
+  const latest = new Map<string, UsageLedgerEntry>();
+  const accounted = new Set<string>();
+  for (const usage of usageEntries) {
+    const attemptKey = usageAttemptKey(usage.workflow_run_id, usage.node_id, usage);
+    const sequence = usage.source_event_sequence;
+    const occurrence = occurrencesByAttempt
+      .get(attemptKey)
+      ?.find((entry) => entry.started_event_sequence <= sequence && sequence <= entry.source_event_sequence);
+    const occurrenceIdentity = occurrence === undefined ? undefined : nodeAttemptLedgerIdentity(occurrence);
+    if (occurrenceIdentity !== undefined) accounted.add(occurrenceIdentity);
+    const key = occurrenceIdentity ?? attemptKey;
+    const previous = latest.get(key);
+    if (previous === undefined || sequence > previous.source_event_sequence) latest.set(key, usage);
+  }
+  const unaccounted = attempts.flatMap((entry): SpendEstimateUnaccountedAttemptInput[] => {
+    if (entry.reuse.status !== "executed" || entry.agent === undefined) return [];
+    if (accounted.has(nodeAttemptLedgerIdentity(entry))) return [];
+    const modelName = entry.agent.model_name;
+    return [
+      {
+        workflow_run_id: entry.workflow_run_id,
+        source_event_sequence: entry.source_event_sequence,
+        node_id: `node:${entry.strategy_attempt_id}`,
+        iteration: entry.iteration,
+        attempt: entry.attempt,
+        ...(modelName === undefined ? {} : { model_name: modelName })
+      }
+    ];
+  });
+  return {
+    snapshots: [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence),
+    unaccounted
+  };
+}
+
+function usageAttemptKey(
+  workflowRunId: string,
+  smithersNodeId: string,
+  coordinate: { iteration: number; attempt: number }
+): string {
+  return JSON.stringify([workflowRunId, smithersNodeId, coordinate.iteration, coordinate.attempt]);
 }
 
 /**
