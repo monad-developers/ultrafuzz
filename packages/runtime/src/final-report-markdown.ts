@@ -712,31 +712,41 @@ function proofOfConcept(issue: JsonRecord): RenderableProof | undefined {
 }
 
 function markdownOutsideFencedCode(markdown: string): string {
-  const prose: string[] = [];
+  return markdownLines(markdown)
+    .filter(({ kind }) => kind === "prose")
+    .map(({ text }) => text)
+    .join("\n");
+}
+
+interface MarkdownLine {
+  text: string;
+  /** A fence line opens or closes fenced code; a code line sits inside it. */
+  kind: "prose" | "fence" | "code";
+}
+
+function markdownLines(markdown: string): MarkdownLine[] {
+  const lines: MarkdownLine[] = [];
   let openFence: { marker: "`" | "~"; length: number } | undefined;
-  for (const line of markdown.split("\n")) {
+  for (const text of markdown.split("\n")) {
     if (openFence === undefined) {
-      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
-      if (opening === null) {
-        prose.push(line);
-        continue;
-      }
-      const delimiter = opening[1]!;
-      const marker = delimiter[0] as "`" | "~";
-      if (marker === "`" && opening[2]!.includes("`")) {
-        prose.push(line);
-        continue;
-      }
-      openFence = { marker, length: delimiter.length };
+      openFence = openingFence(text);
+      lines.push({ text, kind: openFence === undefined ? "prose" : "fence" });
       continue;
     }
-    const closing = /^ {0,3}(`+|~+)[ \t]*$/u.exec(line)?.[1];
-    if (closing?.[0] === openFence.marker && closing.length >= openFence.length) {
-      openFence = undefined;
-      continue;
-    }
+    const closing = /^ {0,3}(`+|~+)[ \t]*$/u.exec(text)?.[1];
+    const closes = closing?.[0] === openFence.marker && closing.length >= openFence.length;
+    if (closes) openFence = undefined;
+    lines.push({ text, kind: closes ? "fence" : "code" });
   }
-  return prose.join("\n");
+  return lines;
+}
+
+function openingFence(line: string): { marker: "`" | "~"; length: number } | undefined {
+  const [, delimiter, info] = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line) ?? [];
+  if (delimiter === undefined || info === undefined) return undefined;
+  const marker = delimiter.startsWith("`") ? "`" : "~";
+  // A backtick fence's info string cannot hold a backtick; such a line is prose.
+  return marker === "`" && info.includes("`") ? undefined : { marker, length: delimiter.length };
 }
 
 function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown): string {
@@ -754,7 +764,7 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     lines.push("| Issue id | Title |", "| --- | --- |");
     for (const issue of issues) {
       lines.push(
-        `| ${issue.id} | [${escapeTable(renderedIssueLabel(issue))}](#${markdownAnchor(renderedIssueVisibleLabel(issue))}) |`
+        `| ${issue.id} | [${escapeTable(renderedIssueLabel(issue, true))}](#${markdownAnchor(renderedIssueVisibleLabel(issue))}) |`
       );
     }
     lines.push("", issueCountSentence(issues), "");
@@ -981,8 +991,9 @@ function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
   }));
 }
 
-function renderedIssueLabel(issue: RenderedIssue): string {
-  return `[${findingProse(issue.id)}] - ${findingProse(issue.title)}`;
+/** `cell`: the label sits in a table cell (see findingProse). */
+function renderedIssueLabel(issue: RenderedIssue, cell = false): string {
+  return `[${findingProse(issue.id, cell)}] - ${findingProse(issue.title, cell)}`;
 }
 
 /** The label text a reader sees, which GitHub slugs into the heading anchor. */
@@ -1040,7 +1051,15 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   const { issue } = rendered;
-  lines.push("", renderedIssueHeading(rendered), "", findingProse(issueDescription(issue)), "", "### Severity", "");
+  lines.push(
+    "",
+    renderedIssueHeading(rendered),
+    "",
+    findingProseBlock(issueDescription(issue)),
+    "",
+    "### Severity",
+    ""
+  );
   const impact = riskAssessment(issue, "impact");
   const likelihood = riskAssessment(issue, "likelihood");
   lines.push(`- **Impact**: ${impact.label}: ${findingProse(impact.rationale)}`);
@@ -1057,7 +1076,7 @@ function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
     "",
     "### Remediation",
     "",
-    isAvailable(issue.recommendation) ? findingProse(String(issue.recommendation)) : REMEDIATION_UNRECORDED_NOTICE
+    isAvailable(issue.recommendation) ? findingProseBlock(String(issue.recommendation)) : REMEDIATION_UNRECORDED_NOTICE
   );
 }
 
@@ -1067,7 +1086,7 @@ function appendProofOfConcept(lines: string[], issue: JsonRecord): void {
     throw new Error("production issue proof of concept is missing a human-readable scenario or execution trace");
   }
   for (const [index, step] of proof.steps.entries()) {
-    lines.push(`${String(index + 1)}. ${findingProse(step)}`);
+    lines.push(`${String(index + 1)}. ${findingProseBlock(step)}`);
   }
   const code = publicCode(proof.code);
   const language = safeFenceLanguage(proof.language);
@@ -1112,7 +1131,7 @@ function appendPropertyProvenance(
     "| --- | --- | --- | --- | --- | --- |"
   );
   for (const entry of entries) {
-    const finding = propertyFindingLabel(entry, issues, outcomes);
+    const finding = propertyFindingCell(entry, issues, outcomes);
     const sources = Array.isArray(entry.sources) ? entry.sources.filter(isRecord) : [];
     const paths = uniqueStrings([
       ...(Array.isArray(entry.implementation_paths) ? entry.implementation_paths : []),
@@ -1123,7 +1142,7 @@ function appendPropertyProvenance(
       ...(typeof entry.fuzzer_backend === "string" ? [entry.fuzzer_backend] : [])
     ]);
     lines.push(
-      `| ${tableCell(finding)} | ${tableList(entry.property_ids)} | ${tableList(sources.map((source) => source.source_node_id))} | ${tableList(sources.map((source) => source.source_property_id))} | ${tableList(paths)} | ${tableList(backends)} |`
+      `| ${finding} | ${tableList(entry.property_ids)} | ${tableList(sources.map((source) => source.source_node_id))} | ${tableList(sources.map((source) => source.source_property_id))} | ${tableList(paths)} | ${tableList(backends)} |`
     );
   }
 }
@@ -1168,7 +1187,7 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
   const unselectedExpected = referenceExpected.filter((id) => !selectedIds.has(id));
   if (unselectedExpected.length > 0) {
     lines.push(
-      `- Unselected reference expectation properties (not fulfilled): ${unselectedExpected.map((id) => `\`${inlineValue(id)}\``).join(", ")}`
+      `- Unselected reference expectation properties (not fulfilled): ${unselectedExpected.map((id) => propertyIdMarkdown(id)).join(", ")}`
     );
   }
   const blockerSummaries = Array.isArray(value.blocker_summaries)
@@ -1180,6 +1199,15 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
       lines.push(`- ${publicProse(summary)}`);
     }
   }
+}
+
+/**
+ * A property ID as inline code, where a backslash stays literal. Inside a code span `<` and `>` stay
+ * raw, which the raw-HTML rule reads as markup, so an ID holding either renders as escaped text.
+ */
+function propertyIdMarkdown(id: unknown): string {
+  const value = String(id);
+  return /[<>]/u.test(value) ? findingProse(value) : `\`${inlineValue(id)}\``;
 }
 
 /**
@@ -1410,14 +1438,14 @@ function appendPriorFindingDisposition(lines: string[], issues: RenderedIssue[],
     addPriorDisposition(
       groups,
       recordField(issue.issue, "lifecycle")?.comparison_disposition,
-      `[${issue.id}] - ${issue.title}`
+      renderedIssueLabel(issue)
     );
   }
   for (const outcome of outcomes) {
     addPriorDisposition(
       groups,
       recordField(outcome, "lifecycle")?.comparison_disposition,
-      recordTitle(outcome, "Untitled outcome")
+      findingProseBlock(recordTitle(outcome, "Untitled outcome"))
     );
   }
   if (groups.size === 0) {
@@ -1431,7 +1459,7 @@ function appendPriorFindingDisposition(lines: string[], issues: RenderedIssue[],
     }
     lines.push("", `### ${label}`, "");
     for (const entry of entries) {
-      lines.push(`- ${publicProse(entry)}`);
+      lines.push(`- ${entry}`);
     }
   }
 }
@@ -1449,7 +1477,7 @@ function appendNonProductionOutcomes(lines: string[], outcomes: JsonRecord[]): v
   );
   for (const outcome of outcomes) {
     lines.push(
-      `| ${tableCell(outcome.triage_classification)} | ${tableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(outcome.recommended_next_action)} |`
+      `| ${tableCell(outcome.triage_classification)} | ${findingTableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(outcome.recommended_next_action)} |`
     );
   }
 }
@@ -1504,19 +1532,23 @@ function markdownAnchor(heading: string): string {
     .replace(/\s/gu, "-");
 }
 
-function propertyFindingLabel(entry: JsonRecord, issues: RenderedIssue[], outcomes: JsonRecord[]): string {
+/** The provenance row's Finding cell: the issue label, or the outcome's title, as finding prose in a cell. */
+function propertyFindingCell(entry: JsonRecord, issues: RenderedIssue[], outcomes: JsonRecord[]): string {
   const findingId = firstAvailableString(entry.finding_id);
   const issue = issues.find(({ issue: candidate }) => candidate.id === findingId);
   if (issue !== undefined) {
-    return `[${issue.id}] - ${issue.title}`;
+    return escapeTable(renderedIssueLabel(issue, true));
   }
   const outcome = outcomes.find((candidate) => candidate.id === findingId);
-  return outcome === undefined
-    ? (firstAvailableString(entry.title, findingId) ?? "unavailable")
-    : recordTitle(outcome, findingId ?? "Untitled outcome");
+  return findingTableCell(
+    outcome === undefined
+      ? (firstAvailableString(entry.title, findingId) ?? "unavailable")
+      : recordTitle(outcome, findingId ?? "Untitled outcome")
+  );
 }
 
-function addPriorDisposition(groups: Map<string, string[]>, value: unknown, title: string): void {
+/** `entry` is the rendered Markdown of one list item's body. */
+function addPriorDisposition(groups: Map<string, string[]>, value: unknown, entry: string): void {
   const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[ _]+/gu, "-") : "";
   const label =
     normalized === "promoted-again"
@@ -1529,7 +1561,7 @@ function addPriorDisposition(groups: Map<string, string[]>, value: unknown, titl
             ? "Not searched"
             : undefined;
   if (label !== undefined) {
-    groups.set(label, [...(groups.get(label) ?? []), title]);
+    groups.set(label, [...(groups.get(label) ?? []), entry]);
   }
 }
 
@@ -1571,6 +1603,14 @@ function tableList(value: unknown): string {
 
 function tableCell(value: unknown): string {
   return isAvailable(value) ? escapeTable(publicProse(String(value))) : "unavailable";
+}
+
+/**
+ * A finding title in a table cell: finding prose, so inline code stays code where a cell can hold
+ * it, with every pipe escaped.
+ */
+function findingTableCell(value: string): string {
+  return isAvailable(value) ? escapeTable(findingProse(value, true)) : "unavailable";
 }
 
 function isAvailable(value: unknown): boolean {
@@ -1643,20 +1683,22 @@ const ENTITY_NAME_PREFIX = /^[A-Za-z][A-Za-z0-9]{0,31};/u;
  * Backtick runs pair as CommonMark pairs them: a run of one or two backticks opens a span that the
  * next run of the same length closes. A span is kept verbatim unless its content holds `<` or `>`,
  * which the raw-HTML rule would read as markup; that span, any run of three or more backticks, and
- * any unmatched run are escaped as text instead, so no fence can open.
+ * any unmatched run are escaped as text instead, so no fence can open. In a table `cell`, a span
+ * holding `\|` is escaped as text too: escapeTable would make it `\\|`, which a GFM row reads as an
+ * escaped backslash and a cell delimiter, while the text's `&#92;\|` keeps the cell whole.
  *
  * Text renders exactly as written. A backslash before ASCII punctuation (or at the end) becomes
  * `&#92;`, never `\\`, which the private-path re-scan would read as a UNC path, as in `\x19\x01`.
  * `&` becomes `&amp;` only where it would start a named character reference (`#` is always escaped,
  * so a numeric one cannot form); elsewhere it stays raw, since `\&` after `B:` or `file:` would read
  * as a Windows or `file:` path. `_` stays raw only between two letters or digits, where it cannot
- * open or close emphasis. `](` cannot form an inline link, `<`/`>` cannot form HTML or an autolink,
- * and the escaped first character cannot open a list, a block quote, a table, a setext underline,
- * or a link reference definition. publicProse stays the escaper for every other report field and
- * for the coverage producer's section.
+ * open or close emphasis. `](` cannot form an inline link, and `<`/`>` cannot form HTML, an
+ * autolink, or a block quote. findingProseBlock also escapes a first character that could open a
+ * block. publicProse stays the escaper for every other report field and for the coverage
+ * producer's section.
  */
-function findingProse(value: string): string {
-  return findingProseParts(value)
+function findingProse(value: string, cell = false): string {
+  return findingProseParts(value, cell)
     .map((part) => part.markdown)
     .join("");
 }
@@ -1667,7 +1709,7 @@ function findingProseVisibleText(value: string): string {
     .join("");
 }
 
-function findingProseParts(value: string): FindingProsePart[] {
+function findingProseParts(value: string, cell = false): FindingProsePart[] {
   const text = value.replace(/\s+/gu, " ").trim();
   const runs = [...text.matchAll(/`+/gu)].map((match) => ({ start: match.index, end: match.index + match[0].length }));
   // The next run of the same length closes a one- or two-backtick opener.
@@ -1690,7 +1732,7 @@ function findingProseParts(value: string): FindingProsePart[] {
     // A span is consumed whole either way: runs inside it never pair again.
     consumedThrough = closerIndex;
     const content = text.slice(opener.end, closer.start);
-    if (/[<>]/u.test(content)) continue;
+    if (/[<>]/u.test(content) || (cell && content.includes("\\|"))) continue;
     parts.push(findingProseText(text, textStart, opener.start), {
       markdown: text.slice(opener.start, closer.end),
       // CommonMark strips one space from each side of content that is not only spaces.
@@ -1706,13 +1748,21 @@ function findingProseParts(value: string): FindingProsePart[] {
 function findingProseText(text: string, start: number, end: number): FindingProsePart {
   let markdown = "";
   for (let index = start; index < end; index += 1) markdown += findingProseCharacter(text, index);
-  return { markdown: start === 0 ? escapeFindingProseStart(markdown) : markdown, visible: text.slice(start, end) };
+  return { markdown, visible: text.slice(start, end) };
 }
 
 /**
- * Prose can start a line or a list item, where its first characters could open a list, a setext
- * underline, a table, or a link reference definition. A leading `|` becomes an entity rather than
- * `\|`, which escapeTable would turn into an escaped backslash and a cell delimiter in the index.
+ * Finding prose that opens a Markdown block: a paragraph, or the body of a list item. Everywhere
+ * else (an issue label, a rationale after its label, a table cell) the prose follows other text on
+ * its line, where an escaped first `[` would leave its closing `]` to end the index link early.
+ */
+function findingProseBlock(value: string): string {
+  return escapeFindingProseStart(findingProse(value));
+}
+
+/**
+ * At the start of a block the first characters could open a list, a setext underline, a table, or
+ * a link reference definition. A leading `|` becomes an entity, which no later escape rewrites.
  */
 function escapeFindingProseStart(markdown: string): string {
   return markdown
@@ -1788,13 +1838,43 @@ function containsUnredactedSecretInValue(value: unknown, keyPath: readonly strin
  * The Markdown re-scan has no key path, so the retained identifiers (which the speculative pass
  * would flag) are substituted with the placeholder before scanning. They were already scanned
  * positive-only in the report walk; a leftover real secret anywhere else still changes under the pass.
+ *
+ * Positive detections read the whole document, so a key label that ends one block and the key that
+ * opens the next still fail closed. The speculative pass reads one rendered unit at a time (see
+ * markdownSecretScanUnits): its key-name rule would otherwise take the renderer's next token (a
+ * `##` heading, a list marker, a cell's `|`) as the value of prose that ends in `token:`.
  */
 function containsUnredactedSecretInMarkdown(markdown: string, report: JsonRecord): boolean {
   const scanned = retainedIdentifierValues(report).reduce(
     (current, identifier) => current.replaceAll(identifier, PUBLIC_SECRET_REDACTION_PLACEHOLDER),
     markdown
   );
-  return containsUnredactedSecret(scanned);
+  return (
+    containsUnredactedSecret(scanned, "positive-only") ||
+    [...new Set(markdownSecretScanUnits(scanned))].some((unit) => containsUnredactedSecret(unit))
+  );
+}
+
+/**
+ * Each fenced block whole, as the report walk read its proof code, and each other line split at the
+ * renderer's own delimiters: an unescaped table pipe, and the `**` around a bold label (finding and
+ * public prose escape `*`, and a table cell escapes `|`). Every finding-prose or inline value
+ * renders on one line, and each report string was already scanned whole by the report walk.
+ */
+function markdownSecretScanUnits(markdown: string): string[] {
+  const units: string[] = [];
+  let code: string[] | undefined;
+  for (const { text, kind } of markdownLines(markdown)) {
+    if (kind === "code") {
+      (code ??= []).push(text);
+      continue;
+    }
+    if (code !== undefined) units.push(code.join("\n"));
+    code = undefined;
+    units.push(...text.split(/(?<!\\)\||\*\*/u));
+  }
+  if (code !== undefined) units.push(code.join("\n"));
+  return units;
 }
 
 function retainedIdentifierValues(report: JsonRecord): string[] {
@@ -1840,11 +1920,12 @@ function redactSecretsInStringValues(value: unknown, keyPath: readonly string[] 
 }
 
 function containsPrivatePath(value: string): boolean {
-  return privatePathPatterns().some((pattern) => pattern.test(value));
+  return redactPrivatePaths(value) !== value;
 }
 
 function containsPrivatePathInMarkdown(markdown: string): boolean {
-  return privateMarkdownPathPatterns().some((pattern) => pattern.test(markdown));
+  const scanned = markdown.replace(RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN, "$1 ");
+  return privateMarkdownPathPatterns().some((pattern) => pattern.test(scanned));
 }
 
 function containsPrivatePathInValue(value: unknown): boolean {
@@ -1883,7 +1964,24 @@ function collapseRedactionDuplicates(original: readonly unknown[], redacted: unk
   return [...new Set(redacted)];
 }
 
+/**
+ * Redact every match of the strict patterns, then redact again from the end of each
+ * PATH_SLASH_BEFORE_NON_PATH_RUN as if a word started there, which is how the Markdown re-scan
+ * reads it: a path after a leading slash and `*` keeps the slash and `*` and becomes
+ * `[redacted-path]`.
+ */
 function redactPrivatePaths(value: string): string {
+  const redacted = redactPrivatePathMatches(value);
+  const ends = Array.from(redacted.matchAll(PATH_SLASH_BEFORE_NON_PATH_RUN), (match) => match.index + match[0].length);
+  return [0, ...ends]
+    .map((start, index) => {
+      const piece = redacted.slice(start, ends[index]);
+      return index === 0 ? piece : redactPrivatePathMatches(piece);
+    })
+    .join("");
+}
+
+function redactPrivatePathMatches(value: string): string {
   return privatePathPatterns().reduce(
     (current, pattern) => current.replace(pattern, (_match, prefix: string) => `${prefix}[redacted-path]`),
     value
@@ -1891,16 +1989,35 @@ function redactPrivatePaths(value: string): string {
 }
 
 /**
- * Report strings are plain text, so a path after a literal `\`, `&lt;`, or a `|` that starts a word
- * is still a path: findingProse writes the first two as `&#92;` and `&amp;lt;`, and a field's leading
- * `|` as `&#124;`, each ending in a `;` that the Markdown re-scan reads as a boundary. A `|` that
- * ends a word is not one, so `|a - b|/b` stays readable. The renderer's own escapes are exempted
- * only when the Markdown is re-scanned.
+ * A slash where a path could start, or a private directory's slash, followed by a run of the
+ * characters no path starts with (`*`, `<`, `>`, a backtick), each optionally after another slash,
+ * as in a C comment opener, `<Foo />`, `artifacts/<run-id>`, or a `/**` glob. The strict patterns
+ * start no path inside the run, and nothing after it is at a boundary for them.
+ */
+const PATH_SLASH_BEFORE_NON_PATH_RUN =
+  /(?:(?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/[*<>`]+|(?:^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[<>`][*<>`]*)(?:\/[*<>`]+)*/gmu;
+
+/**
+ * The same run in rendered Markdown, raw or as the renderer's escapes (`\*`, `` \` ``, `&lt;`,
+ * `&gt;`). The Markdown re-scan drops the run and puts a space after its leading slash, so neither
+ * the slash nor the escapes read as a path, and whatever follows still starts one: report.json was
+ * redacted from the same point, so only a path the strict pass did not see can be left there.
+ */
+const RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN =
+  /((?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/|(?:^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/(?=\\`|&[gl]t;|[<>`]))(?:\\[*`]|&[gl]t;|[*<>`])+(?:\/(?:\\[*`]|&[gl]t;|[*<>`])+)*/gmu;
+
+/**
+ * Report strings are plain text, so a path after a literal `\`, `&lt;`, `>`, or a `|` that starts a
+ * word is still a path: findingProse writes the first three as `&#92;`, `&amp;lt;`, and `&gt;`, and
+ * a block's leading `|` as `&#124;`, each ending in a `;` that the Markdown re-scan reads as a
+ * boundary. A `|` that ends a word is not a boundary, so `|a - b|/b` stays readable, and `<` is not
+ * one either, so a closing tag such as `</div>` stays readable too. The renderer's own escapes are
+ * exempted only when the Markdown is re-scanned.
  */
 function privatePathPatterns(): RegExp[] {
   return [
     /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3})[^\s"'`()[\]{}<>]*/gimu,
-    /(^|[\s("'`=,:;[\\]|(?<!\S)\|)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
+    /(^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
     /(^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
     /(^|[\s("'`=,:[])[A-Za-z]:\\[^\s"'`()[\]{}<>]+/gmu,
     /(^|[\s("'`=,:[])\\\\[^\s"'`()[\]{}<>]+/gmu
@@ -1909,16 +2026,18 @@ function privatePathPatterns(): RegExp[] {
 
 /**
  * The same patterns over rendered Markdown, where the renderer's own escapes are not path syntax.
- * The `;` closing an escaped `<` (`&lt;`, as in a closing tag) or findingProse's `&#92;` (a
- * backslash before punctuation) is not a path boundary, and a backslash the renderer writes before
- * the punctuation it escapes is not a `file:\` or `B:\` separator. Every report string was redacted
- * by the strict JSON patterns before rendering, so a path after a literal `\`, `&lt;`, `B:\`, or
- * `file:\` is already gone, and only the renderer's escape can remain there.
+ * The `;` closing an escaped `<` or `>` (`&lt;` as in a closing tag, `&gt;`) or findingProse's
+ * `&#92;` (a backslash before punctuation) is not a path boundary. An escaped run right after a
+ * slash (`\*`, `` \` ``, `&lt;`, `&gt;`) has already been replaced by a space (see
+ * RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN). A backslash the renderer writes before the punctuation
+ * it escapes is not a `file:\` or `B:\` separator. Every report string was redacted by the strict
+ * JSON patterns before rendering, so a path after a literal `\`, `&lt;`, `>`, `B:\`, or `file:\` is
+ * already gone, and only the renderer's escape can remain there.
  */
 function privateMarkdownPathPatterns(): RegExp[] {
   return [
     /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3}(?![!-/:-@[-`{-~]))[^\s"'`()[\]{}<>]*/gimu,
-    /(^|[\s("'`=,:;[\\]|(?<!\S)\|)(?<!&lt;|&#92;)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
+    /(^|[\s("'`=,:;>[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
     /(^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
     /(^|[\s("'`=,:[])[A-Za-z]:\\(?![!-/:-@[-`{-~])[^\s"'`()[\]{}<>]+/gmu,
     /(^|[\s("'`=,:[])\\\\[^\s"'`()[\]{}<>]+/gmu

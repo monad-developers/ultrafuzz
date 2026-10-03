@@ -1620,6 +1620,24 @@ function markdownNodes(markdown: string): Array<{ type: string; url?: string; te
   return nodes;
 }
 
+/** GitHub's heading slug: lowercase, keep letters, marks, digits, spaces, "-" and "_", then spaces become "-". */
+function headingSlug(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
+    .replace(/\s/gu, "-");
+}
+
+function titledReport(title: string): Record<string, unknown> {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.title = title;
+  for (const entry of report.property_provenance as Array<Record<string, unknown>>) entry.title = title;
+  return report;
+}
+
 test("upstream prose with link or image syntax renders as literal text", () => {
   const report = renderableReport();
   const [issue] = report.issues as Array<Record<string, unknown>>;
@@ -1701,13 +1719,6 @@ test("upstream prose that reads like a legacy report label still renders", () =>
 });
 
 test("issue titles with non-ASCII letters, underscores, and code spans render index anchors that resolve", () => {
-  // GitHub heading slugs: lowercase, keep letters, marks, digits, spaces, "-" and "_", then spaces become "-".
-  const slug = (text: string): string =>
-    text
-      .trim()
-      .toLowerCase()
-      .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
-      .replace(/\s/gu, "-");
   for (const title of [
     "Δ-neutral rebalance drifts",
     "Naïve [share] math",
@@ -1717,21 +1728,15 @@ test("issue titles with non-ASCII letters, underscores, and code spans render in
     "Q&amp;A \\x19 prefix",
     "| piped `a|b` title"
   ]) {
-    const report = renderableReport();
-    const [issue] = report.issues as Array<Record<string, unknown>>;
-    if (issue === undefined) throw new Error("missing issue fixture");
-    issue.title = `[L-01] - ${title}`;
-    for (const entry of report.property_provenance as Array<Record<string, unknown>>) entry.title = issue.title;
-
-    const markdown = projectCanonicalFinalReport(report).markdown;
+    const markdown = projectCanonicalFinalReport(titledReport(`[L-01] - ${title}`)).markdown;
     const nodes = markdownNodes(markdown);
-    const headings = new Set(nodes.filter((node) => node.type === "heading").map((node) => slug(node.text)));
+    const headings = new Set(nodes.filter((node) => node.type === "heading").map((node) => headingSlug(node.text)));
     const anchors = nodes.filter((node) => node.type === "link" && node.url?.startsWith("#"));
     assert.ok(anchors.length > 0, title);
     for (const anchor of anchors) assert.ok(headings.has(anchor.url?.slice(1) ?? ""), `${title}: ${anchor.url ?? ""}`);
   }
-  // A GFM table row splits on every pipe that is not backslash-escaped, so the index escapes each one
-  // and a leading pipe stays an entity rather than an escaped backslash before a delimiter.
+  // A GFM table row splits on every pipe that is not backslash-escaped, so the index escapes each one,
+  // including a title's first character: the title follows the label's `] - `, so it opens no block.
   const piped = renderableReport();
   const [pipedIssue] = piped.issues as Array<Record<string, unknown>>;
   if (pipedIssue === undefined) throw new Error("missing issue fixture");
@@ -1739,7 +1744,7 @@ test("issue titles with non-ASCII letters, underscores, and code spans render in
   for (const entry of piped.property_provenance as Array<Record<string, unknown>>) entry.title = pipedIssue.title;
   assert.ok(
     projectCanonicalFinalReport(piped).markdown.includes(
-      "\n| L-01 | [[L-01] - &#124; piped `a\\|b` title](#l-01----piped-ab-title) |\n"
+      "\n| L-01 | [[L-01] - \\| piped `a\\|b` title](#l-01----piped-ab-title) |\n"
     )
   );
 });
@@ -2291,7 +2296,8 @@ test("finding prose keeps public projections fixed points without private-conten
   pipeIssue.title = "[L-01] - |/srv/customer/key leaks";
   for (const entry of pipeTitle.property_provenance as Array<Record<string, unknown>>) entry.title = pipeIssue.title;
   const pipePublished = projectPublicCanonicalFinalReport(pipeTitle);
-  assert.ok(pipePublished.markdown.includes("\n## [L-01] - &#124;[redacted-path] leaks\n"), pipePublished.markdown);
+  assert.ok(pipePublished.markdown.includes("\n## [L-01] - |[redacted-path] leaks\n"), pipePublished.markdown);
+  assert.ok(pipePublished.markdown.includes("](#l-01---redacted-path-leaks) |\n"), pipePublished.markdown);
   assertPublicProjectionFixedPoint(pipePublished);
 });
 
@@ -2301,4 +2307,283 @@ test("blocker summaries keep the frozen public prose escaping", () => {
     "Needs `max_supply` and *care*"
   ];
   assert.ok(projectCanonicalFinalReport(report).markdown.includes("\n- Needs \\`max\\_supply\\` and \\*care\\*\n"));
+});
+
+test("an issue title that opens with a bracket keeps a working index link, including a redacted leading path", () => {
+  const redactedTitle = "[L-01] - /home/runner/private/Vault.sol rounds deposits down";
+  const cases = [
+    { project: projectCanonicalFinalReport, title: "[L-01] - [Vault] deposit rounding" },
+    { project: projectCanonicalFinalReport, title: "[L-01] - - [x] 1. =| title" },
+    {
+      project: projectPublicCanonicalFinalReport,
+      title: redactedTitle,
+      label: "[L-01] - [redacted-path] rounds deposits down"
+    }
+  ];
+  for (const { project, title, label = title } of cases) {
+    const projection = project(titledReport(title));
+    const nodes = markdownNodes(projection.markdown);
+    assert.ok(
+      nodes.some((node) => node.type === "heading" && node.text === label),
+      `${title}: ${projection.markdown}`
+    );
+    // The index row's link text is the whole label, and its fragment is the heading's slug.
+    const link = nodes.find((node) => node.type === "link" && node.text === label);
+    assert.equal(link?.url, `#${headingSlug(label)}`, `${title}: ${projection.markdown}`);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true, title);
+  }
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(titledReport(redactedTitle)));
+});
+
+test("remediation that writes the renderer's escapes next to a slash publishes, and a real path there is redacted", () => {
+  const cases: ReadonlyArray<readonly [recommendation: string, published: string]> = [
+    ["Delete the stale /* unchecked */ annotation.", "Delete the stale /* unchecked */ annotation."],
+    ["Use `<`/`<=` consistently.", "Use `<`/`<=` consistently."],
+    ["Use `a >= b`/`a > b` checks.", "Use `a >= b`/`a > b` checks."],
+    ["Render it as <Foo />.", "Render it as <Foo />."],
+    ["Keep outputs under artifacts/<run-id> only.", "Keep outputs under artifacts/<run-id> only."],
+    // A `>` is a path boundary in report.json, so whatever follows `>/` is redacted before rendering
+    // and the re-scan can treat the escaped `&gt;` in front of a slash as the renderer's own escape.
+    ["Ensure ratio>/2 is rejected.", "Ensure ratio>[redacted-path] is rejected."],
+    ["Delete the stale /srv/customer/key annotation.", "Delete the stale [redacted-path] annotation."],
+    ["Use `<`/srv/customer/key consistently.", "Use `<`[redacted-path] consistently."],
+    ["Use `a >= b`/srv/customer/key checks.", "Use `a >= b`[redacted-path] checks."],
+    ["Render it as <Foo /srv/customer/key.", "Render it as <Foo [redacted-path]"],
+    ["Keep outputs under artifacts/srv/customer only.", "Keep outputs under [redacted-path] only."],
+    ["Ensure ratio>/srv/customer/key is rejected.", "Ensure ratio>[redacted-path] is rejected."],
+    // The re-scan reads the escaped run after a slash as a word break, so report.json redacts a path
+    // that follows the run, however long or nested the run is.
+    ["Delete the stale /*/srv/customer/key annotation.", "Delete the stale /*[redacted-path] annotation."],
+    ["Use `<`/</srv/customer/key consistently.", "Use `<`/<[redacted-path] consistently."],
+    ["Render it as <Foo />artifacts/srv/customer.", "Render it as <Foo />[redacted-path]"],
+    ["Keep outputs under artifacts/</srv/customer only.", "Keep outputs under artifacts/<[redacted-path] only."],
+    [
+      "Keep outputs under artifacts/<artifacts/srv/customer only.",
+      "Keep outputs under artifacts/<[redacted-path] only."
+    ],
+    ["Match /**/srv/customer/key and /*/*/srv/customer/key.", "Match /**[redacted-path] and /*/*[redacted-path]"],
+    ["Read /*file:///srv/customer/key now.", "Read /*[redacted-path] now."],
+    // A slash inside a word starts no run, so a relative glob stays readable.
+    [
+      "Match test/*/Invariant.t.sol and test/**/Vault.t.sol, not /**/*.sol or /*/*.",
+      "Match test/*/Invariant.t.sol and test/**/Vault.t.sol, not /**/*.sol or /*/*."
+    ]
+  ];
+  for (const [recommendation, expected] of cases) {
+    const published = projectPublicCanonicalFinalReport(remediationReport(recommendation));
+    assert.equal(
+      (published.report.issues as Array<Record<string, unknown>>)[0]?.recommendation,
+      expected,
+      recommendation
+    );
+    assert.doesNotMatch(published.markdown, /srv\/customer/u, recommendation);
+    const remediation = published.markdown.split("\n### Remediation\n\n")[1]?.split("\n")[0] ?? "";
+    assert.ok(
+      markdownNodes(remediation).some((node) => node.type === "paragraph" && node.text === expected),
+      `${recommendation}: ${remediation}`
+    );
+    assertPublicProjectionFixedPoint(published);
+  }
+  // report.json reads no boundary after `<`, so it leaves this path in place; the re-scan still reads
+  // a path after the escaped run and refuses to publish.
+  assert.throws(
+    () => projectPublicCanonicalFinalReport(remediationReport("Close it with </*/srv/customer/key.")),
+    /public final-report projection contains private/u
+  );
+});
+
+test("finding prose ending in a secret-like key name and a colon publishes without a secret false positive", () => {
+  for (const recommendation of [
+    "Validate the API key:",
+    "Rotate the leaked token:",
+    "Rotate the secret:",
+    "Check the private key:"
+  ]) {
+    const published = projectPublicCanonicalFinalReport(remediationReport(recommendation));
+    assert.equal((published.report.issues as Array<Record<string, unknown>>)[0]?.recommendation, recommendation);
+    assert.ok(published.markdown.includes(`\n### Remediation\n\n${recommendation}\n\n## `), recommendation);
+    assertPublicProjectionFixedPoint(published);
+  }
+  // The same holds when the next line is a list item or a fence, or the next text a table cell or the
+  // rest of a bold variant label.
+  const report = titledReport("[L-01] - Leaked token:");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.description = "Rotate the password:";
+  issue.impact_rationale = "Anyone holding the secret:";
+  (issue.proof_of_concept as Record<string, unknown>).scenario = ["Read the token:", "Replay the auth:"];
+  issue.family_variants = [
+    { id: "variant-1", title: "Replay the token:", summary: "The same leak via `burn`.", dedupe_key: "variant-1" }
+  ];
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+
+  // A credential the report walk cannot see field by field still fails closed: a key label that ends
+  // one block and the key that opens the next are still scanned together.
+  const leaked = titledReport("[L-01] - Hardcoded deployer signing key");
+  const [leakedIssue] = leaked.issues as Array<Record<string, unknown>>;
+  if (leakedIssue === undefined) throw new Error("missing issue fixture");
+  leakedIssue.description = `0x${"3f9a1c7e5b2d8f40".repeat(4)} is committed in the deploy script.`;
+  assert.throws(() => projectPublicCanonicalFinalReport(leaked), /public final-report projection contains private/u);
+  // A credential inside one field is still redacted from both report.json and report.md.
+  const assigned = projectPublicCanonicalFinalReport(
+    remediationReport("Rotate token=synthetic-remediation-secret now.")
+  );
+  assert.equal(
+    (assigned.report.issues as Array<Record<string, unknown>>)[0]?.recommendation,
+    "Rotate token=REDACTED now."
+  );
+  assert.doesNotMatch(assigned.markdown, /synthetic-remediation-secret/u);
+  assertPublicProjectionFixedPoint(assigned);
+});
+
+test("finding titles with backslashes publish through the provenance table, dispositions, and outcomes", () => {
+  const report = titledReport("[L-01] - Missing `\\x19\\x01` prefix and Q&amp;A \\x19 text in max_supply | digest");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  (issue.lifecycle as Record<string, unknown>).comparison_disposition = "promoted-again";
+  const outcomeTitle = "1. Digest omits \\x19\\x01 in `_hash` | here";
+  report.non_production_outcomes = [
+    {
+      ...structuredClone(issue),
+      id: "NP-01",
+      title: outcomeTitle,
+      triage_classification: "undetermined",
+      recommended_next_action: "Review the campaign evidence.",
+      lifecycle: {
+        dedupe_key: "digest-prefix",
+        source_artifacts: [],
+        strategy_hits: [{ strategy: "stateful-invariant" }],
+        triage_classification: "undetermined",
+        final_disposition: "non-production",
+        comparison_disposition: "not-reproduced"
+      }
+    }
+  ];
+  (report.property_provenance as Array<Record<string, unknown>>).push({
+    finding_id: "NP-01",
+    source_finding_id: "source-outcome",
+    title: outcomeTitle,
+    property_ids: ["property-1"],
+    sources: [{ source_node_id: "properties", source_property_id: "property-1" }],
+    implementation_paths: ["test/Invariant.t.sol"],
+    test_paths: ["test/Invariant.t.sol"]
+  });
+  // Finding prose in a cell: inline code kept, a backslash before a letter kept, every pipe escaped.
+  const label = "[L-01] - Missing `\\x19\\x01` prefix and Q&amp;amp;A \\x19 text in max_supply | digest";
+  const outcomeCell = "1. Digest omits \\x19\\x01 in `_hash` \\| here";
+  for (const projection of [projectCanonicalFinalReport(report), projectPublicCanonicalFinalReport(report)]) {
+    const { markdown } = projection;
+    assert.ok(markdown.includes(`\n| ${label.replace("|", "\\|")} | property-1 |`), markdown);
+    assert.ok(markdown.includes(`\n| ${outcomeCell} | property-1 |`), markdown);
+    assert.ok(markdown.includes(`\n| undetermined | ${outcomeCell} | confirmed |`), markdown);
+    // A disposition entry starts a list item, so an outcome title cannot open a nested list there.
+    assert.ok(markdown.includes(`\n### Promoted again\n\n- ${label}\n`), markdown);
+    assert.ok(
+      markdown.includes("\n### Not reproduced\n\n- 1\\. Digest omits \\x19\\x01 in `_hash` | here\n"),
+      markdown
+    );
+    const items = markdownNodes(markdown).filter((node) => node.type === "listItem");
+    assert.ok(items.some((node) => node.text === "1. Digest omits \\x19\\x01 in _hash | here"));
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), true);
+  }
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+});
+
+/** A GFM table row's cells: a backslash escapes the character after it, and every other `|` delimits. */
+function gfmTableCells(row: string): string[] {
+  const cells = [""];
+  for (let index = 0; index < row.length; index += 1) {
+    const character = row.charAt(index);
+    if (character === "|") {
+      cells.push("");
+      continue;
+    }
+    const text = character === "\\" ? row.slice(index, index + 2) : character;
+    cells[cells.length - 1] += text;
+    index += text.length - 1;
+  }
+  return cells.slice(1, -1).map((cell) => cell.trim());
+}
+
+test("a finding title whose code span holds \\| keeps every table row whole", () => {
+  const report = titledReport("[L-01] - Pipe `a\\|b` in code");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  report.non_production_outcomes = [
+    {
+      ...structuredClone(issue),
+      id: "NP-01",
+      title: "Outcome `a\\|b` in code",
+      triage_classification: "undetermined",
+      recommended_next_action: "Review the campaign evidence.",
+      lifecycle: {
+        dedupe_key: "pipe-outcome",
+        source_artifacts: [],
+        strategy_hits: [{ strategy: "stateful-invariant" }],
+        triage_classification: "undetermined",
+        final_disposition: "non-production"
+      }
+    }
+  ];
+  // escapeTable would turn the span's `\|` into `\\|`, an escaped backslash and a delimiter, so a
+  // cell writes the span as text: `&#92;` and an escaped pipe.
+  const label = "[L-01] - Pipe \\`a&#92;\\|b\\` in code";
+  for (const projection of [projectCanonicalFinalReport(report), projectPublicCanonicalFinalReport(report)]) {
+    const { markdown } = projection;
+    const rows = markdown
+      .split("\n")
+      .filter((line) => line.startsWith("| "))
+      .map(gfmTableCells);
+    assert.deepEqual(
+      rows.find((cells) => cells[0] === "L-01"),
+      ["L-01", `[${label}](#l-01---pipe-ab-in-code)`]
+    );
+    assert.deepEqual(
+      rows.find((cells) => cells[0] === label),
+      [label, "property-1", "properties", "property-1", "test/Invariant.t.sol", "unavailable"]
+    );
+    assert.deepEqual(
+      rows.find((cells) => cells[0] === "undetermined"),
+      [
+        "undetermined",
+        "Outcome \\`a&#92;\\|b\\` in code",
+        "confirmed",
+        "A bounded transition violates the expected relationship.",
+        "Review the campaign evidence."
+      ]
+    );
+    // Outside a table the span stays code, and the index link still resolves to the heading.
+    assert.ok(markdown.includes("\n## [L-01] - Pipe `a\\|b` in code\n"), markdown);
+    const nodes = markdownNodes(markdown);
+    const heading = nodes.find((node) => node.type === "heading" && node.text.startsWith("[L-01]"));
+    const link = nodes.find((node) => node.type === "link" && node.text === "[L-01] - Pipe `a\\|b` in code");
+    assert.equal(link?.url, `#${headingSlug(heading?.text ?? "")}`);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), true);
+  }
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+});
+
+test("a property ID with angle brackets renders as escaped text, not as raw HTML inside a code span", () => {
+  const report = renderableReport();
+  report.property_implementation_coverage = {
+    ...(report.property_implementation_coverage as Record<string, unknown>),
+    reference_expected_property_ids: ["property-1", "excluded_low_property", "Vault<ERC4626>-share_price"]
+  };
+  const projection = projectCanonicalFinalReport(report);
+  assert.ok(
+    projection.markdown.includes(
+      "\n- Unselected reference expectation properties (not fulfilled): `excluded_low_property`, Vault&lt;ERC4626&gt;-share_price\n"
+    ),
+    projection.markdown
+  );
+  assert.ok(
+    markdownNodes(projection.markdown).some(
+      (node) =>
+        node.type === "listItem" &&
+        node.text ===
+          "Unselected reference expectation properties (not fulfilled): excluded_low_property, Vault<ERC4626>-share_price"
+    )
+  );
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
 });
