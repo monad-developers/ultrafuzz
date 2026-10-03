@@ -4,7 +4,12 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { writeRunMetadataDocument, type RunAccountingSummary, type RunMetadataDocument } from "@ultrafuzz/artifacts";
+import {
+  writeRunMetadataDocument,
+  type RunAccountingSummary,
+  type RunMetadataAccounting,
+  type RunMetadataDocument
+} from "@ultrafuzz/artifacts";
 import { describe, expect, it, vi } from "vitest";
 
 import { OPERATIONAL_DISPOSITION_CATEGORIES, OperationalDispositionError } from "../src/terminal-disposition.js";
@@ -388,6 +393,45 @@ describe("strict worker result contracts", () => {
     expect(JSON.stringify(snapshot)).not.toContain("placeholder-one");
   });
 
+  it("persists a fetched pricing catalog that leaves a model unresolved", async () => {
+    const root = await temporaryRoot();
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ current: taskNode("succeeded") }))}\n`
+    );
+    writeRunMetadataDocument(
+      path.join(runRoot, "run.json"),
+      currentRunMetadata(currentAccountingSummary(), {
+        status: "available",
+        resolved_models: ["placeholder-one", "placeholder-three"],
+        unresolved_models: ["placeholder-two"],
+        model_prices: {
+          "placeholder-one": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 },
+          "placeholder-three": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }
+        }
+      })
+    );
+    const writer = await WorkerResultWriter.create({
+      statusPath: path.join(root, "status.json"),
+      resultPath: path.join(root, "result.json")
+    });
+
+    const contract = await writer.writeTerminal("finished", await readWorkerCheckpoint(root));
+
+    expect(contract.pricing).toEqual({
+      source: "configured-catalog",
+      status: "available",
+      fetched_at: "2026-01-01T00:00:01.000Z",
+      resolved_model_count: 2,
+      unresolved_model_count: 1
+    });
+    expect(contract.usage).toMatchObject({ partial_pricing: true, unpriced_event_count: 1 });
+    expect(readContract(path.join(root, "status.json"))).toEqual(contract);
+    expect(readContract(path.join(root, "result.json"))).toEqual(contract);
+  });
+
   it("bounds contradictory accounting breakdowns while preserving the provider total", async () => {
     const root = await temporaryRoot();
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
@@ -633,7 +677,10 @@ function taskNode(status: string): Record<string, unknown> {
   return { status };
 }
 
-function currentRunMetadata(summary: RunAccountingSummary = currentAccountingSummary()): RunMetadataDocument {
+function currentRunMetadata(
+  summary: RunAccountingSummary = currentAccountingSummary(),
+  pricingCatalog: Partial<RunMetadataAccounting["pricing_catalog"]> = {}
+): RunMetadataDocument {
   const segment = {
     ...summary,
     control_generation: "b".repeat(64),
@@ -692,7 +739,8 @@ function currentRunMetadata(summary: RunAccountingSummary = currentAccountingSum
         unresolved_models: ["placeholder-two", "placeholder-three"],
         model_prices: {
           "placeholder-one": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }
-        }
+        },
+        ...pricingCatalog
       },
       updated_at: "2026-01-01T00:00:01.000Z"
     }
