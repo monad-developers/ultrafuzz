@@ -3722,6 +3722,114 @@ test("a final report that rewords a carried finding's prose verifies with warnin
   }
 });
 
+test("a final report row that adds a recommendation its source finding lacks fails in both report modes", () => {
+  // report.md renders a carried recommendation as the issue's Remediation, so the report stage may
+  // copy one but never author one. Changing or omitting a carried one stays a warning (above).
+  const finding = {
+    id: "finding-a",
+    title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
+    summary: "Withdrawals round up against a donated balance.",
+    severity_guess: "Low",
+    dedupe_key: "root-a"
+  };
+  const assessment = {
+    triage_classification: "true-positive",
+    impact: "Low",
+    likelihood: "Low",
+    impact_rationale: "Only a rounding surplus moves.",
+    likelihood_rationale: "A donation must precede a partial withdrawal.",
+    severity: "Low",
+    severity_rationale: "Low impact and Low likelihood map to Low."
+  };
+  const dedupeLifecycle = {
+    dedupe_key: "root-a",
+    source_artifacts: [],
+    stages: [{ stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-a" }]
+  };
+  const promotedLifecycle = {
+    ...dedupeLifecycle,
+    triage_classification: "true-positive",
+    triage_reason: "The generated reproducer passes.",
+    canonical_severity: "Low",
+    final_disposition: "promoted"
+  };
+  const droppedLifecycle = {
+    ...dedupeLifecycle,
+    triage_classification: "false-positive",
+    triage_reason: "The donation cannot precede a withdrawal.",
+    demotion_reason: "The candidate is a false positive.",
+    final_disposition: "dropped"
+  };
+  const promotedRow = {
+    ...finding,
+    ...assessment,
+    id: "L-01",
+    title: `[L-01] - ${finding.title}`,
+    lifecycle: promotedLifecycle
+  };
+  const droppedRow = { ...finding, triage_classification: "false-positive", lifecycle: droppedLifecycle };
+  const boundedArtifactSet = (source: Record<string, unknown>) => ({
+    severityClassifiedFindings: null,
+    dedupedFindings: [source],
+    findingLifecycleLedger: { records: [dedupeLifecycle] }
+  });
+  const cases = [
+    { label: "bounded issue", key: "issues", row: promotedRow, source: finding, artifactSet: boundedArtifactSet },
+    {
+      label: "bounded non-production outcome",
+      key: "non_production_outcomes",
+      row: droppedRow,
+      source: finding,
+      artifactSet: boundedArtifactSet
+    },
+    {
+      label: "strict issue",
+      key: "issues",
+      row: promotedRow,
+      source: { ...finding, ...assessment },
+      artifactSet: (source: Record<string, unknown>) => ({
+        severityClassifiedFindings: [source],
+        findingLifecycleLedger: { records: [promotedLifecycle] }
+      })
+    },
+    {
+      label: "strict non-production outcome",
+      key: "non_production_outcomes",
+      row: droppedRow,
+      source: { ...finding, triage_classification: "false-positive" },
+      artifactSet: (source: Record<string, unknown>) => ({
+        severityClassifiedFindings: [source],
+        findingLifecycleLedger: { records: [droppedLifecycle] }
+      })
+    }
+  ];
+  for (const { label, key, row, source, artifactSet } of cases) {
+    const check = (candidate: unknown, upstream: Record<string, unknown>) =>
+      executeSemanticGate("report-severity-classification-preservation", {
+        document: { issues: [], non_production_outcomes: [], [key]: [candidate] },
+        context: { artifactSet: artifactSet(upstream) }
+      });
+    assert.equal(check(row, source).status, "passed", label);
+
+    const recommendation = "Round withdrawals down.";
+    const added = check({ ...row, recommendation }, source);
+    assert.equal(added.status, "failed", label);
+    assert.deepEqual(
+      added.status === "failed" && added.issues.map((entry) => [entry.path, entry.severity ?? "error"]),
+      [[`$.${key}[0].recommendation`, "error"]],
+      label
+    );
+    assert.match(
+      added.status === "failed" ? (added.issues[0]?.message ?? "") : "",
+      /adds a recommendation its source finding does not carry/u
+    );
+
+    const carriedSource = { ...source, recommendation };
+    assert.equal(check({ ...row, recommendation }, carriedSource).status, "passed", `${label}: carried`);
+    assert.equal(check(row, carriedSource).status, "warning", `${label}: omitted`);
+  }
+});
+
 test("differential reconciliation diagnostics expose exact expected machine-derived values", () => {
   for (const [gate, document, current] of [
     ["reference-harness-plan-reconciliation", emptyReferenceHarness, differentialHarnessBinding],

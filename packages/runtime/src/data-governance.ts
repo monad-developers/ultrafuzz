@@ -3,7 +3,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseStrictJsonBytes, readSinglyLinkedRegularFileSnapshotInside } from "@ultrafuzz/artifacts";
+import {
+  parseStrictJsonBytes,
+  readRegularFileSnapshot,
+  readSinglyLinkedRegularFileSnapshotInside
+} from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
 import { isSensitiveEnvironmentName } from "@ultrafuzz/security";
 import { parse as parseToml } from "smol-toml";
@@ -27,7 +31,10 @@ export const DATA_GOVERNANCE_POLICY_ENV = "ULTRAFUZZ_DATA_GOVERNANCE_POLICY" as 
   DATA_GOVERNANCE_PROVENANCE_SCHEMA_VERSION = "ultrafuzz.data-governance-provenance.v1" as const,
   DATA_DISCLOSURE_ACKNOWLEDGEMENT_SCHEMA_VERSION = "ultrafuzz.data-disclosure-acknowledgement.v1" as const;
 const MAX_GOVERNANCE_FILE_BYTES = 16 * 1024 * 1024,
-  MAX_GOVERNANCE_TOTAL_BYTES = 64 * 1024 * 1024;
+  MAX_GOVERNANCE_TOTAL_BYTES = 64 * 1024 * 1024,
+  MAX_SEALED_GOVERNANCE_RECORD_BYTES = 1024 * 1024,
+  // The report contract's object ID: exactly a SHA-1 or a SHA-256 commit, never a prefix.
+  REPORT_TARGET_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   ClaudeAgent: ["ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_", "AZURE_", "CLOUD_ML_", "FOUNDRY_", "GOOGLE_"],
   CodexAgent: ["AZURE_OPENAI_", "OPENAI_"],
@@ -638,6 +645,40 @@ export function targetIdentity(
     dirty: hiddenTrackedState || diff.length > 0 || untracked.length > 0,
     worktree_digest: sha256Stable({ tree, diff: hash(diff), index_flags: hash(indexFlags), untracked })
   };
+}
+/**
+ * The evaluated target's commit for `report.json#run_metadata.target_commit`, read from the sealed
+ * data-governance record the controller exposes at `ULTRAFUZZ_DATA_GOVERNANCE_PATH`. Task worktrees
+ * are created from that commit, so it names the evaluated tree. `null` means no Git commit identity
+ * was recorded for the target (no trusted Git, not a repository, or an unborn HEAD). A missing,
+ * unreadable or invalid record fails: the report never carries a placeholder commit.
+ */
+export function readFinalReportTargetCommit(env: NodeJS.ProcessEnv = process.env): string | null {
+  const governancePath = env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
+  if (governancePath === undefined || governancePath === "")
+    throw new Error("artifact-contract failure: final-report target commit authority is unavailable");
+  if (!path.isAbsolute(governancePath))
+    throw new Error("artifact-contract failure: final-report target commit authority path must be absolute");
+  let governance: unknown;
+  try {
+    governance = parseStrictJsonBytes(readRegularFileSnapshot(governancePath, MAX_SEALED_GOVERNANCE_RECORD_BYTES), {
+      maxBytes: MAX_SEALED_GOVERNANCE_RECORD_BYTES,
+      maxDepth: 32,
+      maxItems: 4096,
+      maxProperties: 4096
+    });
+  } catch (error) {
+    throw new Error("artifact-contract failure: final-report target commit authority is unreadable", { cause: error });
+  }
+  const provenance = record(governance),
+    target =
+      provenance?.schema_version === DATA_GOVERNANCE_PROVENANCE_SCHEMA_VERSION ? record(provenance.target) : undefined,
+    commit = target?.commit;
+  // targetIdentity records the commit and tree together, so one without the other is not its output.
+  if (commit === null && target?.tree === null) return null;
+  if (typeof commit !== "string" || !REPORT_TARGET_COMMIT.test(commit) || typeof target?.tree !== "string")
+    throw new Error("artifact-contract failure: final-report target commit authority is invalid");
+  return commit;
 }
 export function trustedGitExecutable(projectRoot: string): string {
   const target = fs.realpathSync(projectRoot),

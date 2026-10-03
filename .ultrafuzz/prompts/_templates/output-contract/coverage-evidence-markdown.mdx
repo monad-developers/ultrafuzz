@@ -1,11 +1,11 @@
-`report.md` and the coverage producer's Markdown use exactly one canonical
-section and preserve array order. Apply public-inline sanitization to code-like
-fields: redact secrets and private paths, collapse whitespace, replace
-backticks with apostrophes, and use `unavailable` when blank. Apply public-prose
-sanitization to `<summary>` and `<exclusion_reason>`: use the same redaction,
-whitespace, and fallback rules, then escape backslashes and Markdown code,
-emphasis, link, image, heading, and strikethrough delimiters plus HTML angle
-brackets. Measured evidence uses:
+The coverage producer's Markdown uses exactly one canonical section and
+preserves array order; `report.md` does not render it. Apply public-inline
+sanitization to code-like fields: redact secrets and private paths, collapse
+whitespace, replace backticks with apostrophes, and use `unavailable` when
+blank. Apply public-prose sanitization to `<summary>` and `<exclusion_reason>`:
+use the same redaction, whitespace, and fallback rules, then escape backslashes
+and Markdown code, emphasis, link, image, heading, and strikethrough delimiters
+plus HTML angle brackets. Measured evidence uses:
 
 ```text
 ## Scoped coverage evidence

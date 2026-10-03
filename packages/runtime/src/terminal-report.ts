@@ -64,6 +64,13 @@ export interface CurrentFinalReportSnapshot {
   validation_warnings: readonly ArtifactValidationWarning[];
   completion?: ReportCompletion;
   terminal: boolean;
+  /**
+   * run.json as parsed for a runtime presentation, whose Run summary restates it, so a consumer can
+   * check the presentation against the record it was built from rather than a later rewrite. It is
+   * validated for the terminal publication, unvalidated for an unchecked report, and absent from the
+   * agent's own publication and when an unchecked report could not read run.json.
+   */
+  restated_run_metadata?: unknown;
   /** Exact controller publications, including both receipt copies, for recursive exporters. */
   publications?: readonly { path: string; bytes: Buffer }[];
 }
@@ -324,6 +331,7 @@ function createTerminalSnapshot(
     validation_warnings: agentReport.validation_warnings,
     completion,
     terminal: true,
+    restated_run_metadata: inputs.metadata,
     publications: Object.freeze(publications)
   });
 }

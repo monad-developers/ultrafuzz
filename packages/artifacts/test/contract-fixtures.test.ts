@@ -1535,6 +1535,88 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   assert.deepEqual(mismatches, [], `Zod accepted JSON-Schema-invalid unique arrays: ${mismatches.join("; ")}`);
 });
 
+test("report target commits are exact lowercase SHA-1 or SHA-256 object IDs or null in Ajv and Zod", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "report.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const fixture = contractFixtures["ultrafuzz/report@3"];
+  assert.ok(fixture !== undefined);
+  const withTargetCommit = (targetCommit: unknown): Record<string, unknown> => {
+    const report = structuredClone(fixture.valid) as {
+      run_metadata: Record<string, unknown>;
+    };
+    if (targetCommit === undefined) delete report.run_metadata.target_commit;
+    else report.run_metadata.target_commit = targetCommit;
+    return report;
+  };
+  const cases: Array<[string, unknown, boolean]> = [
+    ["null", null, true],
+    ["SHA-1", "0123456789abcdef0123456789abcdef01234567", true],
+    ["SHA-256", "0123456789abcdef".repeat(4), true],
+    ["missing", undefined, false],
+    ["unavailable", "unavailable", false],
+    ["none", "none", false],
+    ["empty", "", false],
+    ["uppercase hex", "0123456789ABCDEF0123456789ABCDEF01234567", false],
+    ["41 hex digits", "a".repeat(41), false],
+    ["63 hex digits", "a".repeat(63), false],
+    ["65 hex digits", "a".repeat(65), false],
+    ["abbreviated", "a".repeat(12), false],
+    ["number", 0, false]
+  ];
+  for (const [label, targetCommit, accepted] of cases) {
+    const report = withTargetCommit(targetCommit);
+    assert.equal(validateRegisteredJsonSchema(entry.id, report).ok, accepted, `Ajv ${label}`);
+    assert.equal(parser.safeParse(report).success, accepted, `Zod ${label}`);
+    assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, accepted, label);
+  }
+});
+
+test("report estimated spend is a numeric USD estimate without a + or unavailable label in Ajv and Zod", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "report.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const fixture = contractFixtures["ultrafuzz/report@3"];
+  assert.ok(fixture !== undefined);
+  const cases: Array<[unknown, boolean]> = [
+    ["$0.00", true],
+    ["$12.35", true],
+    ["$0.0042", true],
+    ["$1234567.1234567891", true],
+    ["$1.00+", false],
+    ["unavailable", false],
+    ["$1", false],
+    ["$1.0", false],
+    ["1.00", false],
+    ["$01.00", false],
+    ["$1,234.00", false],
+    ["$1.12345678901", false],
+    ["-$1.00", false],
+    [" $1.00", false],
+    ["", false],
+    [1, false]
+  ];
+  for (const [estimatedSpend, accepted] of cases) {
+    const report = structuredClone(fixture.valid) as { run_metadata: Record<string, unknown> };
+    report.run_metadata.estimated_spend = estimatedSpend;
+    const label = JSON.stringify(estimatedSpend);
+    assert.equal(validateRegisteredJsonSchema(entry.id, report).ok, accepted, `Ajv ${label}`);
+    assert.equal(parser.safeParse(report).success, accepted, `Zod ${label}`);
+    assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, accepted, label);
+    if (typeof estimatedSpend === "string") {
+      assert.equal(artifactExports.ESTIMATED_SPEND_PATTERN.test(estimatedSpend), accepted, `pattern ${label}`);
+    }
+  }
+  // Every label the shared formatter produces is accepted.
+  for (const amount of [0, 0.004, 0.00000000004, 0.01, 1.005, 12.345, 41.2, 1e6]) {
+    assert.match(
+      artifactExports.formatEstimatedSpendUsd(amount),
+      artifactExports.ESTIMATED_SPEND_PATTERN,
+      String(amount)
+    );
+  }
+});
+
 test("portable generated-test paths and implementation selection uniqueness agree bidirectionally", () => {
   const generatedEntry = artifactSchemaRegistry().find(
     (candidate) => candidate.filename === "generated-tests.schema.json"

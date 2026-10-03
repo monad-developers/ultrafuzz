@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-test("final reports retain artifact warnings and their context without changing the report JSON", () => {
+test("report.md drops the warning and scoped coverage sections while report.json and the companion keep them", () => {
   const report = renderableReport();
-  (report.run_metadata as Record<string, unknown>).artifact_validation_warnings = [
+  const warnings = [
     {
       code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
       artifact_path: "artifacts/dedupe/strategy-detections.json",
@@ -13,16 +13,40 @@ test("final reports retain artifact warnings and their context without changing 
       source_path: "artifacts/dedupe/deduped-findings.json#$[5].family_id"
     }
   ];
+  (report.run_metadata as Record<string, unknown>).artifact_validation_warnings = warnings;
+  report.coverage_evidence = completeCoverageEvidence();
   const before = structuredClone(report);
   const projection = projectCanonicalFinalReport(report);
-  assert.match(projection.markdown, /## Artifact validation warnings/u);
-  assert.match(projection.markdown, /strategy-detections\.json#\$\[5\]\.family_id/u);
-  assert.match(projection.markdown, /deduped-findings\.json/u);
+  assert.doesNotMatch(projection.markdown, /Artifact validation warnings|Scoped coverage evidence/u);
+  assert.doesNotMatch(
+    projection.markdown,
+    /strategy-detections\.json|deduped-findings\.json|declaration-completeness/u
+  );
   assert.deepEqual(report, before);
-  assert.deepEqual(projection.report, before);
+  assert.deepEqual(projection.report, before, "report.json keeps the warnings and the typed coverage evidence");
   const published = projectPublicCanonicalFinalReport(report);
-  assert.match(published.markdown, /Artifact validation warnings/u);
+  assert.doesNotMatch(published.markdown, /Artifact validation warnings|Scoped coverage evidence/u);
+  assert.deepEqual(
+    (published.report.run_metadata as Record<string, unknown>).artifact_validation_warnings,
+    projectPublicArtifactValidationWarnings(warnings).warnings
+  );
+  assert.deepEqual(published.report.coverage_evidence, report.coverage_evidence);
   assertPublicProjectionFixedPoint(published);
+  // The warning companions are now the only human-readable form of the warnings, with unchanged bytes.
+  assert.equal(
+    renderArtifactValidationWarningsMarkdown(warnings),
+    "## Artifact validation warnings\n\n" +
+      "The run continued with partial metadata. Producer artifacts were preserved unchanged.\n\n" +
+      "- ARTIFACT_OPTIONAL_METADATA_MISSING — `artifacts/dedupe/strategy-detections.json#$[5].family_id`: " +
+      "Optional metadata is missing; the original artifact is accepted unchanged\n" +
+      "  - Available context: `artifacts/dedupe/deduped-findings.json#$[5].family_id`\n"
+  );
+  const companion = projectPublicArtifactValidationWarnings(warnings);
+  assert.match(
+    companion.markdown,
+    /^## Artifact validation warnings\n\n.*\n\n- ARTIFACT_OPTIONAL_METADATA_MISSING — /u
+  );
+  assert.deepEqual(projectPublicArtifactValidationWarnings(companion.warnings), companion);
 });
 
 import { validateSafeId, type ReportCompletion } from "@ultrafuzz/artifacts";
@@ -34,6 +58,7 @@ import {
   projectCanonicalFinalReport,
   projectPublicArtifactValidationWarnings,
   projectPublicCanonicalFinalReport,
+  renderArtifactValidationWarningsMarkdown,
   renderCoverageEvidenceMarkdownSection,
   supportsCanonicalFinalReportProjection,
   type CanonicalFinalReportProjection
@@ -62,11 +87,14 @@ test("public warning companions redact private context and retain the original d
   );
 });
 
+const TARGET_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
 function runMetadata(runId: string): Record<string, unknown> {
   return {
     run_id: runId,
     source_run_id: runId,
     repository: "example/repository",
+    target_commit: TARGET_COMMIT,
     elapsed_time: "1m",
     models_used: ["model-a"],
     tokens_used: "100",
@@ -156,6 +184,56 @@ function renderableReport(): Record<string, unknown> {
     }
   };
 }
+
+function unavailableCoverageEvidence(): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "unavailable",
+    blockers: [
+      {
+        category: "coverage-tooling-blocked",
+        summary: "Recon could not produce an authenticated coverage map.",
+        evidence_paths: ["logs/recon-coverage.log"]
+      }
+    ]
+  };
+}
+
+/** Measured evidence over one production file with `covered` of its two selected ranges covered. */
+function measuredCoverageEvidence(covered: 1 | 2): Record<string, unknown> {
+  return {
+    schema_version: "ultrafuzz.coverage-evidence.v1",
+    status: "measured",
+    lcov: { path: "coverage-input.lcov", sha256: "e".repeat(64) },
+    recon_selection: { path: "recon-coverage.json", sha256: "f".repeat(64) },
+    views: [
+      { scope: "recon-selected-declaration-completeness", covered_ranges: covered, total_ranges: 2 },
+      { scope: "production-declaration-completeness", covered_ranges: covered, total_ranges: 2 }
+    ],
+    files: [{ path: "src/Core.sol", kind: "production", included: true, covered_ranges: covered, total_ranges: 2 }],
+    counted_ranges: [1, 2].map((line) => ({
+      file: "src/Core.sol",
+      kind: "production",
+      start_line: line,
+      line_count: 1,
+      selected: true,
+      covered: line <= covered
+    })),
+    zero_coverage_components:
+      covered === 2 ? [] : [{ path: "src/Core.sol", kind: "production", start_line: 2, line_count: 1 }]
+  };
+}
+
+function completeCoverageEvidence(): Record<string, unknown> {
+  return measuredCoverageEvidence(2);
+}
+
+const COVERAGE_UNMEASURED_NOTICE =
+  "Scoped coverage could not be measured for this run, so how much of the in-scope code the campaign exercised is unknown.";
+const COVERAGE_INCOMPLETE_NOTICE =
+  "Scoped coverage was measured, but the campaign did not exercise every in-scope declaration; uncovered code may contain issues this report does not show.";
+const REMEDIATION_UNRECORDED_NOTICE =
+  "No remediation was recorded for this finding, and Ultrafuzz does not infer one. Confirm the root cause in the description and Proof of Concept before designing a fix.";
 
 function partialCompletion(runId = "projection-test"): ReportCompletion {
   return {
@@ -558,14 +636,14 @@ test("public final-report projection redacts secrets with a placeholder the bund
     `https://x-access-token:${token}@github.com/example/repository`;
   const before = structuredClone(input);
 
-  // Prose escapes Markdown punctuation such as the token's underscore, so the developer Markdown is
-  // checked on the token body while the JSON keeps the exact token.
+  // Finding prose keeps an underscore between two letters raw, so the developer Markdown carries the
+  // exact token; the public checks below use the token body, which no escape can split.
   const tokenBody = token.slice("ghp_".length);
   const internal = projectCanonicalFinalReport(input);
   assert.deepEqual(input, before);
   assert.deepEqual(internal.report, before);
   assert.equal(JSON.stringify(internal.report).includes(token), true, "the developer report keeps the token");
-  assert.equal(internal.markdown.includes(tokenBody), true);
+  assert.equal(internal.markdown.includes(token), true);
   assert.equal(internal.markdown.includes(apiKey), true);
   assert.equal(internal.markdown.includes(cloneUrl), true);
   assert.doesNotMatch(internal.markdown, /REDACTED|\[redacted\]|<redacted>|\[redacted-path\]/u);
@@ -625,12 +703,123 @@ test("public final-report projection keeps machine-generated run IDs the entropy
   assert.equal(metadata.run_id, runId);
   assert.equal(metadata.source_run_id, sourceRunId);
   assert.match(published.markdown, /^- Run ID: `ci-33918585561-1-smoke-ultrafuzz-benc-3e994a685ad7bf44`$/mu);
-  assert.match(published.markdown, /^- Source run ID: `ci-33918585561-1-smoke-ultrafuzz-benc-7d622d2207767a8d`$/mu);
+  // Lineage stays in report.json only; the Markdown summary names the evaluated commit instead.
+  assert.equal(published.markdown.includes(sourceRunId), false);
+  assert.match(published.markdown, new RegExp(`^- Commit: \`${TARGET_COMMIT}\`$`, "mu"));
   assert.match(JSON.stringify(published.report), /token=REDACTED/u, "every other field still scans in full");
   assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
   assert.deepEqual(projectCanonicalFinalReport(published.report), published);
   assertPublicProjectionFixedPoint(published);
 });
+
+test("the Run summary names the evaluated commit and keeps run lineage in report.json only", () => {
+  const sha256Commit = "0123456789abcdef".repeat(4);
+  assert.notEqual(
+    redactSecretsInText(TARGET_COMMIT, "REDACTED", [], "all"),
+    TARGET_COMMIT,
+    "a bare SHA-1 commit must be a generic-hex redaction candidate for this test to mean anything"
+  );
+  for (const commit of [TARGET_COMMIT, sha256Commit]) {
+    const input = renderableReport();
+    input.run_metadata = {
+      ...runMetadata("commit-run"),
+      source_run_id: "commit-source-run",
+      source_run_ids: ["commit-source-run"],
+      target_commit: commit
+    };
+    const before = structuredClone(input);
+    const projection = projectCanonicalFinalReport(input);
+    assert.deepEqual(projection.report, before);
+    assert.ok(projection.markdown.includes(`\n## Run summary\n\n${summaryBullets(commit)}\n\n`), projection.markdown);
+    assert.doesNotMatch(projection.markdown, /Source run ID|commit-source-run/u);
+
+    const published = projectPublicCanonicalFinalReport(input);
+    assert.deepEqual(input, before);
+    const metadata = published.report.run_metadata as Record<string, unknown>;
+    assert.equal(metadata.target_commit, commit, "the public projection must not redact the evaluated commit");
+    assert.equal(metadata.source_run_id, "commit-source-run");
+    assert.deepEqual(metadata.source_run_ids, ["commit-source-run"]);
+    assert.match(published.markdown, new RegExp(`^- Commit: \`${commit}\`$`, "mu"));
+    assert.doesNotMatch(published.markdown, /Source run ID|commit-source-run/u);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+    assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+    assertPublicProjectionFixedPoint(published);
+  }
+});
+
+test("the Run summary states when no Git commit was recorded for the evaluated target", () => {
+  const input = renderableReport();
+  input.run_metadata = { ...runMetadata("no-commit-run"), target_commit: null };
+  const projection = projectCanonicalFinalReport(input);
+  assert.match(projection.markdown, /^- Commit: `none` \(no Git commit was recorded for the evaluated target\)$/mu);
+  assert.equal(projection.markdown.match(/^- Commit: /gmu)?.length, 1);
+  assert.equal((projection.report.run_metadata as Record<string, unknown>).target_commit, null);
+  const published = projectPublicCanonicalFinalReport(input);
+  assert.equal((published.report.run_metadata as Record<string, unknown>).target_commit, null);
+  assert.match(published.markdown, /^- Commit: `none` \(no Git commit was recorded for the evaluated target\)$/mu);
+  assertPublicProjectionFixedPoint(published);
+});
+
+test("the Run summary rejects a stale Source run ID row, a missing Commit row, and reordered rows", () => {
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const commitRow = `- Commit: \`${TARGET_COMMIT}\`\n`;
+  const repositoryRow = "- Repository: `example/repository`\n";
+  assert.ok(projection.markdown.includes(`${repositoryRow}${commitRow}`));
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  for (const markdown of [
+    projection.markdown.replace(repositoryRow, `- Source run ID: \`projection-test\`\n${repositoryRow}`),
+    projection.markdown.replace(commitRow, "- Source run ID: `projection-test`\n"),
+    projection.markdown.replace(commitRow, ""),
+    projection.markdown.replace(`${repositoryRow}${commitRow}`, `${commitRow}${repositoryRow}`),
+    projection.markdown.replace(commitRow, `${commitRow}- Dirty: \`false\`\n`)
+  ]) {
+    assert.notEqual(markdown, projection.markdown);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false, markdown);
+  }
+});
+
+test("the Run summary renders the spend as a numeric estimate and rejects a + or unavailable spend", () => {
+  for (const estimatedSpend of ["$0.00", "$0.0042", "$12.35", "$1234567.1234567891"]) {
+    const input = renderableReport();
+    input.run_metadata = { ...runMetadata("spend-run"), estimated_spend: estimatedSpend, partial_pricing: true };
+    const projection = projectCanonicalFinalReport(input);
+    assert.match(projection.markdown, new RegExp(`^- Estimated spend: \`\\${estimatedSpend}\`$`, "mu"));
+    // partial_pricing stays in report.json and is never rendered.
+    assert.doesNotMatch(projection.markdown, /partial.pricing/iu);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  }
+  for (const estimatedSpend of ["$1.00+", "unavailable", "$1", "1.00", "$01.00"]) {
+    const input = renderableReport();
+    input.run_metadata = { ...runMetadata("spend-run"), estimated_spend: estimatedSpend };
+    assert.throws(() => projectCanonicalFinalReport(input), /estimated_spend/u, estimatedSpend);
+  }
+  // The Markdown directive complements the schema: a hand-edited spend row cannot pass either.
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const spendRow = "- Estimated spend: `$0.01`\n";
+  assert.ok(projection.markdown.includes(spendRow));
+  for (const replacement of [
+    "- Estimated spend: `$0.01+`\n",
+    "- Estimated spend: `unavailable`\n",
+    "- Estimated spend: $0.01\n",
+    "- Estimated spend: `$0.01` (partial)\n"
+  ]) {
+    const markdown = projection.markdown.replace(spendRow, replacement);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false, replacement);
+  }
+});
+
+function summaryBullets(commit: string): string {
+  return [
+    "- Run ID: `commit-run`",
+    "- Repository: `example/repository`",
+    `- Commit: \`${commit}\``,
+    "- Elapsed time: `1m`",
+    "- Models used: `model-a`",
+    "- Tokens used: `100`",
+    "- Estimated spend: `$0.01`",
+    "- Audit profile: `exhaustive`"
+  ].join("\n");
+}
 
 test("public final-report projection still redacts a vendor-format credential in a run ID slot", () => {
   const credentialId = "sk-abcdefghijklmnopqrstuvwx"; // gitleaks:allow -- fake credential fixture for the redaction tests
@@ -647,7 +836,8 @@ test("public final-report projection still redacts a vendor-format credential in
   assert.equal(JSON.stringify(published.report).includes(credentialId), false);
   assert.equal(published.markdown.includes(credentialId), false);
   assert.match(published.markdown, /^- Run ID: `REDACTED`$/mu);
-  assert.match(published.markdown, /^- Source run ID: `REDACTED`$/mu);
+  assert.doesNotMatch(published.markdown, /Source run ID/u);
+  assert.equal(metadata.target_commit, TARGET_COMMIT);
   assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
   assertPublicProjectionFixedPoint(published);
 });
@@ -862,14 +1052,16 @@ test("priority-filtered reference expectations remain visible without claiming f
   const report = renderableReport();
   report.property_implementation_coverage = {
     ...(report.property_implementation_coverage as Record<string, unknown>),
-    reference_expected_property_ids: ["property-1", "excluded-low-property"],
+    reference_expected_property_ids: ["property-1", "excluded-low-property", "excluded_low_property"],
     reference_expectation_ids: ["external-required-check"]
   };
   const projection = projectCanonicalFinalReport(report);
-  assert.match(projection.markdown, /Reference expectation properties: `2`/u);
-  assert.match(
-    projection.markdown,
-    /Unselected reference expectation properties \(not fulfilled\): `excluded-low-property`/u
+  assert.match(projection.markdown, /Reference expectation properties: `3`/u);
+  // Inside a code span a backslash is literal, so property IDs are inline values, never escaped prose.
+  assert.ok(
+    projection.markdown.includes(
+      "- Unselected reference expectation properties (not fulfilled): `excluded-low-property`, `excluded_low_property`\n"
+    )
   );
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
 });
@@ -891,7 +1083,7 @@ test("agent reports disclose omitted property implementation without discarding 
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
 });
 
-test("canonical final-report projection renders unavailable coverage evidence and typed blockers", () => {
+test("the coverage producer section keeps its bytes while report.md states only the unmeasured notice", () => {
   const coverageEvidence = {
     schema_version: "ultrafuzz.coverage-evidence.v1",
     status: "unavailable",
@@ -919,10 +1111,11 @@ test("canonical final-report projection renders unavailable coverage evidence an
 
   const projection = projectCanonicalFinalReport(report);
   assert.deepEqual(projection.report.coverage_evidence, coverageEvidence);
-  assert.match(
+  assert.doesNotMatch(
     projection.markdown,
-    /## Scoped coverage evidence\n\n- Status: unavailable\n\nBlockers:\n- coverage-tooling-blocked: Recon &lt;span hidden&gt;could not&lt;\/span&gt; \\~\\~produce\\~\\~ an authenticated coverage map\.\n {2}- Evidence: `logs\/recon-coverage\.log`\n {2}- Evidence: `campaign-summary\.json`/u
+    /Scoped coverage evidence|coverage-tooling-blocked|Blockers:|recon-coverage/u
   );
+  assert.ok(projection.markdown.includes(`- Audit profile: \`exhaustive\`\n\n${COVERAGE_UNMEASURED_NOTICE}\n\n`));
 });
 
 test("canonical coverage projection escapes exclusion-reason HTML as public prose", () => {
@@ -1138,6 +1331,30 @@ test("directive validation treats fenced proof code as code while retaining pros
       projection.report
     ),
     false
+  );
+});
+
+test("issue headings inside fenced proof code are code, not issue headings", () => {
+  const input = renderableReport();
+  const [issue] = input.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.proof_of_concept = {
+    scenario: ["Run the script."],
+    language: "python",
+    code: "## [L-01] - State mismatch\n## [M-01] - Another heading\nprint('probe')"
+  };
+  const projection = projectCanonicalFinalReport(input);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      projection.markdown.replace(
+        "\n## Property implementation coverage\n",
+        "\n## [M-01] - Another heading\n\n## Property implementation coverage\n"
+      ),
+      projection.report
+    ),
+    false,
+    "an issue heading outside the fence still counts"
   );
 });
 
@@ -1403,6 +1620,24 @@ function markdownNodes(markdown: string): Array<{ type: string; url?: string; te
   return nodes;
 }
 
+/** GitHub's heading slug: lowercase, keep letters, marks, digits, spaces, "-" and "_", then spaces become "-". */
+function headingSlug(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
+    .replace(/\s/gu, "-");
+}
+
+function titledReport(title: string): Record<string, unknown> {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.title = title;
+  for (const entry of report.property_provenance as Array<Record<string, unknown>>) entry.title = title;
+  return report;
+}
+
 test("upstream prose with link or image syntax renders as literal text", () => {
   const report = renderableReport();
   const [issue] = report.issues as Array<Record<string, unknown>>;
@@ -1437,10 +1672,12 @@ test("artifact validation warning codes with link or image syntax render as lite
   }));
   (report.run_metadata as Record<string, unknown>).artifact_validation_warnings = warnings;
 
-  for (const markdown of [
-    projectCanonicalFinalReport(report).markdown,
-    projectPublicArtifactValidationWarnings(warnings).markdown
-  ]) {
+  // report.md no longer lists the warnings; the public companion carries them as literal text.
+  assert.equal(
+    codes.some((code) => projectCanonicalFinalReport(report).markdown.includes(code)),
+    false
+  );
+  for (const markdown of [projectPublicArtifactValidationWarnings(warnings).markdown]) {
     const nodes = markdownNodes(markdown);
     assert.deepEqual(
       nodes.filter((node) => node.type === "image" || (node.type === "link" && !node.url?.startsWith("#"))),
@@ -1481,27 +1718,35 @@ test("upstream prose that reads like a legacy report label still renders", () =>
   }
 });
 
-test("issue titles with non-ASCII letters render with index anchors that resolve to their headings", () => {
-  // GitHub heading slugs: lowercase, keep letters, marks, digits, spaces, "-" and "_", then spaces become "-".
-  const slug = (text: string): string =>
-    text
-      .trim()
-      .toLowerCase()
-      .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
-      .replace(/\s/gu, "-");
-  for (const title of ["Δ-neutral rebalance drifts", "Naïve [share] math"]) {
-    const report = renderableReport();
-    const [issue] = report.issues as Array<Record<string, unknown>>;
-    if (issue === undefined) throw new Error("missing issue fixture");
-    issue.title = `[L-01] - ${title}`;
-    for (const entry of report.property_provenance as Array<Record<string, unknown>>) entry.title = issue.title;
-
-    const nodes = markdownNodes(projectCanonicalFinalReport(report).markdown);
-    const headings = new Set(nodes.filter((node) => node.type === "heading").map((node) => slug(node.text)));
+test("issue titles with non-ASCII letters, underscores, and code spans render index anchors that resolve", () => {
+  for (const title of [
+    "Δ-neutral rebalance drifts",
+    "Naïve [share] math",
+    "max_supply overflow in `_mint`",
+    "`` a`b `` and ` spaced ` spans",
+    "`Vec<T>` length and _private_ helper",
+    "Q&amp;A \\x19 prefix",
+    "| piped `a|b` title"
+  ]) {
+    const markdown = projectCanonicalFinalReport(titledReport(`[L-01] - ${title}`)).markdown;
+    const nodes = markdownNodes(markdown);
+    const headings = new Set(nodes.filter((node) => node.type === "heading").map((node) => headingSlug(node.text)));
     const anchors = nodes.filter((node) => node.type === "link" && node.url?.startsWith("#"));
     assert.ok(anchors.length > 0, title);
     for (const anchor of anchors) assert.ok(headings.has(anchor.url?.slice(1) ?? ""), `${title}: ${anchor.url ?? ""}`);
   }
+  // A GFM table row splits on every pipe that is not backslash-escaped, so the index escapes each one,
+  // including a title's first character: the title follows the label's `] - `, so it opens no block.
+  const piped = renderableReport();
+  const [pipedIssue] = piped.issues as Array<Record<string, unknown>>;
+  if (pipedIssue === undefined) throw new Error("missing issue fixture");
+  pipedIssue.title = "[L-01] - | piped `a|b` title";
+  for (const entry of piped.property_provenance as Array<Record<string, unknown>>) entry.title = pipedIssue.title;
+  assert.ok(
+    projectCanonicalFinalReport(piped).markdown.includes(
+      "\n| L-01 | [[L-01] - \\| piped `a\\|b` title](#l-01----piped-ab-title) |\n"
+    )
+  );
 });
 
 test("public projection keeps a redacted path followed by a parenthesis as literal text", () => {
@@ -1531,4 +1776,814 @@ test("public projection keeps a redacted path followed by a parenthesis as liter
     issue.description = description;
     assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
   }
+});
+
+function emptyFindingsReport(): Record<string, unknown> {
+  return { ...renderableReport(), issues: [], property_provenance: [] };
+}
+
+function runSummaryParagraphAfterBullets(markdown: string): string | undefined {
+  return markdown.split("\n## Run summary\n\n")[1]?.split("\n\n")[1];
+}
+
+const UNMEASURED_EMPTY_SENTENCE =
+  "No issues were reported, but scoped coverage could not be measured, so this is not a result.";
+
+test("coverage notices follow the Run summary exactly when the typed evidence calls for one", () => {
+  const cases: Array<{ evidence: Record<string, unknown> | undefined; notice: string | undefined; empty: string }> = [
+    {
+      evidence: unavailableCoverageEvidence(),
+      notice: COVERAGE_UNMEASURED_NOTICE,
+      empty: UNMEASURED_EMPTY_SENTENCE
+    },
+    { evidence: measuredCoverageEvidence(1), notice: COVERAGE_INCOMPLETE_NOTICE, empty: "No issues reported." },
+    { evidence: completeCoverageEvidence(), notice: undefined, empty: "No issues reported." },
+    { evidence: undefined, notice: undefined, empty: "No issues reported." }
+  ];
+  for (const { evidence, notice, empty } of cases) {
+    for (const base of [renderableReport(), emptyFindingsReport()]) {
+      const report = evidence === undefined ? base : { ...base, coverage_evidence: evidence };
+      const projection = projectCanonicalFinalReport(report);
+      const label = `${String(evidence?.status)} with ${String((report.issues as unknown[]).length)} issues`;
+      assert.deepEqual(projection.report, report, label);
+      const afterSummary = runSummaryParagraphAfterBullets(projection.markdown);
+      if (notice === undefined) {
+        assert.notEqual(afterSummary, COVERAGE_UNMEASURED_NOTICE, label);
+        assert.notEqual(afterSummary, COVERAGE_INCOMPLETE_NOTICE, label);
+      } else {
+        assert.equal(afterSummary, notice, label);
+      }
+      assert.doesNotMatch(projection.markdown, /Scoped coverage evidence|declaration-completeness|\d+\/\d+/u, label);
+      if ((report.issues as unknown[]).length === 0) {
+        assert.ok(projection.markdown.split("\n").includes(empty), `${label}: ${projection.markdown}`);
+      }
+      assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true, label);
+      assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+
+      const otherNotice =
+        notice === COVERAGE_UNMEASURED_NOTICE ? COVERAGE_INCOMPLETE_NOTICE : COVERAGE_UNMEASURED_NOTICE;
+      const mutations = [
+        `${projection.markdown}\n${COVERAGE_UNMEASURED_NOTICE}\n`,
+        `${projection.markdown}\n${COVERAGE_INCOMPLETE_NOTICE}\n`,
+        projection.markdown.replace(
+          "- Audit profile: `exhaustive`\n",
+          `- Audit profile: \`exhaustive\`\n\n${otherNotice}\n`
+        )
+      ];
+      if (notice !== undefined) {
+        mutations.push(
+          projection.markdown.replace(`\n${notice}\n`, "\n"),
+          projection.markdown
+            .replace(`\n\n${notice}\n`, "\n")
+            .replace("\n## Property provenance\n", `\n${notice}\n\n## Property provenance\n`)
+        );
+      }
+      for (const markdown of mutations) {
+        assert.notEqual(markdown, projection.markdown, label);
+        assert.equal(
+          isDirectiveConformingFinalReportMarkdown(markdown, projection.report),
+          false,
+          `${label}: ${markdown}`
+        );
+      }
+    }
+  }
+
+  const unmeasured = projectCanonicalFinalReport({
+    ...emptyFindingsReport(),
+    coverage_evidence: unavailableCoverageEvidence()
+  });
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      unmeasured.markdown.replace(UNMEASURED_EMPTY_SENTENCE, "No issues reported."),
+      unmeasured.report
+    ),
+    false,
+    "unmeasured scoped coverage must never read as a clean empty result"
+  );
+});
+
+test("finding prose that repeats a coverage notice or the clean-result sentence still renders", () => {
+  const cases: Array<{ evidence: Record<string, unknown> | undefined; notice: string | undefined }> = [
+    { evidence: undefined, notice: undefined },
+    { evidence: unavailableCoverageEvidence(), notice: COVERAGE_UNMEASURED_NOTICE },
+    { evidence: measuredCoverageEvidence(1), notice: COVERAGE_INCOMPLETE_NOTICE }
+  ];
+  for (const { evidence, notice } of cases) {
+    const report = remediationReport(COVERAGE_INCOMPLETE_NOTICE);
+    const [issue] = report.issues as Array<Record<string, unknown>>;
+    if (issue === undefined) throw new Error("missing issue fixture");
+    issue.description = COVERAGE_UNMEASURED_NOTICE;
+    issue.impact_rationale = "No issues reported.";
+    (issue.proof_of_concept as Record<string, unknown>).scenario = ["No issues reported.", COVERAGE_INCOMPLETE_NOTICE];
+    if (evidence !== undefined) report.coverage_evidence = evidence;
+    const projection = projectCanonicalFinalReport(report);
+    const label = String(evidence?.status);
+    assert.ok(projection.markdown.includes(`\n${COVERAGE_UNMEASURED_NOTICE}\n\n### Severity\n`), label);
+    assert.ok(projection.markdown.includes(`\n### Remediation\n\n${COVERAGE_INCOMPLETE_NOTICE}\n`), label);
+    const afterSummary = runSummaryParagraphAfterBullets(projection.markdown);
+    if (notice === undefined) {
+      assert.notEqual(afterSummary, COVERAGE_UNMEASURED_NOTICE, label);
+      assert.notEqual(afterSummary, COVERAGE_INCOMPLETE_NOTICE, label);
+    } else {
+      assert.equal(afterSummary, notice, label);
+    }
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true, label);
+    assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+    // Outside the issue blocks a notice still appears exactly when owed, once, after the Run summary.
+    for (const extra of [COVERAGE_UNMEASURED_NOTICE, COVERAGE_INCOMPLETE_NOTICE]) {
+      assert.equal(
+        isDirectiveConformingFinalReportMarkdown(
+          projection.markdown.replace(
+            "\n## Property implementation coverage\n",
+            `\n## Notes\n\n${extra}\n\n## Property implementation coverage\n`
+          ),
+          projection.report
+        ),
+        false,
+        `${label}: ${extra}`
+      );
+    }
+  }
+  // An empty report keeps its clean-result rule: the sentence outside an issue block still fails.
+  const unmeasured = projectCanonicalFinalReport({
+    ...emptyFindingsReport(),
+    coverage_evidence: unavailableCoverageEvidence()
+  });
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      unmeasured.markdown.replace(
+        "\n## Property implementation coverage\n",
+        "\n## Notes\n\nNo issues reported.\n\n## Property implementation coverage\n"
+      ),
+      unmeasured.report
+    ),
+    false
+  );
+});
+
+test("the unmeasured-coverage clause composes with the other no-issues clauses", () => {
+  const blocked = projectCanonicalFinalReport({
+    ...emptyFindingsReport(),
+    coverage_evidence: unavailableCoverageEvidence(),
+    campaign_outcome: { outcome: "blocked" }
+  });
+  assert.ok(
+    blocked.markdown
+      .split("\n")
+      .includes(
+        "No issues were reported, but the invariant campaign did not run and scoped coverage could not be measured, so this is not a result."
+      ),
+    blocked.markdown
+  );
+  const lane = (index: number, status: string): Record<string, unknown> => ({
+    node_id: `dynamic:class:${index}`,
+    logical_node_id: "class-goals",
+    attempt_id: `attempt-${index}`,
+    status,
+    finding_count: status === "completed-no-findings" ? 0 : null
+  });
+  const census = {
+    schema_version: "ultrafuzz.goal-search-coverage.v1",
+    run_id: "projection-test",
+    totals: { planned: 2 },
+    goals: [lane(1, "completed-no-findings"), lane(2, "stopped-early")]
+  };
+  const allThree = projectCanonicalFinalReport(
+    {
+      ...emptyFindingsReport(),
+      coverage_evidence: unavailableCoverageEvidence(),
+      campaign_outcome: { outcome: "blocked" }
+    },
+    { goalSearchCoverage: census }
+  );
+  assert.ok(
+    allThree.markdown
+      .split("\n")
+      .includes(
+        "No issues were reported, but the invariant campaign did not run, only 1 of 2 targeted goal searches completed, and scoped coverage could not be measured, so this is not a result. See [Goal search coverage](#goal-search-coverage)."
+      ),
+    allThree.markdown
+  );
+  assert.equal(isDirectiveConformingFinalReportMarkdown(allThree.markdown, allThree.report), true);
+  // Without the coverage clause the existing sentence keeps its exact bytes.
+  const goalOnly = projectCanonicalFinalReport(
+    { ...emptyFindingsReport(), campaign_outcome: { outcome: "blocked" } },
+    { goalSearchCoverage: census }
+  );
+  assert.ok(
+    goalOnly.markdown
+      .split("\n")
+      .includes(
+        "No issues were reported, but the invariant campaign did not run and only 1 of 2 targeted goal searches completed, so this is not a result. See [Goal search coverage](#goal-search-coverage)."
+      )
+  );
+});
+
+test("partial and unchecked disclosures are unchanged by the coverage notice", () => {
+  const partial = projectCanonicalFinalReport({
+    ...emptyFindingsReport(),
+    completion: partialCompletion(),
+    coverage_evidence: unavailableCoverageEvidence()
+  });
+  assert.match(
+    partial.markdown,
+    /^# Ultrafuzz report — PARTIAL\n\n> \*\*PARTIAL REPORT — coverage is incomplete\.\*\*/u
+  );
+  assert.match(partial.markdown, /^No production issues were reported from the available verified results\. /mu);
+  assert.equal(runSummaryParagraphAfterBullets(partial.markdown), COVERAGE_UNMEASURED_NOTICE);
+  assert.doesNotMatch(partial.markdown, /^No issues (?:were )?reported/mu);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(partial.markdown, partial.report), true);
+
+  const unchecked = projectCanonicalFinalReport({
+    ...uncheckedReport(),
+    coverage_evidence: measuredCoverageEvidence(1)
+  });
+  assert.match(
+    unchecked.markdown,
+    /^# Ultrafuzz report — PARTIAL\n\n> \*\*PARTIAL REPORT — verification not checked\.\*\*/u
+  );
+  assert.match(unchecked.markdown, /^No final findings are included in this agent-written report\. /mu);
+  assert.equal(runSummaryParagraphAfterBullets(unchecked.markdown), COVERAGE_INCOMPLETE_NOTICE);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(unchecked.markdown, unchecked.report), true);
+});
+
+test("directive validation rejects the removed sections outside fenced code only", () => {
+  const projection = projectCanonicalFinalReport(renderableReport());
+  const insertBlock = (block: string): string =>
+    projection.markdown.replace("\n## Property provenance\n", `\n${block}\n\n## Property provenance\n`);
+  for (const heading of [
+    "## Scoped coverage evidence",
+    "## Artifact validation warnings",
+    "### Scoped coverage evidence"
+  ]) {
+    assert.equal(
+      isDirectiveConformingFinalReportMarkdown(insertBlock(`${heading}\n\n- Status: unavailable`), projection.report),
+      false,
+      heading
+    );
+    assert.equal(
+      isDirectiveConformingFinalReportMarkdown(insertBlock(`~~~text\n${heading}\n~~~`), projection.report),
+      true,
+      `${heading} inside fenced code`
+    );
+  }
+});
+
+function remediationReport(recommendation?: unknown): Record<string, unknown> {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.family_variants = [
+    { id: "variant-1", title: "Sibling path", summary: "The same overflow via `burn`.", dedupe_key: "variant-1" }
+  ];
+  if (recommendation !== undefined) issue.recommendation = recommendation;
+  return report;
+}
+
+test("every production issue ends with Remediation after its proof and family variants", () => {
+  const recommendation = "Use `SafeERC20.safeTransfer` instead of `transfer`, and bound max_supply in `_mint()`.";
+  const report = remediationReport(recommendation);
+  const before = structuredClone(report);
+  const projection = projectCanonicalFinalReport(report);
+  assert.deepEqual(projection.report, before);
+  const markdown = projection.markdown;
+  const proof = markdown.indexOf("\n### Proof of Concept\n");
+  const variants = markdown.indexOf("\n#### Family variants\n");
+  const remediation = markdown.indexOf(`\n### Remediation\n\n${recommendation}\n`);
+  assert.ok(proof > 0 && variants > proof && remediation > variants, markdown);
+  assert.ok(remediation < markdown.indexOf("\n## Property implementation coverage\n"));
+  const nodes = markdownNodes(markdown);
+  for (const code of ["SafeERC20.safeTransfer", "transfer", "_mint()"]) {
+    assert.ok(
+      nodes.some((node) => node.type === "inlineCode" && node.text === code),
+      code
+    );
+  }
+  assert.ok(
+    nodes.some(
+      (node) =>
+        node.type === "paragraph" &&
+        node.text === "Use SafeERC20.safeTransfer instead of transfer, and bound max_supply in _mint()."
+    )
+  );
+  assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), true);
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+
+  for (const missing of [undefined, "   ", "unavailable", " Unavailable "]) {
+    const fallbackReport = remediationReport(missing);
+    const fallbackBefore = structuredClone(fallbackReport);
+    const fallback = projectCanonicalFinalReport(fallbackReport);
+    assert.deepEqual(fallback.report, fallbackBefore, "the fallback is render-time only");
+    assert.ok(
+      fallback.markdown.includes(
+        "\n#### Family variants\n\n- **Sibling path**: The same overflow via `burn`.\n\n" +
+          `### Remediation\n\n${REMEDIATION_UNRECORDED_NOTICE}\n\n## Property implementation coverage\n`
+      ),
+      `${JSON.stringify(missing)}: ${fallback.markdown}`
+    );
+    assert.equal(isDirectiveConformingFinalReportMarkdown(fallback.markdown, fallback.report), true);
+  }
+});
+
+test("directive validation rejects a missing, duplicated, or misordered Remediation", () => {
+  const recommendation = "Bound the supply before minting.";
+  const projection = projectCanonicalFinalReport(remediationReport(recommendation));
+  const block = `\n### Remediation\n\n${recommendation}\n`;
+  const withoutBlock = projection.markdown.replace(block, "");
+  assert.notEqual(withoutBlock, projection.markdown);
+  const section = `### Remediation\n\n${recommendation}\n\n`;
+  const mutations = {
+    missing: withoutBlock,
+    duplicated: projection.markdown.replace(block, `${block}${block}`),
+    "before the proof": withoutBlock.replace("### Proof of Concept\n", `${section}### Proof of Concept\n`),
+    "before family variants": withoutBlock.replace("#### Family variants\n", `${section}#### Family variants\n`),
+    "after the next h2": withoutBlock.replace("\n## Goal search coverage\n", `\n## Goal search coverage\n${block}`)
+  };
+  for (const [label, markdown] of Object.entries(mutations)) {
+    assert.notEqual(markdown, projection.markdown, label);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false, label);
+  }
+
+  // Remediation text inside fenced proof code is code, not the issue's section.
+  const fenced = remediationReport(recommendation);
+  const [issue] = fenced.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  (issue.proof_of_concept as Record<string, unknown>).code = `// notes\n### Remediation\n\n${recommendation}`;
+  const fencedProjection = projectCanonicalFinalReport(fenced);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(fencedProjection.markdown, fencedProjection.report), true);
+  const fencedWithoutBlock = fencedProjection.markdown.replace(`\n### Remediation\n\n${recommendation}\n\n##`, "\n##");
+  assert.notEqual(fencedWithoutBlock, fencedProjection.markdown);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(fencedWithoutBlock, fencedProjection.report), false);
+});
+
+function descriptionReport(description: string): Record<string, unknown> {
+  const report = renderableReport();
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.description = description;
+  return report;
+}
+
+function projectDescription(description: string): CanonicalFinalReportProjection {
+  return projectCanonicalFinalReport(descriptionReport(description));
+}
+
+test("finding prose renders backtick spans as inline code and everything else as literal text", () => {
+  const description = "Use `max_supply` and `_mint()` so max_supply and _a b_ stay text.";
+  const projection = projectDescription(description);
+  assert.ok(projection.markdown.includes("\nUse `max_supply` and `_mint()` so max_supply and \\_a b\\_ stay text.\n"));
+  const nodes = markdownNodes(projection.markdown);
+  assert.ok(nodes.some((node) => node.type === "inlineCode" && node.text === "max_supply"));
+  assert.ok(nodes.some((node) => node.type === "inlineCode" && node.text === "_mint()"));
+  assert.equal(
+    nodes.some((node) => node.type === "emphasis"),
+    false
+  );
+  assert.ok(
+    nodes.some(
+      (node) =>
+        node.type === "paragraph" && node.text === "Use max_supply and _mint() so max_supply and _a b_ stay text."
+    )
+  );
+
+  const markup = projectDescription("A `Vec<T>` length and ```x``` and `` a`b `` and an unmatched ` tick.");
+  assert.ok(
+    markup.markdown.includes(
+      "\nA \\`Vec&lt;T&gt;\\` length and \\`\\`\\`x\\`\\`\\` and `` a`b `` and an unmatched \\` tick.\n"
+    )
+  );
+  const markupNodes = markdownNodes(markup.markdown);
+  assert.equal(
+    markupNodes.some((node) => node.type === "inlineCode" && (node.text.includes("Vec") || node.text === "x")),
+    false
+  );
+  assert.ok(markupNodes.some((node) => node.type === "inlineCode" && node.text === "a`b"));
+  assert.ok(
+    markupNodes.some(
+      (node) =>
+        node.type === "paragraph" && node.text === "A `Vec<T>` length and ```x``` and a`b and an unmatched ` tick."
+    )
+  );
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(markup.markdown, markup.report),
+    true,
+    "passes the raw-HTML rule"
+  );
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(markup.report));
+});
+
+test("finding prose cannot open a block, a fence, or a link reference definition", () => {
+  for (const description of [
+    "1. Call deposit.",
+    "2) Call deposit.",
+    "- Call deposit.",
+    "+ Call deposit.",
+    "# Call deposit.",
+    "> Call deposit.",
+    "| a | b |",
+    "=== heading",
+    "```solidity",
+    "~~~ fence",
+    "<div>raw</div>"
+  ]) {
+    const projection = projectDescription(description);
+    const nodes = markdownNodes(projection.markdown);
+    assert.ok(
+      nodes.some((node) => node.type === "paragraph" && node.text === description),
+      `${description}: ${projection.markdown}`
+    );
+    assert.equal(
+      nodes.some((node) => node.type === "html" || node.type === "blockquote"),
+      false,
+      description
+    );
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true, description);
+  }
+
+  const report = descriptionReport("[spec]: https://example.com/evil");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  (issue.proof_of_concept as Record<string, unknown>).scenario = [
+    "[spec]: https://example.com/evil",
+    "Read [spec] and [spec][spec]."
+  ];
+  issue.recommendation = "Follow [spec].";
+  const nodes = markdownNodes(projectCanonicalFinalReport(report).markdown);
+  assert.equal(
+    nodes.some((node) => node.type === "definition" || node.type === "linkReference"),
+    false
+  );
+  assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === "[spec]: https://example.com/evil"));
+  assert.ok(nodes.some((node) => node.type === "paragraph" && node.text === "Read [spec] and [spec][spec]."));
+});
+
+test("finding prose keeps public projections fixed points without private-content false positives", () => {
+  const digestText = "The digest uses \\x19\\x01 as prefix, and a\\b keeps its backslash.";
+  const published = projectPublicCanonicalFinalReport(descriptionReport(digestText));
+  assert.ok(published.markdown.includes(`\n${digestText}\n`));
+  assertPublicProjectionFixedPoint(published);
+  assert.ok(markdownNodes(published.markdown).some((node) => node.type === "paragraph" && node.text === digestText));
+
+  // A backslash before punctuation, or at the end, renders as an entity, never as a doubled backslash.
+  const escapes = projectPublicCanonicalFinalReport(descriptionReport("Escape \\*star and \\_under, ending in \\"));
+  assert.ok(escapes.markdown.includes("\nEscape &#92;\\*star and &#92;\\_under, ending in &#92;\n"));
+  assert.ok(
+    markdownNodes(escapes.markdown).some(
+      (node) => node.type === "paragraph" && node.text === "Escape \\*star and \\_under, ending in \\"
+    )
+  );
+  assertPublicProjectionFixedPoint(escapes);
+
+  const redacted = projectPublicCanonicalFinalReport(
+    descriptionReport("Set token=synthetic-assignment-secret and `api_key=zzz` now.")
+  );
+  assert.equal(
+    (redacted.report.issues as Array<Record<string, unknown>>)[0]?.description,
+    "Set token=REDACTED and `api_key=REDACTED now."
+  );
+  assert.ok(redacted.markdown.includes("\nSet token=REDACTED and \\`api_key=REDACTED now.\n"));
+  assert.doesNotMatch(redacted.markdown, /synthetic-assignment-secret|zzz/u);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(redacted.markdown, redacted.report), true);
+  assertPublicProjectionFixedPoint(redacted);
+
+  const privateSpan = projectPublicCanonicalFinalReport(descriptionReport("Read `/srv/customer/private/x.sol` first."));
+  assert.ok(privateSpan.markdown.includes("\nRead `[redacted-path]` first.\n"));
+  assertPublicProjectionFixedPoint(privateSpan);
+
+  // The renderer's own escapes are not path syntax: `&` stays raw unless it would start a character
+  // reference, and a backslash written before escaped punctuation is not a `B:\` or `file:\` separator.
+  for (const description of [
+    "Option B:&C, see file:&x, and read Q&amp;A.",
+    "Option B:*x* and C:_y_ differ, and the error |a - b|/b grows."
+  ]) {
+    const published = projectPublicCanonicalFinalReport(descriptionReport(description));
+    assert.equal((published.report.issues as Array<Record<string, unknown>>)[0]?.description, description);
+    assert.ok(
+      markdownNodes(published.markdown).some((node) => node.type === "paragraph" && node.text === description),
+      `${description}: ${published.markdown}`
+    );
+    assertPublicProjectionFixedPoint(published);
+  }
+  assert.ok(
+    projectCanonicalFinalReport(descriptionReport("Option B:&C and Q&amp;A")).markdown.includes(
+      "\nOption B:&C and Q&amp;amp;A\n"
+    )
+  );
+
+  // A path after a literal backslash, a pipe that starts a word, or a literal `&lt;` is redacted in
+  // report.json, so the Markdown re-scan never meets one behind `&#92;`, `&#124;`, or `&amp;lt;`.
+  for (const [description, redactedDescription] of [
+    ["Escape a\\/b.", "Escape a\\[redacted-path]"],
+    ["Read a\\/srv/customer/key first.", "Read a\\[redacted-path] first."],
+    ["|/x leads.", "|[redacted-path] leads."],
+    ["|/srv/customer/key first.", "|[redacted-path] first."],
+    ["Pipe x |/srv/customer/key first.", "Pipe x |[redacted-path] first."],
+    ["Quoted &lt;/srv/customer/key first.", "Quoted &lt;[redacted-path] first."]
+  ] as const) {
+    const published = projectPublicCanonicalFinalReport(descriptionReport(description));
+    assert.equal(
+      (published.report.issues as Array<Record<string, unknown>>)[0]?.description,
+      redactedDescription,
+      description
+    );
+    assert.doesNotMatch(published.markdown, /srv\/customer/u, description);
+    assertPublicProjectionFixedPoint(published);
+  }
+  const pipeTitle = renderableReport();
+  const [pipeIssue] = pipeTitle.issues as Array<Record<string, unknown>>;
+  if (pipeIssue === undefined) throw new Error("missing issue fixture");
+  pipeIssue.title = "[L-01] - |/srv/customer/key leaks";
+  for (const entry of pipeTitle.property_provenance as Array<Record<string, unknown>>) entry.title = pipeIssue.title;
+  const pipePublished = projectPublicCanonicalFinalReport(pipeTitle);
+  assert.ok(pipePublished.markdown.includes("\n## [L-01] - |[redacted-path] leaks\n"), pipePublished.markdown);
+  assert.ok(pipePublished.markdown.includes("](#l-01---redacted-path-leaks) |\n"), pipePublished.markdown);
+  assertPublicProjectionFixedPoint(pipePublished);
+});
+
+test("blocker summaries keep the frozen public prose escaping", () => {
+  const report = renderableReport();
+  (report.property_implementation_coverage as Record<string, unknown>).blocker_summaries = [
+    "Needs `max_supply` and *care*"
+  ];
+  assert.ok(projectCanonicalFinalReport(report).markdown.includes("\n- Needs \\`max\\_supply\\` and \\*care\\*\n"));
+});
+
+test("an issue title that opens with a bracket keeps a working index link, including a redacted leading path", () => {
+  const redactedTitle = "[L-01] - /home/runner/private/Vault.sol rounds deposits down";
+  const cases = [
+    { project: projectCanonicalFinalReport, title: "[L-01] - [Vault] deposit rounding" },
+    { project: projectCanonicalFinalReport, title: "[L-01] - - [x] 1. =| title" },
+    {
+      project: projectPublicCanonicalFinalReport,
+      title: redactedTitle,
+      label: "[L-01] - [redacted-path] rounds deposits down"
+    }
+  ];
+  for (const { project, title, label = title } of cases) {
+    const projection = project(titledReport(title));
+    const nodes = markdownNodes(projection.markdown);
+    assert.ok(
+      nodes.some((node) => node.type === "heading" && node.text === label),
+      `${title}: ${projection.markdown}`
+    );
+    // The index row's link text is the whole label, and its fragment is the heading's slug.
+    const link = nodes.find((node) => node.type === "link" && node.text === label);
+    assert.equal(link?.url, `#${headingSlug(label)}`, `${title}: ${projection.markdown}`);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true, title);
+  }
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(titledReport(redactedTitle)));
+});
+
+test("remediation that writes the renderer's escapes next to a slash publishes, and a real path there is redacted", () => {
+  const cases: ReadonlyArray<readonly [recommendation: string, published: string]> = [
+    ["Delete the stale /* unchecked */ annotation.", "Delete the stale /* unchecked */ annotation."],
+    ["Use `<`/`<=` consistently.", "Use `<`/`<=` consistently."],
+    ["Use `a >= b`/`a > b` checks.", "Use `a >= b`/`a > b` checks."],
+    ["Render it as <Foo />.", "Render it as <Foo />."],
+    ["Keep outputs under artifacts/<run-id> only.", "Keep outputs under artifacts/<run-id> only."],
+    // A `>` is a path boundary in report.json, so whatever follows `>/` is redacted before rendering
+    // and the re-scan can treat the escaped `&gt;` in front of a slash as the renderer's own escape.
+    ["Ensure ratio>/2 is rejected.", "Ensure ratio>[redacted-path] is rejected."],
+    ["Delete the stale /srv/customer/key annotation.", "Delete the stale [redacted-path] annotation."],
+    ["Use `<`/srv/customer/key consistently.", "Use `<`[redacted-path] consistently."],
+    ["Use `a >= b`/srv/customer/key checks.", "Use `a >= b`[redacted-path] checks."],
+    ["Render it as <Foo /srv/customer/key.", "Render it as <Foo [redacted-path]"],
+    ["Keep outputs under artifacts/srv/customer only.", "Keep outputs under [redacted-path] only."],
+    ["Ensure ratio>/srv/customer/key is rejected.", "Ensure ratio>[redacted-path] is rejected."],
+    // The re-scan reads the escaped run after a slash as a word break, so report.json redacts a path
+    // that follows the run, however long or nested the run is.
+    ["Delete the stale /*/srv/customer/key annotation.", "Delete the stale /*[redacted-path] annotation."],
+    ["Use `<`/</srv/customer/key consistently.", "Use `<`/<[redacted-path] consistently."],
+    ["Render it as <Foo />artifacts/srv/customer.", "Render it as <Foo />[redacted-path]"],
+    ["Keep outputs under artifacts/</srv/customer only.", "Keep outputs under artifacts/<[redacted-path] only."],
+    [
+      "Keep outputs under artifacts/<artifacts/srv/customer only.",
+      "Keep outputs under artifacts/<[redacted-path] only."
+    ],
+    ["Match /**/srv/customer/key and /*/*/srv/customer/key.", "Match /**[redacted-path] and /*/*[redacted-path]"],
+    ["Read /*file:///srv/customer/key now.", "Read /*[redacted-path] now."],
+    // A slash inside a word starts no run, so a relative glob stays readable.
+    [
+      "Match test/*/Invariant.t.sol and test/**/Vault.t.sol, not /**/*.sol or /*/*.",
+      "Match test/*/Invariant.t.sol and test/**/Vault.t.sol, not /**/*.sol or /*/*."
+    ]
+  ];
+  for (const [recommendation, expected] of cases) {
+    const published = projectPublicCanonicalFinalReport(remediationReport(recommendation));
+    assert.equal(
+      (published.report.issues as Array<Record<string, unknown>>)[0]?.recommendation,
+      expected,
+      recommendation
+    );
+    assert.doesNotMatch(published.markdown, /srv\/customer/u, recommendation);
+    const remediation = published.markdown.split("\n### Remediation\n\n")[1]?.split("\n")[0] ?? "";
+    assert.ok(
+      markdownNodes(remediation).some((node) => node.type === "paragraph" && node.text === expected),
+      `${recommendation}: ${remediation}`
+    );
+    assertPublicProjectionFixedPoint(published);
+  }
+  // report.json reads no boundary after `<`, so it leaves this path in place; the re-scan still reads
+  // a path after the escaped run and refuses to publish.
+  assert.throws(
+    () => projectPublicCanonicalFinalReport(remediationReport("Close it with </*/srv/customer/key.")),
+    /public final-report projection contains private/u
+  );
+});
+
+test("finding prose ending in a secret-like key name and a colon publishes without a secret false positive", () => {
+  for (const recommendation of [
+    "Validate the API key:",
+    "Rotate the leaked token:",
+    "Rotate the secret:",
+    "Check the private key:"
+  ]) {
+    const published = projectPublicCanonicalFinalReport(remediationReport(recommendation));
+    assert.equal((published.report.issues as Array<Record<string, unknown>>)[0]?.recommendation, recommendation);
+    assert.ok(published.markdown.includes(`\n### Remediation\n\n${recommendation}\n\n## `), recommendation);
+    assertPublicProjectionFixedPoint(published);
+  }
+  // The same holds when the next line is a list item or a fence, or the next text a table cell or the
+  // rest of a bold variant label.
+  const report = titledReport("[L-01] - Leaked token:");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  issue.description = "Rotate the password:";
+  issue.impact_rationale = "Anyone holding the secret:";
+  (issue.proof_of_concept as Record<string, unknown>).scenario = ["Read the token:", "Replay the auth:"];
+  issue.family_variants = [
+    { id: "variant-1", title: "Replay the token:", summary: "The same leak via `burn`.", dedupe_key: "variant-1" }
+  ];
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+
+  // A credential the report walk cannot see field by field still fails closed: a key label that ends
+  // one block and the key that opens the next are still scanned together.
+  const leaked = titledReport("[L-01] - Hardcoded deployer signing key");
+  const [leakedIssue] = leaked.issues as Array<Record<string, unknown>>;
+  if (leakedIssue === undefined) throw new Error("missing issue fixture");
+  leakedIssue.description = `0x${"3f9a1c7e5b2d8f40".repeat(4)} is committed in the deploy script.`;
+  assert.throws(() => projectPublicCanonicalFinalReport(leaked), /public final-report projection contains private/u);
+  // A credential inside one field is still redacted from both report.json and report.md.
+  const assigned = projectPublicCanonicalFinalReport(
+    remediationReport("Rotate token=synthetic-remediation-secret now.")
+  );
+  assert.equal(
+    (assigned.report.issues as Array<Record<string, unknown>>)[0]?.recommendation,
+    "Rotate token=REDACTED now."
+  );
+  assert.doesNotMatch(assigned.markdown, /synthetic-remediation-secret/u);
+  assertPublicProjectionFixedPoint(assigned);
+});
+
+test("finding titles with backslashes publish through the provenance table, dispositions, and outcomes", () => {
+  const report = titledReport("[L-01] - Missing `\\x19\\x01` prefix and Q&amp;A \\x19 text in max_supply | digest");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  (issue.lifecycle as Record<string, unknown>).comparison_disposition = "promoted-again";
+  const outcomeTitle = "1. Digest omits \\x19\\x01 in `_hash` | here";
+  report.non_production_outcomes = [
+    {
+      ...structuredClone(issue),
+      id: "NP-01",
+      title: outcomeTitle,
+      triage_classification: "undetermined",
+      recommended_next_action: "Review the campaign evidence.",
+      lifecycle: {
+        dedupe_key: "digest-prefix",
+        source_artifacts: [],
+        strategy_hits: [{ strategy: "stateful-invariant" }],
+        triage_classification: "undetermined",
+        final_disposition: "non-production",
+        comparison_disposition: "not-reproduced"
+      }
+    }
+  ];
+  (report.property_provenance as Array<Record<string, unknown>>).push({
+    finding_id: "NP-01",
+    source_finding_id: "source-outcome",
+    title: outcomeTitle,
+    property_ids: ["property-1"],
+    sources: [{ source_node_id: "properties", source_property_id: "property-1" }],
+    implementation_paths: ["test/Invariant.t.sol"],
+    test_paths: ["test/Invariant.t.sol"]
+  });
+  // Finding prose in a cell: inline code kept, a backslash before a letter kept, every pipe escaped.
+  const label = "[L-01] - Missing `\\x19\\x01` prefix and Q&amp;amp;A \\x19 text in max_supply | digest";
+  const outcomeCell = "1. Digest omits \\x19\\x01 in `_hash` \\| here";
+  for (const projection of [projectCanonicalFinalReport(report), projectPublicCanonicalFinalReport(report)]) {
+    const { markdown } = projection;
+    assert.ok(markdown.includes(`\n| ${label.replace("|", "\\|")} | property-1 |`), markdown);
+    assert.ok(markdown.includes(`\n| ${outcomeCell} | property-1 |`), markdown);
+    assert.ok(markdown.includes(`\n| undetermined | ${outcomeCell} | confirmed |`), markdown);
+    // A disposition entry starts a list item, so an outcome title cannot open a nested list there.
+    assert.ok(markdown.includes(`\n### Promoted again\n\n- ${label}\n`), markdown);
+    assert.ok(
+      markdown.includes("\n### Not reproduced\n\n- 1\\. Digest omits \\x19\\x01 in `_hash` | here\n"),
+      markdown
+    );
+    const items = markdownNodes(markdown).filter((node) => node.type === "listItem");
+    assert.ok(items.some((node) => node.text === "1. Digest omits \\x19\\x01 in _hash | here"));
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), true);
+  }
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+});
+
+/** A GFM table row's cells: a backslash escapes the character after it, and every other `|` delimits. */
+function gfmTableCells(row: string): string[] {
+  const cells = [""];
+  for (let index = 0; index < row.length; index += 1) {
+    const character = row.charAt(index);
+    if (character === "|") {
+      cells.push("");
+      continue;
+    }
+    const text = character === "\\" ? row.slice(index, index + 2) : character;
+    cells[cells.length - 1] += text;
+    index += text.length - 1;
+  }
+  return cells.slice(1, -1).map((cell) => cell.trim());
+}
+
+test("a finding title whose code span holds \\| keeps every table row whole", () => {
+  const report = titledReport("[L-01] - Pipe `a\\|b` in code");
+  const [issue] = report.issues as Array<Record<string, unknown>>;
+  if (issue === undefined) throw new Error("missing issue fixture");
+  report.non_production_outcomes = [
+    {
+      ...structuredClone(issue),
+      id: "NP-01",
+      title: "Outcome `a\\|b` in code",
+      triage_classification: "undetermined",
+      recommended_next_action: "Review the campaign evidence.",
+      lifecycle: {
+        dedupe_key: "pipe-outcome",
+        source_artifacts: [],
+        strategy_hits: [{ strategy: "stateful-invariant" }],
+        triage_classification: "undetermined",
+        final_disposition: "non-production"
+      }
+    }
+  ];
+  // escapeTable would turn the span's `\|` into `\\|`, an escaped backslash and a delimiter, so a
+  // cell writes the span as text: `&#92;` and an escaped pipe.
+  const label = "[L-01] - Pipe \\`a&#92;\\|b\\` in code";
+  for (const projection of [projectCanonicalFinalReport(report), projectPublicCanonicalFinalReport(report)]) {
+    const { markdown } = projection;
+    const rows = markdown
+      .split("\n")
+      .filter((line) => line.startsWith("| "))
+      .map(gfmTableCells);
+    assert.deepEqual(
+      rows.find((cells) => cells[0] === "L-01"),
+      ["L-01", `[${label}](#l-01---pipe-ab-in-code)`]
+    );
+    assert.deepEqual(
+      rows.find((cells) => cells[0] === label),
+      [label, "property-1", "properties", "property-1", "test/Invariant.t.sol", "unavailable"]
+    );
+    assert.deepEqual(
+      rows.find((cells) => cells[0] === "undetermined"),
+      [
+        "undetermined",
+        "Outcome \\`a&#92;\\|b\\` in code",
+        "confirmed",
+        "A bounded transition violates the expected relationship.",
+        "Review the campaign evidence."
+      ]
+    );
+    // Outside a table the span stays code, and the index link still resolves to the heading.
+    assert.ok(markdown.includes("\n## [L-01] - Pipe `a\\|b` in code\n"), markdown);
+    const nodes = markdownNodes(markdown);
+    const heading = nodes.find((node) => node.type === "heading" && node.text.startsWith("[L-01]"));
+    const link = nodes.find((node) => node.type === "link" && node.text === "[L-01] - Pipe `a\\|b` in code");
+    assert.equal(link?.url, `#${headingSlug(heading?.text ?? "")}`);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), true);
+  }
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
+});
+
+test("a property ID with angle brackets renders as escaped text, not as raw HTML inside a code span", () => {
+  const report = renderableReport();
+  report.property_implementation_coverage = {
+    ...(report.property_implementation_coverage as Record<string, unknown>),
+    reference_expected_property_ids: ["property-1", "excluded_low_property", "Vault<ERC4626>-share_price"]
+  };
+  const projection = projectCanonicalFinalReport(report);
+  assert.ok(
+    projection.markdown.includes(
+      "\n- Unselected reference expectation properties (not fulfilled): `excluded_low_property`, Vault&lt;ERC4626&gt;-share_price\n"
+    ),
+    projection.markdown
+  );
+  assert.ok(
+    markdownNodes(projection.markdown).some(
+      (node) =>
+        node.type === "listItem" &&
+        node.text ===
+          "Unselected reference expectation properties (not fulfilled): excluded_low_property, Vault<ERC4626>-share_price"
+    )
+  );
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+  assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
 });

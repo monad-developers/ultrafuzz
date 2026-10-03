@@ -195,6 +195,11 @@ test("terminal controller report adds authenticated complete census without chan
   assert.equal(published.completion?.counts.planned, 1);
   assert.equal(published.completion?.counts.succeeded, 1);
   assert.equal(published.terminal, true);
+  // The run.json its Run summary restated, for consumers that check the presentation against it.
+  assert.deepEqual(
+    published.restated_run_metadata,
+    JSON.parse(fs.readFileSync(path.join(fixture.layout.root, "run.json"), "utf8"))
+  );
   assert.deepEqual(loadCurrentFinalReportSnapshot(fixture.layout.root), published);
   assert.deepEqual(fs.readFileSync(fixture.reportPath), fixture.reportBytes);
   assert.deepEqual(fs.readFileSync(fixture.markdownPath), fixture.markdownBytes);
@@ -2556,6 +2561,7 @@ function currentReport(runId: string, issues: Record<string, unknown>[] = []): R
       run_id: runId,
       source_run_id: runId,
       repository: "example/repository",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "1m",
       models_used: ["model-a"],
       tokens_used: "100",

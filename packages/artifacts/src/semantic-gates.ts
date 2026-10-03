@@ -913,6 +913,19 @@ function reportCarriedFieldIssues(
   return [FINDING_NARRATIVE_FIELDS.has(field) ? { ...difference, severity: "warning" } : difference];
 }
 
+// The report stage carries `recommendation` and never authors one: report.md
+// renders it as the issue's Remediation, so a value its source finding lacks
+// would read as preserved advice that no producer established. A changed or
+// omitted recommendation stays a warning above.
+function reportAddedRecommendationIssues(
+  entry: { row: unknown; path: string },
+  source: Readonly<Record<string, unknown>>
+): SemanticGateIssue[] {
+  return source.recommendation === undefined && at(entry.row, ["recommendation"]) !== undefined
+    ? [issue(`${entry.path}.recommendation`, "Report row adds a recommendation its source finding does not carry")]
+    : [];
+}
+
 function reportSeverityClassificationPreservationIssues(
   document: unknown,
   context: SemanticGateContext
@@ -1130,6 +1143,7 @@ function reportSeverityClassificationPreservationIssues(
       if (disposition === "promoted" && (field === "id" || field === "title")) continue;
       issues.push(...reportCarriedFieldIssues(reportEntry, finding, field, "Report did not preserve severity field"));
     }
+    issues.push(...reportAddedRecommendationIssues(reportEntry, finding));
   }
 
   const upstreamKeys = new Set(
@@ -1416,6 +1430,7 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
         ...reportCarriedFieldIssues(reportEntry, finding, field, "Bounded report did not preserve dedupe field")
       );
     }
+    issues.push(...reportAddedRecommendationIssues(reportEntry, finding));
   }
 
   expectedPromoted.sort((left, right) => {

@@ -142,6 +142,7 @@ function captureUnverifiedReport(inputs: UnverifiedReportInputs): ReportSnapshot
     verification: "not-checked",
     observed_completion: inputs.observed,
     terminal: stoppedStatus(inputs.state?.status),
+    ...(inputs.metadata === undefined ? {} : { restated_run_metadata: inputs.metadata }),
     sources_sha256: inputs.sources_sha256,
     publications: [
       { path: jsonPath, bytes: jsonBytes },

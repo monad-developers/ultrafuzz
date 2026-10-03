@@ -7,13 +7,13 @@ import { Readable } from "node:stream";
 import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import { isRecord } from "@ultrafuzz/artifacts";
 
+import { hasPricingRoute, nonNegativeNumber, positiveNumber, pricesForModels } from "./model-pricing-catalog.js";
+
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
 export const MAX_PRICING_CATALOG_BYTES = 25 * 1024 * 1024;
 const MAX_PRICING_CATALOG_CHUNKS = 65_536;
 const MAX_PRICING_ADDRESS_ATTEMPTS = 8;
-const MOONSHOT_PROVIDER_ID = "moonshotai";
-const DEEPSEEK_PROVIDER_ID = "deepseek";
 
 export interface ModelPricing {
   inputUsdPerMillion: number;
@@ -39,34 +39,19 @@ export interface PricingCatalogMetadata {
   unresolved_models: string[];
 }
 
+/** The catalog provider entry a model's route priced it from. */
+export interface ModelPricingProvenance {
+  provider: string;
+  catalogModelId: string;
+}
+
 export interface PricingCatalogResult {
   prices: ReadonlyMap<string, ModelPricing>;
+  /** Per priced model, the catalog provider and model ID its route resolved. */
+  provenance: ReadonlyMap<string, ModelPricingProvenance>;
+  /** Models whose route lists them only at zero input and output rates, so they stay unpriced. */
+  zeroRateModels: readonly string[];
   metadata: PricingCatalogMetadata;
-}
-
-interface CatalogCost {
-  input?: unknown;
-  output?: unknown;
-  cache_read?: unknown;
-  cache_write?: unknown;
-  tiers?: unknown;
-  context_over_200k?: unknown;
-}
-
-interface CatalogCostTier {
-  input?: unknown;
-  output?: unknown;
-  cache_read?: unknown;
-  cache_write?: unknown;
-  tier?: unknown;
-}
-
-interface CatalogModel {
-  cost?: CatalogCost;
-}
-
-interface CatalogProvider {
-  models?: Record<string, CatalogModel>;
 }
 
 const DISABLED_VALUES = new Set(["disabled", "none", "off"]);
@@ -148,7 +133,7 @@ export async function resolveLiveModelPricing(input: {
   const models = uniqueModels(input.models);
   if (models.length === 0) {
     return {
-      prices: new Map(),
+      ...unpricedCatalogResult(),
       metadata: {
         source: "models.dev",
         status: "available",
@@ -161,7 +146,7 @@ export async function resolveLiveModelPricing(input: {
   const configuredUrl = input.env?.ULTRAFUZZ_PRICING_CATALOG_URL?.trim();
   if (configuredUrl !== undefined && DISABLED_VALUES.has(configuredUrl.toLowerCase())) {
     return {
-      prices: new Map(),
+      ...unpricedCatalogResult(),
       metadata: {
         source: "disabled",
         status: "disabled",
@@ -174,6 +159,13 @@ export async function resolveLiveModelPricing(input: {
   const sourceUrl =
     configuredUrl === undefined || configuredUrl.length === 0 ? DEFAULT_PRICING_CATALOG_URL : configuredUrl;
   const source = sourceUrl === DEFAULT_PRICING_CATALOG_URL ? "models.dev" : "configured-catalog";
+  // A model without a catalog route is never priced, so a download that prices none is skipped.
+  if (!models.some(hasPricingRoute)) {
+    return {
+      ...unpricedCatalogResult(),
+      metadata: { source, status: "available", resolved_models: [], unresolved_models: models }
+    };
+  }
   const timeoutMs = Math.min(
     pricingTimeoutMs(input.env?.ULTRAFUZZ_PRICING_TIMEOUT_MS),
     input.timeoutMs ?? Number.POSITIVE_INFINITY
@@ -205,10 +197,12 @@ export async function resolveLiveModelPricing(input: {
       maxItems: 1_000_000,
       maxProperties: 1_000_000
     });
-    const prices = pricesForModels(catalog, models);
+    const { prices, provenance, zeroRateModels } = pricesForModels(catalog, models);
     const resolvedModels = models.filter((model) => prices.has(model));
     return {
       prices,
+      provenance,
+      zeroRateModels,
       metadata: {
         source,
         status: "available",
@@ -219,7 +213,7 @@ export async function resolveLiveModelPricing(input: {
     };
   } catch {
     return {
-      prices: new Map(),
+      ...unpricedCatalogResult(),
       metadata: {
         source,
         status: "unavailable",
@@ -490,65 +484,8 @@ async function readPricingCatalogChunk(
   });
 }
 
-function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelPricing> {
-  const result = new Map<string, ModelPricing>();
-  if (!isRecord(catalog)) {
-    return result;
-  }
-  const providers = Object.entries(catalog).filter((entry): entry is [string, CatalogProvider] => isRecord(entry[1]));
-  for (const model of models) {
-    const pinnedProvider = pinnedProviderForModel(model);
-    const candidateProviders =
-      pinnedProvider === undefined
-        ? orderedProvidersForModel(providers, providerForModel(model))
-        : providers.filter(([id]) => id === pinnedProvider);
-    for (const [, provider] of candidateProviders) {
-      if (!isRecord(provider.models)) {
-        continue;
-      }
-      const match = Object.entries(provider.models).find(([id]) => id === model);
-      const pricing = pricingFromCatalogModel(match?.[1]);
-      if (pricing !== undefined) {
-        result.set(model, pricing);
-        break;
-      }
-    }
-  }
-  return result;
-}
-
-function pricingFromCatalogModel(model: CatalogModel | undefined): ModelPricing | undefined {
-  if (!isRecord(model) || !isRecord(model.cost)) {
-    return undefined;
-  }
-  const input = nonNegativeNumber(model.cost.input);
-  const output = nonNegativeNumber(model.cost.output);
-  if (input === undefined || output === undefined) {
-    return undefined;
-  }
-  const cachedInput = nonNegativeNumber(model.cost.cache_read);
-  const cacheWrite = nonNegativeNumber(model.cost.cache_write);
-  const basePricing = {
-    inputUsdPerMillion: input,
-    ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
-    ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
-    outputUsdPerMillion: output
-  };
-  const catalogTiers = Array.isArray(model.cost.tiers)
-    ? model.cost.tiers
-        .flatMap((tier): ModelPricingContextTier[] => {
-          const parsed = pricingContextTier(tier, basePricing);
-          return parsed === undefined ? [] : [parsed];
-        })
-        .sort((left, right) => left.contextTokens - right.contextTokens)
-    : [];
-  const fallbackContextTier = pricingContextTier(model.cost.context_over_200k, basePricing, 200_000);
-  const contextTiers =
-    catalogTiers.length > 0 ? catalogTiers : fallbackContextTier === undefined ? [] : [fallbackContextTier];
-  return {
-    ...basePricing,
-    ...(contextTiers.length === 0 ? {} : { contextTiers })
-  };
+function unpricedCatalogResult(): Pick<PricingCatalogResult, "prices" | "provenance" | "zeroRateModels"> {
+  return { prices: new Map(), provenance: new Map(), zeroRateModels: [] };
 }
 
 export function pricingForContext(pricing: ModelPricing, inputTokens: number): ModelPricing {
@@ -585,31 +522,6 @@ export function modelPricingFromSnapshot(value: unknown): Map<string, ModelPrici
     }
   }
   return result;
-}
-
-function pricingContextTier(
-  value: unknown,
-  base: ModelPricing,
-  fallbackContextTokens?: number
-): ModelPricingContextTier | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  const tier = isRecord(value.tier) ? value.tier : undefined;
-  const contextTokens = tier?.type === "context" ? positiveNumber(tier.size) : fallbackContextTokens;
-  if (contextTokens === undefined) {
-    return undefined;
-  }
-  const input = nonNegativeNumber((value as CatalogCostTier).input) ?? base.inputUsdPerMillion;
-  const cachedInput = nonNegativeNumber((value as CatalogCostTier).cache_read) ?? base.cachedInputUsdPerMillion;
-  const cacheWrite = nonNegativeNumber((value as CatalogCostTier).cache_write) ?? base.cacheWriteUsdPerMillion;
-  return {
-    contextTokens,
-    inputUsdPerMillion: input,
-    ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
-    ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
-    outputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).output) ?? base.outputUsdPerMillion
-  };
 }
 
 function storedModelPricing(value: unknown): ModelPricing | undefined {
@@ -657,39 +569,6 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
   };
 }
 
-function orderedProvidersForModel(
-  providers: Array<[string, CatalogProvider]>,
-  preferredProvider: string | undefined
-): Array<[string, CatalogProvider]> {
-  return [...providers].sort(([left], [right]) => {
-    if (left === preferredProvider) return -1;
-    if (right === preferredProvider) return 1;
-    return left.localeCompare(right);
-  });
-}
-
-function providerForModel(model: string): string | undefined {
-  if (model.startsWith("claude-")) {
-    return "anthropic";
-  }
-  if (model.startsWith("gpt-") || /^o\d/u.test(model) || model.startsWith("chatgpt-")) {
-    return "openai";
-  }
-  return pinnedProviderForModel(model);
-}
-
-/**
- * Kimi and DeepSeek aliases appear in many models.dev provider catalogs at
- * different rates, including $0 subscription-only entries. Pinning each family
- * to its first-party provider keeps the API-comparison estimate from depending
- * on whichever third-party provider happens to sort first. A pin is exclusive:
- * when the first-party catalog does not list an alias, it stays unresolved.
- */
-function pinnedProviderForModel(model: string): string | undefined {
-  if (model.startsWith("deepseek")) return DEEPSEEK_PROVIDER_ID;
-  return model.startsWith("kimi") || model.startsWith("moonshot") ? MOONSHOT_PROVIDER_ID : undefined;
-}
-
 function uniqueModels(models: Iterable<string>): string[] {
   return [...new Set([...models].filter((model) => model.length > 0))].sort();
 }
@@ -697,12 +576,4 @@ function uniqueModels(models: Iterable<string>): string[] {
 function pricingTimeoutMs(value: string | undefined): number {
   const parsed = value === undefined ? Number.NaN : Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 60_000) : DEFAULT_PRICING_TIMEOUT_MS;
-}
-
-function nonNegativeNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-}
-
-function positiveNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }

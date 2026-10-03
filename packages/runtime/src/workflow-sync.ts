@@ -71,6 +71,7 @@ import {
   type RunLayout,
   type RunMetadataAccounting,
   type RunMetadataDocument,
+  type RunSpendEstimate,
   type RunStatus,
   type SmithersTaskManifestDocument,
   type SmithersTaskManifestTask,
@@ -92,8 +93,18 @@ import {
   type ModelPricing,
   type PricingCatalogFetch,
   type PricingCatalogMetadata,
+  type PricingCatalogResult,
   type PricingHostnameLookup
 } from "./model-pricing.js";
+import {
+  buildSpendEstimate,
+  catalogMissForModel,
+  spendEstimatePrices,
+  type SpendEstimateModelRoute,
+  type SpendEstimateSourceRun,
+  type SpendEstimateUnaccountedAttemptInput,
+  type SpendEstimateUsageEvidence
+} from "./spend-estimate.js";
 import {
   linkedWorkflowExecutionEnvironment,
   readLinkedWorkflowEvidence,
@@ -830,6 +841,7 @@ export async function synchronizeLinkedWorkflowRun(
   } catch (error) {
     diagnostics.push({ ...diagnosticFromError(error, "workflow", "WORKFLOW_ACCOUNTING_FAILED"), severity: "warning" });
   }
+  diagnostics.push(...(accountingResult.diagnostics ?? []));
   if (accountingResult.budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
   }
@@ -1175,11 +1187,7 @@ async function synchronizeWorkflowAccounting(input: {
   events: WorkflowEvent[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
-}): Promise<{
-  changed: boolean;
-  available: boolean;
-  budgetDiagnostic?: RuntimeDiagnostic;
-}> {
+}): Promise<WorkflowAccountingSynchronization> {
   const metadata = readRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId);
   assertAccountedWorkflow(metadata, input.workflowRunId, input.controlGeneration);
   // run.json accounting is a cache derived from usage.jsonl: every pass rebuilds
@@ -1203,7 +1211,8 @@ async function synchronizeWorkflowAccounting(input: {
     if (metadata.accounting !== undefined) {
       throw new Error("run.json accounting cannot exist when the usage ledger is empty");
     }
-    return { changed: false, available: false };
+    // Accounting stays absent, but agent attempts that ran without reporting usage are still estimated.
+    return synchronizeUnaccountedSpendEstimate({ ...input, metadata });
   }
 
   const storedPricingCatalog = storedAccounting?.pricingCatalog;
@@ -1245,14 +1254,119 @@ async function synchronizeWorkflowAccounting(input: {
   for (const [model, modelPricing] of livePricing?.prices ?? []) {
     resolvedPricing.set(model, modelPricing);
   }
-  const pricingCatalog = mergedPricingCatalogMetadata({
-    requiredModels,
-    resolvedPricing,
-    stored: storedPricingCatalog,
-    live: livePricing?.metadata
-  });
   const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
-  const accountingSegments = accountingSegmentsFromUsageLedger(preparedUsage.entries, resolvedPricing, cacheReadRatio);
+  // Accounting v4 and the spend estimate are separate projections of the same usage: when one
+  // fails, the other still synchronizes and the failure is reported as a warning.
+  const accounting = settled(() =>
+    nextWorkflowAccounting({
+      layout: input.layout,
+      metadata,
+      workflowRunId: input.workflowRunId,
+      storedAccounting,
+      preparedUsage,
+      pricingCatalog: mergedPricingCatalogMetadata({
+        requiredModels,
+        resolvedPricing,
+        stored: storedPricingCatalog,
+        live: livePricing?.metadata
+      }),
+      resolvedPricing,
+      cacheReadRatio
+    })
+  );
+  const estimatePricing = spendEstimatePrices(resolvedPricing);
+  const spendEstimate = settledSpendEstimate(input.layout, metadata, () =>
+    synchronizedSpendEstimate({
+      layout: input.layout,
+      metadata,
+      workflowRunId: input.workflowRunId,
+      usageEntries: preparedUsage.entries,
+      pricing: estimatePricing.prices,
+      routes: synchronizedSpendEstimateRoutes({
+        requiredModels,
+        resolvedPricing: estimatePricing.prices,
+        storedZeroRateModels: estimatePricing.zeroRateModels,
+        fetchedModels: missingModels,
+        live: livePricing,
+        stored: storedPricingCatalog,
+        previous: metadata.spend_estimate
+      }),
+      cacheReadRatio
+    })
+  );
+  const nextAccounting = accounting.value;
+  const accountingChanged = nextAccounting?.changed ?? false;
+  // The usage ledger grows only with the accounting projected from it.
+  const pendingUsageEntries = nextAccounting === undefined ? 0 : preparedUsage.pendingEntries.length;
+  const diagnostics = [
+    ...(accounting.error === undefined ? [] : [accountingWarning(accounting.error, "WORKFLOW_ACCOUNTING_FAILED")]),
+    ...spendEstimate.diagnostics
+  ];
+  if (!accountingChanged && !spendEstimate.changed && pendingUsageEntries === 0) {
+    return { changed: false, available: nextAccounting !== undefined, diagnostics };
+  }
+
+  const preAccountingMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    input.control,
+    synchronizationClock(input.control)
+  );
+  if (preAccountingMutationBudgetDiagnostic !== undefined) {
+    return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
+  }
+
+  if (nextAccounting !== undefined && preparedUsage.inputs.length > 0) {
+    appendUsageEvents(input.layout, preparedUsage.inputs);
+  }
+  if (accountingChanged || spendEstimate.changed) {
+    // A lifecycle command can rewrite run.json while this pass runs, as resume
+    // does to record its controller's Forge guard. Writing back the copy read
+    // above would undo that write, so the accounting goes into the document as
+    // it is now, which must still be bound to the workflow it was computed for.
+    // Failed accounting leaves the stored copy as it was.
+    updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
+      assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
+      return withSpendEstimate(
+        nextAccounting === undefined ? current : { ...current, accounting: nextAccounting.accounting },
+        spendEstimate.estimate
+      );
+    });
+  }
+  return {
+    changed: accountingChanged || spendEstimate.changed || pendingUsageEntries > 0,
+    available: nextAccounting !== undefined,
+    diagnostics
+  };
+}
+
+interface WorkflowAccountingSynchronization {
+  changed: boolean;
+  available: boolean;
+  budgetDiagnostic?: RuntimeDiagnostic;
+  /** Warnings for a projection that failed while the other one synchronized. */
+  diagnostics?: RuntimeDiagnostic[];
+}
+
+/**
+ * Accounting v4 rebuilt from the usage ledger and the source run's cumulative accounting, and
+ * whether it differs from the stored copy. It is validated here, before the ledger append that
+ * depends on it; the run.json write re-checks the document it lands in.
+ */
+function nextWorkflowAccounting(input: {
+  layout: RunLayout;
+  metadata: RunMetadataDocument;
+  workflowRunId: string;
+  storedAccounting: StoredAccountingDocument | undefined;
+  preparedUsage: PreparedUsageLedgerAppend;
+  pricingCatalog: RunMetadataAccounting["pricing_catalog"];
+  resolvedPricing: ReadonlyMap<string, ModelPricing>;
+  cacheReadRatio: number | undefined;
+}): { accounting: RunMetadataAccounting; changed: boolean } {
+  const { metadata, preparedUsage } = input;
+  const accountingSegments = accountingSegmentsFromUsageLedger(
+    preparedUsage.entries,
+    input.resolvedPricing,
+    input.cacheReadRatio
+  );
   const current = accountingSegments.at(-1);
   if (current === undefined) throw new Error("non-empty usage ledger produced no accounting segment");
 
@@ -1279,44 +1393,240 @@ async function synchronizeWorkflowAccounting(input: {
       control_generation: lastUsageEvent.control_generation,
       workflow_run_id: lastUsageEvent.workflow_run_id
     },
-    pricing_catalog: pricingCatalog
+    pricing_catalog: input.pricingCatalog
   };
-  const accountingChanged = !sameJsonValue(
-    comparableAccounting(storedAccounting?.raw),
+  const changed = !sameJsonValue(
+    comparableAccounting(input.storedAccounting?.raw),
     comparableAccounting(nextComparable)
   );
-  const nextAccounting: RunMetadataAccounting = {
+  const accounting: RunMetadataAccounting = {
     ...nextComparable,
-    updated_at:
-      accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
+    updated_at: changed || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
-  // Checked before the ledger append below; the write re-checks the document it lands in.
-  assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
+  assertRunMetadataDocument({ ...metadata, accounting }, input.layout.runId);
+  return { accounting, changed };
+}
 
-  if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
-    return { changed: false, available: true };
+function settled<T>(compute: () => T): { value: T; error?: undefined } | { value?: undefined; error: unknown } {
+  try {
+    return { value: compute() };
+  } catch (error) {
+    return { error };
   }
+}
 
-  const preAccountingMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
-    input.control,
-    synchronizationClock(input.control)
+function accountingWarning(error: unknown, code: string): RuntimeDiagnostic {
+  return { ...diagnosticFromError(error, "workflow", code), severity: "warning" };
+}
+
+/**
+ * The synchronized spend estimate, validated against the run.json it joins. When it cannot be
+ * computed, the stored estimate is removed rather than left to disagree with the accounting
+ * written beside it, and the failure is reported as a warning.
+ */
+function settledSpendEstimate(
+  layout: RunLayout,
+  metadata: RunMetadataDocument,
+  compute: () => { estimate?: RunSpendEstimate; changed: boolean }
+): { estimate?: RunSpendEstimate; changed: boolean; diagnostics: RuntimeDiagnostic[] } {
+  try {
+    const result = compute();
+    assertRunMetadataDocument(withSpendEstimate(metadata, result.estimate), layout.runId);
+    return { ...result, diagnostics: [] };
+  } catch (error) {
+    return {
+      changed: metadata.spend_estimate !== undefined,
+      diagnostics: [accountingWarning(error, "WORKFLOW_SPEND_ESTIMATE_FAILED")]
+    };
+  }
+}
+
+/**
+ * The spend-estimate pass for an empty usage ledger: an executed agent attempt that reported no
+ * usage still cost money, so it is imputed even though accounting v4 cannot exist yet.
+ */
+function synchronizeUnaccountedSpendEstimate(input: {
+  layout: RunLayout;
+  metadata: RunMetadataDocument;
+  workflowRunId: string;
+  controlGeneration: string;
+  control: WorkflowSynchronizationControl;
+}): WorkflowAccountingSynchronization {
+  const spendEstimate = settledSpendEstimate(input.layout, input.metadata, () =>
+    synchronizedSpendEstimate({
+      ...input,
+      usageEntries: [],
+      pricing: new Map(),
+      routes: new Map(),
+      cacheReadRatio: undefined
+    })
   );
-  if (preAccountingMutationBudgetDiagnostic !== undefined) {
-    return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
-  }
+  const diagnostics = spendEstimate.diagnostics;
+  if (!spendEstimate.changed) return { changed: false, available: false, diagnostics };
+  const budgetDiagnostic = synchronizationBudgetDiagnostic(input.control, synchronizationClock(input.control));
+  if (budgetDiagnostic !== undefined) return { changed: false, available: false, budgetDiagnostic };
+  updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
+    assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
+    return withSpendEstimate(current, spendEstimate.estimate);
+  });
+  return { changed: true, available: false, diagnostics };
+}
 
-  if (preparedUsage.inputs.length > 0) appendUsageEvents(input.layout, preparedUsage.inputs);
-  if (accountingChanged) {
-    // A lifecycle command can rewrite run.json while this pass runs, as resume
-    // does to record its controller's Forge guard. Writing back the copy read
-    // above would undo that write, so the accounting goes into the document as
-    // it is now, which must still be bound to the workflow it was computed for.
-    updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
-      assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
-      return { ...current, accounting: nextAccounting };
-    });
+/**
+ * Rebuilds the spend estimate from the usage ledger, the attempt ledger, and source-run lineage.
+ * Without usage or an executed agent attempt there is nothing to estimate, so a stale estimate is
+ * removed. An estimate that differs only in `updated_at` keeps the stored copy, so a pass that
+ * changes nothing never rewrites run.json.
+ */
+function synchronizedSpendEstimate(input: {
+  layout: RunLayout;
+  metadata: RunMetadataDocument;
+  workflowRunId: string;
+  usageEntries: readonly UsageLedgerEntry[];
+  pricing: ReadonlyMap<string, ModelPricing>;
+  routes: ReadonlyMap<string, SpendEstimateModelRoute>;
+  cacheReadRatio: number | undefined;
+}): { estimate?: RunSpendEstimate; changed: boolean } {
+  const occurrences = spendEstimateAttemptOccurrences(replayNodeAttempts(input.layout).entries, input.usageEntries);
+  const unaccountedAttempts = occurrences.unaccounted;
+  const previous = input.metadata.spend_estimate;
+  if (input.usageEntries.length === 0 && unaccountedAttempts.length === 0) return { changed: previous !== undefined };
+  const sourceRunId = input.metadata.source_run_id;
+  const next = buildSpendEstimate({
+    workflowRunId: input.workflowRunId,
+    events: occurrences.snapshots.map((entry) =>
+      spendEstimateUsageEvidence({
+        usage: entry.usage,
+        modelPricing: input.pricing,
+        cacheReadRatio: input.cacheReadRatio
+      })
+    ),
+    routes: input.routes,
+    prices: input.pricing,
+    unaccountedAttempts,
+    ...(sourceRunId === undefined ? {} : { sourceRun: sourceRunSpendEstimate(input.layout, sourceRunId) }),
+    ...(previous === undefined ? {} : { previous })
+  });
+  if (previous !== undefined) {
+    const { updated_at: _updatedAt, ...comparable } = previous;
+    if (isDeepStrictEqual(comparable, next)) return { estimate: previous, changed: false };
   }
-  return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
+  return { estimate: { ...next, updated_at: new Date().toISOString() }, changed: true };
+}
+
+function withSpendEstimate(metadata: RunMetadataDocument, estimate: RunSpendEstimate | undefined): RunMetadataDocument {
+  if (estimate !== undefined) return { ...metadata, spend_estimate: estimate };
+  const { spend_estimate: _stale, ...withoutEstimate } = metadata;
+  return withoutEstimate;
+}
+
+/**
+ * The usage snapshots the spend estimate prices and the executed agent attempts it imputes, per
+ * attempt occurrence across every workflow run of this run (a replay or fork rebinds the run to a
+ * new workflow run while the replaced run's usage stays in the ledger).
+ *
+ * An occurrence is an attempt-ledger entry, identified by (workflow_run_id, source_event_sequence):
+ * a reset (`resume --retry-failed`, `--reset-node`) restarts Smithers' attempt numbering in the
+ * same workflow run, so one (node, iteration, attempt) can name several occurrences. Smithers
+ * records a usage event only while its attempt is in progress, so the event's sequence falls
+ * between the occurrence's start and terminal events. Each occurrence is priced from its own
+ * latest snapshot, and an executed agent occurrence with no usage event in its window is
+ * unaccounted. Usage that no recorded occurrence spans, such as that of an attempt still running,
+ * is priced per attempt from its latest snapshot. Accounting v4 looks up prices only for the
+ * models of each attempt's latest snapshot, so a model that only an earlier occurrence names is
+ * priced at fallback rates.
+ *
+ * The attempt ledger names the planned strategy attempt, while usage names the Smithers task that
+ * ran it: `node:<strategy attempt ID>`, which every task manifest enforces, whatever its control
+ * generation.
+ */
+function spendEstimateAttemptOccurrences(
+  attempts: readonly NodeAttemptLedgerEntry[],
+  usageEntries: readonly UsageLedgerEntry[]
+): { snapshots: UsageLedgerEntry[]; unaccounted: SpendEstimateUnaccountedAttemptInput[] } {
+  const occurrencesByAttempt = new Map<string, NodeAttemptLedgerEntry[]>();
+  for (const entry of attempts) {
+    const key = usageAttemptKey(entry.workflow_run_id, `node:${entry.strategy_attempt_id}`, entry);
+    occurrencesByAttempt.set(key, [...(occurrencesByAttempt.get(key) ?? []), entry]);
+  }
+  // Latest snapshots keyed by occurrence identity, or by attempt for usage no occurrence spans; the
+  // two keys never collide, since they encode arrays of different lengths.
+  const latest = new Map<string, UsageLedgerEntry>();
+  const accounted = new Set<string>();
+  for (const usage of usageEntries) {
+    const attemptKey = usageAttemptKey(usage.workflow_run_id, usage.node_id, usage);
+    const sequence = usage.source_event_sequence;
+    const occurrence = occurrencesByAttempt
+      .get(attemptKey)
+      ?.find((entry) => entry.started_event_sequence <= sequence && sequence <= entry.source_event_sequence);
+    const occurrenceIdentity = occurrence === undefined ? undefined : nodeAttemptLedgerIdentity(occurrence);
+    if (occurrenceIdentity !== undefined) accounted.add(occurrenceIdentity);
+    const key = occurrenceIdentity ?? attemptKey;
+    const previous = latest.get(key);
+    if (previous === undefined || sequence > previous.source_event_sequence) latest.set(key, usage);
+  }
+  const unaccounted = attempts.flatMap((entry): SpendEstimateUnaccountedAttemptInput[] => {
+    if (entry.reuse.status !== "executed" || entry.agent === undefined) return [];
+    if (accounted.has(nodeAttemptLedgerIdentity(entry))) return [];
+    const modelName = entry.agent.model_name;
+    return [
+      {
+        workflow_run_id: entry.workflow_run_id,
+        source_event_sequence: entry.source_event_sequence,
+        node_id: `node:${entry.strategy_attempt_id}`,
+        iteration: entry.iteration,
+        attempt: entry.attempt,
+        ...(modelName === undefined ? {} : { model_name: modelName })
+      }
+    ];
+  });
+  return {
+    snapshots: [...latest.values()].sort((left, right) => left.source_event_sequence - right.source_event_sequence),
+    unaccounted
+  };
+}
+
+function usageAttemptKey(
+  workflowRunId: string,
+  smithersNodeId: string,
+  coordinate: { iteration: number; attempt: number }
+): string {
+  return JSON.stringify([workflowRunId, smithersNodeId, coordinate.iteration, coordinate.attempt]);
+}
+
+/**
+ * Each priced model's catalog provenance and each unpriced model's miss: from this pass's fetch when
+ * it looked the model up, otherwise from the stored catalog status and estimate.
+ */
+function synchronizedSpendEstimateRoutes(input: {
+  requiredModels: readonly string[];
+  resolvedPricing: ReadonlyMap<string, ModelPricing>;
+  /** Models whose stored accounting v4 price lists them at zero rates, which the estimate ignores. */
+  storedZeroRateModels: readonly string[];
+  fetchedModels: readonly string[];
+  live: PricingCatalogResult | undefined;
+  stored: StoredPricingCatalog | undefined;
+  previous: RunSpendEstimate | undefined;
+}): Map<string, SpendEstimateModelRoute> {
+  const routes = new Map<string, SpendEstimateModelRoute>();
+  for (const model of input.requiredModels) {
+    const live = input.fetchedModels.includes(model) ? input.live : undefined;
+    if (input.resolvedPricing.has(model)) {
+      const provenance = live?.provenance.get(model);
+      routes.set(model, provenance === undefined ? {} : { provenance });
+      continue;
+    }
+    const zeroRateListed =
+      input.storedZeroRateModels.includes(model) ||
+      (live === undefined
+        ? (input.previous?.assumptions.some(
+            (assumption) => assumption.code === "zero-catalog-rate-ignored" && assumption.model === model
+          ) ?? false)
+        : live.zeroRateModels.includes(model));
+    const status = live?.metadata.status ?? input.stored?.status ?? "unavailable";
+    routes.set(model, { miss: catalogMissForModel(status, zeroRateListed) });
+  }
+  return routes;
 }
 
 function assertAccountedWorkflow(
@@ -1384,9 +1694,7 @@ function accountingFromWorkflowEvents(
       modelPricing
     });
     const pricingIncompleteReasons = recordedCostUsd === undefined ? [...componentPricing.incompleteReasons] : [];
-    const usageUnavailable = usageIncompleteReasons.some(
-      (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
-    );
+    const usageUnavailable = usageBreakdownUnavailable(usageIncompleteReasons);
     const hasComponentActivity = Object.values(normalizedUsage.components).some((tokens) => tokens > 0);
     const estimatedCostUsd =
       recordedCostUsd ?? (!hasComponentActivity ? 0 : usageUnavailable ? undefined : componentPricing.costUsd);
@@ -2192,6 +2500,132 @@ function cumulativeAccountingForSourceRun(
   layout: RunLayout,
   sourceRunId: string
 ): { summary: AccountingSummary; sourceRunIds: string[] } {
+  const { safeSourceRunId, sourceLayout, sourceMetadata } = readSourceRunMetadata(layout, sourceRunId);
+  if (sourceMetadata.accounting === undefined) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no accounting.v4 evidence`);
+  }
+  if (sourceMetadata.workflow === undefined) {
+    throw new Error(
+      `referenced source run ${JSON.stringify(safeSourceRunId)} has accounting without workflow metadata`
+    );
+  }
+  const accounting = storedAccountingDocument(sourceMetadata.accounting, sourceMetadata.workflow.run_id);
+  assertAccountingMatchesUsageLedger(
+    accounting,
+    replayUsageEvents(sourceLayout).entries,
+    `referenced source run ${JSON.stringify(safeSourceRunId)} accounting`
+  );
+  if (accounting.cumulative.source_run_ids.includes(safeSourceRunId)) {
+    throw new Error(`referenced source accounting already contains its own run ID ${JSON.stringify(safeSourceRunId)}`);
+  }
+  assertSourceLineageStartsAtDirectSource(sourceMetadata, safeSourceRunId, accounting.cumulative.source_run_ids);
+  return {
+    summary: accounting.cumulative,
+    sourceRunIds: [safeSourceRunId, ...accounting.cumulative.source_run_ids]
+  };
+}
+
+/**
+ * The source run's contribution to the spend estimate: its persisted estimate, or, for a source
+ * without one, its accounting v4 spend marked incomplete. A source with neither contributes its
+ * own source run's contribution, so the lineage and its spend survive a run that recorded none.
+ * It is independent of accounting v4's lineage, which requires every source to have accounting.
+ */
+function sourceRunSpendEstimate(
+  layout: RunLayout,
+  sourceRunId: string,
+  descendantRunIds: ReadonlySet<string> = new Set([layout.runId])
+): SpendEstimateSourceRun {
+  const { safeSourceRunId, sourceLayout, sourceMetadata } = readSourceRunMetadata(layout, sourceRunId);
+  const lineageRunIds = new Set([...descendantRunIds, safeSourceRunId]);
+  if (lineageRunIds.size === descendantRunIds.size) {
+    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} repeats in its own lineage`);
+  }
+  const estimate = sourceMetadata.spend_estimate;
+  const contribution: SpendEstimateSourceRun =
+    estimate !== undefined
+      ? {
+          sourceRunIds: [safeSourceRunId, ...estimate.source_run_ids],
+          estimatedSpendUsd: estimate.estimated_spend_usd,
+          complete: estimate.complete,
+          estimateUnavailable: false
+        }
+      : sourceMetadata.accounting !== undefined
+        ? accountingSourceRunContribution(cumulativeAccountingForSourceRun(layout, sourceRunId))
+        : ancestorSourceRunContribution(
+            safeSourceRunId,
+            sourceMetadata.source_run_id === undefined
+              ? undefined
+              : sourceRunSpendEstimate(sourceLayout, sourceMetadata.source_run_id, lineageRunIds)
+          );
+  const [, ...ancestorRunIds] = contribution.sourceRunIds;
+  if (
+    ancestorRunIds.some((runId) => lineageRunIds.has(runId)) ||
+    new Set(ancestorRunIds).size !== ancestorRunIds.length
+  ) {
+    throw new Error(`referenced source spend estimate already contains run ID ${JSON.stringify(safeSourceRunId)}`);
+  }
+  assertSourceLineageStartsAtDirectSource(sourceMetadata, safeSourceRunId, ancestorRunIds);
+  return contribution;
+}
+
+/**
+ * A continuation's source-run contribution to the spend estimate, read and validated exactly as
+ * synchronization reads it, for the report-start projection of a run whose own estimate has not
+ * been synchronized yet.
+ */
+export function readSourceRunSpendEstimate(
+  runRoot: string,
+  runId: string,
+  sourceRunId: string
+): SpendEstimateSourceRun {
+  return sourceRunSpendEstimate(layoutForRunRoot(runRoot, runId), sourceRunId);
+}
+
+function accountingSourceRunContribution(accounting: {
+  summary: AccountingSummary;
+  sourceRunIds: string[];
+}): SpendEstimateSourceRun {
+  return {
+    sourceRunIds: accounting.sourceRunIds,
+    estimatedSpendUsd: accounting.summary.estimated_spend_usd ?? 0,
+    complete: false,
+    estimateUnavailable: true
+  };
+}
+
+function ancestorSourceRunContribution(
+  safeSourceRunId: string,
+  ancestor: SpendEstimateSourceRun | undefined
+): SpendEstimateSourceRun {
+  return {
+    sourceRunIds: [safeSourceRunId, ...(ancestor?.sourceRunIds ?? [])],
+    estimatedSpendUsd: ancestor?.estimatedSpendUsd ?? 0,
+    complete: false,
+    estimateUnavailable: true
+  };
+}
+
+function assertSourceLineageStartsAtDirectSource(
+  sourceMetadata: RunMetadataDocument,
+  safeSourceRunId: string,
+  lineage: readonly string[]
+): void {
+  const directSourceRunId = sourceMetadata.source_run_id;
+  if (
+    (directSourceRunId === undefined && lineage.length !== 0) ||
+    (directSourceRunId !== undefined && lineage[0] !== directSourceRunId)
+  ) {
+    throw new Error(
+      `referenced source run ${JSON.stringify(safeSourceRunId)} cumulative lineage disagrees with its direct source relationship`
+    );
+  }
+}
+
+function readSourceRunMetadata(
+  layout: RunLayout,
+  sourceRunId: string
+): { safeSourceRunId: string; sourceLayout: RunLayout; sourceMetadata: RunMetadataDocument } {
   const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
   if (safeSourceRunId === layout.runId) {
     throw new Error("source run ID cannot refer to the current run");
@@ -2212,36 +2646,7 @@ function cumulativeAccountingForSourceRun(
   if (sourceMetadata.source_run_id === safeSourceRunId) {
     throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} links to itself`);
   }
-  if (sourceMetadata.accounting === undefined) {
-    throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has no accounting.v4 evidence`);
-  }
-  if (sourceMetadata.workflow === undefined) {
-    throw new Error(
-      `referenced source run ${JSON.stringify(safeSourceRunId)} has accounting without workflow metadata`
-    );
-  }
-  const accounting = storedAccountingDocument(sourceMetadata.accounting, sourceMetadata.workflow.run_id);
-  assertAccountingMatchesUsageLedger(
-    accounting,
-    replayUsageEvents(sourceLayout).entries,
-    `referenced source run ${JSON.stringify(safeSourceRunId)} accounting`
-  );
-  if (accounting.cumulative.source_run_ids.includes(safeSourceRunId)) {
-    throw new Error(`referenced source accounting already contains its own run ID ${JSON.stringify(safeSourceRunId)}`);
-  }
-  const directSourceRunId = sourceMetadata.source_run_id;
-  if (
-    (directSourceRunId === undefined && accounting.cumulative.source_run_ids.length !== 0) ||
-    (directSourceRunId !== undefined && accounting.cumulative.source_run_ids[0] !== directSourceRunId)
-  ) {
-    throw new Error(
-      `referenced source run ${JSON.stringify(safeSourceRunId)} cumulative lineage disagrees with its direct source relationship`
-    );
-  }
-  return {
-    summary: accounting.cumulative,
-    sourceRunIds: [safeSourceRunId, ...accounting.cumulative.source_run_ids]
-  };
+  return { safeSourceRunId, sourceLayout, sourceMetadata };
 }
 
 function cumulativeAccountingSummary(
@@ -2708,9 +3113,7 @@ export function projectNormalizedUsageAccounting(input: {
   });
   const componentTotal = normalized.totalTokens;
   const componentReasons = normalized.incompleteReasons;
-  const usageUnavailable = componentReasons.some(
-    (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
-  );
+  const usageUnavailable = usageBreakdownUnavailable(componentReasons);
   const pricing = priceUsageComponents({
     model: usage.model,
     components: normalized.components,
@@ -2740,6 +3143,66 @@ export function projectNormalizedUsageAccounting(input: {
     pricing_incomplete_reasons: pricingIncompleteReasons,
     partial_pricing: estimatedSpendUsd === undefined || pricingIncompleteReasons.length > 0
   };
+}
+
+/**
+ * One attempt's latest usage snapshot as spend-estimate evidence: the components and route-catalog
+ * prices accounting v4 derives from it, so the estimate starts from exactly the v4 pricing.
+ */
+export function spendEstimateUsageEvidence(input: {
+  usage: NormalizedUsage;
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+  cacheReadRatio?: number;
+}): SpendEstimateUsageEvidence {
+  const usage = input.usage;
+  const normalized = normalizeUsageComponents({
+    model: usage.model,
+    inputTokens: usage.input_tokens,
+    freshInputTokens: usage.fresh_input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheWriteTokens: usage.cache_write_tokens ?? 0,
+    reasoningTokens: usage.reasoning_tokens ?? 0,
+    cacheReadRatio: input.cacheReadRatio
+  });
+  const pricing = priceUsageComponents({
+    model: usage.model,
+    components: normalized.components,
+    modelPricing: input.modelPricing
+  });
+  const { reasoning: _reasoningTokens, ...components } = normalized.components;
+  const { reasoning: _reasoningCost, ...catalogComponentCostsUsd } = pricing.componentCostsUsd;
+  const catalogPricing = pricingForModel(usage.model, input.modelPricing);
+  return {
+    model: usage.model,
+    ...(usage.recorded_cost_usd === undefined ? {} : { recordedCostUsd: usage.recorded_cost_usd }),
+    components,
+    reasoningTokens: normalized.components.reasoning,
+    providerInputTokens: normalized.providerInputTokens,
+    usageUnavailable: usageBreakdownUnavailable(normalized.incompleteReasons),
+    usageEstimated: normalized.cacheReadPricingEstimated,
+    ...(catalogPricing === undefined
+      ? {}
+      : {
+          catalogRates: pricingForContext(
+            catalogPricing,
+            components.uncached_input + components.cache_read + components.cache_write
+          )
+        }),
+    catalogComponentCostsUsd,
+    missingRateComponents: pricing.incompleteReasons.flatMap((reason) =>
+      reason.code === "component-rate-unavailable" && reason.component !== undefined && reason.component !== "reasoning"
+        ? [reason.component]
+        : []
+    )
+  };
+}
+
+/** Whether unknown cache reads or a contradictory breakdown leave the components unpriceable. */
+function usageBreakdownUnavailable(reasons: readonly ComponentUsageIncompleteReason[]): boolean {
+  return reasons.some(
+    (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
+  );
 }
 
 function boundedIndependentUsageComponents(normalized: {
@@ -2834,7 +3297,7 @@ function storedComponentCosts(value: unknown, label: string): UsageComponentCost
   };
 }
 
-function configuredCacheReadRatio(value: string | undefined): number | undefined {
+export function configuredCacheReadRatio(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   if (!/^(?:0(?:\.\d+)?|1(?:\.0+)?)$/u.test(value)) {
     throw new Error("ULTRAFUZZ_CACHE_READ_RATIO must be an exact decimal between 0 and 1");

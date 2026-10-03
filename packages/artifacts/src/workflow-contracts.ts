@@ -32,6 +32,7 @@ import {
 } from "./generated-test-schema.js";
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
+import { ESTIMATED_SPEND_PATTERN } from "./run-documents.js";
 import { SAFE_ID_PATTERN } from "./safe-paths.js";
 import { canonicalJsonValueKey } from "./lang-primitives.js";
 
@@ -1658,10 +1659,15 @@ export const reportSchema = withDocumentMetadata(
         run_id: nonEmptyString,
         source_run_id: nonEmptyString,
         repository: nonEmptyString,
+        // The evaluated target's SHA-1 or SHA-256 Git commit from the sealed data-governance record.
+        // null means no Git commit identity was recorded for the target; it is never a placeholder.
+        target_commit: z.union([z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u), z.null()]),
         elapsed_time: nonEmptyString,
         models_used: z.array(nonEmptyString),
         tokens_used: nonEmptyString,
-        estimated_spend: nonEmptyString,
+        // A numeric USD estimate (formatEstimatedSpendUsd); never `+`-suffixed or `unavailable`.
+        // partial_pricing records whether it is incomplete and is never rendered.
+        estimated_spend: z.string().regex(ESTIMATED_SPEND_PATTERN),
         partial_pricing: z.boolean(),
         strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
         // The report renders these beside the rest of the run summary, so a report

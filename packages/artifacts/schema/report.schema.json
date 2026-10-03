@@ -21,6 +21,17 @@
           "type": "string",
           "minLength": 1
         },
+        "target_commit": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "elapsed_time": {
           "type": "string",
           "minLength": 1
@@ -38,7 +49,7 @@
         },
         "estimated_spend": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^\\$(?:0|[1-9][0-9]*)\\.[0-9]{2,10}$"
         },
         "partial_pricing": {
           "type": "boolean"
@@ -265,6 +276,7 @@
         "run_id",
         "source_run_id",
         "repository",
+        "target_commit",
         "elapsed_time",
         "models_used",
         "tokens_used",

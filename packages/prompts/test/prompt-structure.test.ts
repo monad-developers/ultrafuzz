@@ -15,9 +15,9 @@ import { extractPromptVariables, loadBuiltInPromptAssets, type PromptVariableRef
 // Template variables a shipped prompt must keep. The catalog loader, the renderer and topology
 // validation only check the references a prompt makes, so a prompt without one of these still loads.
 // Each binds something the runtime relies on after the agent finishes:
-// - a gate compares the node's output with it: the coverage-evidence partial
-//   (COVERAGE_EVIDENCE_MARKDOWN_MISMATCH, REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING), the report's
-//   coverage evidence (REPORT_COVERAGE_EVIDENCE_MISMATCH) and goal-search census (the verified
+// - a gate compares the node's output with it: the coverage producer's copy of the coverage-evidence
+//   partial (COVERAGE_EVIDENCE_MARKDOWN_MISMATCH), the report's coverage evidence
+//   (REPORT_COVERAGE_EVIDENCE_MISMATCH) and goal-search census (the verified
 //   report must equal its census-aware projection), the property selection settings
 //   (PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH) and the dynamic enumerator policy;
 // - the runtime reserves it in the invariant campaign's node window: the smoke and fuzzer budgets;
@@ -34,11 +34,7 @@ const REQUIRED_PROMPT_VARIABLES: Readonly<Record<string, readonly string[]>> = {
     "ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3",
     "goal_search_coverage_path"
   ],
-  "review/final-report.md": [
-    "ancestor_artifact_path_authority:coverage-evidence.json",
-    "coverage_evidence_markdown_projection",
-    "goal_search_coverage_path"
-  ],
+  "review/final-report.md": ["ancestor_artifact_path_authority:coverage-evidence.json", "goal_search_coverage_path"],
   "strategies/differential/differential-lane-author.md": [
     "ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1"
   ],
@@ -84,6 +80,26 @@ const REQUIRED_PROMPT_VARIABLES: Readonly<Record<string, readonly string[]>> = {
 
 // The gates accept exactly one canonical scoped-coverage section, so the prompt carries one copy.
 const EXACTLY_ONCE_PROMPT_VARIABLES = new Set(["coverage_evidence_markdown_projection"]);
+
+// Template variables a shipped prompt must not use. report.md carries no scoped-coverage section,
+// and the final-report gate rejects one (REPORT_COVERAGE_EVIDENCE_MARKDOWN_UNEXPECTED), so the report
+// prompt must not hand its agent the coverage producer's section format.
+const FORBIDDEN_PROMPT_VARIABLES: Readonly<Record<string, readonly string[]>> = {
+  "review/final-report.md": ["coverage_evidence_markdown_projection"]
+};
+
+// The canonical renderer's Run summary labels, in order. The report prompt's Markdown example shows
+// the agent this list; the renderer and `ultrafuzz report`'s accounting diagnostics read these labels.
+const RUN_SUMMARY_LABELS = [
+  "Run ID",
+  "Repository",
+  "Commit",
+  "Elapsed time",
+  "Models used",
+  "Tokens used",
+  "Estimated spend",
+  "Audit profile"
+];
 
 function requirementKeys(reference: PromptVariableReference): string[] {
   if (reference.argument === undefined) return [reference.name];
@@ -216,6 +232,34 @@ describe("shipped prompt structure", () => {
         else expect(count, `${promptPath}: {{${variable}}}`).toBeGreaterThan(0);
       }
     }
+  });
+
+  it("keeps template variables out of prompts whose gates reject what they render", () => {
+    const assetsByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset]));
+
+    for (const [promptPath, variables] of Object.entries(FORBIDDEN_PROMPT_VARIABLES)) {
+      const asset = assetsByPath.get(promptPath);
+      expect(asset, promptPath).toBeDefined();
+      const names = new Set(
+        extractPromptVariables(asset?.markdown ?? "", { allowDynamicItemVariables: true }).flatMap(requirementKeys)
+      );
+      for (const variable of variables) expect(names.has(variable), `${promptPath}: {{${variable}}}`).toBe(false);
+    }
+  });
+
+  it("shows the canonical Run summary labels in the final-report Markdown example", () => {
+    const asset = loadBuiltInPromptAssets().find((entry) => entry.relativePath === "review/final-report.md");
+    expect(asset).toBeDefined();
+    const markdown = asset?.markdown ?? "";
+    const exampleStart = markdown.indexOf("```md\n# Ultrafuzz report\n");
+    expect(exampleStart, "final-report.md report-opening example").toBeGreaterThanOrEqual(0);
+    const example = markdown.slice(exampleStart, markdown.indexOf("\n```\n", exampleStart));
+    const summaryStart = example.indexOf("\n## Run summary\n");
+    expect(summaryStart, "final-report.md Run summary example").toBeGreaterThanOrEqual(0);
+    const summary = example.slice(summaryStart);
+    const labels = [...summary.matchAll(/^- ([^:\n]+): /gmu)].map((match) => match[1]);
+
+    expect(labels).toEqual(RUN_SUMMARY_LABELS);
   });
 
   it("keeps the reference docs' copy of the coverage-evidence Markdown partial verbatim", () => {

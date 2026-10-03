@@ -1927,7 +1927,9 @@ function writeLinkedWorkflowBinding(
 ): void {
   const existingWorkflow = metadata.workflow;
   if (existingWorkflow === undefined) throw new Error("workflow replacement requires an existing workflow binding");
-  const { accounting: _staleAccounting, ...metadataWithoutAccounting } = metadata;
+  // Accounting and the spend estimate both name the workflow run they describe; the next sync
+  // recomputes them for the replacement run.
+  const { accounting: _staleAccounting, spend_estimate: _staleSpendEstimate, ...metadataWithoutAccounting } = metadata;
   writeRunMetadataDocument(layout.runMetadataPath, {
     ...metadataWithoutAccounting,
     workflow_ids: [link.workflow_run_id],
