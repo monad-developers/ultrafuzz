@@ -3604,7 +3604,8 @@ test("a final report that rewords a carried finding's prose verifies with warnin
   // the saved attempt the report agent reworded three of five steps and, as the
   // report prompt asks, replaced the code field's pointer to a generated test
   // with the inline reproducer. Changed or omitted prose is a warning; the
-  // finding's identity, location, and classification fields still fail.
+  // finding's identity, location, and classification fields still fail, and so
+  // does its recommendation, which report.md renders as the issue's Remediation.
   const finding = {
     id: "finding-a",
     title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
@@ -3660,7 +3661,6 @@ test("a final report that rewords a carried finding's prose verifies with warnin
       ],
       code: "function testWithdrawCeiling() public {}"
     },
-    recommendation: "Round withdrawals down.",
     recommended_next_action: "Ask the maintainers which rounding direction is intended."
   };
   const rewordedRationales = {
@@ -3710,7 +3710,19 @@ test("a final report that rewords a carried finding's prose verifies with warnin
 
     const omitted: Record<string, unknown> = { ...reworded };
     delete omitted.recommendation;
-    assert.equal(check(omitted).status, "warning", `${mode}: omitted recommendation`);
+    for (const [label, candidate] of [
+      ["omitted recommendation", omitted],
+      ["changed recommendation", { ...reworded, recommendation: "Round withdrawals down." }]
+    ] as const) {
+      const recommendationResult = check(candidate);
+      assert.equal(recommendationResult.status, "failed", `${mode}: ${label}`);
+      assert.deepEqual(
+        recommendationResult.status === "failed" &&
+          recommendationResult.issues.filter((entry) => entry.severity !== "warning").map((entry) => entry.path),
+        ["$.issues[0].recommendation"],
+        `${mode}: ${label}`
+      );
+    }
 
     for (const [field, value] of [
       ["affected_files", ["src/Other.sol"]],
@@ -3724,7 +3736,8 @@ test("a final report that rewords a carried finding's prose verifies with warnin
 
 test("a final report row that adds a recommendation its source finding lacks fails in both report modes", () => {
   // report.md renders a carried recommendation as the issue's Remediation, so the report stage may
-  // copy one but never author one. Changing or omitting a carried one stays a warning (above).
+  // copy one but never author one. Changing or omitting a carried one fails a production issue,
+  // which renders it, and stays a warning on a non-production outcome, which never does.
   const finding = {
     id: "finding-a",
     title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
@@ -3826,7 +3839,13 @@ test("a final report row that adds a recommendation its source finding lacks fai
 
     const carriedSource = { ...source, recommendation };
     assert.equal(check({ ...row, recommendation }, carriedSource).status, "passed", `${label}: carried`);
-    assert.equal(check(row, carriedSource).status, "warning", `${label}: omitted`);
+    const drift = key === "issues" ? "failed" : "warning";
+    assert.equal(check(row, carriedSource).status, drift, `${label}: omitted`);
+    assert.equal(
+      check({ ...row, recommendation: "Round withdrawals toward zero." }, carriedSource).status,
+      drift,
+      `${label}: changed`
+    );
   }
 });
 
