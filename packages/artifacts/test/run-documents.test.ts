@@ -440,6 +440,50 @@ test("run metadata current accounting must exactly equal its final segment", () 
   );
 });
 
+test("run metadata accepts fallback-priced models and lists attempts without usage", () => {
+  const metadata = canonicalRunMetadata();
+  metadata.accounting!.pricing_catalog = {
+    ...metadata.accounting!.pricing_catalog,
+    unresolved_models: ["gpt-5.5"],
+    fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"] },
+    model_prices: {
+      "gpt-5.5": { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 },
+      ...metadata.accounting!.pricing_catalog.model_prices
+    }
+  };
+  const attempt = {
+    workflow_run_id: "workflow-replaced",
+    source_event_sequence: 7,
+    node_id: "node:node-a-0",
+    iteration: 0,
+    attempt: 2,
+    model_name: "gpt-5.5"
+  };
+  metadata.attempts_without_usage = { attempts: [attempt], cumulative_count: 3 };
+  assert.deepEqual(assertRunMetadataDocument(structuredClone(metadata)), metadata);
+
+  for (const fallback of [
+    { table: "ultrafuzz.fallback-pricing.latest", models: ["gpt-5.5"] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: [] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5", "gpt-5.5"] }
+  ]) {
+    const invalid = structuredClone(metadata);
+    invalid.accounting!.pricing_catalog.fallback = fallback;
+    assert.throws(() => assertRunMetadataDocument(invalid), /run metadata/u, JSON.stringify(fallback));
+  }
+  const invalidAttempts: Array<[RunMetadataDocument["attempts_without_usage"], RegExp]> = [
+    [{ attempts: [], cumulative_count: 0 }, /run metadata/u],
+    [{ attempts: [{ ...attempt, extra: true } as typeof attempt], cumulative_count: 1 }, /run metadata/u],
+    [{ attempts: [attempt, { ...attempt, attempt: 3 }], cumulative_count: 2 }, /must be unique by workflow run/u],
+    [{ attempts: [attempt, { ...attempt, source_event_sequence: 9 }], cumulative_count: 1 }, /count is smaller/u]
+  ];
+  for (const [attemptsWithoutUsage, message] of invalidAttempts) {
+    const invalid = structuredClone(metadata);
+    invalid.attempts_without_usage = attemptsWithoutUsage;
+    assert.throws(() => assertRunMetadataDocument(invalid), message, JSON.stringify(attemptsWithoutUsage));
+  }
+});
+
 test("estimated spend formats without suffixes and keeps a nonzero amount visible", () => {
   const label = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u;
   const expected: Array<[number, string]> = [

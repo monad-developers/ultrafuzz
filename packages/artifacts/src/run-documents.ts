@@ -287,6 +287,32 @@ export interface RunMetadataDocument {
   };
   workflow?: RunMetadataWorkflow;
   accounting?: RunMetadataAccounting;
+  attempts_without_usage?: RunAttemptsWithoutUsage;
+}
+
+/**
+ * One executed agent attempt occurrence of this run, named by its attempt-ledger identity
+ * (`workflow_run_id`, `source_event_sequence`), with no usage event of its own.
+ */
+export interface RunAttemptWithoutUsage {
+  workflow_run_id: string;
+  source_event_sequence: number;
+  /** The Smithers task, `node:<strategy attempt ID>`. */
+  node_id: string;
+  iteration: number;
+  attempt: number;
+  model_name?: string;
+}
+
+/**
+ * The executed agent attempts whose usage was never recorded, so accounting cannot price them. They
+ * are counted and listed, never estimated. Present only when `cumulative_count` is at least one.
+ */
+export interface RunAttemptsWithoutUsage {
+  /** This run's attempts, across every workflow run it was bound to. */
+  attempts: RunAttemptWithoutUsage[];
+  /** `attempts.length` plus the source run's `cumulative_count`. */
+  cumulative_count: number;
 }
 
 /**
@@ -426,6 +452,20 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
       document.accounting.current.workflow_run_id !== document.workflow.run_id
     ) {
       throw new Error("run metadata accounting does not match the active workflow run");
+    }
+  }
+  if (document.attempts_without_usage !== undefined) {
+    const { attempts, cumulative_count: cumulativeCount } = document.attempts_without_usage;
+    const identities = new Set(
+      attempts.map(({ workflow_run_id, source_event_sequence }) =>
+        JSON.stringify([workflow_run_id, source_event_sequence])
+      )
+    );
+    if (identities.size !== attempts.length) {
+      throw new Error("run metadata attempts without usage must be unique by workflow run and source event sequence");
+    }
+    if (cumulativeCount < attempts.length) {
+      throw new Error("run metadata attempts-without-usage count is smaller than its attempts");
     }
   }
   return document;

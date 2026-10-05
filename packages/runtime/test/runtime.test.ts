@@ -22207,6 +22207,309 @@ test("syncRun prices only the models its catalog leaves unpriced from the fallba
   assert.equal(accounting?.cumulative.unpriced_event_count, 1);
 });
 
+/** A project-discovery task whose two agent attempts both failed; `firstAttemptUsage` is the first one's usage. */
+async function syncRetriedAgentAttempts(runId: string, firstAttemptUsage?: { model: string; costUsd: number }) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 2\n\n[agents.CodexAgent]"),
+    "utf8"
+  );
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      ...(firstAttemptUsage === undefined
+        ? []
+        : [
+            {
+              type: "TokenUsageReported",
+              nodeId: "node:project-discovery",
+              attempt: 1,
+              extra: {
+                iteration: 0,
+                inputTokens: 1_000,
+                outputTokens: 100,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                costUsd: firstAttemptUsage.costUsd,
+                model: firstAttemptUsage.model,
+                agent: "codex"
+              }
+            }
+          ]),
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "agent exited" } },
+      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: { message: "agent exited" } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const sync = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  return {
+    project,
+    env,
+    metadataPath,
+    metadata: readRunMetadataDocument(metadataPath, runId),
+    resync: async () => {
+      const before = fs.readFileSync(metadataPath);
+      const again = await syncRun({ projectRoot: project, runId, env });
+      assert.equal(again.ok, true, JSON.stringify(again.diagnostics));
+      return { before, after: fs.readFileSync(metadataPath) };
+    }
+  };
+}
+
+/**
+ * A project-discovery attempt 1 that failed and was synchronized, then reset and run again as a new
+ * attempt 1 in the same workflow run, as `resume --retry-failed` or `--reset-node` does, and
+ * synchronized again. `usage` names the recorded cost each occurrence reported, if any.
+ */
+async function syncResetAgentAttempt(runId: string, usage: { first?: number; replacement?: number } = {}) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const occurrence = (costUsd: number | undefined) => [
+    { type: "RunStarted" },
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    ...(costUsd === undefined
+      ? []
+      : [
+          {
+            type: "TokenUsageReported",
+            nodeId,
+            attempt: 1,
+            extra: {
+              iteration: 0,
+              inputTokens: 1_000,
+              outputTokens: 100,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd,
+              model: "gpt-5.5",
+              agent: "codex"
+            }
+          }
+        ]),
+    { type: "NodeFailed", nodeId, attempt: 1, error: { message: "agent exited" } }
+  ];
+  const first = workflowEvents(workflowRunId, occurrence(usage.first));
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: first
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const sync = async () => {
+    const result = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  };
+  await sync();
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(workflowRunId, [...occurrence(usage.first), ...occurrence(usage.replacement)]),
+    "utf8"
+  );
+  await sync();
+  const ledger = fs
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          source_event_sequence: number;
+          iteration: number;
+          attempt: number;
+          reuse: { status: string };
+          agent?: { model_name?: string };
+        }
+    );
+  return { metadata: readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId), ledger };
+}
+
+test("syncRun lists executed agent attempts without usage in run.json, even while accounting is absent", async () => {
+  const unrecorded = await syncRetriedAgentAttempts("attempts-without-usage");
+  // Nothing recorded usage, so there is no accounting to price; the attempts are listed instead.
+  assert.equal(unrecorded.metadata.accounting, undefined);
+  assert.deepEqual(unrecorded.metadata.attempts_without_usage, {
+    attempts: [
+      [1, 1],
+      [2, 4]
+    ].map(([attempt, sourceEventSequence]) => ({
+      workflow_run_id: "ultrafuzz-attempts-without-usage",
+      source_event_sequence: sourceEventSequence,
+      node_id: "node:project-discovery",
+      iteration: 0,
+      attempt,
+      model_name: "gpt-5.5"
+    })),
+    cumulative_count: 2
+  });
+  const { before, after } = await unrecorded.resync();
+  assert.deepEqual(after, before);
+
+  // The attempt that recorded usage is priced by accounting; only the other one is listed.
+  const partial = await syncRetriedAgentAttempts("attempts-partly-without-usage", { model: "gpt-5.5", costUsd: 0.5 });
+  assert.equal(partial.metadata.accounting?.cumulative.estimated_spend, "$0.50");
+  assert.deepEqual(partial.metadata.attempts_without_usage, {
+    attempts: [
+      {
+        workflow_run_id: "ultrafuzz-attempts-partly-without-usage",
+        source_event_sequence: 5,
+        node_id: "node:project-discovery",
+        iteration: 0,
+        attempt: 2,
+        model_name: "gpt-5.5"
+      }
+    ],
+    cumulative_count: 1
+  });
+});
+
+test("syncRun lists each occurrence of an attempt number that a reset reused by its own event window", async () => {
+  const unreported = await syncResetAgentAttempt("reset-without-usage");
+  // Both occurrences are executed agent attempts that share node, iteration, and attempt; the
+  // attempt ledger tells them apart by their terminal event sequence.
+  assert.deepEqual(
+    unreported.ledger.map((entry) => [entry.source_event_sequence, entry.attempt, entry.reuse.status]),
+    [
+      [2, 1, "executed"],
+      [5, 1, "executed"]
+    ]
+  );
+  assert.deepEqual(
+    unreported.metadata.attempts_without_usage?.attempts.map((entry) => [entry.source_event_sequence, entry.attempt]),
+    [
+      [2, 1],
+      [5, 1]
+    ]
+  );
+  assert.equal(unreported.metadata.attempts_without_usage?.cumulative_count, 2);
+
+  // Only the occurrence before the reset reported usage, so only the replacement is listed.
+  const firstReported = await syncResetAgentAttempt("reset-first-reported", { first: 0.5 });
+  assert.deepEqual(
+    firstReported.metadata.attempts_without_usage?.attempts.map((entry) => entry.source_event_sequence),
+    [6]
+  );
+
+  // Every occurrence reported usage, so the member is absent.
+  const bothReported = await syncResetAgentAttempt("reset-both-reported", { first: 0.5, replacement: 0.25 });
+  assert.equal(bothReported.metadata.attempts_without_usage, undefined);
+});
+
+test("syncRun keeps listing the attempts of a workflow run that a fork replaced", async () => {
+  const runId = "fork-attempts-without-usage";
+  const retried = await syncRetriedAgentAttempts(runId);
+  const forkedWorkflowRunId = `ultrafuzz-${runId}-fork`;
+  const forked = await forkRun({
+    projectRoot: retried.project,
+    runId,
+    forkFrame: 0,
+    env: { ...retried.env, SMITHERS_FAKE_FORKED_RUN_ID: forkedWorkflowRunId }
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  // Rebinding run.json to the replacement keeps the member: it is recomputed from the ledgers.
+  const rebound = readRunMetadataDocument(retried.metadataPath, runId);
+  assert.equal(rebound.workflow?.run_id, forkedWorkflowRunId);
+  assert.deepEqual(rebound.attempts_without_usage, retried.metadata.attempts_without_usage);
+  // The runner now reports the fork, which has started but run no attempt yet.
+  fs.writeFileSync(
+    path.join(retried.project, "fake-smithers-inspect.json"),
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId: forkedWorkflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "pending" }]
+      })
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(retried.project, "fake-smithers-events.ndjson"),
+    workflowEvents(forkedWorkflowRunId, [{ type: "RunStarted" }]),
+    "utf8"
+  );
+  const sync = await syncRun({ projectRoot: retried.project, runId, env: retried.env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const after = readRunMetadataDocument(retried.metadataPath, runId);
+  assert.equal(after.accounting, undefined);
+  assert.equal(after.attempts_without_usage?.cumulative_count, 2);
+  assert.deepEqual(
+    [...new Set(after.attempts_without_usage?.attempts.map((entry) => entry.workflow_run_id))],
+    [`ultrafuzz-${runId}`]
+  );
+});
+
+test("syncRun adds a source run's attempts without usage and keeps the member when accounting fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const source = await recordedUsageRun({ project, runId: "unrecorded-source", costUsd: 0.5 });
+  const sourceMetadata = await source.sync();
+  assert.equal(sourceMetadata.attempts_without_usage, undefined);
+  const withSourceCount = (count: number | undefined, metadata = sourceMetadata) => {
+    const { attempts_without_usage: _count, ...rest } = metadata;
+    writeRunMetadataDocument(
+      source.metadataPath,
+      count === undefined ? rest : { ...rest, attempts_without_usage: { attempts: [], cumulative_count: count } }
+    );
+  };
+  // The source's own source ran three attempts that recorded no usage.
+  withSourceCount(3);
+  const continuation = await recordedUsageRun({
+    project,
+    runId: "unrecorded-continuation",
+    costUsd: 0.25,
+    sourceRunId: "unrecorded-source"
+  });
+
+  const continued = await continuation.sync();
+  assert.equal(continued.accounting?.cumulative.estimated_spend, "$0.75");
+  assert.deepEqual(continued.attempts_without_usage, { attempts: [], cumulative_count: 3 });
+
+  // The member goes away once nothing remains to list.
+  withSourceCount(undefined);
+  assert.equal((await continuation.sync()).attempts_without_usage, undefined);
+
+  // A pass whose accounting fails writes nothing, so the member it last wrote stays.
+  withSourceCount(3);
+  assert.equal((await continuation.sync()).attempts_without_usage?.cumulative_count, 3);
+  const { accounting: _sourceAccounting, ...sourceWithoutAccounting } = sourceMetadata;
+  withSourceCount(5, sourceWithoutAccounting);
+  const before = fs.readFileSync(continuation.metadataPath);
+  const failed = await syncRun({ projectRoot: project, runId: "unrecorded-continuation", env: continuation.env });
+  assert.ok(failed.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  assert.deepEqual(fs.readFileSync(continuation.metadataPath), before);
+});
+
 test("getRunStatus synchronizes without appending duplicate events", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

@@ -57,6 +57,9 @@
     "accounting": {
       "$ref": "#/$defs/accounting"
     },
+    "attempts_without_usage": {
+      "$ref": "#/$defs/attemptsWithoutUsage"
+    },
     "prompt_digest": {
       "$ref": "#/$defs/sha256"
     },
@@ -819,6 +822,54 @@
         "updated_at": {
           "type": "string",
           "format": "date-time"
+        }
+      }
+    },
+    "attemptsWithoutUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempts", "cumulative_count"],
+      "properties": {
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attemptWithoutUsage"
+          }
+        },
+        "cumulative_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "attemptWithoutUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workflow_run_id", "source_event_sequence", "node_id", "iteration", "attempt"],
+      "properties": {
+        "workflow_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_event_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "iteration": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model_name": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }

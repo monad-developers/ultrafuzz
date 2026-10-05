@@ -69,6 +69,8 @@ import {
   type PlannedArtifactSchema,
   type PrerequisiteManifestDigest,
   type RunLayout,
+  type RunAttemptsWithoutUsage,
+  type RunAttemptWithoutUsage,
   type RunMetadataAccounting,
   type RunMetadataDocument,
   type RunStatus,
@@ -1200,11 +1202,20 @@ async function synchronizeWorkflowAccounting(input: {
   if (metadata.source_run_id !== stateSourceRunId) {
     throw new Error("run.json and state.json disagree on source_run_id");
   }
+  const attemptsWithoutUsage = runAttemptsWithoutUsage(input.layout, metadata, preparedUsage.entries);
+  const attemptsWithoutUsageChanged = !sameJsonValue(metadata.attempts_without_usage, attemptsWithoutUsage);
   if (preparedUsage.entries.length === 0) {
     if (metadata.accounting !== undefined) {
       throw new Error("run.json accounting cannot exist when the usage ledger is empty");
     }
-    return { changed: false, available: false };
+    if (!attemptsWithoutUsageChanged) return { changed: false, available: false };
+    const budgetDiagnostic = synchronizationBudgetDiagnostic(input.control, synchronizationClock(input.control));
+    if (budgetDiagnostic !== undefined) return { changed: false, available: false, budgetDiagnostic };
+    updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
+      assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
+      return withAttemptsWithoutUsage(current, attemptsWithoutUsage);
+    });
+    return { changed: true, available: false };
   }
 
   const storedPricingCatalog = storedAccounting?.pricingCatalog;
@@ -1292,9 +1303,12 @@ async function synchronizeWorkflowAccounting(input: {
       accountingChanged || metadata.accounting === undefined ? new Date().toISOString() : metadata.accounting.updated_at
   };
   // Checked before the ledger append below; the write re-checks the document it lands in.
-  assertRunMetadataDocument({ ...metadata, accounting: nextAccounting }, input.layout.runId);
+  assertRunMetadataDocument(
+    withAttemptsWithoutUsage({ ...metadata, accounting: nextAccounting }, attemptsWithoutUsage),
+    input.layout.runId
+  );
 
-  if (!accountingChanged && preparedUsage.pendingEntries.length === 0) {
+  if (!accountingChanged && !attemptsWithoutUsageChanged && preparedUsage.pendingEntries.length === 0) {
     return { changed: false, available: true };
   }
 
@@ -1307,17 +1321,90 @@ async function synchronizeWorkflowAccounting(input: {
   }
 
   if (preparedUsage.inputs.length > 0) appendUsageEvents(input.layout, preparedUsage.inputs);
-  if (accountingChanged) {
+  if (accountingChanged || attemptsWithoutUsageChanged) {
     // A lifecycle command can rewrite run.json while this pass runs, as resume
     // does to record its controller's Forge guard. Writing back the copy read
     // above would undo that write, so the accounting goes into the document as
     // it is now, which must still be bound to the workflow it was computed for.
     updateRunMetadataDocument(input.layout.runMetadataPath, input.layout.runId, (current) => {
       assertAccountedWorkflow(current, input.workflowRunId, input.controlGeneration);
-      return { ...current, accounting: nextAccounting };
+      return withAttemptsWithoutUsage({ ...current, accounting: nextAccounting }, attemptsWithoutUsage);
     });
   }
-  return { changed: accountingChanged || preparedUsage.pendingEntries.length > 0, available: true };
+  return {
+    changed: accountingChanged || attemptsWithoutUsageChanged || preparedUsage.pendingEntries.length > 0,
+    available: true
+  };
+}
+
+/**
+ * The executed agent attempts of this run, and of its source runs by count, that recorded no usage.
+ * Accounting cannot price what was never recorded, so they are listed rather than estimated.
+ * Absent when there are none.
+ */
+function runAttemptsWithoutUsage(
+  layout: RunLayout,
+  metadata: RunMetadataDocument,
+  usage: readonly UsageLedgerEntry[]
+): RunAttemptsWithoutUsage | undefined {
+  const attempts = attemptsWithoutUsage(replayNodeAttempts(layout).entries, usage);
+  const sourceCount =
+    metadata.source_run_id === undefined
+      ? 0
+      : (sourceRunMetadata(layout, metadata.source_run_id).metadata.attempts_without_usage?.cumulative_count ?? 0);
+  const cumulativeCount = attempts.length + sourceCount;
+  return cumulativeCount === 0 ? undefined : { attempts, cumulative_count: cumulativeCount };
+}
+
+/**
+ * Executed agent attempt occurrences with no usage event of their own. An occurrence is an attempt
+ * ledger entry: a reset restarts Smithers' attempt numbering, so one (node, iteration, attempt) can
+ * name several occurrences, and Smithers reports usage only while its attempt runs, between the
+ * occurrence's start and terminal events. Every workflow run of this run counts, since a replay or
+ * fork keeps the replaced run's ledgers. The ledger names the planned strategy attempt and usage the
+ * Smithers task, `node:<strategy attempt ID>`.
+ */
+function attemptsWithoutUsage(
+  attempts: readonly NodeAttemptLedgerEntry[],
+  usage: readonly UsageLedgerEntry[]
+): RunAttemptWithoutUsage[] {
+  const usageSequences = new Map<string, number[]>();
+  for (const entry of usage) {
+    const key = JSON.stringify([entry.workflow_run_id, entry.node_id, entry.iteration, entry.attempt]);
+    usageSequences.set(key, [...(usageSequences.get(key) ?? []), entry.source_event_sequence]);
+  }
+  return attempts.flatMap((entry): RunAttemptWithoutUsage[] => {
+    if (entry.reuse.status !== "executed" || entry.agent === undefined) return [];
+    const nodeId = `node:${entry.strategy_attempt_id}`;
+    const sequences = usageSequences.get(
+      JSON.stringify([entry.workflow_run_id, nodeId, entry.iteration, entry.attempt])
+    );
+    if (
+      sequences?.some((sequence) => entry.started_event_sequence <= sequence && sequence <= entry.source_event_sequence)
+    ) {
+      return [];
+    }
+    const modelName = entry.agent.model_name;
+    return [
+      {
+        workflow_run_id: entry.workflow_run_id,
+        source_event_sequence: entry.source_event_sequence,
+        node_id: nodeId,
+        iteration: entry.iteration,
+        attempt: entry.attempt,
+        ...(modelName === undefined ? {} : { model_name: modelName })
+      }
+    ];
+  });
+}
+
+function withAttemptsWithoutUsage(
+  metadata: RunMetadataDocument,
+  attemptsWithoutUsage: RunAttemptsWithoutUsage | undefined
+): RunMetadataDocument {
+  if (attemptsWithoutUsage !== undefined) return { ...metadata, attempts_without_usage: attemptsWithoutUsage };
+  const { attempts_without_usage: _stale, ...withoutAttempts } = metadata;
+  return withoutAttempts;
 }
 
 function assertAccountedWorkflow(
@@ -2207,10 +2294,11 @@ function storedModelPricingTiers(value: unknown, label: string): NonNullable<Mod
   return tiers;
 }
 
-function cumulativeAccountingForSourceRun(
+/** A source run's layout and run.json, read from beside this run's directory. */
+function sourceRunMetadata(
   layout: RunLayout,
   sourceRunId: string
-): { summary: AccountingSummary; sourceRunIds: string[] } {
+): { safeSourceRunId: string; layout: RunLayout; metadata: RunMetadataDocument } {
   const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
   if (safeSourceRunId === layout.runId) {
     throw new Error("source run ID cannot refer to the current run");
@@ -2223,7 +2311,18 @@ function cumulativeAccountingForSourceRun(
   }
   assertNoSymlinkComponents(runsRoot, sourceRoot, "source run root");
   const sourceLayout = layoutForRunRoot(sourceRoot, safeSourceRunId);
-  const sourceMetadata = readRunMetadataDocument(sourceLayout.runMetadataPath, safeSourceRunId);
+  return {
+    safeSourceRunId,
+    layout: sourceLayout,
+    metadata: readRunMetadataDocument(sourceLayout.runMetadataPath, safeSourceRunId)
+  };
+}
+
+function cumulativeAccountingForSourceRun(
+  layout: RunLayout,
+  sourceRunId: string
+): { summary: AccountingSummary; sourceRunIds: string[] } {
+  const { safeSourceRunId, layout: sourceLayout, metadata: sourceMetadata } = sourceRunMetadata(layout, sourceRunId);
   const sourceState = readRunState(sourceLayout);
   if (sourceMetadata.source_run_id !== sourceState.source_run_id) {
     throw new Error(`referenced source run ${JSON.stringify(safeSourceRunId)} has inconsistent source_run_id metadata`);
