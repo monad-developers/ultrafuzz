@@ -318,7 +318,7 @@ topology node or group default.
 The effective agent timeout uses this precedence: a topology node or group
 timeout, then the model profile timeout, then `[run].default_timeout_seconds`.
 A topology pin wins even when it is shorter, so raising the profile or run
-default does not reach a pinned node. `validate`, `plan` and `run` report a
+default does not reach a pinned node. `validate`, `doctor` and `run` report a
 `TOPOLOGY_TIMEOUT_SHADOWS_DEFAULT` warning for each node or group pin below the
 default it overrides. The packaged `goals`, `strategies`, `specialists` and `review`
 groups pin 7,200 seconds, so a `default_timeout_seconds` above that warns for
