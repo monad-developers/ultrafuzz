@@ -4867,14 +4867,12 @@ bunAdapterTest(
       const [firstRequest, ...retriedRequests] = responseBodies.map((body) => JSON.parse(body) as unknown);
       for (const retried of retriedRequests) assert.deepEqual(retried, firstRequest);
     } finally {
-      for (const [name, value] of Object.entries({
-        ULTRAFUZZ_CONFIG_PATH: previous.config,
-        ULTRAFUZZ_PROVIDER_HOME_ROOT: previous.providerHomeRoot,
-        OPENROUTER_API_KEY: previous.openRouterKey
-      })) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.providerHomeRoot === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous.providerHomeRoot;
+      if (previous.openRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouterKey;
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }
