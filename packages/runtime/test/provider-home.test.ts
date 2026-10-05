@@ -5,7 +5,6 @@ import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
-import { modelDestination } from "../src/data-governance.js";
 import { loadRuntimeTemplate } from "../src/runtime-template.js";
 import { underGroupWritableUmask } from "./process-umask.js";
 type ResolveProviderHome = (provider: string, configured?: string) => string;
@@ -44,13 +43,6 @@ test(
       assert.equal(codex, path.join(root, "codex", "teams", "codex"));
       for (let current = codex; current !== home; current = path.dirname(current))
         assert.equal(fs.statSync(current).mode & 0o777, 0o700, current);
-      // Data governance reads a configured provider's route from the same home.
-      fs.writeFileSync(path.join(codex, "config.toml"), 'model_provider = "gateway"\n');
-      const config = { agents: { CodexAgent: { configDir: "teams/codex" } } } as never;
-      assert.match(
-        modelDestination("CodexAgent", config, { HOME: home, XDG_STATE_HOME: xdgState }),
-        /^model:codex-route-/u
-      );
       // The umask can only clear mkdir's mode bits; chmod restores 0700 when it clears the owner's.
       process.umask(0o277);
       try {

@@ -67,7 +67,6 @@ import {
   assertControllerExecutionSnapshotDigest,
   assertProviderScopedSensitiveEnvironmentCapability
 } from "./controller-source.js";
-import { controllerOwnedGovernancePaths, targetIdentity } from "./data-governance.js";
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
@@ -77,7 +76,6 @@ import {
   runSmithersInspectionCommand,
   runSmithersLifecycleCommand,
   type SmithersResumeInspection,
-  assertSealedDataGovernance,
   smithersExecutionControlFiles,
   smithersDiagnostic,
   submitSmithersWorkflow,
@@ -88,7 +86,6 @@ import { runsRootForProject } from "./validate.js";
 import {
   acquireWorkflowControlLock,
   acquireWorkflowLifecycleLock,
-  authenticatedContinuationGovernancePath,
   materializeWorkflowExecutionSnapshot,
   sealedBunStartupControlDrift,
   sealWorkflowControlFiles,
@@ -142,10 +139,6 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_BUN_MODULE_CONFINEMENT",
   "ULTRAFUZZ_CONFIG_PATH",
-  "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
-  "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
-  "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-  "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
@@ -196,7 +189,6 @@ export async function startRun(input: StartRunInput) {
   if (knownRun !== undefined) return runtimeFailure<StartRunValue>([knownRun]);
   let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
-    enforceDataGovernance: true,
     beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
       // Launch seals a controller of its own, but `resume` runs the installed
       // runner, so refuse one it cannot bind (an unpatched install, a missing
@@ -242,8 +234,7 @@ export async function startRun(input: StartRunInput) {
       renderedPrompts: plan.rendered_prompts,
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput,
-      controllerSourceDigest: plan.controller_source_digest,
-      dataGovernance: plan.data_governance
+      controllerSourceDigest: plan.controller_source_digest
     });
     const prepared = await persistSmithersEvidence(plan.layout, plan.graph, compiled, input.env, forbiddenSecretValues);
     appendEvent(plan.layout, {
@@ -291,12 +282,6 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
-    assertCurrentDataGovernanceTarget(
-      plan.validation.project_root,
-      prepared.verifiedControl.executionFiles,
-      plan.data_governance.path,
-      controllerOwnedGovernancePaths(plan.validation.project_root, plan.layout.root)
-    );
     const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
     const submissionEnvironment = {
@@ -673,21 +658,6 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       keepWorkspaces: config.run.keepWorkspaces,
       controllerLeaseSeconds: config.run.controllerLeaseSeconds,
       env: lifecycleEnvironment,
-      prepareContinuationEnvironment: () => {
-        const claimsSealedControl =
-          workflow.control_generation !== undefined || workflow.control_integrity_path !== undefined;
-        if (!claimsSealedControl && pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)) {
-          return lifecycleEnvironment;
-        }
-        return {
-          ...lifecycleEnvironment,
-          ULTRAFUZZ_DATA_GOVERNANCE_PATH: authenticatedContinuationGovernancePath(
-            projectRoot,
-            layout,
-            workflow.control_generation
-          )
-        };
-      },
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
@@ -1351,8 +1321,6 @@ async function persistSmithersEvidence(
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, layout);
   assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, compiled.controllerSourceDigest);
-  if (compiled.dataGovernance === undefined) throw new Error("compiled workflow is missing data governance");
-  assertSealedDataGovernance(verifiedControl.executionFiles, compiled.dataGovernance, compiled.runId);
   const executionSnapshot = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout,
@@ -1513,7 +1481,6 @@ export async function readLinkedWorkflowEvidence(
     if (sealedPlan === undefined) throw new Error("sealed workflow is missing its run plan");
     const plan = assertRunPlanDocument(parseStrictJsonBytes(sealedPlan.contents), runId);
     assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, plan.controller_source_digest);
-    assertSealedDataGovernance(verifiedControl.executionFiles, plan.data_governance, runId);
     const sealedTaskManifest = tolerateDivergence
       ? parseSealedTaskManifestForObserver(verifiedControl.contents)
       : { document: parseSealedTaskManifest(verifiedControl.contents), divergences: [] as readonly string[] };
@@ -2137,18 +2104,6 @@ function assertCredentialEnvironmentVariableName(name: string): void {
 
 function objectRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function assertCurrentDataGovernanceTarget(
-  projectRoot: string,
-  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
-  governancePath: string,
-  controllerOwnedPaths: string[]
-): void {
-  const sealed = executionFiles.find((file) => file.snapshotPath === `controls/${governancePath}`),
-    expected = objectRecord(objectRecord(parseStrictJsonBytes(sealed?.contents ?? Buffer.alloc(0))).target);
-  if (JSON.stringify(targetIdentity(projectRoot, controllerOwnedPaths)) !== JSON.stringify(expected))
-    throw new Error("campaign source changed after its data-disclosure acknowledgement");
 }
 
 function parseSealedResolvedConfig(

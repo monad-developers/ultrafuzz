@@ -156,6 +156,38 @@ test("detached HEAD receives the same immutable run source binding", () => {
   }
 });
 
+test("run source revision never executes a git binary inside the target", () => {
+  const project = temporaryRoot("ultrafuzz-source-path-git-");
+  const savedPath = process.env.PATH;
+  try {
+    gitAt(project, ["init", "--quiet", "--initial-branch=main"]);
+    gitAt(project, ["config", "user.name", "Ultrafuzz Test"]);
+    gitAt(project, ["config", "user.email", "test@invalid"]);
+    fs.writeFileSync(path.join(project, "source.txt"), "source\n");
+    gitAt(project, ["add", "source.txt"]);
+    gitAt(project, ["commit", "--quiet", "-m", "source"]);
+    const revision = gitAt(project, ["rev-parse", "HEAD"]);
+    const bin = path.join(project, "bin");
+    const fake = path.join(bin, "git");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(fake, '#!/bin/sh\nprintf x > "$0.used"\nexit 97\n', { mode: 0o755 });
+
+    process.env.PATH = bin;
+    let source: ReturnType<typeof captureRunSourceRevision>;
+    try {
+      source = captureRunSourceRevision(project, "run-path-git");
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    assert.ok(source);
+    assert.equal(source.revision, revision);
+    assert.equal(gitAt(project, ["rev-parse", source.ref]), revision);
+    assert.equal(fs.existsSync(`${fake}.used`), false);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("planning captures source before repository reads and publishes no ref when the checkout changes", async () => {
   const project = temporaryRoot("ultrafuzz-source-race-");
   try {
