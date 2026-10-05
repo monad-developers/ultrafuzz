@@ -62,9 +62,10 @@ export function projectTerminalReport(input: TerminalReportProjectionInput): Can
 /**
  * The report agent copies a run summary that the host captured when the report task started, so its
  * elapsed time and accounting miss the report task itself and anything that finished later. Runtime
- * presentations restate them from run.json and the recorded finish time. Models, tokens, spend, and
- * partial pricing move together and come only from `accounting.cumulative` (see runSummaryUsage);
- * without it they keep the agent's copy. Malformed records are ignored, never thrown.
+ * presentations restate them from run.json and the recorded finish time. Models, tokens, spend,
+ * partial pricing, and the unpriced-attempt count move together and come only from
+ * `accounting.cumulative`; without it they keep the agent's copy. The count of attempts without
+ * usage is restated on its own. Malformed records are ignored, never thrown.
  */
 export function withWholeRunSummary(
   runMetadata: Record<string, unknown>,
@@ -74,8 +75,15 @@ export function withWholeRunSummary(
   const summary = { ...runMetadata };
   const elapsed = elapsedTime(field(metadata, "created_at"), finishedAt);
   if (elapsed !== undefined) summary.elapsed_time = elapsed;
-  const usage = runSummaryUsage(metadata).accounting;
-  if (usage !== undefined) Object.assign(summary, usage);
+  const usage = runSummaryUsage(metadata);
+  if (usage.accounting !== undefined) {
+    if (usage.accounting.unpriced_attempts === undefined) delete summary.unpriced_attempts;
+    Object.assign(summary, usage.accounting);
+  }
+  if (isRecord(metadata)) {
+    if (usage.attempts_without_usage === undefined) delete summary.attempts_without_usage;
+    else summary.attempts_without_usage = usage.attempts_without_usage;
+  }
   return summary;
 }
 
@@ -88,26 +96,39 @@ export interface RunSummaryUsage {
     /** `accounting.cumulative.estimated_spend_usd`, `$0.00` when no usage could be priced. */
     estimated_spend: string;
     partial_pricing: boolean;
+    /** `accounting.cumulative.unpriced_event_count`, when at least one. */
+    unpriced_attempts?: number;
   };
+  /** `attempts_without_usage.cumulative_count`, when run.json records the member. */
+  attempts_without_usage?: number;
 }
 
 /**
  * The one place a Run summary's usage figures are read from run.json, for the report-start
  * projection and both runtime presentations. Accounting v4's own `estimated_spend` label (with its
- * `+` and `unavailable`) stays in run.json for `ultrafuzz stats`; the report shows its USD amount.
- * Reads are defensive: a malformed record yields no accounting.
+ * `+` and `unavailable`) stays in run.json for `ultrafuzz stats`; the report shows its USD amount and
+ * counts what that amount excludes. Reads are defensive: a malformed record yields nothing.
  */
 export function runSummaryUsage(metadata: unknown): RunSummaryUsage {
-  const cumulative = field(field(metadata, "accounting"), "cumulative");
+  const attemptsWithoutUsage = field(field(metadata, "attempts_without_usage"), "cumulative_count");
+  return {
+    ...accountingUsage(field(field(metadata, "accounting"), "cumulative")),
+    ...(isPositiveCount(attemptsWithoutUsage) ? { attempts_without_usage: attemptsWithoutUsage } : {})
+  };
+}
+
+function accountingUsage(cumulative: unknown): Pick<RunSummaryUsage, "accounting"> {
   const models = field(cumulative, "models");
   const tokens = field(cumulative, "tokens_used");
   const spendUsd = field(cumulative, "estimated_spend_usd");
   const partialPricing = field(cumulative, "partial_pricing");
+  const unpricedAttempts = field(cumulative, "unpriced_event_count");
   if (
     !isStringList(models) ||
     !availableLabel(tokens) ||
     !(spendUsd === undefined || isSpendAmount(spendUsd)) ||
-    typeof partialPricing !== "boolean"
+    typeof partialPricing !== "boolean" ||
+    !(unpricedAttempts === undefined || unpricedAttempts === 0 || isPositiveCount(unpricedAttempts))
   ) {
     return {};
   }
@@ -116,13 +137,22 @@ export function runSummaryUsage(metadata: unknown): RunSummaryUsage {
       models_used: [...models],
       tokens_used: tokens,
       estimated_spend: formatEstimatedSpendUsd(spendUsd ?? 0),
-      partial_pricing: partialPricing
+      partial_pricing: partialPricing,
+      ...(isPositiveCount(unpricedAttempts) ? { unpriced_attempts: unpricedAttempts } : {})
     }
   };
 }
 
 function field(value: unknown, key: string): unknown {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? Reflect.get(value, key) : undefined;
+  return isRecord(value) ? Reflect.get(value, key) : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPositiveCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
 function isStringList(value: unknown): value is string[] {

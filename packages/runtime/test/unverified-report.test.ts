@@ -356,13 +356,16 @@ test("unchecked reports restate whole-run accounting from run.json", () => {
     path.join(root, "state.json"),
     JSON.stringify({ ...state, finished_at: "2026-09-01T03:30:00.000Z" })
   );
-  const writeRunMetadata = (cumulative?: Record<string, unknown>): void =>
+  const writeRunMetadata = (cumulative?: Record<string, unknown>, attemptsWithoutUsage?: number): void =>
     fs.writeFileSync(
       path.join(root, "run.json"),
       JSON.stringify({
         run_id: runId,
         created_at: "2026-09-01T00:00:00.000Z",
-        ...(cumulative === undefined ? {} : { accounting: { cumulative } })
+        ...(cumulative === undefined ? {} : { accounting: { cumulative } }),
+        ...(attemptsWithoutUsage === undefined
+          ? {}
+          : { attempts_without_usage: { attempts: [], cumulative_count: attemptsWithoutUsage } })
       })
     );
   const cumulative = {
@@ -381,6 +384,16 @@ test("unchecked reports restate whole-run accounting from run.json", () => {
   assert.match(report.markdown, /^- Estimated spend: `\$3\.00`$/mu);
   assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, true);
   assertReportSnapshotRemainedCurrent(report);
+
+  // The spend line counts what the figure excludes, from accounting and run.json's own count.
+  writeRunMetadata({ ...cumulative, unpriced_event_count: 1 }, 2);
+  const counted = loadReportSnapshot(root);
+  assert.match(
+    counted.markdown,
+    /^- Estimated spend: `\$3\.00` \(excludes 3 agent attempts whose usage was not recorded or could not be priced\)$/mu
+  );
+  assert.equal(reportSchema.parse(counted.json).run_metadata.attempts_without_usage, 2);
+  assert.equal(reportSchema.parse(counted.json).run_metadata.unpriced_attempts, 1);
 
   // Without well-formed accounting the agent's usage stays, and a malformed record is ignored.
   for (const kept of [undefined, { ...cumulative, estimated_spend_usd: "3" }, { ...cumulative, partial_pricing: 1 }]) {

@@ -1665,10 +1665,14 @@ export const reportSchema = withDocumentMetadata(
         elapsed_time: nonEmptyString,
         models_used: z.array(nonEmptyString),
         tokens_used: nonEmptyString,
-        // A numeric USD estimate (formatEstimatedSpendUsd); never `+`-suffixed or `unavailable`.
-        // partial_pricing records whether it is incomplete and is never rendered.
+        // The priced usage in USD (formatEstimatedSpendUsd); never `+`-suffixed or `unavailable`.
+        // partial_pricing is the flag of the accounting it came from and is never rendered.
         estimated_spend: z.string().regex(ESTIMATED_SPEND_PATTERN),
         partial_pricing: z.boolean(),
+        // Executed agent attempts whose usage was never recorded (run.json attempts_without_usage)
+        // and recorded usage that could not be priced; the rendered spend excludes both.
+        attempts_without_usage: positiveInteger.optional(),
+        unpriced_attempts: positiveInteger.optional(),
         strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
         // The report renders these beside the rest of the run summary, so a report
         // that omits them cannot be projected.

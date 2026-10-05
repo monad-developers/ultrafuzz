@@ -9241,7 +9241,15 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       await authority.materialize(task);
       const projection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
       return Object.fromEntries(
-        ["elapsed_time", "models_used", "tokens_used", "estimated_spend", "partial_pricing", "unpriced_attempts"]
+        [
+          "elapsed_time",
+          "models_used",
+          "tokens_used",
+          "estimated_spend",
+          "partial_pricing",
+          "attempts_without_usage",
+          "unpriced_attempts"
+        ]
           .filter((key) => Object.hasOwn(projection, key))
           .map((key) => [key, projection[key]])
       );
@@ -9268,7 +9276,8 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       models_used: ["model-priced", "model-unpriced"],
       tokens_used: "300",
       estimated_spend: "$0.05",
-      partial_pricing: true
+      partial_pricing: true,
+      unpriced_attempts: 1
     });
     // Nothing recorded at all is zero usage, never `unavailable`.
     const unrecorded = loadFinalReportRunMetadataAuthorityHarness();
@@ -9289,13 +9298,15 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       partial_pricing: true,
       unpriced_event_count: 1
     };
-    writeRunMetadata({ accounting: { cumulative } });
+    writeRunMetadata({ accounting: { cumulative }, attempts_without_usage: { attempts: [], cumulative_count: 2 } });
     assert.deepEqual(await usageOf(full), {
       elapsed_time: "1h 00m",
       models_used: ["model-a"],
       tokens_used: "9,999",
       estimated_spend: "$41.20",
-      partial_pricing: true
+      partial_pricing: true,
+      attempts_without_usage: 2,
+      unpriced_attempts: 1
     });
     // Accounting that priced nothing has no USD amount and shows zero spend.
     const { estimated_spend_usd: _amount, ...unpriced } = cumulative;
@@ -9303,7 +9314,8 @@ test("final-report Run summary copies run accounting, else a continuation's sour
     assert.equal((await usageOf(full)).estimated_spend, "$0.00");
 
     // A continuation's own accounting includes its source runs. Before it has any, the source run's
-    // accounting stands in, never this workflow run's live subtotal.
+    // accounting stands in, never this workflow run's live subtotal; its own count of attempts
+    // without usage, which already includes the lineage, still applies.
     writeRunMetadata({ source_run_id: "source-run" });
     const sourceRoot = path.join(runsRoot, "source-run");
     fs.mkdirSync(sourceRoot, { recursive: true });
@@ -9322,7 +9334,8 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       models_used: ["model-a", "model-b"],
       tokens_used: "12,345,678",
       estimated_spend: "$41.20",
-      partial_pricing: true
+      partial_pricing: true,
+      unpriced_attempts: 1
     });
     const { accounting: _sourceAccounting, ...sourceWithoutAccounting } = sourceMetadata;
     fs.writeFileSync(path.join(sourceRoot, "run.json"), `${JSON.stringify(sourceWithoutAccounting)}\n`, "utf8");

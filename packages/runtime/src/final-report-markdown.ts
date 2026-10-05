@@ -43,6 +43,7 @@ const PARTIAL_EMPTY_FINDINGS_NOTICE =
 const UNCHECKED_PARTIAL_REPORT_WARNING =
   "> **PARTIAL REPORT — verification not checked.** This report contains the saved report-agent output. Task counts and results could not be fully verified. Missing or uncertain results are coverage gaps, and an empty findings list is not a clean result. See [Run completion](#run-completion).";
 const UNRECORDED_COMMIT_SUMMARY = "- Commit: `none` (no Git commit was recorded for the evaluated target)";
+const UNRECORDED_MODELS_SUMMARY = "- Models used: `none` (no model usage was recorded)";
 const UNCHECKED_EMPTY_FINDINGS_NOTICE =
   "No final findings are included in this agent-written report. This partial report is not a clean result and does not establish that unfinished or unchecked work found no issues. See [Run completion](#run-completion).";
 /**
@@ -382,7 +383,8 @@ function coverageEvidenceNotice(value: unknown): string | undefined {
 /**
  * The Run summary bullets carry exactly the summary labels, in order, so a stale row (such as the
  * former `Source run ID`) or a dropped `Commit` row cannot pass as the current report shape. The
- * spend is a numeric estimate, so a `+`-suffixed or `unavailable` spend cannot render either.
+ * spend is a numeric estimate, optionally followed by the fixed exclusion clause, so a `+`-suffixed
+ * or `unavailable` spend cannot render either.
  */
 function runSummaryLabelsViolation(markdown: string): string | undefined {
   const [, summary, ...repeated] = markdownOutsideFencedCode(markdown).split("\n## Run summary\n\n");
@@ -391,7 +393,10 @@ function runSummaryLabelsViolation(markdown: string): string | undefined {
   const labels = bullets.map((line) => /^- ([^:\n]+): /u.exec(line)?.[1]);
   const expected = reportSummaryFields.map(([label]) => label);
   if (!isDeepStrictEqual(labels, expected)) return "run summary labels do not match the report contract";
-  const spend = /^- Estimated spend: `([^`]*)`$/u.exec(bullets[labels.indexOf("Estimated spend")] ?? "")?.[1];
+  const spend =
+    /^- Estimated spend: `([^`]*)`(?: \(excludes [1-9][0-9]* agent attempts? whose usage was not recorded or could not be priced\))?$/u.exec(
+      bullets[labels.indexOf("Estimated spend")] ?? ""
+    )?.[1];
   return spend !== undefined && ESTIMATED_SPEND_PATTERN.test(spend)
     ? undefined
     : "run summary estimated spend is not a numeric USD estimate";
@@ -1045,8 +1050,28 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
       lines.push(UNRECORDED_COMMIT_SUMMARY);
       continue;
     }
-    lines.push(`- ${label}: \`${inlineValue(metadata[key])}\``);
+    if (key === "models_used" && Array.isArray(metadata[key]) && metadata[key].length === 0) {
+      lines.push(UNRECORDED_MODELS_SUMMARY);
+      continue;
+    }
+    const clause = key === "estimated_spend" ? spendExclusionClause(metadata) : "";
+    lines.push(`- ${label}: \`${inlineValue(metadata[key])}\`${clause}`);
   }
+}
+
+/**
+ * The spend is the usage that was recorded and priced; this fixed clause counts the agent attempts it
+ * leaves out, both those that recorded no usage and those whose usage had no price. It carries no
+ * `%`, `/`, `of` or `+`, so the coverage-score scan never reads it as a claim.
+ */
+function spendExclusionClause(metadata: JsonRecord): string {
+  const excluded = exclusionCount(metadata.attempts_without_usage) + exclusionCount(metadata.unpriced_attempts);
+  if (excluded === 0) return "";
+  return ` (excludes ${excluded} agent attempt${excluded === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
+}
+
+function exclusionCount(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : 0;
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {

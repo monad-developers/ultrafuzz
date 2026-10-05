@@ -806,6 +806,78 @@ test("the Run summary renders the spend as a numeric estimate and rejects a + or
   }
 });
 
+test("the Run summary spend line counts the agent attempts the figure excludes", () => {
+  const usageLines = (metadata: Record<string, unknown>) => {
+    const input = renderableReport();
+    input.run_metadata = { ...runMetadata("spend-run"), ...metadata };
+    const projection = projectCanonicalFinalReport(input);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
+    return projection.markdown
+      .split("\n")
+      .filter((line) => /^- (?:Models used|Tokens used|Estimated spend):/u.test(line));
+  };
+  const clause = (count: number) =>
+    ` (excludes ${count} agent attempt${count === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
+  // All usage recorded and priced, whether by a recorded charge, the catalog or the fallback table.
+  assert.deepEqual(usageLines({ estimated_spend: "$38.72" }), [
+    "- Models used: `model-a`",
+    "- Tokens used: `100`",
+    "- Estimated spend: `$38.72`"
+  ]);
+  // Attempts without usage and recorded usage that could not be priced are counted together.
+  assert.deepEqual(
+    usageLines({ estimated_spend: "$38.72", attempts_without_usage: 2, unpriced_attempts: 1 }).at(-1),
+    [`- Estimated spend: \`$38.72\`${clause(3)}`][0]
+  );
+  assert.equal(
+    usageLines({ estimated_spend: "$38.72", attempts_without_usage: 1 }).at(-1),
+    `- Estimated spend: \`$38.72\`${clause(1)}`
+  );
+  assert.equal(
+    usageLines({ estimated_spend: "$0.0008", unpriced_attempts: 2 }).at(-1),
+    `- Estimated spend: \`$0.0008\`${clause(2)}`
+  );
+  // Nothing recorded at all: no model, zero tokens, zero spend, never `unavailable`.
+  assert.deepEqual(
+    usageLines({ models_used: [], tokens_used: "0", estimated_spend: "$0.00", attempts_without_usage: 5 }),
+    [
+      "- Models used: `none` (no model usage was recorded)",
+      "- Tokens used: `0`",
+      `- Estimated spend: \`$0.00\`${clause(5)}`
+    ]
+  );
+  assert.deepEqual(usageLines({ models_used: [], tokens_used: "0", estimated_spend: "$0.00" }), [
+    "- Models used: `none` (no model usage was recorded)",
+    "- Tokens used: `0`",
+    "- Estimated spend: `$0.00`"
+  ]);
+  // The counts are positive integers, so a zero or fractional count fails the schema.
+  for (const count of [0, 1.5, "1"]) {
+    const input = renderableReport();
+    input.run_metadata = { ...runMetadata("spend-run"), attempts_without_usage: count };
+    assert.throws(() => projectCanonicalFinalReport(input), /attempts_without_usage/u, String(count));
+  }
+
+  // A hand-edited spend row cannot pass the Markdown directive; the canonical byte comparison
+  // then pins the exact count.
+  const input = renderableReport();
+  input.run_metadata = { ...runMetadata("spend-run"), attempts_without_usage: 3 };
+  const projection = projectCanonicalFinalReport(input);
+  const spendRow = `- Estimated spend: \`$0.01\`${clause(3)}\n`;
+  assert.ok(projection.markdown.includes(spendRow));
+  for (const replacement of [
+    `- Estimated spend: \`$0.01+\`${clause(3)}\n`,
+    `- Estimated spend: \`unavailable\`${clause(3)}\n`,
+    "- Estimated spend: `$0.01` (excludes 0 agent attempts whose usage was not recorded or could not be priced)\n",
+    "- Estimated spend: `$0.01` (excludes 3 of 9 agent attempts whose usage was not recorded or could not be priced)\n",
+    "- Estimated spend: `$0.01` (excludes 3 agent attempts)\n",
+    `- Estimated spend: \`$0.01\`${clause(3)} (partial)\n`
+  ]) {
+    const markdown = projection.markdown.replace(spendRow, replacement);
+    assert.equal(isDirectiveConformingFinalReportMarkdown(markdown, projection.report), false, replacement);
+  }
+});
+
 function summaryBullets(commit: string): string {
   return [
     "- Run ID: `commit-run`",

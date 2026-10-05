@@ -54,6 +54,16 @@
         "partial_pricing": {
           "type": "boolean"
         },
+        "attempts_without_usage": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "unpriced_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
         "strategy_loops": {
           "anyOf": [
             {

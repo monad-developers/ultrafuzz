@@ -1422,6 +1422,8 @@ type FinalReportRunMetadataProjection = {
   tokens_used: string;
   estimated_spend: string;
   partial_pricing: boolean;
+  attempts_without_usage?: number;
+  unpriced_attempts?: number;
   strategy_loops: number | "unavailable";
   audit_profile: string;
   audit_profile_catalog_digest: string;
@@ -1799,11 +1801,13 @@ function deriveAuthoritativeFinalReportRunMetadata(
   const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
   const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
   const sourceRunIds = finalReportOptionalStringArray(accounting.source_run_ids, "accounting source run IDs");
-  // Models, tokens, spend, and partial pricing come from one source: the run's accounting, which
-  // includes its source runs; for a continuation without its own accounting yet, the source run's;
-  // and for a direct run, this workflow run's live Smithers usage. Without any, nothing was recorded.
+  // Models, tokens, spend, partial pricing, and unpriced attempts come from one source: the run's
+  // accounting, which includes its source runs; for a continuation without its own accounting yet,
+  // the source run's; and for a direct run, this workflow run's live Smithers usage. Without any,
+  // nothing was recorded. Attempts without usage are run.json's own count, which includes lineage.
+  const recorded = runSummaryUsage(metadata);
   const usage =
-    runSummaryUsage(metadata).accounting ??
+    recorded.accounting ??
     (metadata.source_run_id === undefined
       ? finalReportLiveUsage(workflowMetrics)
       : runSummaryUsage(finalReportSourceRunMetadata(runRoot, metadata.source_run_id, task.attemptId)).accounting);
@@ -1822,6 +1826,10 @@ function deriveAuthoritativeFinalReportRunMetadata(
     tokens_used: usage?.tokens_used ?? "0",
     estimated_spend: usage?.estimated_spend ?? "$0.00",
     partial_pricing: usage?.partial_pricing ?? false,
+    ...(recorded.attempts_without_usage === undefined
+      ? {}
+      : { attempts_without_usage: recorded.attempts_without_usage }),
+    ...(usage?.unpriced_attempts === undefined ? {} : { unpriced_attempts: usage.unpriced_attempts }),
     strategy_loops: strategyLoops,
     audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
     audit_profile_catalog_digest: finalReportOptionalSha256(
