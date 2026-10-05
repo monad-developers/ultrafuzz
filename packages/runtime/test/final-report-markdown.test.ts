@@ -713,38 +713,36 @@ test("public final-report projection keeps machine-generated run IDs the entropy
 });
 
 test("the Run summary names the evaluated commit and keeps run lineage in report.json only", () => {
-  const sha256Commit = "0123456789abcdef".repeat(4);
   assert.notEqual(
     redactSecretsInText(TARGET_COMMIT, "REDACTED", [], "all"),
     TARGET_COMMIT,
     "a bare SHA-1 commit must be a generic-hex redaction candidate for this test to mean anything"
   );
-  for (const commit of [TARGET_COMMIT, sha256Commit]) {
-    const input = renderableReport();
-    input.run_metadata = {
-      ...runMetadata("commit-run"),
-      source_run_id: "commit-source-run",
-      source_run_ids: ["commit-source-run"],
-      target_commit: commit
-    };
-    const before = structuredClone(input);
-    const projection = projectCanonicalFinalReport(input);
-    assert.deepEqual(projection.report, before);
-    assert.ok(projection.markdown.includes(`\n## Run summary\n\n${summaryBullets(commit)}\n\n`), projection.markdown);
-    assert.doesNotMatch(projection.markdown, /Source run ID|commit-source-run/u);
+  const commit = TARGET_COMMIT;
+  const input = renderableReport();
+  input.run_metadata = {
+    ...runMetadata("commit-run"),
+    source_run_id: "commit-source-run",
+    source_run_ids: ["commit-source-run"],
+    target_commit: commit
+  };
+  const before = structuredClone(input);
+  const projection = projectCanonicalFinalReport(input);
+  assert.deepEqual(projection.report, before);
+  assert.ok(projection.markdown.includes(`\n## Run summary\n\n${summaryBullets(commit)}\n\n`), projection.markdown);
+  assert.doesNotMatch(projection.markdown, /Source run ID|commit-source-run/u);
 
-    const published = projectPublicCanonicalFinalReport(input);
-    assert.deepEqual(input, before);
-    const metadata = published.report.run_metadata as Record<string, unknown>;
-    assert.equal(metadata.target_commit, commit, "the public projection must not redact the evaluated commit");
-    assert.equal(metadata.source_run_id, "commit-source-run");
-    assert.deepEqual(metadata.source_run_ids, ["commit-source-run"]);
-    assert.match(published.markdown, new RegExp(`^- Commit: \`${commit}\`$`, "mu"));
-    assert.doesNotMatch(published.markdown, /Source run ID|commit-source-run/u);
-    assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
-    assert.deepEqual(projectCanonicalFinalReport(published.report), published);
-    assertPublicProjectionFixedPoint(published);
-  }
+  const published = projectPublicCanonicalFinalReport(input);
+  assert.deepEqual(input, before);
+  const metadata = published.report.run_metadata as Record<string, unknown>;
+  assert.equal(metadata.target_commit, commit, "the public projection must not redact the evaluated commit");
+  assert.equal(metadata.source_run_id, "commit-source-run");
+  assert.deepEqual(metadata.source_run_ids, ["commit-source-run"]);
+  assert.match(published.markdown, new RegExp(`^- Commit: \`${commit}\`$`, "mu"));
+  assert.doesNotMatch(published.markdown, /Source run ID|commit-source-run/u);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(published.markdown, published.report), true);
+  assert.deepEqual(projectCanonicalFinalReport(published.report), published);
+  assertPublicProjectionFixedPoint(published);
 });
 
 test("the Run summary states when no Git commit was recorded for the evaluated target", () => {

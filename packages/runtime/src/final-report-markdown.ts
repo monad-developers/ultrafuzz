@@ -1803,7 +1803,7 @@ function redactSecrets(value: string, mode: SecretScanMode = "all"): string {
  * fields scan positive-only: a vendor-format credential or URL credential in the slot is still
  * redacted (and the bundle then fails closed on lineage), while a high-entropy safe ID is kept.
  *
- * `run_metadata.target_commit` is a schema-checked lowercase Git object ID or null. The generic
+ * `run_metadata.target_commit` is a schema-checked lowercase 40-hex commit or null. The generic
  * 40-hex rule would redact a SHA-1 commit to the placeholder, which the report contract rejects, so
  * it scans positive-only too: the published commit is the evaluated target's identity, not a secret.
  */

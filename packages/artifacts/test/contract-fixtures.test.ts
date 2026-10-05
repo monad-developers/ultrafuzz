@@ -1535,7 +1535,7 @@ test("Ajv and retained Zod parsers agree on canonical unique-array constraints",
   assert.deepEqual(mismatches, [], `Zod accepted JSON-Schema-invalid unique arrays: ${mismatches.join("; ")}`);
 });
 
-test("report target commits are exact lowercase SHA-1 or SHA-256 object IDs or null in Ajv and Zod", () => {
+test("report target commits are exact lowercase 40-hex object IDs or null in Ajv and Zod", () => {
   const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "report.schema.json");
   assert.ok(entry?.zodParser !== undefined);
   const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
@@ -1552,7 +1552,7 @@ test("report target commits are exact lowercase SHA-1 or SHA-256 object IDs or n
   const cases: Array<[string, unknown, boolean]> = [
     ["null", null, true],
     ["SHA-1", "0123456789abcdef0123456789abcdef01234567", true],
-    ["SHA-256", "0123456789abcdef".repeat(4), true],
+    ["64 hex digits", "0123456789abcdef".repeat(4), false],
     ["missing", undefined, false],
     ["unavailable", "unavailable", false],
     ["none", "none", false],
