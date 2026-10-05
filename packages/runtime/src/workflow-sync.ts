@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { parseResolvedConfigJsonBytes } from "@ultrafuzz/config";
+import { parseResolvedConfigJsonBytes, type RunConfig } from "@ultrafuzz/config";
 import lockfile from "proper-lockfile";
 
 import {
@@ -20,6 +20,7 @@ import {
   createNodeState,
   createUsageLedgerEntry,
   getNodeArtifactDir,
+  isTerminalNodeStatus,
   isTerminalRunStatus,
   layoutForRunRoot,
   manifestDigest,
@@ -107,7 +108,8 @@ import {
   type SyncRunValue
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
-import { loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
+import { hasSuccessfulFinalizationAuthority, loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
+import { removeRunTaskWorktrees } from "./stale-worktree-recovery.js";
 import { publishBestEffortTerminalReport } from "./unverified-report.js";
 import { hasCurrentReportPublicationStatus, writeReportPublicationStatus } from "./report-publication-status.js";
 import {
@@ -1024,6 +1026,32 @@ export async function synchronizeLinkedWorkflowRun(
     }
   }
 
+  // Ultrafuzz, not the workflow engine, deletes task worktrees once the run
+  // has ended and every task with evidence is finalized. A disposable worktree
+  // cannot hold the only copy of an output. A failure is retried by the next sync.
+  if (["succeeded", "succeeded-with-failures", "failed", "cancelled"].includes(inspect.runState)) {
+    try {
+      if (!sealedRunConfig(evidence).keepWorkspaces) {
+        removeRunTaskWorktrees({
+          projectRoot,
+          runRoot: layout.root,
+          runId: layout.runId,
+          attemptIds: disposableTaskWorktrees(layout),
+          checkpoint: () => {
+            assertSynchronizationBudget(control);
+          }
+        });
+      }
+    } catch (error) {
+      const interrupted = synchronizationInterruptionDiagnostic(error);
+      if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
+      diagnostics.push({
+        ...diagnosticFromError(error, "workflow", "TASK_WORKTREE_REMOVAL_FAILED"),
+        severity: "warning"
+      });
+    }
+  }
+
   return {
     ok: true,
     diagnostics,
@@ -1038,11 +1066,57 @@ export async function synchronizeLinkedWorkflowRun(
 }
 
 function requiresCompleteRun(evidence: LinkedWorkflowEvidence): boolean {
+  return sealedRunConfig(evidence).completionPolicy === "require-complete";
+}
+
+/** The run configuration fixed at launch. */
+function sealedRunConfig(evidence: LinkedWorkflowEvidence): RunConfig {
   const saved = evidence.verifiedControl.executionFiles.find(
     (file) => file.snapshotPath === "controls/resolved-config.json"
   );
-  if (saved === undefined) throw new Error("sealed completion policy is unavailable");
-  return parseResolvedConfigJsonBytes(saved.contents).run.completionPolicy === "require-complete";
+  if (saved === undefined) throw new Error("sealed run configuration is unavailable");
+  return parseResolvedConfigJsonBytes(saved.contents).run;
+}
+
+/**
+ * The terminal attempts whose task worktree Ultrafuzz may delete: one whose
+ * outputs are published under successful finalization authority, or one whose
+ * artifact mirror holds no file. A rejected output stays in its worktree.
+ */
+function disposableTaskWorktrees(layout: RunLayout): string[] {
+  return Object.entries(readRunState(layout).nodes)
+    .filter(
+      ([attemptId, node]) =>
+        isTerminalNodeStatus(node.status) &&
+        (hasSuccessfulFinalizationAuthority(node) ||
+          !containsFile(safeResolveInside(layout.workspacesDir, attemptId, "task worktree"), ["artifacts", attemptId]))
+    )
+    .map(([attemptId]) => attemptId);
+}
+
+/**
+ * Whether `root/<segments>` holds anything but directories, without following
+ * a symlink. A missing path holds nothing; a symlink or a read error counts as
+ * a file, so the caller keeps what it cannot inspect.
+ */
+function containsFile(root: string, segments: readonly string[]): boolean {
+  let current = root;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    try {
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory()) return true;
+    } catch (error) {
+      return !(error instanceof Error && "code" in error && error.code === "ENOENT");
+    }
+  }
+  try {
+    return fs
+      .readdirSync(current, { withFileTypes: true })
+      .some((entry) => !entry.isDirectory() || containsFile(current, [entry.name]));
+  } catch {
+    return true;
+  }
 }
 
 function synchronizationBudgetDiagnostic(

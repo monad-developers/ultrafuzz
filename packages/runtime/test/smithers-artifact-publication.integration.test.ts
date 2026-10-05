@@ -6,16 +6,22 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { removeRunTaskWorktrees } from "../src/stale-worktree-recovery.js";
+
 const fixtureContents = "verified synthetic artifact\n";
 
-test("verified ignored artifacts survive a real successful Smithers worktree reap", async () => {
+test("the workflow engine keeps an Ultrafuzz task worktree, and one Ultrafuzz removed is recreated when its task reruns", async () => {
   const root = temporaryRoot("ultrafuzz-smithers-publication-");
   const workflowDir = path.join(root, ".smithers", "workflows");
   const workflowPath = path.join(workflowDir, "artifact-publication.tsx");
-  const worktreePath = path.join(root, ".smithers", "worktrees", "artifact-publication");
+  const ultrafuzzRunId = "artifact-publication";
+  const attemptId = "write-artifact";
+  const runRoot = path.join(root, ".ultrafuzz", "runs", ultrafuzzRunId);
+  const worktreePath = path.join(runRoot, "workspaces", attemptId);
+  const branch = `ultrafuzz/${ultrafuzzRunId}/${attemptId}`;
   const canonicalRoot = path.join(root, ".ultrafuzz", "canonical-artifacts");
   const canonicalPath = path.join(canonicalRoot, "result.md");
-  const runId = `artifact-publication-${process.pid}-${Date.now()}`;
+  const workflowRunId = (generation: number) => `artifact-publication-${process.pid}-${Date.now()}-${generation}`;
 
   try {
     fs.mkdirSync(workflowDir, { recursive: true });
@@ -23,6 +29,7 @@ test("verified ignored artifacts survive a real successful Smithers worktree rea
     execGit(root, ["init", "--quiet", "--initial-branch=main"]);
     execGit(root, ["config", "user.name", "Ultrafuzz Synthetic Test"]);
     execGit(root, ["config", "user.email", "synthetic@example.invalid"]);
+    // The worktree looks clean to Git, so the engine's own rule would reap it.
     fs.writeFileSync(path.join(root, ".gitignore"), "/artifacts/\n/.smithers/\n/.ultrafuzz/\n", "utf8");
     fs.writeFileSync(path.join(root, "README.md"), "# Synthetic fixture\n", "utf8");
     execGit(root, ["add", ".gitignore", "README.md"]);
@@ -35,30 +42,48 @@ test("verified ignored artifacts survive a real successful Smithers worktree rea
       syntheticWorkflowSource({
         artifactModule: pathToFileURL(path.join(workspaceRoot(), "packages", "artifacts", "dist", "index.js")).href,
         canonicalRoot,
-        worktreePath
+        worktreePath,
+        branch
       }),
       "utf8"
     );
-
-    execFileSync(
-      smithersBinary(),
-      ["up", workflowPath, "--detach", "--run-id", runId, "--root", root, "--input", "{}", "--format", "json"],
-      {
-        cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          SMITHERS_KEEP_WORKTREES: "",
-          SMITHERS_POST_FAILURE: "0"
+    const runWorkflow = async (runId: string): Promise<void> => {
+      execFileSync(
+        smithersBinary(),
+        ["up", workflowPath, "--detach", "--run-id", runId, "--root", root, "--input", "{}", "--format", "json"],
+        {
+          cwd: root,
+          encoding: "utf8",
+          // Ultrafuzz always launches the engine this way (#1227).
+          env: { ...process.env, SMITHERS_KEEP_WORKTREES: "1", SMITHERS_POST_FAILURE: "0" }
         }
-      }
-    );
+      );
+      await waitForSuccessfulCompletion(root, runId);
+    };
 
-    await waitForSuccessfulReap(root, runId, worktreePath);
-
-    assert.equal(fs.existsSync(worktreePath), false, "the successful task worktree should be reaped");
+    await runWorkflow(workflowRunId(1));
+    assert.equal(fs.existsSync(path.join(worktreePath, ".git")), true, "the engine must keep the task worktree");
     assert.equal(fs.readFileSync(canonicalPath, "utf8"), fixtureContents);
-    assert.doesNotMatch(execGit(root, ["worktree", "list", "--porcelain"]), /artifact-publication/u);
+
+    assert.deepEqual(
+      removeRunTaskWorktrees({
+        projectRoot: root,
+        runRoot,
+        runId: ultrafuzzRunId,
+        attemptIds: [attemptId],
+        checkpoint: () => undefined
+      }),
+      [attemptId]
+    );
+    assert.equal(fs.existsSync(worktreePath), false);
+    assert.doesNotMatch(execGit(root, ["worktree", "list", "--porcelain"]), /write-artifact/u);
+    assert.equal(execGit(root, ["for-each-ref", `refs/heads/${branch}`]), "");
+
+    fs.rmSync(canonicalPath);
+    await runWorkflow(workflowRunId(2));
+    assert.equal(fs.existsSync(path.join(worktreePath, ".git")), true, "the engine must recreate the task worktree");
+    assert.match(execGit(root, ["worktree", "list", "--porcelain"]), new RegExp(`^branch refs/heads/${branch}$`, "mu"));
+    assert.equal(fs.readFileSync(canonicalPath, "utf8"), fixtureContents);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -127,6 +152,7 @@ function syntheticWorkflowSource(input: {
   artifactModule: string;
   canonicalRoot: string;
   worktreePath: string;
+  branch: string;
 }): string {
   return `/** @jsxImportSource smthrs */
 import fs from "node:fs";
@@ -137,6 +163,7 @@ import { z } from "zod/v4";
 const { publishFileDurableExclusive } = await import(${JSON.stringify(input.artifactModule)});
 const canonicalRoot = ${JSON.stringify(input.canonicalRoot)};
 const worktreePath = ${JSON.stringify(input.worktreePath)};
+const branch = ${JSON.stringify(input.branch)};
 const contents = ${JSON.stringify(fixtureContents)};
 const { Workflow, Worktree, Task, smithers, outputs } = createSmithers({
   input: z.object({}),
@@ -146,7 +173,7 @@ const { Workflow, Worktree, Task, smithers, outputs } = createSmithers({
 
 export default smithers(() => (
   <Workflow name="synthetic-artifact-publication">
-    <Worktree path={worktreePath} branch="synthetic-artifact-publication">
+    <Worktree path={worktreePath} branch={branch}>
       <Task id="write" output={outputs.write} retries={0}>
         {() => {
           const mirror = path.join(worktreePath, "artifacts", "attempt");
@@ -211,32 +238,6 @@ export default smithers(() => (
   </Workflow>
 ));
 `;
-}
-
-async function waitForSuccessfulReap(root: string, runId: string, worktreePath: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  let status = "unknown";
-  while (Date.now() < deadline) {
-    let inspected: { status?: string; run?: { status?: string } };
-    try {
-      inspected = JSON.parse(
-        execFileSync(smithersBinary(), ["inspect", runId, "--format", "json"], {
-          cwd: root,
-          encoding: "utf8"
-        })
-      ) as { status?: string; run?: { status?: string } };
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      continue;
-    }
-    status = inspected.status ?? inspected.run?.status ?? status;
-    if (status === "finished" && !fs.existsSync(worktreePath)) return;
-    if (["failed", "cancelled", "canceled"].includes(status)) {
-      throw new Error(`synthetic Smithers workflow ended with status ${status}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`synthetic Smithers workflow did not reap its worktree; final status ${status}`);
 }
 
 async function waitForSuccessfulCompletion(root: string, runId: string): Promise<void> {

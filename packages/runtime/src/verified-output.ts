@@ -954,7 +954,7 @@ function selectFinalizedAttempt(
   return { attemptId: selectedAttemptId, state: selectedState };
 }
 
-function hasSuccessfulFinalizationAuthority(node: NodeState): boolean {
+export function hasSuccessfulFinalizationAuthority(node: NodeState): boolean {
   if (node.status !== "succeeded") return false;
   const provenance = node.provenance;
   if (!isRecord(provenance) || !isRecord(provenance.output_contracts)) return false;

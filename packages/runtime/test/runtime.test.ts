@@ -93,6 +93,7 @@ import {
   initProject,
   listRuns,
   loadCurrentFinalReportSnapshot,
+  loadVerifiedRunOutputSnapshots,
   planRun,
   pauseRun,
   readRetainedFailureStateIds,
@@ -14081,7 +14082,7 @@ test("workflow synchronization preserves a quota-waiting run with parked tasks",
   assert.equal(status.value?.workflow?.status, "waiting-quota");
 });
 
-test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {
+test("startRun never lets the workflow engine reap task worktrees", async () => {
   for (const keepWorkspaces of [false, true]) {
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
@@ -14097,14 +14098,15 @@ test("startRun maps keep_workspaces to the Smithers worktree retention environme
     const keepLog = path.join(project, "keep-worktrees.log");
     const env = {
       ...fakeSmithersEnv(project),
-      SMITHERS_KEEP_WORKTREES: "1",
+      SMITHERS_KEEP_WORKTREES: "",
       SMITHERS_FAKE_KEEP_WORKTREES_LOG: keepLog
     };
 
     const run = await startRun({ projectRoot: project, runId: `keep-workspaces-${keepWorkspaces}`, env });
 
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-    assert.equal(fs.readFileSync(keepLog, "utf8"), keepWorkspaces ? "1\n" : "\n");
+    // Ultrafuzz deletes task worktrees itself after the run (#1227).
+    assert.equal(fs.readFileSync(keepLog, "utf8"), "1\n");
   }
 });
 
@@ -21796,6 +21798,224 @@ test("getRunStatus synchronizes without appending duplicate events", async () =>
   assert.equal(second.value?.events, first.value?.events);
 });
 
+/** Make a test project a Git repository, so its task worktrees are real linked worktrees. */
+function gitTaskWorktreeProject(project: string): (args: string[]) => string {
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz Test"]);
+  git(["config", "user.email", "test@invalid"]);
+  fs.writeFileSync(path.join(project, ".gitignore"), "/.ultrafuzz/runs/\n/.smithers/\n/fake-smithers-*\n", "utf8");
+  git(["add", "--all"]);
+  git(["commit", "--quiet", "-m", "project"]);
+  return git;
+}
+
+/** Create the task worktree the workflow engine would create, with an empty artifact mirror. */
+function addTaskWorktree(git: (args: string[]) => string, runRoot: string, runId: string, attemptId: string): string {
+  const worktree = path.join(runRoot, "workspaces", attemptId);
+  git(["worktree", "add", "--quiet", "-B", `ultrafuzz/${runId}/${attemptId}`, worktree, "HEAD"]);
+  fs.mkdirSync(path.join(worktree, "artifacts", attemptId), { recursive: true });
+  return worktree;
+}
+
+function taskWorktreeState(
+  git: (args: string[]) => string,
+  runId: string,
+  worktree: string
+): { directory: boolean; registered: boolean; branch: boolean } {
+  return {
+    directory: fs.existsSync(worktree),
+    registered: git(["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${worktree}`),
+    branch: git(["for-each-ref", "--format=%(refname)", `refs/heads/ultrafuzz/${runId}/`]).length > 0
+  };
+}
+
+test("status deletes a succeeded task's worktree once the run has ended, unless keep_workspaces is set", async () => {
+  for (const keepWorkspaces of [false, true]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+    if (keepWorkspaces) {
+      const configPath = path.join(project, "ultrafuzz.toml");
+      fs.writeFileSync(
+        configPath,
+        fs.readFileSync(configPath, "utf8").replace("keep_workspaces = false", "keep_workspaces = true"),
+        "utf8"
+      );
+    }
+    const git = gitTaskWorktreeProject(project);
+    const runId = `reap-succeeded-${String(keepWorkspaces)}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.ok(run.value, JSON.stringify(run.diagnostics));
+    const runRoot = run.value.run_root;
+    const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+    // Everything left in the worktree is Ultrafuzz-owned: schemas, the mirror of the
+    // published outputs, strategy scratch tests and a Forge lock file.
+    for (const [relativePath, contents] of [
+      [".ultrafuzz/schemas/findings.schema.json", "{}\n"],
+      ["artifacts/project-discovery/findings.json", "[]\n"],
+      ["test/foundry/project-discovery/Scratch.t.sol", "contract Scratch {}\n"],
+      ["foundry.lock", "{}\n"]
+    ] as const) {
+      fs.mkdirSync(path.dirname(path.join(worktree, relativePath)), { recursive: true });
+      fs.writeFileSync(path.join(worktree, relativePath), contents, "utf8");
+    }
+    writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+    for (const pass of ["first", "second"]) {
+      const status = await getRunStatus({ projectRoot: project, runId, env });
+      assert.equal(status.ok, true, `${pass}: ${JSON.stringify(status.diagnostics)}`);
+      assert.equal(status.value?.status, "succeeded");
+      assert.equal(
+        status.diagnostics.some((diagnostic) => diagnostic.code === "TASK_WORKTREE_REMOVAL_FAILED"),
+        false,
+        JSON.stringify(status.diagnostics)
+      );
+      assert.deepEqual(
+        taskWorktreeState(git, runId, worktree),
+        keepWorkspaces
+          ? { directory: true, registered: true, branch: true }
+          : { directory: false, registered: false, branch: false },
+        pass
+      );
+    }
+    assert.equal(fs.existsSync(path.join(runRoot, "workspaces", ".removing")), false);
+    // The published outputs stay verified without the worktree.
+    assert.deepEqual(
+      loadVerifiedRunOutputSnapshots(runRoot).map((snapshot) => snapshot.attempt_id),
+      ["project-discovery"]
+    );
+  }
+});
+
+test("status keeps the worktree of a failed task that holds its rejected output and deletes one that holds none", async () => {
+  for (const rejectedOutput of [true, false]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const git = gitTaskWorktreeProject(project);
+    const runId = `reap-failed-${String(rejectedOutput)}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.ok(run.value, JSON.stringify(run.diagnostics));
+    const runRoot = run.value.run_root;
+    const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+    const mirroredFindings = path.join(worktree, "artifacts", "project-discovery", "findings.json");
+    // The verifier never published this output, so the mirror holds its only copy.
+    if (rejectedOutput) fs.writeFileSync(mirroredFindings, "[not json\n", "utf8");
+
+    const status = await getRunStatus({ projectRoot: project, runId, env });
+
+    assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+    assert.equal(status.value?.status, "failed");
+    assert.equal(readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status, "failed");
+    assert.deepEqual(
+      taskWorktreeState(git, runId, worktree),
+      rejectedOutput
+        ? { directory: true, registered: true, branch: true }
+        : { directory: false, registered: false, branch: false }
+    );
+    if (rejectedOutput) assert.equal(fs.readFileSync(mirroredFindings, "utf8"), "[not json\n");
+  }
+});
+
+test("status deletes no task worktree while the run is still running", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const git = gitTaskWorktreeProject(project);
+  const runId = "reap-running";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.ok(run.value, JSON.stringify(run.diagnostics));
+  const runRoot = run.value.run_root;
+  const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const status = await getRunStatus({ projectRoot: project, runId, env });
+
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status, "succeeded");
+  assert.deepEqual(taskWorktreeState(git, runId, worktree), { directory: true, registered: true, branch: true });
+});
+
+test("resume --retry-failed can rerun a task whose worktree status deleted", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const git = gitTaskWorktreeProject(project);
+  const runId = "reap-then-retry";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "the provider failed before writing output" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.ok(run.value, JSON.stringify(run.diagnostics));
+  const runRoot = run.value.run_root;
+  const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+
+  const status = await getRunStatus({ projectRoot: project, runId, env });
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(status.value?.status, "failed");
+  assert.deepEqual(taskWorktreeState(git, runId, worktree), { directory: false, registered: false, branch: false });
+
+  const commandLog = fakeRunnerPath(env, "SMITHERS_FAKE_LOG");
+  fs.writeFileSync(commandLog, "", "utf8");
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(
+    resumed.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_WORKTREE_REPAIR_FAILED"),
+    false,
+    JSON.stringify(resumed.diagnostics)
+  );
+  assert.match(fs.readFileSync(commandLog, "utf8"), /^timetravel .* --node-id node:project-discovery /mu);
+  // Nothing of the deleted worktree is left for the engine's `worktree add -B` to trip over.
+  addTaskWorktree(git, runRoot, runId, "project-discovery");
+  assert.deepEqual(taskWorktreeState(git, runId, worktree), { directory: true, registered: true, branch: true });
+});
+
 test("syncRun rejects workspace-mirrored outputs without copying or repairing them", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -25210,7 +25430,6 @@ test("fork child preflight receives sealed input and resolves it before creating
       inputJson: relaunchInput,
       logsDir: path.join(project, "logs")
     },
-    keepWorkspaces: false,
     controllerLeaseSeconds: 60,
     env
   });
@@ -25230,7 +25449,6 @@ test("fork child preflight receives sealed input and resolves it before creating
       workflowPath,
       projectRoot: project,
       forkFrame: 7,
-      keepWorkspaces: false,
       controllerLeaseSeconds: 60,
       env
     }),
