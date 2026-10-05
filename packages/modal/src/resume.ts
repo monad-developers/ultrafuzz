@@ -60,6 +60,8 @@ export function modalDurableResumeCommand(cliPath: string, runId: string, projec
  * `retainedFailures` names the failed tasks `resume --retry-failed` leaves failed because a started
  * consumer already ran without them (#1231). A terminal run whose only failures are those has
  * nothing a resume would rerun, and `waitForTerminalRun` would wait for a change that never comes.
+ * A skipped task is not one either: `--retry-failed` reruns it only by rerunning the failed task it
+ * waited on, which has a failed entry of its own.
  */
 export function modalDurableRunNeedsResume(
   state: ModalResumeRunState,
@@ -72,7 +74,10 @@ export function modalDurableRunNeedsResume(
   if (counts.remaining > 0) return true;
   if (counts.failed === 0) return false;
   const failedNodeIds = Object.entries(state.nodes ?? {})
-    .filter(([, node]) => node.status !== undefined && CHECKPOINT_FAILED_STATUSES.has(node.status))
+    .filter(
+      ([, node]) =>
+        node.status !== undefined && node.status !== "skipped" && CHECKPOINT_FAILED_STATUSES.has(node.status)
+    )
     .map(([nodeId]) => nodeId);
   return failedNodeIds.length === 0 || failedNodeIds.some((nodeId) => !retainedFailures.has(nodeId));
 }

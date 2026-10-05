@@ -10197,6 +10197,15 @@ test("validate warns when a packaged group timeout pin is below the run default 
   assert.equal(raised.value?.policy_posture.topology.status, "warn");
 });
 
+test("validate stays silent when a timeout pin equals the default it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  setRunDefaultTimeout(project, 7_200);
+
+  const equal = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(timeoutShadowingWarnings(equal.diagnostics), []);
+});
+
 // The default a pin overrides is the model profile's own `timeout_seconds` when it has one, which
 // task compilation prefers to the run default, so the warning names the profile's value.
 test("validate warns when a packaged group timeout pin is below the model profile timeout it overrides", async () => {
@@ -10235,6 +10244,66 @@ test("validate warns when a packaged group timeout pin is below the model profil
   }
 });
 
+// A node fanned out to several model profiles is reported once, against the longest timeout of
+// its profiles.
+test("validate reports a fanned-out node timeout pin against its longest model profile timeout", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[models\.claude\]$/mu);
+  assert.match(config, /^\[models\.deepseek\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config
+      .replace(/^\[models\.claude\]$/mu, "[models.claude]\ntimeout_seconds = 5400")
+      .replace(/^\[models\.deepseek\]$/mu, "[models.deepseek]\ntimeout_seconds = 10800"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: fanned
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    model_profiles: [claude, deepseek, default]
+    timeout_seconds: 1800
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [fanned]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+
+  const result = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(result.diagnostics);
+  assert.deepEqual(
+    warnings.map((warning) => warning.path),
+    ["nodes.fanned.timeout_seconds"],
+    JSON.stringify(result.diagnostics)
+  );
+  const [warning] = warnings;
+  assert.ok(warning);
+  assert.match(
+    warning.message,
+    /node `fanned` pins timeout_seconds=1800, below model profile `deepseek` `timeout_seconds`=10800; the pin wins, so fanned time out after 1800 seconds/u
+  );
+});
+
 test("plan warns about group and node timeout pins below the default they override", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -10252,6 +10321,10 @@ groups:
     label: Pinned
     defaults:
       timeout_seconds: 600
+  long:
+    label: Long
+    defaults:
+      timeout_seconds: 7200
 nodes:
   - id: __start__
     kind: meta
@@ -10275,10 +10348,17 @@ nodes:
     timeout_seconds: 7200
     depends_on: [own-pin]
     outputs:${markdownOutput}
+  - id: grouped-own-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: long
+    timeout_seconds: 3000
+    depends_on: [long-pin]
+    outputs:${markdownOutput}
   - id: __finish__
     kind: meta
     role: finish
-    depends_on: [long-pin]
+    depends_on: [grouped-own-pin]
 `,
     "utf8"
   );
@@ -10290,16 +10370,28 @@ nodes:
   const warnings = timeoutShadowingWarnings(plan.diagnostics);
   assert.deepEqual(
     warnings.map((warning) => warning.path),
-    ["groups.pinned.defaults.timeout_seconds", "nodes.own-pin.timeout_seconds"],
+    [
+      "groups.pinned.defaults.timeout_seconds",
+      "nodes.own-pin.timeout_seconds",
+      "nodes.grouped-own-pin.timeout_seconds"
+    ],
     JSON.stringify(plan.diagnostics)
   );
-  const [groupWarning, nodeWarning] = warnings;
-  assert.ok(groupWarning && nodeWarning);
+  const [groupWarning, nodeWarning, groupedNodeWarning] = warnings;
+  assert.ok(groupWarning && nodeWarning && groupedNodeWarning);
   assert.match(
     groupWarning.message,
-    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds/u
+    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds\. Raise or remove the pin to use the longer default\.$/u
   );
-  assert.match(nodeWarning.message, /node `own-pin` pins timeout_seconds=300/u);
+  assert.match(
+    nodeWarning.message,
+    /node `own-pin` pins timeout_seconds=300.* Raise or remove the pin to use the longer default\.$/u
+  );
+  // Removing a node pin inside a group that pins falls back to the group's pin, not the default.
+  assert.match(
+    groupedNodeWarning.message,
+    /node `grouped-own-pin` pins timeout_seconds=3000, below `run\.default_timeout_seconds`=3600; .* Raise the pin, or remove it to fall back to `groups\.long\.defaults\.timeout_seconds`=7200\.$/u
+  );
 });
 
 test("plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission", async () => {
@@ -27418,36 +27510,73 @@ test("a pending lifecycle link reconciles split source and target projections fr
 
 // #1258: a run ID the engine already has a run for is refused before planning builds the plan and the
 // execution snapshot, instead of at submission minutes later with a partial run directory left behind.
-// The pinned runner prints a found run's `inspect --format json` bare; the full-output envelope wraps it.
-for (const shape of ["bare", "enveloped"] as const) {
-  test(`run refuses a run ID the workflow engine already records before planning anything (${shape} inspection)`, async () => {
-    const project = tempProject();
-    initProject({ projectRoot: project, force: true });
-    writeSmallTopology(project);
-    const runId = `engine-known-run-${shape}`;
-    const inspection = workflowInspect({
+test("run refuses a run ID the workflow engine already records before planning anything", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-known-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
       workflowRunId: `ultrafuzz-${runId}`,
       status: "finished",
       state: "succeeded",
       steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
-    }) as { data: unknown };
-    const env = fakeLifecycleSmithersEnv(project, { inspect: shape === "bare" ? inspection.data : inspection });
-    // The engine keeps its run records here; `clean` removed the run directory but not the record.
-    fs.writeFileSync(path.join(project, "smithers.db"), "");
-
-    const refused = await startRun({ projectRoot: project, runId, env });
-
-    assert.equal(refused.ok, false);
-    const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
-    assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
-    assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
-    assert.doesNotMatch(diagnostic.message, /smithers/iu);
-    assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
-    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
-    assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
-    assert.doesNotMatch(commands, /^up /mu);
+    })
   });
-}
+  // The engine keeps its run records here; `clean` removed the run directory but not the record.
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+
+  const refused = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(refused.ok, false);
+  const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+  assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
+  assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
+  // Without its run directory the run cannot be resumed, so the message does not suggest it.
+  assert.match(diagnostic.message, /its run directory is gone .*; choose a different --run-id$/u);
+  assert.doesNotMatch(diagnostic.message, /ultrafuzz resume/u);
+  assert.doesNotMatch(diagnostic.message, /smithers/iu);
+  assert.equal(fs.existsSync(runRoot), false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json --full-output$`, "mu"));
+  assert.doesNotMatch(commands, /^up /mu);
+
+  // A run whose directory still exists can be continued instead.
+  fs.mkdirSync(runRoot, { recursive: true });
+  const resumable = await startRun({ projectRoot: project, runId, env });
+  assert.equal(resumable.ok, false);
+  const withDirectory = resumable.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+  assert.ok(withDirectory, JSON.stringify(resumable.diagnostics));
+  assert.match(
+    withDirectory.message,
+    new RegExp(`; choose a different --run-id, or continue it with \`ultrafuzz resume ${runId}\`$`, "u")
+  );
+});
+
+test("run launches when the engine reports a run other than the one it was asked about", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-other-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}-earlier`, status: "finished", steps: [] })
+  });
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+  const launched = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(
+    launched.diagnostics.some(({ code }) => code === "RUN_ALREADY_EXISTS"),
+    false,
+    JSON.stringify(launched.diagnostics)
+  );
+  const commands = fs.readFileSync(commandLog, "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json --full-output$`, "mu"));
+  assert.match(commands, /^up /mu);
+});
 
 test("run asks the engine about its run ID only once the engine has records, and launches a new one", async () => {
   const project = tempProject();
@@ -27473,7 +27602,7 @@ test("run asks the engine about its run ID only once the engine has records, and
     JSON.stringify(launched.diagnostics)
   );
   const commands = fs.readFileSync(commandLog, "utf8");
-  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json$`, "mu"));
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json --full-output$`, "mu"));
   assert.match(commands, /^up /mu);
 
   // Without engine records there is nothing to collide with, and the engine is not asked.
@@ -27487,7 +27616,7 @@ test("run asks the engine about its run ID only once the engine has records, and
   assert.equal(started.ok, true, JSON.stringify(started.diagnostics));
   assert.doesNotMatch(
     fs.readFileSync(freshEnv.SMITHERS_FAKE_LOG ?? "", "utf8"),
-    /^inspect ultrafuzz-fresh-run --format json$/mu
+    /^inspect ultrafuzz-fresh-run --format json --full-output$/mu
   );
 });
 
@@ -27844,6 +27973,66 @@ for (const fixture of [
       }
     });
   }
+}
+
+// A consumer admits its optional inputs in its preparation, which waits for its producers. A failed
+// preparation reruns behind the producer's rerun and can read it, so the producer is retried too. A
+// failed agent or verifier reruns at once on the preparation that already ran without the producer,
+// so the producer stays failed (#1231).
+for (const fixture of [
+  { failed: "prepare:catalog", state: "failed", reset: "prepare:catalog", producerRetried: true },
+  { failed: "prepare:catalog", state: "stalled", reset: "prepare:catalog", producerRetried: true },
+  { failed: "node:catalog", state: "failed", reset: "node:catalog", producerRetried: false },
+  { failed: "verify:catalog", state: "failed", reset: "node:catalog", producerRetried: false }
+] as const) {
+  test(`resume --retry-failed ${fixture.producerRetried ? "retries" : "leaves"} a failed continuing lens when its consumer's ${fixture.failed} is ${fixture.state}`, async () => {
+    const project = writeRetriedLensReviewProject();
+    const runId = `retry-omitted-lens-${fixture.failed.replace(":", "-")}-${fixture.state}`;
+    const preparationFailed = fixture.failed === "prepare:catalog";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId: `ultrafuzz-${runId}`,
+        status: "failed",
+        state: "failed",
+        steps: [
+          { id: "node:lens", state: "failed", attempt: 1 },
+          { id: "prepare:catalog", state: preparationFailed ? fixture.state : "finished", attempt: 1 },
+          ...(preparationFailed
+            ? [
+                { id: "node:catalog", state: "skipped" as const, attempt: 0 },
+                { id: "verify:catalog", state: "skipped" as const, attempt: 0 }
+              ]
+            : fixture.failed === "node:catalog"
+              ? [{ id: "node:catalog", state: fixture.state, attempt: 1 }]
+              : [
+                  { id: "node:catalog", state: "finished" as const, attempt: 1 },
+                  { id: "verify:catalog", state: fixture.state, attempt: 1 }
+                ])
+        ]
+      })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const commandLog = env.SMITHERS_FAKE_LOG;
+    assert.ok(commandLog);
+    fs.writeFileSync(commandLog, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const commands = fs.readFileSync(commandLog, "utf8");
+    assert.match(commands, new RegExp(`^timetravel .* --node-id ${fixture.reset} `, "mu"));
+    const producerReset = /^timetravel .* --node-id node:lens /mu;
+    const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+    if (fixture.producerRetried) {
+      assert.match(commands, producerReset);
+      assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+    } else {
+      assert.doesNotMatch(commands, producerReset);
+      assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+      assert.match(skipped.message, /lens: catalog already ran without it/u);
+    }
+  });
 }
 
 // `--reset-node` reruns a failed continuing task even when `--retry-failed` would leave it, so the
