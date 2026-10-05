@@ -1,8 +1,5 @@
 import crypto from "node:crypto";
 
-export const MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS = 4_096;
-export const MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS = 4_096;
-
 /** Stable identity for one canonically ordered exact-path selector group. */
 export function promptArtifactAuthorityPathSelectorId(paths: readonly string[]): string {
   return crypto

@@ -1,6 +1,5 @@
 import {
   ARTIFACT_CONTRACT_IDS,
-  isArtifactContractId,
   NON_JSON_ARTIFACT_CONTRACT_IDS,
   type ArtifactContractId
 } from "./artifact-contract-ids.js";
@@ -8,11 +7,6 @@ import { CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN } from "./artifact-path-primit
 import { MAX_RETRY_CHAIN_ATTEMPTS } from "./artifact-limits.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
 import type { PlannedGraphDocument, PlannedGraphNodeDocument, PlannedGraphOutput } from "./planned-graph.js";
-import {
-  MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
-  MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
-  promptArtifactAuthorityPathSelectorId
-} from "./prompt-artifact-authority-selectors.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
 
 export const SMITHERS_TASK_MANIFEST_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v4" as const;
@@ -32,7 +26,6 @@ const ENVIRONMENT_VARIABLE_PATTERN = "^[A-Za-z_][A-Za-z0-9_]{0,127}$";
 const GIT_OBJECT_PATTERN = "^[0-9a-f]{40}$";
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const RUN_SOURCE_REF = /^refs\/(?:heads\/ultrafuzz-pinned|ultrafuzz\/runs\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/source)$/u;
-const CANONICAL_ARTIFACT_RELATIVE_PATH = new RegExp(CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN, "u");
 const SCHEMA_BINDING_FIELDS = [
   "schemaFile",
   "schemaId",
@@ -246,36 +239,6 @@ const taskAgentChainEntryJsonSchema = {
     reasoningEffort: nonEmptyStringJsonSchema,
     role: { enum: ["primary", "fallback"] }
   }
-} as const;
-
-const promptArtifactAuthoritySelectorJsonSchema = {
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "contract"],
-      properties: {
-        kind: { const: "contract" },
-        contract: { enum: ARTIFACT_CONTRACT_IDS }
-      }
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "id", "paths"],
-      properties: {
-        kind: { const: "path" },
-        id: { type: "string", pattern: SHA256_PATTERN },
-        paths: {
-          type: "array",
-          minItems: 1,
-          maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
-          uniqueItems: true,
-          items: canonicalArtifactRelativePathJsonSchemaRef
-        }
-      }
-    }
-  ]
 } as const;
 
 const referenceArtifactManifestAuthorityJsonSchema = {
@@ -723,13 +686,6 @@ export const smithersTaskManifestJsonSchema = {
             uniqueItems: true,
             items: boundedNonNulPathJsonSchemaRef
           },
-          promptArtifactAuthoritySelectors: {
-            type: "array",
-            minItems: 1,
-            maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
-            uniqueItems: true,
-            items: promptArtifactAuthoritySelectorJsonSchema
-          },
           renderedPromptPath: safePathValueJsonSchema,
           promptTemplatePath: safePathValueJsonSchema,
           dynamicDependencies: {
@@ -874,9 +830,6 @@ export interface SmithersTaskManifestAgentChainEntry {
   role: "primary" | "fallback";
 }
 
-export type SmithersTaskManifestPromptArtifactAuthoritySelector =
-  { kind: "contract"; contract: ArtifactContractId } | { kind: "path"; id: string; paths: readonly string[] };
-
 export interface SmithersTaskManifestReferenceArtifactManifestAuthority {
   attemptId: string;
   artifactDir: string;
@@ -915,8 +868,6 @@ export interface SmithersTaskManifestTask {
   referenceArtifactManifestAuthorities?: SmithersTaskManifestReferenceArtifactManifestAuthority[];
   /** Subset whose producer group uses failure_policy=continue and differs from this task's group. */
   optionalDependencyArtifactDirs?: string[];
-  /** Canonical union of compact ancestor-output selectors used by the rendered prompt. */
-  promptArtifactAuthoritySelectors?: SmithersTaskManifestPromptArtifactAuthoritySelector[];
   renderedPromptPath?: string;
   promptTemplatePath?: string;
   dynamicDependencies?: string[];
@@ -1138,7 +1089,6 @@ export function assertSmithersTaskManifestSemantics(manifest: SmithersTaskManife
       throw new Error(`Smithers task ${JSON.stringify(task.attemptId)} has mismatched execution metadata`);
     }
     assertReferenceArtifactManifestAuthorities(task);
-    assertPromptArtifactAuthoritySelectors(task);
   }
 
   for (const task of manifest.tasks) {
@@ -1216,65 +1166,6 @@ function assertPinnedSubmoduleExpectation(manifest: SmithersTaskManifestDocument
     if (roots.some((candidate, candidateIndex) => candidateIndex !== index && root.startsWith(`${candidate}/`))) {
       throw new Error(`Smithers pinned submodule roots overlap at ${JSON.stringify(root)}`);
     }
-  }
-}
-
-function assertPromptArtifactAuthoritySelectors(task: SmithersTaskManifestTask): void {
-  const selectors = task.promptArtifactAuthoritySelectors;
-  if (selectors === undefined) return;
-  if (selectors.length === 0 || selectors.length > MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS) {
-    throw new Error(
-      `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors must be non-empty and bounded`
-    );
-  }
-  let totalPaths = 0;
-  const keys = selectors.map((selector) => {
-    if (selector.kind === "contract") {
-      if (!isArtifactContractId(selector.contract)) {
-        throw new Error(
-          `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selector has an unknown contract`
-        );
-      }
-      return `contract\u0000${selector.contract}`;
-    }
-    if (
-      selector.kind !== "path" ||
-      !/^[0-9a-f]{64}$/u.test(selector.id) ||
-      !Array.isArray(selector.paths) ||
-      selector.paths.length === 0
-    ) {
-      throw new Error(
-        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority path selector is invalid`
-      );
-    }
-    totalPaths += selector.paths.length;
-    if (totalPaths > MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS) {
-      throw new Error(
-        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority has too many selected paths`
-      );
-    }
-    // Paths and selectors are checked for uniqueness, not order: manifests sealed
-    // before code-unit ordering hold them in host-collation order, and the
-    // selector ID already binds each path group to its exact list.
-    if (
-      selector.paths.some((selectedPath) => !CANONICAL_ARTIFACT_RELATIVE_PATH.test(selectedPath)) ||
-      new Set(selector.paths).size !== selector.paths.length
-    ) {
-      throw new Error(
-        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority paths are not canonical and unique`
-      );
-    }
-    if (selector.id !== promptArtifactAuthorityPathSelectorId(selector.paths)) {
-      throw new Error(
-        `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority path selector ID does not match its paths`
-      );
-    }
-    return `path\u0000${selector.id}`;
-  });
-  if (new Set(keys).size !== keys.length) {
-    throw new Error(
-      `Smithers task ${JSON.stringify(task.attemptId)} prompt artifact authority selectors are not unique`
-    );
   }
 }
 

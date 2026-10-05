@@ -14,11 +14,9 @@ import {
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
-  isArtifactContractId,
   MAX_REFERENCE_ARTIFACT_MANIFEST_AUTHORITY_BYTES,
   parseStrictJsonBytes,
   publishFileDurableExclusive,
-  promptArtifactAuthorityPathSelectorId,
   readRegularFileSnapshot,
   readRunPlanDocument,
   safeResolveInside,
@@ -35,7 +33,6 @@ import {
   type SmithersTaskManifestDynamicGroup,
   type SmithersTaskManifestDynamicPromptRuntimeContext,
   type SmithersTaskManifestMetadata,
-  type SmithersTaskManifestPromptArtifactAuthoritySelector,
   type SmithersTaskManifestReferenceArtifactManifestAuthority,
   type SmithersTaskManifestTask
 } from "@ultrafuzz/artifacts";
@@ -3647,7 +3644,6 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
               : snapshotPromptTemplate(input.runLayout, input.graph, node),
           dynamicDependencies: node.dependsOn.filter((dependency) => dynamicNodeIds.has(dependency)),
           deferredPromptGroups: dynamicAncestorGroupsForNode(node, nodeById),
-          promptArtifactAuthoritySelectors: promptArtifactAuthoritySelectorsFor(renderedPrompt),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) =>
             dynamicNodeIds.has(dependency) ? [] : (attemptsByNodeId.get(dependency) ?? [])
           ),
@@ -7425,7 +7421,6 @@ function compileTask(input: {
   promptTemplatePath?: string;
   dynamicDependencies?: readonly string[];
   deferredPromptGroups?: readonly string[];
-  promptArtifactAuthoritySelectors?: readonly SmithersTaskManifestPromptArtifactAuthoritySelector[];
   referenceArtifactManifestAuthorities?: readonly SmithersTaskManifestReferenceArtifactManifestAuthority[];
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
@@ -7565,9 +7560,6 @@ function compileTask(input: {
     ...(input.referenceArtifactManifestAuthorities === undefined
       ? {}
       : { referenceArtifactManifestAuthorities: [...input.referenceArtifactManifestAuthorities] }),
-    ...(input.promptArtifactAuthoritySelectors === undefined
-      ? {}
-      : { promptArtifactAuthoritySelectors: [...input.promptArtifactAuthoritySelectors] }),
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
     ...(input.promptTemplatePath ? { promptTemplatePath: input.promptTemplatePath } : {}),
     ...(input.dynamicDependencies && input.dynamicDependencies.length > 0
@@ -7579,41 +7571,6 @@ function compileTask(input: {
     execution,
     metadata
   };
-}
-
-function promptArtifactAuthoritySelectorsFor(
-  renderedPrompt: RenderedPromptPlan | undefined
-): SmithersTaskManifestPromptArtifactAuthoritySelector[] | undefined {
-  if (renderedPrompt === undefined) return undefined;
-  const selectors = new Map<string, SmithersTaskManifestPromptArtifactAuthoritySelector>();
-  for (const reference of renderedPrompt.artifact_references) {
-    if (reference.kind === "ancestor_contract_artifact_authority") {
-      const contract = reference.contract;
-      if (!isArtifactContractId(contract)) {
-        throw new Error(
-          `rendered prompt ${JSON.stringify(renderedPrompt.attempt_id)} uses an unknown prompt artifact authority contract ${JSON.stringify(contract)}`
-        );
-      }
-      const selector = { kind: "contract", contract } as const;
-      selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
-      continue;
-    }
-    if (reference.kind !== "ancestor_artifact_path_authority") continue;
-    const paths = [...reference.relativePaths];
-    if (paths.length === 0 || reference.selectorId !== promptArtifactAuthorityPathSelectorId(paths)) {
-      throw new Error(
-        `rendered prompt ${JSON.stringify(renderedPrompt.attempt_id)} uses an invalid prompt artifact authority path selector group`
-      );
-    }
-    const selector = { kind: "path", id: reference.selectorId, paths } as const;
-    selectors.set(promptArtifactAuthoritySelectorKey(selector), selector);
-  }
-  if (selectors.size === 0) return undefined;
-  return [...selectors].sort(([left], [right]) => (left < right ? -1 : 1)).map(([, selector]) => selector);
-}
-
-function promptArtifactAuthoritySelectorKey(selector: SmithersTaskManifestPromptArtifactAuthoritySelector): string {
-  return selector.kind === "contract" ? `contract\u0000${selector.contract}` : `path\u0000${selector.id}`;
 }
 
 function agentChainForTask(
@@ -7956,12 +7913,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
           }),
       optionalDependencyArtifactDirs: task.optionalDependencyArtifactDirs ?? [],
       dependencyVerificationProducers: dependencyVerificationProducersForTask(task, taskByArtifactDir),
-      ...(task.promptArtifactAuthoritySelectors === undefined
-        ? {}
-        : { promptArtifactAuthoritySelectors: task.promptArtifactAuthoritySelectors }),
       runRoot: path.resolve(task.artifactDir, "..", ".."),
       workflowPath: compiled.workflowPath,
-      sourceTaskManifestPath: compiled.tasksPath,
       sourceProjectRoot: compiled.projectRoot,
       sourceRevision: task.sourceRevision ?? null,
       sourceRef: task.sourceRef ?? null,

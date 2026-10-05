@@ -11,7 +11,6 @@ import {
   type SmithersTaskManifestTask
 } from "../src/smithers-task-manifest.js";
 import type { PlannedGraphDocument } from "../src/planned-graph.js";
-import { promptArtifactAuthorityPathSelectorId } from "../src/prompt-artifact-authority-selectors.js";
 
 const SHA256 = "a".repeat(64);
 
@@ -219,8 +218,16 @@ function dynamicGroup(): SmithersTaskManifestDynamicGroup {
 test("strictly parses the current sealed Smithers task manifest and planned-graph join", () => {
   const parsed = parseSmithersTaskManifestBytes(bytes(manifest()));
   assert.equal(parsed.schema_version, SMITHERS_TASK_MANIFEST_SCHEMA_VERSION);
-  assert.equal("promptArtifactAuthoritySelectors" in parsed.tasks[0]!, false);
   assert.doesNotThrow(() => assertSmithersTaskManifestMatchesPlannedGraph(parsed, graph()));
+  // Tasks no longer carry the prompt artifact authority selectors that earlier releases sealed.
+  const withSelectors = {
+    ...task(),
+    promptArtifactAuthoritySelectors: [{ kind: "contract", contract: "ultrafuzz/findings@2" }]
+  };
+  assert.throws(
+    () => parseSmithersTaskManifestBytes(bytes(manifest([withSelectors as SmithersTaskManifestTask]))),
+    /registered schema/u
+  );
 });
 
 test("strictly validates retained dynamic group templates and prompt context", () => {
@@ -240,85 +247,6 @@ test("strictly validates retained dynamic group templates and prompt context", (
   };
   delete missingTemplateDigest.dynamic_groups[0]!.templateDigest;
   assert.throws(() => parseSmithersTaskManifestBytes(bytes(missingTemplateDigest)), /registered schema/u);
-});
-
-test("accepts prompt artifact authority selectors in any order and rejects duplicates", () => {
-  const pathSelector = (paths: string[]) => ({
-    kind: "path" as const,
-    id: promptArtifactAuthorityPathSelectorId(paths),
-    paths
-  });
-  const contracts = [
-    { kind: "contract" as const, contract: "ultrafuzz/findings@2" as const },
-    { kind: "contract" as const, contract: "ultrafuzz/generated-tests@3" as const }
-  ];
-  const selectors = [
-    ...contracts,
-    // Code-unit order, which planning now produces: "Z" sorts before "a".
-    pathSelector(["reports/Zeta.json", "reports/alpha.json"]),
-    // Host-collation order, as sealed before code-unit ordering: ICU puts "_" before ".".
-    pathSelector(["findings_raw.json", "findings.json"])
-  ];
-  const parsedSelectors = (promptArtifactAuthoritySelectors: typeof selectors) =>
-    parseSmithersTaskManifestBytes(bytes(manifest([task({ promptArtifactAuthoritySelectors })]))).tasks[0]
-      ?.promptArtifactAuthoritySelectors;
-
-  assert.deepEqual(parsedSelectors(selectors), selectors);
-  const reversed = [...selectors].reverse();
-  assert.deepEqual(parsedSelectors(reversed), reversed);
-  assert.throws(
-    () => parsedSelectors([...selectors, pathSelector(["findings_raw.json", "findings.json"])]),
-    /registered schema/u
-  );
-  assert.throws(
-    () => parsedSelectors([...contracts, pathSelector(["findings.json", "findings.json"])]),
-    /registered schema/u
-  );
-});
-
-test("rejects empty, unknown-contract, unsafe-path, and mismatched-ID prompt artifact authority selectors", () => {
-  const withSelectors = (promptArtifactAuthoritySelectors: unknown[]) => ({
-    ...task(),
-    promptArtifactAuthoritySelectors
-  });
-  assert.throws(
-    () => parseSmithersTaskManifestBytes(bytes(manifest([withSelectors([]) as SmithersTaskManifestTask]))),
-    /registered schema/u
-  );
-  assert.throws(
-    () =>
-      parseSmithersTaskManifestBytes(
-        bytes(
-          manifest([
-            withSelectors([
-              { kind: "contract", contract: "ultrafuzz/not-a-registered-contract@1" }
-            ]) as SmithersTaskManifestTask
-          ])
-        )
-      ),
-    /registered schema/u
-  );
-  const paths = ["reports/alpha.json"];
-  assert.throws(
-    () =>
-      parseSmithersTaskManifestBytes(
-        bytes(
-          manifest([
-            withSelectors([
-              { kind: "path", id: promptArtifactAuthorityPathSelectorId(paths), paths: ["../controller-secret.json"] }
-            ]) as SmithersTaskManifestTask
-          ])
-        )
-      ),
-    /registered schema/u
-  );
-  assert.throws(
-    () =>
-      parseSmithersTaskManifestBytes(
-        bytes(manifest([withSelectors([{ kind: "path", id: "0".repeat(64), paths }]) as SmithersTaskManifestTask]))
-      ),
-    /path selector ID does not match its paths/u
-  );
 });
 
 test("accepts a 100-attempt task chain and rejects 101 attempts at the manifest boundary", () => {
