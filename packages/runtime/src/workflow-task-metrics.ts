@@ -1,24 +1,19 @@
 import { Effect } from "effect";
 
-import { isRecord, parseStrictJsonBytes, type NormalizedUsage } from "@ultrafuzz/artifacts";
+import { formatEstimatedSpendUsd, isRecord, parseStrictJsonBytes, type NormalizedUsage } from "@ultrafuzz/artifacts";
 
 import { resolveLiveModelPricing } from "./model-pricing.js";
-import { buildSpendEstimate, spendEstimateRoutes, type SpendEstimateDocument } from "./spend-estimate.js";
-import { configuredCacheReadRatio, spendEstimateUsageEvidence } from "./workflow-sync.js";
+import { projectNormalizedUsageAccounting } from "./workflow-sync.js";
 
 export interface CurrentTaskWorkflowMetrics {
   elapsed_through?: string;
   models_used: string[];
   tokens_used?: string;
-  /** `spend_estimate.estimated_spend`; absent only when there is no usage evidence. */
+  /** The priced usage in USD (formatEstimatedSpendUsd), whenever a usage event or an exact aggregate exists. */
   estimated_spend?: string;
-  /** Whether the live estimate is incomplete. */
   partial_pricing: boolean;
-  /**
-   * The live spend estimate of this workflow run's Smithers usage, made by the same estimator as
-   * `run.json#spend_estimate`. It is never persisted.
-   */
-  spend_estimate?: SpendEstimateDocument;
+  /** Usage events whose cost could not be priced, when there is at least one. */
+  unpriced_attempts?: number;
 }
 
 interface WorkflowUsageEvent extends NormalizedUsage {
@@ -211,54 +206,49 @@ async function readCurrentTaskWorkflowEvidence(
   };
 }
 
-/**
- * Estimates this workflow run's spend from its latest usage snapshot per attempt, priced against the
- * live catalog with fallback rates for whatever it leaves unpriced. Smithers' aggregate holds one
- * row per attempt that reported usage, so an attempt it counts without a usage event is imputed:
- * at what remains of the aggregate's exact cost when every attempt and event recorded one, and at
- * a mean otherwise.
- */
 async function deriveWorkflowSpend(input: {
-  workflow_run_id: string;
+  aggregate_cost: number | undefined;
   attempts: number;
-  /** Smithers' total recorded cost, present only when every attempt recorded one. */
-  aggregate_cost_usd: number | undefined;
+  priced_attempts: number;
   events: WorkflowUsageEvent[];
+  models: string[];
   signal: AbortSignal;
-}): Promise<SpendEstimateDocument | undefined> {
-  const unidentifiedAttempts = Math.max(0, input.attempts - input.events.length);
-  if (input.events.length === 0 && unidentifiedAttempts === 0) return undefined;
-  const recordedUsd = input.events.reduce((total, event) => total + (event.recorded_cost_usd ?? 0), 0);
-  const unidentifiedSpendUsd =
-    input.aggregate_cost_usd === undefined || input.events.some((event) => event.recorded_cost_usd === undefined)
-      ? undefined
-      : Math.max(0, input.aggregate_cost_usd - recordedUsd);
-  // A positive recorded cost is used as is, so only the other snapshots' models need catalog rates.
-  const models = [
-    ...new Set(
-      input.events
-        .filter((event) => event.recorded_cost_usd === undefined || event.recorded_cost_usd === 0)
-        .map((event) => event.model)
-    )
-  ];
-  const pricing = await resolveLiveModelPricing({ models, env: process.env, signal: input.signal });
-  // The same cache-read split as synchronization, so both estimators price the same usage alike.
-  const cacheReadRatio = configuredCacheReadRatio(process.env.ULTRAFUZZ_CACHE_READ_RATIO);
-  return buildSpendEstimate({
-    workflowRunId: input.workflow_run_id,
-    events: input.events.map((event) =>
-      spendEstimateUsageEvidence({
-        usage: event,
-        modelPricing: pricing.prices,
-        ...(cacheReadRatio === undefined ? {} : { cacheReadRatio })
-      })
-    ),
-    routes: spendEstimateRoutes(models, pricing),
-    prices: pricing.prices,
-    unaccountedAttempts: [],
-    unidentifiedUnaccountedAttempts: unidentifiedAttempts,
-    ...(unidentifiedSpendUsd === undefined ? {} : { unidentifiedUnaccountedSpendUsd: unidentifiedSpendUsd })
-  });
+  coverage_partial: boolean;
+}): Promise<{ estimated_spend?: string; partial_pricing: boolean; unpriced_attempts?: number }> {
+  if (input.aggregate_cost !== undefined && input.priced_attempts === input.attempts) {
+    return { estimated_spend: formatEstimatedSpendUsd(input.aggregate_cost), partial_pricing: false };
+  }
+  if (input.events.length === 0) {
+    return { partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts };
+  }
+
+  const pricing = await resolveLiveModelPricing({ models: input.models, env: process.env, signal: input.signal });
+  let knownCost = 0;
+  let knownCostEvents = 0;
+  let fullyPricedEvents = 0;
+  for (const event of input.events) {
+    if (event.recorded_cost_usd !== undefined) {
+      knownCost += event.recorded_cost_usd;
+      knownCostEvents += 1;
+      fullyPricedEvents += 1;
+      continue;
+    }
+    const projected = projectNormalizedUsageAccounting({
+      usage: event,
+      modelPricing: pricing.prices
+    });
+    if (projected.estimated_spend_usd !== null) {
+      knownCost += projected.estimated_spend_usd;
+      knownCostEvents += 1;
+    }
+    if (!projected.partial_pricing) fullyPricedEvents += 1;
+  }
+  const unpricedAttempts = input.events.length - knownCostEvents;
+  return {
+    estimated_spend: formatEstimatedSpendUsd(knownCost),
+    partial_pricing: input.coverage_partial || fullyPricedEvents < input.events.length,
+    ...(unpricedAttempts === 0 ? {} : { unpriced_attempts: unpricedAttempts })
+  };
 }
 
 /**
@@ -293,12 +283,14 @@ export async function deriveCurrentTaskWorkflowMetrics(
   if (attempts === 0 && usageEvents.length === 0 && reportStartedAt === undefined) return undefined;
 
   const aggregateCost = optionalNonNegativeFiniteNumber(rawUsage.costUsd, "workflow aggregate cost");
-  const spendEstimate = await deriveWorkflowSpend({
-    workflow_run_id: runtime.runId,
+  const spend = await deriveWorkflowSpend({
+    aggregate_cost: aggregateCost,
     attempts,
-    aggregate_cost_usd: pricedAttempts === attempts ? aggregateCost : undefined,
+    priced_attempts: pricedAttempts,
     events: usageEvents,
-    signal: evidence.signal
+    models,
+    signal: evidence.signal,
+    coverage_partial: usageEvents.length < attempts || pricedAttempts < attempts
   });
 
   const elapsedThroughMs = reportStartedAt ?? latestUsageAt;
@@ -306,8 +298,8 @@ export async function deriveCurrentTaskWorkflowMetrics(
     ...(elapsedThroughMs === undefined ? {} : { elapsed_through: new Date(elapsedThroughMs).toISOString() }),
     models_used: models,
     ...(attempts > 0 || totalTokens > 0 ? { tokens_used: formatInteger(totalTokens) } : {}),
-    ...(spendEstimate === undefined ? {} : { estimated_spend: spendEstimate.estimated_spend }),
-    partial_pricing: spendEstimate !== undefined && !spendEstimate.complete,
-    ...(spendEstimate === undefined ? {} : { spend_estimate: spendEstimate })
+    ...(spend.estimated_spend === undefined ? {} : { estimated_spend: spend.estimated_spend }),
+    partial_pricing: spend.partial_pricing,
+    ...(spend.unpriced_attempts === undefined ? {} : { unpriced_attempts: spend.unpriced_attempts })
   };
 }

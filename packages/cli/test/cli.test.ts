@@ -18,7 +18,6 @@ import {
   createInitialRunState,
   createEventRecord,
   createRunLayout,
-  formatEstimatedSpendUsd,
   layoutForRunRoot,
   manifestDigest,
   parseSmithersTaskManifestBytes,
@@ -586,8 +585,6 @@ function writeRunAccounting(
     estimatedSpend: string;
     partialPricing: boolean;
     unpricedEventCount?: number;
-    /** The run's `spend_estimate` beside accounting v4, as every synchronization writes it. */
-    spendEstimate?: { usd: number; complete: boolean };
   }
 ): void {
   const runMetadataPath = path.join(runRoot, "run.json");
@@ -665,45 +662,8 @@ function writeRunAccounting(
         }
       },
       updated_at: new Date().toISOString()
-    },
-    ...(accounting.spendEstimate === undefined
-      ? {}
-      : { spend_estimate: runSpendEstimate(workflowRunId, accounting.spendEstimate) })
+    }
   });
-}
-
-/** A valid `run.json#spend_estimate` for one gpt-test attempt, priced from a recorded cost or a fallback rate. */
-function runSpendEstimate(workflowRunId: string, estimate: { usd: number; complete: boolean }) {
-  return {
-    schema_version: "ultrafuzz.spend-estimate.v1" as const,
-    workflow_run_id: workflowRunId,
-    estimated_spend_usd: estimate.usd,
-    estimated_spend: formatEstimatedSpendUsd(estimate.usd),
-    complete: estimate.complete,
-    fallback_pricing_table: "ultrafuzz.fallback-pricing.2026-10-01",
-    basis_usd: {
-      recorded: estimate.complete ? estimate.usd : 0,
-      catalog: 0,
-      fallback: estimate.complete ? 0 : estimate.usd,
-      imputed: 0,
-      source_runs: 0
-    },
-    accounted_attempts: 1,
-    models: [
-      {
-        model: "gpt-test",
-        attempts: 1,
-        estimated_spend_usd: estimate.usd,
-        price_source: estimate.complete ? ("recorded" as const) : ("fallback" as const)
-      }
-    ],
-    assumptions: estimate.complete
-      ? []
-      : [{ code: "model-not-in-route-catalog" as const, count: 1, model: "gpt-test" }],
-    unaccounted_attempts: { count: 0, imputed_spend_usd: 0, omitted: 0, entries: [] },
-    source_run_ids: [],
-    updated_at: new Date().toISOString()
-  };
 }
 
 function writeFinalReportAccounting(
@@ -1718,8 +1678,7 @@ async function assertReportAndLifecycleCommands(
     tokensUsed: "123",
     estimatedSpend: "$0.46+",
     partialPricing: true,
-    unpricedEventCount: 1,
-    spendEstimate: { usd: 0.4567, complete: false }
+    unpricedEventCount: 1
   });
   const terminalReport = publishTerminalReport(runData.run_root, {
     workflowRunId: "ultrafuzz-cli-run",
@@ -1737,13 +1696,8 @@ async function assertReportAndLifecycleCommands(
     terminal: true
   });
   assert.equal(accountingMismatchCount(reportBody), 0);
-  // The terminal publication restates the run's spend estimate; the agent's snapshot keeps its own.
-  const terminalMarkdown = fs.readFileSync(terminalReport.artifacts.markdown_path, "utf8");
-  assert.match(terminalMarkdown, /- Estimated spend: `\$0\.46`/u);
-  assert.equal(
-    (terminalReport.json as { run_metadata: { partial_pricing?: unknown } }).run_metadata.partial_pricing,
-    true
-  );
+  // The terminal publication restates accounting's USD amount, never its `+`-labelled figure.
+  assert.match(fs.readFileSync(terminalReport.artifacts.markdown_path, "utf8"), /- Estimated spend: `\$0\.46`/u);
   const reportMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(reportMarkdown, /- Tokens used: `123`/u);
   assert.match(reportMarkdown, /- Estimated spend: `\$0\.46`/u);
@@ -2246,7 +2200,7 @@ test("run rejects an OpenRouter override whose effective model is invalid", asyn
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "invalid-openrouter-model")), false);
 });
 
-test("report checks the agent snapshot's numeric spend without bounding it by the run's spend estimate", async (t) => {
+test("report checks a numeric spend against run accounting's USD amount without its partial-pricing +", async (t) => {
   const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
@@ -2260,13 +2214,12 @@ test("report checks the agent snapshot's numeric spend without bounding it by th
     totalTokens: 56_523,
     tokensUsed: "56,523",
     estimatedSpend: "$0.16+",
-    partialPricing: true,
-    spendEstimate: { usd: 0.16, complete: false }
+    partialPricing: true
   });
-  // The report-start snapshot includes an imputed report attempt, so it exceeds the estimate.
+  // A report never carries accounting's `+`; partial pricing is recorded in run.json instead.
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "56,523",
-    estimatedSpend: "$3.26",
+    estimatedSpend: "$0.16",
     partialPricing: true
   });
   const initialSnapshot = snapshotFinalReport(reportDir);
@@ -2274,46 +2227,48 @@ test("report checks the agent snapshot's numeric spend without bounding it by th
   const initialReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(initialReport.code, 0, initialReport.stderr);
   const initialBody = parseJson(initialReport);
-  assert.equal((initialBody.data as { source: string }).source, "verified-agent-report");
   assert.equal(accountingMismatchCount(initialBody), 0);
   assert.equal((initialBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
   assertFinalReportUnchanged(reportDir, initialSnapshot);
 
-  // The estimate is not monotonic: it can rise with later usage or fall when a catalog price
-  // replaces a fallback rate, and neither makes the agent's snapshot a mismatch.
-  for (const spendEstimate of [
-    { usd: 1.98, complete: false },
-    { usd: 0.1, complete: true }
-  ]) {
-    writeRunAccounting(runData.run_root, {
-      totalTokens: 725_905,
-      tokensUsed: "725,905",
-      estimatedSpend: "$1.98+",
-      partialPricing: true,
-      spendEstimate
-    });
-    const postSyncReport = await cli(project, ["report", runData.run_id, "--json"]);
-    assert.equal(postSyncReport.code, 0, postSyncReport.stderr);
-    assert.equal(accountingMismatchCount(parseJson(postSyncReport)), 0, JSON.stringify(spendEstimate));
-    assertFinalReportUnchanged(reportDir, initialSnapshot);
-  }
-
-  // Tokens keep their checks: a snapshot count above the current cumulative count is a mismatch
-  // in both report.md and report.json, while accounting v4's `+` spend never sets an expectation.
   writeRunAccounting(runData.run_root, {
-    totalTokens: 50_000,
-    tokensUsed: "50,000",
+    totalTokens: 725_905,
+    tokensUsed: "725,905",
     estimatedSpend: "$1.98+",
     partialPricing: true
   });
-  const tokensReport = parseJson(await cli(project, ["report", runData.run_id, "--json"]));
-  assert.equal(accountingMismatchCount(tokensReport), 2);
-  for (const diagnostic of (tokensReport.diagnostics as Array<{ code: string; message: string }>).filter(
+  const postSyncReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(postSyncReport.code, 0, postSyncReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(postSyncReport)), 0);
+  assertFinalReportUnchanged(reportDir, initialSnapshot);
+
+  // Zero spend is a valid figure, not a missing one.
+  writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$0.00",
+    partialPricing: true
+  });
+  const zeroSnapshot = snapshotFinalReport(reportDir);
+  const zeroReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(zeroReport.code, 0, zeroReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(zeroReport)), 0);
+  assertFinalReportUnchanged(reportDir, zeroSnapshot);
+
+  // A spend above the run's priced usage is a mismatch in both report.md and report.json.
+  writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$2.00",
+    partialPricing: true
+  });
+  const overSnapshot = snapshotFinalReport(reportDir);
+  const overReport = parseJson(await cli(project, ["report", runData.run_id, "--json"]));
+  assert.equal(accountingMismatchCount(overReport), 2);
+  for (const diagnostic of (overReport.diagnostics as Array<{ code: string; message: string }>).filter(
     (candidate) => candidate.code === "REPORT_ACCOUNTING_MISMATCH"
   )) {
-    assert.match(diagnostic.message, /usable tokens_used .*\(greater than current run metadata\)$/u);
+    assert.match(diagnostic.message, /expected \$1\.98, got \$2\.00 \(greater than current run metadata\)$/u);
   }
-  assertFinalReportUnchanged(reportDir, initialSnapshot);
+  assertFinalReportUnchanged(reportDir, overSnapshot);
 
   const metadataPath = path.join(runData.run_root, "run.json");
   fs.writeFileSync(metadataPath, "{", "utf8");
@@ -2323,7 +2278,7 @@ test("report checks the agent snapshot's numeric spend without bounding it by th
   assert.match(JSON.stringify(parseJson(unavailableAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
   const strictAccounting = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
   assert.equal(strictAccounting.code, 1, strictAccounting.stderr);
-  assertFinalReportUnchanged(reportDir, initialSnapshot);
+  assertFinalReportUnchanged(reportDir, overSnapshot);
   assert.equal(fs.readFileSync(metadataPath, "utf8"), "{");
 });
 

@@ -1,11 +1,6 @@
 import { isRecord } from "@ultrafuzz/artifacts";
 
-import type {
-  ModelPricing,
-  ModelPricingContextTier,
-  ModelPricingProvenance,
-  PricingCatalogResult
-} from "./model-pricing.js";
+import type { ModelPricing, ModelPricingContextTier } from "./model-pricing.js";
 
 /*
  * How a models.dev-shaped catalog prices a model ID: the one provider entry its route allows, and
@@ -42,41 +37,27 @@ interface CatalogModel {
 }
 
 /** Prices each model from its route's catalog entry; prices stay keyed by the requested model ID. */
-export function pricesForModels(
-  catalog: unknown,
-  models: readonly string[]
-): Pick<PricingCatalogResult, "prices" | "provenance" | "zeroRateModels"> {
+export function pricesForModels(catalog: unknown, models: readonly string[]): Map<string, ModelPricing> {
   const prices = new Map<string, ModelPricing>();
-  const provenance = new Map<string, ModelPricingProvenance>();
-  const zeroRateModels: string[] = [];
-  if (!isRecord(catalog)) {
-    return { prices, provenance, zeroRateModels };
-  }
+  if (!isRecord(catalog)) return prices;
   for (const model of models) {
     const route = pricingRouteForModel(model);
     if (route === undefined) continue;
     const provider = Object.hasOwn(catalog, route.provider) ? catalog[route.provider] : undefined;
     const providerModels =
       isRecord(provider) && isRecord(provider.models) ? (provider.models as Record<string, CatalogModel>) : undefined;
-    let zeroRateListed = false;
     for (const catalogModelId of route.catalogModelIds) {
       const pricing = pricingFromCatalogModel(
         providerModels !== undefined && Object.hasOwn(providerModels, catalogModelId)
           ? providerModels[catalogModelId]
           : undefined
       );
-      if (pricing === undefined) continue;
-      if (isZeroRatePricing(catalogModelId, pricing)) {
-        zeroRateListed = true;
-        continue;
-      }
+      if (pricing === undefined || isZeroRatePricing(catalogModelId, pricing)) continue;
       prices.set(model, pricing);
-      provenance.set(model, { provider: route.provider, catalogModelId });
       break;
     }
-    if (zeroRateListed && !prices.has(model)) zeroRateModels.push(model);
   }
-  return { prices, provenance, zeroRateModels };
+  return prices;
 }
 
 /** Whether any catalog could price the model ID; one without a route always stays unpriced. */
@@ -84,20 +65,15 @@ export function hasPricingRoute(model: string): boolean {
   return pricingRouteForModel(model) !== undefined;
 }
 
-/** Whether a model ID names a free variant, whose zero rates and zero recorded costs are real. */
-export function isFreeModelId(model: string): boolean {
-  return model.replace(CONTEXT_ALIAS_SUFFIX, "").endsWith(":free");
-}
-
 /**
- * Whether a catalog price lists a model that is not a free variant at zero input and output
- * rates: a subscription or placeholder listing, not a price.
+ * Whether a catalog entry lists a model that is not a free variant at zero input and output rates:
+ * a subscription or placeholder listing, not a price.
  */
-export function isZeroRatePricing(
-  model: string,
+function isZeroRatePricing(
+  catalogModelId: string,
   pricing: Pick<ModelPricing, "inputUsdPerMillion" | "outputUsdPerMillion">
 ): boolean {
-  return pricing.inputUsdPerMillion === 0 && pricing.outputUsdPerMillion === 0 && !isFreeModelId(model);
+  return pricing.inputUsdPerMillion === 0 && pricing.outputUsdPerMillion === 0 && !catalogModelId.endsWith(":free");
 }
 
 /**

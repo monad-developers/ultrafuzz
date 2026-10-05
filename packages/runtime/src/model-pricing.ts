@@ -39,18 +39,8 @@ export interface PricingCatalogMetadata {
   unresolved_models: string[];
 }
 
-/** The catalog provider entry a model's route priced it from. */
-export interface ModelPricingProvenance {
-  provider: string;
-  catalogModelId: string;
-}
-
 export interface PricingCatalogResult {
   prices: ReadonlyMap<string, ModelPricing>;
-  /** Per priced model, the catalog provider and model ID its route resolved. */
-  provenance: ReadonlyMap<string, ModelPricingProvenance>;
-  /** Models whose route lists them only at zero input and output rates, so they stay unpriced. */
-  zeroRateModels: readonly string[];
   metadata: PricingCatalogMetadata;
 }
 
@@ -133,7 +123,7 @@ export async function resolveLiveModelPricing(input: {
   const models = uniqueModels(input.models);
   if (models.length === 0) {
     return {
-      ...unpricedCatalogResult(),
+      prices: new Map(),
       metadata: {
         source: "models.dev",
         status: "available",
@@ -146,7 +136,7 @@ export async function resolveLiveModelPricing(input: {
   const configuredUrl = input.env?.ULTRAFUZZ_PRICING_CATALOG_URL?.trim();
   if (configuredUrl !== undefined && DISABLED_VALUES.has(configuredUrl.toLowerCase())) {
     return {
-      ...unpricedCatalogResult(),
+      prices: new Map(),
       metadata: {
         source: "disabled",
         status: "disabled",
@@ -162,7 +152,7 @@ export async function resolveLiveModelPricing(input: {
   // A model without a catalog route is never priced, so a download that prices none is skipped.
   if (!models.some(hasPricingRoute)) {
     return {
-      ...unpricedCatalogResult(),
+      prices: new Map(),
       metadata: { source, status: "available", resolved_models: [], unresolved_models: models }
     };
   }
@@ -197,12 +187,10 @@ export async function resolveLiveModelPricing(input: {
       maxItems: 1_000_000,
       maxProperties: 1_000_000
     });
-    const { prices, provenance, zeroRateModels } = pricesForModels(catalog, models);
+    const prices = pricesForModels(catalog, models);
     const resolvedModels = models.filter((model) => prices.has(model));
     return {
       prices,
-      provenance,
-      zeroRateModels,
       metadata: {
         source,
         status: "available",
@@ -213,7 +201,7 @@ export async function resolveLiveModelPricing(input: {
     };
   } catch {
     return {
-      ...unpricedCatalogResult(),
+      prices: new Map(),
       metadata: {
         source,
         status: "unavailable",
@@ -482,10 +470,6 @@ async function readPricingCatalogChunk(
       (error) => finish(() => reject(error))
     );
   });
-}
-
-function unpricedCatalogResult(): Pick<PricingCatalogResult, "prices" | "provenance" | "zeroRateModels"> {
-  return { prices: new Map(), provenance: new Map(), zeroRateModels: [] };
 }
 
 export function pricingForContext(pricing: ModelPricing, inputTokens: number): ModelPricing {

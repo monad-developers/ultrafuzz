@@ -102,11 +102,10 @@ const {
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
-  finalReportRunSummaryAccounting,
-  readFinalReportSourceRunSpendUsd,
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
+  runSummaryUsage,
   smithersTaskAgentId,
   topologyRuntimeBudgetForTimeout,
   topologyRuntimeContextForTimeout,
@@ -1439,12 +1438,16 @@ type FinalReportWorkflowMetricsProjection = {
   tokens_used?: string;
   estimated_spend?: string;
   partial_pricing: boolean;
-  // The live estimate finalReportRunSummaryAccounting prices the run from; never persisted.
-  spend_estimate?: {
-    estimated_spend_usd: number;
-    accounted_attempts: number;
-    models: Array<{ model: string; attempts: number; estimated_spend_usd: number }>;
-  };
+  unpriced_attempts?: number;
+};
+
+/** The usage fields of a Run summary, as runSummaryUsage reads them from run.json accounting. */
+type FinalReportRunSummaryUsage = {
+  models_used: string[];
+  tokens_used: string;
+  estimated_spend: string;
+  partial_pricing: boolean;
+  unpriced_attempts?: number;
 };
 
 type FinalReportTaskRuntime = {
@@ -1726,6 +1729,41 @@ function finalReportTargetCommit(task: (typeof taskSpecs)[number]): string | nul
   return task.sourceRevision;
 }
 
+function finalReportLiveUsage(
+  workflowMetrics: FinalReportWorkflowMetricsProjection | undefined
+): FinalReportRunSummaryUsage | undefined {
+  if (workflowMetrics === undefined) return undefined;
+  return {
+    models_used: workflowMetrics.models_used,
+    tokens_used: workflowMetrics.tokens_used ?? "0",
+    estimated_spend: workflowMetrics.estimated_spend ?? "$0.00",
+    partial_pricing: workflowMetrics.partial_pricing,
+    ...(workflowMetrics.unpriced_attempts === undefined ? {} : { unpriced_attempts: workflowMetrics.unpriced_attempts })
+  };
+}
+
+/** A continuation's source run.json, which sits beside this run's in the runs directory. */
+function finalReportSourceRunMetadata(runRoot: string, sourceRunId: unknown, attemptId: string): unknown {
+  const runsRoot = path.dirname(runRoot);
+  if (typeof sourceRunId !== "string" || sourceRunId.length === 0) {
+    throw new Error(`artifact-contract failure: final-report source run ID is malformed ${attemptId}`);
+  }
+  const snapshot = readBoundedRegularArtifactSnapshot(
+    runsRoot,
+    path.resolve(runsRoot, sourceRunId, "run.json"),
+    `artifact-contract failure: final-report source run metadata is unavailable ${attemptId}`,
+    MAX_FINAL_REPORT_RUN_METADATA_BYTES,
+    true
+  );
+  try {
+    return assertRunMetadataDocument(parseStrictJsonSnapshot(snapshot, "source run metadata"), sourceRunId);
+  } catch (error) {
+    throw new Error(`artifact-contract failure: final-report source run metadata is invalid ${attemptId}`, {
+      cause: error
+    });
+  }
+}
+
 function deriveAuthoritativeFinalReportRunMetadata(
   task: (typeof taskSpecs)[number],
   workflowMetrics?: FinalReportWorkflowMetricsProjection
@@ -1761,16 +1799,14 @@ function deriveAuthoritativeFinalReportRunMetadata(
   const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
   const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
   const sourceRunIds = finalReportOptionalStringArray(accounting.source_run_ids, "accounting source run IDs");
-  const sourceRunId = finalReportOptionalString(metadata.source_run_id, "source run ID");
-  // Tokens, spend, and partial pricing come from one source, and the spend always includes an
-  // imputed attempt for this report task itself (see finalReportRunSummaryAccounting).
-  const summaryAccounting = finalReportRunSummaryAccounting({
-    metadata,
-    workflowMetrics,
-    sourceRunSpendUsd: (source: string) =>
-      readFinalReportSourceRunSpendUsd(runRoot, task.metadata.run.ultrafuzzRunId, source),
-    reportModelName: task.agentChain[0]?.modelName
-  });
+  // Models, tokens, spend, and partial pricing come from one source: the run's accounting, which
+  // includes its source runs; for a continuation without its own accounting yet, the source run's;
+  // and for a direct run, this workflow run's live Smithers usage. Without any, nothing was recorded.
+  const usage =
+    runSummaryUsage(metadata).accounting ??
+    (metadata.source_run_id === undefined
+      ? finalReportLiveUsage(workflowMetrics)
+      : runSummaryUsage(finalReportSourceRunMetadata(runRoot, metadata.source_run_id, task.attemptId)).accounting);
   const validationWarnings = finalReportArtifactValidationWarnings(task);
   const elapsedTime = finalReportElapsedTime(
     metadata.created_at,
@@ -1778,14 +1814,14 @@ function deriveAuthoritativeFinalReportRunMetadata(
   );
   return {
     run_id: task.metadata.run.ultrafuzzRunId,
-    source_run_id: sourceRunId,
+    source_run_id: finalReportOptionalString(metadata.source_run_id, "source run ID"),
     repository: normalizeFinalReportGitHubRepository(task),
     target_commit: finalReportTargetCommit(task),
     elapsed_time: elapsedTime,
-    models_used: summaryAccounting.models_used,
-    tokens_used: summaryAccounting.tokens_used,
-    estimated_spend: summaryAccounting.estimated_spend,
-    partial_pricing: summaryAccounting.partial_pricing,
+    models_used: usage?.models_used ?? [],
+    tokens_used: usage?.tokens_used ?? "0",
+    estimated_spend: usage?.estimated_spend ?? "$0.00",
+    partial_pricing: usage?.partial_pricing ?? false,
     strategy_loops: strategyLoops,
     audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
     audit_profile_catalog_digest: finalReportOptionalSha256(
@@ -1844,7 +1880,6 @@ async function materializeFinalReportRunMetadataAuthority(
       `artifact-contract failure: final-report run metadata authority changed while materialized ${task.attemptId}`
     );
   }
-  writeFileDurable(finalReportRunMetadataRecordPath(task), expected);
   finalReportRunMetadataAuthoritiesByTask.set(task.attemptId, {
     projection,
     snapshot: Object.freeze({
@@ -1886,41 +1921,10 @@ function assertFinalReportRunMetadataAuthorityUnchanged(task: (typeof taskSpecs)
   }
 }
 
-/**
- * The run's host-only copy of the projection last materialized for the report producer. A verifier
- * in a restarted controller (resume, quota park, supervisor relaunch) reads it back instead of
- * re-deriving the projection, because elapsed time, accounting, and the spend estimate have moved
- * since the producer started. Like the report-producer selection record, it lives outside the
- * agent's worktree and declared artifact roots; the agent-writable workspace copy is never read back.
- */
-function finalReportRunMetadataRecordPath(task: (typeof taskSpecs)[number]): string {
-  return path.join(realpathSync(task.runRoot), "smithers", "final-report-run-metadata", `${task.attemptId}.json`);
-}
-
-function recordedFinalReportRunMetadata(task: (typeof taskSpecs)[number]): FinalReportRunMetadataProjection {
-  let value: unknown;
-  try {
-    value = parseStrictJsonBytes(
-      readRegularFileSnapshot(finalReportRunMetadataRecordPath(task), MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES)
-    );
-  } catch (error) {
-    throw new Error(
-      `artifact-contract failure: the report producer's recorded run metadata projection is unavailable; ${finalReportProducerRerunHint(task)}`,
-      { cause: error }
-    );
-  }
-  // The verifier deep-compares the agent's copy with it, and the report schema then validates both.
-  if (!isPlainJsonRecord(value) || value.run_id !== task.metadata.run.ultrafuzzRunId) {
-    throw new Error(
-      `artifact-contract failure: the recorded report-producer run metadata projection is malformed; delete \`smithers/final-report-run-metadata/${task.attemptId}.json\` in the run directory, then ${finalReportProducerRerunHint(task)}`
-    );
-  }
-  return value as FinalReportRunMetadataProjection;
-}
-
 function authoritativeFinalReportRunMetadata(task: (typeof taskSpecs)[number]): FinalReportRunMetadataProjection {
   return (
-    finalReportRunMetadataAuthoritiesByTask.get(task.attemptId)?.projection ?? recordedFinalReportRunMetadata(task)
+    finalReportRunMetadataAuthoritiesByTask.get(task.attemptId)?.projection ??
+    deriveAuthoritativeFinalReportRunMetadata(task)
   );
 }
 

@@ -53,9 +53,9 @@ function writeAgentReport(root: string, status = "succeeded"): string {
         target_commit: "0123456789abcdef0123456789abcdef01234567",
         elapsed_time: "1m",
         models_used: [],
-        tokens_used: "unavailable",
-        estimated_spend: "$3.10",
-        partial_pricing: true,
+        tokens_used: "0",
+        estimated_spend: "$0.00",
+        partial_pricing: false,
         strategy_loops: 0,
         audit_profile: "example",
         audit_profile_catalog_digest: "unavailable",
@@ -347,7 +347,7 @@ test("failure to save the status cache does not suppress explicit report access"
   assert.equal(readReportPublicationStatus(root, state).status, "unknown");
 });
 
-test("unchecked reports restate whole-run accounting and the spend estimate from run.json", () => {
+test("unchecked reports restate whole-run accounting from run.json", () => {
   const root = reportRun("whole-run-accounting");
   writeAgentReport(root);
   const runId = path.basename(root);
@@ -356,94 +356,39 @@ test("unchecked reports restate whole-run accounting and the spend estimate from
     path.join(root, "state.json"),
     JSON.stringify({ ...state, finished_at: "2026-09-01T03:30:00.000Z" })
   );
-  const writeRunMetadata = (spendEstimate?: Record<string, unknown>): void =>
+  const writeRunMetadata = (cumulative?: Record<string, unknown>): void =>
     fs.writeFileSync(
       path.join(root, "run.json"),
       JSON.stringify({
         run_id: runId,
         created_at: "2026-09-01T00:00:00.000Z",
-        accounting: {
-          cumulative: {
-            models: ["model-a"],
-            tokens_used: "4,321",
-            estimated_spend: "unavailable",
-            partial_pricing: true
-          }
-        },
-        ...(spendEstimate === undefined ? {} : { spend_estimate: spendEstimate })
+        ...(cumulative === undefined ? {} : { accounting: { cumulative } })
       })
     );
-  writeRunMetadata({ estimated_spend: "$3.00", complete: true });
+  const cumulative = {
+    models: ["model-a"],
+    tokens_used: "4,321",
+    estimated_spend: "$3.00+",
+    estimated_spend_usd: 3,
+    partial_pricing: true
+  };
+  writeRunMetadata(cumulative);
   const report = loadReportSnapshot(root);
   assert.equal(report.verification, "not-checked");
   assert.match(report.markdown, /^- Elapsed time: `3h 30m`$/mu);
   assert.match(report.markdown, /^- Models used: `model-a`$/mu);
   assert.match(report.markdown, /^- Tokens used: `4,321`$/mu);
-  // The estimate, never accounting v4's `unavailable`, and its completeness.
   assert.match(report.markdown, /^- Estimated spend: `\$3\.00`$/mu);
-  assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, false);
-  // The snapshot carries the run.json it restated, so a consumer checks it without a second read.
-  assert.deepEqual(report.restated_run_metadata, JSON.parse(fs.readFileSync(path.join(root, "run.json"), "utf8")));
+  assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, true);
   assertReportSnapshotRemainedCurrent(report);
 
-  // Without a usable estimate the agent's numeric spend, tokens, and partial pricing stay together.
-  for (const spendEstimate of [
-    undefined,
-    { estimated_spend: "$3.00+", complete: true },
-    { estimated_spend: "$3.00" }
-  ]) {
-    writeRunMetadata(spendEstimate);
-    const kept = loadReportSnapshot(root);
-    assert.match(kept.markdown, /^- Models used: `model-a`$/mu);
-    assert.match(kept.markdown, /^- Tokens used: `unavailable`$/mu);
-    assert.match(kept.markdown, /^- Estimated spend: `\$3\.10`$/mu);
-    assert.equal(reportSchema.parse(kept.json).run_metadata.partial_pricing, true);
-  }
-
-  // An unreadable run.json leaves nothing to restate or carry.
-  fs.writeFileSync(path.join(root, "run.json"), "{", "utf8");
-  assert.equal(Object.hasOwn(loadReportSnapshot(root), "restated_run_metadata"), false);
-});
-
-test("unchecked reports keep the agent's target commit while they restate whole-run accounting", () => {
-  const commits = [
-    ["full-commit", "0123456789abcdef0123456789abcdef01234567"],
-    ["sha256-commit", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
-    ["no-commit", null]
-  ] as const;
-  for (const [name, targetCommit] of commits) {
-    const root = reportRun(name);
-    const file = writeAgentReport(root);
-    const agent = JSON.parse(fs.readFileSync(file, "utf8")) as { run_metadata: { target_commit: string | null } };
-    agent.run_metadata.target_commit = targetCommit;
-    fs.writeFileSync(file, JSON.stringify(agent));
-    fs.writeFileSync(
-      path.join(root, "run.json"),
-      JSON.stringify({
-        run_id: path.basename(root),
-        created_at: "2026-09-01T00:00:00.000Z",
-        accounting: {
-          cumulative: { models: ["model-a"], tokens_used: "4,321", estimated_spend: "$3.00", partial_pricing: false }
-        },
-        spend_estimate: { estimated_spend: "$3.00", complete: true }
-      })
-    );
-    const report = loadReportSnapshot(root);
-    assert.equal(report.verification, "not-checked", name);
-    assert.match(report.markdown, /^- Tokens used: `4,321`$/mu, name);
-    assert.equal(
-      JSON.stringify(reportSchema.parse(report.json).run_metadata.target_commit),
-      JSON.stringify(targetCommit)
-    );
-    assert.deepEqual(
-      report.markdown.split("\n").filter((line) => line.startsWith("- Commit:")),
-      [
-        targetCommit === null
-          ? "- Commit: `none` (no Git commit was recorded for the evaluated target)"
-          : `- Commit: \`${targetCommit}\``
-      ],
-      name
-    );
+  // Without well-formed accounting the agent's usage stays, and a malformed record is ignored.
+  for (const kept of [undefined, { ...cumulative, estimated_spend_usd: "3" }, { ...cumulative, partial_pricing: 1 }]) {
+    writeRunMetadata(kept);
+    const unchanged = loadReportSnapshot(root);
+    assert.match(unchanged.markdown, /^- Tokens used: `0`$/mu);
+    assert.match(unchanged.markdown, /^- Estimated spend: `\$0\.00`$/mu);
+    assert.equal(reportSchema.parse(unchanged.json).run_metadata.partial_pricing, false);
   }
 });
 

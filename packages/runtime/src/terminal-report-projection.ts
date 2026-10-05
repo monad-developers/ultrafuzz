@@ -1,7 +1,7 @@
 import {
   assertRunMetadataDocument,
   assertRunStateDocument,
-  ESTIMATED_SPEND_PATTERN,
+  formatEstimatedSpendUsd,
   reportCompletionSchema,
   TERMINAL_RUN_STATE_STATUSES,
   type ReportCompletion,
@@ -62,13 +62,9 @@ export function projectTerminalReport(input: TerminalReportProjectionInput): Can
 /**
  * The report agent copies a run summary that the host captured when the report task started, so its
  * elapsed time and accounting miss the report task itself and anything that finished later. Runtime
- * presentations restate them from run.json and the recorded finish time: elapsed time, models from
- * `accounting.cumulative`, and, when run.json has a spend estimate, the estimate's spend and
- * completeness (`partial_pricing` is its negation) with tokens from `accounting.cumulative` when it
- * records them. The terminal synchronization writes the estimate before terminal publication, so the
- * restated spend includes the report task's own usage, recorded or imputed. Without an estimate the
- * agent's numeric copy stays, as does any value those records do not provide; malformed records are
- * ignored, never thrown.
+ * presentations restate them from run.json and the recorded finish time. Models, tokens, spend, and
+ * partial pricing move together and come only from `accounting.cumulative` (see runSummaryUsage);
+ * without it they keep the agent's copy. Malformed records are ignored, never thrown.
  */
 export function withWholeRunSummary(
   runMetadata: Record<string, unknown>,
@@ -78,27 +74,63 @@ export function withWholeRunSummary(
   const summary = { ...runMetadata };
   const elapsed = elapsedTime(field(metadata, "created_at"), finishedAt);
   if (elapsed !== undefined) summary.elapsed_time = elapsed;
+  const usage = runSummaryUsage(metadata).accounting;
+  if (usage !== undefined) Object.assign(summary, usage);
+  return summary;
+}
+
+/** The Run summary usage fields a report restates from run.json. */
+export interface RunSummaryUsage {
+  /** Present only when `accounting.cumulative` is well-formed. */
+  accounting?: {
+    models_used: string[];
+    tokens_used: string;
+    /** `accounting.cumulative.estimated_spend_usd`, `$0.00` when no usage could be priced. */
+    estimated_spend: string;
+    partial_pricing: boolean;
+  };
+}
+
+/**
+ * The one place a Run summary's usage figures are read from run.json, for the report-start
+ * projection and both runtime presentations. Accounting v4's own `estimated_spend` label (with its
+ * `+` and `unavailable`) stays in run.json for `ultrafuzz stats`; the report shows its USD amount.
+ * Reads are defensive: a malformed record yields no accounting.
+ */
+export function runSummaryUsage(metadata: unknown): RunSummaryUsage {
   const cumulative = field(field(metadata, "accounting"), "cumulative");
   const models = field(cumulative, "models");
-  if (isNonEmptyStringList(models)) summary.models_used = [...models];
-  const estimate = field(metadata, "spend_estimate");
-  const spend = field(estimate, "estimated_spend");
-  const complete = field(estimate, "complete");
-  if (typeof spend === "string" && ESTIMATED_SPEND_PATTERN.test(spend) && typeof complete === "boolean") {
-    summary.estimated_spend = spend;
-    summary.partial_pricing = !complete;
-    const tokens = field(cumulative, "tokens_used");
-    if (availableLabel(tokens)) summary.tokens_used = tokens;
+  const tokens = field(cumulative, "tokens_used");
+  const spendUsd = field(cumulative, "estimated_spend_usd");
+  const partialPricing = field(cumulative, "partial_pricing");
+  if (
+    !isStringList(models) ||
+    !availableLabel(tokens) ||
+    !(spendUsd === undefined || isSpendAmount(spendUsd)) ||
+    typeof partialPricing !== "boolean"
+  ) {
+    return {};
   }
-  return summary;
+  return {
+    accounting: {
+      models_used: [...models],
+      tokens_used: tokens,
+      estimated_spend: formatEstimatedSpendUsd(spendUsd ?? 0),
+      partial_pricing: partialPricing
+    }
+  };
 }
 
 function field(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? Reflect.get(value, key) : undefined;
 }
 
-function isNonEmptyStringList(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string" && entry !== "");
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry !== "");
+}
+
+function isSpendAmount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value < 1e21;
 }
 
 function availableLabel(value: unknown): value is string {

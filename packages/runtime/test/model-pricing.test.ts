@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { hasPricingRoute, isFreeModelId } from "../src/model-pricing-catalog.js";
+import { hasPricingRoute } from "../src/model-pricing-catalog.js";
 import {
   fetchPinnedPricingCatalog,
   readBoundedPricingCatalogResponse,
@@ -284,15 +284,7 @@ test("gateway model IDs are priced only from OpenRouter's own catalog entry", as
   assert.equal(result.prices.get("openai/gpt-mini-latest")?.inputUsdPerMillion, 0.25);
   // OpenRouter does not list it; another gateway's same-named rate is never borrowed.
   assert.equal(result.prices.has("x-ai/grok-5"), false);
-  assert.deepEqual(Object.fromEntries(result.provenance), {
-    "anthropic/claude-opus-4.8": { provider: "openrouter", catalogModelId: "anthropic/claude-opus-4.8" },
-    "deepseek/deepseek-v4-pro": { provider: "openrouter", catalogModelId: "deepseek/deepseek-v4-pro" },
-    "moonshotai/kimi-k3": { provider: "openrouter", catalogModelId: "moonshotai/kimi-k3" },
-    "openai/gpt-mini-latest": { provider: "openrouter", catalogModelId: "~openai/gpt-mini-latest" },
-    "openrouter/anthropic/claude-sonnet-4.6": { provider: "openrouter", catalogModelId: "anthropic/claude-sonnet-4.6" }
-  });
   assert.deepEqual(result.metadata.unresolved_models, ["x-ai/grok-5"]);
-  assert.deepEqual(result.zeroRateModels, []);
 });
 
 test("first-party model IDs are priced only from their first-party provider", async () => {
@@ -330,16 +322,6 @@ test("first-party model IDs are priced only from their first-party provider", as
   assert.equal(result.prices.get("o4-mini")?.inputUsdPerMillion, 1.1);
   assert.equal(result.prices.get("deepseek-v4-pro")?.inputUsdPerMillion, 0.435);
   assert.equal(result.prices.get("kimi-k3")?.inputUsdPerMillion, 3);
-  assert.deepEqual(result.provenance.get("claude-opus-4-8"), {
-    provider: "anthropic",
-    catalogModelId: "claude-opus-4-8"
-  });
-  assert.deepEqual(result.provenance.get("gpt-5.5"), { provider: "openai", catalogModelId: "gpt-5.5" });
-  assert.deepEqual(result.provenance.get("deepseek-v4-pro"), {
-    provider: "deepseek",
-    catalogModelId: "deepseek-v4-pro"
-  });
-  assert.deepEqual(result.provenance.get("kimi-k3"), { provider: "moonshotai", catalogModelId: "kimi-k3" });
   // A first-party miss stays unresolved instead of falling through to an aggregator, and an ID
   // without a route is never priced.
   assert.deepEqual(result.metadata.unresolved_models, ["claude-fable-5", "custom-model"]);
@@ -353,7 +335,8 @@ test("first-party model IDs are priced only from their first-party provider", as
 });
 
 test("an all-zero catalog rate is unpriced unless the model ID is a free variant", async () => {
-  const result = await resolveFromCatalog(["gpt-zero", "vendor/model-zero", "vendor/model:free", "vendor/zero-alias"], {
+  const models = ["gpt-zero", "vendor/model-zero", "vendor/model:free", "vendor/model:free[1m]", "vendor/zero-alias"];
+  const result = await resolveFromCatalog(models, {
     openai: { models: { "gpt-zero": { cost: { input: 0, output: 0, cache_read: 0 } } } },
     openrouter: {
       models: {
@@ -366,12 +349,9 @@ test("an all-zero catalog rate is unpriced unless the model ID is a free variant
   });
 
   assert.deepEqual(result.prices.get("vendor/model:free"), { inputUsdPerMillion: 0, outputUsdPerMillion: 0 });
-  assert.deepEqual(result.provenance.get("vendor/zero-alias"), {
-    provider: "openrouter",
-    catalogModelId: "~vendor/zero-alias"
-  });
+  assert.deepEqual(result.prices.get("vendor/model:free[1m]"), { inputUsdPerMillion: 0, outputUsdPerMillion: 0 });
+  assert.equal(result.prices.get("vendor/zero-alias")?.inputUsdPerMillion, 2);
   assert.deepEqual(result.metadata.unresolved_models, ["gpt-zero", "vendor/model-zero"]);
-  assert.deepEqual(result.zeroRateModels, ["gpt-zero", "vendor/model-zero"]);
 });
 
 test("a context alias is stripped for the lookup while prices stay keyed by the requested ID", async () => {
@@ -389,30 +369,20 @@ test("a context alias is stripped for the lookup while prices stay keyed by the 
     outputUsdPerMillion: 25,
     contextTiers: [{ contextTokens: 200_000, inputUsdPerMillion: 10, outputUsdPerMillion: 37.5 }]
   });
-  assert.deepEqual(result.provenance.get("claude-opus-4-8[1m]"), {
-    provider: "anthropic",
-    catalogModelId: "claude-opus-4-8"
-  });
-  assert.deepEqual(result.provenance.get("anthropic/claude-opus-4.8[1m]"), {
-    provider: "openrouter",
-    catalogModelId: "anthropic/claude-opus-4.8"
-  });
   assert.deepEqual(result.metadata.resolved_models, ["anthropic/claude-opus-4.8[1m]", "claude-opus-4-8[1m]"]);
 });
 
-test("an unavailable or disabled catalog returns no prices or provenance", async () => {
+test("an unavailable or disabled catalog returns no prices", async () => {
   const disabled = await resolveLiveModelPricing({
     models: ["gpt-5.5"],
     env: { ULTRAFUZZ_PRICING_CATALOG_URL: "off" }
   });
   assert.equal(disabled.metadata.status, "disabled");
-  assert.equal(disabled.provenance.size, 0);
-  assert.deepEqual(disabled.zeroRateModels, []);
+  assert.equal(disabled.prices.size, 0);
 
   const unavailable = await resolveFromCatalog(["gpt-5.5"], undefined);
   assert.equal(unavailable.metadata.status, "unavailable");
   assert.equal(unavailable.prices.size, 0);
-  assert.equal(unavailable.provenance.size, 0);
 });
 
 test("a request whose models have no catalog route skips the catalog download", async () => {
@@ -453,11 +423,4 @@ test("a catalog route follows only from the model ID's shape", () => {
   }
   for (const model of ["custom-model", "grok-5", "[1m]", "openrouter/"])
     assert.equal(hasPricingRoute(model), false, model);
-});
-
-test("free-variant detection ignores a trailing context alias", () => {
-  assert.equal(isFreeModelId("vendor/model:free"), true);
-  assert.equal(isFreeModelId("vendor/model:free[1m]"), true);
-  assert.equal(isFreeModelId("vendor/model"), false);
-  assert.equal(isFreeModelId("free-model"), false);
 });

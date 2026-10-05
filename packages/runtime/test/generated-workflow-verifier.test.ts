@@ -63,8 +63,8 @@ import {
   invariantLedgerMarkdownParityIssues
 } from "../src/canonical-properties-markdown.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
-import { finalReportRunSummaryAccounting, readFinalReportSourceRunSpendUsd } from "../src/final-report-run-summary.js";
-import type { SpendEstimateDocument } from "../src/spend-estimate.js";
+import { runSummaryUsage } from "../src/terminal-report-projection.js";
+import { runMetadataWithAccounting } from "./run-metadata-fixtures.js";
 import {
   derivePromptArtifactAuthority,
   parsePromptArtifactAuthorityBytes,
@@ -620,7 +620,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     tokens_used?: string;
     estimated_spend?: string;
     partial_pricing: boolean;
-    spend_estimate?: SpendEstimateDocument;
+    unpriced_attempts?: number;
   },
   admissions: ReadonlyMap<string, unknown> = new Map()
 ): {
@@ -641,8 +641,9 @@ function loadFinalReportRunMetadataAuthorityHarness(
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  const readSnapshot = (root: string, filePath: string, _label: string, maxBytes: number, nonEmpty = false) => {
+  const readSnapshot = (root: string, filePath: string, label: string, maxBytes: number, nonEmpty = false) => {
     assert.ok(path.resolve(filePath).startsWith(`${path.resolve(root)}${path.sep}`));
+    if (!fs.existsSync(filePath)) throw new Error(`${label}: file is missing`);
     const resolvedPath = fs.realpathSync(filePath);
     const stat = fs.statSync(resolvedPath, { bigint: true });
     const bytes = fs.readFileSync(resolvedPath);
@@ -693,10 +694,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "deriveCurrentTaskWorkflowMetrics",
     "dependencyArtifactAdmissionsByTask",
     "boundArtifactValidationWarnings",
-    "finalReportRunSummaryAccounting",
-    "readFinalReportSourceRunSpendUsd",
-    "readRegularFileSnapshot",
-    "finalReportProducerRerunHint",
+    "runSummaryUsage",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
       latestElapsedThrough: finalReportLatestElapsedThrough,
@@ -749,11 +747,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     async () => workflowMetrics,
     admissions,
     boundArtifactValidationWarnings,
-    finalReportRunSummaryAccounting,
-    readFinalReportSourceRunSpendUsd,
-    readRegularFileSnapshot,
-    (task: { smithersNodeId: string }) =>
-      `run \`ultrafuzz resume <run-id> --refresh-controller --reset-node ${task.smithersNodeId}\` to rerun the producer`
+    runSummaryUsage
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
@@ -9025,24 +9019,23 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       }
     };
     fs.writeFileSync(path.join(runRoot, "run.json"), `${JSON.stringify(metadata)}\n`, "utf8");
+    // The source run has no accounting either, so nothing was recorded for the lineage yet.
+    const sourceRoot = path.join(root, ".ultrafuzz", "runs", "source-run");
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    const { source_run_id: _sourceRunId, ...sourceMetadata } = { ...metadata, run_id: "source-run" };
+    fs.writeFileSync(path.join(sourceRoot, "run.json"), `${JSON.stringify(sourceMetadata)}\n`, "utf8");
     const task = {
       attemptId: "final-report",
-      smithersNodeId: "node:final-report",
       runRoot,
       workspacePath,
       metadata: { run: { ultrafuzzRunId: "run-1" } },
-      agentChain: [{ modelName: "claude-opus-4-8" }],
       sourceRevision: FINAL_REPORT_TARGET_COMMIT,
       outputs: [
         { path: "custom/report.json", contract: "ultrafuzz/report@3" },
         { path: "custom/report.md", contract: "ultrafuzz/nonempty-markdown@1" }
       ]
     };
-    const authority = loadFinalReportRunMetadataAuthorityHarness(
-      undefined,
-      undefined,
-      undefined
-    );
+    const authority = loadFinalReportRunMetadataAuthorityHarness();
     await authority.materialize(task);
 
     const relativePath = ".ultrafuzz/authorities/final-report.final-report-run-metadata.json";
@@ -9056,11 +9049,9 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       target_commit: FINAL_REPORT_TARGET_COMMIT,
       elapsed_time: "unavailable",
       models_used: [],
-      tokens_used: "unavailable",
-      // No synchronized estimate, an unreadable source run, and no Smithers metrics: only the
-      // report attempt itself, at the default usage priced at the claude-opus fallback rates.
-      estimated_spend: "$2.90",
-      partial_pricing: true,
+      tokens_used: "0",
+      estimated_spend: "$0.00",
+      partial_pricing: false,
       strategy_loops: 3,
       audit_profile: "exhaustive",
       audit_profile_catalog_digest: "3".repeat(64),
@@ -9072,9 +9063,6 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
     assert.equal(JSON.stringify(projection).includes("private-id"), false);
     assert.deepEqual(authority.authoritative(task), projection);
     assert.doesNotThrow(() => authority.assertUnchanged(task));
-    // The run keeps a host-only copy outside the agent's worktree for a restarted verifier.
-    const recordPath = path.join(runRoot, "smithers", "final-report-run-metadata", "final-report.json");
-    assert.deepEqual(fs.readFileSync(recordPath), fs.readFileSync(authorityPath));
 
     const prompt = authority.prompt(
       "trusted preamble\n\nUNTRUSTED CONTENT BOUNDARY\n\ntrusted runtime\n\nrendered task",
@@ -9108,25 +9096,6 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
     }
 
     fs.writeFileSync(path.join(runRoot, "run.json"), `${JSON.stringify({ run_id: "run-1" })}\n`, "utf8");
-    // A verifier in a restarted controller reads the recorded projection back instead of
-    // re-deriving it from the moved run.json, and never reads the agent-writable workspace copy.
-    fs.writeFileSync(authorityPath, `${JSON.stringify({ ...projection, repository: "tampered" })}\n`, "utf8");
-    const restarted = loadFinalReportRunMetadataAuthorityHarness(
-      undefined,
-      undefined,
-      undefined
-    );
-    assert.deepEqual(restarted.authoritative(task), projection);
-    fs.writeFileSync(recordPath, `${JSON.stringify({ ...projection, run_id: "other-run" })}\n`, "utf8");
-    assert.throws(
-      () => restarted.authoritative(task),
-      /recorded report-producer run metadata projection is malformed; delete `smithers\/final-report-run-metadata\/final-report\.json` in the run directory, then run `ultrafuzz resume <run-id> --refresh-controller --reset-node node:final-report` to rerun the producer/u
-    );
-    fs.rmSync(recordPath);
-    assert.throws(
-      () => restarted.authoritative(task),
-      /the report producer's recorded run metadata projection is unavailable; run `ultrafuzz resume <run-id> --refresh-controller --reset-node node:final-report` to rerun the producer/u
-    );
     assert.deepEqual(authority.derive(task), {
       run_id: "run-1",
       source_run_id: "unavailable",
@@ -9134,9 +9103,9 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       target_commit: FINAL_REPORT_TARGET_COMMIT,
       elapsed_time: "unavailable",
       models_used: [],
-      tokens_used: "unavailable",
-      estimated_spend: "$2.90",
-      partial_pricing: true,
+      tokens_used: "0",
+      estimated_spend: "$0.00",
+      partial_pricing: false,
       strategy_loops: "unavailable",
       audit_profile: "unavailable",
       audit_profile_catalog_digest: "unavailable",
@@ -9220,54 +9189,25 @@ test("final-report workflow metrics use the engine-owned Smithers task runtime h
   assert.match(metricsSource, /runtime: CurrentTaskWorkflowRuntime/u);
 });
 
-/** A live spend estimate over `[model, attempts, USD]` rows, as deriveCurrentTaskWorkflowMetrics returns it. */
-function liveSpendEstimate(rows: Array<[string, number, number]>, complete: boolean): SpendEstimateDocument {
-  const total = rows.reduce((sum, [, , usd]) => sum + usd, 0);
-  return {
-    schema_version: "ultrafuzz.spend-estimate.v1",
-    workflow_run_id: "smithers-run-1",
-    estimated_spend_usd: total,
-    estimated_spend: `$${total.toFixed(2)}`,
-    complete,
-    fallback_pricing_table: "ultrafuzz.fallback-pricing.2026-10-01",
-    basis_usd: {
-      recorded: complete ? total : 0,
-      catalog: 0,
-      fallback: complete ? 0 : total,
-      imputed: 0,
-      source_runs: 0
-    },
-    accounted_attempts: rows.reduce((sum, [, attempts]) => sum + attempts, 0),
-    models: rows.map(([model, attempts, usd]) => ({
-      model,
-      attempts,
-      estimated_spend_usd: usd,
-      price_source: complete ? ("recorded" as const) : ("fallback" as const)
-    })),
-    assumptions: complete ? [] : [{ code: "model-not-in-route-catalog" as const, count: 1 }],
-    unaccounted_attempts: { count: 0, imputed_spend_usd: 0, omitted: 0, entries: [] },
-    source_run_ids: []
-  };
-}
-
-test("final-report Run summary prices one source plus the report attempt, always partial, without undercounting lineage", async () => {
+test("final-report Run summary copies run accounting, else a continuation's source accounting or a direct run's live usage", async () => {
   const root = temporaryRoot("ultrafuzz-final-report-workflow-metrics-");
   try {
-    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
+    const runsRoot = path.join(root, ".ultrafuzz", "runs");
+    const runRoot = path.join(runsRoot, "run-1");
     const workspacePath = path.join(runRoot, "workspaces", "final-report");
     fs.mkdirSync(workspacePath, { recursive: true });
-    fs.writeFileSync(
-      path.join(runRoot, "run.json"),
-      `${JSON.stringify({ run_id: "run-1", created_at: "2026-08-20T00:00:00.000Z" })}\n`,
-      "utf8"
-    );
+    const writeRunMetadata = (value: Record<string, unknown>): void =>
+      fs.writeFileSync(
+        path.join(runRoot, "run.json"),
+        `${JSON.stringify({ run_id: "run-1", created_at: "2026-08-20T00:00:00.000Z", ...value })}\n`,
+        "utf8"
+      );
+    writeRunMetadata({});
     const task = {
       attemptId: "final-report",
-      smithersNodeId: "node:final-report",
       runRoot,
       workspacePath,
       metadata: { run: { ultrafuzzRunId: "run-1" } },
-      agentChain: [{ modelName: "model-a" }],
       sourceRevision: FINAL_REPORT_TARGET_COMMIT,
       outputs: [
         { path: "report.json", contract: "ultrafuzz/report@3" },
@@ -9279,19 +9219,9 @@ test("final-report Run summary prices one source plus the report attempt, always
       models_used: ["model-a", "model-b"],
       tokens_used: "1,234",
       estimated_spend: "$0.46",
-      partial_pricing: false,
-      spend_estimate: liveSpendEstimate(
-        [
-          ["model-a", 1, 0.3],
-          ["model-b", 1, 0.16]
-        ],
-        true
-      )
+      partial_pricing: false
     };
-    const full = loadFinalReportRunMetadataAuthorityHarness(
-      "https://github.com/example/project.git\n",
-      fullMetrics
-    );
+    const full = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", fullMetrics);
     assert.equal(
       full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
       "2026-08-20T01:00:00.000Z",
@@ -9301,177 +9231,113 @@ test("final-report Run summary prices one source plus the report attempt, always
       () => full.latestElapsedThrough("2026-08-20T01:00:00.000Z", "not-a-timestamp"),
       /elapsed-time metadata is malformed/u
     );
-    await full.materialize(task);
     const authorityPath = path.join(
       workspacePath,
       ".ultrafuzz",
       "authorities",
       "final-report.final-report-run-metadata.json"
     );
-    const projectionOf = (): Record<string, unknown> =>
-      JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
-    const fullProjection = projectionOf();
-    assert.equal(fullProjection.elapsed_time, "1h 00m");
-    assert.deepEqual(fullProjection.models_used, ["model-a", "model-b"]);
-    assert.equal(fullProjection.tokens_used, "1,234");
-    // The live $0.46 plus the report attempt at model-a's mean ($0.30). Even a complete live
-    // estimate is partial here, because the report's own production is imputed.
-    assert.equal(fullProjection.estimated_spend, "$0.76");
-    assert.equal(fullProjection.partial_pricing, true);
-
-    const partial = loadFinalReportRunMetadataAuthorityHarness(
-      "https://github.com/example/project.git\n",
-      {
-        elapsed_through: "2026-08-20T00:01:30.000Z",
-        models_used: ["model-priced", "model-unpriced"],
-        tokens_used: "300",
-        estimated_spend: "$0.06",
-        partial_pricing: true,
-        spend_estimate: liveSpendEstimate(
-          [
-            ["model-priced", 1, 0.02],
-            ["model-unpriced", 1, 0.04]
-          ],
-          false
-        )
-      }
-    );
-    await partial.materialize(task);
-    const partialProjection = projectionOf();
-    assert.equal(partialProjection.elapsed_time, "1m 30s");
-    assert.deepEqual(partialProjection.models_used, ["model-priced", "model-unpriced"]);
-    assert.equal(partialProjection.tokens_used, "300");
-    // model-a has no accounted attempt, so the report attempt is imputed at the run mean ($0.03).
-    assert.equal(partialProjection.estimated_spend, "$0.09");
-    assert.equal(partialProjection.partial_pricing, true);
-
-    const unavailable = loadFinalReportRunMetadataAuthorityHarness();
-    await unavailable.materialize(task);
-    const unavailableProjection = projectionOf();
-    assert.equal(unavailableProjection.elapsed_time, "unavailable");
-    assert.deepEqual(unavailableProjection.models_used, []);
-    assert.equal(unavailableProjection.tokens_used, "unavailable");
-    // No usage evidence at all still prices the report attempt (default usage at generic rates).
-    assert.equal(unavailableProjection.estimated_spend, "$3.10");
-    assert.equal(unavailableProjection.partial_pricing, true);
-
-    // Accounting v4's display labels never reach the projection: a `+` or `unavailable` spend and
-    // its partial_pricing are replaced by one numeric estimate from the live metrics.
-    fs.writeFileSync(
-      path.join(runRoot, "run.json"),
-      `${JSON.stringify({
-        run_id: "run-1",
-        created_at: "2026-08-20T00:00:00.000Z",
-        accounting: {
-          cumulative: {
-            models: ["model-a"],
-            tokens_used: "9,999",
-            estimated_spend: "$41.20+",
-            partial_pricing: true
-          }
-        }
-      })}\n`,
-      "utf8"
-    );
-    await full.materialize(task);
-    const labelledProjection = projectionOf();
-    assert.deepEqual(labelledProjection.models_used, ["model-a"]);
-    assert.equal(labelledProjection.tokens_used, "1,234", "tokens come from the same source as the spend");
-    assert.equal(labelledProjection.estimated_spend, "$0.76");
-    assert.equal(labelledProjection.partial_pricing, true);
-
-    fs.writeFileSync(
-      path.join(runRoot, "run.json"),
-      `${JSON.stringify({
-        run_id: "run-1",
-        source_run_id: "source-run",
-        created_at: "2026-08-20T00:00:00.000Z"
-      })}\n`,
-      "utf8"
-    );
-    const lineage = loadFinalReportRunMetadataAuthorityHarness(
-      "https://github.com/example/project.git\n",
-      { ...fullMetrics, models_used: ["current-run-model"] }
-    );
-    await lineage.materialize(task);
-    const lineageProjection = projectionOf();
-    assert.equal(lineageProjection.elapsed_time, "1h 00m");
-    // A current-run subtotal never stands in for lineage models or tokens.
-    assert.deepEqual(lineageProjection.models_used, []);
-    assert.equal(lineageProjection.tokens_used, "unavailable");
-    // The unreadable source run counts as zero; the live current run and the report attempt remain.
-    assert.equal(lineageProjection.estimated_spend, "$0.76");
-    assert.equal(lineageProjection.partial_pricing, true);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("final-report Run summary keeps partial pricing for a continuation whose cumulative spend is unavailable", async () => {
-  const root = temporaryRoot("ultrafuzz-final-report-unavailable-lineage-spend-");
-  try {
-    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
-    const workspacePath = path.join(runRoot, "workspaces", "final-report");
-    fs.mkdirSync(workspacePath, { recursive: true });
-    // The run.json shape that used to lose partial_pricing: accounting v4 could price none of the
-    // lineage's usage, so its cumulative spend is `unavailable` and its partial_pricing true.
-    fs.writeFileSync(
-      path.join(runRoot, "run.json"),
-      `${JSON.stringify({
-        run_id: "run-1",
-        source_run_id: "source-run",
-        created_at: "2026-08-20T00:00:00.000Z",
-        accounting: {
-          updated_at: "2026-08-20T00:30:00.000Z",
-          cumulative: {
-            models: ["unpriced-model"],
-            tokens_used: "1,234,567",
-            estimated_spend: "unavailable",
-            partial_pricing: true,
-            source_run_ids: ["source-run"]
-          }
-        }
-      })}\n`,
-      "utf8"
-    );
-    const task = {
-      attemptId: "final-report",
-      smithersNodeId: "node:final-report",
-      runRoot,
-      workspacePath,
-      metadata: { run: { ultrafuzzRunId: "run-1" } },
-      agentChain: [{ modelName: "unpriced-model" }],
-      sourceRevision: FINAL_REPORT_TARGET_COMMIT,
-      outputs: [
-        { path: "report.json", contract: "ultrafuzz/report@3" },
-        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
-      ]
-    };
-    for (const workflowMetrics of [
-      undefined,
-      {
-        models_used: ["unpriced-model"],
-        tokens_used: "12",
-        partial_pricing: true,
-        spend_estimate: liveSpendEstimate([["unpriced-model", 2, 0.5]], false)
-      }
-    ]) {
-      const authority = loadFinalReportRunMetadataAuthorityHarness(
-        "https://github.com/example/project.git\n",
-        workflowMetrics,
-        undefined
-      );
+    const usageOf = async (authority: { materialize(task: unknown): Promise<void> }) => {
       await authority.materialize(task);
-      const projection = authority.authoritative(task) as Record<string, unknown>;
-      assert.equal(projection.partial_pricing, true);
-      assert.equal(projection.tokens_used, "1,234,567");
-      assert.deepEqual(projection.models_used, ["unpriced-model"]);
-      assert.deepEqual(projection.source_run_ids, ["source-run"]);
-      // Without metrics: the report attempt at default usage on generic rates. With them: the live
-      // $0.50 plus the report attempt at the model's mean ($0.25).
-      assert.equal(projection.estimated_spend, workflowMetrics === undefined ? "$3.10" : "$0.75");
-      assert.match(String(projection.estimated_spend), /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u);
-    }
+      const projection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+      return Object.fromEntries(
+        ["elapsed_time", "models_used", "tokens_used", "estimated_spend", "partial_pricing", "unpriced_attempts"]
+          .filter((key) => Object.hasOwn(projection, key))
+          .map((key) => [key, projection[key]])
+      );
+    };
+
+    // A direct run without accounting yet copies this workflow run's live usage.
+    assert.deepEqual(await usageOf(full), {
+      elapsed_time: "1h 00m",
+      models_used: ["model-a", "model-b"],
+      tokens_used: "1,234",
+      estimated_spend: "$0.46",
+      partial_pricing: false
+    });
+    const partial = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      elapsed_through: "2026-08-20T00:01:30.000Z",
+      models_used: ["model-priced", "model-unpriced"],
+      tokens_used: "300",
+      estimated_spend: "$0.05",
+      partial_pricing: true,
+      unpriced_attempts: 1
+    });
+    assert.deepEqual(await usageOf(partial), {
+      elapsed_time: "1m 30s",
+      models_used: ["model-priced", "model-unpriced"],
+      tokens_used: "300",
+      estimated_spend: "$0.05",
+      partial_pricing: true
+    });
+    // Nothing recorded at all is zero usage, never `unavailable`.
+    const unrecorded = loadFinalReportRunMetadataAuthorityHarness();
+    assert.deepEqual(await usageOf(unrecorded), {
+      elapsed_time: "unavailable",
+      models_used: [],
+      tokens_used: "0",
+      estimated_spend: "$0.00",
+      partial_pricing: false
+    });
+
+    // Run accounting replaces the live usage, with its USD amount rather than its `+` label.
+    const cumulative = {
+      models: ["model-a"],
+      tokens_used: "9,999",
+      estimated_spend: "$41.20+",
+      estimated_spend_usd: 41.2,
+      partial_pricing: true,
+      unpriced_event_count: 1
+    };
+    writeRunMetadata({ accounting: { cumulative } });
+    assert.deepEqual(await usageOf(full), {
+      elapsed_time: "1h 00m",
+      models_used: ["model-a"],
+      tokens_used: "9,999",
+      estimated_spend: "$41.20",
+      partial_pricing: true
+    });
+    // Accounting that priced nothing has no USD amount and shows zero spend.
+    const { estimated_spend_usd: _amount, ...unpriced } = cumulative;
+    writeRunMetadata({ accounting: { cumulative: { ...unpriced, estimated_spend: "unavailable" } } });
+    assert.equal((await usageOf(full)).estimated_spend, "$0.00");
+
+    // A continuation's own accounting includes its source runs. Before it has any, the source run's
+    // accounting stands in, never this workflow run's live subtotal.
+    writeRunMetadata({ source_run_id: "source-run" });
+    const sourceRoot = path.join(runsRoot, "source-run");
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    const sourceMetadata = runMetadataWithAccounting({
+      runId: "source-run",
+      createdAt: "2026-08-19T00:00:00.000Z",
+      updatedAt: "2026-08-19T01:00:00.000Z"
+    });
+    fs.writeFileSync(path.join(sourceRoot, "run.json"), `${JSON.stringify(sourceMetadata)}\n`, "utf8");
+    const lineage = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", {
+      ...fullMetrics,
+      models_used: ["current-run-model"]
+    });
+    assert.deepEqual(await usageOf(lineage), {
+      elapsed_time: "1h 00m",
+      models_used: ["model-a", "model-b"],
+      tokens_used: "12,345,678",
+      estimated_spend: "$41.20",
+      partial_pricing: true
+    });
+    const { accounting: _sourceAccounting, ...sourceWithoutAccounting } = sourceMetadata;
+    fs.writeFileSync(path.join(sourceRoot, "run.json"), `${JSON.stringify(sourceWithoutAccounting)}\n`, "utf8");
+    assert.deepEqual(await usageOf(lineage), {
+      elapsed_time: "1h 00m",
+      models_used: [],
+      tokens_used: "0",
+      estimated_spend: "$0.00",
+      partial_pricing: false
+    });
+    fs.rmSync(sourceRoot, { recursive: true });
+    await assert.rejects(
+      lineage.materialize(task),
+      /artifact-contract failure: final-report source run metadata is unavailable final-report/u
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

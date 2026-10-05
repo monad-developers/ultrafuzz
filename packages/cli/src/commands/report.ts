@@ -4,12 +4,10 @@ import { Args, Command, Flags } from "@oclif/core";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
-  assertRunMetadataDocument,
-  ESTIMATED_SPEND_PATTERN,
+  formatEstimatedSpendUsd,
   layoutForRunRoot,
   readRunMetadataDocument,
-  validateSafeId,
-  type RunMetadataDocument
+  validateSafeId
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
@@ -19,17 +17,9 @@ import { loadReportArtifactsSnapshot, type ReportArtifactsSnapshot } from "../re
 type AccountingField = "tokens_used" | "estimated_spend";
 
 interface ExpectedAccounting {
-  /** `accounting.cumulative.tokens_used`, when it is available. */
   tokens_used?: string;
-  /** `spend_estimate.estimated_spend`, when run.json has a spend estimate. */
   estimated_spend?: string;
 }
-
-/**
- * Whether the presented report is a runtime presentation, which restates the spend from run.json,
- * rather than the agent's report-start snapshot.
- */
-type ReportPresentation = "runtime" | "agent";
 
 export default class Report extends Command {
   static override summary = "Show the available report for a run";
@@ -97,21 +87,14 @@ export default class Report extends Command {
   }
 }
 
-/**
- * Warnings for a report whose `Tokens used` or `Estimated spend` does not preserve the run's
- * accounting: tokens against run.json `accounting.cumulative`, spend against
- * `spend_estimate.estimated_spend`.
- */
-export function reportAccountingDiagnostics(
+function reportAccountingDiagnostics(
   runRoot: string,
   report: ReportArtifactsSnapshot,
   requireVerified: boolean
 ): RuntimeDiagnostic[] {
-  const presentation: ReportPresentation = report.artifacts.source === "verified-agent-report" ? "agent" : "runtime";
-  const metadataPath = path.join(runRoot, "run.json");
   let expected: ExpectedAccounting | undefined;
   try {
-    expected = expectedAccountingFromRunMetadata(runMetadataForPresentation(metadataPath, report, presentation));
+    expected = expectedAccountingFromRunMetadata(path.join(runRoot, "run.json"));
   } catch (error) {
     if (requireVerified) throw error;
     return [
@@ -120,7 +103,7 @@ export function reportAccountingDiagnostics(
         message: `Report accounting could not be checked: ${error instanceof Error ? error.message : String(error)}`,
         severity: "warning",
         source: "report",
-        path: metadataPath
+        path: path.join(runRoot, "run.json")
       }
     ];
   }
@@ -130,40 +113,22 @@ export function reportAccountingDiagnostics(
 
   const diagnostics: RuntimeDiagnostic[] = [];
   diagnostics.push(
-    ...markdownAccountingDiagnostics(report.markdown, expected, presentation, report.artifacts.markdown_path),
-    ...reportJsonAccountingDiagnostics(report.json, expected, presentation, report.artifacts.json_path)
+    ...markdownAccountingDiagnostics(report.markdown, expected, report.artifacts.markdown_path),
+    ...reportJsonAccountingDiagnostics(report.json, expected, report.artifacts.json_path)
   );
   return diagnostics;
 }
 
-/**
- * The run.json the report is checked against. A runtime presentation must equal the spend estimate
- * it restated, so it is checked against the run.json it was built from rather than a second read
- * that a synchronization may have rewritten since. The agent's snapshot depends on no run.json, and
- * its checks hold against a later one (tokens only grow, and its spend has no bound), so it is
- * checked against the current file.
- */
-function runMetadataForPresentation(
-  metadataPath: string,
-  report: ReportArtifactsSnapshot,
-  presentation: ReportPresentation
-): RunMetadataDocument {
-  const runId = path.basename(path.dirname(metadataPath));
-  if (presentation === "agent") {
-    return readRunMetadataDocument(metadataPath, runId);
-  }
-  if (report.restated_run_metadata === undefined) {
-    throw new Error("run.json could not be read when the report was presented");
-  }
-  return assertRunMetadataDocument(report.restated_run_metadata, runId);
-}
-
-function expectedAccountingFromRunMetadata(metadata: RunMetadataDocument): ExpectedAccounting | undefined {
-  const tokensUsed = metadata.accounting?.cumulative.tokens_used;
-  const estimatedSpend = metadata.spend_estimate?.estimated_spend;
+function expectedAccountingFromRunMetadata(metadataPath: string): ExpectedAccounting | undefined {
+  const metadata = readRunMetadataDocument(metadataPath, path.basename(path.dirname(metadataPath)));
+  const cumulative = metadata.accounting?.cumulative;
+  if (cumulative === undefined) return undefined;
+  const tokensUsed = cumulative.tokens_used;
+  // A report shows accounting's USD amount in the same format, never its `+`-labelled estimated_spend.
+  const estimatedSpendUsd = cumulative.estimated_spend_usd;
   const expected = {
     ...(isAvailableLabel(tokensUsed) ? { tokens_used: tokensUsed } : {}),
-    ...(estimatedSpend === undefined ? {} : { estimated_spend: estimatedSpend })
+    ...(estimatedSpendUsd === undefined ? {} : { estimated_spend: formatEstimatedSpendUsd(estimatedSpendUsd) })
   };
   return expected.tokens_used === undefined && expected.estimated_spend === undefined ? undefined : expected;
 }
@@ -171,16 +136,14 @@ function expectedAccountingFromRunMetadata(metadata: RunMetadataDocument): Expec
 function markdownAccountingDiagnostics(
   markdown: string,
   expected: ExpectedAccounting,
-  presentation: ReportPresentation,
   markdownPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "tokens_used",
-      actual: markdownLabel(markdown, "Tokens used", "tokens_used"),
+      actual: markdownLabel(markdown, "Tokens used"),
       expected: expected.tokens_used,
-      presentation,
       filePath: markdownPath,
       artifact: "markdown"
     })
@@ -188,9 +151,8 @@ function markdownAccountingDiagnostics(
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "estimated_spend",
-      actual: markdownLabel(markdown, "Estimated spend", "estimated_spend"),
+      actual: markdownLabel(markdown, "Estimated spend"),
       expected: expected.estimated_spend,
-      presentation,
       filePath: markdownPath,
       artifact: "markdown"
     })
@@ -201,7 +163,6 @@ function markdownAccountingDiagnostics(
 function reportJsonAccountingDiagnostics(
   reportJson: unknown,
   expected: ExpectedAccounting,
-  presentation: ReportPresentation,
   jsonPath: string
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
@@ -219,20 +180,17 @@ function reportJsonAccountingDiagnostics(
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "tokens_used",
-      actual: tokensField(runMetadata),
+      actual: labelField(runMetadata, "tokens_used", "integer"),
       expected: expected.tokens_used,
-      presentation,
       filePath: jsonPath,
       artifact: "json"
     })
   );
-  const spend = runMetadata.estimated_spend;
   diagnostics.push(
     ...accountingValueDiagnostics({
       field: "estimated_spend",
-      actual: typeof spend === "string" ? spend : undefined,
+      actual: labelField(runMetadata, "estimated_spend", "usd"),
       expected: expected.estimated_spend,
-      presentation,
       filePath: jsonPath,
       artifact: "json"
     })
@@ -244,109 +202,83 @@ function accountingValueDiagnostics(input: {
   field: AccountingField;
   actual: string | undefined;
   expected: string | undefined;
-  presentation: ReportPresentation;
   filePath: string;
   artifact: "markdown" | "json";
 }): RuntimeDiagnostic[] {
   if (input.expected === undefined) {
     return [];
   }
-  const reason =
-    input.field === "tokens_used"
-      ? tokensValueProblem(input.actual, input.expected)
-      : spendValueProblem(input.actual, input.expected, input.presentation);
-  if (reason === undefined) {
-    return [];
-  }
-  // The agent's snapshot is never expected to equal the run's current spend estimate.
-  const expected = input.field === "estimated_spend" && input.presentation === "agent" ? undefined : input.expected;
-  return [accountingDiagnostic(input.field, expected, input.filePath, input.artifact, input.actual, reason)];
+  const reason = accountingValueProblem(input.field, input.actual, input.expected);
+  return reason === undefined
+    ? []
+    : [accountingDiagnostic(input.field, input.expected, input.filePath, input.artifact, input.actual, reason)];
 }
 
-function tokensValueProblem(actual: string | undefined, expected: string): string | undefined {
-  if (!isAvailableLabel(actual)) {
-    return "missing or unavailable";
-  }
-  const actualTokens = parseIntegerLabel(actual);
-  const expectedTokens = parseIntegerLabel(expected);
-  if (actualTokens === undefined || actualTokens <= 0) {
-    return "not a positive integer";
-  }
-  if (expectedTokens !== undefined && actualTokens > expectedTokens) {
-    return "greater than current run metadata";
-  }
-  return undefined;
-}
-
-/**
- * The spend is an estimate that can fall as well as rise (a catalog price can replace a fallback
- * rate), so the agent's report-start snapshot needs only the numeric form, while a runtime
- * presentation restates run.json's estimate and must equal it.
- */
-function spendValueProblem(
+function accountingValueProblem(
+  field: AccountingField,
   actual: string | undefined,
-  expected: string,
-  presentation: ReportPresentation
+  expected: string
 ): string | undefined {
   if (!isAvailableLabel(actual)) {
     return "missing or unavailable";
   }
-  if (!ESTIMATED_SPEND_PATTERN.test(actual)) {
-    return "not a numeric USD estimate";
+  if (field === "tokens_used") {
+    const actualTokens = parseIntegerLabel(actual);
+    const expectedTokens = parseIntegerLabel(expected);
+    if (actualTokens === undefined || actualTokens <= 0) {
+      return "not a positive integer";
+    }
+    if (expectedTokens !== undefined && actualTokens > expectedTokens) {
+      return "greater than current run metadata";
+    }
+    return undefined;
   }
-  if (presentation === "runtime" && actual !== expected) {
-    return "differs from the run.json spend estimate";
+
+  const actualSpend = parseUsdLabel(actual);
+  const expectedSpend = parseUsdLabel(expected);
+  if (actualSpend === undefined) {
+    return "not a USD amount";
+  }
+  if (expectedSpend !== undefined && actualSpend > expectedSpend + 0.000001) {
+    return "greater than current run metadata";
   }
   return undefined;
 }
 
 function accountingDiagnostic(
   field: AccountingField,
-  expected: string | undefined,
+  expected: string,
   filePath: string,
   artifact: "markdown" | "json",
   actual: string | undefined,
   reason: string
 ): RuntimeDiagnostic {
-  const got = `got ${actual ?? "missing"} (${reason})`;
   return {
     code: "REPORT_ACCOUNTING_MISMATCH",
-    message:
-      expected === undefined
-        ? `${artifact} final report has no usable ${field}; ${got}`
-        : `${artifact} final report did not preserve usable ${field} from run metadata; expected ${expected}, ${got}`,
+    message: `${artifact} final report did not preserve usable ${field} from run metadata; expected ${expected}, got ${
+      actual ?? "missing"
+    } (${reason})`,
     severity: "warning",
     source: "report",
     path: filePath,
-    details: {
-      field,
-      ...(expected === undefined ? {} : { expected }),
-      ...(actual === undefined ? {} : { actual }),
-      reason
-    }
+    details: { field, expected, ...(actual === undefined ? {} : { actual }), reason }
   };
 }
 
-function markdownLabel(markdown: string, label: string, field: AccountingField): string | undefined {
+function markdownLabel(markdown: string, label: string): string | undefined {
   const match = markdown.match(
     new RegExp(`^\\s*(?:[-*+]\\s*)?(?:\\*\\*)?${escapeRegExp(label)}(?:\\*\\*)?\\s*:\\s*(.+)$`, "imu")
   );
-  return match?.[1] === undefined ? undefined : firstAccountingLabel(match[1], field);
+  return match?.[1] === undefined ? undefined : firstAccountingLabel(match[1]);
 }
 
-/**
- * The value of a Run summary label: its first code span, else a leading token count (or
- * `unavailable`) for tokens and the leading word for spend, which `ESTIMATED_SPEND_PATTERN` then
- * classifies, so an inline `$0.46+` is reported as not numeric rather than missing.
- */
-function firstAccountingLabel(value: string, field: AccountingField): string | undefined {
+function firstAccountingLabel(value: string): string | undefined {
   const trimmed = value.trim();
   const code = trimmed.match(/`([^`]+)`/u);
   if (code?.[1] !== undefined) {
     return code[1].trim();
   }
-  const inline =
-    field === "tokens_used" ? trimmed.match(/^\$?\d[\d,]*(?:\.\d+)?\+?|^unavailable\b/iu) : trimmed.match(/^\S+/u);
+  const inline = trimmed.match(/^\$?\d[\d,]*(?:\.\d+)?\+?|^unavailable\b/iu);
   return inline?.[0];
 }
 
@@ -354,12 +286,20 @@ function isAvailableLabel(value: string | undefined): value is string {
   return value !== undefined && value.trim().length > 0 && value.trim().toLowerCase() !== "unavailable";
 }
 
-function tokensField(value: Record<string, unknown>): string | undefined {
-  const field = value.tokens_used;
+function labelField(
+  value: Record<string, unknown> | undefined,
+  key: string,
+  numericFormat: "integer" | "usd"
+): string | undefined {
+  const field = value?.[key];
   if (typeof field === "string") {
     return field;
   }
-  return typeof field === "number" && Number.isFinite(field) ? formatInteger(field) : undefined;
+  return typeof field === "number" && Number.isFinite(field)
+    ? numericFormat === "usd"
+      ? formatUsd(field)
+      : formatInteger(field)
+    : undefined;
 }
 
 function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
@@ -376,9 +316,21 @@ function formatInteger(value: number): string {
     .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
 }
 
+function formatUsd(value: number): string {
+  return `$${value.toFixed(value > 0 && value < 0.01 ? 4 : 2)}`;
+}
+
 function parseIntegerLabel(value: string): number | undefined {
   const normalized = value.trim().replace(/,/gu, "");
   return /^\d+$/u.test(normalized) ? Number(normalized) : undefined;
+}
+
+function parseUsdLabel(value: string): number | undefined {
+  const normalized = value.trim().replace(/,/gu, "").replace(/^\$/u, "").replace(/\+$/u, "");
+  if (!/^\d+(?:\.\d+)?$/u.test(normalized)) {
+    return undefined;
+  }
+  return Number(normalized);
 }
 
 function escapeRegExp(value: string): string {
