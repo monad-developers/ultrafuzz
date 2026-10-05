@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -65,7 +65,7 @@ test("run planning binds local task worktrees to the launch checkout commit", as
     assert.notEqual(launchRevision, mainRevision);
     git(["update-ref", "refs/heads/ultrafuzz-pinned", mainRevision]);
 
-    const planned = await planRun({ projectRoot: project, runId: "develop-source", env: {} });
+    const planned = await planRun({ projectRoot: project, runId: "develop-source", env: privateHomeEnv() });
     assert.equal(planned.ok, true, JSON.stringify(planned.diagnostics));
     assert.equal(planned.value?.source_revision, launchRevision);
     assert.equal(planned.value?.source_ref, "refs/ultrafuzz/runs/develop-source/source");
@@ -209,7 +209,7 @@ test("planning captures source before repository reads and publishes no ref when
     const launchRevision = gitAt(project, ["rev-parse", "HEAD"]);
 
     const planned = await planRun(
-      { projectRoot: project, runId: "source-race", env: {} },
+      { projectRoot: project, runId: "source-race", env: privateHomeEnv() },
       {
         afterSourceCapture: (source) => {
           assert.equal(source?.revision, launchRevision);
@@ -239,8 +239,8 @@ test("multi-run cleanup deletes source refs atomically", async () => {
     gitAt(project, ["commit", "--quiet", "-m", "source"]);
     const sourceRevision = gitAt(project, ["rev-parse", "HEAD"]);
 
-    const first = await planRun({ projectRoot: project, runId: "atomic-first", env: {} });
-    const second = await planRun({ projectRoot: project, runId: "atomic-second", env: {} });
+    const first = await planRun({ projectRoot: project, runId: "atomic-first", env: privateHomeEnv() });
+    const second = await planRun({ projectRoot: project, runId: "atomic-second", env: privateHomeEnv() });
     assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
     assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
     const firstRef = first.value!.source_ref!;
@@ -278,7 +278,7 @@ test("failed directory cleanup preserves the run source ref", async () => {
     gitAt(project, ["add", "--all"]);
     gitAt(project, ["commit", "--quiet", "-m", "source"]);
 
-    const planned = await planRun({ projectRoot: project, runId: "remove-failure", env: {} });
+    const planned = await planRun({ projectRoot: project, runId: "remove-failure", env: privateHomeEnv() });
     assert.equal(planned.ok, true, JSON.stringify(planned.diagnostics));
     const sourceRef = planned.value!.source_ref!;
     const sourceRevision = planned.value!.source_revision!;

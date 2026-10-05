@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { packagedTopology } from "@ultrafuzz/config";
 
 import { runCli } from "../src/index.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 interface Capture {
   stdout: string;
@@ -23,7 +23,7 @@ async function cli(project: string, argv: string[]): Promise<Capture> {
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env: {},
+    env: privateHomeEnv(),
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
