@@ -3899,10 +3899,9 @@ export async function smithersExecutionControlFiles(
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
-  // Prompt artifact-authority selectors resolve through the same immutable
-  // execution generation as the workflow. Keep the complete task manifest in
-  // that snapshot so a continuation reads identical sealed task/output
-  // declarations.
+  // The compiled task manifest, sealed beside the plan. The workflow no longer
+  // reads this copy: it indexes each task's prompt inputs from the task plan it
+  // runs, after dynamic expansion (#1234).
   add(compiled.tasksPath, "controls/tasks.json");
   if (compiled.dynamicGroups.length > 0) {
     const dynamicBaseGraphPath = path.join(layout.root, "smithers", "runtime-base-graph.json");

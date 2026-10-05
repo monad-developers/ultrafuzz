@@ -122,41 +122,38 @@ to `.ultrafuzz/authorities/<attemptId>.json` inside the current task workspace,
 the exact current `attemptId`, and the requested contract. Unknown contracts
 fail prompt validation.
 
-`ancestor_artifact_path_authority:<path,...>` provides the same bounded sealed
-JSON pointer while selecting transitive ancestor outputs by exact declared
-output paths. It is appropriate when a consumer needs a fixed set of filenames
-whose contracts are shared with unrelated outputs, such as final-report
-fallback intake. It records the matching logical producers, canonically ordered
-path group, and deterministic SHA-256 selector ID in the run plan. Prompt prose
-contains only that fixed-size ID; the authenticated sidecar's matching
-`selectors[]` entry carries the paths. Missing and duplicate path arguments
-fail prompt validation.
+`ancestor_artifact_path_authority:<path,...>` renders the same JSON pointer
+while selecting transitive ancestor outputs by exact declared output paths,
+which it lists in the prompt. It is appropriate when a consumer needs a fixed
+set of filenames whose contracts are shared with unrelated outputs, such as
+final-report fallback intake. It records the matching logical producers,
+canonically ordered path group, and deterministic SHA-256 selector ID in the
+run plan. Missing and duplicate path arguments fail prompt validation.
 
 Compact authority selectors are only for agentic task producers. If the exact
 contract or path selector matches any `kind: reference` ancestor, rendering
 fails closed, even when it also matches agentic ancestors. A consumer of a
 fixed reference node must name it explicitly with
 `artifact_path:<logical-node-id>` or `artifact_handoff:<logical-node-id>`.
-Selectors with no matching ancestor remain valid and produce an empty authority.
+Selectors with no matching ancestor remain valid; the agent then finds no
+matching output.
 
-The runtime generates that JSON immediately before each model attempt. It
-reparses the controller-only sealed task manifest, authenticates the exact
-required and marker-admitted optional dependency set, relocates it to the
-current execution root, and projects only outputs matched by the current
-prompt's compact selectors. The shared `controls/tasks.json` file is never
-added to agent filesystem access.
+The runtime writes that JSON for every agent task immediately before each model
+attempt, whether or not its prompt names it. It authenticates the exact
+required and marker-admitted optional dependency set and lists every declared
+output of those ancestors, from the task plan the workflow is running. A task
+that waits on a dynamic group, such as `dedupe-findings`, therefore sees the
+children the group generated.
 
-The authority document contains its schema version, run and attempt IDs,
-`artifact_path_base`, canonical selectors, and a `producers` array. Each
-producer exposes only `attempt_id`, `logical_node_id`, a portable
-`artifacts/<attemptId>` directory, and selected output `path`/`contract` pairs.
-Resolve `artifact_dir` beneath `artifact_path_base` and append the output path;
-reject absolute or escaping paths. An empty `producers` array means no matching
-ancestor was admitted. Controller paths, source and workspace identity, model
-metadata, unrelated tasks, and unselected outputs are absent. Exact authority
-bytes are restored before retries and checked after every model call, so agent
-mutation fails verification. Serialization is capped at 32 MiB and fails before
-the runtime writes the task-local sidecar.
+The document contains its schema version, run and attempt IDs,
+`artifact_path_base`, and a `producers` array. Each producer exposes only
+`attempt_id`, `logical_node_id`, a portable `artifacts/<attemptId>` directory,
+and its declared output `path`/`contract` pairs. Resolve `artifact_dir` beneath
+`artifact_path_base` and append the output path; reject absolute or escaping
+paths. Controller paths, source and workspace identity, model metadata, and
+tasks outside the admitted closure are absent. The runtime rewrites the file
+before every attempt. Serialization is capped at 32 MiB and fails before the
+runtime writes the file.
 
 These compact authorities are used for findings lifecycle intake, property
 lenses, boundary recipes, final-report machine handoffs, and differential

@@ -59,6 +59,23 @@ export function declaredAncestorOutputsByContract(
   options: DeclaredAncestorOutputOptions = {}
 ): readonly DeclaredSemanticArtifactOutput[] {
   assertNonEmpty(contract, "artifact contract");
+  return declaredAncestorOutputsMatching(task, tasks, contract, options);
+}
+
+/** Every output declared in the current attempt's artifact-ancestor closure, resolved as above. */
+export function declaredAncestorOutputs(
+  task: SemanticArtifactTaskDeclaration,
+  tasks: readonly SemanticArtifactTaskDeclaration[]
+): readonly DeclaredSemanticArtifactOutput[] {
+  return declaredAncestorOutputsMatching(task, tasks, undefined, {});
+}
+
+function declaredAncestorOutputsMatching(
+  task: SemanticArtifactTaskDeclaration,
+  tasks: readonly SemanticArtifactTaskDeclaration[],
+  contract: string | undefined,
+  options: DeclaredAncestorOutputOptions
+): readonly DeclaredSemanticArtifactOutput[] {
   const tasksByAttempt = indexTaskDeclarations(tasks);
   const current = tasksByAttempt.get(task.attemptId);
   if (current === undefined) {
@@ -102,9 +119,10 @@ export function declaredAncestorOutputsByContract(
   return Object.freeze(bindings);
 }
 
+/** The task's declared outputs, all of them when `contract` is undefined. */
 function declaredOutputsByContract(
   task: SemanticArtifactTaskDeclaration,
-  contract: string
+  contract: string | undefined
 ): DeclaredSemanticArtifactOutput[] {
   const seenPaths = new Set<string>();
   const outputs: DeclaredSemanticArtifactOutput[] = [];
@@ -117,7 +135,7 @@ function declaredOutputsByContract(
       );
     }
     seenPaths.add(output.path);
-    if (output.contract !== contract) continue;
+    if (contract !== undefined && output.contract !== contract) continue;
     outputs.push(
       Object.freeze({
         attemptId: task.attemptId,

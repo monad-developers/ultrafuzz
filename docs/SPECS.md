@@ -350,48 +350,44 @@ renderer MUST still record the exact matching logical ancestor IDs and contract
 in prompt artifact references so topology validation and contextual semantic
 gates share the same selector.
 
-Immediately before every model attempt, the runtime MUST reparse and validate
-the sealed execution snapshot's `controls/tasks.json` itself. That shared
-control file and its parent directory MUST NOT be admitted to the agent. The
-current task's `dependencyArtifactDirs` is the declared closure and
+Immediately before every model attempt of every agent task, the runtime MUST
+write that JSON document from the task plan the workflow is running, after
+dynamic expansion, so the closure of a task that waits on a dynamic group
+includes the children the group generated. The current task's
+`dependencyArtifactDirs` is the declared closure and
 `optionalDependencyArtifactDirs` is its exact optional subset. Matching
 producers outside that optional subset MUST remain admitted. A producer inside
 the optional subset MUST be admitted only when its exact runtime verification
 marker exists; a markerless optional producer MUST be excluded. Every admitted
-agentic producer MUST cross the complete verifier boundary before the authority
-is derived.
+agentic producer MUST cross the complete verifier boundary before the document
+is written.
 
-The derived `ultrafuzz.prompt-artifact-authority.v1` document MUST contain only
-`schema_version`, `run_id`, `attempt_id`, the absolute relocated run root as
-`artifact_path_base`, the current prompt's canonical `selectors`, and matching
-`producers`. Each producer contains only its attempt ID, logical node ID,
-canonical `artifacts/<attemptId>` directory, and selected output `path` and
-`contract` declarations. Controller-host paths, workspaces, source identities,
-model metadata, unrelated tasks, and unselected outputs MUST be omitted. An
-empty `producers` array is the authoritative no-match representation. Every
-relative path MUST reject absolute prefixes and traversal before it is resolved
-beneath `artifact_path_base`.
+The `ultrafuzz.prompt-artifact-authority.v1` document MUST contain only
+`schema_version`, `run_id`, `attempt_id`, the absolute run root as
+`artifact_path_base`, and `producers`: every admitted agentic ancestor, with
+each of its declared outputs. Each producer contains only its attempt ID,
+logical node ID, canonical `artifacts/<attemptId>` directory, and output `path`
+and `contract` declarations. Controller-host paths, workspaces, source
+identities, model metadata, and tasks outside the admitted closure MUST be
+omitted. Every relative path MUST reject absolute prefixes and traversal before
+it is resolved beneath `artifact_path_base`.
 
-The deterministic serialized authority MUST be rejected when it exceeds
-32 MiB, before the runtime creates or writes the task-local sidecar.
-
-The runtime MUST restore the deterministic authority bytes before a retry and
-compare the exact file bytes after every model call, including failed calls and
-schema-correction calls. Missing, malformed, replaced, linked, or modified
-authority files MUST fail verification.
+The deterministic serialized document MUST be rejected when it exceeds 32 MiB,
+before the runtime creates or writes the task-local file. The runtime rewrites
+it before every attempt, so a retry starts from the derived bytes.
 
 `ancestor_artifact_path_authority:<path>[,<path>...]` MUST accept one or more
 distinct safe declared output paths and MUST apply the same transitive closure,
-runtime verification-marker admission, per-task JSON projection, bounded
-rendering, portable-path ordering, and prompt artifact-reference requirements as
-`ancestor_contract_artifact_authority`. It MUST select admitted producer output
-declarations only when their exact declared `path` is in the requested set. It
-MUST record the exact matching logical ancestor IDs, a deterministic SHA-256
-selector ID, and the canonically ordered requested output paths in the run
-plan. The sealed task manifest and task-local authority MUST preserve that path
-group and MUST reject an ID that does not match its paths. Prompt prose MUST
-name only the fixed-size selector ID; it MUST NOT enumerate the group's paths,
-matching producer paths, model-fanout attempts, or source-authority rows.
+runtime verification-marker admission, per-task JSON document, portable-path
+ordering, and prompt artifact-reference requirements as
+`ancestor_contract_artifact_authority`. The agent MUST use only admitted
+producer output declarations whose exact declared `path` is in the requested
+set. The renderer MUST list the canonically ordered requested paths in the
+prompt and MUST NOT expand matching producer paths, model-fanout attempts, or
+source-authority rows. It MUST record the exact matching logical ancestor IDs,
+a deterministic SHA-256 selector ID, and the canonically ordered requested
+output paths in the run plan, and the run plan MUST reject an ID that does not
+match its paths.
 
 Both compact authority selectors MUST select only planned nodes with
 `kind: agentic`. If a selector's exact contract or path filter matches any
@@ -400,8 +396,8 @@ when the same selector also matches an agentic ancestor. The diagnostic MUST
 identify the reference node and direct fixed reference consumers to
 `artifact_path:<logical-node-id>` or `artifact_handoff:<logical-node-id>`.
 A selector with no matching ancestor MUST remain valid and MUST be represented
-by an empty `logicalIds` array in the run plan and an empty `producers` array at
-runtime.
+by an empty `logicalIds` array in the run plan and by no matching output in the
+task's document at runtime.
 
 For every agent-authored JSON output, the centrally rendered output contract
 MUST include both safely shell-quoted commands using the exact resolved paths

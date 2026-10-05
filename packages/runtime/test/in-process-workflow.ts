@@ -16,7 +16,8 @@ const WORKFLOW_MODULE_ENVIRONMENT = [
 /**
  * Imports a rendered project workflow in this process and renders it for `dispatchInput`, from
  * `projectRoot`. Only the orchestration primitives are stubbed: components record the element tree,
- * and the project agent registry returns an inert agent for each of `agentRefs`. Module-scope
+ * and the project agent registry returns, for each of `agentRefs`, an inert agent whose `generate`
+ * does nothing. Module-scope
  * admission, task hydration, dispatch parsing, prompt reading, and rendering run as rendered, against
  * `artifactsModule` and `runtimeModule`, the way a native `resume` runs a persisted workflow against
  * the installed packages.
@@ -55,7 +56,7 @@ export function createSmithers() {
   );
   const agents = stub(
     "agents.mjs",
-    `export const agentFactories = { ${[...new Set(input.agentRefs)].map((ref) => `${ref}: () => ({ id: "inert-agent" })`).join(", ")} };\n`
+    `export const agentFactories = { ${[...new Set(input.agentRefs)].map((ref) => `${ref}: () => ({ id: "inert-agent", generate: async () => ({}) })`).join(", ")} };\n`
   );
   const program = ts
     .transpileModule(fs.readFileSync(input.workflowPath, "utf8"), {

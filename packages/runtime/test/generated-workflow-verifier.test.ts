@@ -14,8 +14,6 @@ import { loadAgentPreambleTemplate } from "@ultrafuzz/prompts";
 
 import {
   ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
-  artifactContractDefinition,
-  artifactContractSchemaBinding,
   artifactContractSchemaFile,
   artifactSchemaBundleDigest,
   artifactSchemaRegistry,
@@ -36,27 +34,20 @@ import {
   normalizeNodeAttemptFailureMessage,
   parseJsonValidatorPreflightSuccessEnvelope,
   parseStrictJsonBytes,
-  promptArtifactAuthorityPathSelectorId,
   prepareSafeFilePath,
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
   RUN_METADATA_SCHEMA_VERSION,
   schemaRegistryBundleDigest,
-  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
-  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
   validateArtifactContract,
   validateArtifactContractBytes,
   validatePropertiesSchema,
   writeFileDurable,
-  type ArtifactContractId,
   type InvariantLedgerArtifact,
   type PropertiesArtifact,
-  type SemanticGateContext,
-  type SmithersTaskManifestDocument,
-  type SmithersTaskManifestOutput,
-  type SmithersTaskManifestTask
+  type SemanticGateContext
 } from "@ultrafuzz/artifacts";
 import {
   canonicalPropertiesMarkdownParityIssues,
@@ -67,9 +58,7 @@ import {
   derivePromptArtifactAuthority,
   parsePromptArtifactAuthorityBytes,
   serializePromptArtifactAuthority,
-  type DerivePromptArtifactAuthorityInput,
-  type PromptArtifactAuthorityDocument,
-  type PromptArtifactAuthoritySelector
+  type DerivePromptArtifactAuthorityInput
 } from "../src/prompt-artifact-authority.js";
 import {
   declaredAncestorOutputsByContract,
@@ -203,11 +192,10 @@ type ArtifactAwareAgentFixture = {
   generate(args: unknown): Promise<unknown>;
 };
 
-type TaskLocalAuthority = "dependency-admission" | "prompt-artifacts" | "report-run-metadata" | "report-prompt";
+type TaskLocalAuthority = "dependency-admission" | "report-run-metadata" | "report-prompt";
 
 function loadArtifactAwareAgent(
   options: {
-    onAuthorityCheck?: () => void;
     onCheck?: (authority: TaskLocalAuthority) => void;
     onReset?: () => void;
     onSourceVerify?: () => void;
@@ -241,7 +229,6 @@ function loadArtifactAwareAgent(
     "normalizeNodeAttemptFailureMessage",
     "sensitiveEnvironmentValues",
     "assertDependencyArtifactAdmissionCurrent",
-    "assertPromptArtifactAuthorityUnchanged",
     "assertFinalReportRunMetadataAuthorityUnchanged",
     "assertFinalReportPromptAuthorityUnchanged",
     "finalReportTaskRuntimeFromAgentArgs",
@@ -260,10 +247,6 @@ function loadArtifactAwareAgent(
     normalizeNodeAttemptFailureMessage,
     sensitiveEnvironmentValues,
     () => options.onCheck?.("dependency-admission"),
-    () => {
-      options.onCheck?.("prompt-artifacts");
-      options.onAuthorityCheck?.();
-    },
     () => options.onCheck?.("report-run-metadata"),
     () => options.onCheck?.("report-prompt"),
     () => undefined
@@ -370,7 +353,6 @@ test("artifact-aware agents recheck every task-local authority after the model r
     "report-prompt",
     "generate",
     "dependency-admission",
-    "prompt-artifacts",
     "report-run-metadata",
     "report-prompt"
   ];
@@ -864,277 +846,86 @@ function loadWorkflowControlPathResolvers(): {
   )(path, fs.existsSync, fs.realpathSync) as ReturnType<typeof loadWorkflowControlPathResolvers>;
 }
 
+/** The task spec fields the generated workflow's prompt input index reads. */
 type GeneratedPromptArtifactAuthorityTask = {
   attemptId: string;
   runRoot: string;
-  taskManifestPath: string;
   workspacePath: string;
-  promptArtifactAuthoritySelectors?: readonly PromptArtifactAuthoritySelector[];
+  artifactDir: string;
+  dependencyArtifactDirs: readonly string[];
+  outputs: readonly { path: string; contract: string }[];
+  metadata: {
+    run: { ultrafuzzRunId: string };
+    node: { logicalNodeId: string };
+    dependencies: { attemptIds: readonly string[] };
+  };
 };
 
+/**
+ * The generated workflow's `materializePromptArtifactAuthority`, with `taskSpecs` as the workflow's
+ * task plan and each task's admitted dependency directories from `admittedDependencyArtifactDirs`.
+ */
 function loadGeneratedPromptArtifactAuthorityHarness(
-  initialAdmittedDependencyArtifactDirs: readonly string[],
-  options: { writeFileDurable?: typeof writeFileDurable } = {}
+  taskSpecs: readonly GeneratedPromptArtifactAuthorityTask[],
+  admittedDependencyArtifactDirs: (task: GeneratedPromptArtifactAuthorityTask) => readonly string[]
 ): {
-  assertUnchanged(task: GeneratedPromptArtifactAuthorityTask): void;
   derivationInputs: DerivePromptArtifactAuthorityInput[];
   materialize(task: GeneratedPromptArtifactAuthorityTask): void;
-  path(task: GeneratedPromptArtifactAuthorityTask, workspaceRoot: string): string;
   relativePath(task: GeneratedPromptArtifactAuthorityTask): string;
-  setAdmittedDependencyArtifactDirs(directories: readonly string[]): void;
 } {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const authorityStart = source.indexOf("const promptArtifactAuthoritySnapshotsByTask");
-  const authorityEnd = source.indexOf("\n\nfunction verifiedDependencyJsonArtifact", authorityStart);
-  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
-  const resolverEnd = source.indexOf("\n\nfunction resolveNonEmptyRegularArtifactFile", resolverStart);
-  const snapshotStart = source.indexOf("type ImmutableFileSnapshot", resolverEnd);
-  const snapshotEnd = source.indexOf("\n\nfunction decodeStrictUtf8Snapshot", snapshotStart);
-  assert.ok(authorityStart >= 0 && authorityEnd > authorityStart, source);
-  assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, source);
-  assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart, source);
+  const slice = (start: string, end: string): string => {
+    const startIndex = source.indexOf(start);
+    const endIndex = source.indexOf(end, startIndex);
+    assert.ok(startIndex >= 0 && endIndex > startIndex, `${start} … ${end}`);
+    return source.slice(startIndex, endIndex);
+  };
   const emitted = ts.transpileModule(
     [
-      source.slice(authorityStart, authorityEnd),
-      source.slice(resolverStart, resolverEnd),
-      source.slice(snapshotStart, snapshotEnd)
+      slice("function promptArtifactAuthorityRelativePath", "\n\nfunction verifiedDependencyJsonArtifact"),
+      slice("function semanticArtifactTaskDeclarations", "\n\nfunction declaredInvariantLedgerProducerPair")
     ].join("\n\n"),
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
   ).outputText;
-
-  let admittedDependencyArtifactDirs = [...initialAdmittedDependencyArtifactDirs];
   const derivationInputs: DerivePromptArtifactAuthorityInput[] = [];
   const loaded = new Function(
     "path",
     "realpathSync",
-    "statSync",
-    "assertRegularFileInside",
-    "isStrictlyInsideDirectory",
-    "readRegularFileSnapshot",
-    "derivePromptArtifactAuthority",
-    "admittedDependencyArtifactDirs",
-    "serializePromptArtifactAuthority",
-    "assertDependencyArtifactAdmissionCurrent",
-    "prepareSafeFilePath",
-    "writeFileDurable",
-    "parsePromptArtifactAuthorityBytes",
     "lstatSync",
     "rmSync",
     "isMissingPathError",
-    "MAX_SEALED_TASK_MANIFEST_BYTES",
-    "MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES",
+    "prepareSafeFilePath",
+    "writeFileDurable",
+    "derivePromptArtifactAuthority",
+    "serializePromptArtifactAuthority",
+    "assertDependencyArtifactAdmissionCurrent",
+    "taskSpecs",
     "PROMPT_ARTIFACT_AUTHORITY_DIRECTORY",
     `${emitted}; return {
-      assertUnchanged: assertPromptArtifactAuthorityUnchanged,
       materialize: materializePromptArtifactAuthority,
-      path: promptArtifactAuthorityPath,
       relativePath: promptArtifactAuthorityRelativePath
     };`
   )(
     path,
     fs.realpathSync,
-    fs.statSync,
-    assertRegularFileInside,
-    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
-    readRegularFileSnapshot,
-    (input: DerivePromptArtifactAuthorityInput) => {
-      derivationInputs.push(input);
-      return derivePromptArtifactAuthority(input);
-    },
-    () => admittedDependencyArtifactDirs,
-    serializePromptArtifactAuthority,
-    () => ({ directories: admittedDependencyArtifactDirs }),
-    prepareSafeFilePath,
-    options.writeFileDurable ?? writeFileDurable,
-    parsePromptArtifactAuthorityBytes,
     fs.lstatSync,
     fs.rmSync,
     (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
-    64 * 1024 * 1024,
-    32 * 1024 * 1024,
+    prepareSafeFilePath,
+    writeFileDurable,
+    (derivation: DerivePromptArtifactAuthorityInput) => {
+      derivationInputs.push(derivation);
+      return derivePromptArtifactAuthority(derivation);
+    },
+    serializePromptArtifactAuthority,
+    (task: GeneratedPromptArtifactAuthorityTask) => ({ directories: admittedDependencyArtifactDirs(task) }),
+    taskSpecs,
     ".ultrafuzz/authorities"
-  ) as Pick<
-    ReturnType<typeof loadGeneratedPromptArtifactAuthorityHarness>,
-    "assertUnchanged" | "materialize" | "path" | "relativePath"
-  >;
-
-  return {
-    ...loaded,
-    derivationInputs,
-    setAdmittedDependencyArtifactDirs(directories) {
-      admittedDependencyArtifactDirs = [...directories];
-    }
+  ) as {
+    materialize(task: GeneratedPromptArtifactAuthorityTask): void;
+    relativePath(task: GeneratedPromptArtifactAuthorityTask): string;
   };
-}
-
-function promptAuthorityDeclaredOutput(
-  outputPath: string,
-  contract: ArtifactContractId,
-  primary = false
-): SmithersTaskManifestOutput {
-  const binding = artifactContractSchemaBinding(contract);
-  return {
-    path: outputPath,
-    contract,
-    contractDigest: artifactContractDefinition(contract).digest,
-    ...(binding === undefined
-      ? {}
-      : {
-          schemaFile: binding.schema_file,
-          schemaId: binding.schema_id,
-          schemaSha256: binding.schema_sha256,
-          schemaBundleSha256: binding.schema_bundle_sha256,
-          validatorBuild: binding.validator_build
-        }),
-    primary
-  };
-}
-
-function promptAuthoritySealedTask(input: {
-  attemptId: string;
-  controllerRunRoot: string;
-  dependencies?: readonly SmithersTaskManifestTask[];
-  logicalNodeId?: string;
-  optionalDependencyAttemptIds?: readonly string[];
-  outputs: SmithersTaskManifestOutput[];
-  selectors?: PromptArtifactAuthoritySelector[];
-}): SmithersTaskManifestTask {
-  const dependencies = input.dependencies ?? [];
-  const dependencyAttemptIds = dependencies.map((dependency) => dependency.attemptId);
-  const dependencySmithersNodeIds = dependencies.map((dependency) => dependency.verifierSmithersNodeId);
-  const dependencyArtifactDirs = dependencies.map((dependency) => dependency.artifactDir);
-  const optionalDependencyAttemptIds = new Set(input.optionalDependencyAttemptIds ?? []);
-  const optionalDependencyArtifactDirs = dependencies
-    .filter((dependency) => optionalDependencyAttemptIds.has(dependency.attemptId))
-    .map((dependency) => dependency.artifactDir);
-  const logicalNodeId = input.logicalNodeId ?? input.attemptId;
-  const workspacePath = path.join(input.controllerRunRoot, "workspaces", input.attemptId);
-  const artifactDir = path.join(input.controllerRunRoot, "artifacts", input.attemptId);
-  const sourceRevision = "a".repeat(40);
-  const sourceRef = "refs/ultrafuzz/runs/run-1/source";
-  const resources = { cpu: 1, memoryMiB: 1_024, timeoutSeconds: 60 };
-  const agentChain = [
-    {
-      profileId: "private-profile",
-      agentRef: "CodexAgent",
-      modelName: "controller-model-private",
-      reasoningEffort: "controller-reasoning-private",
-      role: "primary" as const
-    }
-  ];
-  return {
-    attemptId: input.attemptId,
-    concreteNodeId: input.attemptId,
-    logicalNodeId,
-    preparationSmithersNodeId: `prepare:${input.attemptId}`,
-    smithersNodeId: `node:${input.attemptId}`,
-    verifierSmithersNodeId: `verify:${input.attemptId}`,
-    agentRef: "CodexAgent",
-    agentChain,
-    modelName: "controller-model-private",
-    reasoningEffort: "controller-reasoning-private",
-    sourceRevision,
-    sourceRef,
-    dependencies: dependencyAttemptIds,
-    dependencySmithersNodeIds,
-    timeoutMs: 60_000,
-    heartbeatTimeoutMs: 60_000,
-    retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
-    workspacePath,
-    artifactDir,
-    dependencyArtifactDirs,
-    ...(optionalDependencyArtifactDirs.length === 0 ? {} : { optionalDependencyArtifactDirs }),
-    ...(input.selectors === undefined ? {} : { promptArtifactAuthoritySelectors: input.selectors }),
-    execution: { mode: "local", resources, agentCredentialEnv: [] },
-    metadata: {
-      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
-      run: {
-        ultrafuzzRunId: "run-1",
-        smithersWorkflowName: "workflow-run-1",
-        graphVersion: "4",
-        topologyVersion: 2
-      },
-      node: {
-        concreteNodeId: input.attemptId,
-        logicalNodeId,
-        attemptId: input.attemptId,
-        label: logicalNodeId,
-        kind: "agentic"
-      },
-      dependencies: {
-        concreteNodeIds: [...dependencyAttemptIds],
-        attemptIds: [...dependencyAttemptIds],
-        smithersNodeIds: [...dependencySmithersNodeIds]
-      },
-      loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
-      model: {
-        profileId: "private-profile",
-        agentRef: "CodexAgent",
-        modelName: "controller-model-private",
-        reasoningEffort: "controller-reasoning-private",
-        modelIndex: 0,
-        attemptIndex: 0,
-        agentChain
-      },
-      workspace: {
-        primitive: "worktree",
-        path: workspacePath,
-        repoPath: path.dirname(input.controllerRunRoot),
-        trustModel: "skip-permissions",
-        sourceRevision,
-        sourceRef
-      },
-      artifacts: {
-        dir: artifactDir,
-        outputs: input.outputs,
-        manifestPath: path.join(artifactDir, "artifact-manifest.json")
-      },
-      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
-      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
-      execution: { mode: "local", resources }
-    }
-  };
-}
-
-function promptAuthorityManifestFixture(
-  controllerRunRoot: string,
-  selectors: PromptArtifactAuthoritySelector[]
-): SmithersTaskManifestDocument {
-  const required = promptAuthoritySealedTask({
-    attemptId: "required-producer",
-    controllerRunRoot,
-    logicalNodeId: "required-strategy",
-    outputs: [
-      promptAuthorityDeclaredOutput("findings.json", "ultrafuzz/findings@2", true),
-      promptAuthorityDeclaredOutput("generated-tests/manifest.json", "ultrafuzz/generated-tests@3"),
-      promptAuthorityDeclaredOutput("controller-notes.txt", "ultrafuzz/text@1")
-    ]
-  });
-  const optional = promptAuthoritySealedTask({
-    attemptId: "optional-producer",
-    controllerRunRoot,
-    logicalNodeId: "optional-strategy",
-    outputs: [promptAuthorityDeclaredOutput("findings.json", "ultrafuzz/findings@2", true)]
-  });
-  const consumer = promptAuthoritySealedTask({
-    attemptId: "consumer",
-    controllerRunRoot,
-    dependencies: [required, optional],
-    optionalDependencyAttemptIds: [optional.attemptId],
-    outputs: [promptAuthorityDeclaredOutput("report.md", "ultrafuzz/nonempty-markdown@1", true)],
-    selectors
-  });
-  return {
-    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
-    run_id: "run-1",
-    smithers_run_id: "ultrafuzz-run-1",
-    workflow_name: "workflow-run-1",
-    source_revision: "a".repeat(40),
-    source_ref: "refs/ultrafuzz/runs/run-1/source",
-    pinned_submodules: null,
-    tasks: [required, optional, consumer]
-  };
+  return { ...loaded, derivationInputs };
 }
 
 function loadRestoreInvariantSuiteWorkspaceSnapshot(
@@ -7128,7 +6919,7 @@ test("runtime workspace patch publication replaces empty placeholders but reject
 test("a task prompt comes from its relocatable prompt path before the dispatch input's path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const promptStart = source.indexOf("function promptForTask");
-  const promptEnd = source.indexOf("\n\nconst promptArtifactAuthoritySnapshotsByTask", promptStart);
+  const promptEnd = source.indexOf("\n\nfunction promptArtifactAuthorityRelativePath", promptStart);
   assert.ok(promptStart >= 0 && promptEnd > promptStart, source);
   const promptForTask = new Function(
     "readRegularFileSnapshot",
@@ -7163,7 +6954,7 @@ test("generated prompt relocation rebases task-local authority paths without exp
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const promptStart = source.indexOf("function promptForTask");
   const helperStart = source.indexOf("function relocatePromptPath");
-  const helperEnd = source.indexOf("\n\nconst promptArtifactAuthoritySnapshotsByTask", helperStart);
+  const helperEnd = source.indexOf("\n\nfunction promptArtifactAuthorityRelativePath", helperStart);
   assert.ok(promptStart >= 0 && promptStart < helperStart, source);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
@@ -7271,201 +7062,117 @@ test("generated immutable file identities preserve bigint device, inode, size, a
   assert.match(source, /BigInt\(bytes\.length\) !== after\.size/u);
 });
 
-test("generated task-local prompt authority is minimized, tamper-evident, and restored for retries", async () => {
+test("the generated prompt input index lists admitted ancestors' outputs and is rewritten for every attempt", async () => {
   const root = temporaryRoot("ultrafuzz-generated-prompt-authority-");
   try {
-    const controllerRunRoot = path.join(root, "controller-host-private", ".ultrafuzz", "runs", "run-1");
-    const relocatedRunRoot = path.join(root, "execution-b", ".ultrafuzz", "runs", "run-1");
-    const workspacePath = path.join(relocatedRunRoot, "workspaces", "consumer");
-    const requiredDir = path.join(relocatedRunRoot, "artifacts", "required-producer");
-    const optionalDir = path.join(relocatedRunRoot, "artifacts", "optional-producer");
-    const controlsDir = path.join(root, "sealed-snapshot", "controls");
-    const taskManifestPath = path.join(controlsDir, "tasks.json");
-    for (const directory of [workspacePath, requiredDir, optionalDir, controlsDir]) {
-      fs.mkdirSync(directory, { recursive: true });
-    }
-
-    const selectors: PromptArtifactAuthoritySelector[] = [
-      { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
-      {
-        kind: "path",
-        id: promptArtifactAuthorityPathSelectorId(["findings.json"]),
-        paths: ["findings.json"]
+    const runRoot = path.join(root, "project", ".ultrafuzz", "runs", "run-1");
+    const taskSpec = (
+      attemptId: string,
+      logicalNodeId: string,
+      outputs: Array<{ path: string; contract: string }>,
+      dependencies: GeneratedPromptArtifactAuthorityTask[] = []
+    ): GeneratedPromptArtifactAuthorityTask => ({
+      attemptId,
+      runRoot,
+      workspacePath: path.join(runRoot, "workspaces", attemptId),
+      artifactDir: path.join(runRoot, "artifacts", attemptId),
+      dependencyArtifactDirs: dependencies.map((dependency) => dependency.artifactDir),
+      outputs,
+      metadata: {
+        run: { ultrafuzzRunId: "run-1" },
+        node: { logicalNodeId },
+        dependencies: { attemptIds: dependencies.map((dependency) => dependency.attemptId) }
       }
-    ];
-    const manifest = promptAuthorityManifestFixture(controllerRunRoot, selectors);
-    const sealedManifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-    writeFileDurable(taskManifestPath, sealedManifestBytes);
-    const task: GeneratedPromptArtifactAuthorityTask & { agentChain: [Record<string, never>] } = {
-      attemptId: "consumer",
-      runRoot: relocatedRunRoot,
-      taskManifestPath,
-      workspacePath,
-      promptArtifactAuthoritySelectors: selectors,
-      agentChain: [{}]
-    };
-    const harness = loadGeneratedPromptArtifactAuthorityHarness([requiredDir]);
-    const authorityPath = path.join(workspacePath, ".ultrafuzz", "authorities", "consumer.json");
-
-    harness.materialize(task);
-    assert.equal(harness.relativePath(task), ".ultrafuzz/authorities/consumer.json");
-    assert.equal(harness.path(task, fs.realpathSync(workspacePath)), authorityPath);
-    assert.equal(harness.derivationInputs.length, 1);
-    assert.equal(harness.derivationInputs[0]!.selectors, selectors);
-    assert.deepEqual(harness.derivationInputs[0]!.admittedDependencyArtifactDirs, [requiredDir]);
-    assert.deepEqual(Buffer.from(harness.derivationInputs[0]!.sealedTaskManifestBytes), sealedManifestBytes);
-
-    const originalBytes = fs.readFileSync(authorityPath);
-    const original = parsePromptArtifactAuthorityBytes(originalBytes);
-    assert.deepEqual(original.selectors, selectors);
-    assert.equal(original.artifact_path_base, fs.realpathSync(relocatedRunRoot));
-    assert.deepEqual(
-      original.producers.map((producer) => producer.attempt_id),
-      ["required-producer"]
-    );
-    assert.deepEqual(original.producers[0]?.outputs, [
+    });
+    const required = taskSpec("required-producer", "required-strategy", [
       { path: "findings.json", contract: "ultrafuzz/findings@2" },
-      { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" }
+      { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" },
+      { path: "controller-notes.txt", contract: "ultrafuzz/text@1" }
     ]);
-    const exposedJson = originalBytes.toString("utf8");
-    assert.equal(exposedJson.includes(controllerRunRoot), false);
-    assert.equal(exposedJson.includes(taskManifestPath), false);
-    assert.doesNotMatch(
-      exposedJson,
-      /controller-(?:host|model|reasoning)|private-profile|source_revision|source_ref|workspacePath|workspace_path|dependencyArtifactDirs|tasks\.json/u
+    const optional = taskSpec("optional-producer", "optional-strategy", [
+      { path: "findings.json", contract: "ultrafuzz/findings@2" }
+    ]);
+    const consumer = taskSpec(
+      "consumer",
+      "consumer",
+      [{ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }],
+      [required, optional]
     );
+    // A task whose prompt names no artifact authority gets the index too.
+    const first = taskSpec("first", "first", [{ path: "notes.md", contract: "ultrafuzz/nonempty-markdown@1" }]);
+    for (const task of [required, optional, consumer, first]) fs.mkdirSync(task.workspacePath, { recursive: true });
+    let admitted = [required.artifactDir];
+    const harness = loadGeneratedPromptArtifactAuthorityHarness([required, optional, consumer, first], (task) =>
+      task === consumer ? admitted : []
+    );
+    const authorityPath = path.join(consumer.workspacePath, ".ultrafuzz", "authorities", "consumer.json");
 
-    harness.setAdmittedDependencyArtifactDirs([requiredDir, optionalDir]);
-    harness.materialize(task);
+    harness.materialize(consumer);
+    assert.equal(harness.relativePath(consumer), ".ultrafuzz/authorities/consumer.json");
+    assert.deepEqual(
+      harness.derivationInputs.map((derivation) => derivation.admittedDependencyArtifactDirs),
+      [[required.artifactDir]]
+    );
+    const originalBytes = fs.readFileSync(authorityPath);
+    assert.deepEqual(parsePromptArtifactAuthorityBytes(originalBytes), {
+      schema_version: "ultrafuzz.prompt-artifact-authority.v1",
+      run_id: "run-1",
+      attempt_id: "consumer",
+      artifact_path_base: fs.realpathSync(runRoot),
+      producers: [
+        {
+          attempt_id: "required-producer",
+          logical_node_id: "required-strategy",
+          artifact_dir: "artifacts/required-producer",
+          outputs: [
+            { path: "controller-notes.txt", contract: "ultrafuzz/text@1" },
+            { path: "findings.json", contract: "ultrafuzz/findings@2" },
+            { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" }
+          ]
+        }
+      ]
+    });
+
+    admitted = [required.artifactDir, optional.artifactDir];
+    harness.materialize(consumer);
     assert.deepEqual(
       parsePromptArtifactAuthorityBytes(fs.readFileSync(authorityPath)).producers.map(
         (producer) => producer.attempt_id
       ),
       ["optional-producer", "required-producer"]
     );
-    harness.setAdmittedDependencyArtifactDirs([requiredDir]);
-    harness.materialize(task);
-    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    admitted = [required.artifactDir];
 
-    fs.writeFileSync(taskManifestPath, "{}\n", "utf8");
-    assert.throws(() => harness.materialize(task), /Smithers task manifest violates its registered schema/u);
-    assert.ok(harness.derivationInputs.length >= 4);
-    writeFileDurable(taskManifestPath, sealedManifestBytes);
-    harness.materialize(task);
-    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    harness.materialize(first);
+    assert.deepEqual(
+      parsePromptArtifactAuthorityBytes(
+        fs.readFileSync(path.join(first.workspacePath, ".ultrafuzz", "authorities", "first.json"))
+      ).producers,
+      []
+    );
 
-    const lifecycle: string[] = [];
+    // Each attempt starts from the index, whatever the previous attempt left at its path.
     let generation = 0;
-    const wrapped = loadArtifactAwareAgent({
-      onAuthorityCheck: () => {
-        lifecycle.push("check");
-        harness.assertUnchanged(task);
-      },
-      onReset: () => {
-        lifecycle.push("materialize");
-        harness.materialize(task);
-      },
-      onSourceVerify: () => lifecycle.push("source")
-    })(task, 0, "prompt", {
+    const agentTask = { ...consumer, agentChain: [{}] };
+    const wrapped = loadArtifactAwareAgent({ onReset: () => harness.materialize(consumer) })(agentTask, 0, "prompt", {
       async generate(): Promise<unknown> {
         generation += 1;
-        lifecycle.push(`generate-${generation}`);
         assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
-        if (generation === 3) throw new Error("provider failed after reading exact authority");
+        fs.writeFileSync(authorityPath, "{}\n", "utf8");
         return { summary: `generation-${generation}` };
       }
     });
-    assert.deepEqual(await wrapped.generate({ taskContext: { attempt: 1 } }), {
-      summary: "generation-1",
-      _output: { completed: true }
-    });
-    assert.deepEqual(
-      await wrapped.generate({
-        messages: [{ role: "user", content: "correct the schema" }],
-        taskContext: { attempt: 1 }
-      }),
-      { summary: "generation-2", _output: { completed: true } }
-    );
-    await assert.rejects(
-      () => wrapped.generate({ taskContext: { attempt: 2 } }),
-      /provider failed after reading exact authority/u
-    );
-    assert.deepEqual(lifecycle, [
-      "source",
-      "materialize",
-      "generate-1",
-      "check",
-      "check",
-      "generate-2",
-      "check",
-      "source",
-      "materialize",
-      "generate-3",
-      "check"
-    ]);
+    await wrapped.generate({ taskContext: { attempt: 1 } });
+    await wrapped.generate({ taskContext: { attempt: 2 } });
+    assert.equal(generation, 2);
 
-    const tamperedDocument = structuredClone(original) as PromptArtifactAuthorityDocument;
-    tamperedDocument.run_id = "tampered-run";
-    const tamperedBytes = serializePromptArtifactAuthority(tamperedDocument);
-    for (const outcome of ["success", "failure", "schema-correction"] as const) {
-      let calls = 0;
-      const tamperAware = loadArtifactAwareAgent({
-        onAuthorityCheck: () => harness.assertUnchanged(task),
-        onReset: () => harness.materialize(task)
-      })(task, 0, "prompt", {
-        async generate(): Promise<unknown> {
-          calls += 1;
-          const shouldTamper = outcome !== "schema-correction" || calls === 2;
-          if (shouldTamper) fs.writeFileSync(authorityPath, tamperedBytes);
-          if (outcome === "failure") throw new Error("provider failure must not hide authority tampering");
-          return { summary: "candidate" };
-        }
-      });
-      if (outcome === "schema-correction") {
-        assert.deepEqual(await tamperAware.generate({ taskContext: { attempt: 1 } }), {
-          summary: "candidate",
-          _output: { completed: true }
-        });
-      }
-      await assert.rejects(
-        () =>
-          tamperAware.generate({
-            ...(outcome === "schema-correction" ? { messages: [{ role: "user", content: "schema correction" }] } : {}),
-            taskContext: { attempt: 1 }
-          }),
-        /prompt artifact authority was modified consumer/u,
-        outcome
-      );
-    }
-
-    harness.materialize(task);
-    fs.writeFileSync(authorityPath, tamperedBytes);
-    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority was modified consumer/u);
-    harness.materialize(task);
-    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes, "retry rematerialization restores exact bytes");
-
-    const identicalReplacementPath = path.join(workspacePath, ".ultrafuzz", "identical-authority.json");
-    fs.writeFileSync(identicalReplacementPath, originalBytes);
-    fs.renameSync(identicalReplacementPath, authorityPath);
-    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
-    assert.throws(
-      () => harness.assertUnchanged(task),
-      /prompt artifact authority was modified consumer/u,
-      "an identical-byte inode replacement must not preserve authority"
-    );
-    harness.materialize(task);
-
-    fs.rmSync(authorityPath);
-    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority is unavailable consumer/u);
-    harness.materialize(task);
-    const linkedAuthorityTarget = path.join(workspacePath, ".ultrafuzz", "linked-authority.json");
-    fs.writeFileSync(linkedAuthorityTarget, originalBytes);
+    const linkedAuthorityTarget = path.join(consumer.workspacePath, ".ultrafuzz", "linked-authority.json");
+    fs.writeFileSync(linkedAuthorityTarget, "{}\n", "utf8");
     fs.rmSync(authorityPath);
     fs.symlinkSync(linkedAuthorityTarget, authorityPath);
-    assert.throws(() => harness.assertUnchanged(task), /prompt artifact authority is unavailable consumer/u);
-    harness.materialize(task);
-    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
+    harness.materialize(consumer);
     assert.equal(fs.lstatSync(authorityPath).isSymbolicLink(), false);
+    assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
 
     for (const directoryContents of [undefined, "hostile/retained.txt"] as const) {
       fs.rmSync(authorityPath);
@@ -7475,21 +7182,10 @@ test("generated task-local prompt authority is minimized, tamper-evident, and re
         fs.mkdirSync(path.dirname(retainedPath), { recursive: true });
         fs.writeFileSync(retainedPath, "model-owned directory entry\n", "utf8");
       }
-      harness.materialize(task);
+      harness.materialize(consumer);
       assert.equal(fs.lstatSync(authorityPath).isFile(), true);
       assert.deepEqual(fs.readFileSync(authorityPath), originalBytes);
-      assert.doesNotThrow(() => harness.assertUnchanged(task));
     }
-
-    // The model must read exactly the derived bytes: a schema-valid re-serialization is still rejected.
-    const reserializing = loadGeneratedPromptArtifactAuthorityHarness([requiredDir], {
-      writeFileDurable: (target, contents) =>
-        writeFileDurable(target, `${JSON.stringify(JSON.parse(Buffer.from(contents).toString("utf8")))}\n`)
-    });
-    assert.throws(
-      () => reserializing.materialize(task),
-      /prompt artifact authority changed while materialized consumer/u
-    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -7651,7 +7347,6 @@ function loadTaskSpecProjections(input: {
     "topologyRuntimeContextForTimeout",
     "topologyRuntimeBudgetForTimeout",
     "__ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__",
-    "__ULTRAFUZZ_RUN_ROOT_RELATIVE__",
     "__ULTRAFUZZ_RUN_ID_LITERAL__",
     `${helpers}; return { hydrateTaskSpec, taskSpecsFromCompiled };`
   )(
@@ -7664,7 +7359,6 @@ function loadTaskSpecProjections(input: {
     () => ({}),
     () => ({ finalizationReserveSeconds: 0 }),
     ".smithers/workflows/ultrafuzz-prompt-paths.tsx",
-    ".ultrafuzz/runs/prompt-paths",
     "prompt-paths"
   ) as ReturnType<typeof loadTaskSpecProjections>;
 }
@@ -7697,7 +7391,6 @@ test("every engine binds an attempt's own prompt file, launched from an executio
       smithersRunId: "ultrafuzz-prompt-paths",
       attemptId: "project-discovery",
       promptPath: runPrompt,
-      sourceTaskManifestPath: path.join(runRoot, "smithers", "tasks.json"),
       workflowPath: nativeWorkflowPath,
       workspacePath: path.join(runRoot, "workspaces", "project-discovery"),
       artifactDir,
@@ -7764,7 +7457,7 @@ function loadTaskPromptInputHarness(
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helpers = ts.transpileModule(
     [
-      templateSlice(source, "function promptForTask", "\nconst promptArtifactAuthoritySnapshotsByTask"),
+      templateSlice(source, "function promptForTask", "\nfunction promptArtifactAuthorityRelativePath"),
       templateSlice(source, "function assertTaskPromptInput", "\n\nfunction assertTaskDependencyInputs")
     ].join("\n"),
     { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }

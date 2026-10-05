@@ -18,7 +18,7 @@ function productionReportSource(): string {
     ["type FinalReportAgentAttempt", "\nfunction baseAgentForProfile"],
     ["function artifactAwareAgent", "\nfunction isStrictlyInsideDirectory"],
     ["function isStrictlyInsideDirectory", "\nfunction isPlainRecord"],
-    ["function prepareTaskLocalAuthorityPath", "\n/**\n * Derive the least-authority"],
+    ["function prepareTaskLocalAuthorityPath", "\n/**\n * Write the task's index of admitted ancestor outputs"],
     ["function isMissingPathError", "\nfunction compareCanonicalRuntimeStrings"],
     ["function resolveRegularArtifactFile", "\nfunction resolveNonEmptyRegularArtifactFile"],
     ["function readBoundedRegularArtifactSnapshot", "\nfunction decodeStrictUtf8Snapshot"],
@@ -83,7 +83,6 @@ const assertWorkspaceSourceRevision = () => {};
 const resetTaskArtifactsForRetry = async () => {};
 const finalReportTaskRuntimeFromAgentArgs = () => undefined;
 const assertDependencyArtifactAdmissionCurrent = () => {};
-const assertPromptArtifactAuthorityUnchanged = () => {};
 const assertFinalReportRunMetadataAuthorityUnchanged = () => {};
 const authoritativeFinalReportRunMetadataArgs = (_task, args) => args;
 const authoritativeFinalReportCoverage = () => baseReport.property_implementation_coverage;

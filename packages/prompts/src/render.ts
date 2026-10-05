@@ -376,7 +376,7 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
         matched.logicalIds,
         graph
       );
-      rendered += renderAncestorArtifactPathAuthority(input, selectorId);
+      rendered += renderAncestorArtifactPathAuthority(input, ancestorArtifactPathAuthority);
       artifactReferences.push({
         kind: "ancestor_artifact_path_authority",
         logicalIds: matched.logicalIds,
@@ -1051,27 +1051,26 @@ function renderPathList(paths: string[]): string {
 }
 
 function renderAncestorContractArtifactAuthority(input: PromptRenderInput, contract: string): string {
-  const authorityPath = promptArtifactAuthorityPath(input);
-  return (
-    `Read the runtime-generated ancestor artifact authority JSON at ${markdownCodeSpan(authorityPath)}. ` +
-    `Confirm its \`attempt_id\` is ${markdownCodeSpan(input.node.concreteId)}. It contains only this task's ` +
-    "verifier-admitted ancestor producers and the outputs selected by its compact prompt selectors; an empty " +
-    "`producers` array means no matching ancestor was admitted. For this intake, use only `producers[].outputs` " +
-    `entries whose \`contract\` is ${markdownCodeSpan(contract)}. Resolve each producer \`artifact_dir\` beneath ` +
-    "`artifact_path_base`, append the output `path`, and reject any absolute or escaping result."
+  return renderAncestorArtifactAuthority(input, `whose \`contract\` is ${markdownCodeSpan(contract)}`);
+}
+
+function renderAncestorArtifactPathAuthority(input: PromptRenderInput, paths: readonly string[]): string {
+  const listed = paths.map((artifactPath) => markdownCodeSpan(artifactPath)).join(", ");
+  return renderAncestorArtifactAuthority(
+    input,
+    paths.length === 1 ? `whose declared \`path\` is ${listed}` : `whose declared \`path\` is one of ${listed}`
   );
 }
 
-function renderAncestorArtifactPathAuthority(input: PromptRenderInput, selectorId: string): string {
+function renderAncestorArtifactAuthority(input: PromptRenderInput, outputFilter: string): string {
   const authorityPath = promptArtifactAuthorityPath(input);
   return (
     `Read the runtime-generated ancestor artifact authority JSON at ${markdownCodeSpan(authorityPath)}. ` +
-    `Confirm its \`attempt_id\` is ${markdownCodeSpan(input.node.concreteId)}. It contains only this task's ` +
-    "verifier-admitted ancestor producers and the outputs selected by its compact prompt selectors; an empty " +
-    "`producers` array means no matching ancestor was admitted. For this intake, find the `selectors[]` path " +
-    `entry whose \`id\` is ${markdownCodeSpan(selectorId)}, then use only \`producers[].outputs\` entries whose ` +
-    "declared `path` is listed in that entry's `paths` array. Resolve each producer `artifact_dir` beneath " +
-    "`artifact_path_base`, append the output `path`, and reject any absolute or escaping result."
+    `Confirm its \`attempt_id\` is ${markdownCodeSpan(input.node.concreteId)}. It lists every declared output ` +
+    "of this task's verifier-admitted ancestor producers. For this intake, use only `producers[].outputs` " +
+    `entries ${outputFilter}; when none match, no matching ancestor was admitted. Resolve each producer ` +
+    "`artifact_dir` beneath `artifact_path_base`, append the output `path`, and reject any absolute or escaping " +
+    "result."
   );
 }
 

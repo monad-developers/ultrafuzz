@@ -4,15 +4,11 @@ import {
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   isArtifactContractId,
-  MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
-  MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
-  parseSmithersTaskManifestBytes,
   parseStrictJsonBytes,
-  promptArtifactAuthorityPathSelectorId,
-  type ArtifactContractId,
-  type SmithersTaskManifestPromptArtifactAuthoritySelector,
-  type SmithersTaskManifestTask
+  type ArtifactContractId
 } from "@ultrafuzz/artifacts";
+
+import { declaredAncestorOutputs, type SemanticArtifactTaskDeclaration } from "./semantic-artifact-context.js";
 
 export const PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION = "ultrafuzz.prompt-artifact-authority.v1" as const;
 export const PROMPT_ARTIFACT_AUTHORITY_JSON_SCHEMA_ID =
@@ -32,44 +28,12 @@ export const promptArtifactAuthorityJsonSchema = {
   title: "Ultrafuzz per-task prompt artifact authority",
   type: "object",
   additionalProperties: false,
-  required: ["schema_version", "run_id", "attempt_id", "artifact_path_base", "selectors", "producers"],
+  required: ["schema_version", "run_id", "attempt_id", "artifact_path_base", "producers"],
   properties: {
     schema_version: { const: PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION },
     run_id: { type: "string", pattern: SAFE_ID_PATTERN },
     attempt_id: { type: "string", pattern: SAFE_ID_PATTERN },
     artifact_path_base: { type: "string", minLength: 1, maxLength: 4_096 },
-    selectors: {
-      type: "array",
-      minItems: 1,
-      maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS,
-      uniqueItems: true,
-      items: {
-        oneOf: [
-          {
-            type: "object",
-            additionalProperties: false,
-            required: ["kind", "contract"],
-            properties: { kind: { const: "contract" }, contract: { enum: ARTIFACT_CONTRACT_IDS } }
-          },
-          {
-            type: "object",
-            additionalProperties: false,
-            required: ["kind", "id", "paths"],
-            properties: {
-              kind: { const: "path" },
-              id: { type: "string", pattern: "^[0-9a-f]{64}$" },
-              paths: {
-                type: "array",
-                minItems: 1,
-                maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
-                uniqueItems: true,
-                items: { type: "string", pattern: CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN }
-              }
-            }
-          }
-        ]
-      }
-    },
     producers: {
       type: "array",
       maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS,
@@ -104,20 +68,6 @@ export const promptArtifactAuthorityJsonSchema = {
   }
 } as const;
 
-export interface PromptArtifactAuthorityContractSelector {
-  kind: "contract";
-  contract: ArtifactContractId;
-}
-
-export interface PromptArtifactAuthorityPathSelector {
-  kind: "path";
-  id: string;
-  paths: readonly string[];
-}
-
-export type PromptArtifactAuthoritySelector =
-  PromptArtifactAuthorityContractSelector | PromptArtifactAuthorityPathSelector;
-
 export interface PromptArtifactAuthorityOutput {
   path: string;
   contract: ArtifactContractId;
@@ -132,117 +82,69 @@ export interface PromptArtifactAuthorityProducer {
 }
 
 /**
- * The minimized artifact declaration exposed to one agent attempt.
+ * The index of one agent attempt's admitted ancestor outputs.
  *
  * `artifact_path_base` is the absolute run root in the current execution
- * environment. All other paths are canonical relative paths, so sealed
- * controller-host paths never enter this document.
+ * environment. All other paths are canonical relative paths.
  */
 export interface PromptArtifactAuthorityDocument {
   schema_version: typeof PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION;
   run_id: string;
   attempt_id: string;
   artifact_path_base: string;
-  selectors: PromptArtifactAuthoritySelector[];
   producers: PromptArtifactAuthorityProducer[];
 }
 
 export interface DerivePromptArtifactAuthorityInput {
-  /** Exact bytes read from the sealed execution snapshot's `controls/tasks.json`. */
-  sealedTaskManifestBytes: Uint8Array;
-  currentAttemptId: string;
-  /** Absolute run root after execution relocation. */
-  relocatedRunRoot: string;
-  /**
-   * Exact relocated ancestor directories admitted after dependency
-   * authentication. Every required directory must be present. Optional
-   * directories without an admitted verifier marker must be omitted.
-   */
+  runId: string;
+  /** The current attempt's declaration in the live task plan, after dynamic expansion. */
+  current: SemanticArtifactTaskDeclaration;
+  /** Every task declaration in that plan. */
+  tasks: readonly SemanticArtifactTaskDeclaration[];
+  /** Absolute run root in the current execution environment. */
+  artifactPathBase: string;
+  /** The ancestor directories admitted after dependency authentication. Only their producers are listed. */
   admittedDependencyArtifactDirs: readonly string[];
-  /** Canonical compact selector groups sealed for this task's prompt. */
-  selectors: readonly SmithersTaskManifestPromptArtifactAuthoritySelector[];
 }
 
 /**
- * Derive the portable, least-authority artifact view for one task.
+ * Index every declared output of the current task's admitted ancestors.
  *
- * The sealed task manifest is parsed and semantically validated from bytes on
- * every call. The result contains only admitted ancestor producers and only
- * their outputs selected by the current prompt.
+ * The producers come from the task plan the workflow is running, so a task
+ * that waits on a dynamic group sees the children that group generated.
  */
 export function derivePromptArtifactAuthority(
   input: DerivePromptArtifactAuthorityInput
 ): PromptArtifactAuthorityDocument {
-  assertSafeId(input.currentAttemptId, "current attempt ID");
-  const manifest = parseSmithersTaskManifestBytes(input.sealedTaskManifestBytes);
-  const current = manifest.tasks.find((task) => task.attemptId === input.currentAttemptId);
-  if (current === undefined) {
-    throw new Error(
-      `prompt artifact authority cannot find current attempt ${JSON.stringify(input.currentAttemptId)} in the sealed task manifest`
-    );
-  }
-  const selectors = normalizeSelectors(input.selectors);
-  const sealedSelectors = normalizeSelectors(current.promptArtifactAuthoritySelectors ?? []);
-  if (JSON.stringify(selectors) !== JSON.stringify(sealedSelectors)) {
-    throw new Error("prompt artifact authority selectors do not match the sealed current-task declaration");
-  }
-
-  const relocatedRunRoot = canonicalAbsolutePath(input.relocatedRunRoot, "relocated run root");
-  const sourceCurrentArtifactDir = canonicalAbsolutePath(current.artifactDir, "sealed current-task artifact directory");
-  const sourceRunRoot = path.dirname(path.dirname(sourceCurrentArtifactDir));
-  assertExactArtifactDirectory(
-    relativePathInside(sourceRunRoot, sourceCurrentArtifactDir, "sealed current-task artifact directory"),
-    current.attemptId,
-    "sealed current-task artifact directory"
+  const artifactPathBase = canonicalAbsolutePath(input.artifactPathBase, "artifact path base");
+  const runRoot = path.dirname(
+    path.dirname(canonicalAbsolutePath(input.current.artifactDir, "task artifact directory"))
   );
-
-  const tasksBySourceArtifactDir = indexSealedTasksByArtifactDirectory(manifest.tasks, sourceRunRoot);
-  const declaredDependencies = indexDeclaredDependencies(current, sourceRunRoot);
-  const optionalDependencies = new Set(
-    (current.optionalDependencyArtifactDirs ?? []).map((directory) => {
-      const relative = relativePathInside(
-        sourceRunRoot,
-        canonicalAbsolutePath(directory, "sealed optional dependency artifact directory"),
-        "sealed optional dependency artifact directory"
-      );
-      if (!declaredDependencies.has(relative)) {
-        throw new Error(
-          `prompt artifact authority optional dependency is outside the current task's declared closure: ${JSON.stringify(relative)}`
-        );
-      }
-      return relative;
-    })
-  );
-
-  const admittedDependencies = indexAdmittedDependencies(
-    input.admittedDependencyArtifactDirs,
-    relocatedRunRoot,
-    declaredDependencies
-  );
-  for (const relative of declaredDependencies.keys()) {
-    if (!optionalDependencies.has(relative) && !admittedDependencies.has(relative)) {
-      throw new Error(`prompt artifact authority is missing required admitted dependency ${JSON.stringify(relative)}`);
+  const admitted = new Set(input.admittedDependencyArtifactDirs.map((directory) => path.resolve(directory)));
+  const producersByAttempt = new Map<string, PromptArtifactAuthorityProducer>();
+  for (const output of declaredAncestorOutputs(input.current, input.tasks)) {
+    if (!admitted.has(path.resolve(output.artifactDir))) continue;
+    const contract = output.contract;
+    if (!isArtifactContractId(contract)) {
+      throw new Error(`prompt artifact authority ancestor ${output.attemptId} declares an unknown contract`);
     }
+    let producer = producersByAttempt.get(output.attemptId);
+    if (producer === undefined) {
+      producer = {
+        attempt_id: output.attemptId,
+        logical_node_id: output.logicalNodeId,
+        artifact_dir: relativePathInside(runRoot, path.resolve(output.artifactDir), "producer artifact directory"),
+        outputs: []
+      };
+      producersByAttempt.set(output.attemptId, producer);
+    }
+    producer.outputs.push({ path: output.path, contract });
   }
-
-  const selectedContracts = new Set(
-    selectors.flatMap((selector) => (selector.kind === "contract" ? [selector.contract] : []))
-  );
-  const selectedPaths = new Set(selectors.flatMap((selector) => (selector.kind === "path" ? selector.paths : [])));
-  const producers: PromptArtifactAuthorityProducer[] = [];
-  for (const relativeDirectory of [...admittedDependencies].sort(compareCodeUnits)) {
-    const sourceDirectory = declaredDependencies.get(relativeDirectory)!;
-    const producer = tasksBySourceArtifactDir.get(sourceDirectory);
-    // Reference ancestors have artifact roots but no agentic task declaration.
-    if (producer === undefined) continue;
-    const outputs = selectedProducerOutputs(producer, selectedContracts, selectedPaths);
-    if (outputs.length === 0) continue;
-    producers.push({
-      attempt_id: producer.attemptId,
-      logical_node_id: producer.logicalNodeId,
-      artifact_dir: relativeDirectory,
-      outputs
-    });
+  const producers = [...producersByAttempt.values()];
+  for (const producer of producers) {
+    producer.outputs.sort(
+      (left, right) => compareCodeUnits(left.path, right.path) || compareCodeUnits(left.contract, right.contract)
+    );
   }
   producers.sort(
     (left, right) =>
@@ -251,10 +153,9 @@ export function derivePromptArtifactAuthority(
 
   const document: PromptArtifactAuthorityDocument = {
     schema_version: PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION,
-    run_id: manifest.run_id,
-    attempt_id: current.attemptId,
-    artifact_path_base: relocatedRunRoot,
-    selectors,
+    run_id: input.runId,
+    attempt_id: input.current.attemptId,
+    artifact_path_base: artifactPathBase,
     producers
   };
   assertValidPromptArtifactAuthority(document);
@@ -266,11 +167,7 @@ export function parsePromptArtifactAuthorityBytes(bytes: Uint8Array): PromptArti
   const value = parseStrictJsonBytes(bytes, {
     maxBytes: MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
     maxDepth: 8,
-    maxItems:
-      MAX_PROMPT_ARTIFACT_AUTHORITY_OUTPUTS +
-      MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS +
-      MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS +
-      MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS,
+    maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_OUTPUTS + MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS,
     maxProperties: 4 * MAX_PROMPT_ARTIFACT_AUTHORITY_OUTPUTS + 8 * MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS
   });
   assertValidPromptArtifactAuthority(value);
@@ -292,7 +189,7 @@ export function serializePromptArtifactAuthority(document: PromptArtifactAuthori
 export function assertValidPromptArtifactAuthority(value: unknown): asserts value is PromptArtifactAuthorityDocument {
   const document = exactRecord(
     value,
-    ["schema_version", "run_id", "attempt_id", "artifact_path_base", "selectors", "producers"],
+    ["schema_version", "run_id", "attempt_id", "artifact_path_base", "producers"],
     "prompt artifact authority"
   );
   if (document.schema_version !== PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION) {
@@ -301,31 +198,6 @@ export function assertValidPromptArtifactAuthority(value: unknown): asserts valu
   assertSafeId(document.run_id, "prompt artifact authority run ID");
   assertSafeId(document.attempt_id, "prompt artifact authority attempt ID");
   canonicalAbsolutePath(document.artifact_path_base, "prompt artifact authority artifact path base");
-
-  if (
-    !Array.isArray(document.selectors) ||
-    document.selectors.length === 0 ||
-    document.selectors.length > MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS
-  ) {
-    throw new Error("prompt artifact authority selectors must be a non-empty bounded array");
-  }
-  const selectorKeys: string[] = [];
-  const selectedContracts = new Set<ArtifactContractId>();
-  const selectedPaths = new Set<string>();
-  let totalSelectorPaths = 0;
-  for (const [index, valueSelector] of document.selectors.entries()) {
-    const selector = validateSelector(valueSelector, `prompt artifact authority selector ${index}`);
-    selectorKeys.push(selectorKey(selector));
-    if (selector.kind === "contract") selectedContracts.add(selector.contract);
-    else {
-      totalSelectorPaths += selector.paths.length;
-      if (totalSelectorPaths > MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS) {
-        throw new Error("prompt artifact authority has too many selected paths");
-      }
-      for (const selectedPath of selector.paths) selectedPaths.add(selectedPath);
-    }
-  }
-  assertCanonicalUniqueOrder(selectorKeys, "prompt artifact authority selectors");
 
   if (!Array.isArray(document.producers) || document.producers.length > MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS) {
     throw new Error("prompt artifact authority producers must be a bounded array");
@@ -394,11 +266,6 @@ export function assertValidPromptArtifactAuthority(value: unknown): asserts valu
           `prompt artifact authority producer ${producerIndex} output ${outputIndex} has an unknown contract`
         );
       }
-      if (!selectedContracts.has(output.contract) && !selectedPaths.has(outputPath)) {
-        throw new Error(
-          `prompt artifact authority producer ${producerIndex} output ${outputIndex} is outside the declared selectors`
-        );
-      }
       if (outputPaths.has(outputPath)) {
         throw new Error(
           `prompt artifact authority producer ${producerIndex} repeats output path ${JSON.stringify(outputPath)}`
@@ -412,160 +279,6 @@ export function assertValidPromptArtifactAuthority(value: unknown): asserts valu
       priorOutputKey = outputKey;
     }
   }
-}
-
-function indexSealedTasksByArtifactDirectory(
-  tasks: readonly SmithersTaskManifestTask[],
-  sourceRunRoot: string
-): ReadonlyMap<string, SmithersTaskManifestTask> {
-  const tasksByArtifactDirectory = new Map<string, SmithersTaskManifestTask>();
-  for (const task of tasks) {
-    const sourceArtifactDirectory = canonicalAbsolutePath(task.artifactDir, "sealed task artifact directory");
-    const relativeDirectory = relativePathInside(
-      sourceRunRoot,
-      sourceArtifactDirectory,
-      "sealed task artifact directory"
-    );
-    assertExactArtifactDirectory(relativeDirectory, task.attemptId, "sealed task artifact directory");
-    if (tasksByArtifactDirectory.has(sourceArtifactDirectory)) {
-      throw new Error(`sealed task manifest repeats artifact directory ${JSON.stringify(sourceArtifactDirectory)}`);
-    }
-    tasksByArtifactDirectory.set(sourceArtifactDirectory, task);
-  }
-  return tasksByArtifactDirectory;
-}
-
-function indexDeclaredDependencies(
-  current: SmithersTaskManifestTask,
-  sourceRunRoot: string
-): ReadonlyMap<string, string> {
-  const dependencies = new Map<string, string>();
-  for (const directory of current.dependencyArtifactDirs) {
-    const sourceDirectory = canonicalAbsolutePath(directory, "sealed dependency artifact directory");
-    const relativeDirectory = relativePathInside(
-      sourceRunRoot,
-      sourceDirectory,
-      "sealed dependency artifact directory"
-    );
-    assertArtifactDirectory(relativeDirectory, "sealed dependency artifact directory");
-    if (dependencies.has(relativeDirectory)) {
-      throw new Error(`sealed current task repeats dependency artifact directory ${JSON.stringify(relativeDirectory)}`);
-    }
-    dependencies.set(relativeDirectory, sourceDirectory);
-  }
-  return dependencies;
-}
-
-function indexAdmittedDependencies(
-  directories: readonly string[],
-  relocatedRunRoot: string,
-  declaredDependencies: ReadonlyMap<string, string>
-): ReadonlySet<string> {
-  if (!Array.isArray(directories)) {
-    throw new Error("prompt artifact authority admitted dependency directories must be an array");
-  }
-  const admitted = new Set<string>();
-  for (const directory of directories) {
-    const relocatedDirectory = canonicalAbsolutePath(directory, "admitted dependency artifact directory");
-    const relativeDirectory = relativePathInside(
-      relocatedRunRoot,
-      relocatedDirectory,
-      "admitted dependency artifact directory"
-    );
-    assertArtifactDirectory(relativeDirectory, "admitted dependency artifact directory");
-    if (!declaredDependencies.has(relativeDirectory)) {
-      throw new Error(
-        `prompt artifact authority admitted dependency is outside the sealed ancestor closure: ${JSON.stringify(relativeDirectory)}`
-      );
-    }
-    if (admitted.has(relativeDirectory)) {
-      throw new Error(`prompt artifact authority repeats admitted dependency ${JSON.stringify(relativeDirectory)}`);
-    }
-    admitted.add(relativeDirectory);
-  }
-  return admitted;
-}
-
-function selectedProducerOutputs(
-  producer: SmithersTaskManifestTask,
-  selectedContracts: ReadonlySet<ArtifactContractId>,
-  selectedPaths: ReadonlySet<string>
-): PromptArtifactAuthorityOutput[] {
-  const seenPaths = new Set<string>();
-  const selected: PromptArtifactAuthorityOutput[] = [];
-  for (const output of producer.metadata.artifacts.outputs) {
-    const outputPath = canonicalRelativePath(
-      output.path,
-      `sealed producer ${JSON.stringify(producer.attemptId)} output path`
-    );
-    if (seenPaths.has(outputPath)) {
-      throw new Error(
-        `sealed producer ${JSON.stringify(producer.attemptId)} repeats output path ${JSON.stringify(outputPath)}`
-      );
-    }
-    seenPaths.add(outputPath);
-    if (!selectedContracts.has(output.contract) && !selectedPaths.has(outputPath)) continue;
-    selected.push({ path: outputPath, contract: output.contract });
-  }
-  selected.sort(
-    (left, right) => compareCodeUnits(left.path, right.path) || compareCodeUnits(left.contract, right.contract)
-  );
-  return selected;
-}
-
-function normalizeSelectors(selectors: readonly PromptArtifactAuthoritySelector[]): PromptArtifactAuthoritySelector[] {
-  if (!Array.isArray(selectors) || selectors.length === 0) {
-    throw new Error("prompt artifact authority requires at least one output selector");
-  }
-  if (selectors.length > MAX_PROMPT_ARTIFACT_AUTHORITY_SELECTORS) {
-    throw new Error("prompt artifact authority has too many output selectors");
-  }
-  const normalized = selectors.map((selector, index) =>
-    validateSelector(selector, `prompt artifact authority input selector ${index}`)
-  );
-  const seen = new Set<string>();
-  for (const selector of normalized) {
-    const key = selectorKey(selector);
-    if (seen.has(key)) {
-      throw new Error(`prompt artifact authority repeats selector ${JSON.stringify(key)}`);
-    }
-    seen.add(key);
-  }
-  return normalized.sort((left, right) => compareCodeUnits(selectorKey(left), selectorKey(right)));
-}
-
-function validateSelector(value: unknown, label: string): PromptArtifactAuthoritySelector {
-  if (!isPlainRecord(value) || (value.kind !== "contract" && value.kind !== "path")) {
-    throw new Error(`${label} is invalid`);
-  }
-  if (value.kind === "contract") {
-    exactRecord(value, ["kind", "contract"], label);
-    if (!isArtifactContractId(value.contract)) throw new Error(`${label} has an unknown artifact contract`);
-    return { kind: "contract", contract: value.contract };
-  }
-  exactRecord(value, ["kind", "id", "paths"], label);
-  if (typeof value.id !== "string" || !/^[0-9a-f]{64}$/u.test(value.id)) {
-    throw new Error(`${label} has an invalid selector ID`);
-  }
-  if (
-    !Array.isArray(value.paths) ||
-    value.paths.length === 0 ||
-    value.paths.length > MAX_PROMPT_ARTIFACT_AUTHORITY_PATHS
-  ) {
-    throw new Error(`${label} paths must be a non-empty bounded array`);
-  }
-  const paths = value.paths.map((selectedPath, index) => canonicalRelativePath(selectedPath, `${label} path ${index}`));
-  // Sealed selectors keep the path order they were planned with, which was host
-  // collation before code-unit ordering; the ID below binds that exact list.
-  if (new Set(paths).size !== paths.length) throw new Error(`${label} paths are duplicated`);
-  if (value.id !== promptArtifactAuthorityPathSelectorId(paths)) {
-    throw new Error(`${label} ID does not match its paths`);
-  }
-  return { kind: "path", id: value.id, paths };
-}
-
-function selectorKey(selector: PromptArtifactAuthoritySelector): string {
-  return selector.kind === "contract" ? `contract\u0000${selector.contract}` : `path\u0000${selector.id}`;
 }
 
 function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
@@ -628,16 +341,6 @@ function assertExactArtifactDirectory(value: string, attemptId: string, label: s
   assertArtifactDirectory(value, label);
   if (value !== `artifacts/${attemptId}`) {
     throw new Error(`${label} does not match its producer attempt ID`);
-  }
-}
-
-function assertCanonicalUniqueOrder(values: readonly string[], label: string): void {
-  let previous: string | undefined;
-  for (const value of values) {
-    if (previous !== undefined && compareCodeUnits(previous, value) >= 0) {
-      throw new Error(`${label} are duplicated or not canonically ordered`);
-    }
-    previous = value;
   }
 }
 
