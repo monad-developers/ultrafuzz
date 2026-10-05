@@ -1,5 +1,18 @@
 {
   "$schema": "./dependency-advisory-exceptions.schema.json",
   "schema_version": "ultrafuzz.dependency-advisory-exceptions.v1",
-  "exceptions": []
+  "exceptions": [
+    {
+      "advisory": "GHSA-ch52-4w7c-c8xp",
+      "package": "http-cache-semantics",
+      "severity": "high",
+      "status": "not-reachable",
+      "reviewed_on": "2026-10-05",
+      "expires": "2026-11-04",
+      "owner": "@aviggiano",
+      "tracking_issue": "#1278",
+      "reachability": "The only copy is http-cache-semantics 4.2.0 bundled inside the runtime's pinned operator npm (@ultrafuzz/runtime -> npm 11.19.0 -> make-fetch-happen 15.0.6). npm uses it only for its local per-user cacache HTTP cache, and make-fetch-happen creates every cache policy with shared: false. The maxAge() zeroing that the advisory says max-stale bypasses (Set-Cookie without public, proxy-revalidate) runs only for a shared cache, so a private cache has no such entry to disclose. npm never sends a max-stale request directive. Ultrafuzz runs the operator npm only for npm install --ignore-scripts of the pinned workflow runner from registry.npmjs.org in a private controller root, and no Ultrafuzz code serves cached HTTP responses to other users.",
+      "rationale": "No release fixes the max-stale path: http-cache-semantics 4.3.0 (2026-10-04) keeps the same maxAge() and max-stale code and is outside the advisory range only because the range predates it, and npm 12.2.0 still bundles 4.2.0. The upstream maintainer closed the report as not planned and called it bogus (kornelski/http-cache-semantics#56); a withdrawal request is open (github/advisory-database#10139). Remove this entry when the advisory is withdrawn or narrowed, or when npm bundles a release that changes the max-stale handling."
+    }
+  ]
 }
