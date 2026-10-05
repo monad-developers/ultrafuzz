@@ -4691,6 +4691,8 @@ bunAdapterTest(
           'name = "OpenRouter"',
           'base_url = "https://openrouter.ai/api/v1"',
           'wire_api = "responses"',
+          "stream_max_retries = 10",
+          "stream_idle_timeout_ms = 1800000",
           "",
           "[model_providers.openrouter.auth]",
           'command = "node"',
@@ -4718,6 +4720,162 @@ bunAdapterTest(
       }
     }
   })
+);
+
+bunAdapterTest(
+  "generated OpenRouter config lets the real Codex CLI survive more stream disconnects than its default budget (#676)",
+  { timeout: 90_000 },
+  async () => {
+    const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    const realCodexCliAvailable = codexVersion.status === 0 && codexVersion.stdout.includes("codex-cli");
+    // Codex's default stream_max_retries is 5. Dropping one more stream than
+    // that proves the generated provider limits, not Codex's defaults, carried
+    // the turn to completion.
+    const droppedStreams = 6;
+    const responseBodies: string[] = [];
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => (body += chunk));
+      request.on("end", () => {
+        if (request.method !== "POST" || request.url !== "/v1/responses") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end('{"data":[]}');
+          return;
+        }
+        responseBodies.push(body);
+        const id = `resp_fixture_${responseBodies.length}`;
+        const event = (payload: Record<string, unknown>) => `data: ${JSON.stringify(payload)}\n\n`;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write(event({ type: "response.created", response: { id } }));
+        if (responseBodies.length <= droppedStreams) {
+          // Mid-stream transport loss: the response started, then the socket closes.
+          setTimeout(() => response.destroy(), 50);
+          return;
+        }
+        const message = {
+          id: "msg_fixture",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "fixture-ok", annotations: [] }]
+        };
+        response.end(
+          event({ type: "response.output_item.done", output_index: 0, item: message }) +
+            event({
+              type: "response.completed",
+              response: {
+                id,
+                status: "completed",
+                output: [message],
+                usage: {
+                  input_tokens: 1,
+                  input_tokens_details: { cached_tokens: 0 },
+                  output_tokens: 1,
+                  output_tokens_details: { reasoning_tokens: 0 },
+                  total_tokens: 2
+                }
+              }
+            })
+        );
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    server.unref();
+
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const providerHomeRoot = path.join(project, "operator-provider-homes");
+    const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-stream-codex");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"',
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"\nconfig_dir = "openrouter-stream-codex"'
+        ),
+      "utf8"
+    );
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
+      openRouterKey: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    process.env.OPENROUTER_API_KEY = "openrouter-stream-test-key";
+    try {
+      const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+      const agent = createOpenRouterAgent({ model: "fixture/model" }) as unknown as {
+        opts: { env: Record<string, string> };
+        buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+          command: string;
+          args: string[];
+          env?: Record<string, string>;
+          stdin?: string;
+          cleanup?: () => Promise<void>;
+        }>;
+      };
+      const providerConfigPath = path.join(codexHome, "config.toml");
+      const providerConfig = fs.readFileSync(providerConfigPath, "utf8");
+      assert.match(providerConfig, /^stream_max_retries = 10$/mu);
+      assert.match(providerConfig, /^stream_idle_timeout_ms = 1800000$/mu);
+      if (!realCodexCliAvailable) {
+        return;
+      }
+
+      // Keep every generated setting, including the transport limits under
+      // test; only the endpoint moves to the local fixture.
+      const address = server.address() as AddressInfo;
+      const generatedBaseUrl = 'base_url = "https://openrouter.ai/api/v1"';
+      assert.equal(providerConfig.split(generatedBaseUrl).length, 2);
+      fs.writeFileSync(
+        providerConfigPath,
+        providerConfig.replace(generatedBaseUrl, `base_url = "http://127.0.0.1:${address.port}/v1"`),
+        "utf8"
+      );
+      const command = await agent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      try {
+        const execution = await runSpawnedCommand({
+          command: command.command,
+          args: command.args,
+          cwd: project,
+          env: { ...process.env, ...agent.opts.env, ...command.env },
+          stdin: command.stdin,
+          timeoutMs: 75_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+        assert.match(execution.stdout, /fixture-ok/u);
+      } finally {
+        await command.cleanup?.();
+      }
+      // Each reconnect re-sends the same turn request inside the same session,
+      // so the work the session already holds is not discarded.
+      assert.equal(responseBodies.length, droppedStreams + 1);
+      // Compare parsed bodies: Codex serializes client_metadata from a hash map,
+      // so its key order can change between otherwise identical requests.
+      const [firstRequest, ...retriedRequests] = responseBodies.map((body) => JSON.parse(body) as unknown);
+      for (const retried of retriedRequests) assert.deepEqual(retried, firstRequest);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.providerHomeRoot === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous.providerHomeRoot;
+      if (previous.openRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouterKey;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
 );
 
 bunAdapterTest(
@@ -27935,6 +28093,66 @@ for (const fixture of [
       }
     });
   }
+}
+
+// A consumer admits its optional inputs in its preparation, which waits for its producers. A failed
+// preparation reruns behind the producer's rerun and can read it, so the producer is retried too. A
+// failed agent or verifier reruns at once on the preparation that already ran without the producer,
+// so the producer stays failed (#1231).
+for (const fixture of [
+  { failed: "prepare:catalog", state: "failed", reset: "prepare:catalog", producerRetried: true },
+  { failed: "prepare:catalog", state: "stalled", reset: "prepare:catalog", producerRetried: true },
+  { failed: "node:catalog", state: "failed", reset: "node:catalog", producerRetried: false },
+  { failed: "verify:catalog", state: "failed", reset: "node:catalog", producerRetried: false }
+] as const) {
+  test(`resume --retry-failed ${fixture.producerRetried ? "retries" : "leaves"} a failed continuing lens when its consumer's ${fixture.failed} is ${fixture.state}`, async () => {
+    const project = writeRetriedLensReviewProject();
+    const runId = `retry-omitted-lens-${fixture.failed.replace(":", "-")}-${fixture.state}`;
+    const preparationFailed = fixture.failed === "prepare:catalog";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId: `ultrafuzz-${runId}`,
+        status: "failed",
+        state: "failed",
+        steps: [
+          { id: "node:lens", state: "failed", attempt: 1 },
+          { id: "prepare:catalog", state: preparationFailed ? fixture.state : "finished", attempt: 1 },
+          ...(preparationFailed
+            ? [
+                { id: "node:catalog", state: "skipped" as const, attempt: 0 },
+                { id: "verify:catalog", state: "skipped" as const, attempt: 0 }
+              ]
+            : fixture.failed === "node:catalog"
+              ? [{ id: "node:catalog", state: fixture.state, attempt: 1 }]
+              : [
+                  { id: "node:catalog", state: "finished" as const, attempt: 1 },
+                  { id: "verify:catalog", state: fixture.state, attempt: 1 }
+                ])
+        ]
+      })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const commandLog = env.SMITHERS_FAKE_LOG;
+    assert.ok(commandLog);
+    fs.writeFileSync(commandLog, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const commands = fs.readFileSync(commandLog, "utf8");
+    assert.match(commands, new RegExp(`^timetravel .* --node-id ${fixture.reset} `, "mu"));
+    const producerReset = /^timetravel .* --node-id node:lens /mu;
+    const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+    if (fixture.producerRetried) {
+      assert.match(commands, producerReset);
+      assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+    } else {
+      assert.doesNotMatch(commands, producerReset);
+      assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+      assert.match(skipped.message, /lens: catalog already ran without it/u);
+    }
+  });
 }
 
 // `--reset-node` reruns a failed continuing task even when `--retry-failed` would leave it, so the
