@@ -109,9 +109,10 @@ The generated provider configuration raises Codex's stream transport limits to
 10 reconnects and a 30-minute idle timeout. Codex reconnects a dropped or idle
 response stream by re-sending the current request in the same session, so a
 reconnect keeps the agent's earlier work, while a node retry starts over.
-OpenRouter's keepalive comments during long silent reasoning do not reset
-Codex's idle timer, so the default 5-minute timeout can drop such turns on
-every reconnect. A genuine outage still fails the node within a few minutes.
+Codex's idle timer counts only stream events. OpenRouter's keepalive comments
+do not reset it, so a model that streams no reasoning events can stay silent
+past the default 5-minute timeout and drop on every reconnect. A genuine outage
+still fails the node within a few minutes.
 
 ## Claude agent
 
