@@ -85,7 +85,7 @@ auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
 ```
 
-API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home; every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
+API-key auth uses fixed `OPENAI_API_KEY`. Subscription auth requires a current-user-owned, mode-`0700`, symlink-free canonical provider home (Codex creates `~/.codex` from the umask, usually `0755`; `validate` reports it as `PROVIDER_HOME_UNSAFE` with the command that fixes it, `chmod 700 ~/.codex`); every `config_dir` is a safe relative child of its provider namespace under the operator-owned `ULTRAFUZZ_PROVIDER_HOME_ROOT`.
 
 When `ULTRAFUZZ_PROVIDER_HOME_ROOT` is unset, that root is `~/.ultrafuzz-provider-homes`. `OpenRouterAgent` and `DeepSeekAgent` always keep their homes there, and `ClaudeAgent`, `CodexAgent`, and `KimiAgent` do when they set `config_dir`. The adapters create any missing directory of that path with mode `0700`. `XDG_STATE_HOME` does not move the root. No directory above a provider home may be writable by its group or by others unless it has the sticky bit, so a root you set must not sit below a directory that the default umask `0002` makes `0775`, such as Ubuntu's `~/.local` or a project's `.ultrafuzz`. To log a CLI in before its agent first runs, create its home, such as `~/.ultrafuzz-provider-homes/codex/<config_dir>`, with `(umask 077; mkdir -p <home>)`: under umask `0002` a plain `mkdir -p` leaves the directories it creates `0775`, and Codex refuses a `CODEX_HOME` that does not exist.
 

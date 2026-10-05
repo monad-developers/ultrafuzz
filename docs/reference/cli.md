@@ -711,6 +711,15 @@ non-launching configuration contract unchanged. Doctor reports:
   2 GiB free, and never removes those directories, because a native resume
   from an earlier release kept its controller there for the detached engine.
 
+- the provider home of each agent the selected topology can dispatch to.
+  Agents refuse a provider home that is not a private directory the operator
+  owns (mode `0700`) below directories only the operator can write, and so
+  does the Ultrafuzz provider-home root above one. Claude Code and Codex
+  create `~/.claude` and `~/.codex` from the umask, usually `0755` or `0775`,
+  so a home either CLI created is refused. `validate`, and so `run`, report
+  such a home as `PROVIDER_HOME_UNSAFE` before planning, with the directory
+  and the command that fixes it, such as `chmod 700 ~/.codex`.
+
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies.
 
