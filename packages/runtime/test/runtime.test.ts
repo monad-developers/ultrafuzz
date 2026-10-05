@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
-import { preGovernanceRunPlan } from "./fixtures/pre-governance-run-plan.js";
 import crypto from "node:crypto";
 import {
   execFileSync,
@@ -99,6 +98,7 @@ import {
   loadCurrentFinalReportSnapshot,
   planRun,
   pauseRun,
+  readRetainedFailureStateIds,
   readLinkedWorkflowEvidence,
   readReportPublicationStatus,
   replayRun as runtimeReplayRun,
@@ -108,7 +108,6 @@ import {
   toPlannedGraph,
   validateProject
 } from "../src/index.js";
-import { effectiveRouteEnvironment, modelDestination } from "../src/data-governance.js";
 import {
   assertSmithersControllerRefreshable,
   inspectSmithersInstallation,
@@ -151,7 +150,7 @@ import {
 const runningUnderBun = typeof process.versions.bun === "string";
 const BUN_ADAPTER_TEST_PREFIX = "Bun adapter contract: ";
 const bunAdapterTest = prefixTestNames(testWhen(runningUnderBun, { timeout: 30_000 }), BUN_ADAPTER_TEST_PREFIX);
-// Generated adapters load their route helper from the runtime module the
+// Generated adapters load their credential helpers from the runtime module the
 // rendered workflow names; point them at this build.
 if (runningUnderBun) process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/index.js", import.meta.url).href;
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
@@ -159,7 +158,6 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_CONTEXT_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
-  "SMITHERS_FAKE_GOVERNANCE_LOG",
   "SMITHERS_FAKE_EXECUTED_AS_LOG",
   "SMITHERS_FAKE_FAIL_UP",
   "SMITHERS_FAKE_FORGE_GUARD_LOG",
@@ -177,7 +175,6 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"
 ] as const;
 const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
-const TEST_DATA_GOVERNANCE_POLICY = `{"schema_version":"ultrafuzz.data-governance-policy.v1","sensitivity":"public","source_destinations":["cloud:modal","model:anthropic","model:deepseek","model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","model:moonshot","model:openai","model:openrouter"],"artifact_destinations":["cloud:modal"],"destination_policies":[{"destination":"cloud:modal","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:anthropic","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:deepseek","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:kimi-route-be5123592c4480e580fc02988f99efc0749a17f114dd67ec7ff655e87ae77a1f","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:moonshot","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openai","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"},{"destination":"model:openrouter","processor":"test","region":"local","retention_policy":"test","training_policy":"none","dpa_status":"n/a","minimization_policy":"synthetic","data_handling_basis":"public"}],"openrouter_model_allowlist":["~anthropic/claude-sonnet-latest:free","~vendor/model.latest:free+preview@2026"]}`;
 process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = temporaryRoot("ufz-provider-homes-");
 
 function tempProject(): string {
@@ -313,17 +310,10 @@ function startRun(input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
     .map((name) => name.trim())
     .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
     .join(",");
-  const ambientRouteEnvironment = Object.fromEntries(
-    ["ClaudeAgent", "CodexAgent", "KimiAgent"]
-      .flatMap((agent) => effectiveRouteEnvironment(agent, process.env).map(([name]) => name))
-      .map((name) => [name, undefined])
-  );
   return runtimeStartRun(
     withFakeCliEntrypoint({
       ...input,
       env: {
-        ...ambientRouteEnvironment,
-        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-start-provider-homes-"),
         ALL_PROXY: undefined,
         HTTP_PROXY: undefined,
@@ -507,7 +497,7 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
   workflowControlChildEnvironment(
     additions?: Record<string, string | undefined>,
     source?: Record<string, string | undefined>,
-    route?: { agent: "ClaudeAgent" | "CodexAgent" | "KimiAgent"; configDir?: string }
+    route?: { agent: "ClaudeAgent" | "CodexAgent" | "KimiAgent" }
   ): Record<string, string>;
 }> {
   const fixture = path.join(project, "codex-agent-executable-test");
@@ -569,7 +559,7 @@ async function loadGeneratedCodexAgent(project: string): Promise<{
     workflowControlChildEnvironment(
       additions?: Record<string, string | undefined>,
       source?: Record<string, string | undefined>,
-      route?: { agent: "ClaudeAgent" | "CodexAgent" | "KimiAgent"; configDir?: string }
+      route?: { agent: "ClaudeAgent" | "CodexAgent" | "KimiAgent" }
     ): Record<string, string>;
   };
   return {
@@ -1880,9 +1870,6 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" "$CLAUDE_CONFIG_DIR" "$SMITHERS_UNDOCUMENTED_SECRET" "$ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES" > "$SMITHERS_FAKE_ENV_LOG"',
-      "fi",
-      'if [ -n "$SMITHERS_FAKE_GOVERNANCE_LOG" ]; then',
-      '  printf \'%s|%s\\n\' "$1" "$ULTRAFUZZ_DATA_GOVERNANCE_PATH" >> "$SMITHERS_FAKE_GOVERNANCE_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$KIMI_CODE_HOME" "$KIMI_SHARE_DIR" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
@@ -3769,396 +3756,6 @@ test("init does not modify a regular file swapped after the anchored open", { co
 });
 
 bunAdapterTest(
-  "generated Codex commands ignore ambient proxies and reject endpoint drift",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
-    const snapshot = path.join(project, "execution-snapshot"),
-      authority = path.join(snapshot, "controls/data-governance.json");
-    fs.mkdirSync(path.dirname(authority), { recursive: true });
-    const names = [
-        "ALL_PROXY",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "all_proxy",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "OPENAI_BASE_URL",
-        "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
-      ],
-      saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-    for (const name of names) delete process.env[name];
-    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
-    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
-    try {
-      const config = { execution: { mode: "local" }, agents: {} } as never;
-      process.env.HTTPS_PROXY = "https://proxy.a.invalid";
-      process.env.OPENAI_BASE_URL = "https://gateway.a.invalid/v1";
-      fs.writeFileSync(
-        authority,
-        JSON.stringify({ required_source_destinations: [modelDestination("CodexAgent", config, process.env)] })
-      );
-      const build = async () => {
-        const command = await new CompatibleCodexAgent().buildCommand({
-          prompt: "Contract only",
-          cwd: project,
-          options: {}
-        });
-        await command.cleanup?.();
-      };
-      await build();
-      // A proxy does not change which provider receives the traffic, so a run
-      // resumed from a shell with another proxy, or none, keeps its route.
-      process.env.HTTPS_PROXY = "https://proxy.b.invalid";
-      await build();
-      delete process.env.HTTPS_PROXY;
-      await build();
-      assert.throws(
-        () =>
-          workflowControlChildEnvironment(
-            {
-              OPENAI_BASE_URL: "https://gateway.b.invalid/v1",
-              ULTRAFUZZ_DATA_GOVERNANCE_PATH: path.join(project, "forged.json")
-            },
-            process.env,
-            { agent: "CodexAgent" }
-          ),
-        /provider route changed/u
-      );
-      process.env.OPENAI_BASE_URL = "https://gateway.b.invalid/v1";
-      await assert.rejects(build(), /provider route changed/u);
-    } finally {
-      for (const name of names) {
-        const value = saved[name];
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
-      }
-    }
-  }
-);
-
-bunAdapterTest("planned routes equal final generated-adapter validation", { timeout: 30_000 }, async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const homes = temporaryRoot("ufz-route-equivalence-"),
-    codexHome = path.join(homes, "codex", "configured"),
-    openRouterHome = path.join(homes, "openrouter", "managed"),
-    snapshot = path.join(project, "route-snapshot"),
-    authority = path.join(snapshot, "controls/data-governance.json");
-  fs.mkdirSync(codexHome, { recursive: true });
-  fs.mkdirSync(openRouterHome, { recursive: true });
-  fs.mkdirSync(path.dirname(authority), { recursive: true });
-  fs.writeFileSync(
-    path.join(codexHome, "config.toml"),
-    'model_provider = "gateway"\n[model_providers.gateway]\nbase_url = "https://gateway.invalid/v1"\n'
-  );
-  fs.writeFileSync(
-    path.join(openRouterHome, "config.toml"),
-    'model_provider = "openrouter"\n[model_providers.openrouter]\nbase_url = "https://openrouter.ai/api/v1"\n'
-  );
-  const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
-    names = [
-      "ALL_PROXY",
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "NO_PROXY",
-      "all_proxy",
-      "http_proxy",
-      "https_proxy",
-      "no_proxy",
-      "OPENAI_BASE_URL",
-      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
-      "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-      "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
-    ],
-    saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  for (const name of names) delete process.env[name];
-  process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
-  process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
-  try {
-    const codexDestination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
-    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [codexDestination] }));
-    const { CompatibleCodexAgent, workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project),
-      codex = await new CompatibleCodexAgent({
-        configDir: codexHome,
-        env: { OPENAI_BASE_URL: "https://gateway.invalid/v1" }
-      }).buildCommand({ prompt: "route", cwd: project, options: {} });
-    await codex.cleanup?.();
-    const openRouterDestination = modelDestination("OpenRouterAgent", config, {});
-    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [openRouterDestination] }));
-    const { OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project),
-      openrouter = await new OpenRouterCodexAgent({
-        configDir: openRouterHome,
-        env: { OPENAI_BASE_URL: "https://openrouter.ai/api/v1" }
-      }).buildCommand({ prompt: "route", cwd: project, options: {} });
-    await (openrouter.cleanup as (() => Promise<void>) | undefined)?.();
-    const claudeEnv = {
-        ULTRAFUZZ_PROVIDER_HOME_ROOT: homes,
-        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AWS_REGION",
-        AWS_REGION: "us-east-1",
-        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
-        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH
-      },
-      claudeDestination = modelDestination("ClaudeAgent", config, claudeEnv);
-    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [claudeDestination] }));
-    assert.doesNotThrow(() => workflowControlChildEnvironment({}, claudeEnv, { agent: "ClaudeAgent" }));
-    assert.throws(
-      () =>
-        workflowControlChildEnvironment({}, { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" }, { agent: "ClaudeAgent" }),
-      /provider route changed/u
-    );
-    // Once Bedrock is selected, its AWS settings are part of the route.
-    const bedrockEnv = { ...claudeEnv, CLAUDE_CODE_USE_BEDROCK: "1" },
-      bedrockDestination = modelDestination("ClaudeAgent", config, bedrockEnv);
-    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [bedrockDestination] }));
-    assert.doesNotThrow(() => workflowControlChildEnvironment({}, bedrockEnv, { agent: "ClaudeAgent" }));
-    assert.throws(
-      () => workflowControlChildEnvironment({}, { ...bedrockEnv, AWS_REGION: "eu-west-1" }, { agent: "ClaudeAgent" }),
-      /provider route changed/u
-    );
-    assert.equal(codexDestination.startsWith("model:codex-route-"), true);
-    assert.equal(openRouterDestination, "model:openrouter");
-    // AWS_REGION alone routes nothing: Claude Code reads it only for an
-    // AWS-hosted platform such as Bedrock.
-    assert.equal(claudeDestination, "model:anthropic");
-    assert.equal(bedrockDestination.startsWith("model:claude-route-"), true);
-  } finally {
-    for (const name of names) {
-      const value = saved[name];
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  }
-});
-
-bunAdapterTest(
-  "generated Claude route validation ignores Azure CLI extension plumbing",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const snapshot = path.join(project, "route-snapshot");
-    const authority = path.join(snapshot, "controls", "data-governance.json");
-    const claudeHome = path.join(project, "claude-home");
-    fs.mkdirSync(path.dirname(authority), { recursive: true });
-    fs.mkdirSync(claudeHome);
-    fs.writeFileSync(
-      path.join(claudeHome, "settings.json"),
-      '{"env":{"AZURE_EXTENSION_DIR":"/opt/az/azcliextensions"}}',
-      "utf8"
-    );
-    fs.writeFileSync(authority, '{"required_source_destinations":["model:anthropic"]}', "utf8");
-    const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
-    const child = workflowControlChildEnvironment(
-      { AZURE_EXTENSION_DIR: "/opt/az/azcliextensions" },
-      {
-        AZURE_EXTENSION_DIR: "/opt/az/azcliextensions",
-        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "AZURE_EXTENSION_DIR",
-        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
-        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
-      },
-      { agent: "ClaudeAgent", configDir: claudeHome }
-    );
-    assert.equal(child.AZURE_EXTENSION_DIR, "/opt/az/azcliextensions");
-  }
-);
-
-bunAdapterTest(
-  "generated Codex adapter keeps its acknowledged route when the CLI rewrites unrelated config",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const homes = temporaryRoot("ufz-codex-rewrite-"),
-      codexHome = path.join(homes, "codex", "configured"),
-      configPath = path.join(codexHome, "config.toml"),
-      snapshot = path.join(project, "route-snapshot"),
-      authority = path.join(snapshot, "controls/data-governance.json"),
-      names = [
-        "ALL_PROXY",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "all_proxy",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
-        "OPENAI_BASE_URL",
-        "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
-        "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-        "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
-      ],
-      saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-    fs.mkdirSync(codexHome, { recursive: true });
-    fs.mkdirSync(path.dirname(authority), { recursive: true });
-    const providerConfig = [
-      'model = "gpt-5.5"',
-      'model_provider = "gateway"',
-      "",
-      "[model_providers.gateway]",
-      'name = "Gateway"',
-      'base_url = "https://gateway.invalid/v1"',
-      'env_key = "GATEWAY_API_KEY"',
-      'wire_api = "responses"',
-      ""
-    ].join("\n");
-    fs.writeFileSync(
-      configPath,
-      `${providerConfig}\n[marketplaces.openai-bundled]\nlast_updated = "2026-08-25T13:35:06Z"\n`
-    );
-    for (const name of names) Reflect.deleteProperty(process.env, name);
-    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
-    process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
-    try {
-      const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
-        destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
-      assert.match(destination, /^model:codex-route-/u);
-      fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] }));
-      const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
-      const build = async () => {
-        const command = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({
-          prompt: "route",
-          cwd: project,
-          options: {}
-        });
-        await command.cleanup?.();
-      };
-      await build();
-      // What the Codex CLI itself writes while running: marketplace refresh
-      // timestamps and project trust levels (#908).
-      fs.writeFileSync(
-        configPath,
-        `${providerConfig}\n[marketplaces.openai-bundled]\nlast_updated = "2026-09-28T00:00:00Z"\n\n` +
-          `[projects."/workspace/target"]\ntrust_level = "trusted"\n`
-      );
-      await build();
-      fs.writeFileSync(configPath, providerConfig.replace("gateway.invalid", "other-gateway.invalid"));
-      await assert.rejects(build(), /provider route changed/u);
-    } finally {
-      for (const name of names) {
-        const value = saved[name];
-        if (value === undefined) Reflect.deleteProperty(process.env, name);
-        else process.env[name] = value;
-      }
-    }
-  }
-);
-
-bunAdapterTest(
-  "generated Claude route ignores ambient cloud settings until a cloud platform is selected",
-  { timeout: 30_000 },
-  async () => {
-    const project = tempProject();
-    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-    const { workflowControlChildEnvironment } = await loadGeneratedCodexAgent(project);
-    const snapshot = path.join(project, "route-snapshot"),
-      authority = path.join(snapshot, "controls", "data-governance.json");
-    fs.mkdirSync(path.dirname(authority), { recursive: true });
-    const config = { execution: { mode: "local" }, agents: {} } as never,
-      env = {
-        ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-claude-ambient-"),
-        AWS_PROFILE: "operator-a",
-        GOOGLE_CLOUD_PROJECT: "project-a",
-        // Foundry's forge profile, not Microsoft Foundry.
-        FOUNDRY_PROFILE: "ci",
-        ULTRAFUZZ_DATA_GOVERNANCE_PATH: authority,
-        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshot, ".smithers", "workflows", "test.tsx")
-      };
-    fs.writeFileSync(
-      authority,
-      JSON.stringify({ required_source_destinations: [modelDestination("ClaudeAgent", config, env)] })
-    );
-    // A run resumed from another shell sees different, unused cloud settings.
-    assert.doesNotThrow(() =>
-      workflowControlChildEnvironment(
-        {},
-        { ...env, AWS_PROFILE: "operator-b", GOOGLE_CLOUD_PROJECT: "project-b", FOUNDRY_PROFILE: "default" },
-        { agent: "ClaudeAgent" }
-      )
-    );
-    const vertex = { ...env, CLAUDE_CODE_USE_VERTEX: "1" };
-    fs.writeFileSync(
-      authority,
-      JSON.stringify({ required_source_destinations: [modelDestination("ClaudeAgent", config, vertex)] })
-    );
-    assert.doesNotThrow(() =>
-      workflowControlChildEnvironment({}, { ...vertex, AWS_PROFILE: "operator-b" }, { agent: "ClaudeAgent" })
-    );
-    assert.throws(
-      () =>
-        workflowControlChildEnvironment({}, { ...vertex, GOOGLE_CLOUD_PROJECT: "project-b" }, { agent: "ClaudeAgent" }),
-      /provider route changed/u
-    );
-  }
-);
-
-bunAdapterTest("quoted TOML provider routes are bound and drift fails closed", { timeout: 30_000 }, async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  const homes = temporaryRoot("ufz-quoted-route-"),
-    codexHome = path.join(homes, "codex", "configured"),
-    configPath = path.join(codexHome, "config.toml"),
-    snapshot = path.join(project, "route-snapshot"),
-    authority = path.join(snapshot, "controls/data-governance.json"),
-    names = [
-      "ALL_PROXY",
-      "HTTP_PROXY",
-      "HTTPS_PROXY",
-      "NO_PROXY",
-      "all_proxy",
-      "http_proxy",
-      "https_proxy",
-      "no_proxy",
-      "OPENAI_BASE_URL",
-      "ULTRAFUZZ_AGENT_ENV_ALLOWLIST",
-      "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-      "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
-    ],
-    saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
-  fs.mkdirSync(codexHome, { recursive: true });
-  fs.mkdirSync(path.dirname(authority), { recursive: true });
-  fs.writeFileSync(
-    configPath,
-    '"model_provider" = "gateway"\n["model_providers"."gateway"]\n"base_url" = "https://gateway.invalid/v1"\n'
-  );
-  for (const name of names) delete process.env[name];
-  process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = authority;
-  process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = path.join(snapshot, ".smithers/workflows/test.tsx");
-  try {
-    const config = { execution: { mode: "local" }, agents: { CodexAgent: { configDir: "configured" } } } as never,
-      destination = modelDestination("CodexAgent", config, { ULTRAFUZZ_PROVIDER_HOME_ROOT: homes });
-    assert.match(destination, /^model:codex-route-/u);
-    fs.writeFileSync(authority, JSON.stringify({ required_source_destinations: [destination] }));
-    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project),
-      accepted = await new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({
-        prompt: "route",
-        cwd: project,
-        options: {}
-      });
-    await accepted.cleanup?.();
-    fs.writeFileSync(
-      configPath,
-      '"model_provider" = "drifted"\n["model_providers"."drifted"]\n"base_url" = "https://drifted.invalid/v1"\n'
-    );
-    await assert.rejects(
-      new CompatibleCodexAgent({ configDir: codexHome }).buildCommand({ prompt: "route", cwd: project, options: {} }),
-      /provider route changed/u
-    );
-  } finally {
-    for (const name of names) {
-      const value = saved[name];
-      if (value === undefined) delete process.env[name];
-      else process.env[name] = value;
-    }
-  }
-});
-
-bunAdapterTest(
   "generated Codex adapter repeats artifact directory flags and preserves resume argv",
   { timeout: 30_000 },
   async () => {
@@ -4636,7 +4233,7 @@ bunAdapterTest(
         ),
       "utf8"
     );
-    const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+    const { createOpenRouterAgent, OpenRouterCodexAgent } = await loadGeneratedOpenRouterAgent(project);
     const model = "~vendor/model.latest:free+preview@2026";
     const previous = {
       config: process.env.ULTRAFUZZ_CONFIG_PATH,
@@ -4646,7 +4243,10 @@ bunAdapterTest(
       openrouter: process.env.OPENROUTER_API_KEY,
       openai: process.env.OPENAI_API_KEY,
       anthropic: process.env.ANTHROPIC_API_KEY,
-      baseUrl: process.env.OPENAI_BASE_URL
+      baseUrl: process.env.OPENAI_BASE_URL,
+      allowlist: process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST,
+      sensitive: process.env.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES,
+      sessionToken: process.env.OPENAI_SESSION_TOKEN
     };
     process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
     delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
@@ -4656,6 +4256,10 @@ bunAdapterTest(
     process.env.OPENAI_API_KEY = "unrelated-openai-key";
     process.env.ANTHROPIC_API_KEY = "unrelated-anthropic-key";
     process.env.OPENAI_BASE_URL = "https://ambient-route.invalid/v1";
+    // An allowlisted OPENAI_* credential belongs to Codex, never to the OpenRouter child.
+    process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST = "OPENAI_SESSION_TOKEN";
+    process.env.ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES = "OPENAI_SESSION_TOKEN";
+    process.env.OPENAI_SESSION_TOKEN = "codex-owned-session-token";
     try {
       const agent = createOpenRouterAgent({
         model,
@@ -4682,8 +4286,17 @@ bunAdapterTest(
       assert.equal(command.env?.CODEX_API_KEY, "");
       assert.equal(command.env?.OPENAI_BASE_URL, "https://openrouter.ai/api/v1");
       assert.equal(command.env?.ANTHROPIC_API_KEY, "");
+      assert.equal(command.env?.OPENAI_SESSION_TOKEN, "");
       assert.equal(command.env?.CODEX_HOME, codexHome);
       await command.cleanup?.();
+      // Without the factory's isolated environment, the adapter's own agent identity still withholds it.
+      const direct = await new OpenRouterCodexAgent({ model, configDir: codexHome }).buildCommand({
+        prompt: "Contract only",
+        cwd: project,
+        options: {}
+      });
+      assert.equal((direct.env as Record<string, string> | undefined)?.OPENAI_SESSION_TOKEN, "");
+      await (direct.cleanup as (() => Promise<void>) | undefined)?.();
 
       const providerConfig = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");
       assert.equal(
@@ -4695,6 +4308,8 @@ bunAdapterTest(
           'name = "OpenRouter"',
           'base_url = "https://openrouter.ai/api/v1"',
           'wire_api = "responses"',
+          "stream_max_retries = 10",
+          "stream_idle_timeout_ms = 1800000",
           "",
           "[model_providers.openrouter.auth]",
           'command = "node"',
@@ -4715,13 +4330,172 @@ bunAdapterTest(
         OPENROUTER_API_KEY: previous.openrouter,
         OPENAI_API_KEY: previous.openai,
         ANTHROPIC_API_KEY: previous.anthropic,
-        OPENAI_BASE_URL: previous.baseUrl
+        OPENAI_BASE_URL: previous.baseUrl,
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: previous.allowlist,
+        ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: previous.sensitive,
+        OPENAI_SESSION_TOKEN: previous.sessionToken
       })) {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
     }
   })
+);
+
+bunAdapterTest(
+  "generated OpenRouter config lets the real Codex CLI survive more stream disconnects than its default budget (#676)",
+  { timeout: 90_000 },
+  async () => {
+    const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
+    const realCodexCliAvailable = codexVersion.status === 0 && codexVersion.stdout.includes("codex-cli");
+    // Codex's default stream_max_retries is 5. Dropping one more stream than
+    // that proves the generated provider limits, not Codex's defaults, carried
+    // the turn to completion.
+    const droppedStreams = 6;
+    const responseBodies: string[] = [];
+    const server = createServer((request, response) => {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => (body += chunk));
+      request.on("end", () => {
+        if (request.method !== "POST" || request.url !== "/v1/responses") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end('{"data":[]}');
+          return;
+        }
+        responseBodies.push(body);
+        const id = `resp_fixture_${responseBodies.length}`;
+        const event = (payload: Record<string, unknown>) => `data: ${JSON.stringify(payload)}\n\n`;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write(event({ type: "response.created", response: { id } }));
+        if (responseBodies.length <= droppedStreams) {
+          // Mid-stream transport loss: the response started, then the socket closes.
+          setTimeout(() => response.destroy(), 50);
+          return;
+        }
+        const message = {
+          id: "msg_fixture",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "fixture-ok", annotations: [] }]
+        };
+        response.end(
+          event({ type: "response.output_item.done", output_index: 0, item: message }) +
+            event({
+              type: "response.completed",
+              response: {
+                id,
+                status: "completed",
+                output: [message],
+                usage: {
+                  input_tokens: 1,
+                  input_tokens_details: { cached_tokens: 0 },
+                  output_tokens: 1,
+                  output_tokens_details: { reasoning_tokens: 0 },
+                  total_tokens: 2
+                }
+              }
+            })
+        );
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    server.unref();
+
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const configPath = path.join(project, "ultrafuzz.toml");
+    const providerHomeRoot = path.join(project, "operator-provider-homes");
+    const codexHome = path.join(providerHomeRoot, "openrouter", "openrouter-stream-codex");
+    fs.writeFileSync(
+      configPath,
+      fs
+        .readFileSync(configPath, "utf8")
+        .replace(
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"',
+          '[agents.OpenRouterAgent]\nauth = "api-key"\napi_key_env = "OPENROUTER_API_KEY"\nconfig_dir = "openrouter-stream-codex"'
+        ),
+      "utf8"
+    );
+    const previous = {
+      config: process.env.ULTRAFUZZ_CONFIG_PATH,
+      providerHomeRoot: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT,
+      openRouterKey: process.env.OPENROUTER_API_KEY
+    };
+    process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = providerHomeRoot;
+    process.env.OPENROUTER_API_KEY = "openrouter-stream-test-key";
+    try {
+      const { createOpenRouterAgent } = await loadGeneratedOpenRouterAgent(project);
+      const agent = createOpenRouterAgent({ model: "fixture/model" }) as unknown as {
+        opts: { env: Record<string, string> };
+        buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+          command: string;
+          args: string[];
+          env?: Record<string, string>;
+          stdin?: string;
+          cleanup?: () => Promise<void>;
+        }>;
+      };
+      const providerConfigPath = path.join(codexHome, "config.toml");
+      const providerConfig = fs.readFileSync(providerConfigPath, "utf8");
+      assert.match(providerConfig, /^stream_max_retries = 10$/mu);
+      assert.match(providerConfig, /^stream_idle_timeout_ms = 1800000$/mu);
+      if (!realCodexCliAvailable) {
+        return;
+      }
+
+      // Keep every generated setting, including the transport limits under
+      // test; only the endpoint moves to the local fixture.
+      const address = server.address() as AddressInfo;
+      const generatedBaseUrl = 'base_url = "https://openrouter.ai/api/v1"';
+      assert.equal(providerConfig.split(generatedBaseUrl).length, 2);
+      fs.writeFileSync(
+        providerConfigPath,
+        providerConfig.replace(generatedBaseUrl, `base_url = "http://127.0.0.1:${address.port}/v1"`),
+        "utf8"
+      );
+      const command = await agent.buildCommand({
+        prompt: "Reply with exactly fixture-ok and do not use tools.",
+        cwd: project,
+        options: {}
+      });
+      try {
+        const execution = await runSpawnedCommand({
+          command: command.command,
+          args: command.args,
+          cwd: project,
+          env: { ...process.env, ...agent.opts.env, ...command.env },
+          stdin: command.stdin,
+          timeoutMs: 75_000
+        });
+        assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+        assert.match(execution.stdout, /fixture-ok/u);
+      } finally {
+        await command.cleanup?.();
+      }
+      // Each reconnect re-sends the same turn request inside the same session,
+      // so the work the session already holds is not discarded.
+      assert.equal(responseBodies.length, droppedStreams + 1);
+      // Compare parsed bodies: Codex serializes client_metadata from a hash map,
+      // so its key order can change between otherwise identical requests.
+      const [firstRequest, ...retriedRequests] = responseBodies.map((body) => JSON.parse(body) as unknown);
+      for (const retried of retriedRequests) assert.deepEqual(retried, firstRequest);
+    } finally {
+      if (previous.config === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+      else process.env.ULTRAFUZZ_CONFIG_PATH = previous.config;
+      if (previous.providerHomeRoot === undefined) delete process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT;
+      else process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = previous.providerHomeRoot;
+      if (previous.openRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = previous.openRouterKey;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
 );
 
 bunAdapterTest(
@@ -7451,10 +7225,6 @@ bunAdapterTest(
     env.PATH = [targetBin, env.PATH].join(path.delimiter);
     env.OPENROUTER_API_KEY = "fixture-openrouter-key";
     env.OPENAI_API_KEY = "unrelated-provider-key";
-    env.ULTRAFUZZ_DATA_GOVERNANCE_POLICY = JSON.stringify({
-      ...JSON.parse(TEST_DATA_GOVERNANCE_POLICY),
-      openrouter_model_allowlist: ["gpt-5.5"]
-    });
     const run = await startRun({ projectRoot: project, runId, env });
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
     assert.ok(run.value);
@@ -8591,15 +8361,6 @@ default_effort = "high"
     await crashResumed.cleanup?.();
     assert.ok(isolatedDirs.every((directory) => !fs.existsSync(directory)));
 
-    const apiKeyGovernance = path.join(project, "kimi-api-governance.json");
-    const apiKeyDestination = modelDestination(
-      "KimiAgent",
-      { agents: { KimiAgent: { auth: "api-key" } } } as never,
-      process.env
-    );
-    fs.writeFileSync(apiKeyGovernance, JSON.stringify({ required_source_destinations: [apiKeyDestination] }) + "\n");
-    const previousGovernancePath = process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
-    process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = apiKeyGovernance;
     const apiKeyAgent = new KimiCode029Agent({
       model: "kimi-k3",
       configDir: sourceConfig,
@@ -8607,18 +8368,11 @@ default_effort = "high"
       ultrafuzzReasoningEffort: "low",
       apiKey: "test-key"
     });
-    let apiKeyCommand: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>> | undefined;
-    try {
-      apiKeyCommand = await apiKeyAgent.buildCommand({
-        prompt: "API key smoke",
-        cwd: "/workspace/target",
-        options: {}
-      });
-    } finally {
-      if (previousGovernancePath === undefined) delete process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
-      else process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = previousGovernancePath;
-    }
-    assert.ok(apiKeyCommand);
+    const apiKeyCommand = await apiKeyAgent.buildCommand({
+      prompt: "API key smoke",
+      cwd: "/workspace/target",
+      options: {}
+    });
     const apiKeyConfigDir = apiKeyCommand.env?.KIMI_SHARE_DIR;
     assert.ok(apiKeyConfigDir);
     assert.equal(apiKeyCommand.env?.KIMI_CODE_HOME, apiKeyConfigDir);
@@ -10157,6 +9911,244 @@ test("force init rejects symlinked config and nested project files before overwr
   assert.equal(topologyInit.ok, false);
   assert.ok(topologyInit.diagnostics.some((diagnostic) => diagnostic.code === "INIT_PATH_UNSAFE"));
   assert.equal(fs.readFileSync(path.join(topologyOutside, "topology.yml"), "utf8"), "outside\n");
+});
+
+// #675: a topology `timeout_seconds` pin outranks the profile and run defaults even when it is the
+// shorter window, so raising a default silently does not reach a pinned node.
+const timeoutShadowingWarnings = <T extends { code: string }>(diagnostics: readonly T[]): T[] =>
+  diagnostics.filter((diagnostic) => diagnostic.code === "TOPOLOGY_TIMEOUT_SHADOWS_DEFAULT");
+
+function setRunDefaultTimeout(project: string, seconds: number): void {
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[run\]$/mu);
+  assert.doesNotMatch(config, /^default_timeout_seconds/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[run\]$/mu, `[run]\ndefault_timeout_seconds = ${String(seconds)}`),
+    "utf8"
+  );
+}
+
+test("validate warns when a packaged group timeout pin is below the run default it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+
+  const shipped = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(timeoutShadowingWarnings(shipped.diagnostics), []);
+
+  setRunDefaultTimeout(project, 14_400);
+  const raised = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(raised.diagnostics);
+  assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
+    "groups.goals.defaults.timeout_seconds",
+    "groups.review.defaults.timeout_seconds",
+    "groups.specialists.defaults.timeout_seconds",
+    "groups.strategies.defaults.timeout_seconds"
+  ]);
+  for (const warning of warnings) {
+    assert.equal(warning.severity, "warning");
+    assert.equal(warning.source, "topology");
+    assert.match(warning.message, /pins timeout_seconds=7200, below `run\.default_timeout_seconds`=14400/u);
+  }
+  assert.equal(raised.value?.policy_posture.topology.status, "warn");
+});
+
+test("validate stays silent when a timeout pin equals the default it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  setRunDefaultTimeout(project, 7_200);
+
+  const equal = await validateProject({ projectRoot: project, env: {} });
+  assert.deepEqual(timeoutShadowingWarnings(equal.diagnostics), []);
+});
+
+// The default a pin overrides is the model profile's own `timeout_seconds` when it has one, which
+// task compilation prefers to the run default, so the warning names the profile's value.
+test("validate warns when a packaged group timeout pin is below the model profile timeout it overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[models\.default\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config.replace(/^\[models\.default\]$/mu, "[models.default]\ntimeout_seconds = 10800"),
+    "utf8"
+  );
+
+  const raised = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(raised.diagnostics);
+  assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
+    "groups.goals.defaults.timeout_seconds",
+    "groups.review.defaults.timeout_seconds",
+    "groups.specialists.defaults.timeout_seconds",
+    "groups.strategies.defaults.timeout_seconds"
+  ]);
+  for (const warning of warnings) {
+    assert.match(warning.message, /pins timeout_seconds=7200, below model profile `default` `timeout_seconds`=10800/u);
+  }
+
+  // A longer run default does not apply to a profile with its own timeout, so the warning keeps
+  // naming the profile.
+  setRunDefaultTimeout(project, 14_400);
+  const both = await validateProject({ projectRoot: project, env: {} });
+  const bothWarnings = timeoutShadowingWarnings(both.diagnostics);
+  assert.equal(bothWarnings.length, 4, JSON.stringify(both.diagnostics));
+  for (const warning of bothWarnings) {
+    assert.match(warning.message, /below model profile `default` `timeout_seconds`=10800/u);
+    assert.doesNotMatch(warning.message, /14400/u);
+  }
+});
+
+// A node fanned out to several model profiles is reported once, against the longest timeout of
+// its profiles.
+test("validate reports a fanned-out node timeout pin against its longest model profile timeout", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  assert.match(config, /^\[models\.claude\]$/mu);
+  assert.match(config, /^\[models\.deepseek\]$/mu);
+  fs.writeFileSync(
+    configPath,
+    config
+      .replace(/^\[models\.claude\]$/mu, "[models.claude]\ntimeout_seconds = 5400")
+      .replace(/^\[models\.deepseek\]$/mu, "[models.deepseek]\ntimeout_seconds = 10800"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: fanned
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    model_profiles: [claude, deepseek, default]
+    timeout_seconds: 1800
+    depends_on: [__start__]
+    outputs:
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [fanned]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+
+  const result = await validateProject({ projectRoot: project, env: {} });
+  const warnings = timeoutShadowingWarnings(result.diagnostics);
+  assert.deepEqual(
+    warnings.map((warning) => warning.path),
+    ["nodes.fanned.timeout_seconds"],
+    JSON.stringify(result.diagnostics)
+  );
+  const [warning] = warnings;
+  assert.ok(warning);
+  assert.match(
+    warning.message,
+    /node `fanned` pins timeout_seconds=1800, below model profile `deepseek` `timeout_seconds`=10800; the pin wins, so fanned time out after 1800 seconds/u
+  );
+});
+
+test("plan warns about group and node timeout pins below the default they override", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const markdownOutput = `
+      - path: ${GENERIC_RUNTIME_MARKDOWN_PATH}
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true`;
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  pinned:
+    label: Pinned
+    defaults:
+      timeout_seconds: 600
+  long:
+    label: Long
+    defaults:
+      timeout_seconds: 7200
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: grouped
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: pinned
+    depends_on: [__start__]
+    outputs:${markdownOutput}
+  - id: own-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    timeout_seconds: 300
+    depends_on: [grouped]
+    outputs:${markdownOutput}
+  - id: long-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    timeout_seconds: 7200
+    depends_on: [own-pin]
+    outputs:${markdownOutput}
+  - id: grouped-own-pin
+    kind: agentic
+    prompt: setup/runtime-fixture.md
+    group: long
+    timeout_seconds: 3000
+    depends_on: [long-pin]
+    outputs:${markdownOutput}
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on: [grouped-own-pin]
+`,
+    "utf8"
+  );
+  writeNeutralRuntimeFixturePrompt(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "timeout-shadowing", env: {} });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const warnings = timeoutShadowingWarnings(plan.diagnostics);
+  assert.deepEqual(
+    warnings.map((warning) => warning.path),
+    [
+      "groups.pinned.defaults.timeout_seconds",
+      "nodes.own-pin.timeout_seconds",
+      "nodes.grouped-own-pin.timeout_seconds"
+    ],
+    JSON.stringify(plan.diagnostics)
+  );
+  const [groupWarning, nodeWarning, groupedNodeWarning] = warnings;
+  assert.ok(groupWarning && nodeWarning && groupedNodeWarning);
+  assert.match(
+    groupWarning.message,
+    /group `pinned` pins timeout_seconds=600, below `run\.default_timeout_seconds`=3600; the pin wins, so grouped time out after 600 seconds\. Raise or remove the pin to use the longer default\.$/u
+  );
+  assert.match(
+    nodeWarning.message,
+    /node `own-pin` pins timeout_seconds=300.* Raise or remove the pin to use the longer default\.$/u
+  );
+  // Removing a node pin inside a group that pins falls back to the group's pin, not the default.
+  assert.match(
+    groupedNodeWarning.message,
+    /node `grouped-own-pin` pins timeout_seconds=3000, below `run\.default_timeout_seconds`=3600; .* Raise the pin, or remove it to fall back to `groups\.long\.defaults\.timeout_seconds`=7200\.$/u
+  );
 });
 
 test("plan creates run layout, graph fingerprint, and rendered prompt before Smithers submission", async () => {
@@ -12323,7 +12315,6 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /<Worktree/);
   assert.match(workflowSource, /const baseBranch = worktreeBaseBranch\(task\)/u);
   assert.match(workflowSource, /baseBranch === undefined \? \{\} : \{ baseBranch \}/u);
-  assert.match(workflowSource, /function readGovernedSource\(\): \{ commit: string; tree: string \} \| undefined/);
   assert.doesNotMatch(workflowSource, /resolveLocalSourceCommit/u);
   assert.match(workflowSource, /function preservePinnedSourceProof/);
   assert.match(workflowSource, /"source-proofs"/);
@@ -23661,6 +23652,66 @@ nodes:
   return project;
 }
 
+// A continuing lens that fans out over two models also has an aggregate state entry beside its
+// attempts. Modal must not read that entry as a failure `--retry-failed` would rerun (#1231).
+test("readRetainedFailureStateIds rolls a fanned-out lens's aggregate entry up with its retained attempts", async () => {
+  const project = writeRetriedLensReviewProject();
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  const fannedOut = topology.replace(
+    "    group: properties\n    depends_on: [__start__]\n",
+    "    group: properties\n    model_profiles: [default, claude]\n    depends_on: [__start__]\n"
+  );
+  assert.notEqual(fannedOut, topology);
+  fs.writeFileSync(topologyPath, fannedOut, "utf8");
+  const runId = "retained-aggregate";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}`, status: "running", steps: [] })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const runRoot = run.value.run_root;
+  // Synchronization creates the per-attempt state entries.
+  const synced = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+  const tasks = (
+    JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "tasks.json"), "utf8")) as {
+      tasks: Array<{ attemptId: string; concreteNodeId: string; metadata: { node: { storageId?: string } } }>;
+    }
+  ).tasks;
+  const lensTasks = tasks.filter((task) => task.concreteNodeId === "lens");
+  assert.equal(lensTasks.length, 2);
+  const aggregateId = lensTasks[0]?.metadata.node.storageId ?? "lens";
+  assert.ok(lensTasks.every((task) => task.attemptId !== aggregateId));
+
+  const statePath = path.join(runRoot, "state.json");
+  const setStatuses = (statuses: Record<string, string>) => {
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as { nodes: Record<string, { status: string }> };
+    for (const [stateId, status] of Object.entries(statuses)) {
+      const node = state.nodes[stateId];
+      assert.ok(node, `state has no entry ${stateId}`);
+      node.status = status;
+    }
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  };
+  const [first, second] = lensTasks;
+  assert.ok(first && second);
+  setStatuses({ [first.attemptId]: "failed", [second.attemptId]: "failed", [aggregateId]: "failed" });
+  // No consumer has started, so `--retry-failed` reruns both attempts.
+  assert.deepEqual([...readRetainedFailureStateIds(runRoot)], []);
+
+  setStatuses({ catalog: "succeeded" });
+  assert.deepEqual(
+    [...readRetainedFailureStateIds(runRoot)].sort(),
+    [first.attemptId, second.attemptId, aggregateId].sort()
+  );
+
+  // One attempt succeeded and the other was retained: the aggregate stands for no rerun either.
+  setStatuses({ [first.attemptId]: "succeeded" });
+  assert.deepEqual([...readRetainedFailureStateIds(runRoot)].sort(), [second.attemptId, aggregateId].sort());
+});
+
 // A sync pass can run while `resume --retry-failed` still reruns a failed optional producer, as
 // Modal's `ultrafuzz inspect` poll does. A consumer that ran without the producer must finalize in
 // that pass too: while it reads failed, the host gate of a dependent that reads its outputs fails,
@@ -23710,6 +23761,8 @@ test("syncRun finalizes consumers admitted without an optional prerequisite whos
   assert.equal((await syncRun({ projectRoot: project, runId, env: failedEnv })).ok, true);
   assert.equal(nodeStatus("lens"), "failed");
   assert.equal(nodeStatus("catalog"), "succeeded");
+  // `resume --retry-failed` would leave the lens failed now that the catalog ran without it (#1231).
+  assert.deepEqual([...readRetainedFailureStateIds(runRoot)], ["lens"]);
 
   // The retried lens is still running when dedupe and triage finish without it.
   writeArtifacts("dedupe", { "findings.json": "[]", "finding-lifecycle-ledger.json": emptyLedger });
@@ -27651,140 +27704,7 @@ test("a launch that has sealed its controls but not written its link journal rea
   assert.equal(readRunState(layout).status, "pending");
 });
 
-test("native continuation restores only authenticated snapshot governance before launch", async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  writeSmallTopology(project);
-  const runId = "native-continuation-governance";
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.ok(run.value);
-  const metadata = JSON.parse(fs.readFileSync(path.join(run.value.run_root, "run.json"), "utf8")) as {
-    workflow: { control_generation: string };
-  };
-  const expected = path.join(
-    run.value.run_root,
-    "smithers",
-    "execution-snapshots",
-    metadata.workflow.control_generation,
-    "controls",
-    "data-governance.json"
-  );
-  const original = fs.readFileSync(expected, "utf8");
-  const mutablePolicy = path.join(run.value.run_root, "data-governance.json");
-  fs.writeFileSync(mutablePolicy, '{"required_source_destinations":[]}\n');
-  env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = mutablePolicy;
-  env.SMITHERS_FAKE_GOVERNANCE_LOG = path.join(project, "governance-environment.log");
-  setFakeSmithersInspectState(project, "failed");
-  for (const options of [{}, { resetNode: "node:project-discovery" }, { refreshController: true }]) {
-    fs.writeFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "");
-    const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
-    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-    const launches: string[] = fs
-      .readFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "utf8")
-      .trim()
-      .split("\n")
-      .filter((line) => /^(?:resume|up|timetravel)\|/u.test(line));
-    assert.ok(launches.length > 0);
-    for (const launch of launches) assert.equal(launch.split("|")[1], expected);
-    assert.equal(fs.readFileSync(expected, "utf8"), original);
-  }
-});
-
-test("native continuation rejects substituted governance before reset but keeps active attach", async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  writeSmallTopology(project);
-  const runId = "native-continuation-governance-tamper";
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.ok(run.value);
-  assert.ok(env.SMITHERS_FAKE_LOG);
-  const metadataPath = path.join(run.value.run_root, "run.json");
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { workflow: { control_generation: string } };
-  const snapshot = path.join(
-    run.value.run_root,
-    "smithers",
-    "execution-snapshots",
-    metadata.workflow.control_generation
-  );
-  const policy = path.join(snapshot, "controls", "data-governance.json");
-  const original = fs.readFileSync(policy);
-  fs.chmodSync(policy, 0o644);
-  fs.writeFileSync(policy, "{}\n");
-  fs.chmodSync(policy, 0o444);
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
-  const attached = await resumeRun({ projectRoot: project, runId, env });
-  assert.equal(attached.ok, true, JSON.stringify(attached.diagnostics));
-  assert.equal(attached.value?.submitted, false);
-  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-  setFakeSmithersInspectState(project, "failed");
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
-  const rejected = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
-  assert.equal(rejected.ok, false);
-  assert.match(JSON.stringify(rejected.diagnostics), /sealed continuation governance changed/u);
-  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-  fs.chmodSync(policy, 0o644);
-  fs.writeFileSync(policy, original);
-  fs.chmodSync(policy, 0o444);
-});
-
-test("native continuation rejects governance symlinks and a mismatched control generation", async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  writeSmallTopology(project);
-  const runId = "native-continuation-governance-binding";
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.ok(run.value);
-  assert.ok(env.SMITHERS_FAKE_LOG);
-  const metadataPath = path.join(run.value.run_root, "run.json");
-  const originalMetadata = fs.readFileSync(metadataPath);
-  const metadata = JSON.parse(originalMetadata.toString("utf8")) as { workflow: { control_generation: string } };
-  const controls = path.join(
-    run.value.run_root,
-    "smithers",
-    "execution-snapshots",
-    metadata.workflow.control_generation,
-    "controls"
-  );
-  const policy = path.join(controls, "data-governance.json");
-  const seal = path.join(run.value.run_root, "smithers", "control-integrity.json");
-  setFakeSmithersInspectState(project, "failed");
-  for (const filePath of [policy, seal]) {
-    const parent = path.dirname(filePath);
-    const mode = fs.statSync(parent).mode & 0o777;
-    fs.chmodSync(parent, 0o755);
-    fs.renameSync(filePath, `${filePath}.retained`);
-    fs.symlinkSync(`${filePath}.retained`, filePath);
-    fs.chmodSync(parent, mode);
-    try {
-      fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
-      const rejected = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
-      assert.equal(rejected.ok, false, filePath);
-      assert.match(JSON.stringify(rejected.diagnostics), /symlink|symbolic|unsealed protected file/u);
-      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-    } finally {
-      fs.chmodSync(parent, 0o755);
-      fs.unlinkSync(filePath);
-      fs.renameSync(`${filePath}.retained`, filePath);
-      fs.chmodSync(parent, mode);
-    }
-  }
-  metadata.workflow.control_generation = "0".repeat(64);
-  fs.writeFileSync(metadataPath, JSON.stringify(metadata));
-  fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
-  const rejected = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
-  assert.equal(rejected.ok, false);
-  assert.match(JSON.stringify(rejected.diagnostics), /sealed control generation/u);
-  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-  fs.writeFileSync(metadataPath, originalMetadata);
-});
-
-test("native continuation preserves unsealed legacy launch without synthesizing governance", async () => {
+test("native continuation resumes an unsealed legacy launch without creating a control seal", async () => {
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const runId = "unsealed-legacy-continuation";
@@ -27802,93 +27722,16 @@ test("native continuation preserves unsealed legacy launch without synthesizing 
     })
   );
   const env = fakeSmithersEnv(project);
-  assert.ok(env.SMITHERS_BIN);
-  const governanceLog = path.join(project, "legacy-governance.log");
-  fs.writeFileSync(
-    env.SMITHERS_BIN,
-    fs
-      .readFileSync(env.SMITHERS_BIN, "utf8")
-      .replace(
-        "#!/bin/sh\n",
-        `#!/bin/sh\nprintf '%s|%s\\n' "$1" "$ULTRAFUZZ_DATA_GOVERNANCE_PATH" >> ${shellQuote(governanceLog)}\n`
-      )
-  );
-  env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = undefined;
+  assert.ok(env.SMITHERS_FAKE_LOG);
   setFakeSmithersInspectState(project, "failed");
   const resumed = await resumeRun({ projectRoot: project, runId, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
-  assert.match(fs.readFileSync(governanceLog, "utf8"), /^(?:resume|up)\|$/mu);
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up) /mu);
   assert.equal(fs.existsSync(path.join(runRoot, "smithers", "control-integrity.json")), false);
 });
 
-test("native continuation preserves authenticated pre-governance seals but rejects partial claims", async () => {
-  const project = tempProject();
-  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
-  writeSmallTopology(project);
-  const runId = "sealed-pre-governance-continuation";
-  const env = fakeSmithersEnv(project);
-  const run = await startRun({ projectRoot: project, runId, env });
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.ok(run.value);
-  assert.ok(env.SMITHERS_FAKE_LOG);
-  const sealPath = path.join(run.value.run_root, "smithers", "control-integrity.json");
-  const seal = JSON.parse(fs.readFileSync(sealPath, "utf8")) as {
-    execution_files: Array<{ snapshot_path: string; sha256: string; size_bytes: number }>;
-  };
-  seal.execution_files = seal.execution_files.filter(
-    (entry) => entry.snapshot_path !== "controls/data-governance.json"
-  );
-  const planEntry = seal.execution_files.find((entry) => entry.snapshot_path === "controls/plan.json");
-  assert.ok(planEntry);
-  const metadataPath = path.join(run.value.run_root, "run.json");
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { workflow: { control_generation: string } };
-  env.SMITHERS_FAKE_GOVERNANCE_LOG = path.join(project, "old-sealed-governance.log");
-  env.ULTRAFUZZ_DATA_GOVERNANCE_PATH = path.join(project, "untrusted-policy.json");
-  setFakeSmithersInspectState(project, "failed");
-  const legacyPlan = { ...preGovernanceRunPlan(), run_id: runId };
-  const cases = [
-    legacyPlan,
-    { ...legacyPlan, data_governance: null },
-    { ...legacyPlan, schema_version: "ultrafuzz.run-plan.v3" }
-  ];
-  for (const [index, plan] of cases.entries()) {
-    const bytes = Buffer.from(JSON.stringify(plan));
-    planEntry.sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
-    planEntry.size_bytes = bytes.length;
-    const sealBytes = Buffer.from(JSON.stringify(seal));
-    const generation = crypto.createHash("sha256").update(sealBytes).digest("hex");
-    const snapshotRoot = path.join(run.value.run_root, "smithers", "execution-snapshots", generation);
-    const controls = path.join(snapshotRoot, "controls");
-    fs.mkdirSync(controls, { recursive: true });
-    fs.writeFileSync(path.join(controls, "plan.json"), bytes, { mode: 0o444 });
-    fs.chmodSync(controls, 0o555);
-    fs.chmodSync(snapshotRoot, 0o555);
-    fs.writeFileSync(sealPath, sealBytes);
-    metadata.workflow.control_generation = generation;
-    fs.writeFileSync(metadataPath, JSON.stringify(metadata));
-    fs.writeFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "");
-    fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
-    const resumed = await resumeRun({ projectRoot: project, runId, env });
-    assert.equal(resumed.ok, index === 0, JSON.stringify(resumed.diagnostics));
-    if (index === 0) {
-      assert.match(fs.readFileSync(env.SMITHERS_FAKE_GOVERNANCE_LOG, "utf8"), /^(?:resume|up)\|$/mu);
-    } else {
-      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-    }
-    fs.writeFileSync(env.SMITHERS_FAKE_LOG, "");
-    const reset = await resumeRun({ projectRoot: project, runId, resetNode: "node:project-discovery", env });
-    assert.equal(reset.ok, index === 0, JSON.stringify(reset.diagnostics));
-    if (index === 0) {
-      assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^timetravel /mu);
-      assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8"), "");
-    } else {
-      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-    }
-  }
-});
-
-test("ordinary resume tolerates link-journal gaps but refuses a missing claimed control seal", async () => {
+test("ordinary resume bypasses legacy control-seal and link-journal gaps", async () => {
   const cases = [
     {
       runId: "legacy-missing-control-seal",
@@ -27924,12 +27767,6 @@ test("ordinary resume tolerates link-journal gaps but refuses a missing claimed 
       assert.match(evidence.diagnostics[0]?.message ?? "", entry.message);
     }
     const resumed = await resumeRun({ projectRoot: project, runId: entry.runId, force: true, env });
-    if (entry.code === "WORKFLOW_CONTROL_SEAL_MISSING") {
-      assert.equal(resumed.ok, false, "a current sealed run cannot recover launch policy from its missing seal");
-      assert.ok(env.SMITHERS_FAKE_LOG);
-      assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8"), /^(?:resume|up|timetravel) /mu);
-      continue;
-    }
     assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
     assert.equal(resumed.value?.run_id, entry.runId);
     assert.equal(resumed.value?.workflow_run_id, `ultrafuzz-${entry.runId}`);
@@ -28105,6 +27942,118 @@ test("a pending lifecycle link reconciles split source and target projections fr
     entries?: Array<{ phase?: string }>;
   };
   assert.equal(reconciledJournal.entries?.at(-1)?.phase, "committed");
+});
+
+// #1258: a run ID the engine already has a run for is refused before planning builds the plan and the
+// execution snapshot, instead of at submission minutes later with a partial run directory left behind.
+test("run refuses a run ID the workflow engine already records before planning anything", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-known-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "finished",
+      state: "succeeded",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    })
+  });
+  // The engine keeps its run records here; `clean` removed the run directory but not the record.
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+  const runRoot = path.join(project, ".ultrafuzz", "runs", runId);
+
+  const refused = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(refused.ok, false);
+  const diagnostic = refused.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+  assert.ok(diagnostic, JSON.stringify(refused.diagnostics));
+  assert.match(diagnostic.message, /already exists in the workflow engine's records \(finished\)/u);
+  // Without its run directory the run cannot be resumed, so the message does not suggest it.
+  assert.match(diagnostic.message, /its run directory is gone .*; choose a different --run-id$/u);
+  assert.doesNotMatch(diagnostic.message, /ultrafuzz resume/u);
+  assert.doesNotMatch(diagnostic.message, /smithers/iu);
+  assert.equal(fs.existsSync(runRoot), false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG ?? "", "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json --full-output$`, "mu"));
+  assert.doesNotMatch(commands, /^up /mu);
+
+  // A run whose directory still exists can be continued instead.
+  fs.mkdirSync(runRoot, { recursive: true });
+  const resumable = await startRun({ projectRoot: project, runId, env });
+  assert.equal(resumable.ok, false);
+  const withDirectory = resumable.diagnostics.find(({ code }) => code === "RUN_ALREADY_EXISTS");
+  assert.ok(withDirectory, JSON.stringify(resumable.diagnostics));
+  assert.match(
+    withDirectory.message,
+    new RegExp(`; choose a different --run-id, or continue it with \`ultrafuzz resume ${runId}\`$`, "u")
+  );
+});
+
+test("run launches when the engine reports a run other than the one it was asked about", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-other-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({ workflowRunId: `ultrafuzz-${runId}-earlier`, status: "finished", steps: [] })
+  });
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+  const launched = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(
+    launched.diagnostics.some(({ code }) => code === "RUN_ALREADY_EXISTS"),
+    false,
+    JSON.stringify(launched.diagnostics)
+  );
+  const commands = fs.readFileSync(commandLog, "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json --full-output$`, "mu"));
+  assert.match(commands, /^up /mu);
+});
+
+test("run asks the engine about its run ID only once the engine has records, and launches a new one", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "engine-new-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: {
+      ok: false,
+      error: { code: "RUN_NOT_FOUND", message: `Run not found: ultrafuzz-${runId}` },
+      meta: { command: "inspect", duration: "1ms" }
+    }
+  });
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(path.join(project, "smithers.db"), "");
+
+  const launched = await startRun({ projectRoot: project, runId, env });
+
+  assert.equal(
+    launched.diagnostics.some(({ code }) => code === "RUN_ALREADY_EXISTS"),
+    false,
+    JSON.stringify(launched.diagnostics)
+  );
+  const commands = fs.readFileSync(commandLog, "utf8");
+  assert.match(commands, new RegExp(`^inspect ultrafuzz-${runId} --format json --full-output$`, "mu"));
+  assert.match(commands, /^up /mu);
+
+  // Without engine records there is nothing to collide with, and the engine is not asked.
+  const fresh = tempProject();
+  initProject({ projectRoot: fresh, force: true });
+  writeSmallTopology(fresh);
+  const freshEnv = fakeLifecycleSmithersEnv(fresh, {
+    inspect: workflowInspect({ workflowRunId: "ultrafuzz-fresh-run", status: "running", steps: [] })
+  });
+  const started = await startRun({ projectRoot: fresh, runId: "fresh-run", env: freshEnv });
+  assert.equal(started.ok, true, JSON.stringify(started.diagnostics));
+  assert.doesNotMatch(
+    fs.readFileSync(freshEnv.SMITHERS_FAKE_LOG ?? "", "utf8"),
+    /^inspect ultrafuzz-fresh-run --format json --full-output$/mu
+  );
 });
 
 test("ordinary resume checks active-run ownership before detached preflight", async () => {
@@ -28393,6 +28342,177 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   assert.match(
     commands,
     /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --accept-workflow-change --max-concurrency 8 --log-dir \S+\/smithers\/logs --format json/u
+  );
+});
+
+// A consumer admits a failed continuing producer as an optional omission. Rerunning the producer
+// once that consumer has started cannot reach the consumer's output, so the run would report
+// COMPLETE over a consumer that never read it (#1231). `--retry-failed` leaves such a producer
+// failed and still retries one whose consumers have not started.
+for (const fixture of [
+  { kind: "lens", producer: "lens", consumer: "catalog", other: "dedupe" },
+  { kind: "strategy", producer: "optional-specialist", consumer: "final-report", other: "direct-strategy" }
+] as const) {
+  for (const consumerStarted of [true, false]) {
+    test(`resume --retry-failed ${consumerStarted ? "leaves" : "retries"} a failed continuing ${fixture.kind} ${consumerStarted ? "a started consumer already ran without" : "whose consumers have not started"}`, async () => {
+      let project: string;
+      if (fixture.kind === "lens") project = writeRetriedLensReviewProject();
+      else {
+        project = tempProject();
+        initProject({ projectRoot: project, force: true });
+        writeOptionalSpecialistTopology(project);
+      }
+      const runId = `retry-omitted-${fixture.kind}-${consumerStarted ? "started" : "pending"}`;
+      const workflowRunId = `ultrafuzz-${runId}`;
+      const env = fakeLifecycleSmithersEnv(project, {
+        inspect: workflowInspect({
+          workflowRunId,
+          status: "failed",
+          state: "failed",
+          steps: [
+            { id: `node:${fixture.producer}`, state: "failed", attempt: 1 },
+            ...(consumerStarted
+              ? [
+                  { id: `prepare:${fixture.consumer}`, state: "finished" as const, attempt: 1 },
+                  { id: `node:${fixture.consumer}`, state: "finished" as const, attempt: 1 },
+                  { id: `node:${fixture.other}`, state: "failed" as const, attempt: 1 }
+                ]
+              : [
+                  { id: `prepare:${fixture.consumer}`, state: "pending" as const, attempt: 0 },
+                  { id: `node:${fixture.consumer}`, state: "pending" as const, attempt: 0 }
+                ])
+          ]
+        })
+      });
+      const run = await startRun({ projectRoot: project, runId, env });
+      assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+      const commandLog = env.SMITHERS_FAKE_LOG;
+      assert.ok(commandLog);
+      fs.writeFileSync(commandLog, "", "utf8");
+
+      const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+      const commands = fs.readFileSync(commandLog, "utf8");
+      const producerReset = new RegExp(`^timetravel .* --node-id node:${fixture.producer} `, "mu");
+      const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+      if (consumerStarted) {
+        assert.doesNotMatch(commands, producerReset);
+        // Another failed task is still retried.
+        assert.match(commands, new RegExp(`^timetravel .* --node-id node:${fixture.other} `, "mu"));
+        assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+        assert.equal(skipped.severity, "warning");
+        assert.match(skipped.message, new RegExp(`${fixture.producer}.*${fixture.consumer}`, "u"));
+      } else {
+        assert.match(commands, producerReset);
+        assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+      }
+    });
+  }
+}
+
+// A consumer admits its optional inputs in its preparation, which waits for its producers. A failed
+// preparation reruns behind the producer's rerun and can read it, so the producer is retried too. A
+// failed agent or verifier reruns at once on the preparation that already ran without the producer,
+// so the producer stays failed (#1231).
+for (const fixture of [
+  { failed: "prepare:catalog", state: "failed", reset: "prepare:catalog", producerRetried: true },
+  { failed: "prepare:catalog", state: "stalled", reset: "prepare:catalog", producerRetried: true },
+  { failed: "node:catalog", state: "failed", reset: "node:catalog", producerRetried: false },
+  { failed: "verify:catalog", state: "failed", reset: "node:catalog", producerRetried: false }
+] as const) {
+  test(`resume --retry-failed ${fixture.producerRetried ? "retries" : "leaves"} a failed continuing lens when its consumer's ${fixture.failed} is ${fixture.state}`, async () => {
+    const project = writeRetriedLensReviewProject();
+    const runId = `retry-omitted-lens-${fixture.failed.replace(":", "-")}-${fixture.state}`;
+    const preparationFailed = fixture.failed === "prepare:catalog";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId: `ultrafuzz-${runId}`,
+        status: "failed",
+        state: "failed",
+        steps: [
+          { id: "node:lens", state: "failed", attempt: 1 },
+          { id: "prepare:catalog", state: preparationFailed ? fixture.state : "finished", attempt: 1 },
+          ...(preparationFailed
+            ? [
+                { id: "node:catalog", state: "skipped" as const, attempt: 0 },
+                { id: "verify:catalog", state: "skipped" as const, attempt: 0 }
+              ]
+            : fixture.failed === "node:catalog"
+              ? [{ id: "node:catalog", state: fixture.state, attempt: 1 }]
+              : [
+                  { id: "node:catalog", state: "finished" as const, attempt: 1 },
+                  { id: "verify:catalog", state: fixture.state, attempt: 1 }
+                ])
+        ]
+      })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const commandLog = env.SMITHERS_FAKE_LOG;
+    assert.ok(commandLog);
+    fs.writeFileSync(commandLog, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    const commands = fs.readFileSync(commandLog, "utf8");
+    assert.match(commands, new RegExp(`^timetravel .* --node-id ${fixture.reset} `, "mu"));
+    const producerReset = /^timetravel .* --node-id node:lens /mu;
+    const skipped = resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED");
+    if (fixture.producerRetried) {
+      assert.match(commands, producerReset);
+      assert.equal(skipped, undefined, JSON.stringify(resumed.diagnostics));
+    } else {
+      assert.doesNotMatch(commands, producerReset);
+      assert.ok(skipped, JSON.stringify(resumed.diagnostics));
+      assert.match(skipped.message, /lens: catalog already ran without it/u);
+    }
+  });
+}
+
+// `--reset-node` reruns a failed continuing task even when `--retry-failed` would leave it, so the
+// resume does not also report that task as left failed.
+test("resume --retry-failed --reset-node does not report the reset task as skipped", async () => {
+  const project = writeRetriedLensReviewProject();
+  const runId = "retry-omitted-lens-reset";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: `ultrafuzz-${runId}`,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:lens", state: "failed", attempt: 1 },
+        { id: "prepare:catalog", state: "finished", attempt: 1 },
+        { id: "node:catalog", state: "finished", attempt: 1 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const commandLog = env.SMITHERS_FAKE_LOG;
+  assert.ok(commandLog);
+  fs.writeFileSync(commandLog, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    force: true,
+    retryFailed: true,
+    resetNode: "node:lens",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const resets = fs
+    .readFileSync(commandLog, "utf8")
+    .split("\n")
+    .filter((line) => /^timetravel .* --node-id node:lens /u.test(line));
+  assert.equal(resets.length, 1, resets.join("\n"));
+  assert.equal(
+    resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED"),
+    undefined,
+    JSON.stringify(resumed.diagnostics)
   );
 });
 

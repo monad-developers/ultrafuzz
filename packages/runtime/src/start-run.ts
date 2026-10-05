@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   appendEvent,
+  isRecord,
   assertRunPlanDocument,
   assertPlannedGraph,
   assertPlannedGraphSemantics,
@@ -66,15 +67,15 @@ import {
   assertControllerExecutionSnapshotDigest,
   assertProviderScopedSensitiveEnvironmentCapability
 } from "./controller-source.js";
-import { controllerOwnedGovernancePaths, targetIdentity } from "./data-governance.js";
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
+  commandPayload,
   renderCurrentSmithersController,
   requestSmithersPause,
+  runSmithersInspectionCommand,
   runSmithersLifecycleCommand,
   type SmithersResumeInspection,
-  assertSealedDataGovernance,
   smithersExecutionControlFiles,
   smithersDiagnostic,
   submitSmithersWorkflow,
@@ -85,7 +86,6 @@ import { runsRootForProject } from "./validate.js";
 import {
   acquireWorkflowControlLock,
   acquireWorkflowLifecycleLock,
-  authenticatedContinuationGovernancePath,
   materializeWorkflowExecutionSnapshot,
   sealedBunStartupControlDrift,
   sealWorkflowControlFiles,
@@ -139,10 +139,6 @@ const WORKFLOW_CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_BUN_MODULE_CONFINEMENT",
   "ULTRAFUZZ_CONFIG_PATH",
-  "ULTRAFUZZ_DATA_DISCLOSURE_ACKNOWLEDGEMENTS",
-  "ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK",
-  "ULTRAFUZZ_DATA_GOVERNANCE_PATH",
-  "ULTRAFUZZ_DATA_GOVERNANCE_POLICY",
   "ULTRAFUZZ_PROVIDER_HOME_ROOT",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "ULTRAFUZZ_SCHEMA_BUNDLE_SHA256",
@@ -189,9 +185,10 @@ function controllerRefreshInspectionEnvironment(
 }
 
 export async function startRun(input: StartRunInput) {
+  const knownRun = await workflowRunAlreadyRecorded(input);
+  if (knownRun !== undefined) return runtimeFailure<StartRunValue>([knownRun]);
   let createdLayout: RunLayout | undefined;
   const planned = await planRun(input, {
-    enforceDataGovernance: true,
     beforeMaterialize: async ({ resolvedConfig, expandedGraph }) => {
       // Launch seals a controller of its own, but `resume` runs the installed
       // runner, so refuse one it cannot bind (an unpatched install, a missing
@@ -237,8 +234,7 @@ export async function startRun(input: StartRunInput) {
       renderedPrompts: plan.rendered_prompts,
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput,
-      controllerSourceDigest: plan.controller_source_digest,
-      dataGovernance: plan.data_governance
+      controllerSourceDigest: plan.controller_source_digest
     });
     const prepared = await persistSmithersEvidence(plan.layout, plan.graph, compiled, input.env, forbiddenSecretValues);
     appendEvent(plan.layout, {
@@ -286,12 +282,6 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
-    assertCurrentDataGovernanceTarget(
-      plan.validation.project_root,
-      prepared.verifiedControl.executionFiles,
-      plan.data_governance.path,
-      controllerOwnedGovernancePaths(plan.validation.project_root, plan.layout.root)
-    );
     const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
     const submissionEnvironment = {
@@ -655,6 +645,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
+      tasks,
       priorInspection: refreshInspection,
       // Applies the project's current prompts to the unfinished tasks; never fails the resume.
       beforeContinuation: async (context) => {
@@ -667,21 +658,6 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       keepWorkspaces: config.run.keepWorkspaces,
       controllerLeaseSeconds: config.run.controllerLeaseSeconds,
       env: lifecycleEnvironment,
-      prepareContinuationEnvironment: () => {
-        const claimsSealedControl =
-          workflow.control_generation !== undefined || workflow.control_integrity_path !== undefined;
-        if (!claimsSealedControl && pathIsMissing(workflowControlPaths(projectRoot, layout).integrityPath)) {
-          return lifecycleEnvironment;
-        }
-        return {
-          ...lifecycleEnvironment,
-          ULTRAFUZZ_DATA_GOVERNANCE_PATH: authenticatedContinuationGovernancePath(
-            projectRoot,
-            layout,
-            workflow.control_generation
-          )
-        };
-      },
       environmentVariableNames: mergeEnvironmentVariableNames(
         agentEnvironmentVariableNames(config, agentRefs, continuedEnvironment),
         ["ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES", "ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES"],
@@ -693,6 +669,24 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // so it must not re-record status, lease, deadline or Forge guard, or warn
     // about a guard no controller runs with; the resume that starts the next
     // controller does.
+    // `--reset-node` reruns its target anyway, so that task is not reported as left failed.
+    const resetAttemptId = tasks.find(
+      (task) =>
+        input.resetNode !== undefined &&
+        [task.preparationSmithersNodeId, task.smithersNodeId, task.verifierSmithersNodeId].includes(input.resetNode)
+    )?.attemptId;
+    for (const [producer, consumers] of result.retainedFailures ?? []) {
+      if (producer === resetAttemptId) continue;
+      // A lens is an optional input to every task after the property fan-in, so name only a few.
+      const named = consumers.slice(0, 3).join(", ");
+      const ranWithout = consumers.length > 3 ? `${named} and ${String(consumers.length - 3)} more tasks` : named;
+      diagnostics.push({
+        code: "WORKFLOW_RETRY_SKIPPED",
+        message: `resume did not retry failed task ${producer}: ${ranWithout} already ran without it, so a rerun could not reach their outputs and the run stays partial`,
+        severity: "warning",
+        source: "runtime"
+      });
+    }
     if (result.alreadyRunning !== true) {
       diagnostics.push(...forgeGuard.diagnostics);
       recordNativeContinuationState({
@@ -720,6 +714,48 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
   } finally {
     await releaseLifecycleLock?.();
   }
+}
+
+/**
+ * Refuse a run ID the workflow engine already has a run for, before planning builds the run's plan and
+ * execution snapshot (#1258). The engine rejects such a launch only at submission, with `RUN_EXISTS`,
+ * after minutes of preparation and with a partial run directory left behind; `clean` removes the run
+ * directory but not the engine's record. The engine creates its database in the project root on the
+ * first launch, so a project without one has no runs to collide with and is not asked. Any answer
+ * other than the engine reporting this exact run lets the launch go ahead, as before: submission
+ * still rejects a duplicate.
+ */
+async function workflowRunAlreadyRecorded(input: StartRunInput): Promise<RuntimeDiagnostic | undefined> {
+  if (input.runId === undefined) return undefined;
+  let runId: string;
+  try {
+    runId = validateSafeId(input.runId, "run ID");
+  } catch {
+    // Planning reports the invalid ID.
+    return undefined;
+  }
+  const projectRoot = path.resolve(input.projectRoot);
+  if (!fs.existsSync(path.join(projectRoot, "smithers.db"))) return undefined;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const inspected = await runSmithersInspectionCommand({
+    args: ["inspect", workflowRunId, "--format", "json", "--full-output"],
+    projectRoot,
+    env: input.env
+  });
+  const run = inspected.ok ? commandPayload(inspected.json)?.run : undefined;
+  if (!isRecord(run) || run.id !== workflowRunId) return undefined;
+  const status = typeof run.status === "string" ? ` (${run.status})` : "";
+  // `resume` continues a run from its directory under this runs root, and `clean` removes that directory
+  // but not the engine's record (#1257), so resuming is suggested only while the directory exists.
+  const next = fs.existsSync(path.join(await runsRootForProject(projectRoot), runId))
+    ? `; choose a different --run-id, or continue it with \`ultrafuzz resume ${runId}\``
+    : ", even though its run directory is gone (`ultrafuzz clean` leaves the engine's record behind); choose a different --run-id";
+  return {
+    code: "RUN_ALREADY_EXISTS",
+    message: `run ${runId} already exists in the workflow engine's records${status}, so it cannot be launched again${next}`,
+    severity: "error",
+    source: "runtime"
+  };
 }
 
 // A missing or unreadable config fails the resume: without it the run's execution mode is unknown.
@@ -1285,8 +1321,6 @@ async function persistSmithersEvidence(
   });
   const verifiedControl = verifyWorkflowControlSnapshot(compiled.projectRoot, layout);
   assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, compiled.controllerSourceDigest);
-  if (compiled.dataGovernance === undefined) throw new Error("compiled workflow is missing data governance");
-  assertSealedDataGovernance(verifiedControl.executionFiles, compiled.dataGovernance, compiled.runId);
   const executionSnapshot = materializeWorkflowExecutionSnapshot({
     projectRoot: compiled.projectRoot,
     layout,
@@ -1447,7 +1481,6 @@ export async function readLinkedWorkflowEvidence(
     if (sealedPlan === undefined) throw new Error("sealed workflow is missing its run plan");
     const plan = assertRunPlanDocument(parseStrictJsonBytes(sealedPlan.contents), runId);
     assertControllerExecutionSnapshotDigest(verifiedControl.executionFiles, plan.controller_source_digest);
-    assertSealedDataGovernance(verifiedControl.executionFiles, plan.data_governance, runId);
     const sealedTaskManifest = tolerateDivergence
       ? parseSealedTaskManifestForObserver(verifiedControl.contents)
       : { document: parseSealedTaskManifest(verifiedControl.contents), divergences: [] as readonly string[] };
@@ -2073,18 +2106,6 @@ function assertCredentialEnvironmentVariableName(name: string): void {
 
 function objectRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function assertCurrentDataGovernanceTarget(
-  projectRoot: string,
-  executionFiles: readonly { snapshotPath: string; contents: Buffer }[],
-  governancePath: string,
-  controllerOwnedPaths: string[]
-): void {
-  const sealed = executionFiles.find((file) => file.snapshotPath === `controls/${governancePath}`),
-    expected = objectRecord(objectRecord(parseStrictJsonBytes(sealed?.contents ?? Buffer.alloc(0))).target);
-  if (JSON.stringify(targetIdentity(projectRoot, controllerOwnedPaths)) !== JSON.stringify(expected))
-    throw new Error("campaign source changed after its data-disclosure acknowledgement");
 }
 
 function parseSealedResolvedConfig(

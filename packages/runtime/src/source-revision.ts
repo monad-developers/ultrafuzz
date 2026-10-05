@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 import { INVARIANT_PINNED_SOURCE_REF } from "@ultrafuzz/artifacts";
-
-import { trustedGitExecutable } from "./data-governance.js";
 
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -126,6 +126,48 @@ function tryGitObjectId(projectRoot: string, revision: string): string | undefin
   } catch (error) {
     if (error instanceof Error && error.message.includes("unsupported object ID")) throw error;
     return undefined;
+  }
+}
+
+function trustedGitExecutable(projectRoot: string): string {
+  const target = fs.realpathSync(projectRoot),
+    uid = process.getuid?.(),
+    search = [
+      ...(process.env.PATH ?? "").split(path.delimiter),
+      ...(process.platform === "win32" ? [] : ["/usr/local/bin", "/usr/bin", "/bin"])
+    ];
+  for (const entry of new Set(search)) {
+    if (!path.isAbsolute(entry)) continue;
+    try {
+      const executable = fs.realpathSync(path.join(entry, process.platform === "win32" ? "git.exe" : "git")),
+        relative = path.relative(target, executable);
+      if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative)))
+        continue;
+      assertOperatorOwnedExecutablePath(executable, uid);
+      fs.accessSync(executable, fs.constants.X_OK);
+      return executable;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("no operator-trusted Git executable is available outside the target repository");
+}
+
+/**
+ * Reject a path with a symlink, or with a component that is group- or world-writable or owned by
+ * neither root nor the operator.
+ */
+function assertOperatorOwnedExecutablePath(executable: string, uid: number | undefined): void {
+  for (let current = executable; ; current = path.dirname(current)) {
+    const stat = fs.lstatSync(current);
+    if (
+      (current === executable ? !stat.isFile() : !stat.isDirectory()) ||
+      stat.isSymbolicLink() ||
+      (process.platform !== "win32" &&
+        ((stat.mode & 0o022) !== 0 || (uid !== undefined && ![0, uid].includes(stat.uid))))
+    )
+      throw new Error("untrusted Git executable path");
+    if (current === path.dirname(current)) break;
   }
 }
 

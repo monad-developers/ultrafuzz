@@ -10,7 +10,7 @@ type OrchestratorResponsibility =
   "argv-construction" | "filesystem-walking" | "output-interpretation" | "session-handling" | "token-accounting";
 
 type AdapterPolicy = {
-  purpose: "adapter" | "data-governance" | "provider-home" | "registry" | "strict-input" | "toml";
+  purpose: "adapter" | "environment" | "provider-home" | "registry" | "strict-input" | "toml";
   responsibilities: readonly OrchestratorResponsibility[];
   upstreamIssues: readonly string[];
 };
@@ -98,7 +98,7 @@ const adapterPolicies: Record<string, AdapterPolicy> = {
     responsibilities: ["output-interpretation"],
     upstreamIssues: ["https://github.com/monad-developers/ultrafuzz/issues/1084"]
   },
-  "environment.tsx": { purpose: "data-governance", responsibilities: [], upstreamIssues: [] },
+  "environment.tsx": { purpose: "environment", responsibilities: [], upstreamIssues: [] },
   "index.tsx": { purpose: "registry", responsibilities: [], upstreamIssues: [] },
   "kimi.tsx": {
     purpose: "adapter",

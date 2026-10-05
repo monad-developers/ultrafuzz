@@ -231,6 +231,14 @@ replacement model.
 `--audit-profile` selects a profile for one command, while `--topology-path`
 atomically replaces the project or profile topology for that command.
 
+A run ID must be new to the project. `run` fails with `RUN_ALREADY_EXISTS`
+before it plans anything when the run directory exists, or when the workflow
+engine already records a run with that ID. The second case happens after
+`ultrafuzz clean <run>`, which removes the run directory but not the engine's
+record. Choose another `--run-id`, or continue a run whose directory still
+exists with `ultrafuzz resume <run-id>`. `run` asks the engine only once the
+project has engine records, so a project's first launch skips the query.
+
 ## Audit Profiles and Packaged Topologies
 
 ```bash
@@ -358,6 +366,19 @@ adapters in the continued workflow read the run's
 `smithers/execution-config.toml` (launch gave them a copy of the same file). If
 resume cannot prune stale task-worktree registrations, it reports a
 `WORKFLOW_WORKTREE_REPAIR_FAILED` warning and continues.
+
+`resume --retry-failed` reruns every failed task except a failed task in a
+`failure_policy: continue` group that a started task already ran without. That
+task was admitted while the failed one had no output, and a rerun cannot reach
+the outputs it already produced, so the run would read as complete over work
+that never used the rerun's output. `resume` leaves such a task failed, reports
+a `WORKFLOW_RETRY_SKIPPED` warning that names it and the tasks that ran without
+it, and the final report stays partial. A task whose preparation failed has not
+started: its preparation, which admits its inputs, reruns after the failed task,
+so both are retried. A task whose agent or verifier failed reruns at once,
+without waiting for the failed task, so it counts as started. The Modal
+benchmark worker does not resume a finished run whose only failures are such
+tasks and the tasks skipped because one of them failed.
 
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so
@@ -693,6 +714,15 @@ non-launching configuration contract unchanged. Doctor reports:
   far. Doctor warns when the directory is a RAM-backed tmpfs or has less than
   2 GiB free, and never removes those directories, because a native resume
   from an earlier release kept its controller there for the detached engine.
+
+- the provider home of each agent the selected topology can dispatch to.
+  Agents refuse a provider home that is not a private directory the operator
+  owns (mode `0700`) below directories only the operator can write, and so
+  does the Ultrafuzz provider-home root above one. Claude Code and Codex
+  create `~/.claude` and `~/.codex` from the umask, usually `0755` or `0775`,
+  so a home either CLI created is refused. `validate`, and so `run`, report
+  such a home as `PROVIDER_HOME_UNSAFE` before planning, with the directory
+  and the command that fixes it, such as `chmod 700 ~/.codex`.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies.

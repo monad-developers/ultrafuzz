@@ -104,12 +104,10 @@ const {
   projectCanonicalFinalReport,
   finalReportRunSummaryAccounting,
   readFinalReportSourceRunSpendUsd,
-  readFinalReportTargetCommit,
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
   smithersTaskAgentId,
-  targetIdentity,
   topologyRuntimeBudgetForTimeout,
   topologyRuntimeContextForTimeout,
   validateWorkspacePatchCapture,
@@ -809,7 +807,6 @@ function prepareFrictionLog(task: (typeof taskSpecs)[number]): void {
 const pinnedSourceBranch = "ultrafuzz-pinned";
 const pinnedSourceRef = `refs/heads/${pinnedSourceBranch}`;
 const usesPinnedSource = sourceUsesPinnedBranch();
-const governedSource = readGovernedSource();
 
 function renderAgentPrompt(values: {
   runtimeContext: string;
@@ -851,30 +848,6 @@ function sourceUsesPinnedBranch(): boolean {
     ? invariantPinnedSourceRefExists(process.cwd(), pinnedSourceRef)
     : recordedRef === pinnedSourceRef;
 }
-function readGovernedSource(): { commit: string; tree: string } | undefined {
-  const governancePath = process.env.ULTRAFUZZ_DATA_GOVERNANCE_PATH;
-  if (governancePath === undefined) return undefined;
-  const governance = parseStrictJsonBytes(readRegularFileSnapshot(governancePath, 1024 * 1024)),
-    policy = isPlainJsonRecord(governance) && isPlainJsonRecord(governance.policy) ? governance.policy : {},
-    target = isPlainJsonRecord(governance) && isPlainJsonRecord(governance.target) ? governance.target : {},
-    { sensitivity } = policy,
-    { commit, tree, dirty } = target;
-  if (sensitivity === "private" && dirty !== false) throw new Error("private campaign source is not clean");
-  if (
-    typeof commit === "string" &&
-    typeof tree === "string" &&
-    /^[a-f0-9]{40,64}$/u.test(commit) &&
-    /^[a-f0-9]{40,64}$/u.test(tree)
-  )
-    return { commit, tree };
-  if (sensitivity === "private") throw new Error("private campaign source commit is invalid");
-  return undefined;
-}
-function assertGovernedWorkspaceSource(task: (typeof taskSpecs)[number]): void {
-  if (governedSource === undefined) return;
-  if (targetIdentity(task.workspacePath).commit !== governedSource.commit)
-    throw new Error("task workspace is not the acknowledged source commit");
-}
 
 function assertWorkspaceSourceRevision(task: (typeof taskSpecs)[number]): void {
   if (task.sourceRevision === null) return;
@@ -900,7 +873,6 @@ function worktreeBaseBranch(task: (typeof taskSpecs)[number]): string | undefine
   }
   if (usesPinnedSource) return pinnedSourceBranch;
   if (task.sourceRevision !== null) return task.sourceRevision;
-  if (governedSource !== undefined) return governedSource.commit;
   return undefined;
 }
 function promptForTask(
@@ -1746,6 +1718,14 @@ function finalReportArtifactValidationWarnings(task: (typeof taskSpecs)[number])
   return boundArtifactValidationWarnings(warnings);
 }
 
+/** The run's launch commit, which every task worktree was created from (assertWorkspaceSourceRevision). */
+function finalReportTargetCommit(task: (typeof taskSpecs)[number]): string | null {
+  if (task.sourceRevision === undefined) {
+    throw new Error(`artifact-contract failure: final-report target commit is unnormalized ${task.attemptId}`);
+  }
+  return task.sourceRevision;
+}
+
 function deriveAuthoritativeFinalReportRunMetadata(
   task: (typeof taskSpecs)[number],
   workflowMetrics?: FinalReportWorkflowMetricsProjection
@@ -1800,8 +1780,7 @@ function deriveAuthoritativeFinalReportRunMetadata(
     run_id: task.metadata.run.ultrafuzzRunId,
     source_run_id: sourceRunId,
     repository: normalizeFinalReportGitHubRepository(task),
-    // The sealed governance record names the commit every task worktree was created from.
-    target_commit: readFinalReportTargetCommit(),
+    target_commit: finalReportTargetCommit(task),
     elapsed_time: elapsedTime,
     models_used: summaryAccounting.models_used,
     tokens_used: summaryAccounting.tokens_used,
@@ -2450,7 +2429,6 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
         // has no admission; stable task identities preserve the exact original
         // snapshot epoch across ordinary rerenders and chain candidates.
         if (!dependencyArtifactAdmissionsByTask.has(task.attemptId)) {
-          assertGovernedWorkspaceSource(task);
           prepareArtifactMirror(task);
         }
         assertDependencyArtifactAdmissionCurrent(task);
@@ -9234,7 +9212,7 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => (assertGovernedWorkspaceSource(task), prepareArtifactMirror(task))}
+                {() => prepareArtifactMirror(task)}
               </Task>
               <Task
                 id={task.id}

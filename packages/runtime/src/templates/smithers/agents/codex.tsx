@@ -33,8 +33,7 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
     let env: Record<string, string>;
     try {
       env = workflowControlChildEnvironment({ ...this.opts.env, ...command.env }, process.env, {
-        agent: this.workflowDataGovernanceAgent(),
-        configDir: this.opts.configDir
+        agent: this.workflowCredentialAgent()
       });
     } catch (error) {
       await command.cleanup?.();
@@ -60,7 +59,7 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
     };
   }
 
-  protected workflowDataGovernanceAgent(): "CodexAgent" | "OpenRouterAgent" {
+  protected workflowCredentialAgent(): "CodexAgent" | "OpenRouterAgent" {
     return "CodexAgent";
   }
 }

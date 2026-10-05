@@ -59,10 +59,7 @@ export class CompatibleClaudeCodeAgent extends StatedFailureClaudeCodeAgent {
     try {
       return {
         ...command,
-        env: workflowControlChildEnvironment(command.env, process.env, {
-          agent: "ClaudeAgent",
-          configDir: this.opts.configDir
-        })
+        env: workflowControlChildEnvironment(command.env, process.env, { agent: "ClaudeAgent" })
       };
     } catch (error) {
       await command.cleanup?.();

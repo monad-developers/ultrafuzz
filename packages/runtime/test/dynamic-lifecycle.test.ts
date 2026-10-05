@@ -33,7 +33,6 @@ import {
   watchWorkflowEvents,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
-import { effectiveRouteEnvironment } from "../src/data-governance.js";
 import {
   renderCurrentSmithersController,
   type CompiledSmithersDynamicGroup,
@@ -42,24 +41,6 @@ import {
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { verifySealedTaskManifestSnapshot, verifyWorkflowControlSnapshot } from "../src/workflow-integrity.js";
 import type { RuntimeDiagnostic } from "../src/types.js";
-
-const TEST_DATA_GOVERNANCE_POLICY = JSON.stringify({
-  schema_version: "ultrafuzz.data-governance-policy.v1",
-  sensitivity: "public",
-  source_destinations: ["model:anthropic", "model:openai"],
-  artifact_destinations: [],
-  destination_policies: ["model:anthropic", "model:openai"].map((destination) => ({
-    destination,
-    processor: "test",
-    region: "local",
-    retention_policy: "test",
-    training_policy: "none",
-    dpa_status: "n/a",
-    minimization_policy: "synthetic",
-    data_handling_basis: "public"
-  })),
-  openrouter_model_allowlist: []
-});
 
 interface LifecycleStep {
   id: string;
@@ -252,18 +233,11 @@ function lifecycleEnvironment(project: string): {
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
-  const ambientRouteEnvironment = Object.fromEntries(
-    ["ClaudeAgent", "CodexAgent"]
-      .flatMap((agent) => effectiveRouteEnvironment(agent, process.env).map(([name]) => name))
-      .map((name) => [name, undefined])
-  );
   return {
     env: bindSmithersExecutableCapability(
       {
-        ...ambientRouteEnvironment,
         PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
         SMITHERS_BIN: smithers,
-        ULTRAFUZZ_DATA_GOVERNANCE_POLICY: TEST_DATA_GOVERNANCE_POLICY,
         ULTRAFUZZ_PROVIDER_HOME_ROOT: temporaryRoot("ufz-dynamic-provider-homes-"),
         ULTRAFUZZ_PRICING_CATALOG_URL: "off"
       },

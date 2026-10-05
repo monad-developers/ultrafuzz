@@ -9,7 +9,7 @@ const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
   };
 export function resolveProviderHome(provider: string, configured?: string): string {
   const selectedRoot = process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim(),
-    // As data-governance.ts reads it. Bun's os.homedir() keeps the HOME its process started with.
+    // Bun's os.homedir() keeps the HOME its process started with.
     home = process.env.HOME?.trim() || os.homedir();
   if (configured === undefined && !selectedRoot) {
     const canonical = CANONICAL_HOMES[provider];

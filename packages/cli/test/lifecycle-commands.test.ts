@@ -28,7 +28,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env: { ULTRAFUZZ_MODAL_PUBLIC_BENCHMARK: "1", ...env },
+    env,
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);

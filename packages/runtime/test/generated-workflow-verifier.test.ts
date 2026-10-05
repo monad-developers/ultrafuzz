@@ -62,7 +62,6 @@ import {
   canonicalPropertiesMarkdownParityIssues,
   invariantLedgerMarkdownParityIssues
 } from "../src/canonical-properties-markdown.js";
-import { readFinalReportTargetCommit } from "../src/data-governance.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { finalReportRunSummaryAccounting, readFinalReportSourceRunSpendUsd } from "../src/final-report-run-summary.js";
 import type { SpendEstimateDocument } from "../src/spend-estimate.js";
@@ -623,9 +622,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     partial_pricing: boolean;
     spend_estimate?: SpendEstimateDocument;
   },
-  admissions: ReadonlyMap<string, unknown> = new Map(),
-  // The controller environment the sealed governance record is read from; see finalReportGovernanceEnvironment.
-  controllerEnvironment: NodeJS.ProcessEnv = {}
+  admissions: ReadonlyMap<string, unknown> = new Map()
 ): {
   normalize(remoteValue: string): string;
   latestElapsedThrough(...values: unknown[]): string | undefined;
@@ -696,7 +693,6 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "deriveCurrentTaskWorkflowMetrics",
     "dependencyArtifactAdmissionsByTask",
     "boundArtifactValidationWarnings",
-    "readFinalReportTargetCommit",
     "finalReportRunSummaryAccounting",
     "readFinalReportSourceRunSpendUsd",
     "readRegularFileSnapshot",
@@ -753,7 +749,6 @@ function loadFinalReportRunMetadataAuthorityHarness(
     async () => workflowMetrics,
     admissions,
     boundArtifactValidationWarnings,
-    () => readFinalReportTargetCommit(controllerEnvironment),
     finalReportRunSummaryAccounting,
     readFinalReportSourceRunSpendUsd,
     readRegularFileSnapshot,
@@ -763,25 +758,6 @@ function loadFinalReportRunMetadataAuthorityHarness(
 }
 
 const FINAL_REPORT_TARGET_COMMIT = "0123456789abcdef0123456789abcdef01234567";
-
-/** Writes a sealed data-governance record under `root` and returns the controller environment naming it. */
-function finalReportGovernanceEnvironment(
-  root: string,
-  commit: string | null = FINAL_REPORT_TARGET_COMMIT
-): NodeJS.ProcessEnv {
-  const governancePath = path.join(root, "controls", "data-governance.json");
-  fs.mkdirSync(path.dirname(governancePath), { recursive: true });
-  const target =
-    commit === null
-      ? { commit: null, tree: null, dirty: true, worktree_digest: null }
-      : { commit, tree: "f".repeat(commit.length), dirty: false, worktree_digest: "e".repeat(64) };
-  fs.writeFileSync(
-    governancePath,
-    `${JSON.stringify({ schema_version: "ultrafuzz.data-governance-provenance.v1", target })}\n`,
-    "utf8"
-  );
-  return { ULTRAFUZZ_DATA_GOVERNANCE_PATH: governancePath };
-}
 
 function loadTaskPromptPathForArtifactReset(): (
   artifactDir: string,
@@ -6251,7 +6227,6 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "assertVerifiedDependency",
         "sameImmutableFileIdentity",
         "agentFactories",
-        "assertGovernedWorkspaceSource",
         "artifactAwareAgent",
         "frictionLogAddDir",
         `${emitted}; return {
@@ -6326,7 +6301,6 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
             };
           }
         },
-        () => undefined,
         (
           _task: unknown,
           _chainIndex: number,
@@ -8141,33 +8115,27 @@ test("runtime task reconstruction preserves source identity and rejects undefine
       sourceRevision?: string | null;
       sourceRef?: string | null;
     },
-    pinned: boolean,
-    governedCommit?: string
+    pinned: boolean
   ): string | undefined =>
-    new Function(
-      "task",
-      "usesPinnedSource",
-      "pinnedSourceBranch",
-      "governedSource",
-      `${baseSource}; return worktreeBaseBranch(task);`
-    )(task, pinned, "ultrafuzz-pinned", governedCommit === undefined ? undefined : { commit: governedCommit });
+    new Function("task", "usesPinnedSource", "pinnedSourceBranch", `${baseSource}; return worktreeBaseBranch(task);`)(
+      task,
+      pinned,
+      "ultrafuzz-pinned"
+    );
 
   assert.equal(resolveBase({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }, false), revision);
   assert.equal(
     resolveBase({ attemptId: "dynamic-one", sourceRevision: revision, sourceRef: ref }, true),
     "ultrafuzz-pinned"
   );
-  assert.equal(
-    resolveBase({ attemptId: "dynamic-one", sourceRevision: null, sourceRef: null }, false, "b".repeat(40)),
-    "b".repeat(40)
-  );
+  assert.equal(resolveBase({ attemptId: "dynamic-one", sourceRevision: null, sourceRef: null }, false), undefined);
   assert.throws(() => resolveBase({ attemptId: "dynamic-one" }, false), /unnormalized source identity/u);
 });
 
 test("recorded source identity, not later ref creation, selects pinned worktree mode", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function sourceUsesPinnedBranch");
-  const helperEnd = source.indexOf("\nfunction readGovernedSource", helperStart);
+  const helperEnd = source.indexOf("\nfunction assertWorkspaceSourceRevision", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
@@ -9064,6 +9032,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
       workspacePath,
       metadata: { run: { ultrafuzzRunId: "run-1" } },
       agentChain: [{ modelName: "claude-opus-4-8" }],
+      sourceRevision: FINAL_REPORT_TARGET_COMMIT,
       outputs: [
         { path: "custom/report.json", contract: "ultrafuzz/report@3" },
         { path: "custom/report.md", contract: "ultrafuzz/nonempty-markdown@1" }
@@ -9072,8 +9041,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
     const authority = loadFinalReportRunMetadataAuthorityHarness(
       undefined,
       undefined,
-      undefined,
-      finalReportGovernanceEnvironment(root)
+      undefined
     );
     await authority.materialize(task);
 
@@ -9146,8 +9114,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
     const restarted = loadFinalReportRunMetadataAuthorityHarness(
       undefined,
       undefined,
-      undefined,
-      finalReportGovernanceEnvironment(root)
+      undefined
     );
     assert.deepEqual(restarted.authoritative(task), projection);
     fs.writeFileSync(recordPath, `${JSON.stringify({ ...projection, run_id: "other-run" })}\n`, "utf8");
@@ -9192,7 +9159,7 @@ test("final-report Run summary authority is allowlisted, path-injected, tamper-e
   }
 });
 
-test("final-report Run summary names the sealed governance commit, null without one, and fails without the record", async () => {
+test("final-report Run summary names the run's source revision, null without one, and fails when unnormalized", async () => {
   const root = temporaryRoot("ultrafuzz-final-report-target-commit-");
   try {
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-1");
@@ -9210,36 +9177,18 @@ test("final-report Run summary names the sealed governance commit, null without 
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
       ]
     };
-    // The harness binds the reader to a test environment; the template reads the controller's own.
-    assert.match(
-      fs.readFileSync(workflowTemplatePath, "utf8"),
-      /\n {4}target_commit: readFinalReportTargetCommit\(\),\n/u
-    );
-    const sha256Commit = "0123456789abcdef".repeat(4);
-    for (const commit of [FINAL_REPORT_TARGET_COMMIT, sha256Commit, null]) {
-      const authority = loadFinalReportRunMetadataAuthorityHarness(
-        undefined,
-        undefined,
-        undefined,
-        finalReportGovernanceEnvironment(root, commit)
-      );
-      await authority.materialize(task);
-      assert.equal((authority.authoritative(task) as Record<string, unknown>).target_commit, commit);
-      assert.equal((authority.derive(task) as Record<string, unknown>).target_commit, commit);
+    const authority = loadFinalReportRunMetadataAuthorityHarness();
+    for (const sourceRevision of [FINAL_REPORT_TARGET_COMMIT, null]) {
+      const sourced = { ...task, sourceRevision };
+      await authority.materialize(sourced);
+      assert.equal((authority.authoritative(sourced) as Record<string, unknown>).target_commit, sourceRevision);
+      assert.equal((authority.derive(sourced) as Record<string, unknown>).target_commit, sourceRevision);
     }
 
-    // No sealed record is a contract failure at report start, never a placeholder commit.
-    const unsealed = loadFinalReportRunMetadataAuthorityHarness();
-    assert.throws(() => unsealed.derive(task), /artifact-contract failure: final-report target commit authority/u);
-    await assert.rejects(
-      unsealed.materialize(task),
-      /artifact-contract failure: final-report target commit authority is unavailable/u
-    );
-    const governance = finalReportGovernanceEnvironment(root);
-    fs.writeFileSync(path.join(root, "controls", "data-governance.json"), '{"schema_version":', "utf8");
+    // A task whose source identity was never normalized is a contract failure, never a placeholder commit.
     assert.throws(
-      () => loadFinalReportRunMetadataAuthorityHarness(undefined, undefined, undefined, governance).derive(task),
-      /artifact-contract failure: final-report target commit authority is unreadable/u
+      () => authority.derive(task),
+      /artifact-contract failure: final-report target commit is unnormalized final-report/u
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -9319,12 +9268,12 @@ test("final-report Run summary prices one source plus the report attempt, always
       workspacePath,
       metadata: { run: { ultrafuzzRunId: "run-1" } },
       agentChain: [{ modelName: "model-a" }],
+      sourceRevision: FINAL_REPORT_TARGET_COMMIT,
       outputs: [
         { path: "report.json", contract: "ultrafuzz/report@3" },
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
       ]
     };
-    const governance = finalReportGovernanceEnvironment(root);
     const fullMetrics = {
       elapsed_through: "2026-08-20T01:00:00.000Z",
       models_used: ["model-a", "model-b"],
@@ -9341,9 +9290,7 @@ test("final-report Run summary prices one source plus the report attempt, always
     };
     const full = loadFinalReportRunMetadataAuthorityHarness(
       "https://github.com/example/project.git\n",
-      fullMetrics,
-      undefined,
-      governance
+      fullMetrics
     );
     assert.equal(
       full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
@@ -9387,9 +9334,7 @@ test("final-report Run summary prices one source plus the report attempt, always
           ],
           false
         )
-      },
-      undefined,
-      governance
+      }
     );
     await partial.materialize(task);
     const partialProjection = projectionOf();
@@ -9400,7 +9345,7 @@ test("final-report Run summary prices one source plus the report attempt, always
     assert.equal(partialProjection.estimated_spend, "$0.09");
     assert.equal(partialProjection.partial_pricing, true);
 
-    const unavailable = loadFinalReportRunMetadataAuthorityHarness(undefined, undefined, undefined, governance);
+    const unavailable = loadFinalReportRunMetadataAuthorityHarness();
     await unavailable.materialize(task);
     const unavailableProjection = projectionOf();
     assert.equal(unavailableProjection.elapsed_time, "unavailable");
@@ -9446,9 +9391,7 @@ test("final-report Run summary prices one source plus the report attempt, always
     );
     const lineage = loadFinalReportRunMetadataAuthorityHarness(
       "https://github.com/example/project.git\n",
-      { ...fullMetrics, models_used: ["current-run-model"] },
-      undefined,
-      governance
+      { ...fullMetrics, models_used: ["current-run-model"] }
     );
     await lineage.materialize(task);
     const lineageProjection = projectionOf();
@@ -9498,6 +9441,7 @@ test("final-report Run summary keeps partial pricing for a continuation whose cu
       workspacePath,
       metadata: { run: { ultrafuzzRunId: "run-1" } },
       agentChain: [{ modelName: "unpriced-model" }],
+      sourceRevision: FINAL_REPORT_TARGET_COMMIT,
       outputs: [
         { path: "report.json", contract: "ultrafuzz/report@3" },
         { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
@@ -9515,8 +9459,7 @@ test("final-report Run summary keeps partial pricing for a continuation whose cu
       const authority = loadFinalReportRunMetadataAuthorityHarness(
         "https://github.com/example/project.git\n",
         workflowMetrics,
-        undefined,
-        finalReportGovernanceEnvironment(root)
+        undefined
       );
       await authority.materialize(task);
       const projection = authority.authoritative(task) as Record<string, unknown>;
