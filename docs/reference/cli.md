@@ -373,8 +373,12 @@ task was admitted while the failed one had no output, and a rerun cannot reach
 the outputs it already produced, so the run would read as complete over work
 that never used the rerun's output. `resume` leaves such a task failed, reports
 a `WORKFLOW_RETRY_SKIPPED` warning that names it and the tasks that ran without
-it, and the final report stays partial. The Modal benchmark worker does not
-resume a finished run whose only failures are such tasks.
+it, and the final report stays partial. A task whose preparation failed has not
+started: its preparation, which admits its inputs, reruns after the failed task,
+so both are retried. A task whose agent or verifier failed reruns at once,
+without waiting for the failed task, so it counts as started. The Modal
+benchmark worker does not resume a finished run whose only failures are such
+tasks and the tasks skipped because one of them failed.
 
 `resume` runs the workflow engine from Ultrafuzz's own install: pnpm applies
 the committed compatibility patches (`patches/`) to it at install time, so
@@ -710,6 +714,15 @@ non-launching configuration contract unchanged. Doctor reports:
   far. Doctor warns when the directory is a RAM-backed tmpfs or has less than
   2 GiB free, and never removes those directories, because a native resume
   from an earlier release kept its controller there for the detached engine.
+
+- the provider home of each agent the selected topology can dispatch to.
+  Agents refuse a provider home that is not a private directory the operator
+  owns (mode `0700`) below directories only the operator can write, and so
+  does the Ultrafuzz provider-home root above one. Claude Code and Codex
+  create `~/.claude` and `~/.codex` from the umask, usually `0755` or `0775`,
+  so a home either CLI created is refused. `validate`, and so `run`, report
+  such a home as `PROVIDER_HOME_UNSAFE` before planning, with the directory
+  and the command that fixes it, such as `chmod 700 ~/.codex`.
 
 Doctor does not create project run state or install, upgrade, or repair local
 dependencies.

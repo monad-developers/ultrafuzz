@@ -291,6 +291,28 @@ describe("Modal durable evaluation resume", () => {
     ).toBe(true);
   });
 
+  it("does not resume a terminal run whose other failures are skipped behind a retained one", () => {
+    // The review ran without the failed setup, so `--retry-failed` leaves it failed, and the later
+    // stages of its group, which require it, stay skipped.
+    const state = {
+      run_id: "durable-run-one",
+      status: "succeeded",
+      nodes: {
+        "stateful-invariant-setup": { status: "failed" },
+        "stateful-invariant-handlers": { status: "skipped" },
+        "stateful-invariant-campaign": { status: "skipped" },
+        "dedupe-findings": { status: "succeeded" }
+      }
+    };
+    const counts = { succeeded: 1, failed: 3, remaining: 0 };
+    const retained = new Set(["stateful-invariant-setup"]);
+    expect(modalDurableRunNeedsResume(state, counts, undefined, retained)).toBe(false);
+    // Rerunning the setup reruns the stages skipped behind it.
+    expect(modalDurableRunNeedsResume(state, counts)).toBe(true);
+    const otherFailure = { ...state, nodes: { ...state.nodes, "boundary-tests": { status: "failed" } } };
+    expect(modalDurableRunNeedsResume(otherFailure, { ...counts, failed: 4 }, undefined, retained)).toBe(true);
+  });
+
   it("resumes operational checkpoints but never retries a terminal task outcome", () => {
     expect(
       modalDurableRunNeedsResume(

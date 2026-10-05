@@ -70,6 +70,7 @@ import {
 import {
   compileSmithersWorkflow,
   assertSmithersControllerRefreshable,
+  commandPayload,
   renderCurrentSmithersController,
   requestSmithersPause,
   runSmithersInspectionCommand,
@@ -737,19 +738,21 @@ async function workflowRunAlreadyRecorded(input: StartRunInput): Promise<Runtime
   if (!fs.existsSync(path.join(projectRoot, "smithers.db"))) return undefined;
   const workflowRunId = `ultrafuzz-${runId}`;
   const inspected = await runSmithersInspectionCommand({
-    args: ["inspect", workflowRunId, "--format", "json"],
+    args: ["inspect", workflowRunId, "--format", "json", "--full-output"],
     projectRoot,
     env: input.env
   });
-  // The runner prints a found run's inspection bare, and the full-output envelope wraps it in `data`.
-  const report = inspected.json;
-  const data = isRecord(report) && report.ok === true ? report.data : report;
-  const run = inspected.ok && isRecord(data) ? data.run : undefined;
+  const run = inspected.ok ? commandPayload(inspected.json)?.run : undefined;
   if (!isRecord(run) || run.id !== workflowRunId) return undefined;
   const status = typeof run.status === "string" ? ` (${run.status})` : "";
+  // `resume` continues a run from its directory under this runs root, and `clean` removes that directory
+  // but not the engine's record (#1257), so resuming is suggested only while the directory exists.
+  const next = fs.existsSync(path.join(await runsRootForProject(projectRoot), runId))
+    ? `; choose a different --run-id, or continue it with \`ultrafuzz resume ${runId}\``
+    : ", even though its run directory is gone (`ultrafuzz clean` leaves the engine's record behind); choose a different --run-id";
   return {
     code: "RUN_ALREADY_EXISTS",
-    message: `run ${runId} already exists in the workflow engine's records${status}, so it cannot be launched again; choose another run ID, or continue the existing run with \`ultrafuzz resume ${runId}\` if its run directory still exists`,
+    message: `run ${runId} already exists in the workflow engine's records${status}, so it cannot be launched again${next}`,
     severity: "error",
     source: "runtime"
   };

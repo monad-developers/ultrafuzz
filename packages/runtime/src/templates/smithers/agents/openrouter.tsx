@@ -34,6 +34,20 @@ const OPENROUTER_SESSION_CONTINUATION_PROMPT =
 const OPENROUTER_TERMINAL_CONTINUATION_PROMPT =
   "The prior turn ended without a final assistant response after substantive work. Continue the existing task from the current session state. Do not repeat completed work. Finish the requested deliverable and provide a final response.";
 const ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+/**
+ * Codex transport limits for the OpenRouter provider (#676). Codex retries a
+ * dropped or idle SSE stream by re-sending the current turn's request inside
+ * the same session, so a successful transport retry keeps all prior work; a
+ * node-level retry restarts the whole session. Codex's idle timer counts only
+ * SSE events: comment lines, which OpenRouter sends while a request waits for
+ * its first event, do not reset it. A model that streams no reasoning events
+ * can therefore stay silent past Codex's 300 s default and drop on every
+ * retry. Models that stream reasoning deltas keep the timer reset. The
+ * backoff doubles from ~200 ms without a cap, so 10 retries still surface a
+ * genuine outage within about 3.5 minutes.
+ */
+const OPENROUTER_STREAM_MAX_RETRIES = 10;
+const OPENROUTER_STREAM_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 type OpenRouter429RecoveryDecision =
   | { kind: "rate-limit-exhausted" }
@@ -1730,6 +1744,8 @@ function openRouterCodexConfig(credentialEnv: string): string {
     'name = "OpenRouter"',
     `base_url = "${OPENROUTER_API_BASE_URL}"`,
     'wire_api = "responses"',
+    `stream_max_retries = ${OPENROUTER_STREAM_MAX_RETRIES}`,
+    `stream_idle_timeout_ms = ${OPENROUTER_STREAM_IDLE_TIMEOUT_MS}`,
     "",
     "[model_providers.openrouter.auth]",
     'command = "node"',

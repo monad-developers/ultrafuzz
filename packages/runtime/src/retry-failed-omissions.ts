@@ -41,9 +41,17 @@ export function failedProducersStartedConsumersOmitted(
 }
 
 const SMITHERS_FAILED_STATES = new Set<SmithersNodeState>(["failed", "stalled"]);
-const SMITHERS_STARTED_STATES = new Set<SmithersNodeState>(["in-progress", "finished", "failed", "stalled"]);
+const SMITHERS_ADMITTED_STATES = new Set<SmithersNodeState>(["in-progress", "finished"]);
 
-/** {@link failedProducersStartedConsumersOmitted}, judged from the Smithers node states a resume inspects. */
+/**
+ * {@link failedProducersStartedConsumersOmitted}, judged from the Smithers node states a resume inspects.
+ *
+ * A consumer starts with its preparation, which waits for its producers and admits its optional
+ * inputs. `--retry-failed` reruns a failed or stalled preparation behind the producer's rerun, so
+ * that consumer can still read it. A failed agent or verifier reruns at once on its finished
+ * preparation, without waiting for the producer. An interrupted preparation still counts, which
+ * errs toward leaving the producer failed.
+ */
 export function failedProducersStartedConsumersOmittedInWorkflow(
   tasks: readonly SmithersTaskManifestTask[],
   nodeStates: ReadonlyMap<string, SmithersNodeState>
@@ -56,11 +64,16 @@ export function failedProducersStartedConsumersOmittedInWorkflow(
   return failedProducersStartedConsumersOmitted(
     tasks,
     (task) => nodesInState(task, SMITHERS_FAILED_STATES),
-    (task) => nodesInState(task, SMITHERS_STARTED_STATES)
+    (task) => {
+      const preparation = nodeStates.get(task.preparationSmithersNodeId);
+      return preparation !== undefined && SMITHERS_ADMITTED_STATES.has(preparation);
+    }
   );
 }
 
 const RUN_FAILED_STATUSES = new Set<NodeStatus>(["failed", "timed-out"]);
+// Run state cannot tell a failed preparation from a failed agent, so a failed consumer counts as
+// started. Naming more failures than `resume` leaves can only skip a resume, never start an empty one.
 const RUN_STARTED_STATUSES = new Set<NodeStatus>(["running", "succeeded", "failed", "timed-out"]);
 const RUN_SUCCEEDED_STATUSES = new Set<NodeStatus>(["succeeded", "reused-from-prior-run"]);
 
