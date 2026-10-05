@@ -432,6 +432,44 @@ describe("strict worker result contracts", () => {
     expect(readContract(path.join(root, "result.json"))).toEqual(contract);
   });
 
+  it("persists a disabled pricing catalog whose fallback-priced models stay unresolved", async () => {
+    const root = await temporaryRoot();
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify(currentRunState({ current: taskNode("succeeded") }))}\n`
+    );
+    const metadata = currentRunMetadata();
+    const accounting = metadata.accounting;
+    if (accounting === undefined) throw new Error("the fixture run has accounting");
+    const { fetched_at: _fetchedAt, ...catalog } = accounting.pricing_catalog;
+    accounting.pricing_catalog = {
+      ...catalog,
+      source: "disabled",
+      status: "disabled",
+      resolved_models: [],
+      unresolved_models: ["placeholder-one", "placeholder-three", "placeholder-two"],
+      fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["placeholder-one"] }
+    };
+    writeRunMetadataDocument(path.join(runRoot, "run.json"), metadata);
+    const writer = await WorkerResultWriter.create({
+      statusPath: path.join(root, "status.json"),
+      resultPath: path.join(root, "result.json")
+    });
+
+    const contract = await writer.writeTerminal("finished", await readWorkerCheckpoint(root));
+
+    expect(contract.pricing).toEqual({
+      source: "disabled",
+      status: "disabled",
+      resolved_model_count: 0,
+      unresolved_model_count: 3
+    });
+    expect(contract.usage).toMatchObject({ estimated_cost_usd: 0.125, partial_pricing: true });
+    expect(readContract(path.join(root, "result.json"))).toEqual(contract);
+  });
+
   it("bounds contradictory accounting breakdowns while preserving the provider total", async () => {
     const root = await temporaryRoot();
     const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");

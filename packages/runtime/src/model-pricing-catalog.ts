@@ -15,6 +15,42 @@ const MOONSHOT_PROVIDER_ID = "moonshotai";
 const DEEPSEEK_PROVIDER_ID = "deepseek";
 const CONTEXT_ALIAS_SUFFIX = /\[[^[\]]*\]$/u;
 
+/** The version of FALLBACK_PRICING_CATALOG, recorded in accounting v4 beside the rates it set. */
+export const FALLBACK_PRICING_TABLE = "ultrafuzz.fallback-pricing.2026-10-05";
+
+/**
+ * Published first-party list prices for the packaged default models: the `cost` objects of
+ * openai/gpt-5.5, anthropic/claude-opus-4-8, moonshotai/kimi-k3 and deepseek/deepseek-v4-pro,
+ * copied verbatim from https://models.dev/api.json on 2026-10-05. It is shaped like that catalog
+ * and priced through the same route lookup, so it prices only a model ID whose route reaches one
+ * of these entries; a gateway, proxy, or custom ID stays unpriced. Bump FALLBACK_PRICING_TABLE with
+ * any change; accounting keeps the rates it first priced a model at.
+ */
+export const FALLBACK_PRICING_CATALOG = {
+  anthropic: {
+    models: { "claude-opus-4-8": { cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 } } }
+  },
+  deepseek: {
+    models: { "deepseek-v4-pro": { cost: { input: 0.66, output: 1.98, reasoning: 1.98, cache_read: 0.022 } } }
+  },
+  moonshotai: {
+    models: { "kimi-k3": { cost: { input: 3, output: 15, cache_read: 0.3 } } }
+  },
+  openai: {
+    models: {
+      "gpt-5.5": {
+        cost: {
+          input: 5,
+          output: 30,
+          cache_read: 0.5,
+          tiers: [{ input: 10, output: 45, cache_read: 1, tier: { type: "context", size: 272_000 } }],
+          context_over_200k: { input: 10, output: 45, cache_read: 1 }
+        }
+      }
+    }
+  }
+} as const;
+
 interface CatalogCost {
   input?: unknown;
   output?: unknown;

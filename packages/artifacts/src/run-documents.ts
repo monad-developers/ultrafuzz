@@ -254,8 +254,12 @@ export interface RunMetadataAccounting {
     status: "available" | "disabled" | "unavailable";
     fetched_at?: string;
     resolved_models: string[];
+    /** Models the catalog did not price, including those priced from the fallback table. */
     unresolved_models: string[];
+    /** Keys are resolved_models plus fallback.models. */
     model_prices: Record<string, RunModelPricing>;
+    /** Unresolved models priced at a versioned table of published list prices. */
+    fallback?: { table: string; models: string[] };
   };
   updated_at: string;
 }

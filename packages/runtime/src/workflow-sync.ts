@@ -92,6 +92,7 @@ import {
   type ModelPricing,
   type PricingCatalogFetch,
   type PricingCatalogMetadata,
+  type PricingFallbackMetadata,
   type PricingHostnameLookup
 } from "./model-pricing.js";
 import {
@@ -2063,7 +2064,7 @@ function storedPricingCatalog(value: unknown, label: string): StoredPricingCatal
     value,
     label,
     ["source", "status", "resolved_models", "unresolved_models", "model_prices"],
-    ["fetched_at"]
+    ["fetched_at", "fallback"]
   );
   const sources = new Set<PricingCatalogMetadata["source"]>(["models.dev", "configured-catalog", "disabled"]);
   const statuses = new Set<PricingCatalogMetadata["status"]>(["available", "disabled", "unavailable"]);
@@ -2095,8 +2096,14 @@ function storedPricingCatalog(value: unknown, label: string): StoredPricingCatal
       return [model, storedModelPricing(pricing, `${label}.model_prices[${JSON.stringify(model)}]`)];
     })
   );
-  if (!sameJsonValue(Object.keys(modelPrices), resolvedModels)) {
-    throw new Error(`${label}.resolved_models must exactly equal model_prices keys`);
+  const fallback = Object.prototype.hasOwnProperty.call(stored, "fallback")
+    ? storedPricingFallback(stored.fallback, `${label}.fallback`)
+    : undefined;
+  if (fallback?.models.some((model) => !unresolvedModels.includes(model)) === true) {
+    throw new Error(`${label}.fallback.models must be unresolved models`);
+  }
+  if (!sameJsonValue(Object.keys(modelPrices), [...resolvedModels, ...(fallback?.models ?? [])].sort())) {
+    throw new Error(`${label}.model_prices keys must exactly equal resolved_models and fallback.models`);
   }
   if (status === "disabled" && source !== "disabled")
     throw new Error(`${label} disabled status requires disabled source`);
@@ -2106,8 +2113,20 @@ function storedPricingCatalog(value: unknown, label: string): StoredPricingCatal
     ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
     resolved_models: resolvedModels,
     unresolved_models: unresolvedModels,
+    ...(fallback === undefined ? {} : { fallback }),
     model_prices: modelPrices
   };
+}
+
+function storedPricingFallback(value: unknown, label: string): PricingFallbackMetadata {
+  const stored = exactStoredRecord(value, label, ["table", "models"], []);
+  const table = requiredStoredString(stored.table, `${label}.table`);
+  if (!/^ultrafuzz\.fallback-pricing\.\d{4}-\d{2}-\d{2}$/u.test(table)) {
+    throw new Error(`${label}.table is not a fallback pricing table version`);
+  }
+  const models = requiredStoredStringArray(stored.models, `${label}.models`, { sorted: true });
+  if (models.length === 0) throw new Error(`${label}.models must not be empty`);
+  return { table, models };
 }
 
 function storedModelPricing(value: unknown, label: string): ModelPricing {
@@ -2892,10 +2911,22 @@ function mergedPricingCatalogMetadata(input: {
   stored: StoredPricingCatalog | undefined;
   live: PricingCatalogMetadata | undefined;
 }): PricingCatalogMetadata & { model_prices: Record<string, ModelPricing> } {
-  const resolvedModels = input.requiredModels.filter((model) => input.resolvedPricing.has(model));
-  const unresolvedModels = input.requiredModels.filter((model) => !input.resolvedPricing.has(model));
+  const pricedModels = input.requiredModels.filter((model) => input.resolvedPricing.has(model));
+  // A model priced from the fallback table keeps those rates on later passes, since its stored
+  // price is never fetched again, and stays unresolved: the catalog never priced it.
+  const fallbackCandidates = new Set([
+    ...(input.stored?.fallback?.models ?? []),
+    ...(input.live?.fallback?.models ?? [])
+  ]);
+  const fallbackModels = pricedModels.filter((model) => fallbackCandidates.has(model));
+  const resolvedModels = pricedModels.filter((model) => !fallbackCandidates.has(model));
+  const unresolvedModels = input.requiredModels.filter((model) => !resolvedModels.includes(model));
+  const fallbackTable = input.live?.fallback?.table ?? input.stored?.fallback?.table;
+  if (fallbackModels.length > 0 && fallbackTable === undefined) {
+    throw new Error("fallback-priced models have no fallback pricing table");
+  }
   const requiredPricing = new Map<string, ModelPricing>();
-  for (const model of resolvedModels) {
+  for (const model of pricedModels) {
     const pricing = input.resolvedPricing.get(model);
     if (pricing === undefined)
       throw new Error(`resolved pricing disappeared for required model ${JSON.stringify(model)}`);
@@ -2912,6 +2943,9 @@ function mergedPricingCatalogMetadata(input: {
     ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
     resolved_models: resolvedModels,
     unresolved_models: unresolvedModels,
+    ...(fallbackModels.length === 0 || fallbackTable === undefined
+      ? {}
+      : { fallback: { table: fallbackTable, models: fallbackModels } }),
     // Stored prices remain useful as a lookup cache above, but the immutable
     // accounting document describes only the latest selected snapshots. A
     // superseded model must not survive here after one attempt switches model.

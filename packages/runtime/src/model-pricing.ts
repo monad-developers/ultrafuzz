@@ -7,7 +7,14 @@ import { Readable } from "node:stream";
 import { parseStrictJsonBytes } from "@ultrafuzz/artifacts";
 import { isRecord } from "@ultrafuzz/artifacts";
 
-import { hasPricingRoute, nonNegativeNumber, positiveNumber, pricesForModels } from "./model-pricing-catalog.js";
+import {
+  FALLBACK_PRICING_CATALOG,
+  FALLBACK_PRICING_TABLE,
+  hasPricingRoute,
+  nonNegativeNumber,
+  positiveNumber,
+  pricesForModels
+} from "./model-pricing-catalog.js";
 
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
@@ -35,8 +42,17 @@ export interface PricingCatalogMetadata {
   source: "models.dev" | "configured-catalog" | "disabled";
   status: "available" | "disabled" | "unavailable";
   fetched_at?: string;
+  /** Models the catalog priced. */
   resolved_models: string[];
+  /** Models the catalog did not price, including those the fallback table priced. */
   unresolved_models: string[];
+  /** The unresolved models priced at the versioned fallback list prices instead. */
+  fallback?: PricingFallbackMetadata;
+}
+
+export interface PricingFallbackMetadata {
+  table: string;
+  models: string[];
 }
 
 export interface PricingCatalogResult {
@@ -135,7 +151,7 @@ export async function resolveLiveModelPricing(input: {
 
   const configuredUrl = input.env?.ULTRAFUZZ_PRICING_CATALOG_URL?.trim();
   if (configuredUrl !== undefined && DISABLED_VALUES.has(configuredUrl.toLowerCase())) {
-    return {
+    return withFallbackPricing({
       prices: new Map(),
       metadata: {
         source: "disabled",
@@ -143,7 +159,7 @@ export async function resolveLiveModelPricing(input: {
         resolved_models: [],
         unresolved_models: models
       }
-    };
+    });
   }
 
   const sourceUrl =
@@ -151,10 +167,10 @@ export async function resolveLiveModelPricing(input: {
   const source = sourceUrl === DEFAULT_PRICING_CATALOG_URL ? "models.dev" : "configured-catalog";
   // A model without a catalog route is never priced, so a download that prices none is skipped.
   if (!models.some(hasPricingRoute)) {
-    return {
+    return withFallbackPricing({
       prices: new Map(),
       metadata: { source, status: "available", resolved_models: [], unresolved_models: models }
-    };
+    });
   }
   const timeoutMs = Math.min(
     pricingTimeoutMs(input.env?.ULTRAFUZZ_PRICING_TIMEOUT_MS),
@@ -189,7 +205,7 @@ export async function resolveLiveModelPricing(input: {
     });
     const prices = pricesForModels(catalog, models);
     const resolvedModels = models.filter((model) => prices.has(model));
-    return {
+    return withFallbackPricing({
       prices,
       metadata: {
         source,
@@ -198,9 +214,9 @@ export async function resolveLiveModelPricing(input: {
         resolved_models: resolvedModels,
         unresolved_models: models.filter((model) => !prices.has(model))
       }
-    };
+    });
   } catch {
-    return {
+    return withFallbackPricing({
       prices: new Map(),
       metadata: {
         source,
@@ -208,8 +224,24 @@ export async function resolveLiveModelPricing(input: {
         resolved_models: [],
         unresolved_models: models
       }
-    };
+    });
   }
+}
+
+/**
+ * Prices the models the catalog left unpriced from the versioned fallback list prices, whether the
+ * catalog was available, unavailable or disabled. They stay in `unresolved_models`.
+ */
+function withFallbackPricing(result: PricingCatalogResult): PricingCatalogResult {
+  const fallbackPrices = pricesForModels(FALLBACK_PRICING_CATALOG, result.metadata.unresolved_models);
+  if (fallbackPrices.size === 0) return result;
+  return {
+    prices: new Map([...result.prices, ...fallbackPrices]),
+    metadata: {
+      ...result.metadata,
+      fallback: { table: FALLBACK_PRICING_TABLE, models: [...fallbackPrices.keys()].sort() }
+    }
+  };
 }
 
 export async function validatePricingCatalogUrl(

@@ -44,9 +44,11 @@ import {
   readRunState,
   promptArtifactAuthorityPathSelectorId,
   replayEvents,
+  replayUsageEvents,
   threatModelJsonSchema,
   validateRegisteredJsonBytesSync,
   VALIDATOR_BUILD_IDENTITY,
+  writeRunMetadataDocument,
   writeRunState,
   type RunState,
   type SmithersTaskManifestDocument,
@@ -87,6 +89,7 @@ import { planDynamicExpansion } from "../src/dynamic-expansion.js";
 import { materializeDynamicRuntime } from "../src/dynamic-runtime.js";
 
 import {
+  assertRunMetadataAccountingUsageAuthority,
   forkRun as runtimeForkRun,
   cancelRun,
   getRunHealth,
@@ -21978,6 +21981,230 @@ test("syncRun prices a gateway model ID from OpenRouter's catalog entry end to e
   assert.equal(metadata.accounting?.current.estimated_spend, "$7.50");
   assert.equal(metadata.accounting?.pricing_catalog.model_prices["anthropic/claude-opus-4.8"]?.inputUsdPerMillion, 5);
   assert.deepEqual(metadata.accounting?.pricing_catalog.resolved_models, ["anthropic/claude-opus-4.8"]);
+});
+
+/**
+ * A run in `project` whose project-discovery attempt reports one usage event, optionally continuing
+ * `sourceRunId`. `addAttempt` adds a second usage-reporting attempt on another Smithers node.
+ */
+async function recordedUsageRun(input: {
+  project: string;
+  runId: string;
+  costUsd?: number;
+  usage?: { inputTokens: number; outputTokens: number; model?: string };
+  sourceRunId?: string;
+}) {
+  const workflowRunId = `ultrafuzz-${input.runId}`;
+  const writeEvents = (attempts: number) =>
+    workflowEvents(workflowRunId, [
+      ...Array.from({ length: attempts }, (_, index) => {
+        const nodeId = index === 0 ? "node:project-discovery" : `node:project-discovery-${index}`;
+        return [
+          { type: "NodeStarted", nodeId, attempt: 1 },
+          {
+            type: "TokenUsageReported",
+            nodeId,
+            attempt: 1,
+            extra: {
+              iteration: 0,
+              inputTokens: input.usage?.inputTokens ?? 1_000,
+              outputTokens: input.usage?.outputTokens ?? 100,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd: input.costUsd,
+              model: input.usage?.model ?? "gpt-5.5",
+              agent: "codex"
+            }
+          },
+          { type: "NodeFinished", nodeId, attempt: 1 }
+        ];
+      }).flat(),
+      { type: "RunFinished" }
+    ]);
+  const env = fakeLifecycleSmithersEnv(input.project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: writeEvents(1)
+  });
+  const run = await startRun({
+    projectRoot: input.project,
+    runId: input.runId,
+    env,
+    ...(input.sourceRunId === undefined ? {} : { sourceRunId: input.sourceRunId })
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const runRoot = run.value.run_root;
+  const metadataPath = path.join(runRoot, "run.json");
+  return {
+    runRoot,
+    metadataPath,
+    env,
+    sync: async () => {
+      const synced = await syncRun({ projectRoot: input.project, runId: input.runId, env });
+      assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+      assert.ok(!synced.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+      return readRunMetadataDocument(metadataPath, input.runId);
+    },
+    addAttempt: () => fs.writeFileSync(path.join(input.project, "fake-smithers-events.ndjson"), writeEvents(2))
+  };
+}
+
+test("syncRun prices a model no catalog prices at the versioned fallback list prices in accounting v4", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "fallback-pricing";
+  const run = await recordedUsageRun({ project, runId, usage: { inputTokens: 200_000, outputTokens: 0 } });
+
+  // The catalog is off, so 200k uncached gpt-5.5 input is priced at the table's $5 per million.
+  const first = await run.sync();
+  const accounting = first.accounting;
+  assert.ok(accounting);
+  assert.equal(accounting.cumulative.estimated_spend, "$1.00");
+  assert.equal(accounting.cumulative.estimated_spend_usd, 1);
+  assert.equal(accounting.cumulative.partial_pricing, false);
+  assert.equal(accounting.cumulative.unpriced_event_count, 0);
+  const fallbackRates = { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 };
+  assert.deepEqual(accounting.pricing_catalog, {
+    source: "disabled",
+    status: "disabled",
+    // The catalog never priced it, so it stays unresolved; its rates are the table's.
+    resolved_models: [],
+    unresolved_models: ["gpt-5.5"],
+    fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"] },
+    model_prices: {
+      "gpt-5.5": {
+        ...fallbackRates,
+        contextTiers: [
+          { contextTokens: 272_000, inputUsdPerMillion: 10, cachedInputUsdPerMillion: 1, outputUsdPerMillion: 45 }
+        ]
+      }
+    }
+  });
+  const ledger = replayUsageEvents(layoutForRunRoot(run.runRoot, runId)).entries;
+  assert.doesNotThrow(() => assertRunMetadataAccountingUsageAuthority(first, ledger));
+
+  // The stored validator, which also guards `ultrafuzz stats`, keeps the fallback rules.
+  const withCatalog = (update: (catalog: Record<string, unknown>) => void) => {
+    const metadata = structuredClone(first);
+    assert.ok(metadata.accounting);
+    update(metadata.accounting.pricing_catalog as unknown as Record<string, unknown>);
+    return metadata;
+  };
+  const invalidCatalogs: Array<[(catalog: Record<string, unknown>) => void, RegExp]> = [
+    [
+      (catalog) => Object.assign(catalog, { resolved_models: ["gpt-5.5"], unresolved_models: [] }),
+      /fallback\.models must be unresolved models/u
+    ],
+    [(catalog) => Object.assign(catalog, { model_prices: {} }), /model_prices keys must exactly equal/u],
+    [(catalog) => delete catalog.fallback, /model_prices keys must exactly equal/u],
+    [
+      (catalog) =>
+        Object.assign(catalog, { fallback: { table: "ultrafuzz.fallback-pricing.latest", models: ["gpt-5.5"] } }),
+      /not a fallback pricing table version/u
+    ],
+    [
+      (catalog) => Object.assign(catalog, { fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: [] } }),
+      /fallback\.models must not be empty/u
+    ]
+  ];
+  for (const [update, message] of invalidCatalogs) {
+    assert.throws(() => assertRunMetadataAccountingUsageAuthority(withCatalog(update), ledger), message);
+  }
+  for (const fallback of [
+    { table: "ultrafuzz.fallback-pricing.latest", models: ["gpt-5.5"] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: [] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"], extra: true }
+  ]) {
+    assert.throws(
+      () =>
+        writeRunMetadataDocument(
+          run.metadataPath,
+          withCatalog((catalog) => Object.assign(catalog, { fallback }))
+        ),
+      JSON.stringify(fallback)
+    );
+  }
+
+  // A pass that changes nothing never rewrites run.json.
+  const before = fs.readFileSync(run.metadataPath);
+  await run.sync();
+  assert.deepEqual(fs.readFileSync(run.metadataPath), before);
+
+  // Once priced from the table, the model keeps those rates even after the catalog lists it.
+  run.env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: { models: { "gpt-5.5": { cost: { input: 4, output: 20 } } } }
+  });
+  run.addAttempt();
+  const later = (await run.sync()).accounting;
+  assert.equal(later?.cumulative.estimated_spend, "$2.00");
+  assert.deepEqual(later?.pricing_catalog.fallback, accounting.pricing_catalog.fallback);
+  assert.deepEqual(later?.pricing_catalog.model_prices, accounting.pricing_catalog.model_prices);
+});
+
+test("syncRun prices only the models its catalog leaves unpriced from the fallback table", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "mixed-fallback-pricing";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const usage = (nodeId: string, model: string) => [
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    {
+      type: "TokenUsageReported",
+      nodeId,
+      attempt: 1,
+      extra: {
+        iteration: 0,
+        inputTokens: 200_000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: undefined,
+        model,
+        agent: "codex"
+      }
+    },
+    { type: "NodeFinished", nodeId, attempt: 1 }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...usage("node:project-discovery", "gpt-5.5"),
+      ...usage("node:project-discovery-1", "claude-opus-4-8[1m]"),
+      ...usage("node:project-discovery-2", "azure/gpt-5.5"),
+      { type: "RunFinished" }
+    ])
+  });
+  // The catalog prices gpt-5.5 itself and lists neither of the others.
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: { models: { "gpt-5.5": { cost: { input: 4, output: 20 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const accounting = readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId).accounting;
+  assert.equal(accounting?.pricing_catalog.status, "available");
+  assert.deepEqual(accounting?.pricing_catalog.resolved_models, ["gpt-5.5"]);
+  assert.deepEqual(accounting?.pricing_catalog.unresolved_models, ["azure/gpt-5.5", "claude-opus-4-8[1m]"]);
+  assert.deepEqual(accounting?.pricing_catalog.fallback?.models, ["claude-opus-4-8[1m]"]);
+  assert.deepEqual(Object.keys(accounting?.pricing_catalog.model_prices ?? {}), ["claude-opus-4-8[1m]", "gpt-5.5"]);
+  // $0.80 at the catalog's rate and $1.00 at the table's; the proxy ID stays unpriced, so the
+  // spend is partial.
+  assert.equal(accounting?.cumulative.estimated_spend, "$1.80+");
+  assert.equal(accounting?.cumulative.unpriced_event_count, 1);
 });
 
 test("getRunStatus synchronizes without appending duplicate events", async () => {

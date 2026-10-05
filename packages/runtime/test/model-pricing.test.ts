@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { hasPricingRoute } from "../src/model-pricing-catalog.js";
+import { createDefaultResolvedConfig } from "@ultrafuzz/config";
+
+import { FALLBACK_PRICING_TABLE, hasPricingRoute } from "../src/model-pricing-catalog.js";
 import {
   fetchPinnedPricingCatalog,
+  pricingForContext,
   readBoundedPricingCatalogResponse,
   resolveLiveModelPricing,
   validatePricingCatalogUrl
@@ -372,17 +375,102 @@ test("a context alias is stripped for the lookup while prices stay keyed by the 
   assert.deepEqual(result.metadata.resolved_models, ["anthropic/claude-opus-4.8[1m]", "claude-opus-4-8[1m]"]);
 });
 
-test("an unavailable or disabled catalog returns no prices", async () => {
-  const disabled = await resolveLiveModelPricing({
-    models: ["gpt-5.5"],
+test("a model the catalog leaves unpriced is priced at the fallback list prices, whatever the catalog status", async () => {
+  const fallbackModels = ["claude-opus-4-8", "deepseek-v4-pro", "gpt-5.5", "kimi-k3"];
+  const models = [...fallbackModels, "custom-model"];
+  const results = {
+    disabled: await resolveLiveModelPricing({ models, env: { ULTRAFUZZ_PRICING_CATALOG_URL: "off" } }),
+    unavailable: await resolveFromCatalog(models, undefined),
+    // Available, but listing none of them, or only at a $0 placeholder rate.
+    available: await resolveFromCatalog(models, {
+      openai: { models: { "gpt-5.5": { cost: { input: 0, output: 0 } } } }
+    })
+  };
+  for (const [status, result] of Object.entries(results)) {
+    assert.equal(result.metadata.status, status);
+    assert.deepEqual(result.metadata.resolved_models, [], status);
+    // The catalog priced none of them, so they stay unresolved; the table prices only its own rows.
+    assert.deepEqual(result.metadata.unresolved_models, [
+      "claude-opus-4-8",
+      "custom-model",
+      "deepseek-v4-pro",
+      "gpt-5.5",
+      "kimi-k3"
+    ]);
+    assert.deepEqual(result.metadata.fallback, { table: FALLBACK_PRICING_TABLE, models: fallbackModels }, status);
+    assert.deepEqual([...result.prices.keys()].sort(), fallbackModels, status);
+    assert.deepEqual(result.prices.get("claude-opus-4-8"), {
+      inputUsdPerMillion: 5,
+      cachedInputUsdPerMillion: 0.5,
+      cacheWriteUsdPerMillion: 6.25,
+      outputUsdPerMillion: 25
+    });
+    assert.deepEqual(result.prices.get("deepseek-v4-pro"), {
+      inputUsdPerMillion: 0.66,
+      cachedInputUsdPerMillion: 0.022,
+      outputUsdPerMillion: 1.98
+    });
+    assert.deepEqual(result.prices.get("kimi-k3"), {
+      inputUsdPerMillion: 3,
+      cachedInputUsdPerMillion: 0.3,
+      outputUsdPerMillion: 15
+    });
+  }
+  // gpt-5.5 takes its long-context rates above 272k input tokens.
+  const gpt = results.disabled.prices.get("gpt-5.5");
+  assert.deepEqual(gpt, {
+    inputUsdPerMillion: 5,
+    cachedInputUsdPerMillion: 0.5,
+    outputUsdPerMillion: 30,
+    contextTiers: [
+      { contextTokens: 272_000, inputUsdPerMillion: 10, cachedInputUsdPerMillion: 1, outputUsdPerMillion: 45 }
+    ]
+  });
+  assert.equal(pricingForContext(gpt, 272_000).inputUsdPerMillion, 5);
+  assert.deepEqual(pricingForContext(gpt, 300_000), {
+    inputUsdPerMillion: 10,
+    cachedInputUsdPerMillion: 1,
+    outputUsdPerMillion: 45
+  });
+});
+
+test("the fallback table follows the same routes as the catalog and never prices a gateway or unknown ID", async () => {
+  const result = await resolveLiveModelPricing({
+    models: [
+      "claude-opus-4-8[1m]",
+      "openrouter/claude-opus-4-8",
+      "azure/gpt-5.5",
+      "openai/gpt-mini-latest",
+      "gpt-5.5-mini",
+      "custom-model"
+    ],
     env: { ULTRAFUZZ_PRICING_CATALOG_URL: "off" }
   });
-  assert.equal(disabled.metadata.status, "disabled");
-  assert.equal(disabled.prices.size, 0);
+  assert.deepEqual(result.metadata.fallback, {
+    table: FALLBACK_PRICING_TABLE,
+    models: ["claude-opus-4-8[1m]", "openrouter/claude-opus-4-8"]
+  });
+  assert.equal(result.prices.get("claude-opus-4-8[1m]")?.inputUsdPerMillion, 5);
+  assert.equal(result.prices.get("openrouter/claude-opus-4-8")?.inputUsdPerMillion, 5);
+  for (const model of ["azure/gpt-5.5", "openai/gpt-mini-latest", "gpt-5.5-mini", "custom-model"]) {
+    assert.equal(result.prices.has(model), false, model);
+  }
 
-  const unavailable = await resolveFromCatalog(["gpt-5.5"], undefined);
-  assert.equal(unavailable.metadata.status, "unavailable");
-  assert.equal(unavailable.prices.size, 0);
+  // A model the catalog prices keeps the catalog's rate and is never listed as fallback-priced.
+  const catalogPriced = await resolveFromCatalog(["gpt-5.5"], {
+    openai: { models: { "gpt-5.5": { cost: { input: 4, output: 20 } } } }
+  });
+  assert.equal(catalogPriced.prices.get("gpt-5.5")?.inputUsdPerMillion, 4);
+  assert.equal(catalogPriced.metadata.fallback, undefined);
+});
+
+test("every packaged default model with a first-party route has a fallback list price", async () => {
+  const defaults = Object.values(createDefaultResolvedConfig().models.profiles).flatMap((profile) =>
+    profile.model === undefined || profile.model.includes("/") ? [] : [profile.model]
+  );
+  assert.ok(defaults.includes("gpt-5.5") && defaults.includes("kimi-k3"), JSON.stringify(defaults));
+  const result = await resolveLiveModelPricing({ models: defaults, env: { ULTRAFUZZ_PRICING_CATALOG_URL: "off" } });
+  assert.deepEqual(result.metadata.fallback?.models, [...new Set(defaults)].sort());
 });
 
 test("a request whose models have no catalog route skips the catalog download", async () => {
