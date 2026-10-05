@@ -105,14 +105,10 @@ validation. The stock OpenRouter adapter owns the provider route and generated
 configuration; a project-local Codex provider file is not the configuration
 surface. Keep credential values out of TOML and version control.
 
-The generated provider configuration raises Codex's stream transport limits to
-10 reconnects and a 30-minute idle timeout. Codex reconnects a dropped or idle
-response stream by re-sending the current request in the same session, so a
-reconnect keeps the agent's earlier work, while a node retry starts over.
-Codex's idle timer counts only stream events. OpenRouter's keepalive comments
-do not reset it, so a model that streams no reasoning events can stay silent
-past the default 5-minute timeout and drop on every reconnect. A genuine outage
-still fails the node within a few minutes.
+The generated provider configuration lets Codex retry a dropped response stream
+up to 10 times inside the same session, which keeps the agent's earlier work,
+while a node retry starts over. The same budget also covers retryable 5xx,
+`response.incomplete` and `response.failed` errors.
 
 ## Claude agent
 
