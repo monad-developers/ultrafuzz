@@ -871,7 +871,8 @@ function sealedTaskForNode(
 function authenticatedSnapshotsForNode(
   layout: ReturnType<typeof createRunLayout>,
   node: PlannedGraphNode,
-  attemptId = node.id
+  attemptId = node.id,
+  taskWorktree: AuthenticatedArtifactGateSnapshots["taskWorktree"] = "read"
 ): AuthenticatedArtifactGateSnapshots {
   const artifactDir = getNodeArtifactDir(layout, attemptId);
   const snapshots = node.outputs.flatMap((output) => {
@@ -881,7 +882,8 @@ function authenticatedSnapshotsForNode(
   });
   return {
     outputs: new Map(snapshots),
-    publications: new Map(snapshots.map(([artifactPath, snapshot]) => [artifactPath, Buffer.from(snapshot.bytes)]))
+    publications: new Map(snapshots.map(([artifactPath, snapshot]) => [artifactPath, Buffer.from(snapshot.bytes)])),
+    taskWorktree
   };
 }
 
@@ -2430,6 +2432,74 @@ test("workspace patch exclusions pass the contract gate but surface a durable wa
   ]);
 });
 
+test("workspace patch Git binding is checked against the worktree at finalization, not on reads of finalized output", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-workspace-patch-task-worktree" });
+  const artifactDir = getNodeArtifactDir(layout, "setup-foundry", { create: true });
+  const node = { ...plannedNode(["workspace-patch.json"]), id: "setup-foundry", logical_id: "setup-foundry" };
+  const workspace = path.join(layout.workspacesDir, "setup-foundry");
+  fs.mkdirSync(workspace, { recursive: true });
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: workspace, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz test"]);
+  git(["config", "user.email", "ultrafuzz@example.invalid"]);
+  fs.writeFileSync(path.join(workspace, "foundry.toml"), "[profile.default]\n");
+  git(["add", "."]);
+  git(["commit", "--quiet", "-m", "baseline"]);
+  const baselineTree = captureWorkspaceTree(workspace);
+  // A setup task whose declared outputs are its only changes publishes an empty patch (#1259).
+  const capture = captureWorkspacePatch(workspace, baselineTree);
+  assert.equal(capture.patch, "");
+  const published = new Map<string, Buffer>([
+    ["workspace.patch", Buffer.from(capture.patch, "utf8")],
+    [
+      "workspace-patch-baseline.json",
+      Buffer.from(
+        JSON.stringify({
+          schema_version: "ultrafuzz.workspace-patch-baseline.v1",
+          attempt_id: "setup-foundry",
+          baseline_tree: baselineTree
+        }),
+        "utf8"
+      )
+    ],
+    ["workspace-patch.json", Buffer.from(JSON.stringify(capture.manifest), "utf8")]
+  ]);
+  for (const [name, bytes] of published) fs.writeFileSync(path.join(artifactDir, name), bytes);
+  const verify = (taskWorktree: "read" | "skip") =>
+    verifyRequiredArtifactsForAttempt(layout, node, "setup-foundry", undefined, {
+      ...authenticatedSnapshotsForNode(layout, node, "setup-foundry", taskWorktree),
+      publications: published
+    });
+  const gitBinding = (result: ReturnType<typeof verifyRequiredArtifactsForAttempt>) =>
+    result.diagnostics.filter((diagnostic) => diagnostic.details?.gate === "workspace-patch-git-binding");
+
+  for (const taskWorktree of ["read", "skip"] as const) {
+    const result = verify(taskWorktree);
+    assert.equal(result.ok, true, `${taskWorktree}: ${JSON.stringify(result.diagnostics)}`);
+  }
+
+  // Finalization reads the live worktree, so it sees a commit made after the capture.
+  git(["commit", "--quiet", "--allow-empty", "-m", "after capture"]);
+  const movedRead = verify("read");
+  assert.equal(movedRead.ok, false);
+  assert.equal(gitBinding(movedRead)[0]?.code, "ARTIFACT_SEMANTIC_GATE_FAILED", JSON.stringify(movedRead.diagnostics));
+  assert.equal(verify("skip").ok, true);
+
+  // Once Ultrafuzz deletes the worktree, only the finalization check would fail closed.
+  fs.rmSync(workspace, { recursive: true, force: true });
+  const deletedRead = verify("read");
+  assert.equal(deletedRead.ok, false);
+  assert.equal(
+    gitBinding(deletedRead)[0]?.code,
+    "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE",
+    JSON.stringify(deletedRead.diagnostics)
+  );
+  const deletedSkip = verify("skip");
+  assert.equal(deletedSkip.ok, true, JSON.stringify(deletedSkip.diagnostics));
+  assert.deepEqual(gitBinding(deletedSkip), []);
+});
+
 test("contextual semantic gates fail closed when trusted host facts are unavailable", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-workspace-context-missing" });
   const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
@@ -3904,7 +3974,8 @@ function verifyAggregationAttempt(
   layout: ReturnType<typeof createRunLayout>,
   aggregationTask: SmithersTaskManifestTask,
   tasks: SmithersTaskManifestTask[],
-  admittedDependencyAttemptIds: string[]
+  admittedDependencyAttemptIds: string[],
+  taskWorktree: AuthenticatedArtifactGateSnapshots["taskWorktree"] = "read"
 ): ReturnType<typeof verifyRuntimeRequiredArtifactsForAttempt> {
   const graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph;
   const node = graph.nodes.find((candidate) => candidate.id === aggregationTask.concreteNodeId);
@@ -3914,7 +3985,7 @@ function verifyAggregationAttempt(
     node,
     aggregationTask.attemptId,
     { task: aggregationTask, tasks, admittedDependencyAttemptIds },
-    authenticatedSnapshotsForNode(layout, node, aggregationTask.attemptId)
+    authenticatedSnapshotsForNode(layout, node, aggregationTask.attemptId, taskWorktree)
   );
 }
 
@@ -3968,6 +4039,45 @@ test("host aggregation intake skips a failed optional generated-tests producer t
     ),
     JSON.stringify(unfinalized.diagnostics)
   );
+});
+
+test("aggregation destinations are reconciled against the worktree at finalization, not on reads of finalized output", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-aggregation-task-worktree" });
+  const strategy = aggregationFixtureNode("strategy-a", { group: "strategies" });
+  const aggregationNode = aggregationFixtureNode("aggregate-test-files", {
+    group: "review",
+    dependsOn: [strategy.id],
+    outputs: [boundOutput("aggregation.json", "ultrafuzz/aggregation-manifest@1", true)]
+  });
+  const nodes = [strategy, aggregationNode];
+  writePlannedGraph(layout, nodes, AGGREGATION_FIXTURE_GROUPS);
+  const strategyTask = sealedTaskForNode(layout, strategy);
+  const aggregationTask = sealedTaskForNode(layout, aggregationNode, [strategyTask]);
+  const tasks = [strategyTask, aggregationTask];
+  const source = finalizeGeneratedTestsProducer(layout, strategy);
+  writeSealedFixtureTaskAuthority(layout, nodes, tasks);
+  writeAggregationManifestCopying(layout, aggregationNode, [source]);
+  const verify = (taskWorktree: "read" | "skip") =>
+    verifyAggregationAttempt(layout, aggregationTask, tasks, [strategyTask.attemptId], taskWorktree);
+
+  for (const taskWorktree of ["read", "skip"] as const) {
+    const result = verify(taskWorktree);
+    assert.equal(result.ok, true, `${taskWorktree}: ${JSON.stringify(result.diagnostics)}`);
+  }
+
+  fs.rmSync(path.join(layout.workspacesDir, aggregationNode.id), { recursive: true, force: true });
+  const deletedRead = verify("read");
+  assert.equal(deletedRead.ok, false);
+  assert.ok(
+    deletedRead.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.details?.gate === "aggregation-authenticated-source-destination-reconciliation" &&
+        diagnostic.message.includes("Trusted aggregation workspace is unsafe")
+    ),
+    JSON.stringify(deletedRead.diagnostics)
+  );
+  const deletedSkip = verify("skip");
+  assert.equal(deletedSkip.ok, true, JSON.stringify(deletedSkip.diagnostics));
 });
 
 test("host aggregation intake keys a directly consumed dynamic producer by its storage attempt ID", () => {
@@ -5961,6 +6071,109 @@ test("project discovery gate verifies immutable source proof after the discovery
   assert.ok(invalidProof.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_PROOF_INVALID"));
 });
 
+test("an unpinned invariant ledger is checked against its durable source proof once its worktree is deleted", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-unpinned-invariant-source-proof" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const workspace = path.join(layout.workspacesDir, node.id);
+  const source = "Total borrowed assets <= total supplied assets\n";
+  fs.mkdirSync(path.join(workspace, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "docs", "overview.md"), source, "utf8");
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: workspace, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz test"]);
+  git(["config", "user.email", "ultrafuzz@example.invalid"]);
+  git(["add", "."]);
+  git(["commit", "--quiet", "-m", "unpinned source"]);
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-solvency",
+        source_path: "docs/overview.md",
+        source_location: "lines 1-1",
+        kind: "inequality",
+        verbatim: "Total borrowed assets <= total supplied assets",
+        inventory_ids: ["inventory-solvency"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-solvency",
+        description: "Borrowed assets stay below supplied assets.",
+        ledger_ids: ["evidence-solvency"]
+      }
+    ],
+    scan_probes: [
+      {
+        id: "probe-repository-root",
+        source_path: ".",
+        query: "repository-wide invariant inventory",
+        result: "Repository-wide scan completed"
+      }
+    ]
+  };
+  const ledgerBytes = Buffer.from(JSON.stringify(ledger));
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", ledgerBytes.toString("utf8"));
+  writeArtifact(layout, node.id, "setup/project-discovery.md", fixtureInvariantLedgerMarkdown(JSON.stringify(ledger)));
+  // An unpinned run has an invariant source proof but no base source proof to bind its commit to.
+  const proofPath = path.join(layout.root, "source-proofs", "project-discovery.invariant.json");
+  fs.mkdirSync(path.dirname(proofPath), { recursive: true });
+  fs.writeFileSync(
+    proofPath,
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-source-proof.v1",
+      attempt_id: "project-discovery",
+      commit: git(["rev-parse", "HEAD"]),
+      tree: git(["rev-parse", "HEAD^{tree}"]),
+      ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+      files: [{ path: "docs/overview.md", sha256: createHash("sha256").update(source).digest("hex"), content: source }]
+    })
+  );
+  const verify = (taskWorktree: "read" | "skip") =>
+    verifyRequiredArtifactsForAttempt(
+      layout,
+      node,
+      node.id,
+      undefined,
+      authenticatedSnapshotsForNode(layout, node, node.id, taskWorktree)
+    );
+
+  for (const taskWorktree of ["read", "skip"] as const) {
+    const result = verify(taskWorktree);
+    assert.equal(result.ok, true, `${taskWorktree}: ${JSON.stringify(result.diagnostics)}`);
+  }
+
+  fs.rmSync(workspace, { recursive: true, force: true });
+  // Without a base proof, the finalization check has no Git facts left once the worktree is gone.
+  const deletedRead = verify("read");
+  assert.equal(deletedRead.ok, false);
+  assert.ok(
+    deletedRead.diagnostics.some(
+      (diagnostic) =>
+        diagnostic.code === "ARTIFACT_SEMANTIC_GATE_CONTEXT_UNAVAILABLE" &&
+        diagnostic.details?.gate === "invariant-source-proof-git-binding"
+    ),
+    JSON.stringify(deletedRead.diagnostics)
+  );
+  const deletedSkip = verify("skip");
+  assert.equal(deletedSkip.ok, true, JSON.stringify(deletedSkip.diagnostics));
+
+  fs.rmSync(proofPath);
+  const missingProof = verify("skip");
+  assert.equal(missingProof.ok, false);
+  assert.deepEqual(
+    missingProof.diagnostics
+      .filter((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_PROOF_MISSING")
+      .map((diagnostic) => diagnostic.message),
+    ["Invariant ledger source proof is unavailable"]
+  );
+});
+
 test("project discovery gate preserves repeated backslashes in Markdown formula evidence", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-escaped-formula" });
   const node = {
@@ -7083,7 +7296,8 @@ test("authenticated current-node snapshots remain authoritative across live-file
           }
         ])
       ),
-      publications: new Map([...bytesByPath].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)]))
+      publications: new Map([...bytesByPath].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)])),
+      taskWorktree: "read"
     };
   };
 
@@ -12991,6 +13205,38 @@ test("coverage gate binds selected and unselected ranges to the trusted producti
   publish(evidence);
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  // The production inventory is a finalization check against the live worktree. A read of
+  // finalized output checks the published evidence and its Markdown projection only (#1227).
+  const deletedWorkspace = `${workspace}.deleted`;
+  const verifyWithoutWorkspace = (taskWorktree: "read" | "skip") => {
+    fs.renameSync(workspace, deletedWorkspace);
+    try {
+      return verifyRequiredArtifactsForAttempt(
+        layout,
+        node,
+        node.id,
+        undefined,
+        authenticatedSnapshotsForNode(layout, node, node.id, taskWorktree)
+      );
+    } finally {
+      fs.renameSync(deletedWorkspace, workspace);
+    }
+  };
+  const inventoryRead = verifyWithoutWorkspace("read");
+  assert.ok(
+    inventoryRead.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_SOURCE_INVENTORY_UNAVAILABLE"),
+    JSON.stringify(inventoryRead.diagnostics)
+  );
+  const inventorySkipped = verifyWithoutWorkspace("skip");
+  assert.equal(inventorySkipped.ok, true, JSON.stringify(inventorySkipped.diagnostics));
+  publish(evidence, scopedMarkdown.replace("`1/6`", "`2/6`"));
+  const skippedMarkdownMismatch = verifyWithoutWorkspace("skip");
+  assert.ok(
+    skippedMarkdownMismatch.diagnostics.some((diagnostic) => diagnostic.code === "COVERAGE_EVIDENCE_MARKDOWN_MISMATCH"),
+    JSON.stringify(skippedMarkdownMismatch.diagnostics)
+  );
+  publish(evidence);
 
   const longHitCount = "9".repeat(100_000);
   const longHitLcov = Buffer.from(

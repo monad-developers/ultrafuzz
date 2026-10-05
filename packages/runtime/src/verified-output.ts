@@ -197,7 +197,9 @@ function loadVerifiedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): Fi
       ),
       files: new Map(
         [...authority.gateContextFiles].map(([relativePath, file]) => [relativePath, Buffer.from(file.bytes)])
-      )
+      ),
+      // Finalization checked the task worktree; Ultrafuzz may since have deleted it (#1227).
+      taskWorktree: "skip"
     }
   );
   const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");

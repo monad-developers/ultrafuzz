@@ -3892,6 +3892,7 @@ function authenticatedGateSnapshots(
   outputs: Map<string, { absolutePath: string; bytes: Buffer }>;
   publications: Map<string, Buffer>;
   files: Map<string, Buffer>;
+  taskWorktree: "read";
 } {
   const publications = new Map(
     [...authority.publications].map(([relativePath, publication]) => [relativePath, Buffer.from(publication.bytes)])
@@ -3907,7 +3908,8 @@ function authenticatedGateSnapshots(
       })
     ),
     publications,
-    files: new Map([...publications].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)]))
+    files: new Map([...publications].map(([relativePath, bytes]) => [relativePath, Buffer.from(bytes)])),
+    taskWorktree: "read"
   };
 }
 
