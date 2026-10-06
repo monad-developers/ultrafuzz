@@ -122,16 +122,13 @@ test("Ultrafuzz removes a registered task worktree, its registration and its bra
   const keptBefore = registrations(project);
 
   const checkpoints: string[] = [];
-  assert.deepEqual(
-    removeRunTaskWorktrees({
-      projectRoot: project,
-      runRoot,
-      runId,
-      attemptIds: ["strategy-a"],
-      checkpoint: () => checkpoints.push("checked")
-    }),
-    ["strategy-a"]
-  );
+  removeRunTaskWorktrees({
+    projectRoot: project,
+    runRoot,
+    runId,
+    attemptIds: ["strategy-a"],
+    checkpoint: () => checkpoints.push("checked")
+  });
 
   assert.deepEqual(checkpoints, ["checked"]);
   assert.equal(fs.existsSync(succeeded), false);
@@ -163,16 +160,13 @@ test("Ultrafuzz never removes a locked, foreign or unregistered task directory",
   fs.mkdirSync(path.join(unregistered, "artifacts"), { recursive: true });
   const before = registrations(project);
 
-  assert.deepEqual(
-    removeRunTaskWorktrees({
-      projectRoot: project,
-      runRoot,
-      runId,
-      attemptIds: ["locked-task", "foreign-branch-task", "unregistered-task", "outside-task"],
-      checkpoint: () => undefined
-    }),
-    []
-  );
+  removeRunTaskWorktrees({
+    projectRoot: project,
+    runRoot,
+    runId,
+    attemptIds: ["locked-task", "foreign-branch-task", "unregistered-task", "outside-task"],
+    checkpoint: () => undefined
+  });
 
   assert.equal(registrations(project), before);
   for (const directory of [locked, foreignBranch, unregistered, outside]) assert.equal(fs.existsSync(directory), true);
@@ -199,10 +193,7 @@ test("Ultrafuzz finishes an interrupted task-worktree removal on the next call",
   git(project, ["worktree", "prune"]);
   assert.equal(branchExists(project, `ultrafuzz/${runId}/unregistered-task`), true);
 
-  assert.deepEqual(
-    removeRunTaskWorktrees({ projectRoot: project, runRoot, runId, attemptIds: [], checkpoint: () => undefined }),
-    ["renamed-task", "unregistered-task"]
-  );
+  removeRunTaskWorktrees({ projectRoot: project, runRoot, runId, attemptIds: [], checkpoint: () => undefined });
 
   assert.equal(fs.existsSync(removing), false);
   assert.doesNotMatch(registrations(project), /renamed-task|unregistered-task/u);
@@ -241,15 +232,12 @@ test("Ultrafuzz task-worktree removal stops at a checkpoint between attempts and
   const plain = path.join(root, "plain-project");
   const plainRunRoot = path.join(plain, ".ultrafuzz", "runs", runId);
   fs.mkdirSync(path.join(plainRunRoot, "workspaces", "task", "artifacts"), { recursive: true });
-  assert.deepEqual(
-    removeRunTaskWorktrees({
-      projectRoot: plain,
-      runRoot: plainRunRoot,
-      runId,
-      attemptIds: ["task"],
-      checkpoint: () => undefined
-    }),
-    []
-  );
+  removeRunTaskWorktrees({
+    projectRoot: plain,
+    runRoot: plainRunRoot,
+    runId,
+    attemptIds: ["task"],
+    checkpoint: () => undefined
+  });
   assert.equal(fs.existsSync(path.join(plainRunRoot, "workspaces", "task")), true);
 });

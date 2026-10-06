@@ -65,16 +65,13 @@ test("the workflow engine keeps an Ultrafuzz task worktree, and one Ultrafuzz re
     assert.equal(fs.existsSync(path.join(worktreePath, ".git")), true, "the engine must keep the task worktree");
     assert.equal(fs.readFileSync(canonicalPath, "utf8"), fixtureContents);
 
-    assert.deepEqual(
-      removeRunTaskWorktrees({
-        projectRoot: root,
-        runRoot,
-        runId: ultrafuzzRunId,
-        attemptIds: [attemptId],
-        checkpoint: () => undefined
-      }),
-      [attemptId]
-    );
+    removeRunTaskWorktrees({
+      projectRoot: root,
+      runRoot,
+      runId: ultrafuzzRunId,
+      attemptIds: [attemptId],
+      checkpoint: () => undefined
+    });
     assert.equal(fs.existsSync(worktreePath), false);
     assert.doesNotMatch(execGit(root, ["worktree", "list", "--porcelain"]), /write-artifact/u);
     assert.equal(execGit(root, ["for-each-ref", `refs/heads/${branch}`]), "");

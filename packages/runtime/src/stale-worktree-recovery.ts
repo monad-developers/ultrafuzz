@@ -120,7 +120,7 @@ export function repairPrunableRunWorktreeRegistrations(input: {
  * The directory is first renamed into `workspaces/.removing/`, so the task
  * path is always an intact worktree or absent, never a directory without
  * `.git` whose Git commands would resolve to the project checkout. A later
- * call finishes a removal that was interrupted. Returns the attempts removed.
+ * call finishes a removal that was interrupted.
  */
 export function removeRunTaskWorktrees(input: {
   projectRoot: string;
@@ -128,7 +128,7 @@ export function removeRunTaskWorktrees(input: {
   runId: string;
   attemptIds: readonly string[];
   checkpoint: () => void;
-}): string[] {
+}): void {
   const projectRoot = path.resolve(input.projectRoot);
   const workspacesRoot = path.join(path.resolve(input.runRoot), "workspaces");
   const removingRoot = path.join(workspacesRoot, REMOVING_DIRECTORY);
@@ -138,12 +138,11 @@ export function removeRunTaskWorktrees(input: {
     )
   );
   const leftovers = pathEntryExists(removingRoot) ? fs.readdirSync(removingRoot) : [];
-  if (live.size === 0 && leftovers.length === 0) return [];
+  if (live.size === 0 && leftovers.length === 0) return;
   const listed = runGit(projectRoot, ["worktree", "list", "--porcelain"]);
-  if (listed.error !== undefined || listed.status !== 0) return [];
+  if (listed.error !== undefined || listed.status !== 0) return;
   const registrations = parseWorktreeRegistrations(listed.stdout);
 
-  const removed: string[] = [];
   for (const attemptId of [...new Set([...leftovers, ...live])].sort()) {
     input.checkpoint();
     const worktreePath = safeResolveInside(workspacesRoot, attemptId, "task worktree");
@@ -163,7 +162,6 @@ export function removeRunTaskWorktrees(input: {
     if (registration !== undefined) runGitOrThrow(projectRoot, ["worktree", "remove", "--force", worktreePath]);
     runGitOrThrow(projectRoot, ["update-ref", "-d", branch]);
     fs.rmSync(removingPath, { recursive: true, force: true });
-    removed.push(attemptId);
   }
   try {
     fs.rmdirSync(removingRoot);
@@ -172,7 +170,6 @@ export function removeRunTaskWorktrees(input: {
       throw error;
     }
   }
-  return removed;
 }
 
 function runGitOrThrow(projectRoot: string, args: string[]): void {
