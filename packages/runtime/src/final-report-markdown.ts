@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   assertRegularFileInside,
   artifactValidationWarningsSchema,
+  ESTIMATED_SPEND_PATTERN,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   reportCompletionSchema,
@@ -41,8 +42,24 @@ const PARTIAL_EMPTY_FINDINGS_NOTICE =
   "No production issues were reported from the available verified results. This partial report is not a clean result and does not establish that uncompleted work found no issues. See [Run completion](#run-completion).";
 const UNCHECKED_PARTIAL_REPORT_WARNING =
   "> **PARTIAL REPORT — verification not checked.** This report contains the saved report-agent output. Task counts and results could not be fully verified. Missing or uncertain results are coverage gaps, and an empty findings list is not a clean result. See [Run completion](#run-completion).";
+const UNRECORDED_COMMIT_SUMMARY = "- Commit: `none` (no Git commit was recorded for the evaluated target)";
+const UNRECORDED_MODELS_SUMMARY = "- Models used: `none` (no model usage was recorded)";
 const UNCHECKED_EMPTY_FINDINGS_NOTICE =
   "No final findings are included in this agent-written report. This partial report is not a clean result and does not establish that unfinished or unchecked work found no issues. See [Run completion](#run-completion).";
+/**
+ * Fixed disclosures that take the place of the scoped coverage section and of an unrecorded
+ * remediation. They carry no digits, `%`, "X of Y", scope IDs, or `<letter`, so the published-coverage
+ * score scan and the raw-HTML rule never read them as claims.
+ */
+const COVERAGE_UNMEASURED_NOTICE =
+  "Scoped coverage could not be measured for this run, so how much of the in-scope code the campaign exercised is unknown.";
+const COVERAGE_INCOMPLETE_NOTICE =
+  "Scoped coverage was measured, but the campaign did not exercise every in-scope declaration; uncovered code may contain issues this report does not show.";
+const REMEDIATION_UNRECORDED_NOTICE =
+  "No remediation was recorded for this finding, and Ultrafuzz does not infer one. Confirm the root cause in the description and Proof of Concept before designing a fix.";
+/** Diagnostic sections that live only in report.json and the public warning companions. */
+const REMOVED_REPORT_SECTION_HEADING =
+  /^ {0,3}#{1,6}[ \t]+(?:Scoped coverage evidence|Artifact validation warnings)(?:[ \t]+#*)?[ \t]*$/mu;
 const REPORT_VERIFICATION_REASON_TEXT: Record<ReportVerification["reason_codes"][number], string> = {
   "verification-unavailable": "Run and output verification could not be completed.",
   "record-missing": "Some saved run records are missing.",
@@ -86,10 +103,14 @@ export function loadGoalSearchCoverageSnapshot(runRoot: string): unknown | undef
 
 type JsonRecord = Record<string, unknown>;
 
+/**
+ * The Run summary bullets, in order. Lineage (`source_run_id`, `source_run_ids`) stays in report.json
+ * only; `Commit` names the evaluated target's commit (`target_commit`).
+ */
 const reportSummaryFields = [
   ["Run ID", "run_id"],
-  ["Source run ID", "source_run_id"],
   ["Repository", "repository"],
+  ["Commit", "target_commit"],
   ["Elapsed time", "elapsed_time"],
   ["Models used", "models_used"],
   ["Tokens used", "tokens_used"],
@@ -145,7 +166,7 @@ export function projectPublicCanonicalFinalReport(
   const projection = projectCanonicalFinalReport(publicReport, context);
   if (
     containsPrivatePathInValue(projection.report) ||
-    containsPrivatePath(projection.markdown) ||
+    containsPrivatePathInMarkdown(projection.markdown) ||
     containsUnredactedSecretInValue(projection.report) ||
     containsUnredactedSecretInMarkdown(projection.markdown, projection.report)
   ) {
@@ -241,6 +262,8 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (!markdown.startsWith(opening) || !markdown.includes("\n## Run summary\n")) {
     return "missing report title or run summary";
   }
+  const runSummaryViolation = runSummaryLabelsViolation(markdown, report);
+  if (runSummaryViolation !== undefined) return runSummaryViolation;
   const completionViolation = completionMarkdownViolation(markdown, report, completion, observed, verification);
   if (completionViolation !== undefined) return completionViolation;
   if (!markdown.includes("\n## Property implementation coverage\n")) {
@@ -259,13 +282,18 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
     return "missing property provenance";
   }
   // Report prose is preserved byte-for-byte from upstream artifacts that the agent cannot repair, so
-  // the only rule left is one escaped prose cannot match: publicProse escapes `<`, and only
-  // unescaped inline-code values can still carry raw HTML.
-  const prose = markdownOutsideFencedCode(markdown).replace(/<br\s*\/?\s*>/giu, "");
+  // the only rule left is one escaped prose cannot match: publicProse and findingProse escape `<`,
+  // findingProse keeps a code span only when it holds no `<` or `>`, and only unescaped inline-code
+  // values can still carry raw HTML.
+  const outsideFences = markdownOutsideFencedCode(markdown);
+  const prose = outsideFences.replace(/<br\s*\/?\s*>/giu, "");
   if (/<[A-Za-z][^>]*>/u.test(prose)) return "contains raw HTML outside fenced code";
+  const coverageViolation = coverageDisclosureViolation(outsideFences, report);
+  if (coverageViolation !== undefined) return coverageViolation;
   const rendered = renderedIssues(Array.isArray(report.issues) ? report.issues.filter(isRecord) : []);
   const expectedHeadings = rendered.map(renderedIssueHeading);
-  const headings = markdown.split("\n").filter((line) => line.startsWith("## ["));
+  // Proof code may hold a line that reads like an issue heading; only headings outside fences count.
+  const headings = outsideFences.split("\n").filter((line) => line.startsWith("## ["));
   if (
     headings.length !== expectedHeadings.length ||
     headings.some((heading, index) => heading !== expectedHeadings[index])
@@ -280,20 +308,98 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (!markdown.startsWith(`${opening}| Issue id | Title |\n| --- | --- |\n`)) {
     return "issue index is missing or malformed";
   }
-  const issueBlocks = expectedHeadings.map((heading, index) => {
-    const start = markdown.indexOf(`${heading}\n`);
-    const nextHeading = expectedHeadings[index + 1];
-    const end =
-      nextHeading === undefined ? markdown.length : markdown.indexOf(`${nextHeading}\n`, start + heading.length);
-    return markdown.slice(start, end < 0 ? markdown.length : end);
-  });
-  return issueBlocks.every((block) => {
-    const severityIndex = block.indexOf("\n### Severity\n");
-    const proofIndex = block.indexOf("\n### Proof of Concept\n");
-    return severityIndex >= 0 && proofIndex > severityIndex;
+  // Each issue block runs from its heading to the next h2, outside fenced proof code, so the last
+  // issue cannot borrow a subsection from a later report section or from its own proof.
+  return expectedHeadings.every((heading) => {
+    const start = outsideFences.indexOf(`\n${heading}\n`);
+    const end = start < 0 ? -1 : outsideFences.indexOf("\n## ", start + 1);
+    return start >= 0 && issueSectionsInOrder(outsideFences.slice(start, end < 0 ? outsideFences.length : end));
   })
     ? undefined
-    : "an issue is missing severity or proof-of-concept ordering";
+    : "an issue is missing severity, proof-of-concept, or remediation ordering";
+}
+
+/** Severity, then Proof of Concept, then any family variants, then exactly one closing Remediation. */
+function issueSectionsInOrder(block: string): boolean {
+  const severity = block.indexOf("\n### Severity\n");
+  const proof = block.indexOf("\n### Proof of Concept\n");
+  const variants = block.indexOf("\n#### Family variants\n");
+  const remediation = block.indexOf("\n### Remediation\n");
+  const repeatedRemediation = remediation >= 0 && block.includes("\n### Remediation\n", remediation + 1);
+  return (
+    severity >= 0 &&
+    proof > severity &&
+    remediation > proof &&
+    !repeatedRemediation &&
+    (variants < 0 || (variants > proof && variants < remediation))
+  );
+}
+
+/**
+ * Scoped coverage evidence and artifact validation warnings stay in report.json (and the public
+ * warning companions), so report.md must not carry their former sections. The coverage notice is
+ * then the only report.md trace of unmeasured or incomplete scoped coverage: it is required exactly
+ * when the typed evidence calls for it, directly after the Run summary bullets, and unmeasured
+ * coverage can never read as a clean empty result. Finding prose is carried byte-for-byte and may
+ * repeat either sentence, so the line checks skip the issue blocks, which hold all of it.
+ */
+function coverageDisclosureViolation(prose: string, report: JsonRecord): string | undefined {
+  if (REMOVED_REPORT_SECTION_HEADING.test(prose)) return "contains a section that report.md no longer renders";
+  const expected = coverageEvidenceNotice(report.coverage_evidence);
+  const lines = prose
+    .split("\n## ")
+    .filter((section, index) => index === 0 || !section.startsWith("["))
+    .join("\n## ")
+    .split("\n");
+  const noticeAfterSummary = prose.split("\n## Run summary\n\n")[1]?.split("\n\n")[1];
+  if (
+    [COVERAGE_UNMEASURED_NOTICE, COVERAGE_INCOMPLETE_NOTICE].some(
+      (notice) => lines.filter((line) => line === notice).length !== (notice === expected ? 1 : 0)
+    ) ||
+    (expected !== undefined && noticeAfterSummary !== expected)
+  ) {
+    return "coverage notice does not match the report coverage evidence";
+  }
+  return expected === COVERAGE_UNMEASURED_NOTICE && lines.includes("No issues reported.")
+    ? "report claims a clean empty result without measured scoped coverage"
+    : undefined;
+}
+
+/** The notice owed by typed coverage evidence: unmeasured, measured with an uncovered range, or none. */
+function coverageEvidenceNotice(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.status === "unavailable") return COVERAGE_UNMEASURED_NOTICE;
+  const views = value.status === "measured" && Array.isArray(value.views) ? value.views.filter(isRecord) : [];
+  return views.some(
+    (view) =>
+      typeof view.covered_ranges === "number" &&
+      typeof view.total_ranges === "number" &&
+      view.covered_ranges < view.total_ranges
+  )
+    ? COVERAGE_INCOMPLETE_NOTICE
+    : undefined;
+}
+
+/**
+ * The Run summary bullets carry exactly the summary labels, in order, so a stale row (such as the
+ * former `Source run ID`) or a dropped `Commit` row cannot pass as the current report shape. The
+ * spend row is exactly the report's `estimated_spend` as inline code: a numeric estimate, with a
+ * `+` only when the report says the amount is probably low, and never `unavailable` or annotated.
+ */
+function runSummaryLabelsViolation(markdown: string, report: JsonRecord): string | undefined {
+  const [, summary, ...repeated] = markdownOutsideFencedCode(markdown).split("\n## Run summary\n\n");
+  if (summary === undefined || repeated.length > 0) return "missing or repeated run summary";
+  const bullets = (summary.split("\n\n")[0] ?? "").split("\n");
+  const labels = bullets.map((line) => /^- ([^:\n]+): /u.exec(line)?.[1]);
+  const expected = reportSummaryFields.map(([label]) => label);
+  if (!isDeepStrictEqual(labels, expected)) return "run summary labels do not match the report contract";
+  const spend = /^- Estimated spend: `([^`]*)`$/u.exec(bullets[labels.indexOf("Estimated spend")] ?? "")?.[1];
+  if (spend === undefined || !ESTIMATED_SPEND_PATTERN.test(spend)) {
+    return "run summary estimated spend is not a numeric USD estimate";
+  }
+  return spend === recordField(report, "run_metadata")?.estimated_spend
+    ? undefined
+    : "run summary estimated spend does not match the report";
 }
 
 function completionMarkdownViolation(
@@ -611,31 +717,41 @@ function proofOfConcept(issue: JsonRecord): RenderableProof | undefined {
 }
 
 function markdownOutsideFencedCode(markdown: string): string {
-  const prose: string[] = [];
+  return markdownLines(markdown)
+    .filter(({ kind }) => kind === "prose")
+    .map(({ text }) => text)
+    .join("\n");
+}
+
+interface MarkdownLine {
+  text: string;
+  /** A fence line opens or closes fenced code; a code line sits inside it. */
+  kind: "prose" | "fence" | "code";
+}
+
+function markdownLines(markdown: string): MarkdownLine[] {
+  const lines: MarkdownLine[] = [];
   let openFence: { marker: "`" | "~"; length: number } | undefined;
-  for (const line of markdown.split("\n")) {
+  for (const text of markdown.split("\n")) {
     if (openFence === undefined) {
-      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
-      if (opening === null) {
-        prose.push(line);
-        continue;
-      }
-      const delimiter = opening[1]!;
-      const marker = delimiter[0] as "`" | "~";
-      if (marker === "`" && opening[2]!.includes("`")) {
-        prose.push(line);
-        continue;
-      }
-      openFence = { marker, length: delimiter.length };
+      openFence = openingFence(text);
+      lines.push({ text, kind: openFence === undefined ? "prose" : "fence" });
       continue;
     }
-    const closing = /^ {0,3}(`+|~+)[ \t]*$/u.exec(line)?.[1];
-    if (closing?.[0] === openFence.marker && closing.length >= openFence.length) {
-      openFence = undefined;
-      continue;
-    }
+    const closing = /^ {0,3}(`+|~+)[ \t]*$/u.exec(text)?.[1];
+    const closes = closing?.[0] === openFence.marker && closing.length >= openFence.length;
+    if (closes) openFence = undefined;
+    lines.push({ text, kind: closes ? "fence" : "code" });
   }
-  return prose.join("\n");
+  return lines;
+}
+
+function openingFence(line: string): { marker: "`" | "~"; length: number } | undefined {
+  const [, delimiter, info] = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line) ?? [];
+  if (delimiter === undefined || info === undefined) return undefined;
+  const marker = delimiter.startsWith("`") ? "`" : "~";
+  // A backtick fence's info string cannot hold a backtick; such a line is prose.
+  return marker === "`" && info.includes("`") ? undefined : { marker, length: delimiter.length };
 }
 
 function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown): string {
@@ -652,9 +768,9 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   if (issues.length > 0) {
     lines.push("| Issue id | Title |", "| --- | --- |");
     for (const issue of issues) {
-      const heading = renderedIssueLabel(issue);
-      const linkLabel = renderedIssueLabel(issue);
-      lines.push(`| ${issue.id} | [${escapeTable(linkLabel)}](#${markdownAnchor(heading)}) |`);
+      lines.push(
+        `| ${issue.id} | [${escapeTable(renderedIssueLabel(issue, true))}](#${markdownAnchor(renderedIssueVisibleLabel(issue))}) |`
+      );
     }
     lines.push("", issueCountSentence(issues), "");
   }
@@ -666,12 +782,11 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     ""
   );
   appendRunSummary(lines, isRecord(report.run_metadata) ? report.run_metadata : {});
-  appendArtifactValidationWarnings(
-    lines,
-    isRecord(report.run_metadata) ? report.run_metadata.artifact_validation_warnings : undefined
-  );
+  // Scoped coverage evidence and artifact validation warnings stay in report.json; report.md keeps
+  // only the fixed notice that coverage was unmeasured or incomplete.
+  const coverageNotice = coverageEvidenceNotice(report.coverage_evidence);
+  if (coverageNotice !== undefined) lines.push("", coverageNotice);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
-  appendCoverageEvidence(lines, report.coverage_evidence);
   const goalCoverage = summarizeGoalSearchCoverage(goalSearchCoverage);
   if (issues.length > 0) appendRunCompletion(lines, completion, observed, verification);
 
@@ -687,7 +802,7 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
     // Saying "no issues" after a campaign that never fuzzed, or after a goal
     // hunt where most lanes never searched, would report an absence of
     // measurement as a clean result.
-    lines.push("", noIssuesSentence(campaignDidNotRun, goalCoverage));
+    lines.push("", noIssuesSentence(campaignDidNotRun, goalCoverage, coverageNotice === COVERAGE_UNMEASURED_NOTICE));
   }
   if (issues.length === 0) appendRunCompletion(lines, completion, observed, verification);
 
@@ -821,11 +936,7 @@ function appendArtifactValidationWarnings(lines: string[], value: unknown): void
   }
 }
 
-function appendCoverageEvidence(lines: string[], value: unknown): void {
-  if (!isRecord(value) || (value.status !== "measured" && value.status !== "unavailable")) return;
-  lines.push("", ...renderCoverageEvidenceMarkdownSection(value));
-}
-
+/** The coverage producer's canonical section; report.md no longer renders it. */
 export function renderCoverageEvidenceMarkdownSection(value: unknown): string[] {
   if (!isRecord(value)) return [];
   const lines = ["## Scoped coverage evidence", ""];
@@ -885,8 +996,14 @@ function renderedIssues(issues: JsonRecord[]): RenderedIssue[] {
   }));
 }
 
-function renderedIssueLabel(issue: RenderedIssue): string {
-  return `[${publicProse(issue.id)}] - ${publicProse(issue.title)}`;
+/** `cell`: the label sits in a table cell (see findingProse). */
+function renderedIssueLabel(issue: RenderedIssue, cell = false): string {
+  return `[${findingProse(issue.id, cell)}] - ${findingProse(issue.title, cell)}`;
+}
+
+/** The label text a reader sees, which GitHub slugs into the heading anchor. */
+function renderedIssueVisibleLabel(issue: RenderedIssue): string {
+  return `[${findingProseVisibleText(issue.id)}] - ${findingProseVisibleText(issue.title)}`;
 }
 
 function renderedIssueHeading(issue: RenderedIssue): string {
@@ -929,21 +1046,33 @@ function appendCampaignOutcome(lines: string[], campaignOutcome: unknown): boole
 
 function appendRunSummary(lines: string[], metadata: JsonRecord): void {
   for (const [label, key] of reportSummaryFields) {
-    let value = metadata[key];
-    if (key === "source_run_id" && !isAvailable(value)) {
-      value = "none";
+    if (key === "target_commit" && metadata[key] === null) {
+      lines.push(UNRECORDED_COMMIT_SUMMARY);
+      continue;
     }
-    lines.push(`- ${label}: \`${inlineValue(value)}\``);
+    if (key === "models_used" && Array.isArray(metadata[key]) && metadata[key].length === 0) {
+      lines.push(UNRECORDED_MODELS_SUMMARY);
+      continue;
+    }
+    lines.push(`- ${label}: \`${inlineValue(metadata[key])}\``);
   }
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   const { issue } = rendered;
-  lines.push("", renderedIssueHeading(rendered), "", publicProse(issueDescription(issue)), "", "### Severity", "");
+  lines.push(
+    "",
+    renderedIssueHeading(rendered),
+    "",
+    findingProseBlock(issueDescription(issue)),
+    "",
+    "### Severity",
+    ""
+  );
   const impact = riskAssessment(issue, "impact");
   const likelihood = riskAssessment(issue, "likelihood");
-  lines.push(`- **Impact**: ${impact.label}: ${publicProse(impact.rationale)}`);
-  lines.push(`- **Likelihood**: ${likelihood.label}: ${publicProse(likelihood.rationale)}`);
+  lines.push(`- **Impact**: ${impact.label}: ${findingProse(impact.rationale)}`);
+  lines.push(`- **Likelihood**: ${likelihood.label}: ${findingProse(likelihood.rationale)}`);
   const sourceNodes = findingSourceNodes(issue);
   if (sourceNodes.length > 0) {
     lines.push(`- **Source nodes**: ${sourceNodes.map((source) => `\`${publicInlineCode(source)}\``).join(", ")}`);
@@ -951,6 +1080,13 @@ function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {
   lines.push("", "### Proof of Concept", "");
   appendProofOfConcept(lines, issue);
   appendFamilyVariants(lines, issue.family_variants);
+  // The carried recommendation, or a fixed statement that none was recorded. JSON is never filled in.
+  lines.push(
+    "",
+    "### Remediation",
+    "",
+    isAvailable(issue.recommendation) ? findingProseBlock(String(issue.recommendation)) : REMEDIATION_UNRECORDED_NOTICE
+  );
 }
 
 function appendProofOfConcept(lines: string[], issue: JsonRecord): void {
@@ -959,7 +1095,7 @@ function appendProofOfConcept(lines: string[], issue: JsonRecord): void {
     throw new Error("production issue proof of concept is missing a human-readable scenario or execution trace");
   }
   for (const [index, step] of proof.steps.entries()) {
-    lines.push(`${index + 1}. ${publicProse(step)}`);
+    lines.push(`${String(index + 1)}. ${findingProseBlock(step)}`);
   }
   const code = publicCode(proof.code);
   const language = safeFenceLanguage(proof.language);
@@ -979,7 +1115,7 @@ function appendFamilyVariants(lines: string[], value: unknown): void {
   for (const variant of variants) {
     const title = firstAvailableString(variant.title) ?? "Variant";
     const summary = firstAvailableString(variant.summary, variant.description);
-    lines.push(`- **${publicProse(title)}**${summary === undefined ? "" : `: ${publicProse(summary)}`}`);
+    lines.push(`- **${findingProse(title)}**${summary === undefined ? "" : `: ${findingProse(summary)}`}`);
   }
 }
 
@@ -1004,7 +1140,7 @@ function appendPropertyProvenance(
     "| --- | --- | --- | --- | --- | --- |"
   );
   for (const entry of entries) {
-    const finding = propertyFindingLabel(entry, issues, outcomes);
+    const finding = propertyFindingCell(entry, issues, outcomes);
     const sources = Array.isArray(entry.sources) ? entry.sources.filter(isRecord) : [];
     const paths = uniqueStrings([
       ...(Array.isArray(entry.implementation_paths) ? entry.implementation_paths : []),
@@ -1015,7 +1151,7 @@ function appendPropertyProvenance(
       ...(typeof entry.fuzzer_backend === "string" ? [entry.fuzzer_backend] : [])
     ]);
     lines.push(
-      `| ${tableCell(finding)} | ${tableList(entry.property_ids)} | ${tableList(sources.map((source) => source.source_node_id))} | ${tableList(sources.map((source) => source.source_property_id))} | ${tableList(paths)} | ${tableList(backends)} |`
+      `| ${finding} | ${tableList(entry.property_ids)} | ${tableList(sources.map((source) => source.source_node_id))} | ${tableList(sources.map((source) => source.source_property_id))} | ${tableList(paths)} | ${tableList(backends)} |`
     );
   }
 }
@@ -1060,7 +1196,7 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
   const unselectedExpected = referenceExpected.filter((id) => !selectedIds.has(id));
   if (unselectedExpected.length > 0) {
     lines.push(
-      `- Unselected reference expectation properties (not fulfilled): ${unselectedExpected.map((id) => `\`${publicProse(String(id))}\``).join(", ")}`
+      `- Unselected reference expectation properties (not fulfilled): ${unselectedExpected.map((id) => propertyIdMarkdown(id)).join(", ")}`
     );
   }
   const blockerSummaries = Array.isArray(value.blocker_summaries)
@@ -1072,6 +1208,15 @@ function appendPropertyImplementationCoverage(lines: string[], value: unknown): 
       lines.push(`- ${publicProse(summary)}`);
     }
   }
+}
+
+/**
+ * A property ID as inline code, where a backslash stays literal. Inside a code span `<` and `>` stay
+ * raw, which the raw-HTML rule reads as markup, so an ID holding either renders as escaped text.
+ */
+function propertyIdMarkdown(id: unknown): string {
+  const value = String(id);
+  return /[<>]/u.test(value) ? findingProse(value) : `\`${inlineValue(id)}\``;
 }
 
 /**
@@ -1256,15 +1401,21 @@ function appendGoalSearchCoverage(lines: string[], summary: GoalSearchCoverageSu
 /**
  * State an empty issue list without letting it stand in for coverage.
  *
- * Two different absences of measurement can leave the issue list empty: an invariant campaign that
- * never fuzzed, and a goal hunt whose lanes were killed before they searched. Either one makes "no
- * issues reported" a false summary, so both are named here, and the goal case points at the section
- * that carries the numbers. Unknown goal coverage deliberately does NOT amend this sentence: a
- * topology with no goal lanes at all reports unknown coverage as a matter of course, and turning
- * every such run's clean result into a warning would spend the warning where it means nothing. That
- * run still gets an explicit "coverage is unknown" statement in its own section.
+ * Three different absences of measurement can leave the issue list empty: an invariant campaign that
+ * never fuzzed, a goal hunt whose lanes were killed before they searched, and scoped coverage that
+ * could not be measured. Any one makes "no issues reported" a false summary, so each is named here,
+ * and the goal case points at the section that carries the numbers. Unknown goal coverage
+ * deliberately does NOT amend this sentence: a topology with no goal lanes at all reports unknown
+ * coverage as a matter of course, and turning every such run's clean result into a warning would
+ * spend the warning where it means nothing. That run still gets an explicit "coverage is unknown"
+ * statement in its own section. Measured but incomplete scoped coverage does not amend it either; the
+ * coverage notice after the Run summary already says so.
  */
-function noIssuesSentence(campaignDidNotRun: boolean, coverage: GoalSearchCoverageSummary | undefined): string {
+function noIssuesSentence(
+  campaignDidNotRun: boolean,
+  coverage: GoalSearchCoverageSummary | undefined,
+  scopedCoverageUnmeasured: boolean
+): string {
   const targeted = coverage?.targeted;
   const goalClause =
     targeted === undefined || (targeted.lanes > 0 && targeted.completed >= targeted.lanes)
@@ -1272,13 +1423,19 @@ function noIssuesSentence(campaignDidNotRun: boolean, coverage: GoalSearchCovera
       : targeted.lanes === 0
         ? "no targeted goal search lane ran"
         : `only ${targeted.completed} of ${targeted.lanes} targeted goal searches completed`;
-  const clauses = [campaignDidNotRun ? "the invariant campaign did not run" : undefined, goalClause].filter(
-    (clause): clause is string => clause !== undefined
-  );
+  const clauses = [
+    campaignDidNotRun ? "the invariant campaign did not run" : undefined,
+    goalClause,
+    scopedCoverageUnmeasured ? "scoped coverage could not be measured" : undefined
+  ].filter((clause): clause is string => clause !== undefined);
   if (clauses.length === 0) {
     return "No issues reported.";
   }
-  const sentence = `No issues were reported, but ${clauses.join(" and ")}, so this is not a result.`;
+  const joined =
+    clauses.length > 2
+      ? clauses.map((clause, index) => (index === clauses.length - 1 ? `and ${clause}` : clause)).join(", ")
+      : clauses.join(" and ");
+  const sentence = `No issues were reported, but ${joined}, so this is not a result.`;
   return goalClause === undefined
     ? sentence
     : `${sentence} See [Goal search coverage](#${markdownAnchor("Goal search coverage")}).`;
@@ -1290,14 +1447,14 @@ function appendPriorFindingDisposition(lines: string[], issues: RenderedIssue[],
     addPriorDisposition(
       groups,
       recordField(issue.issue, "lifecycle")?.comparison_disposition,
-      `[${issue.id}] - ${issue.title}`
+      renderedIssueLabel(issue)
     );
   }
   for (const outcome of outcomes) {
     addPriorDisposition(
       groups,
       recordField(outcome, "lifecycle")?.comparison_disposition,
-      recordTitle(outcome, "Untitled outcome")
+      findingProseBlock(recordTitle(outcome, "Untitled outcome"))
     );
   }
   if (groups.size === 0) {
@@ -1311,7 +1468,7 @@ function appendPriorFindingDisposition(lines: string[], issues: RenderedIssue[],
     }
     lines.push("", `### ${label}`, "");
     for (const entry of entries) {
-      lines.push(`- ${publicProse(entry)}`);
+      lines.push(`- ${entry}`);
     }
   }
 }
@@ -1329,7 +1486,7 @@ function appendNonProductionOutcomes(lines: string[], outcomes: JsonRecord[]): v
   );
   for (const outcome of outcomes) {
     lines.push(
-      `| ${tableCell(outcome.triage_classification)} | ${tableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(outcome.recommended_next_action)} |`
+      `| ${tableCell(outcome.triage_classification)} | ${findingTableCell(recordTitle(outcome, "Untitled outcome"))} | ${tableCell(outcome.status)} | ${tableCell(evidenceSummary(outcome.evidence, outcome.summary))} | ${tableCell(outcome.recommended_next_action)} |`
     );
   }
 }
@@ -1372,27 +1529,35 @@ function issueDescription(issue: JsonRecord): string {
   return firstAvailableString(issue.description, issue.summary) ?? "No public issue description was recorded.";
 }
 
+/**
+ * GitHub's heading slug of visible heading text: lowercase, keep letters, marks, digits, spaces, `_`,
+ * and `-`, then turn each space into `-`. Callers pass the visible text, not escaped Markdown.
+ */
 function markdownAnchor(heading: string): string {
   return heading
     .trim()
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s-]/gu, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
     .replace(/\s/gu, "-");
 }
 
-function propertyFindingLabel(entry: JsonRecord, issues: RenderedIssue[], outcomes: JsonRecord[]): string {
+/** The provenance row's Finding cell: the issue label, or the outcome's title, as finding prose in a cell. */
+function propertyFindingCell(entry: JsonRecord, issues: RenderedIssue[], outcomes: JsonRecord[]): string {
   const findingId = firstAvailableString(entry.finding_id);
   const issue = issues.find(({ issue: candidate }) => candidate.id === findingId);
   if (issue !== undefined) {
-    return `[${issue.id}] - ${issue.title}`;
+    return escapeTable(renderedIssueLabel(issue, true));
   }
   const outcome = outcomes.find((candidate) => candidate.id === findingId);
-  return outcome === undefined
-    ? (firstAvailableString(entry.title, findingId) ?? "unavailable")
-    : recordTitle(outcome, findingId ?? "Untitled outcome");
+  return findingTableCell(
+    outcome === undefined
+      ? (firstAvailableString(entry.title, findingId) ?? "unavailable")
+      : recordTitle(outcome, findingId ?? "Untitled outcome")
+  );
 }
 
-function addPriorDisposition(groups: Map<string, string[]>, value: unknown, title: string): void {
+/** `entry` is the rendered Markdown of one list item's body. */
+function addPriorDisposition(groups: Map<string, string[]>, value: unknown, entry: string): void {
   const normalized = typeof value === "string" ? value.trim().toLowerCase().replace(/[ _]+/gu, "-") : "";
   const label =
     normalized === "promoted-again"
@@ -1405,7 +1570,7 @@ function addPriorDisposition(groups: Map<string, string[]>, value: unknown, titl
             ? "Not searched"
             : undefined;
   if (label !== undefined) {
-    groups.set(label, [...(groups.get(label) ?? []), title]);
+    groups.set(label, [...(groups.get(label) ?? []), entry]);
   }
 }
 
@@ -1447,6 +1612,14 @@ function tableList(value: unknown): string {
 
 function tableCell(value: unknown): string {
   return isAvailable(value) ? escapeTable(publicProse(String(value))) : "unavailable";
+}
+
+/**
+ * A finding title in a table cell: finding prose, so inline code stays code where a cell can hold
+ * it, with every pipe escaped.
+ */
+function findingTableCell(value: string): string {
+  return isAvailable(value) ? escapeTable(findingProse(value, true)) : "unavailable";
 }
 
 function isAvailable(value: unknown): boolean {
@@ -1492,6 +1665,133 @@ function publicProse(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
+interface FindingProsePart {
+  markdown: string;
+  /** What a reader sees: the text as written, or a code span's content. */
+  visible: string;
+}
+
+const FINDING_PROSE_ESCAPES: Readonly<Record<string, string>> = {
+  "`": "\\`",
+  "*": "\\*",
+  "!": "\\!",
+  "#": "\\#",
+  "~": "\\~",
+  "<": "&lt;",
+  ">": "&gt;"
+};
+const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]$/u;
+const WORD_CHARACTER = /^[\p{L}\p{N}]$/u;
+/** HTML entity names start with a letter and run to at most 32 characters before the `;`. */
+const ENTITY_NAME_PREFIX = /^[A-Za-z][A-Za-z0-9]{0,31};/u;
+
+/**
+ * Render a finding's byte-preserved prose (issue labels, description, rationales, Proof of Concept
+ * steps, family variants, and remediation) as one line of literal text that keeps its inline code.
+ *
+ * Backtick runs pair as CommonMark pairs them: a run of one or two backticks opens a span that the
+ * next run of the same length closes. A span is kept verbatim unless its content holds `<` or `>`,
+ * which the raw-HTML rule would read as markup; that span, any run of three or more backticks, and
+ * any unmatched run are escaped as text instead, so no fence can open. In a table `cell`, a span
+ * holding `\|` is escaped as text too: escapeTable would make it `\\|`, which a GFM row reads as an
+ * escaped backslash and a cell delimiter, while the text's `&#92;\|` keeps the cell whole.
+ *
+ * Text renders exactly as written. A backslash before ASCII punctuation (or at the end) becomes
+ * `&#92;`, never `\\`, which the private-path re-scan would read as a UNC path, as in `\x19\x01`.
+ * `&` becomes `&amp;` only where it would start a named character reference (`#` is always escaped,
+ * so a numeric one cannot form); elsewhere it stays raw, since `\&` after `B:` or `file:` would read
+ * as a Windows or `file:` path. `_` stays raw only between two letters or digits, where it cannot
+ * open or close emphasis. `](` cannot form an inline link, and `<`/`>` cannot form HTML, an
+ * autolink, or a block quote. findingProseBlock also escapes a first character that could open a
+ * block. publicProse stays the escaper for every other report field and for the coverage
+ * producer's section.
+ */
+function findingProse(value: string, cell = false): string {
+  return findingProseParts(value, cell)
+    .map((part) => part.markdown)
+    .join("");
+}
+
+function findingProseVisibleText(value: string): string {
+  return findingProseParts(value)
+    .map((part) => part.visible)
+    .join("");
+}
+
+function findingProseParts(value: string, cell = false): FindingProsePart[] {
+  const text = value.replace(/\s+/gu, " ").trim();
+  const runs = [...text.matchAll(/`+/gu)].map((match) => ({ start: match.index, end: match.index + match[0].length }));
+  // The next run of the same length closes a one- or two-backtick opener.
+  const closerByOpener = new Map<number, number>();
+  const nextRunByLength = new Map<number, number>();
+  for (const [index, run] of [...runs.entries()].reverse()) {
+    const length = run.end - run.start;
+    if (length > 2) continue;
+    const closer = nextRunByLength.get(length);
+    if (closer !== undefined) closerByOpener.set(index, closer);
+    nextRunByLength.set(length, index);
+  }
+  const parts: FindingProsePart[] = [];
+  let textStart = 0;
+  let consumedThrough = -1;
+  for (const [index, opener] of runs.entries()) {
+    const closerIndex = index > consumedThrough ? closerByOpener.get(index) : undefined;
+    const closer = closerIndex === undefined ? undefined : runs[closerIndex];
+    if (closerIndex === undefined || closer === undefined) continue;
+    // A span is consumed whole either way: runs inside it never pair again.
+    consumedThrough = closerIndex;
+    const content = text.slice(opener.end, closer.start);
+    if (/[<>]/u.test(content) || (cell && content.includes("\\|"))) continue;
+    parts.push(findingProseText(text, textStart, opener.start), {
+      markdown: text.slice(opener.start, closer.end),
+      // CommonMark strips one space from each side of content that is not only spaces.
+      visible:
+        content.startsWith(" ") && content.endsWith(" ") && content.trim() !== "" ? content.slice(1, -1) : content
+    });
+    textStart = closer.end;
+  }
+  parts.push(findingProseText(text, textStart, text.length));
+  return parts;
+}
+
+function findingProseText(text: string, start: number, end: number): FindingProsePart {
+  let markdown = "";
+  for (let index = start; index < end; index += 1) markdown += findingProseCharacter(text, index);
+  return { markdown, visible: text.slice(start, end) };
+}
+
+/**
+ * Finding prose that opens a Markdown block: a paragraph, or the body of a list item. Everywhere
+ * else (an issue label, a rationale after its label, a table cell) the prose follows other text on
+ * its line, where an escaped first `[` would leave its closing `]` to end the index link early.
+ */
+function findingProseBlock(value: string): string {
+  return escapeFindingProseStart(findingProse(value));
+}
+
+/**
+ * At the start of a block the first characters could open a list, a setext underline, a table, or
+ * a link reference definition. A leading `|` becomes an entity, which no later escape rewrites.
+ */
+function escapeFindingProseStart(markdown: string): string {
+  return markdown
+    .replace(/^[[+=-]/u, "\\$&")
+    .replace(/^\|/u, "&#124;")
+    .replace(/^(\d{1,9})([.)])/u, "$1\\$2");
+}
+
+function findingProseCharacter(text: string, index: number): string {
+  const character = text.charAt(index);
+  const next = text.charAt(index + 1);
+  if (character === "\\") return next === "" || ASCII_PUNCTUATION.test(next) ? "&#92;" : character;
+  if (character === "_") {
+    return WORD_CHARACTER.test(text.charAt(index - 1)) && WORD_CHARACTER.test(next) ? character : "\\_";
+  }
+  if (character === "(" && text.charAt(index - 1) === "]") return "\\(";
+  if (character === "&") return ENTITY_NAME_PREFIX.test(text.slice(index + 1, index + 34)) ? "&amp;" : character;
+  return FINDING_PROSE_ESCAPES[character] ?? character;
+}
+
 function publicCode(value: string): string {
   return value;
 }
@@ -1511,11 +1811,16 @@ function redactSecrets(value: string, mode: SecretScanMode = "all"): string {
  * bounded eval run IDs (`ci-<run>-1-smoke-...-<16 hex>`), which breaks that lineage check, so these
  * fields scan positive-only: a vendor-format credential or URL credential in the slot is still
  * redacted (and the bundle then fails closed on lineage), while a high-entropy safe ID is kept.
+ *
+ * `run_metadata.target_commit` is a schema-checked lowercase 40-hex commit or null. The generic
+ * 40-hex rule would redact a SHA-1 commit to the placeholder, which the report contract rejects, so
+ * it scans positive-only too: the published commit is the evaluated target's identity, not a secret.
  */
 function secretScanModeForPath(keyPath: readonly string[]): SecretScanMode {
   const isRetainedIdentifier =
     keyPath.length === 2 &&
-    ((keyPath[0] === "run_metadata" && (keyPath[1] === "run_id" || keyPath[1] === "source_run_id")) ||
+    ((keyPath[0] === "run_metadata" &&
+      (keyPath[1] === "run_id" || keyPath[1] === "source_run_id" || keyPath[1] === "target_commit")) ||
       (keyPath[0] === "completion" && keyPath[1] === "run_id"));
   return isRetainedIdentifier ? "positive-only" : "all";
 }
@@ -1542,19 +1847,49 @@ function containsUnredactedSecretInValue(value: unknown, keyPath: readonly strin
  * The Markdown re-scan has no key path, so the retained identifiers (which the speculative pass
  * would flag) are substituted with the placeholder before scanning. They were already scanned
  * positive-only in the report walk; a leftover real secret anywhere else still changes under the pass.
+ *
+ * Positive detections read the whole document, so a key label that ends one block and the key that
+ * opens the next still fail closed. The speculative pass reads one rendered unit at a time (see
+ * markdownSecretScanUnits): its key-name rule would otherwise take the renderer's next token (a
+ * `##` heading, a list marker, a cell's `|`) as the value of prose that ends in `token:`.
  */
 function containsUnredactedSecretInMarkdown(markdown: string, report: JsonRecord): boolean {
   const scanned = retainedIdentifierValues(report).reduce(
     (current, identifier) => current.replaceAll(identifier, PUBLIC_SECRET_REDACTION_PLACEHOLDER),
     markdown
   );
-  return containsUnredactedSecret(scanned);
+  return (
+    containsUnredactedSecret(scanned, "positive-only") ||
+    [...new Set(markdownSecretScanUnits(scanned))].some((unit) => containsUnredactedSecret(unit))
+  );
+}
+
+/**
+ * Each fenced block whole, as the report walk read its proof code, and each other line split at the
+ * renderer's own delimiters: an unescaped table pipe, and the `**` around a bold label (finding and
+ * public prose escape `*`, and a table cell escapes `|`). Every finding-prose or inline value
+ * renders on one line, and each report string was already scanned whole by the report walk.
+ */
+function markdownSecretScanUnits(markdown: string): string[] {
+  const units: string[] = [];
+  let code: string[] | undefined;
+  for (const { text, kind } of markdownLines(markdown)) {
+    if (kind === "code") {
+      (code ??= []).push(text);
+      continue;
+    }
+    if (code !== undefined) units.push(code.join("\n"));
+    code = undefined;
+    units.push(...text.split(/(?<!\\)\||\*\*/u));
+  }
+  if (code !== undefined) units.push(code.join("\n"));
+  return units;
 }
 
 function retainedIdentifierValues(report: JsonRecord): string[] {
   const metadata = recordField(report, "run_metadata");
   const completion = recordField(report, "completion");
-  return [metadata?.run_id, metadata?.source_run_id, completion?.run_id].filter(
+  return [metadata?.run_id, metadata?.source_run_id, metadata?.target_commit, completion?.run_id].filter(
     (value): value is string => typeof value === "string" && value !== ""
   );
 }
@@ -1594,7 +1929,12 @@ function redactSecretsInStringValues(value: unknown, keyPath: readonly string[] 
 }
 
 function containsPrivatePath(value: string): boolean {
-  return privatePathPatterns().some((pattern) => pattern.test(value));
+  return redactPrivatePaths(value) !== value;
+}
+
+function containsPrivatePathInMarkdown(markdown: string): boolean {
+  const scanned = markdown.replace(RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN, "$1 ");
+  return privateMarkdownPathPatterns().some((pattern) => pattern.test(scanned));
 }
 
 function containsPrivatePathInValue(value: unknown): boolean {
@@ -1633,20 +1973,85 @@ function collapseRedactionDuplicates(original: readonly unknown[], redacted: unk
   return [...new Set(redacted)];
 }
 
+/**
+ * Redact every match of the strict patterns, then redact again from the end of each
+ * PATH_SLASH_BEFORE_NON_PATH_RUN as if a word started there, which is how the Markdown re-scan
+ * reads it: a path after a leading slash and `*` keeps the slash and `*` and becomes
+ * `[redacted-path]`.
+ */
 function redactPrivatePaths(value: string): string {
+  const redacted = redactPrivatePathMatches(value);
+  const ends = Array.from(redacted.matchAll(PATH_SLASH_BEFORE_NON_PATH_RUN), (match) => match.index + match[0].length);
+  return [0, ...ends]
+    .map((start, index) => {
+      const piece = redacted.slice(start, ends[index]);
+      return index === 0 ? piece : redactPrivatePathMatches(piece);
+    })
+    .join("");
+}
+
+function redactPrivatePathMatches(value: string): string {
   return privatePathPatterns().reduce(
     (current, pattern) => current.replace(pattern, (_match, prefix: string) => `${prefix}[redacted-path]`),
     value
   );
 }
 
+/**
+ * A slash where a path could start, or a private directory's slash, followed by a run of the
+ * characters no path starts with (`*`, `<`, `>`, a backtick), each optionally after another slash,
+ * as in a C comment opener, `<Foo />`, `artifacts/<run-id>`, or a `/**` glob. The strict patterns
+ * start no path inside the run, and nothing after it is at a boundary for them.
+ */
+const PATH_SLASH_BEFORE_NON_PATH_RUN =
+  /(?:(?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/[*<>`]+|(?:^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[<>`][*<>`]*)(?:\/[*<>`]+)*/gmu;
+
+/**
+ * The same run in rendered Markdown, raw or as the renderer's escapes (`\*`, `` \` ``, `&lt;`,
+ * `&gt;`). The Markdown re-scan drops the run and puts a space after its leading slash, so neither
+ * the slash nor the escapes read as a path, and whatever follows still starts one: report.json was
+ * redacted from the same point, so only a path the strict pass did not see can be left there.
+ */
+const RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN =
+  /((?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/|(?:^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?:(?<!\\)~|\\~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/(?=\\`|&[gl]t;|[<>`]))(?:\\[*`]|&[gl]t;|[*<>`])+(?:\/(?:\\[*`]|&[gl]t;|[*<>`])+)*/gmu;
+
+/**
+ * Report strings are plain text, so a path after a literal `\`, `&lt;`, `>`, or a `|` that starts a
+ * word is still a path: findingProse writes the first three as `&#92;`, `&amp;lt;`, and `&gt;`, and
+ * a block's leading `|` as `&#124;`, each ending in a `;` that the Markdown re-scan reads as a
+ * boundary. A `|` that ends a word is not a boundary, so `|a - b|/b` stays readable, and `<` is not
+ * one either, so a closing tag such as `</div>` stays readable too. A home, private-directory,
+ * drive-letter, or UNC path also starts after a `*`, which the renderer shows literally; a
+ * `/`-rooted path does not, so a `**` glob segment stays readable. The renderer's own escapes are
+ * exempted only when the Markdown is re-scanned.
+ */
 function privatePathPatterns(): RegExp[] {
   return [
     /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3})[^\s"'`()[\]{}<>]*/gimu,
-    /(^|[\s("'`=,:;[])(?<!&lt;)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
-    /(^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
-    /(^|[\s("'`=,:[])[A-Za-z]:\\[^\s"'`()[\]{}<>]+/gmu,
-    /(^|[\s("'`=,:[])\\\\[^\s"'`()[\]{}<>]+/gmu
+    /(^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)[A-Za-z]:\\[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)\\\\[^\s"'`()[\]{}<>]+/gmu
+  ];
+}
+
+/**
+ * The same patterns over rendered Markdown, where the renderer's own escapes are not path syntax.
+ * The `;` closing an escaped `<` or `>` (`&lt;` as in a closing tag, `&gt;`) or findingProse's
+ * `&#92;` (a backslash before punctuation) is not a path boundary. An escaped run right after a
+ * slash (`\*`, `` \` ``, `&lt;`, `&gt;`) has already been replaced by a space (see
+ * RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN). A backslash the renderer writes before the punctuation
+ * it escapes is not a `file:\` or `B:\` separator. Every report string was redacted by the strict
+ * JSON patterns before rendering, so a path after a literal `\`, `&lt;`, `>`, `B:\`, or `file:\` is
+ * already gone, and only the renderer's escape can remain there.
+ */
+function privateMarkdownPathPatterns(): RegExp[] {
+  return [
+    /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3}(?![!-/:-@[-`{-~]))[^\s"'`()[\]{}<>]*/gimu,
+    /(^|[\s("'`=,:;>[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)(?:(?<!\\)~|\\~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)[A-Za-z]:\\(?![!-/:-@[-`{-~])[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[]|(?<!\S)\|)(?<!&[gl]t;|&#92;)\\\\[^\s"'`()[\]{}<>]+/gmu
   ];
 }
 

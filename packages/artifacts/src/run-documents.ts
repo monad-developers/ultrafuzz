@@ -248,8 +248,12 @@ export interface RunMetadataAccounting {
     status: "available" | "disabled" | "unavailable";
     fetched_at?: string;
     resolved_models: string[];
+    /** Models the catalog did not price, including those priced from the fallback table. */
     unresolved_models: string[];
+    /** Keys are resolved_models plus fallback.models. */
     model_prices: Record<string, RunModelPricing>;
+    /** Unresolved models priced at a versioned table of published list prices. */
+    fallback?: { table: string; models: string[] };
   };
   updated_at: string;
 }
@@ -277,6 +281,93 @@ export interface RunMetadataDocument {
   };
   workflow?: RunMetadataWorkflow;
   accounting?: RunMetadataAccounting;
+  attempts_without_usage?: RunAttemptsWithoutUsage;
+}
+
+/**
+ * One executed agent attempt occurrence of this run, named by its attempt-ledger identity
+ * (`workflow_run_id`, `source_event_sequence`), with no usage event of its own.
+ */
+export interface RunAttemptWithoutUsage {
+  workflow_run_id: string;
+  source_event_sequence: number;
+  /** The Smithers task, `node:<strategy attempt ID>`. */
+  node_id: string;
+  iteration: number;
+  attempt: number;
+  model_name?: string;
+}
+
+/**
+ * The executed agent attempts whose usage was never recorded, so accounting cannot price them. They
+ * are counted and listed, never estimated. Present only when `cumulative_count` is at least one.
+ */
+export interface RunAttemptsWithoutUsage {
+  /** This run's attempts, across every workflow run it was bound to. */
+  attempts: RunAttemptWithoutUsage[];
+  /** `attempts.length` plus the source run's `cumulative_count`. */
+  cumulative_count: number;
+}
+
+/**
+ * The only form a report's `run_metadata.estimated_spend` and its rendered `Estimated spend` may
+ * take: a `formatEstimatedSpendUsd` amount (no leading zeros, two to ten decimals), followed by `+`
+ * when `reportSpendIsProbablyLow`. Never `unavailable`.
+ */
+export const ESTIMATED_SPEND_PATTERN = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}\+?$/u;
+
+/** The Run summary fields that decide whether its spend carries a `+`. */
+export interface ReportSpendCompleteness {
+  partial_pricing?: unknown;
+  attempts_without_usage?: unknown;
+  unpriced_attempts?: unknown;
+}
+
+/**
+ * A report's spend is probably low, so its `estimated_spend` ends in `+` ("there is probably more"),
+ * when accounting priced only part of the usage (`partial_pricing`), when executed agent attempts
+ * recorded no usage (`attempts_without_usage`), or when recorded usage could not be priced
+ * (`unpriced_attempts`). Values of any other type count as absent.
+ */
+export function reportSpendIsProbablyLow(summary: ReportSpendCompleteness): boolean {
+  return (
+    summary.partial_pricing === true ||
+    isPositiveSafeInteger(summary.attempts_without_usage) ||
+    isPositiveSafeInteger(summary.unpriced_attempts)
+  );
+}
+
+/**
+ * A report's `estimated_spend`: the amount label with any `+` it already carries removed, then a `+`
+ * exactly when `reportSpendIsProbablyLow(summary)`.
+ */
+export function reportEstimatedSpend(amount: string, summary: ReportSpendCompleteness): string {
+  const base = amount.endsWith("+") ? amount.slice(0, -1) : amount;
+  return reportSpendIsProbablyLow(summary) ? `${base}+` : base;
+}
+
+function isPositiveSafeInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+/**
+ * Formats the amount of a report's estimated spend: two decimals from one cent up (and for exactly
+ * zero), otherwise enough decimals (four to ten) to show the leading significant digits, so a nonzero
+ * amount never reads as `$0.00`, though one below the ten-decimal floor (about `5e-11`) rounds to
+ * `$0.0000000000`. It is never `unavailable`; `reportEstimatedSpend` adds the `+` when the amount is
+ * probably low.
+ *
+ * `toFixed` rounds the exact binary value, so decimal ties that binary cannot represent may round
+ * either way (`12.345` is stored just above the tie and formats as `$12.35`; `1.005` is stored just
+ * below it and formats as `$1.00`). Amounts of `1e21` or more are rejected because `toFixed` would
+ * switch to exponent notation.
+ */
+export function formatEstimatedSpendUsd(value: number): string {
+  if (!Number.isFinite(value) || value < 0 || value >= 1e21) {
+    throw new Error("estimated spend is outside the supported range");
+  }
+  if (value === 0 || value >= 0.01) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(Math.min(10, Math.max(4, 1 - Math.floor(Math.log10(value)))))}`;
 }
 
 export const sourceRunJsonSchema = loadSchemaDocument("source-run.schema.json");
@@ -382,6 +473,20 @@ export function assertRunMetadataDocument(value: unknown, expectedRunId?: string
       document.accounting.current.workflow_run_id !== document.workflow.run_id
     ) {
       throw new Error("run metadata accounting does not match the active workflow run");
+    }
+  }
+  if (document.attempts_without_usage !== undefined) {
+    const { attempts, cumulative_count: cumulativeCount } = document.attempts_without_usage;
+    const identities = new Set(
+      attempts.map(({ workflow_run_id, source_event_sequence }) =>
+        JSON.stringify([workflow_run_id, source_event_sequence])
+      )
+    );
+    if (identities.size !== attempts.length) {
+      throw new Error("run metadata attempts without usage must be unique by workflow run and source event sequence");
+    }
+    if (cumulativeCount < attempts.length) {
+      throw new Error("run metadata attempts-without-usage count is smaller than its attempts");
     }
   }
   return document;

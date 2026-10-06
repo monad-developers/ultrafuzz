@@ -50,11 +50,12 @@ function writeAgentReport(root: string, status = "succeeded"): string {
         run_id: runId,
         source_run_id: runId,
         repository: "example/repository",
+        target_commit: "0123456789abcdef0123456789abcdef01234567",
         elapsed_time: "1m",
         models_used: [],
-        tokens_used: "unavailable",
-        estimated_spend: "unavailable",
-        partial_pricing: true,
+        tokens_used: "0",
+        estimated_spend: "$0.00",
+        partial_pricing: false,
         strategy_loops: 0,
         audit_profile: "example",
         audit_profile_catalog_digest: "unavailable",
@@ -355,24 +356,62 @@ test("unchecked reports restate whole-run accounting from run.json", () => {
     path.join(root, "state.json"),
     JSON.stringify({ ...state, finished_at: "2026-09-01T03:30:00.000Z" })
   );
-  fs.writeFileSync(
-    path.join(root, "run.json"),
-    JSON.stringify({
-      run_id: runId,
-      created_at: "2026-09-01T00:00:00.000Z",
-      accounting: {
-        cumulative: { models: ["model-a"], tokens_used: "4,321", estimated_spend: "$3.00", partial_pricing: false }
-      }
-    })
-  );
+  const writeRunMetadata = (cumulative?: Record<string, unknown>, attemptsWithoutUsage?: number): void =>
+    fs.writeFileSync(
+      path.join(root, "run.json"),
+      JSON.stringify({
+        run_id: runId,
+        created_at: "2026-09-01T00:00:00.000Z",
+        ...(cumulative === undefined ? {} : { accounting: { cumulative } }),
+        ...(attemptsWithoutUsage === undefined
+          ? {}
+          : { attempts_without_usage: { attempts: [], cumulative_count: attemptsWithoutUsage } })
+      })
+    );
+  const cumulative = {
+    models: ["model-a"],
+    tokens_used: "4,321",
+    estimated_spend: "$3.00+",
+    estimated_spend_usd: 3,
+    partial_pricing: true
+  };
+  writeRunMetadata(cumulative);
   const report = loadReportSnapshot(root);
   assert.equal(report.verification, "not-checked");
   assert.match(report.markdown, /^- Elapsed time: `3h 30m`$/mu);
   assert.match(report.markdown, /^- Models used: `model-a`$/mu);
   assert.match(report.markdown, /^- Tokens used: `4,321`$/mu);
-  assert.match(report.markdown, /^- Estimated spend: `\$3\.00`$/mu);
-  assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, false);
+  // Partial pricing means there is probably more.
+  assert.match(report.markdown, /^- Estimated spend: `\$3\.00\+`$/mu);
+  assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, true);
   assertReportSnapshotRemainedCurrent(report);
+
+  // Fully priced, with every attempt's usage recorded: no `+`.
+  writeRunMetadata({ ...cumulative, estimated_spend: "$3.00", partial_pricing: false });
+  assert.match(loadReportSnapshot(root).markdown, /^- Estimated spend: `\$3\.00`$/mu);
+
+  // Attempts without usage, from run.json's own count, put the `+` on a fully priced amount; the
+  // counts stay in report.json and are not rendered.
+  writeRunMetadata({ ...cumulative, estimated_spend: "$3.00", partial_pricing: false }, 2);
+  const unrecorded = loadReportSnapshot(root);
+  assert.match(unrecorded.markdown, /^- Estimated spend: `\$3\.00\+`$/mu);
+  assert.equal(reportSchema.parse(unrecorded.json).run_metadata.attempts_without_usage, 2);
+  writeRunMetadata({ ...cumulative, unpriced_event_count: 1 }, 2);
+  const counted = loadReportSnapshot(root);
+  assert.match(counted.markdown, /^- Estimated spend: `\$3\.00\+`$/mu);
+  assert.doesNotMatch(counted.markdown, /agent attempts?|excludes/u);
+  assert.equal(reportSchema.parse(counted.json).run_metadata.estimated_spend, "$3.00+");
+  assert.equal(reportSchema.parse(counted.json).run_metadata.attempts_without_usage, 2);
+  assert.equal(reportSchema.parse(counted.json).run_metadata.unpriced_attempts, 1);
+
+  // Without well-formed accounting the agent's usage stays, and a malformed record is ignored.
+  for (const kept of [undefined, { ...cumulative, estimated_spend_usd: "3" }, { ...cumulative, partial_pricing: 1 }]) {
+    writeRunMetadata(kept);
+    const unchanged = loadReportSnapshot(root);
+    assert.match(unchanged.markdown, /^- Tokens used: `0`$/mu);
+    assert.match(unchanged.markdown, /^- Estimated spend: `\$0\.00`$/mu);
+    assert.equal(reportSchema.parse(unchanged.json).run_metadata.partial_pricing, false);
+  }
 });
 
 test("unchecked reports render the run's goal-search census", () => {

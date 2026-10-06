@@ -696,10 +696,11 @@ function currentReport(
       run_id: runId,
       source_run_id: "none",
       repository: "unavailable",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "unavailable",
       models_used: [],
       tokens_used: "unavailable",
-      estimated_spend: "unavailable",
+      estimated_spend: "$0.00",
       partial_pricing: false,
       strategy_loops: 1,
       audit_profile: "exhaustive",
@@ -1695,9 +1696,12 @@ async function assertReportAndLifecycleCommands(
     terminal: true
   });
   assert.equal(accountingMismatchCount(reportBody), 0);
+  // The terminal publication restates accounting's USD amount, with a `+` because accounting could
+  // not price one event.
+  assert.match(fs.readFileSync(terminalReport.artifacts.markdown_path, "utf8"), /^- Estimated spend: `\$0\.46\+`$/mu);
   const reportMarkdown = fs.readFileSync(path.join(reportDir, "report.md"), "utf8");
   assert.match(reportMarkdown, /- Tokens used: `123`/u);
-  assert.match(reportMarkdown, /- Estimated spend: `\$0\.46\+`/u);
+  assert.match(reportMarkdown, /^- Estimated spend: `\$0\.46\+`$/mu);
   assertFinalReportUnchanged(reportDir, reportSnapshot);
 
   const escapedReport = await cli(project, ["report", "../../outside", "--json"]);
@@ -2197,7 +2201,7 @@ test("run rejects an OpenRouter override whose effective model is invalid", asyn
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", "invalid-openrouter-model")), false);
 });
 
-test("report accepts populated accounting snapshots and preserves partial-pricing marker", async (t) => {
+test("report checks the spend against run accounting's USD amount and its +", async (t) => {
   const project = tempProject(t);
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeReportTopology(project);
@@ -2213,6 +2217,7 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
     estimatedSpend: "$0.16+",
     partialPricing: true
   });
+  // Partial pricing in run.json means the report's amount is probably low, so it ends in `+`.
   const reportDir = writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "56,523",
     estimatedSpend: "$0.16+",
@@ -2233,52 +2238,71 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
     estimatedSpend: "$1.98+",
     partialPricing: true
   });
-
   const postSyncReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(postSyncReport.code, 0, postSyncReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(postSyncReport)), 0);
   assertFinalReportUnchanged(reportDir, initialSnapshot);
 
+  // Zero spend is a valid figure, not a missing one.
+  writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$0.00+",
+    partialPricing: true
+  });
+  const zeroSnapshot = snapshotFinalReport(reportDir);
+  const zeroReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(zeroReport.code, 0, zeroReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(zeroReport)), 0);
+  assertFinalReportUnchanged(reportDir, zeroSnapshot);
+
+  // A report that drops the `+` run accounting calls for is a mismatch in both report.md and report.json.
   writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "56,523",
     estimatedSpend: "$0.16",
+    partialPricing: false
+  });
+  const unmarkedReport = parseJson(await cli(project, ["report", runData.run_id, "--json"]));
+  assert.equal(accountingMismatchCount(unmarkedReport), 2);
+  for (const diagnostic of (unmarkedReport.diagnostics as Array<{ code: string; message: string }>).filter(
+    (candidate) => candidate.code === "REPORT_ACCOUNTING_MISMATCH"
+  )) {
+    assert.match(
+      diagnostic.message,
+      /expected \$1\.98\+, got \$0\.16 \(missing the \+ of an amount that is probably low\)$/u
+    );
+  }
+
+  // A spend above the run's priced usage is a mismatch in both report.md and report.json.
+  writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$2.00+",
     partialPricing: true
   });
-  const missingPlusSnapshot = snapshotFinalReport(reportDir);
-  const missingPlusReport = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(missingPlusReport.code, 0, missingPlusReport.stderr);
-  assert.equal(accountingMismatchCount(parseJson(missingPlusReport)), 2);
-  assertFinalReportUnchanged(reportDir, missingPlusSnapshot);
+  const overSnapshot = snapshotFinalReport(reportDir);
+  const overReport = parseJson(await cli(project, ["report", runData.run_id, "--json"]));
+  assert.equal(accountingMismatchCount(overReport), 2);
+  for (const diagnostic of (overReport.diagnostics as Array<{ code: string; message: string }>).filter(
+    (candidate) => candidate.code === "REPORT_ACCOUNTING_MISMATCH"
+  )) {
+    assert.match(diagnostic.message, /expected \$1\.98\+, got \$2\.00\+ \(greater than current run metadata\)$/u);
+  }
+  assertFinalReportUnchanged(reportDir, overSnapshot);
 
+  // When run accounting priced all the usage it recorded, a spend without the `+` matches.
   writeRunAccounting(runData.run_root, {
     totalTokens: 725_905,
     tokensUsed: "725,905",
     estimatedSpend: "$1.98",
-    partialPricing: true,
-    unpricedEventCount: 0
-  });
-  const inconsistentPartialReport = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(inconsistentPartialReport.code, 0, inconsistentPartialReport.stderr);
-  assert.equal(accountingMismatchCount(parseJson(inconsistentPartialReport)), 2);
-  assertFinalReportUnchanged(reportDir, missingPlusSnapshot);
-
-  writeRunAccounting(runData.run_root, {
-    totalTokens: 725_905,
-    tokensUsed: "725,905",
-    estimatedSpend: "$1.98",
-    partialPricing: false,
-    unpricedEventCount: 0
+    partialPricing: false
   });
   writeFinalReportAccounting(runData.run_root, {
     tokensUsed: "56,523",
     estimatedSpend: "$0.16",
     partialPricing: false
   });
-  const estimatedSnapshot = snapshotFinalReport(reportDir);
-  const estimatedReport = await cli(project, ["report", runData.run_id, "--json"]);
-  assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
-  assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
-  assertFinalReportUnchanged(reportDir, estimatedSnapshot);
+  const completeSnapshot = snapshotFinalReport(reportDir);
+  assert.equal(accountingMismatchCount(parseJson(await cli(project, ["report", runData.run_id, "--json"]))), 0);
+  assertFinalReportUnchanged(reportDir, completeSnapshot);
 
   const metadataPath = path.join(runData.run_root, "run.json");
   fs.writeFileSync(metadataPath, "{", "utf8");
@@ -2288,7 +2312,7 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   assert.match(JSON.stringify(parseJson(unavailableAccounting).diagnostics), /REPORT_ACCOUNTING_UNAVAILABLE/u);
   const strictAccounting = await cli(project, ["report", runData.run_id, "--require-verified", "--json"]);
   assert.equal(strictAccounting.code, 1, strictAccounting.stderr);
-  assertFinalReportUnchanged(reportDir, estimatedSnapshot);
+  assertFinalReportUnchanged(reportDir, completeSnapshot);
   assert.equal(fs.readFileSync(metadataPath, "utf8"), "{");
 });
 

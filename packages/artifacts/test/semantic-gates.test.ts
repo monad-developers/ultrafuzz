@@ -3604,7 +3604,8 @@ test("a final report that rewords a carried finding's prose verifies with warnin
   // the saved attempt the report agent reworded three of five steps and, as the
   // report prompt asks, replaced the code field's pointer to a generated test
   // with the inline reproducer. Changed or omitted prose is a warning; the
-  // finding's identity, location, and classification fields still fail.
+  // finding's identity, location, and classification fields still fail, and so
+  // does its recommendation, which report.md renders as the issue's Remediation.
   const finding = {
     id: "finding-a",
     title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
@@ -3660,7 +3661,6 @@ test("a final report that rewords a carried finding's prose verifies with warnin
       ],
       code: "function testWithdrawCeiling() public {}"
     },
-    recommendation: "Round withdrawals down.",
     recommended_next_action: "Ask the maintainers which rounding direction is intended."
   };
   const rewordedRationales = {
@@ -3710,7 +3710,19 @@ test("a final report that rewords a carried finding's prose verifies with warnin
 
     const omitted: Record<string, unknown> = { ...reworded };
     delete omitted.recommendation;
-    assert.equal(check(omitted).status, "warning", `${mode}: omitted recommendation`);
+    for (const [label, candidate] of [
+      ["omitted recommendation", omitted],
+      ["changed recommendation", { ...reworded, recommendation: "Round withdrawals down." }]
+    ] as const) {
+      const recommendationResult = check(candidate);
+      assert.equal(recommendationResult.status, "failed", `${mode}: ${label}`);
+      assert.deepEqual(
+        recommendationResult.status === "failed" &&
+          recommendationResult.issues.filter((entry) => entry.severity !== "warning").map((entry) => entry.path),
+        ["$.issues[0].recommendation"],
+        `${mode}: ${label}`
+      );
+    }
 
     for (const [field, value] of [
       ["affected_files", ["src/Other.sol"]],
@@ -3719,6 +3731,121 @@ test("a final report that rewords a carried finding's prose verifies with warnin
     ] as const) {
       assert.equal(check({ ...reworded, [field]: value }).status, "failed", `${mode}: ${field}`);
     }
+  }
+});
+
+test("a final report row that adds a recommendation its source finding lacks fails in both report modes", () => {
+  // report.md renders a carried recommendation as the issue's Remediation, so the report stage may
+  // copy one but never author one. Changing or omitting a carried one fails a production issue,
+  // which renders it, and stays a warning on a non-production outcome, which never does.
+  const finding = {
+    id: "finding-a",
+    title: "Withdrawal ceiling lets the first redeemer capture forced surplus",
+    summary: "Withdrawals round up against a donated balance.",
+    severity_guess: "Low",
+    dedupe_key: "root-a"
+  };
+  const assessment = {
+    triage_classification: "true-positive",
+    impact: "Low",
+    likelihood: "Low",
+    impact_rationale: "Only a rounding surplus moves.",
+    likelihood_rationale: "A donation must precede a partial withdrawal.",
+    severity: "Low",
+    severity_rationale: "Low impact and Low likelihood map to Low."
+  };
+  const dedupeLifecycle = {
+    dedupe_key: "root-a",
+    source_artifacts: [],
+    stages: [{ stage: "deduped", artifact_path: "deduped-findings.json", finding_id: "finding-a" }]
+  };
+  const promotedLifecycle = {
+    ...dedupeLifecycle,
+    triage_classification: "true-positive",
+    triage_reason: "The generated reproducer passes.",
+    canonical_severity: "Low",
+    final_disposition: "promoted"
+  };
+  const droppedLifecycle = {
+    ...dedupeLifecycle,
+    triage_classification: "false-positive",
+    triage_reason: "The donation cannot precede a withdrawal.",
+    demotion_reason: "The candidate is a false positive.",
+    final_disposition: "dropped"
+  };
+  const promotedRow = {
+    ...finding,
+    ...assessment,
+    id: "L-01",
+    title: `[L-01] - ${finding.title}`,
+    lifecycle: promotedLifecycle
+  };
+  const droppedRow = { ...finding, triage_classification: "false-positive", lifecycle: droppedLifecycle };
+  const boundedArtifactSet = (source: Record<string, unknown>) => ({
+    severityClassifiedFindings: null,
+    dedupedFindings: [source],
+    findingLifecycleLedger: { records: [dedupeLifecycle] }
+  });
+  const cases = [
+    { label: "bounded issue", key: "issues", row: promotedRow, source: finding, artifactSet: boundedArtifactSet },
+    {
+      label: "bounded non-production outcome",
+      key: "non_production_outcomes",
+      row: droppedRow,
+      source: finding,
+      artifactSet: boundedArtifactSet
+    },
+    {
+      label: "strict issue",
+      key: "issues",
+      row: promotedRow,
+      source: { ...finding, ...assessment },
+      artifactSet: (source: Record<string, unknown>) => ({
+        severityClassifiedFindings: [source],
+        findingLifecycleLedger: { records: [promotedLifecycle] }
+      })
+    },
+    {
+      label: "strict non-production outcome",
+      key: "non_production_outcomes",
+      row: droppedRow,
+      source: { ...finding, triage_classification: "false-positive" },
+      artifactSet: (source: Record<string, unknown>) => ({
+        severityClassifiedFindings: [source],
+        findingLifecycleLedger: { records: [droppedLifecycle] }
+      })
+    }
+  ];
+  for (const { label, key, row, source, artifactSet } of cases) {
+    const check = (candidate: unknown, upstream: Record<string, unknown>) =>
+      executeSemanticGate("report-severity-classification-preservation", {
+        document: { issues: [], non_production_outcomes: [], [key]: [candidate] },
+        context: { artifactSet: artifactSet(upstream) }
+      });
+    assert.equal(check(row, source).status, "passed", label);
+
+    const recommendation = "Round withdrawals down.";
+    const added = check({ ...row, recommendation }, source);
+    assert.equal(added.status, "failed", label);
+    assert.deepEqual(
+      added.status === "failed" && added.issues.map((entry) => [entry.path, entry.severity ?? "error"]),
+      [[`$.${key}[0].recommendation`, "error"]],
+      label
+    );
+    assert.match(
+      added.status === "failed" ? (added.issues[0]?.message ?? "") : "",
+      /adds a recommendation its source finding does not carry/u
+    );
+
+    const carriedSource = { ...source, recommendation };
+    assert.equal(check({ ...row, recommendation }, carriedSource).status, "passed", `${label}: carried`);
+    const drift = key === "issues" ? "failed" : "warning";
+    assert.equal(check(row, carriedSource).status, drift, `${label}: omitted`);
+    assert.equal(
+      check({ ...row, recommendation: "Round withdrawals toward zero." }, carriedSource).status,
+      drift,
+      `${label}: changed`
+    );
   }
 });
 

@@ -748,9 +748,15 @@ ultrafuzz report <run-id> [--project <path>] [--json]
 ```
 
 If run metadata contains populated cumulative accounting, `report --json`
-emits diagnostics when `report.md` or `report.json.run_metadata` leaves
-`Tokens used` or `Estimated spend` unavailable, non-positive, missing the
-partial-pricing `+` marker, or greater than the current cumulative metadata.
+emits `REPORT_ACCOUNTING_MISMATCH` diagnostics when `report.md` or
+`report.json.run_metadata` leaves `Tokens used` unavailable, non-positive, or
+greater than `accounting.cumulative.tokens_used`, or leaves `Estimated spend`
+unavailable, non-numeric, or greater than `accounting.cumulative.estimated_spend_usd`
+in the report's format. A `$0.00` spend is valid. The spend must also end in
+`+` when `run.json` says the amount is probably low: `accounting.cumulative`
+has `partial_pricing` or a positive `unpriced_event_count`, or
+`attempts_without_usage` is present. Without accounting, no expectation
+applies.
 
 ## Materialize
 

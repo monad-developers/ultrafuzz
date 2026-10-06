@@ -199,6 +199,11 @@ several records into one root or family, use the stable union of their canonical
 property IDs on the kept record and relevant family variants; do not discard a
 property reference during deduplication.
 
+Preserve the root finding's own `recommendation` byte-for-byte on the kept
+record, and leave it absent when the root has none. Do not author one, reword
+it, or copy one from a duplicate or family variant; the final report renders
+only the root's.
+
 Treat each input finding's runtime-normalized `producer_node_id`,
 `source_nodes`, and compatibility `source_node_id` as provenance, not agent
 commentary. For every retained root, form a stable first-seen union of every

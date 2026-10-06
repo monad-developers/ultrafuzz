@@ -2607,6 +2607,7 @@ function currentReport(runId: string, issues: Record<string, unknown>[] = []): R
       run_id: runId,
       source_run_id: runId,
       repository: "example/repository",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "1m",
       models_used: ["model-a"],
       tokens_used: "100",

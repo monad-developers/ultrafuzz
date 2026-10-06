@@ -40,11 +40,14 @@ import {
   parseJsonValidatorPreflightSuccessEnvelope,
   parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
+  readRunMetadataDocument,
   readRunState,
   replayEvents,
+  replayUsageEvents,
   threatModelJsonSchema,
   validateRegisteredJsonBytesSync,
   VALIDATOR_BUILD_IDENTITY,
+  writeRunMetadataDocument,
   writeRunState,
   type RunState,
   type SmithersTaskManifestDocument,
@@ -85,6 +88,7 @@ import { planDynamicExpansion } from "../src/dynamic-expansion.js";
 import { materializeDynamicRuntime } from "../src/dynamic-runtime.js";
 
 import {
+  assertRunMetadataAccountingUsageAuthority,
   forkRun as runtimeForkRun,
   cancelRun,
   getRunHealth,
@@ -2639,6 +2643,7 @@ function writeEmptyFinalReportArtifactSet(runRoot: string, runId: string) {
       run_id: runId,
       source_run_id: runId,
       repository: "example/repository",
+      target_commit: "0123456789abcdef0123456789abcdef01234567",
       elapsed_time: "1m",
       models_used: ["gpt-5.5"],
       tokens_used: "100",
@@ -19693,14 +19698,27 @@ test("syncRun publishes a report after a resumed report agent succeeds", async (
   assert.equal(recoveredReport.completion?.counts.succeeded, 1);
   assert.equal(recoveredReport.completion?.counts.failed, 0);
   assert.doesNotMatch(recoveredReport.markdown, /^# Ultrafuzz report — PARTIAL/u);
-  // The run summary restates elapsed time from run.json and state.json; all review content is the agent's.
+  // The run summary restates elapsed time from run.json and state.json, and the count of agent
+  // attempts that recorded no usage: both report attempts ran without reporting any, so the spend
+  // gets its `+`. All review content is the agent's.
   const elapsed = (recoveredReport.json as { run_metadata: { elapsed_time: string } }).run_metadata.elapsed_time;
   assert.match(elapsed, /^(?:\d+\.\ds|\d+m \d{2}s)$/u);
+  const attemptsWithoutUsage = readRunMetadataDocument(
+    path.join(run.value.run_root, "run.json"),
+    runId
+  ).attempts_without_usage;
+  assert.equal(attemptsWithoutUsage?.cumulative_count, 2);
   assert.deepEqual(recoveredReport.json, {
     ...finalReport.report,
-    run_metadata: { ...(finalReport.report.run_metadata as Record<string, unknown>), elapsed_time: elapsed },
+    run_metadata: {
+      ...(finalReport.report.run_metadata as Record<string, unknown>),
+      elapsed_time: elapsed,
+      estimated_spend: "$0.01+",
+      attempts_without_usage: 2
+    },
     completion: recoveredReport.completion
   });
+  assert.match(recoveredReport.markdown, /^- Estimated spend: `\$0\.01\+`$/mu);
 });
 
 test("syncRun follows the runner past a retry-failed recovery a pre-#961 build left prepared", async () => {
@@ -20521,7 +20539,7 @@ test("syncRun uses durable event sequence for the current accounting segment", a
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       reasoningTokens: 0,
-      model: "authoritative-model",
+      model: "gpt-authoritative-model",
       agent: "generated-agent"
     }),
     // A replay after the owned DB write committed but its first event publish
@@ -20535,7 +20553,7 @@ test("syncRun uses durable event sequence for the current accounting segment", a
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       reasoningTokens: 0,
-      model: "authoritative-model",
+      model: "gpt-authoritative-model",
       agent: "generated-agent"
     }),
     event(4, 400, "NodeFinished", { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }),
@@ -20551,7 +20569,7 @@ test("syncRun uses durable event sequence for the current accounting segment", a
   env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
     openai: {
       models: {
-        "authoritative-model": { cost: { input: 1, output: 1, cache_read: 0.5, cache_write: 1.5 } }
+        "gpt-authoritative-model": { cost: { input: 1, output: 1, cache_read: 0.5, cache_write: 1.5 } }
       }
     }
   });
@@ -20579,7 +20597,7 @@ test("syncRun uses durable event sequence for the current accounting segment", a
   assert.equal(metadata.accounting?.current?.total_tokens, 20);
   assert.equal(metadata.accounting?.current?.event_count, 1);
   assert.equal(metadata.accounting?.current?.attempts?.length, 1);
-  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["authoritative-model"]);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["gpt-authoritative-model"]);
   assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, []);
   assert.match(metadata.accounting?.current?.control_generation ?? "", /^[a-f0-9]{64}$/u);
   assert.equal(
@@ -20608,7 +20626,7 @@ test("syncRun appends unseen usage events to the current control segment", async
   });
   const firstSegment = [
     { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
-    tokenEvent(10, 5, "initial-model"),
+    tokenEvent(10, 5, "gpt-initial-model"),
     { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
     { type: "RunFinished" }
   ];
@@ -20620,10 +20638,10 @@ test("syncRun appends unseen usage events to the current control segment", async
     events: workflowEvents(workflowRunId, firstSegment)
   });
   env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
-    test: {
+    openai: {
       models: {
-        "initial-model": { cost: { input: 1, output: 1 } },
-        "replacement-model": { cost: { input: 2, output: 2 } }
+        "gpt-initial-model": { cost: { input: 1, output: 1 } },
+        "gpt-replacement-model": { cost: { input: 2, output: 2 } }
       }
     }
   });
@@ -20638,12 +20656,12 @@ test("syncRun appends unseen usage events to the current control segment", async
   const firstMetadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
     accounting?: { pricing_catalog?: { resolved_models?: string[]; model_prices?: Record<string, unknown> } };
   };
-  assert.deepEqual(firstMetadata.accounting?.pricing_catalog?.resolved_models, ["initial-model"]);
-  assert.deepEqual(Object.keys(firstMetadata.accounting?.pricing_catalog?.model_prices ?? {}), ["initial-model"]);
+  assert.deepEqual(firstMetadata.accounting?.pricing_catalog?.resolved_models, ["gpt-initial-model"]);
+  assert.deepEqual(Object.keys(firstMetadata.accounting?.pricing_catalog?.model_prices ?? {}), ["gpt-initial-model"]);
 
   fs.writeFileSync(
     path.join(project, "fake-smithers-events.ndjson"),
-    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10, "replacement-model")]),
+    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10, "gpt-replacement-model")]),
     "utf8"
   );
   const second = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
@@ -20671,8 +20689,8 @@ test("syncRun appends unseen usage events to the current control segment", async
   assert.match(segments[0]?.control_generation ?? "", /^[a-f0-9]{64}$/u);
   assert.equal(metadata.accounting?.cumulative?.total_tokens, 30);
   assert.equal(metadata.accounting?.cumulative?.event_count, 1);
-  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["replacement-model"]);
-  assert.deepEqual(Object.keys(metadata.accounting?.pricing_catalog?.model_prices ?? {}), ["replacement-model"]);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["gpt-replacement-model"]);
+  assert.deepEqual(Object.keys(metadata.accounting?.pricing_catalog?.model_prices ?? {}), ["gpt-replacement-model"]);
   assert.equal(fs.readFileSync(path.join(runRoot, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
 });
 
@@ -21466,7 +21484,7 @@ test("syncRun prices Kimi models from Moonshot, not an alphabetically earlier sa
   assert.equal(metadata.accounting?.pricing_catalog?.model_prices?.["kimi-k3"]?.inputUsdPerMillion, 3);
 });
 
-test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", async () => {
+test("syncRun prices a Kimi model Moonshot does not list at its fallback list price, never another provider's rate", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -21479,7 +21497,8 @@ test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", asyn
     events: kimiTokenUsageEvents(workflowRunId)
   });
   // Only non-Moonshot providers list the alias; borrowing their rate would
-  // publish a silently wrong cost, so the model must stay unresolved.
+  // publish a silently wrong cost, so the model stays unresolved and is priced
+  // at the versioned Moonshot list price instead.
   env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
     crof: { models: { "kimi-k3": { cost: { input: 2, output: 8, cache_read: 0.25 } } } },
     kenari: { models: { "kimi-k3": { cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 } } } },
@@ -21498,21 +21517,30 @@ test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", asyn
         estimated_spend?: string;
         estimated_spend_usd?: number;
         usage_complete?: boolean;
-        pricing_incomplete_reasons?: Array<{ code?: string }>;
+        pricing_incomplete_reasons?: Array<{ code?: string; component?: string }>;
       };
-      pricing_catalog?: { resolved_models?: string[]; unresolved_models?: string[] };
+      pricing_catalog?: {
+        resolved_models?: string[];
+        unresolved_models?: string[];
+        fallback?: { table: string; models: string[] };
+      };
     };
   };
   assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, []);
   assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["kimi-k3"]);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.fallback, {
+    table: "ultrafuzz.fallback-pricing.2026-10-05",
+    models: ["kimi-k3"]
+  });
   assert.equal(metadata.accounting?.current?.total_tokens, 548_000);
   assert.equal(metadata.accounting?.current?.usage_complete, true);
-  assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, undefined);
-  assert.ok(
-    metadata.accounting?.current?.pricing_incomplete_reasons?.every(
-      (reason) => reason.code === "model-pricing-unavailable"
-    )
+  // 120k uncached input at $3, 400k cache reads at $0.30, and 8k output at $15; the Moonshot list
+  // price has no cache-write rate. crof's $2/$8 would have published $0.40.
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.60+");
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.6);
+  assert.deepEqual(
+    metadata.accounting?.current?.pricing_incomplete_reasons?.map(({ code, component }) => [code, component]),
+    [["component-rate-unavailable", "cache_write"]]
   );
 });
 
@@ -21667,6 +21695,588 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
   assert.equal(metadata.accounting?.current?.cache_read_pricing_estimated, true);
   assert.equal(metadata.accounting?.current?.cache_read_ratio_used, 0.9);
+});
+
+test("syncRun prices a gateway model ID from OpenRouter's catalog entry end to end", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "gateway-model-pricing";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          costUsd: undefined,
+          model: "anthropic/claude-opus-4.8",
+          agent: "OpenRouterAgent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    // Sorts before `openrouter` and lists the same gateway ID at ten times the rate.
+    "cloudflare-ai-gateway": { models: { "anthropic/claude-opus-4.8": { cost: { input: 50, output: 250 } } } },
+    openrouter: {
+      models: {
+        "anthropic/claude-opus-4.8": { cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 } }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId);
+  assert.equal(metadata.accounting?.current.estimated_spend, "$7.50");
+  assert.equal(metadata.accounting?.pricing_catalog.model_prices["anthropic/claude-opus-4.8"]?.inputUsdPerMillion, 5);
+  assert.deepEqual(metadata.accounting?.pricing_catalog.resolved_models, ["anthropic/claude-opus-4.8"]);
+});
+
+/**
+ * A run in `project` whose project-discovery attempt reports one usage event, optionally continuing
+ * `sourceRunId`. `addAttempt` adds a second usage-reporting attempt on another Smithers node.
+ */
+async function recordedUsageRun(input: {
+  project: string;
+  runId: string;
+  costUsd?: number;
+  usage?: { inputTokens: number; outputTokens: number; model?: string };
+  sourceRunId?: string;
+}) {
+  const workflowRunId = `ultrafuzz-${input.runId}`;
+  const writeEvents = (attempts: number) =>
+    workflowEvents(workflowRunId, [
+      ...Array.from({ length: attempts }, (_, index) => {
+        const nodeId = index === 0 ? "node:project-discovery" : `node:project-discovery-${index}`;
+        return [
+          { type: "NodeStarted", nodeId, attempt: 1 },
+          {
+            type: "TokenUsageReported",
+            nodeId,
+            attempt: 1,
+            extra: {
+              iteration: 0,
+              inputTokens: input.usage?.inputTokens ?? 1_000,
+              outputTokens: input.usage?.outputTokens ?? 100,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd: input.costUsd,
+              model: input.usage?.model ?? "gpt-5.5",
+              agent: "codex"
+            }
+          },
+          { type: "NodeFinished", nodeId, attempt: 1 }
+        ];
+      }).flat(),
+      { type: "RunFinished" }
+    ]);
+  const env = fakeLifecycleSmithersEnv(input.project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: writeEvents(1)
+  });
+  const run = await startRun({
+    projectRoot: input.project,
+    runId: input.runId,
+    env,
+    ...(input.sourceRunId === undefined ? {} : { sourceRunId: input.sourceRunId })
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const runRoot = run.value.run_root;
+  const metadataPath = path.join(runRoot, "run.json");
+  return {
+    runRoot,
+    metadataPath,
+    env,
+    sync: async () => {
+      const synced = await syncRun({ projectRoot: input.project, runId: input.runId, env });
+      assert.equal(synced.ok, true, JSON.stringify(synced.diagnostics));
+      assert.ok(!synced.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+      return readRunMetadataDocument(metadataPath, input.runId);
+    },
+    addAttempt: () => fs.writeFileSync(path.join(input.project, "fake-smithers-events.ndjson"), writeEvents(2))
+  };
+}
+
+test("syncRun prices a model no catalog prices at the versioned fallback list prices in accounting v4", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "fallback-pricing";
+  const run = await recordedUsageRun({ project, runId, usage: { inputTokens: 200_000, outputTokens: 0 } });
+
+  // The catalog is off, so 200k uncached gpt-5.5 input is priced at the table's $5 per million.
+  const first = await run.sync();
+  const accounting = first.accounting;
+  assert.ok(accounting);
+  assert.equal(accounting.cumulative.estimated_spend, "$1.00");
+  assert.equal(accounting.cumulative.estimated_spend_usd, 1);
+  assert.equal(accounting.cumulative.partial_pricing, false);
+  assert.equal(accounting.cumulative.unpriced_event_count, 0);
+  const fallbackRates = { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 };
+  assert.deepEqual(accounting.pricing_catalog, {
+    source: "disabled",
+    status: "disabled",
+    // The catalog never priced it, so it stays unresolved; its rates are the table's.
+    resolved_models: [],
+    unresolved_models: ["gpt-5.5"],
+    fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"] },
+    model_prices: {
+      "gpt-5.5": {
+        ...fallbackRates,
+        contextTiers: [
+          { contextTokens: 272_000, inputUsdPerMillion: 10, cachedInputUsdPerMillion: 1, outputUsdPerMillion: 45 }
+        ]
+      }
+    }
+  });
+  const ledger = replayUsageEvents(layoutForRunRoot(run.runRoot, runId)).entries;
+  assert.doesNotThrow(() => assertRunMetadataAccountingUsageAuthority(first, ledger));
+
+  // The stored validator, which also guards `ultrafuzz stats`, keeps the fallback rules.
+  const withCatalog = (update: (catalog: Record<string, unknown>) => void) => {
+    const metadata = structuredClone(first);
+    assert.ok(metadata.accounting);
+    update(metadata.accounting.pricing_catalog as unknown as Record<string, unknown>);
+    return metadata;
+  };
+  const invalidCatalogs: Array<[(catalog: Record<string, unknown>) => void, RegExp]> = [
+    [
+      (catalog) => Object.assign(catalog, { resolved_models: ["gpt-5.5"], unresolved_models: [] }),
+      /fallback\.models must be unresolved models/u
+    ],
+    [(catalog) => Object.assign(catalog, { model_prices: {} }), /model_prices keys must exactly equal/u],
+    [(catalog) => delete catalog.fallback, /model_prices keys must exactly equal/u],
+    [
+      (catalog) =>
+        Object.assign(catalog, { fallback: { table: "ultrafuzz.fallback-pricing.latest", models: ["gpt-5.5"] } }),
+      /not a fallback pricing table version/u
+    ],
+    [
+      (catalog) => Object.assign(catalog, { fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: [] } }),
+      /fallback\.models must not be empty/u
+    ]
+  ];
+  for (const [update, message] of invalidCatalogs) {
+    assert.throws(() => assertRunMetadataAccountingUsageAuthority(withCatalog(update), ledger), message);
+  }
+  for (const fallback of [
+    { table: "ultrafuzz.fallback-pricing.latest", models: ["gpt-5.5"] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: [] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"], extra: true }
+  ]) {
+    assert.throws(
+      () =>
+        writeRunMetadataDocument(
+          run.metadataPath,
+          withCatalog((catalog) => Object.assign(catalog, { fallback }))
+        ),
+      JSON.stringify(fallback)
+    );
+  }
+
+  // A pass that changes nothing never rewrites run.json.
+  const before = fs.readFileSync(run.metadataPath);
+  await run.sync();
+  assert.deepEqual(fs.readFileSync(run.metadataPath), before);
+
+  // Once priced from the table, the model keeps those rates even after the catalog lists it.
+  run.env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: { models: { "gpt-5.5": { cost: { input: 4, output: 20 } } } }
+  });
+  run.addAttempt();
+  const later = (await run.sync()).accounting;
+  assert.equal(later?.cumulative.estimated_spend, "$2.00");
+  assert.deepEqual(later?.pricing_catalog.fallback, accounting.pricing_catalog.fallback);
+  assert.deepEqual(later?.pricing_catalog.model_prices, accounting.pricing_catalog.model_prices);
+});
+
+test("syncRun prices only the models its catalog leaves unpriced from the fallback table", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "mixed-fallback-pricing";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const usage = (nodeId: string, model: string) => [
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    {
+      type: "TokenUsageReported",
+      nodeId,
+      attempt: 1,
+      extra: {
+        iteration: 0,
+        inputTokens: 200_000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: undefined,
+        model,
+        agent: "codex"
+      }
+    },
+    { type: "NodeFinished", nodeId, attempt: 1 }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...usage("node:project-discovery", "gpt-5.5"),
+      ...usage("node:project-discovery-1", "claude-opus-4-8[1m]"),
+      ...usage("node:project-discovery-2", "azure/gpt-5.5"),
+      { type: "RunFinished" }
+    ])
+  });
+  // The catalog prices gpt-5.5 itself and lists neither of the others.
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: { models: { "gpt-5.5": { cost: { input: 4, output: 20 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  writeRequiredArtifactSet(run.value.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId, env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const accounting = readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId).accounting;
+  assert.equal(accounting?.pricing_catalog.status, "available");
+  assert.deepEqual(accounting?.pricing_catalog.resolved_models, ["gpt-5.5"]);
+  assert.deepEqual(accounting?.pricing_catalog.unresolved_models, ["azure/gpt-5.5", "claude-opus-4-8[1m]"]);
+  assert.deepEqual(accounting?.pricing_catalog.fallback?.models, ["claude-opus-4-8[1m]"]);
+  assert.deepEqual(Object.keys(accounting?.pricing_catalog.model_prices ?? {}), ["claude-opus-4-8[1m]", "gpt-5.5"]);
+  // $0.80 at the catalog's rate and $1.00 at the table's; the proxy ID stays unpriced, so the
+  // spend is partial.
+  assert.equal(accounting?.cumulative.estimated_spend, "$1.80+");
+  assert.equal(accounting?.cumulative.unpriced_event_count, 1);
+});
+
+/** A project-discovery task whose two agent attempts both failed; `firstAttemptUsage` is the first one's usage. */
+async function syncRetriedAgentAttempts(runId: string, firstAttemptUsage?: { model: string; costUsd: number }) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("[agents.CodexAgent]", "[retry]\nsame_agent_attempts = 2\n\n[agents.CodexAgent]"),
+    "utf8"
+  );
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      ...(firstAttemptUsage === undefined
+        ? []
+        : [
+            {
+              type: "TokenUsageReported",
+              nodeId: "node:project-discovery",
+              attempt: 1,
+              extra: {
+                iteration: 0,
+                inputTokens: 1_000,
+                outputTokens: 100,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                costUsd: firstAttemptUsage.costUsd,
+                model: firstAttemptUsage.model,
+                agent: "codex"
+              }
+            }
+          ]),
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "agent exited" } },
+      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: { message: "agent exited" } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const sync = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  const metadataPath = path.join(run.value.run_root, "run.json");
+  return {
+    project,
+    env,
+    metadataPath,
+    metadata: readRunMetadataDocument(metadataPath, runId),
+    resync: async () => {
+      const before = fs.readFileSync(metadataPath);
+      const again = await syncRun({ projectRoot: project, runId, env });
+      assert.equal(again.ok, true, JSON.stringify(again.diagnostics));
+      return { before, after: fs.readFileSync(metadataPath) };
+    }
+  };
+}
+
+/**
+ * A project-discovery attempt 1 that failed and was synchronized, then reset and run again as a new
+ * attempt 1 in the same workflow run, as `resume --retry-failed` or `--reset-node` does, and
+ * synchronized again. `usage` names the recorded cost each occurrence reported, if any.
+ */
+async function syncResetAgentAttempt(runId: string, usage: { first?: number; replacement?: number } = {}) {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const nodeId = "node:project-discovery";
+  const occurrence = (costUsd: number | undefined) => [
+    { type: "RunStarted" },
+    { type: "NodeStarted", nodeId, attempt: 1 },
+    ...(costUsd === undefined
+      ? []
+      : [
+          {
+            type: "TokenUsageReported",
+            nodeId,
+            attempt: 1,
+            extra: {
+              iteration: 0,
+              inputTokens: 1_000,
+              outputTokens: 100,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd,
+              model: "gpt-5.5",
+              agent: "codex"
+            }
+          }
+        ]),
+    { type: "NodeFailed", nodeId, attempt: 1, error: { message: "agent exited" } }
+  ];
+  const first = workflowEvents(workflowRunId, occurrence(usage.first));
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: nodeId, state: "failed", attempt: 1 }]
+    }),
+    events: first
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  const sync = async () => {
+    const result = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  };
+  await sync();
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(workflowRunId, [...occurrence(usage.first), ...occurrence(usage.replacement)]),
+    "utf8"
+  );
+  await sync();
+  const ledger = fs
+    .readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          source_event_sequence: number;
+          iteration: number;
+          attempt: number;
+          reuse: { status: string };
+          agent?: { model_name?: string };
+        }
+    );
+  return { metadata: readRunMetadataDocument(path.join(run.value.run_root, "run.json"), runId), ledger };
+}
+
+test("syncRun lists executed agent attempts without usage in run.json, even while accounting is absent", async () => {
+  const unrecorded = await syncRetriedAgentAttempts("attempts-without-usage");
+  // Nothing recorded usage, so there is no accounting to price; the attempts are listed instead.
+  assert.equal(unrecorded.metadata.accounting, undefined);
+  assert.deepEqual(unrecorded.metadata.attempts_without_usage, {
+    attempts: [
+      [1, 1],
+      [2, 4]
+    ].map(([attempt, sourceEventSequence]) => ({
+      workflow_run_id: "ultrafuzz-attempts-without-usage",
+      source_event_sequence: sourceEventSequence,
+      node_id: "node:project-discovery",
+      iteration: 0,
+      attempt,
+      model_name: "gpt-5.5"
+    })),
+    cumulative_count: 2
+  });
+  const { before, after } = await unrecorded.resync();
+  assert.deepEqual(after, before);
+
+  // The attempt that recorded usage is priced by accounting; only the other one is listed.
+  const partial = await syncRetriedAgentAttempts("attempts-partly-without-usage", { model: "gpt-5.5", costUsd: 0.5 });
+  assert.equal(partial.metadata.accounting?.cumulative.estimated_spend, "$0.50");
+  assert.deepEqual(partial.metadata.attempts_without_usage, {
+    attempts: [
+      {
+        workflow_run_id: "ultrafuzz-attempts-partly-without-usage",
+        source_event_sequence: 5,
+        node_id: "node:project-discovery",
+        iteration: 0,
+        attempt: 2,
+        model_name: "gpt-5.5"
+      }
+    ],
+    cumulative_count: 1
+  });
+});
+
+test("syncRun lists each occurrence of an attempt number that a reset reused by its own event window", async () => {
+  const unreported = await syncResetAgentAttempt("reset-without-usage");
+  // Both occurrences are executed agent attempts that share node, iteration, and attempt; the
+  // attempt ledger tells them apart by their terminal event sequence.
+  assert.deepEqual(
+    unreported.ledger.map((entry) => [entry.source_event_sequence, entry.attempt, entry.reuse.status]),
+    [
+      [2, 1, "executed"],
+      [5, 1, "executed"]
+    ]
+  );
+  assert.deepEqual(
+    unreported.metadata.attempts_without_usage?.attempts.map((entry) => [entry.source_event_sequence, entry.attempt]),
+    [
+      [2, 1],
+      [5, 1]
+    ]
+  );
+  assert.equal(unreported.metadata.attempts_without_usage?.cumulative_count, 2);
+
+  // Only the occurrence before the reset reported usage, so only the replacement is listed.
+  const firstReported = await syncResetAgentAttempt("reset-first-reported", { first: 0.5 });
+  assert.deepEqual(
+    firstReported.metadata.attempts_without_usage?.attempts.map((entry) => entry.source_event_sequence),
+    [6]
+  );
+
+  // Every occurrence reported usage, so the member is absent.
+  const bothReported = await syncResetAgentAttempt("reset-both-reported", { first: 0.5, replacement: 0.25 });
+  assert.equal(bothReported.metadata.attempts_without_usage, undefined);
+});
+
+test("syncRun keeps listing the attempts of a workflow run that a fork replaced", async () => {
+  const runId = "fork-attempts-without-usage";
+  const retried = await syncRetriedAgentAttempts(runId);
+  const forkedWorkflowRunId = `ultrafuzz-${runId}-fork`;
+  const forked = await forkRun({
+    projectRoot: retried.project,
+    runId,
+    forkFrame: 0,
+    env: { ...retried.env, SMITHERS_FAKE_FORKED_RUN_ID: forkedWorkflowRunId }
+  });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  // Rebinding run.json to the replacement keeps the member: it is recomputed from the ledgers.
+  const rebound = readRunMetadataDocument(retried.metadataPath, runId);
+  assert.equal(rebound.workflow?.run_id, forkedWorkflowRunId);
+  assert.deepEqual(rebound.attempts_without_usage, retried.metadata.attempts_without_usage);
+  // The runner now reports the fork, which has started but run no attempt yet.
+  fs.writeFileSync(
+    path.join(retried.project, "fake-smithers-inspect.json"),
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId: forkedWorkflowRunId,
+        status: "running",
+        state: "running",
+        steps: [{ id: "node:project-discovery", state: "pending" }]
+      })
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(retried.project, "fake-smithers-events.ndjson"),
+    workflowEvents(forkedWorkflowRunId, [{ type: "RunStarted" }]),
+    "utf8"
+  );
+  const sync = await syncRun({ projectRoot: retried.project, runId, env: retried.env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const after = readRunMetadataDocument(retried.metadataPath, runId);
+  assert.equal(after.accounting, undefined);
+  assert.equal(after.attempts_without_usage?.cumulative_count, 2);
+  assert.deepEqual(
+    [...new Set(after.attempts_without_usage?.attempts.map((entry) => entry.workflow_run_id))],
+    [`ultrafuzz-${runId}`]
+  );
+});
+
+test("syncRun adds a source run's attempts without usage and keeps the member when accounting fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const source = await recordedUsageRun({ project, runId: "unrecorded-source", costUsd: 0.5 });
+  const sourceMetadata = await source.sync();
+  assert.equal(sourceMetadata.attempts_without_usage, undefined);
+  const withSourceCount = (count: number | undefined, metadata = sourceMetadata) => {
+    const { attempts_without_usage: _count, ...rest } = metadata;
+    writeRunMetadataDocument(
+      source.metadataPath,
+      count === undefined ? rest : { ...rest, attempts_without_usage: { attempts: [], cumulative_count: count } }
+    );
+  };
+  // The source's own source ran three attempts that recorded no usage.
+  withSourceCount(3);
+  const continuation = await recordedUsageRun({
+    project,
+    runId: "unrecorded-continuation",
+    costUsd: 0.25,
+    sourceRunId: "unrecorded-source"
+  });
+
+  const continued = await continuation.sync();
+  assert.equal(continued.accounting?.cumulative.estimated_spend, "$0.75");
+  assert.deepEqual(continued.attempts_without_usage, { attempts: [], cumulative_count: 3 });
+
+  // The member goes away once nothing remains to list.
+  withSourceCount(undefined);
+  assert.equal((await continuation.sync()).attempts_without_usage, undefined);
+
+  // A pass whose accounting fails writes nothing, so the member it last wrote stays.
+  withSourceCount(3);
+  assert.equal((await continuation.sync()).attempts_without_usage?.cumulative_count, 3);
+  const { accounting: _sourceAccounting, ...sourceWithoutAccounting } = sourceMetadata;
+  withSourceCount(5, sourceWithoutAccounting);
+  const before = fs.readFileSync(continuation.metadataPath);
+  const failed = await syncRun({ projectRoot: project, runId: "unrecorded-continuation", env: continuation.env });
+  assert.ok(failed.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_ACCOUNTING_FAILED"));
+  assert.deepEqual(fs.readFileSync(continuation.metadataPath), before);
 });
 
 test("getRunStatus synchronizes without appending duplicate events", async () => {
@@ -29431,7 +30041,7 @@ test("syncRun settles a model the fetched pricing catalog does not list instead 
           inputTokens: 10,
           outputTokens: 5,
           costUsd: undefined,
-          model: "unlisted-model",
+          model: "gpt-unlisted-model",
           agent: "codex"
         }
       },
@@ -29440,7 +30050,7 @@ test("syncRun settles a model the fetched pricing catalog does not list instead 
     ])
   });
   env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
-    test: { models: { "listed-model": { cost: { input: 1, output: 1 } } } }
+    openai: { models: { "gpt-listed-model": { cost: { input: 1, output: 1 } } } }
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -29465,7 +30075,7 @@ test("syncRun settles a model the fetched pricing catalog does not list instead 
     accounting?: { pricing_catalog?: { status?: string; unresolved_models?: string[] } };
   };
   assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
-  assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["unlisted-model"]);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["gpt-unlisted-model"]);
 });
 
 test("syncRun writes its accounting into run.json as a lifecycle command rewrote it during the pass", async () => {
@@ -29490,7 +30100,7 @@ test("syncRun writes its accounting into run.json as a lifecycle command rewrote
           inputTokens: 10,
           outputTokens: 5,
           costUsd: undefined,
-          model: "listed-model",
+          model: "gpt-listed-model",
           agent: "codex"
         }
       },
@@ -29499,7 +30109,7 @@ test("syncRun writes its accounting into run.json as a lifecycle command rewrote
     ])
   });
   env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
-    test: { models: { "listed-model": { cost: { input: 1, output: 1 } } } }
+    openai: { models: { "gpt-listed-model": { cost: { input: 1, output: 1 } } } }
   });
   const run = await startRun({ projectRoot: project, runId, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));

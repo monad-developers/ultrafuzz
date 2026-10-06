@@ -4,6 +4,8 @@ import {
   MODAL_SMOKE_RESULT_SCHEMA_ID,
   MODAL_WORKER_RESULT_SCHEMA_ID,
   type ModalContractSchemaId,
+  type StrictModalAggregateUsage,
+  type StrictModalPricingProvenance,
   type StrictModalSmokeResultDocument,
   type StrictModalWorkerResultDocument
 } from "../src/modal-contracts.js";
@@ -27,27 +29,35 @@ function workerResult(): StrictModalWorkerResultDocument {
     checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
     exit_category: "capacity-unavailable",
     runtime_ms: 1,
-    usage: {
-      input_tokens: 11,
-      output_tokens: 7,
-      cache_read_tokens: 3,
-      cache_write_tokens: 2,
-      reasoning_tokens: 5,
-      total_tokens: 28,
-      estimated_cost_usd: 0.125,
-      partial_pricing: false,
-      event_count: 1,
-      priced_event_count: 1,
-      unpriced_event_count: 0
-    },
-    pricing: {
-      source: "configured-catalog",
-      status: "available",
-      fetched_at: "2026-08-09T00:00:00.000Z",
-      resolved_model_count: 1,
-      unresolved_model_count: 0
-    },
+    usage: workerUsage(),
+    pricing: workerPricing(),
     diagnostic_code: "capacity-unavailable"
+  };
+}
+
+function workerUsage(): StrictModalAggregateUsage {
+  return {
+    input_tokens: 11,
+    output_tokens: 7,
+    cache_read_tokens: 3,
+    cache_write_tokens: 2,
+    reasoning_tokens: 5,
+    total_tokens: 28,
+    estimated_cost_usd: 0.125,
+    partial_pricing: false,
+    event_count: 1,
+    priced_event_count: 1,
+    unpriced_event_count: 0
+  };
+}
+
+function workerPricing(): StrictModalPricingProvenance {
+  return {
+    source: "configured-catalog",
+    status: "available",
+    fetched_at: "2026-08-09T00:00:00.000Z",
+    resolved_model_count: 1,
+    unresolved_model_count: 0
   };
 }
 
@@ -96,7 +106,8 @@ describe("Modal semantic gate parity", () => {
       },
       {
         ...workerResult(),
-        pricing: { ...workerResult().pricing!, unresolved_model_count: 1 }
+        usage: { ...workerUsage(), priced_event_count: 0, unpriced_event_count: 1 },
+        pricing: { ...workerPricing(), unresolved_model_count: 1 }
       },
       {
         ...workerResult(),
@@ -108,6 +119,29 @@ describe("Modal semantic gate parity", () => {
       expect(() => parseModalDocumentBytes(MODAL_WORKER_RESULT_SCHEMA_ID, bytes(value))).toThrow(
         ModalDocumentValidationError
       );
+    }
+  });
+
+  it("accepts a fetched catalog that leaves models unresolved", () => {
+    const uncosted: StrictModalWorkerResultDocument = {
+      ...workerResult(),
+      usage: {
+        ...workerUsage(),
+        estimated_cost_usd: null,
+        partial_pricing: true,
+        priced_event_count: 0,
+        unpriced_event_count: 1
+      },
+      pricing: { ...workerPricing(), resolved_model_count: 0, unresolved_model_count: 1 }
+    };
+    // An adapter-recorded event cost prices a model its catalog route leaves unresolved.
+    const recordedCost: StrictModalWorkerResultDocument = {
+      ...workerResult(),
+      pricing: { ...workerPricing(), unresolved_model_count: 1 }
+    };
+
+    for (const value of [uncosted, recordedCost]) {
+      expect(parseModalDocumentBytes(MODAL_WORKER_RESULT_SCHEMA_ID, bytes(value)).value).toEqual(value);
     }
   });
 

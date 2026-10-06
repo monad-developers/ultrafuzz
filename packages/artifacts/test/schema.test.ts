@@ -2056,6 +2056,7 @@ test("finding v2 and report v3 schemas require their current canonical shapes", 
       run_id: "run-1",
       source_run_id: "run-0",
       repository: "example/repository",
+      target_commit: "e".repeat(40),
       elapsed_time: "1m",
       models_used: ["model-a"],
       tokens_used: "100",
@@ -2129,6 +2130,18 @@ test("finding v2 and report v3 schemas require their current canonical shapes", 
   );
   assert.equal(
     validateArtifactContract("ultrafuzz/report@3", JSON.stringify({ ...report, schema_version: "1.0" })).ok,
+    false
+  );
+  const { target_commit: _targetCommit, ...withoutTargetCommit } = report.run_metadata;
+  assert.equal(
+    validateArtifactContract("ultrafuzz/report@3", JSON.stringify({ ...report, run_metadata: withoutTargetCommit })).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@3",
+      JSON.stringify({ ...report, run_metadata: { ...report.run_metadata, target_commit: "unavailable" } })
+    ).ok,
     false
   );
   const withoutProvenance = { ...report } as Partial<typeof report>;

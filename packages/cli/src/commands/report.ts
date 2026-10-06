@@ -4,8 +4,10 @@ import { Args, Command, Flags } from "@oclif/core";
 import {
   assertNoSymlinkComponents,
   assertPathInside,
+  formatEstimatedSpendUsd,
   layoutForRunRoot,
   readRunMetadataDocument,
+  reportEstimatedSpend,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
@@ -18,7 +20,6 @@ type AccountingField = "tokens_used" | "estimated_spend";
 interface ExpectedAccounting {
   tokens_used?: string;
   estimated_spend?: string;
-  partial_pricing?: boolean;
 }
 
 export default class Report extends Command {
@@ -124,12 +125,19 @@ function expectedAccountingFromRunMetadata(metadataPath: string): ExpectedAccoun
   const cumulative = metadata.accounting?.cumulative;
   if (cumulative === undefined) return undefined;
   const tokensUsed = cumulative.tokens_used;
-  const estimatedSpend = cumulative.estimated_spend;
-  const partialPricing = cumulative.partial_pricing;
+  // A report shows accounting's USD amount in its own format, with a `+` when the amount is probably
+  // low (the report's rule, not accounting's own `estimated_spend` label).
+  const estimatedSpendUsd = cumulative.estimated_spend_usd;
+  const spendCompleteness = {
+    partial_pricing: cumulative.partial_pricing,
+    unpriced_attempts: cumulative.unpriced_event_count,
+    attempts_without_usage: metadata.attempts_without_usage?.cumulative_count
+  };
   const expected = {
     ...(isAvailableLabel(tokensUsed) ? { tokens_used: tokensUsed } : {}),
-    ...(isAvailableLabel(estimatedSpend) ? { estimated_spend: estimatedSpend } : {}),
-    partial_pricing: partialPricing
+    ...(estimatedSpendUsd === undefined
+      ? {}
+      : { estimated_spend: reportEstimatedSpend(formatEstimatedSpendUsd(estimatedSpendUsd), spendCompleteness) })
   };
   return expected.tokens_used === undefined && expected.estimated_spend === undefined ? undefined : expected;
 }
@@ -145,7 +153,6 @@ function markdownAccountingDiagnostics(
       field: "tokens_used",
       actual: markdownLabel(markdown, "Tokens used"),
       expected: expected.tokens_used,
-      expectedPartialPricing: false,
       filePath: markdownPath,
       artifact: "markdown"
     })
@@ -155,7 +162,6 @@ function markdownAccountingDiagnostics(
       field: "estimated_spend",
       actual: markdownLabel(markdown, "Estimated spend"),
       expected: expected.estimated_spend,
-      expectedPartialPricing: expected.partial_pricing === true,
       filePath: markdownPath,
       artifact: "markdown"
     })
@@ -185,7 +191,6 @@ function reportJsonAccountingDiagnostics(
       field: "tokens_used",
       actual: labelField(runMetadata, "tokens_used", "integer"),
       expected: expected.tokens_used,
-      expectedPartialPricing: false,
       filePath: jsonPath,
       artifact: "json"
     })
@@ -195,7 +200,6 @@ function reportJsonAccountingDiagnostics(
       field: "estimated_spend",
       actual: labelField(runMetadata, "estimated_spend", "usd"),
       expected: expected.estimated_spend,
-      expectedPartialPricing: expected.partial_pricing === true,
       filePath: jsonPath,
       artifact: "json"
     })
@@ -207,14 +211,13 @@ function accountingValueDiagnostics(input: {
   field: AccountingField;
   actual: string | undefined;
   expected: string | undefined;
-  expectedPartialPricing: boolean;
   filePath: string;
   artifact: "markdown" | "json";
 }): RuntimeDiagnostic[] {
   if (input.expected === undefined) {
     return [];
   }
-  const reason = accountingValueProblem(input.field, input.actual, input.expected, input.expectedPartialPricing);
+  const reason = accountingValueProblem(input.field, input.actual, input.expected);
   return reason === undefined
     ? []
     : [accountingDiagnostic(input.field, input.expected, input.filePath, input.artifact, input.actual, reason)];
@@ -223,8 +226,7 @@ function accountingValueDiagnostics(input: {
 function accountingValueProblem(
   field: AccountingField,
   actual: string | undefined,
-  expected: string,
-  expectedPartialPricing: boolean
+  expected: string
 ): string | undefined {
   if (!isAvailableLabel(actual)) {
     return "missing or unavailable";
@@ -243,14 +245,14 @@ function accountingValueProblem(
 
   const actualSpend = parseUsdLabel(actual);
   const expectedSpend = parseUsdLabel(expected);
-  if (actualSpend === undefined || actualSpend <= 0) {
-    return "not a positive USD amount";
-  }
-  if ((expectedPartialPricing || hasPartialPricingSuffix(expected)) && !hasPartialPricingSuffix(actual)) {
-    return "missing partial-pricing + suffix";
+  if (actualSpend === undefined) {
+    return "not a USD amount";
   }
   if (expectedSpend !== undefined && actualSpend > expectedSpend + 0.000001) {
     return "greater than current run metadata";
+  }
+  if (expected.endsWith("+") && !actual.trim().endsWith("+")) {
+    return "missing the + of an amount that is probably low";
   }
   return undefined;
 }
@@ -341,10 +343,6 @@ function parseUsdLabel(value: string): number | undefined {
     return undefined;
   }
   return Number(normalized);
-}
-
-function hasPartialPricingSuffix(value: string): boolean {
-  return value.trim().endsWith("+");
 }
 
 function escapeRegExp(value: string): string {

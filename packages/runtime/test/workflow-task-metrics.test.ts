@@ -143,12 +143,56 @@ test("current task workflow metrics mark mixed recorded and unavailable pricing 
     const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
 
     assert.equal(metrics?.tokens_used, "300");
-    assert.equal(metrics?.estimated_spend, "$0.05+");
+    // The priced amount alone; the attempt it could not price is counted, and the Run summary adds the `+`.
+    assert.equal(metrics?.estimated_spend, "$0.05");
     assert.equal(metrics?.partial_pricing, true);
+    assert.equal(metrics?.unpriced_attempts, 1);
   } finally {
     if (previousCatalog === undefined) delete process.env.ULTRAFUZZ_PRICING_CATALOG_URL;
     else process.env.ULTRAFUZZ_PRICING_CATALOG_URL = previousCatalog;
   }
+});
+
+test("current task workflow metrics show zero spend and count every attempt they could not price", async () => {
+  const previousCatalog = process.env.ULTRAFUZZ_PRICING_CATALOG_URL;
+  process.env.ULTRAFUZZ_PRICING_CATALOG_URL = "disabled";
+  try {
+    const runtime = runtimeWithEvidence({
+      usage: { attempts: 2, totalTokens: 300, pricedAttempts: 0, costUsd: null },
+      usageRows: ["node-a", "node-b"].map((nodeId, index) =>
+        usageRow({
+          model: "model-unpriced",
+          nodeId,
+          inputTokens: 100,
+          outputTokens: 50,
+          timestampMs: Date.parse("2026-08-20T00:00:30.000Z") + index,
+          seq: index + 1
+        })
+      )
+    });
+
+    const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
+
+    assert.equal(metrics?.estimated_spend, "$0.00");
+    assert.equal(metrics?.partial_pricing, true);
+    assert.equal(metrics?.unpriced_attempts, 2);
+  } finally {
+    if (previousCatalog === undefined) delete process.env.ULTRAFUZZ_PRICING_CATALOG_URL;
+    else process.env.ULTRAFUZZ_PRICING_CATALOG_URL = previousCatalog;
+  }
+});
+
+test("current task workflow metrics show zero spend excluding every attempt when no usage event exists", async () => {
+  const runtime = runtimeWithEvidence({
+    usage: { attempts: 2, totalTokens: 300, pricedAttempts: 1, costUsd: null }
+  });
+
+  const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
+
+  assert.equal(metrics?.tokens_used, "300");
+  assert.equal(metrics?.estimated_spend, "$0.00");
+  assert.equal(metrics?.partial_pricing, true);
+  assert.equal(metrics?.unpriced_attempts, 2);
 });
 
 test("current task workflow metrics keep a complete aggregate cost exact when event rows are missing", async () => {
@@ -220,8 +264,10 @@ test("current task workflow metrics dedupe cumulative spend while preserving the
   // The deliberately inconsistent fresh/cache breakdown is used only to
   // establish that event projections cannot replace that aggregate.
   assert.equal(metrics?.tokens_used, "99,999");
-  assert.equal(metrics?.estimated_spend, "$0.25+");
+  assert.equal(metrics?.estimated_spend, "$0.25");
   assert.equal(metrics?.partial_pricing, true);
+  // The third aggregated attempt has no usage event, so it counts as unpriced.
+  assert.equal(metrics?.unpriced_attempts, 1);
   assert.deepEqual(metrics?.models_used, ["model-a", "model-b"]);
 });
 

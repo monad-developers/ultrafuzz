@@ -152,6 +152,7 @@ function terminalRunFixture(
             run_id: runId,
             source_run_id: runId,
             repository: "https://example.com/target-a",
+            target_commit: "0123456789abcdef0123456789abcdef01234567",
             elapsed_time: "5m",
             models_used: ["gpt-test"],
             tokens_used: "15",

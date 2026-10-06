@@ -900,7 +900,7 @@ const FINDING_NARRATIVE_FIELDS = new Set([
 ]);
 
 function reportCarriedFieldIssues(
-  entry: { row: unknown; path: string },
+  entry: { row: unknown; path: string; kind: "promoted" | "non-production" },
   source: Readonly<Record<string, unknown>>,
   field: string,
   message: string
@@ -910,7 +910,24 @@ function reportCarriedFieldIssues(
   if (FINDING_ADVISORY_FIELDS.has(field) && actual === undefined) return [metadataOmission(fieldPath)];
   if (isDeepStrictEqual(actual, source[field])) return [];
   const difference = issue(fieldPath, `${message} ${JSON.stringify(field)}`);
-  return [FINDING_NARRATIVE_FIELDS.has(field) ? { ...difference, severity: "warning" } : difference];
+  // A production issue renders its recommendation as report.md's Remediation, so there a changed or
+  // omitted one would publish advice no producer gave; non-production rows never render it.
+  const rendersRemediation = field === "recommendation" && entry.kind === "promoted";
+  return [
+    FINDING_NARRATIVE_FIELDS.has(field) && !rendersRemediation ? { ...difference, severity: "warning" } : difference
+  ];
+}
+
+// The report stage carries `recommendation` and never authors one: report.md
+// renders it as the issue's Remediation, so a value its source finding lacks
+// would read as preserved advice that no producer established.
+function reportAddedRecommendationIssues(
+  entry: { row: unknown; path: string },
+  source: Readonly<Record<string, unknown>>
+): SemanticGateIssue[] {
+  return source.recommendation === undefined && at(entry.row, ["recommendation"]) !== undefined
+    ? [issue(`${entry.path}.recommendation`, "Report row adds a recommendation its source finding does not carry")]
+    : [];
 }
 
 function reportSeverityClassificationPreservationIssues(
@@ -969,13 +986,13 @@ function reportSeverityClassificationPreservationIssues(
     ...arrayAt(document, ["issues"]).map((row, index) => ({
       row,
       path: `$.issues[${index}]`,
-      kind: "promoted",
+      kind: "promoted" as const,
       index
     })),
     ...arrayAt(document, ["non_production_outcomes"]).map((row, index) => ({
       row,
       path: `$.non_production_outcomes[${index}]`,
-      kind: "non-production",
+      kind: "non-production" as const,
       index
     }))
   ];
@@ -1130,6 +1147,7 @@ function reportSeverityClassificationPreservationIssues(
       if (disposition === "promoted" && (field === "id" || field === "title")) continue;
       issues.push(...reportCarriedFieldIssues(reportEntry, finding, field, "Report did not preserve severity field"));
     }
+    issues.push(...reportAddedRecommendationIssues(reportEntry, finding));
   }
 
   const upstreamKeys = new Set(
@@ -1416,6 +1434,7 @@ function reportBoundedDedupePreservationIssues(document: unknown, context: Seman
         ...reportCarriedFieldIssues(reportEntry, finding, field, "Bounded report did not preserve dedupe field")
       );
     }
+    issues.push(...reportAddedRecommendationIssues(reportEntry, finding));
   }
 
   expectedPromoted.sort((left, right) => {

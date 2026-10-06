@@ -32,6 +32,7 @@ import {
 } from "./generated-test-schema.js";
 import { canonicalTimestampSchema } from "./portable-json-primitives.js";
 import { PROPERTY_PRIORITIES } from "./property-provenance.js";
+import { ESTIMATED_SPEND_PATTERN, reportSpendIsProbablyLow } from "./run-documents.js";
 import { SAFE_ID_PATTERN } from "./safe-paths.js";
 import { canonicalJsonValueKey } from "./lang-primitives.js";
 
@@ -1658,11 +1659,22 @@ export const reportSchema = withDocumentMetadata(
         run_id: nonEmptyString,
         source_run_id: nonEmptyString,
         repository: nonEmptyString,
+        // The run's source revision (task.sourceRevision / run.json source_revision): the commit
+        // every task worktree was created from, or null when the run recorded none.
+        target_commit: z.union([z.string().regex(/^[0-9a-f]{40}$/u), z.null()]),
         elapsed_time: nonEmptyString,
         models_used: z.array(nonEmptyString),
         tokens_used: nonEmptyString,
-        estimated_spend: nonEmptyString,
+        // The priced usage in USD (formatEstimatedSpendUsd), never `unavailable`, ending in `+`
+        // exactly when the amount is probably low (reportSpendIsProbablyLow; checked below).
+        // partial_pricing is the flag of the accounting it came from and is never rendered.
+        estimated_spend: z.string().regex(ESTIMATED_SPEND_PATTERN),
         partial_pricing: z.boolean(),
+        // Executed agent attempts whose usage was never recorded (run.json attempts_without_usage)
+        // and recorded usage that could not be priced. Neither is in the amount, and neither is
+        // rendered: either one puts the `+` on the spend.
+        attempts_without_usage: positiveInteger.optional(),
+        unpriced_attempts: positiveInteger.optional(),
         strategy_loops: z.union([nonNegativeInteger, z.literal("unavailable")]),
         // The report renders these beside the rest of the run summary, so a report
         // that omits them cannot be projected.
@@ -1708,10 +1720,49 @@ export const reportSchema = withDocumentMetadata(
             required: ["verification", "observed_completion"],
             not: { properties: { completion: true }, required: ["completion"] }
           }
+        },
+        // The spend ends in `+` exactly when it is probably low (reportSpendIsProbablyLow).
+        {
+          if: {
+            properties: {
+              run_metadata: {
+                type: "object",
+                anyOf: [
+                  { properties: { partial_pricing: { const: true } }, required: ["partial_pricing"] },
+                  { properties: { attempts_without_usage: true }, required: ["attempts_without_usage"] },
+                  { properties: { unpriced_attempts: true }, required: ["unpriced_attempts"] }
+                ]
+              }
+            }
+          },
+          then: {
+            properties: {
+              run_metadata: {
+                type: "object",
+                properties: { estimated_spend: { type: "string", pattern: "\\+$" } }
+              }
+            }
+          },
+          else: {
+            properties: {
+              run_metadata: {
+                type: "object",
+                properties: { estimated_spend: { type: "string", pattern: "[0-9]$" } }
+              }
+            }
+          }
         }
       ]
     })
     .superRefine((report, context) => {
+      if (report.run_metadata.estimated_spend.endsWith("+") !== reportSpendIsProbablyLow(report.run_metadata)) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "estimated_spend must end in + exactly when partial_pricing is true or attempts_without_usage or unpriced_attempts is present",
+          path: ["run_metadata", "estimated_spend"]
+        });
+      }
       if (
         (report.verification !== undefined || report.observed_completion !== undefined) &&
         (report.verification === undefined ||

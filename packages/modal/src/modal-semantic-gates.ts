@@ -519,9 +519,9 @@ function assertWorkerResultSemantics(result: StrictModalWorkerResultDocument): v
     if (disabledSource !== disabledStatus) {
       fail("modal-worker-result-pricing-consistency", "disabled pricing source and status must occur together");
     }
-    if (result.pricing.status === "available" && result.pricing.unresolved_model_count !== 0) {
-      fail("modal-worker-result-pricing-consistency", "available pricing cannot report unresolved models");
-    }
+    // `available` means the catalog was fetched (or no model had a route worth fetching), so it may
+    // still count models with no route or no usable price on it. Their events without a recorded cost
+    // count in usage.unpriced_event_count, which the accounting-counts check ties to partial_pricing.
     if (result.pricing.status === "unavailable" && result.pricing.unresolved_model_count === 0) {
       fail("modal-worker-result-pricing-consistency", "unavailable pricing must report an unresolved model");
     }

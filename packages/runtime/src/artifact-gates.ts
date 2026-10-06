@@ -5466,15 +5466,18 @@ function verifyFinalReportCoverageEvidence(
   const markdownBytes = readCurrentArtifactSnapshot(artifactDir, markdownPath, authenticated);
   const markdown = markdownBytes?.toString("utf8") ?? "";
   diagnostics.push(...unscopedReportCoverageScoreDiagnostics(markdown, markdownPath));
+  // Scoped coverage evidence is JSON-only in report.md, whatever the producer status. The heading
+  // scan is line-based, so a section hidden in a comment or a closed container still counts.
+  const scopedSection = markdownSectionOccurrences(markdown, "## Scoped coverage evidence").length > 0;
+  if (scopedSection) diagnostics.push(unexpectedReportCoverageMarkdown(markdownPath));
+  // A score that names an exact declaration-completeness scope claims coverage
+  // evidence; unscoped prose scores stay advisory warnings.
+  const markdownClaimsCoverage = (): boolean =>
+    markdownCoverageScoreOccurrences(markdown).some((occurrence) => occurrence.scopes.length > 0);
 
   const producerStatus = plannedContractProducerStatus(layout, node, "ultrafuzz/coverage-evidence@1", attemptAuthority);
   if (producerStatus === "absent") {
-    // A score that names an exact declaration-completeness scope claims
-    // coverage evidence; unscoped prose scores stay advisory warnings.
-    const markdownClaimsCoverage = markdownCoverageScoreOccurrences(markdown).some(
-      (occurrence) => occurrence.scopes.length > 0
-    );
-    if (report.coverage_evidence !== undefined || markdownClaimsCoverage) {
+    if (report.coverage_evidence !== undefined || markdownClaimsCoverage()) {
       diagnostics.push({
         code: "REPORT_COVERAGE_EVIDENCE_UNPLANNED",
         message: "Final report must not invent typed or Markdown coverage evidence without a planned producer",
@@ -5513,15 +5516,21 @@ function verifyFinalReportCoverageEvidence(
     return diagnostics;
   }
 
-  diagnostics.push(
-    ...coverageEvidenceMarkdownProjectionDiagnostics(
-      evidence.value,
-      markdown,
-      markdownPath,
-      "REPORT_COVERAGE_EVIDENCE_MARKDOWN_MISSING"
-    )
-  );
+  // The coverage producer's Markdown still carries the canonical section and its scores
+  // (verifyCoverageProductionInventory); report.md carries neither.
+  if (!scopedSection && markdownClaimsCoverage()) diagnostics.push(unexpectedReportCoverageMarkdown(markdownPath));
   return diagnostics;
+}
+
+function unexpectedReportCoverageMarkdown(markdownPath: string): RuntimeDiagnostic {
+  return {
+    code: "REPORT_COVERAGE_EVIDENCE_MARKDOWN_UNEXPECTED",
+    message:
+      "Final report Markdown must not render a scoped coverage section or a coverage score that names an exact scope; the evidence stays in report.json",
+    severity: "error",
+    source: "coverage-evidence",
+    path: markdownPath
+  };
 }
 
 function coverageEvidenceMarkdownProjectionDiagnostics(

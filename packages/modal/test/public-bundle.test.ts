@@ -92,6 +92,55 @@ describe("public Modal benchmark bundles", () => {
     ).toThrow(/not the canonical public pair/u);
   });
 
+  it("requires both warning companions whenever the report carries artifact validation warnings", () => {
+    const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-warning-required-"));
+    const rowId = "target-a-runner-trial-1";
+    const files = completePublicSources(root, [rowId]);
+    const reportSource = files.find((source) => source.path === `reports/${rowId}/report.json`);
+    const markdownSource = files.find((source) => source.path === `reports/${rowId}/report.md`);
+    if (reportSource === undefined || markdownSource === undefined) throw new Error("missing report fixture");
+    const warnings = [
+      {
+        code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+        artifact_path: "deduped-findings.json",
+        field_path: "$[0].family_id",
+        gate: "strategy-detection-review-stage-reconciliation",
+        message: "Optional metadata is missing; the original artifact is accepted unchanged"
+      }
+    ];
+    const report = JSON.parse(fs.readFileSync(reportSource.source, "utf8")) as {
+      run_metadata: Record<string, unknown>;
+    };
+    report.run_metadata.artifact_validation_warnings = warnings;
+    const projection = projectPublicCanonicalFinalReport(report);
+    // report.md no longer lists the warnings, so the companions are their only human-readable form.
+    expect(projection.markdown).not.toContain("Artifact validation warnings");
+    fs.writeFileSync(reportSource.source, `${JSON.stringify(projection.report, null, 2)}\n`);
+    fs.writeFileSync(markdownSource.source, projection.markdown);
+    expect(() => createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files })).toThrow(
+      /requires both artifact validation warning companions/u
+    );
+
+    const diagnostics = projectPublicArtifactValidationWarnings(warnings);
+    const companions = (
+      [
+        ["artifact-validation-warnings.json", `${JSON.stringify(diagnostics.warnings, null, 2)}\n`],
+        ["artifact-validation-warnings.md", diagnostics.markdown]
+      ] as const
+    ).map(([name, contents]) => {
+      const source = path.join(root, name);
+      fs.writeFileSync(source, contents);
+      return { path: `reports/${rowId}/${name}`, root, source };
+    });
+    for (const partial of [companions.slice(0, 1), companions.slice(1)]) {
+      expect(() => createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files: [...files, ...partial] })).toThrow(
+        /requires both artifact validation warning companions/u
+      );
+    }
+    const bundle = createPublicBenchmarkBundle({ ...TEST_BUNDLE_METADATA, files: [...files, ...companions] });
+    expect(bundleFileText(bundle, `reports/${rowId}/artifact-validation-warnings.md`)).toContain("$[0].family_id");
+  });
+
   it("hashes, validates, and extracts the scored generation and public reports", () => {
     const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-public-bundle-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
@@ -1009,10 +1058,11 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
         run_id: row.run_id,
         source_run_id: "none",
         repository: row.target.repo,
+        target_commit: "0123456789abcdef0123456789abcdef01234567",
         elapsed_time: "0s",
         models_used: [TEST_MODEL],
         tokens_used: "0",
-        estimated_spend: "0",
+        estimated_spend: "$0.00",
         partial_pricing: false,
         strategy_loops: 0,
         audit_profile: "exhaustive",

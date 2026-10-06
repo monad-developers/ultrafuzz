@@ -525,7 +525,12 @@ any other synchronization of a live run still renews its controller lease.
 Custom pricing catalogs must use HTTPS without credentials, query parameters,
 or fragments and must resolve entirely to public addresses. The validated DNS
 address is pinned for the request, redirects are rejected, and response bodies
-are streamed with a 25 MiB limit before strict JSON parsing.
+are streamed with a 25 MiB limit before strict JSON parsing. Whether the
+catalog is available, disabled, or unreachable, accounting prices a packaged
+default model the catalog leaves unpriced at the versioned
+[fallback list prices](artifacts-reports.md#spend-pricing) and records them in
+`pricing_catalog.fallback`; any other model without a recorded cost stays
+unpriced.
 
 ## Completion policy
 

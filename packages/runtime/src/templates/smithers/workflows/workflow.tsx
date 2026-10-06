@@ -73,6 +73,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  reportEstimatedSpend,
   RUN_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
   validateArtifactContractBytes,
@@ -105,6 +106,7 @@ const {
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
+  runSummaryUsage,
   smithersTaskAgentId,
   topologyRuntimeBudgetForTimeout,
   topologyRuntimeContextForTimeout,
@@ -1329,11 +1331,14 @@ type FinalReportRunMetadataProjection = {
   run_id: string;
   source_run_id: string;
   repository: string;
+  target_commit: string | null;
   elapsed_time: string;
   models_used: string[];
   tokens_used: string;
   estimated_spend: string;
   partial_pricing: boolean;
+  attempts_without_usage?: number;
+  unpriced_attempts?: number;
   strategy_loops: number | "unavailable";
   audit_profile: string;
   audit_profile_catalog_digest: string;
@@ -1350,6 +1355,16 @@ type FinalReportWorkflowMetricsProjection = {
   tokens_used?: string;
   estimated_spend?: string;
   partial_pricing: boolean;
+  unpriced_attempts?: number;
+};
+
+/** The usage fields of a Run summary, as runSummaryUsage reads them from run.json accounting. */
+type FinalReportRunSummaryUsage = {
+  models_used: string[];
+  tokens_used: string;
+  estimated_spend: string;
+  partial_pricing: boolean;
+  unpriced_attempts?: number;
 };
 
 type FinalReportTaskRuntime = {
@@ -1535,10 +1550,6 @@ function finalReportLatestElapsedThrough(...values: unknown[]): string | undefin
   return latest?.value;
 }
 
-function finalReportAvailableLabel(value: string): string | undefined {
-  return value === "unavailable" ? undefined : value;
-}
-
 function finalReportStrategyLoops(
   effectiveSettings: Record<string, unknown>,
   attemptId: string
@@ -1627,6 +1638,49 @@ function finalReportArtifactValidationWarnings(task: (typeof taskSpecs)[number])
   return boundArtifactValidationWarnings(warnings);
 }
 
+/** The run's launch commit, which every task worktree was created from (assertWorkspaceSourceRevision). */
+function finalReportTargetCommit(task: (typeof taskSpecs)[number]): string | null {
+  if (task.sourceRevision === undefined) {
+    throw new Error(`artifact-contract failure: final-report target commit is unnormalized ${task.attemptId}`);
+  }
+  return task.sourceRevision;
+}
+
+function finalReportLiveUsage(
+  workflowMetrics: FinalReportWorkflowMetricsProjection | undefined
+): FinalReportRunSummaryUsage | undefined {
+  if (workflowMetrics === undefined) return undefined;
+  return {
+    models_used: workflowMetrics.models_used,
+    tokens_used: workflowMetrics.tokens_used ?? "0",
+    estimated_spend: workflowMetrics.estimated_spend ?? "$0.00",
+    partial_pricing: workflowMetrics.partial_pricing,
+    ...(workflowMetrics.unpriced_attempts === undefined ? {} : { unpriced_attempts: workflowMetrics.unpriced_attempts })
+  };
+}
+
+/** A continuation's source run.json, which sits beside this run's in the runs directory. */
+function finalReportSourceRunMetadata(runRoot: string, sourceRunId: unknown, attemptId: string): unknown {
+  const runsRoot = path.dirname(runRoot);
+  if (typeof sourceRunId !== "string" || sourceRunId.length === 0) {
+    throw new Error(`artifact-contract failure: final-report source run ID is malformed ${attemptId}`);
+  }
+  const snapshot = readBoundedRegularArtifactSnapshot(
+    runsRoot,
+    path.resolve(runsRoot, sourceRunId, "run.json"),
+    `artifact-contract failure: final-report source run metadata is unavailable ${attemptId}`,
+    MAX_FINAL_REPORT_RUN_METADATA_BYTES,
+    true
+  );
+  try {
+    return assertRunMetadataDocument(parseStrictJsonSnapshot(snapshot, "source run metadata"), sourceRunId);
+  } catch (error) {
+    throw new Error(`artifact-contract failure: final-report source run metadata is invalid ${attemptId}`, {
+      cause: error
+    });
+  }
+}
+
 function deriveAuthoritativeFinalReportRunMetadata(
   task: (typeof taskSpecs)[number],
   workflowMetrics?: FinalReportWorkflowMetricsProjection
@@ -1661,18 +1715,25 @@ function deriveAuthoritativeFinalReportRunMetadata(
   const strategyLoops = finalReportStrategyLoops(effectiveSettings, task.attemptId);
   const accountingRoot = finalReportOptionalRecord(metadata.accounting, "accounting metadata");
   const accounting = finalReportOptionalRecord(accountingRoot.cumulative, "cumulative accounting metadata");
-  const models = finalReportOptionalStringArray(accounting.models, "accounting models");
   const sourceRunIds = finalReportOptionalStringArray(accounting.source_run_ids, "accounting source run IDs");
-  if (accounting.partial_pricing !== undefined && typeof accounting.partial_pricing !== "boolean") {
-    throw new Error(`artifact-contract failure: final-report partial pricing is malformed ${task.attemptId}`);
-  }
-  const tokensUsed = finalReportOptionalString(accounting.tokens_used, "tokens used");
-  const estimatedSpend = finalReportOptionalString(accounting.estimated_spend, "estimated spend");
-  // The Smithers fallback is scoped to this workflow run. A continuation's
-  // run.json cumulative block is the only authority that includes source-run
-  // usage, so never replace missing lineage accounting with a current-run
-  // subtotal that would look complete.
-  const directWorkflowMetrics = metadata.source_run_id === undefined ? workflowMetrics : undefined;
+  // Models, tokens, spend, partial pricing, and unpriced attempts come from one source: the run's
+  // accounting, which includes its source runs; for a continuation without its own accounting yet,
+  // the source run's; and for a direct run, this workflow run's live Smithers usage. Without any,
+  // nothing was recorded. Attempts without usage are run.json's own count, which includes lineage.
+  // The spend ends in `+` when any of them says the amount is probably low.
+  const recorded = runSummaryUsage(metadata);
+  const usage =
+    recorded.accounting ??
+    (metadata.source_run_id === undefined
+      ? finalReportLiveUsage(workflowMetrics)
+      : runSummaryUsage(finalReportSourceRunMetadata(runRoot, metadata.source_run_id, task.attemptId)).accounting);
+  const spendCompleteness = {
+    partial_pricing: usage?.partial_pricing ?? false,
+    ...(recorded.attempts_without_usage === undefined
+      ? {}
+      : { attempts_without_usage: recorded.attempts_without_usage }),
+    ...(usage?.unpriced_attempts === undefined ? {} : { unpriced_attempts: usage.unpriced_attempts })
+  };
   const validationWarnings = finalReportArtifactValidationWarnings(task);
   const elapsedTime = finalReportElapsedTime(
     metadata.created_at,
@@ -1682,15 +1743,12 @@ function deriveAuthoritativeFinalReportRunMetadata(
     run_id: task.metadata.run.ultrafuzzRunId,
     source_run_id: finalReportOptionalString(metadata.source_run_id, "source run ID"),
     repository: normalizeFinalReportGitHubRepository(task),
+    target_commit: finalReportTargetCommit(task),
     elapsed_time: elapsedTime,
-    models_used: models.length === 0 ? (directWorkflowMetrics?.models_used ?? []) : models,
-    tokens_used: finalReportAvailableLabel(tokensUsed) ?? directWorkflowMetrics?.tokens_used ?? "unavailable",
-    estimated_spend:
-      finalReportAvailableLabel(estimatedSpend) ?? directWorkflowMetrics?.estimated_spend ?? "unavailable",
-    partial_pricing:
-      finalReportAvailableLabel(estimatedSpend) === undefined
-        ? (directWorkflowMetrics?.partial_pricing ?? false)
-        : (accounting.partial_pricing ?? false),
+    models_used: usage?.models_used ?? [],
+    tokens_used: usage?.tokens_used ?? "0",
+    estimated_spend: reportEstimatedSpend(usage?.estimated_spend ?? "$0.00", spendCompleteness),
+    ...spendCompleteness,
     strategy_loops: strategyLoops,
     audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
     audit_profile_catalog_digest: finalReportOptionalSha256(

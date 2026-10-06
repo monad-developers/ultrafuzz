@@ -9,6 +9,7 @@ import {
   assertRunMetadataDocument,
   assertRunPlanDocument,
   assertSourceRunDocument,
+  formatEstimatedSpendUsd,
   readConfigRedactionsDocument,
   readRunMetadataDocument,
   readRunPlanDocument,
@@ -426,6 +427,93 @@ test("run metadata current accounting must exactly equal its final segment", () 
     () => assertRunMetadataDocument(metadata),
     /current accounting does not equal the final accounting segment/u
   );
+});
+
+test("run metadata accepts fallback-priced models and lists attempts without usage", () => {
+  const metadata = canonicalRunMetadata();
+  const pricingCatalog = (document: RunMetadataDocument) => {
+    assert.ok(document.accounting, "the fixture has accounting");
+    return document.accounting.pricing_catalog;
+  };
+  Object.assign(pricingCatalog(metadata), {
+    unresolved_models: ["gpt-5.5"],
+    fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"] },
+    model_prices: {
+      "gpt-5.5": { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 },
+      ...pricingCatalog(metadata).model_prices
+    }
+  });
+  const attempt = {
+    workflow_run_id: "workflow-replaced",
+    source_event_sequence: 7,
+    node_id: "node:node-a-0",
+    iteration: 0,
+    attempt: 2,
+    model_name: "gpt-5.5"
+  };
+  metadata.attempts_without_usage = { attempts: [attempt], cumulative_count: 3 };
+  assert.deepEqual(assertRunMetadataDocument(structuredClone(metadata)), metadata);
+
+  for (const fallback of [
+    { table: "ultrafuzz.fallback-pricing.latest", models: ["gpt-5.5"] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: [] },
+    { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5", "gpt-5.5"] }
+  ]) {
+    const invalid = structuredClone(metadata);
+    pricingCatalog(invalid).fallback = fallback;
+    assert.throws(() => assertRunMetadataDocument(invalid), /run metadata/u, JSON.stringify(fallback));
+  }
+  const invalidAttempts: Array<[RunMetadataDocument["attempts_without_usage"], RegExp]> = [
+    [{ attempts: [], cumulative_count: 0 }, /run metadata/u],
+    [{ attempts: [{ ...attempt, extra: true } as typeof attempt], cumulative_count: 1 }, /run metadata/u],
+    [{ attempts: [attempt, { ...attempt, attempt: 3 }], cumulative_count: 2 }, /must be unique by workflow run/u],
+    [{ attempts: [attempt, { ...attempt, source_event_sequence: 9 }], cumulative_count: 1 }, /count is smaller/u]
+  ];
+  for (const [attemptsWithoutUsage, message] of invalidAttempts) {
+    const invalid = structuredClone(metadata);
+    invalid.attempts_without_usage = attemptsWithoutUsage;
+    assert.throws(() => assertRunMetadataDocument(invalid), message, JSON.stringify(attemptsWithoutUsage));
+  }
+});
+
+test("estimated spend formats without suffixes and keeps a nonzero amount visible", () => {
+  const label = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u;
+  const expected: Array<[number, string]> = [
+    [0, "$0.00"],
+    [0.01, "$0.01"],
+    [0.125, "$0.13"],
+    // toFixed rounds the exact binary value: 12.345 is stored just above the tie and 1.005 just below it.
+    [12.345, "$12.35"],
+    [1.005, "$1.00"],
+    [12.3456, "$12.35"],
+    [123_456_789.999, "$123456790.00"],
+    [0.0099, "$0.0099"],
+    [0.009995, "$0.0100"],
+    [0.005, "$0.0050"],
+    [1.65e-5, "$0.000017"],
+    [1.23456e-5, "$0.000012"],
+    [1e-10, "$0.0000000001"],
+    [4e-11, "$0.0000000000"],
+    [Number.MIN_VALUE, "$0.0000000000"]
+  ];
+  for (const [value, formatted] of expected) {
+    assert.equal(formatEstimatedSpendUsd(value), formatted, String(value));
+    assert.match(formatEstimatedSpendUsd(value), label, String(value));
+  }
+  for (const value of [
+    -0.01,
+    -Number.MIN_VALUE,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+    1e21
+  ]) {
+    assert.throws(
+      () => formatEstimatedSpendUsd(value),
+      /estimated spend is outside the supported range/u,
+      String(value)
+    );
+  }
 });
 
 test("a malformed present document fails differently from a genuinely missing document", (t) => {

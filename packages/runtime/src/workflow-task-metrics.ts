@@ -1,6 +1,6 @@
 import { Effect } from "effect";
 
-import { isRecord, parseStrictJsonBytes, type NormalizedUsage } from "@ultrafuzz/artifacts";
+import { formatEstimatedSpendUsd, isRecord, parseStrictJsonBytes, type NormalizedUsage } from "@ultrafuzz/artifacts";
 
 import { resolveLiveModelPricing } from "./model-pricing.js";
 import { projectNormalizedUsageAccounting } from "./workflow-sync.js";
@@ -9,8 +9,14 @@ export interface CurrentTaskWorkflowMetrics {
   elapsed_through?: string;
   models_used: string[];
   tokens_used?: string;
+  /**
+   * The priced usage in USD (formatEstimatedSpendUsd), whenever a usage event or an exact aggregate
+   * exists. It carries no `+`; the Run summary adds one when the amount is probably low.
+   */
   estimated_spend?: string;
   partial_pricing: boolean;
+  /** Attempts not in the amount (usage that could not be priced, or no usage event), when at least one. */
+  unpriced_attempts?: number;
 }
 
 interface WorkflowUsageEvent extends NormalizedUsage {
@@ -177,11 +183,6 @@ function formatInteger(value: number): string {
     .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
 }
 
-function formatUsd(value: number, partial: boolean): string {
-  const suffix = partial ? "+" : "";
-  return value > 0 && value < 0.01 ? `$${value.toFixed(4)}${suffix}` : `$${value.toFixed(2)}${suffix}`;
-}
-
 async function readCurrentTaskWorkflowEvidence(
   runtime: CurrentTaskWorkflowRuntime
 ): Promise<CurrentTaskWorkflowEvidence | undefined> {
@@ -216,12 +217,19 @@ async function deriveWorkflowSpend(input: {
   models: string[];
   signal: AbortSignal;
   coverage_partial: boolean;
-}): Promise<{ estimated_spend?: string; partial_pricing: boolean }> {
+}): Promise<{ estimated_spend?: string; partial_pricing: boolean; unpriced_attempts?: number }> {
   if (input.aggregate_cost !== undefined && input.priced_attempts === input.attempts) {
-    return { estimated_spend: formatUsd(input.aggregate_cost, false), partial_pricing: false };
+    return { estimated_spend: formatEstimatedSpendUsd(input.aggregate_cost), partial_pricing: false };
   }
+  // Without usage events nothing can be priced per attempt (Smithers' aggregate cost is null
+  // unless every attempt has one), so the amount is zero and every attempt counts as unpriced.
   if (input.events.length === 0) {
-    return { partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts };
+    return {
+      partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts,
+      ...(input.attempts === 0
+        ? {}
+        : { estimated_spend: formatEstimatedSpendUsd(0), unpriced_attempts: input.attempts })
+    };
   }
 
   const pricing = await resolveLiveModelPricing({ models: input.models, env: process.env, signal: input.signal });
@@ -245,10 +253,12 @@ async function deriveWorkflowSpend(input: {
     }
     if (!projected.partial_pricing) fullyPricedEvents += 1;
   }
-  const partialPricing = input.coverage_partial || fullyPricedEvents < input.events.length;
+  // Attempts Smithers aggregated without a usage event of their own count as unpriced too.
+  const unpricedAttempts = input.events.length - knownCostEvents + Math.max(0, input.attempts - input.events.length);
   return {
-    ...(knownCostEvents === 0 ? {} : { estimated_spend: formatUsd(knownCost, partialPricing) }),
-    partial_pricing: partialPricing
+    estimated_spend: formatEstimatedSpendUsd(knownCost),
+    partial_pricing: input.coverage_partial || fullyPricedEvents < input.events.length,
+    ...(unpricedAttempts === 0 ? {} : { unpriced_attempts: unpricedAttempts })
   };
 }
 
@@ -300,6 +310,7 @@ export async function deriveCurrentTaskWorkflowMetrics(
     models_used: models,
     ...(attempts > 0 || totalTokens > 0 ? { tokens_used: formatInteger(totalTokens) } : {}),
     ...(spend.estimated_spend === undefined ? {} : { estimated_spend: spend.estimated_spend }),
-    partial_pricing: spend.partial_pricing
+    partial_pricing: spend.partial_pricing,
+    ...(spend.unpriced_attempts === undefined ? {} : { unpriced_attempts: spend.unpriced_attempts })
   };
 }

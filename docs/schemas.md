@@ -163,9 +163,16 @@ conflict.
 
 The verifier persists bounded warnings in the existing artifact-verification
 marker. The final report receives warnings from its authenticated ancestor
-markers through the run-metadata authority and renders an **Artifact validation
-warnings** section. Re-reading an artifact does not modify it or append duplicate
-repair records. Large warning sets are summarized without failing the campaign.
+markers through the run-metadata authority and keeps them in
+`report.json` `run_metadata.artifact_validation_warnings`; `report.md` does not
+render them. For a verified report they are shown by `ultrafuzz report`
+diagnostics, the dashboard's `host_validation_warnings`, and, in a public
+bundle, the `artifact-validation-warnings.json` and
+`artifact-validation-warnings.md` companions, which are both required whenever
+the report's `run_metadata` carries warnings. An unchecked report shows none,
+although its `report.json` still carries them.
+Re-reading an artifact does not modify it or append duplicate repair records.
+Large warning sets are summarized without failing the campaign.
 
 The final-report verifier also records omissions introduced by the report
 agent itself. These authenticated host diagnostics accompany the original

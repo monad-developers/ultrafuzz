@@ -1,7 +1,9 @@
 import {
   assertRunMetadataDocument,
   assertRunStateDocument,
+  formatEstimatedSpendUsd,
   reportCompletionSchema,
+  reportEstimatedSpend,
   TERMINAL_RUN_STATE_STATUSES,
   type ReportCompletion,
   type RunMetadataDocument,
@@ -61,10 +63,11 @@ export function projectTerminalReport(input: TerminalReportProjectionInput): Can
 /**
  * The report agent copies a run summary that the host captured when the report task started, so its
  * elapsed time and accounting miss the report task itself and anything that finished later. Runtime
- * presentations restate them from run.json and the recorded finish time. Tokens, spend, and partial
- * pricing move together, because the agent's spend may price only part of the run; a spend the
- * whole-run record calls unavailable stays unavailable. A value those records do not provide keeps
- * the agent's copy; malformed records are ignored, never thrown.
+ * presentations restate them from run.json and the recorded finish time. Models, tokens, spend,
+ * partial pricing, and the unpriced-attempt count move together and come only from
+ * `accounting.cumulative`; without it they keep the agent's copy. The count of attempts without
+ * usage is restated on its own, and the spend's `+` is then set again from the restated fields.
+ * Malformed records are ignored, never thrown.
  */
 export function withWholeRunSummary(
   runMetadata: Record<string, unknown>,
@@ -74,25 +77,99 @@ export function withWholeRunSummary(
   const summary = { ...runMetadata };
   const elapsed = elapsedTime(field(metadata, "created_at"), finishedAt);
   if (elapsed !== undefined) summary.elapsed_time = elapsed;
-  const cumulative = field(field(metadata, "accounting"), "cumulative");
-  const models = field(cumulative, "models");
-  if (isNonEmptyStringList(models)) summary.models_used = [...models];
-  const tokens = field(cumulative, "tokens_used");
-  const spend = field(cumulative, "estimated_spend");
-  if (availableLabel(tokens) && typeof spend === "string" && spend.trim() !== "") {
-    summary.tokens_used = tokens;
-    summary.estimated_spend = spend;
-    summary.partial_pricing = field(cumulative, "partial_pricing") === true;
+  const usage = runSummaryUsage(metadata);
+  if (usage.accounting !== undefined) {
+    if (usage.accounting.unpriced_attempts === undefined) delete summary.unpriced_attempts;
+    Object.assign(summary, usage.accounting);
+  }
+  if (isRecord(metadata)) {
+    if (usage.attempts_without_usage === undefined) delete summary.attempts_without_usage;
+    else summary.attempts_without_usage = usage.attempts_without_usage;
+  }
+  if (typeof summary.estimated_spend === "string") {
+    summary.estimated_spend = reportEstimatedSpend(summary.estimated_spend, summary);
   }
   return summary;
 }
 
-function field(value: unknown, key: string): unknown {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? Reflect.get(value, key) : undefined;
+/** The Run summary usage fields a report restates from run.json. */
+export interface RunSummaryUsage {
+  /** Present only when `accounting.cumulative` is well-formed. */
+  accounting?: {
+    models_used: string[];
+    tokens_used: string;
+    /**
+     * `accounting.cumulative.estimated_spend_usd` without a `+`, `$0.00` when no usage could be
+     * priced. `reportEstimatedSpend` adds the `+` once the whole Run summary is known.
+     */
+    estimated_spend: string;
+    partial_pricing: boolean;
+    /** `accounting.cumulative.unpriced_event_count`, when at least one. */
+    unpriced_attempts?: number;
+  };
+  /** `attempts_without_usage.cumulative_count`, when run.json records the member. */
+  attempts_without_usage?: number;
 }
 
-function isNonEmptyStringList(value: unknown): value is string[] {
-  return Array.isArray(value) && value.length > 0 && value.every((entry) => typeof entry === "string" && entry !== "");
+/**
+ * The one place a Run summary's usage figures are read from run.json, for the report-start
+ * projection and both runtime presentations. Accounting v4's own `estimated_spend` label (with its
+ * `unavailable` and its own `+` rule) stays in run.json for `ultrafuzz stats`; the report shows its
+ * USD amount, with the `+` the report's rule gives (`reportEstimatedSpend`). Reads are defensive: a
+ * malformed record yields nothing.
+ */
+export function runSummaryUsage(metadata: unknown): RunSummaryUsage {
+  const attemptsWithoutUsage = field(field(metadata, "attempts_without_usage"), "cumulative_count");
+  return {
+    ...accountingUsage(field(field(metadata, "accounting"), "cumulative")),
+    ...(isPositiveCount(attemptsWithoutUsage) ? { attempts_without_usage: attemptsWithoutUsage } : {})
+  };
+}
+
+function accountingUsage(cumulative: unknown): Pick<RunSummaryUsage, "accounting"> {
+  const models = field(cumulative, "models");
+  const tokens = field(cumulative, "tokens_used");
+  const spendUsd = field(cumulative, "estimated_spend_usd");
+  const partialPricing = field(cumulative, "partial_pricing");
+  const unpricedAttempts = field(cumulative, "unpriced_event_count");
+  if (
+    !isStringList(models) ||
+    !availableLabel(tokens) ||
+    !(spendUsd === undefined || isSpendAmount(spendUsd)) ||
+    typeof partialPricing !== "boolean" ||
+    !(unpricedAttempts === undefined || unpricedAttempts === 0 || isPositiveCount(unpricedAttempts))
+  ) {
+    return {};
+  }
+  return {
+    accounting: {
+      models_used: [...models],
+      tokens_used: tokens,
+      estimated_spend: formatEstimatedSpendUsd(spendUsd ?? 0),
+      partial_pricing: partialPricing,
+      ...(isPositiveCount(unpricedAttempts) ? { unpriced_attempts: unpricedAttempts } : {})
+    }
+  };
+}
+
+function field(value: unknown, key: string): unknown {
+  return isRecord(value) ? Reflect.get(value, key) : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPositiveCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry !== "");
+}
+
+function isSpendAmount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value < 1e21;
 }
 
 function availableLabel(value: unknown): value is string {

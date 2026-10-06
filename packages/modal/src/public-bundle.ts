@@ -472,16 +472,25 @@ function parseTerminalReports(
     if (!markdown.equals(Buffer.from(projection.markdown, "utf8"))) {
       throw new Error(`public benchmark row ${rowId} report.md is not the canonical projection of report.json`);
     }
-    validateArtifactWarningCompanions(rowId, contentsByPath);
+    validateArtifactWarningCompanions(rowId, contentsByPath, report);
     reports.set(rowId, report);
   }
   return reports;
 }
 
-function validateArtifactWarningCompanions(rowId: string, contentsByPath: ReadonlyMap<string, Buffer>): void {
+/**
+ * report.md no longer renders artifact validation warnings, so a report that carries them must ship
+ * the public companion pair, the only human-readable form of those warnings.
+ */
+function validateArtifactWarningCompanions(
+  rowId: string,
+  contentsByPath: ReadonlyMap<string, Buffer>,
+  report: TerminalReport
+): void {
   const warningJson = contentsByPath.get(`reports/${rowId}/artifact-validation-warnings.json`);
   const warningMarkdown = contentsByPath.get(`reports/${rowId}/artifact-validation-warnings.md`);
-  if (warningJson === undefined && warningMarkdown === undefined) return;
+  const reportCarriesWarnings = (report.run_metadata.artifact_validation_warnings ?? []).length > 0;
+  if (warningJson === undefined && warningMarkdown === undefined && !reportCarriesWarnings) return;
   if (warningJson === undefined || warningMarkdown === undefined) {
     throw new Error(`public benchmark row ${rowId} requires both artifact validation warning companions`);
   }
