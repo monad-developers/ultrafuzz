@@ -2371,6 +2371,32 @@ test("finding prose keeps public projections fixed points without private-conten
   assertPublicProjectionFixedPoint(pipePublished);
 });
 
+test("a home, private-directory, drive-letter, or UNC path after a literal backslash, star, or word-starting pipe is redacted", () => {
+  // findingProse shows these characters literally, so each one is a path boundary in report.json, as
+  // it already was for a `/`-rooted path; a star still is not one for a `/`-rooted glob.
+  for (const [description, redactedDescription] of [
+    ["Read \\~/secret first.", "Read \\[redacted-path] first."],
+    ["Read *C:\\Users\\bob\\key first.", "Read *[redacted-path] first."],
+    ["Read \\C:\\Users\\bob\\key first.", "Read \\[redacted-path] first."],
+    ["Read **~/.bashrc** first.", "Read **[redacted-path] first."],
+    ["Read >~/secret first.", "Read >[redacted-path] first."],
+    ["Read |~/secret first.", "Read |[redacted-path] first."],
+    ["Read ;artifacts/run/report.json first.", "Read ;[redacted-path] first."],
+    ["Read x\\\\\\host\\share first.", "Read x\\[redacted-path] first."],
+    ["Keep src/**/X.sol and x~/y readable.", "Keep src/**/X.sol and x~/y readable."],
+    ["Keep gt;artifacts/<run-id> readable.", "Keep gt;artifacts/<run-id> readable."]
+  ] as const) {
+    const published = projectPublicCanonicalFinalReport(descriptionReport(description));
+    assert.equal(
+      (published.report.issues as Array<Record<string, unknown>>)[0]?.description,
+      redactedDescription,
+      description
+    );
+    assert.doesNotMatch(published.markdown, /secret|bob|bashrc|host|run\/report/u, description);
+    assertPublicProjectionFixedPoint(published);
+  }
+});
+
 test("blocker summaries keep the frozen public prose escaping", () => {
   const report = renderableReport();
   (report.property_implementation_coverage as Record<string, unknown>).blocker_summaries = [

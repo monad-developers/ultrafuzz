@@ -2020,7 +2020,7 @@ function redactPrivatePathMatches(value: string): string {
  * start no path inside the run, and nothing after it is at a boundary for them.
  */
 const PATH_SLASH_BEFORE_NON_PATH_RUN =
-  /(?:(?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/[*<>`]+|(?:^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[<>`][*<>`]*)(?:\/[*<>`]+)*/gmu;
+  /(?:(?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/[*<>`]+|(?:^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[<>`][*<>`]*)(?:\/[*<>`]+)*/gmu;
 
 /**
  * The same run in rendered Markdown, raw or as the renderer's escapes (`\*`, `` \` ``, `&lt;`,
@@ -2029,23 +2029,25 @@ const PATH_SLASH_BEFORE_NON_PATH_RUN =
  * redacted from the same point, so only a path the strict pass did not see can be left there.
  */
 const RENDERED_PATH_SLASH_BEFORE_NON_PATH_RUN =
-  /((?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/|(?:^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/(?=\\`|&[gl]t;|[<>`]))(?:\\[*`]|&[gl]t;|[*<>`])+(?:\/(?:\\[*`]|&[gl]t;|[*<>`])+)*/gmu;
+  /((?:^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/|(?:^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?:(?<!\\)~|\\~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/(?=\\`|&[gl]t;|[<>`]))(?:\\[*`]|&[gl]t;|[*<>`])+(?:\/(?:\\[*`]|&[gl]t;|[*<>`])+)*/gmu;
 
 /**
  * Report strings are plain text, so a path after a literal `\`, `&lt;`, `>`, or a `|` that starts a
  * word is still a path: findingProse writes the first three as `&#92;`, `&amp;lt;`, and `&gt;`, and
  * a block's leading `|` as `&#124;`, each ending in a `;` that the Markdown re-scan reads as a
  * boundary. A `|` that ends a word is not a boundary, so `|a - b|/b` stays readable, and `<` is not
- * one either, so a closing tag such as `</div>` stays readable too. The renderer's own escapes are
+ * one either, so a closing tag such as `</div>` stays readable too. A home, private-directory,
+ * drive-letter, or UNC path also starts after a `*`, which the renderer shows literally; a
+ * `/`-rooted path does not, so a `**` glob segment stays readable. The renderer's own escapes are
  * exempted only when the Markdown is re-scanned.
  */
 function privatePathPatterns(): RegExp[] {
   return [
     /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3})[^\s"'`()[\]{}<>]*/gimu,
     /(^|[\s("'`=,:;>[\\]|(?<!\S)\|)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
-    /(^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
-    /(^|[\s("'`=,:[])[A-Za-z]:\\[^\s"'`()[\]{}<>]+/gmu,
-    /(^|[\s("'`=,:[])\\\\[^\s"'`()[\]{}<>]+/gmu
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)[A-Za-z]:\\[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)\\\\[^\s"'`()[\]{}<>]+/gmu
   ];
 }
 
@@ -2063,9 +2065,9 @@ function privateMarkdownPathPatterns(): RegExp[] {
   return [
     /(^|[\s("'`=,:;[])file:(?:\/{1,3}|\\{1,3}(?![!-/:-@[-`{-~]))[^\s"'`()[\]{}<>]*/gimu,
     /(^|[\s("'`=,:;>[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)\/(?![/*])[^/\s"'`()[\]{}<>][^\s"'`()[\]{}<>]*/gmu,
-    /(^|[\s("'`=,:[])(?:~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
-    /(^|[\s("'`=,:[])[A-Za-z]:\\(?![!-/:-@[-`{-~])[^\s"'`()[\]{}<>]+/gmu,
-    /(^|[\s("'`=,:[])\\\\[^\s"'`()[\]{}<>]+/gmu
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)(?:(?<!\\)~|\\~|\.ultrafuzz|artifacts|workspaces|generated-tests)\/[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[\\]|(?<!\S)\|)(?<!&[gl]t;|&#92;)[A-Za-z]:\\(?![!-/:-@[-`{-~])[^\s"'`()[\]{}<>]+/gmu,
+    /(^|[\s("'`=,:;>*[]|(?<!\S)\|)(?<!&[gl]t;|&#92;)\\\\[^\s"'`()[\]{}<>]+/gmu
   ];
 }
 
