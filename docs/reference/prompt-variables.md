@@ -126,9 +126,9 @@ fail prompt validation.
 while selecting transitive ancestor outputs by exact declared output paths,
 which it lists in the prompt. It is appropriate when a consumer needs a fixed
 set of filenames whose contracts are shared with unrelated outputs, such as
-final-report fallback intake. It records the matching logical producers,
-canonically ordered path group, and deterministic SHA-256 selector ID in the
-run plan. Missing and duplicate path arguments fail prompt validation.
+final-report fallback intake. It records the matching logical producers and the
+canonically ordered path group in the run plan. Missing and duplicate path
+arguments fail prompt validation.
 
 Compact authority selectors are only for agentic task producers. If the exact
 contract or path selector matches any `kind: reference` ancestor, rendering

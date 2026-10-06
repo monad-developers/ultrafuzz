@@ -4,7 +4,6 @@ import {
   ARTIFACT_CONTRACT_IDS,
   CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN,
   isArtifactContractId,
-  parseStrictJsonBytes,
   type ArtifactContractId
 } from "@ultrafuzz/artifacts";
 
@@ -162,18 +161,6 @@ export function derivePromptArtifactAuthority(
   return document;
 }
 
-/** Parse and validate an agent-visible prompt artifact authority document. */
-export function parsePromptArtifactAuthorityBytes(bytes: Uint8Array): PromptArtifactAuthorityDocument {
-  const value = parseStrictJsonBytes(bytes, {
-    maxBytes: MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
-    maxDepth: 8,
-    maxItems: MAX_PROMPT_ARTIFACT_AUTHORITY_OUTPUTS + MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS,
-    maxProperties: 4 * MAX_PROMPT_ARTIFACT_AUTHORITY_OUTPUTS + 8 * MAX_PROMPT_ARTIFACT_AUTHORITY_PRODUCERS
-  });
-  assertValidPromptArtifactAuthority(value);
-  return value;
-}
-
 /** Serialize a validated authority into deterministic bytes suitable for retry restoration. */
 export function serializePromptArtifactAuthority(document: PromptArtifactAuthorityDocument): Buffer {
   assertValidPromptArtifactAuthority(document);
@@ -243,11 +230,11 @@ export function assertValidPromptArtifactAuthority(value: unknown): asserts valu
     priorProducerKey = producerKey;
 
     if (!Array.isArray(producer.outputs) || producer.outputs.length === 0) {
-      throw new Error(`prompt artifact authority producer ${producerIndex} must have selected outputs`);
+      throw new Error(`prompt artifact authority producer ${String(producerIndex)} must have declared outputs`);
     }
     totalOutputs += producer.outputs.length;
     if (totalOutputs > MAX_PROMPT_ARTIFACT_AUTHORITY_OUTPUTS) {
-      throw new Error("prompt artifact authority has too many selected outputs");
+      throw new Error("prompt artifact authority has too many declared outputs");
     }
     const outputPaths = new Set<string>();
     let priorOutputKey: string | undefined;

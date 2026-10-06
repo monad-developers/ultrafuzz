@@ -384,10 +384,8 @@ ordering, and prompt artifact-reference requirements as
 producer output declarations whose exact declared `path` is in the requested
 set. The renderer MUST list the canonically ordered requested paths in the
 prompt and MUST NOT expand matching producer paths, model-fanout attempts, or
-source-authority rows. It MUST record the exact matching logical ancestor IDs,
-a deterministic SHA-256 selector ID, and the canonically ordered requested
-output paths in the run plan, and the run plan MUST reject an ID that does not
-match its paths.
+source-authority rows. It MUST record the exact matching logical ancestor IDs
+and the canonically ordered requested output paths in the run plan.
 
 Both compact authority selectors MUST select only planned nodes with
 `kind: agentic`. If a selector's exact contract or path filter matches any

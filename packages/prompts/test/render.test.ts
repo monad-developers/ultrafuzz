@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { promptArtifactAuthorityPathSelectorId } from "@ultrafuzz/artifacts";
 import {
   loadBuiltInPromptAssets,
   PromptError,
@@ -979,7 +978,7 @@ describe("prompt rendering", () => {
     }
   });
 
-  it("renders a bounded sealed authority while retaining transitive findings-contract selection", () => {
+  it("renders a bounded authority while retaining transitive findings-contract selection", () => {
     const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -1167,7 +1166,6 @@ describe("prompt rendering", () => {
     );
     expect(authorityReference).toMatchObject({
       kind: "ancestor_artifact_path_authority",
-      selectorId: promptArtifactAuthorityPathSelectorId(["setup/base-test-setup.md"]),
       relativePaths: ["setup/base-test-setup.md"]
     });
     expect(
@@ -1307,7 +1305,6 @@ describe("prompt rendering", () => {
     expect(result.artifactReferences).toContainEqual({
       kind: "ancestor_artifact_path_authority",
       logicalIds: [],
-      selectorId: promptArtifactAuthorityPathSelectorId(["missing.json"]),
       relativePaths: ["missing.json"]
     });
   });
@@ -1322,7 +1319,6 @@ describe("prompt rendering", () => {
     expect(renderPrompt(input).artifactReferences).toContainEqual({
       kind: "ancestor_artifact_path_authority",
       logicalIds: [],
-      selectorId: promptArtifactAuthorityPathSelectorId(paths),
       relativePaths: paths
     });
   });
@@ -1330,7 +1326,7 @@ describe("prompt rendering", () => {
   it("rejects unknown contracts in compact ancestor authority selectors", () => {
     expect(() =>
       validatePromptVariables("{{ancestor_contract_artifact_authority:ultrafuzz/not-a-registered-contract@1}}")
-    ).toThrow(/unknown ancestor artifact contract for sealed authority/u);
+    ).toThrow(/unknown ancestor artifact contract for compact authority/u);
     expect(() => validatePromptVariables("{{ancestor_contract_artifact_authority}}")).toThrow(
       /requires an exact registered artifact contract/u
     );
@@ -1360,7 +1356,6 @@ describe("prompt rendering", () => {
     expect(manyPaths.artifactReferences).toContainEqual({
       kind: "ancestor_artifact_path_authority",
       logicalIds: [],
-      selectorId: promptArtifactAuthorityPathSelectorId(paths),
       relativePaths: paths
     });
   });

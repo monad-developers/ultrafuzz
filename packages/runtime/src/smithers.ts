@@ -3895,10 +3895,6 @@ export async function smithersExecutionControlFiles(
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
-  // The compiled task manifest, sealed beside the plan. The workflow no longer
-  // reads this copy: it indexes each task's prompt inputs from the task plan it
-  // runs, after dynamic expansion (#1234).
-  add(compiled.tasksPath, "controls/tasks.json");
   if (compiled.dynamicGroups.length > 0) {
     const dynamicBaseGraphPath = path.join(layout.root, "smithers", "runtime-base-graph.json");
     const dynamicBaseTasksPath = path.join(layout.root, "smithers", "runtime-base-tasks.json");

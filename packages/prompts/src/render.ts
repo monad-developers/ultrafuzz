@@ -4,8 +4,7 @@ import path from "node:path";
 import {
   findingNoteKeyPromptVocabulary,
   findingReachabilityPromptVocabulary,
-  isArtifactContractId,
-  promptArtifactAuthorityPathSelectorId
+  isArtifactContractId
 } from "@ultrafuzz/artifacts";
 
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
@@ -185,12 +184,7 @@ export interface PromptRenderResult {
 export type PromptArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
-  | {
-      kind: "ancestor_artifact_path_authority";
-      logicalIds: string[];
-      selectorId: string;
-      relativePaths: string[];
-    }
+  | { kind: "ancestor_artifact_path_authority"; logicalIds: string[]; relativePaths: string[] }
   | { kind: "ancestor_contract_artifact_authority"; logicalIds: string[]; contract: string };
 
 type ArtifactProducer =
@@ -370,7 +364,6 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     if (ancestorArtifactPathAuthority) {
       rejectCompactAuthoritySuffix(body.slice(occurrence.end));
       const matched = matchingAncestorsByPaths(ancestorArtifactPathAuthority, graph);
-      const selectorId = promptArtifactAuthorityPathSelectorId(ancestorArtifactPathAuthority);
       rejectReferenceAncestorsForCompactAuthority(
         `ancestor_artifact_path_authority:${ancestorArtifactPathAuthority.join(",")}`,
         matched.logicalIds,
@@ -380,7 +373,6 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
       artifactReferences.push({
         kind: "ancestor_artifact_path_authority",
         logicalIds: matched.logicalIds,
-        selectorId,
         relativePaths: ancestorArtifactPathAuthority
       });
       consumed = occurrence.end;
@@ -783,7 +775,7 @@ function parseAncestorArtifactPathAuthoritySelector(name: string): string[] | un
     }
     seen.add(relativePath);
   }
-  // Code-unit order: localeCompare would make the sealed selector ID depend on the host locale.
+  // Code-unit order: localeCompare would make the listed path order depend on the host locale.
   return relativePaths.sort();
 }
 
@@ -794,7 +786,7 @@ function parseAncestorContractArtifactAuthoritySelector(name: string): string | 
   if (!isArtifactContractId(contract)) {
     throw new PromptError(
       "invalid-artifact-reference",
-      `unknown ancestor artifact contract for sealed authority: ${contract}`
+      `unknown ancestor artifact contract for compact authority: ${contract}`
     );
   }
   return contract;

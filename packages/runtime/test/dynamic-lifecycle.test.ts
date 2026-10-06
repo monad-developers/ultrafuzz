@@ -41,7 +41,7 @@ import {
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { verifySealedTaskManifestSnapshot, verifyWorkflowControlSnapshot } from "../src/workflow-integrity.js";
-import { parsePromptArtifactAuthorityBytes } from "../src/prompt-artifact-authority.js";
+import { assertValidPromptArtifactAuthority } from "../src/prompt-artifact-authority.js";
 import { renderedComponents, renderWorkflowInProcess } from "./in-process-workflow.js";
 import type { RuntimeDiagnostic } from "../src/types.js";
 
@@ -2376,8 +2376,9 @@ test("a deferred join run from the execution snapshot gets a prompt input index 
   const [generation, ...moreGenerations] = fs.readdirSync(snapshotsRoot);
   assert.ok(generation !== undefined && moreGenerations.length === 0);
   const snapshotRoot = path.join(snapshotsRoot, generation);
+  // The task manifest as compiled at launch, before the group expanded.
   const sealedJoin = parseSmithersTaskManifestBytes(
-    fs.readFileSync(path.join(snapshotRoot, "controls", "tasks.json"))
+    fs.readFileSync(path.join(snapshotRoot, "controls", "runtime-base-tasks.json"))
   ).tasks.find((task) => task.attemptId === join.attemptId);
   assert.ok(sealedJoin);
   assert.equal(sealedJoin.dependencyArtifactDirs.includes(child.artifactDir), false);
@@ -2429,7 +2430,8 @@ test("a deferred join run from the execution snapshot gets a prompt input index 
   }
 
   const indexPath = path.join(join.workspacePath, ".ultrafuzz", "authorities", `${join.attemptId}.json`);
-  const index = parsePromptArtifactAuthorityBytes(fs.readFileSync(indexPath));
+  const index: unknown = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  assertValidPromptArtifactAuthority(index);
   assert.equal(index.attempt_id, join.attemptId);
   assert.deepEqual(index.producers, [
     {

@@ -55,10 +55,11 @@ import {
 } from "../src/canonical-properties-markdown.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import {
+  assertValidPromptArtifactAuthority,
   derivePromptArtifactAuthority,
-  parsePromptArtifactAuthorityBytes,
   serializePromptArtifactAuthority,
-  type DerivePromptArtifactAuthorityInput
+  type DerivePromptArtifactAuthorityInput,
+  type PromptArtifactAuthorityDocument
 } from "../src/prompt-artifact-authority.js";
 import {
   declaredAncestorOutputsByContract,
@@ -926,6 +927,12 @@ function loadGeneratedPromptArtifactAuthorityHarness(
     relativePath(task: GeneratedPromptArtifactAuthorityTask): string;
   };
   return { ...loaded, derivationInputs };
+}
+
+function readPromptArtifactAuthority(file: string): PromptArtifactAuthorityDocument {
+  const document: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+  assertValidPromptArtifactAuthority(document);
+  return document;
 }
 
 function loadRestoreInvariantSuiteWorkspaceSnapshot(
@@ -7114,7 +7121,7 @@ test("the generated prompt input index lists admitted ancestors' outputs and is 
       [[required.artifactDir]]
     );
     const originalBytes = fs.readFileSync(authorityPath);
-    assert.deepEqual(parsePromptArtifactAuthorityBytes(originalBytes), {
+    assert.deepEqual(readPromptArtifactAuthority(authorityPath), {
       schema_version: "ultrafuzz.prompt-artifact-authority.v1",
       run_id: "run-1",
       attempt_id: "consumer",
@@ -7136,18 +7143,14 @@ test("the generated prompt input index lists admitted ancestors' outputs and is 
     admitted = [required.artifactDir, optional.artifactDir];
     harness.materialize(consumer);
     assert.deepEqual(
-      parsePromptArtifactAuthorityBytes(fs.readFileSync(authorityPath)).producers.map(
-        (producer) => producer.attempt_id
-      ),
+      readPromptArtifactAuthority(authorityPath).producers.map((producer) => producer.attempt_id),
       ["optional-producer", "required-producer"]
     );
     admitted = [required.artifactDir];
 
     harness.materialize(first);
     assert.deepEqual(
-      parsePromptArtifactAuthorityBytes(
-        fs.readFileSync(path.join(first.workspacePath, ".ultrafuzz", "authorities", "first.json"))
-      ).producers,
+      readPromptArtifactAuthority(path.join(first.workspacePath, ".ultrafuzz", "authorities", "first.json")).producers,
       []
     );
 

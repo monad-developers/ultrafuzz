@@ -6,7 +6,6 @@ import {
   assertValidPromptArtifactAuthority,
   derivePromptArtifactAuthority,
   MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
-  parsePromptArtifactAuthorityBytes,
   PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION,
   serializePromptArtifactAuthority,
   type DerivePromptArtifactAuthorityInput,
@@ -105,9 +104,11 @@ test("the prompt input index is portable, lists every declared output of each ad
   });
 
   const bytes = serializePromptArtifactAuthority(authority);
-  assert.deepEqual(parsePromptArtifactAuthorityBytes(bytes), authority);
-  assert.deepEqual(serializePromptArtifactAuthority(parsePromptArtifactAuthorityBytes(bytes)), bytes);
   const json = bytes.toString("utf8");
+  const parsed: unknown = JSON.parse(json);
+  assertValidPromptArtifactAuthority(parsed);
+  assert.deepEqual(parsed, authority);
+  assert.deepEqual(serializePromptArtifactAuthority(parsed), bytes);
   assert.equal(json.includes(planRunRoot), false);
   assert.doesNotMatch(json, /producer-b|unrelated|reference-docs/u);
 });
