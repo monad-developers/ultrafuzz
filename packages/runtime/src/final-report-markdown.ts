@@ -1067,7 +1067,7 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
 function spendExclusionClause(metadata: JsonRecord): string {
   const excluded = exclusionCount(metadata.attempts_without_usage) + exclusionCount(metadata.unpriced_attempts);
   if (excluded === 0) return "";
-  return ` (excludes ${excluded} agent attempt${excluded === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
+  return ` (excludes ${String(excluded)} agent attempt${excluded === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
 }
 
 function exclusionCount(value: unknown): number {

@@ -9189,38 +9189,67 @@ test("final-report workflow metrics use the engine-owned Smithers task runtime h
   assert.match(metricsSource, /runtime: CurrentTaskWorkflowRuntime/u);
 });
 
-test("final-report Run summary copies run accounting, else a continuation's source accounting or a direct run's live usage", async () => {
+/** A final-report task over `<root>/.ultrafuzz/runs/run-1`, and the usage fields its projection copies. */
+function finalReportUsageFixture(root: string) {
+  const runsRoot = path.join(root, ".ultrafuzz", "runs");
+  const runRoot = path.join(runsRoot, "run-1");
+  const workspacePath = path.join(runRoot, "workspaces", "final-report");
+  fs.mkdirSync(workspacePath, { recursive: true });
+  const writeRunMetadata = (value: Record<string, unknown>): void =>
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      `${JSON.stringify({ run_id: "run-1", created_at: "2026-08-20T00:00:00.000Z", ...value })}\n`,
+      "utf8"
+    );
+  writeRunMetadata({});
+  const task = {
+    attemptId: "final-report",
+    runRoot,
+    workspacePath,
+    metadata: { run: { ultrafuzzRunId: "run-1" } },
+    sourceRevision: FINAL_REPORT_TARGET_COMMIT,
+    outputs: [
+      { path: "report.json", contract: "ultrafuzz/report@3" },
+      { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
+    ]
+  };
+  const authorityPath = path.join(
+    workspacePath,
+    ".ultrafuzz",
+    "authorities",
+    "final-report.final-report-run-metadata.json"
+  );
+  const usageOf = async (authority: { materialize(task: unknown): Promise<void> }) => {
+    await authority.materialize(task);
+    const projection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
+    return Object.fromEntries(
+      [
+        "elapsed_time",
+        "models_used",
+        "tokens_used",
+        "estimated_spend",
+        "partial_pricing",
+        "attempts_without_usage",
+        "unpriced_attempts"
+      ]
+        .filter((key) => Object.hasOwn(projection, key))
+        .map((key) => [key, projection[key]])
+    );
+  };
+  const fullMetrics = {
+    elapsed_through: "2026-08-20T01:00:00.000Z",
+    models_used: ["model-a", "model-b"],
+    tokens_used: "1,234",
+    estimated_spend: "$0.46",
+    partial_pricing: false
+  };
+  return { runsRoot, task, writeRunMetadata, usageOf, fullMetrics };
+}
+
+test("final-report Run summary copies run accounting, else a direct run's live usage, else zero usage", async () => {
   const root = temporaryRoot("ultrafuzz-final-report-workflow-metrics-");
   try {
-    const runsRoot = path.join(root, ".ultrafuzz", "runs");
-    const runRoot = path.join(runsRoot, "run-1");
-    const workspacePath = path.join(runRoot, "workspaces", "final-report");
-    fs.mkdirSync(workspacePath, { recursive: true });
-    const writeRunMetadata = (value: Record<string, unknown>): void =>
-      fs.writeFileSync(
-        path.join(runRoot, "run.json"),
-        `${JSON.stringify({ run_id: "run-1", created_at: "2026-08-20T00:00:00.000Z", ...value })}\n`,
-        "utf8"
-      );
-    writeRunMetadata({});
-    const task = {
-      attemptId: "final-report",
-      runRoot,
-      workspacePath,
-      metadata: { run: { ultrafuzzRunId: "run-1" } },
-      sourceRevision: FINAL_REPORT_TARGET_COMMIT,
-      outputs: [
-        { path: "report.json", contract: "ultrafuzz/report@3" },
-        { path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }
-      ]
-    };
-    const fullMetrics = {
-      elapsed_through: "2026-08-20T01:00:00.000Z",
-      models_used: ["model-a", "model-b"],
-      tokens_used: "1,234",
-      estimated_spend: "$0.46",
-      partial_pricing: false
-    };
+    const { writeRunMetadata, usageOf, fullMetrics } = finalReportUsageFixture(root);
     const full = loadFinalReportRunMetadataAuthorityHarness("https://github.com/example/project.git\n", fullMetrics);
     assert.equal(
       full.latestElapsedThrough("2026-08-20T00:45:00.000Z", "2026-08-20T01:00:00.000Z"),
@@ -9231,29 +9260,6 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       () => full.latestElapsedThrough("2026-08-20T01:00:00.000Z", "not-a-timestamp"),
       /elapsed-time metadata is malformed/u
     );
-    const authorityPath = path.join(
-      workspacePath,
-      ".ultrafuzz",
-      "authorities",
-      "final-report.final-report-run-metadata.json"
-    );
-    const usageOf = async (authority: { materialize(task: unknown): Promise<void> }) => {
-      await authority.materialize(task);
-      const projection = JSON.parse(fs.readFileSync(authorityPath, "utf8")) as Record<string, unknown>;
-      return Object.fromEntries(
-        [
-          "elapsed_time",
-          "models_used",
-          "tokens_used",
-          "estimated_spend",
-          "partial_pricing",
-          "attempts_without_usage",
-          "unpriced_attempts"
-        ]
-          .filter((key) => Object.hasOwn(projection, key))
-          .map((key) => [key, projection[key]])
-      );
-    };
 
     // A direct run without accounting yet copies this workflow run's live usage.
     assert.deepEqual(await usageOf(full), {
@@ -9280,8 +9286,7 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       unpriced_attempts: 1
     });
     // Nothing recorded at all is zero usage, never `unavailable`.
-    const unrecorded = loadFinalReportRunMetadataAuthorityHarness();
-    assert.deepEqual(await usageOf(unrecorded), {
+    assert.deepEqual(await usageOf(loadFinalReportRunMetadataAuthorityHarness()), {
       elapsed_time: "unavailable",
       models_used: [],
       tokens_used: "0",
@@ -9312,10 +9317,17 @@ test("final-report Run summary copies run accounting, else a continuation's sour
     const { estimated_spend_usd: _amount, ...unpriced } = cumulative;
     writeRunMetadata({ accounting: { cumulative: { ...unpriced, estimated_spend: "unavailable" } } });
     assert.equal((await usageOf(full)).estimated_spend, "$0.00");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
+test("final-report Run summary of a continuation without accounting copies its source run's accounting", async () => {
+  const root = temporaryRoot("ultrafuzz-final-report-lineage-metrics-");
+  try {
+    const { runsRoot, task, writeRunMetadata, usageOf, fullMetrics } = finalReportUsageFixture(root);
     // A continuation's own accounting includes its source runs. Before it has any, the source run's
-    // accounting stands in, never this workflow run's live subtotal; its own count of attempts
-    // without usage, which already includes the lineage, still applies.
+    // accounting stands in, never this workflow run's live subtotal.
     writeRunMetadata({ source_run_id: "source-run" });
     const sourceRoot = path.join(runsRoot, "source-run");
     fs.mkdirSync(sourceRoot, { recursive: true });
@@ -9337,8 +9349,12 @@ test("final-report Run summary copies run accounting, else a continuation's sour
       partial_pricing: true,
       unpriced_attempts: 1
     });
+    // The continuation's own count of attempts without usage, which includes its lineage, still applies.
+    writeRunMetadata({ source_run_id: "source-run", attempts_without_usage: { attempts: [], cumulative_count: 3 } });
+    assert.equal((await usageOf(lineage)).attempts_without_usage, 3);
     const { accounting: _sourceAccounting, ...sourceWithoutAccounting } = sourceMetadata;
     fs.writeFileSync(path.join(sourceRoot, "run.json"), `${JSON.stringify(sourceWithoutAccounting)}\n`, "utf8");
+    writeRunMetadata({ source_run_id: "source-run" });
     assert.deepEqual(await usageOf(lineage), {
       elapsed_time: "1h 00m",
       models_used: [],

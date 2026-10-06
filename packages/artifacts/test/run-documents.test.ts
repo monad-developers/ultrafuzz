@@ -442,15 +442,18 @@ test("run metadata current accounting must exactly equal its final segment", () 
 
 test("run metadata accepts fallback-priced models and lists attempts without usage", () => {
   const metadata = canonicalRunMetadata();
-  metadata.accounting!.pricing_catalog = {
-    ...metadata.accounting!.pricing_catalog,
+  const pricingCatalog = (document: RunMetadataDocument) => {
+    assert.ok(document.accounting, "the fixture has accounting");
+    return document.accounting.pricing_catalog;
+  };
+  Object.assign(pricingCatalog(metadata), {
     unresolved_models: ["gpt-5.5"],
     fallback: { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5"] },
     model_prices: {
       "gpt-5.5": { inputUsdPerMillion: 5, cachedInputUsdPerMillion: 0.5, outputUsdPerMillion: 30 },
-      ...metadata.accounting!.pricing_catalog.model_prices
+      ...pricingCatalog(metadata).model_prices
     }
-  };
+  });
   const attempt = {
     workflow_run_id: "workflow-replaced",
     source_event_sequence: 7,
@@ -468,7 +471,7 @@ test("run metadata accepts fallback-priced models and lists attempts without usa
     { table: "ultrafuzz.fallback-pricing.2026-10-05", models: ["gpt-5.5", "gpt-5.5"] }
   ]) {
     const invalid = structuredClone(metadata);
-    invalid.accounting!.pricing_catalog.fallback = fallback;
+    pricingCatalog(invalid).fallback = fallback;
     assert.throws(() => assertRunMetadataDocument(invalid), /run metadata/u, JSON.stringify(fallback));
   }
   const invalidAttempts: Array<[RunMetadataDocument["attempts_without_usage"], RegExp]> = [
