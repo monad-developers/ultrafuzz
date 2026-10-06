@@ -133,7 +133,7 @@ test("a real Smithers worktree uses the recorded launch commit after its branch 
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "", SMITHERS_POST_FAILURE: "0" }
+        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "1", SMITHERS_POST_FAILURE: "0" }
       }
     );
 

@@ -39,7 +39,7 @@ test("simultaneously dispatched worktree preparations all succeed under a real S
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "", SMITHERS_POST_FAILURE: "0" }
+        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "1", SMITHERS_POST_FAILURE: "0" }
       }
     );
 
@@ -80,7 +80,7 @@ test("a worktree preparation that fails once is retried and the node succeeds", 
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "", SMITHERS_POST_FAILURE: "0" }
+        env: { ...process.env, SMITHERS_KEEP_WORKTREES: "1", SMITHERS_POST_FAILURE: "0" }
       }
     );
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -35,6 +36,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { projectCanonicalFinalReport, renderArtifactValidationWarningsMarkdown } from "../src/final-report-markdown.js";
+import { captureWorkspacePatch, captureWorkspaceTree } from "../src/workspace-handoff.js";
 import { WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION } from "../src/runtime-contracts.js";
 import {
   assertVerifiedRunOutputAuthorityRemainedCurrent,
@@ -1648,6 +1650,55 @@ test("verified campaign reader rejects post-finalization evidence mutation witho
       /digest\/size binding changed/iu.test(error.message)
   );
   assert.deepEqual(fs.readFileSync(fixture.evidencePath), mutated);
+});
+
+test("a finalized workspace patch stays verified after Ultrafuzz deletes its task worktree", () => {
+  const output = boundOutput("workspace-patch.json", "ultrafuzz/workspace-patch@1", true);
+  const node = plannedAgentNode("setup-foundry", [output], []);
+  const graph: PlannedGraphDocument = {
+    schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
+    graph_version: "4",
+    topology_version: 2,
+    groups: {},
+    nodes: [node]
+  };
+  const layout = createRunLayout({
+    outputRoot: temporaryRoot("ultrafuzz-verified-workspace-patch-"),
+    runId: "verified-workspace-patch",
+    graph,
+    graphFingerprint: "f".repeat(64),
+    configFingerprint: "e".repeat(64),
+    stateNodes: [{ id: node.id, logicalNodeId: node.id, artifactDir: node.artifact_dir, outputs: [output] }]
+  });
+  const workspace = path.join(layout.workspacesDir, node.id);
+  fs.mkdirSync(workspace, { recursive: true });
+  const git = (args: string[]): void => {
+    execFileSync("git", args, { cwd: workspace, stdio: "ignore" });
+  };
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz test"]);
+  git(["config", "user.email", "ultrafuzz@example.invalid"]);
+  fs.writeFileSync(path.join(workspace, "foundry.toml"), "[profile.default]\n");
+  git(["add", "."]);
+  git(["commit", "--quiet", "-m", "baseline"]);
+  const baselineTree = captureWorkspaceTree(workspace);
+  fs.writeFileSync(path.join(workspace, "foundry.toml"), "[profile.default]\nsrc = 'src'\n");
+  const capture = captureWorkspacePatch(workspace, baselineTree);
+  finalizeNodeOutputs(layout, node, node.id, { [output.path]: JSON.stringify(capture.manifest) }, [], 0, {
+    "workspace.patch": capture.patch,
+    "workspace-patch-baseline.json": JSON.stringify({
+      schema_version: "ultrafuzz.workspace-patch-baseline.v1",
+      attempt_id: node.id,
+      baseline_tree: baselineTree
+    })
+  });
+  writeSealedTaskAuthority(layout, graph, [smithersTaskForNode(layout, graph, node, node.id)]);
+  const read = () => loadVerifiedNodeOutputSnapshot({ runRoot: layout.root, logicalNodeId: node.id }).attempt_id;
+  assert.equal(read(), node.id);
+
+  // Finalization checked the patch's Git binding against this worktree; reads check the published bytes (#1227).
+  fs.rmSync(workspace, { recursive: true, force: true });
+  assert.equal(read(), node.id);
 });
 
 function createVerifiedReportFixture(
