@@ -21725,7 +21725,7 @@ test("syncRun prices Kimi models from Moonshot, not an alphabetically earlier sa
   assert.equal(metadata.accounting?.pricing_catalog?.model_prices?.["kimi-k3"]?.inputUsdPerMillion, 3);
 });
 
-test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", async () => {
+test("syncRun prices a Kimi model Moonshot does not list at its fallback list price, never another provider's rate", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -21738,7 +21738,8 @@ test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", asyn
     events: kimiTokenUsageEvents(workflowRunId)
   });
   // Only non-Moonshot providers list the alias; borrowing their rate would
-  // publish a silently wrong cost, so the model must stay unresolved.
+  // publish a silently wrong cost, so the model stays unresolved and is priced
+  // at the versioned Moonshot list price instead.
   env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
     crof: { models: { "kimi-k3": { cost: { input: 2, output: 8, cache_read: 0.25 } } } },
     kenari: { models: { "kimi-k3": { cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 } } } },
@@ -21757,21 +21758,30 @@ test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", asyn
         estimated_spend?: string;
         estimated_spend_usd?: number;
         usage_complete?: boolean;
-        pricing_incomplete_reasons?: Array<{ code?: string }>;
+        pricing_incomplete_reasons?: Array<{ code?: string; component?: string }>;
       };
-      pricing_catalog?: { resolved_models?: string[]; unresolved_models?: string[] };
+      pricing_catalog?: {
+        resolved_models?: string[];
+        unresolved_models?: string[];
+        fallback?: { table: string; models: string[] };
+      };
     };
   };
   assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, []);
   assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["kimi-k3"]);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.fallback, {
+    table: "ultrafuzz.fallback-pricing.2026-10-05",
+    models: ["kimi-k3"]
+  });
   assert.equal(metadata.accounting?.current?.total_tokens, 548_000);
   assert.equal(metadata.accounting?.current?.usage_complete, true);
-  assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, undefined);
-  assert.ok(
-    metadata.accounting?.current?.pricing_incomplete_reasons?.every(
-      (reason) => reason.code === "model-pricing-unavailable"
-    )
+  // 120k uncached input at $3, 400k cache reads at $0.30, and 8k output at $15; the Moonshot list
+  // price has no cache-write rate. crof's $2/$8 would have published $0.40.
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.60+");
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.6);
+  assert.deepEqual(
+    metadata.accounting?.current?.pricing_incomplete_reasons?.map(({ code, component }) => [code, component]),
+    [["component-rate-unavailable", "cache_write"]]
   );
 });
 
