@@ -8,7 +8,7 @@ import type { SmithersTaskManifestTask } from "@ultrafuzz/artifacts";
 import { initProject, planRun } from "../src/index.js";
 import { compileSmithersWorkflow } from "../src/smithers.js";
 import { reconcileSmithersAttemptAgentSelection, smithersTaskAgentId } from "../src/smithers-attempt-authority.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 function reconstructTaskIdentity(matchingStaticTask: boolean) {
   const template = fs.readFileSync(
@@ -108,7 +108,7 @@ nodes:
     depends_on: [report]
 `
   );
-  const plan = await planRun({ projectRoot, runId: "static-identity", env: {} });
+  const plan = await planRun({ projectRoot, runId: "static-identity", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   const compiled = compileSmithersWorkflow({

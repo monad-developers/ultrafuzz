@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -108,7 +108,7 @@ test("compiled dynamic workflow defers templates, emits syntactically valid Type
   git(["add", "--all"]);
   git(["commit", "--quiet", "-m", "dynamic source"]);
   const sourceRevision = git(["rev-parse", "HEAD"]);
-  const plan = await planRun({ projectRoot: project, runId: "dynamic-compile", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "dynamic-compile", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(plan.value!.source_revision, sourceRevision);
   assert.deepEqual(
@@ -286,7 +286,7 @@ nodes:
 `,
     "utf8"
   );
-  const plan = await planRun({ projectRoot: project, runId: "dynamic-optional-inputs", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "dynamic-optional-inputs", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   const planned = plan.value;
@@ -359,7 +359,7 @@ test("compilation snapshots the exact transformed prompt body used during planni
     projectRoot: project,
     runId: "dynamic-transform",
     topologyTransform: { excludedNodeIds: ["context"] },
-    env: {}
+    env: privateHomeEnv()
   });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
 

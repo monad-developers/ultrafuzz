@@ -808,7 +808,11 @@ Write a neutral fixture message to {{artifact_path}}/fixture.md.
       evalRunId: "missing-backend-eval",
       row,
       suite,
-      env: { PATH: path.join(project, "empty-bin") }
+      env: {
+        PATH: path.join(project, "empty-bin"),
+        // A HOME of its own: validation predicts each agent's provider home from it (#1265).
+        HOME: path.join(project, ".home")
+      }
     });
 
     expect(record.status).toBe("failed");

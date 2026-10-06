@@ -8,7 +8,7 @@ import { loadReferenceCatalog } from "@ultrafuzz/references";
 
 import { compileSmithersWorkflow, initProject, planRun } from "../src/index.js";
 import { writeShippedDocumentReferenceCaches, writeShippedVulnerabilityDatabaseCache } from "./reference-fixtures.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 /**
  * Every Smithers engine process parses and transpiles the whole generated workflow (#1146). With a
@@ -28,7 +28,7 @@ test("the packaged default topology compiles to a generated workflow under its b
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   let plan: Awaited<ReturnType<typeof planRun>>;
   try {
-    plan = await planRun({ projectRoot: project, runId: "footprint", env: {} });
+    plan = await planRun({ projectRoot: project, runId: "footprint", env: privateHomeEnv() });
   } finally {
     if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = previousXdgCacheHome;

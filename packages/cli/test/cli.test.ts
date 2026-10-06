@@ -44,7 +44,7 @@ import AdmZip from "adm-zip";
 import { validateReportBundleManifest } from "../src/cli-schema-registry.js";
 import { runCli } from "../src/index.js";
 import { formatStatusDuration } from "../src/status-rendering.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 interface Capture {
   stdout: string;
@@ -475,7 +475,7 @@ async function cli(
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env,
+    env: { ...privateHomeEnv(), ...env },
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
@@ -1885,7 +1885,7 @@ test("clean prints the Modal storage an old cloud run leaves behind once, before
   assert.equal((await cli(project, ["init", "--json"])).code, 0);
   writeSmallTopology(project);
   const runId = "cli-old-cloud-run";
-  const plan = await planRun({ projectRoot: project, runId, env: {} });
+  const plan = await planRun({ projectRoot: project, runId, env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   // The execution block a run planned with `execution.mode = "cloud"` recorded before that mode was removed.
@@ -1931,7 +1931,7 @@ test("status observes an incomplete launch with a successful CLI envelope and un
   assert.equal((await cli(project, ["init", "--json"], env)).code, 0);
   writeSmallTopology(project);
   const runId = "cli-incomplete-launch";
-  const plan = await planRun({ projectRoot: project, runId, env });
+  const plan = await planRun({ projectRoot: project, runId, env: { ...env, ...privateHomeEnv() } });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const status = await cli(project, ["status", runId, "--json"], env);
   assert.equal(status.code, 0, `${status.stderr}\n${status.stdout}`);
