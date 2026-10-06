@@ -3020,9 +3020,11 @@ function mergedPricingCatalogMetadata(input: {
   const fallbackModels = pricedModels.filter((model) => fallbackCandidates.has(model));
   const resolvedModels = pricedModels.filter((model) => !fallbackCandidates.has(model));
   const unresolvedModels = input.requiredModels.filter((model) => !resolvedModels.includes(model));
-  const fallbackTable = input.live?.fallback?.table ?? input.stored?.fallback?.table;
-  if (fallbackModels.length > 0 && fallbackTable === undefined) {
-    throw new Error("fallback-priced models have no fallback pricing table");
+  let fallback: PricingFallbackMetadata | undefined;
+  if (fallbackModels.length > 0) {
+    const table = input.live?.fallback?.table ?? input.stored?.fallback?.table;
+    if (table === undefined) throw new Error("fallback-priced models have no fallback pricing table");
+    fallback = { table, models: fallbackModels };
   }
   const requiredPricing = new Map<string, ModelPricing>();
   for (const model of pricedModels) {
@@ -3042,9 +3044,7 @@ function mergedPricingCatalogMetadata(input: {
     ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
     resolved_models: resolvedModels,
     unresolved_models: unresolvedModels,
-    ...(fallbackModels.length === 0 || fallbackTable === undefined
-      ? {}
-      : { fallback: { table: fallbackTable, models: fallbackModels } }),
+    ...(fallback === undefined ? {} : { fallback }),
     // Stored prices remain useful as a lookup cache above, but the immutable
     // accounting document describes only the latest selected snapshots. A
     // superseded model must not survive here after one attempt switches model.
