@@ -7,6 +7,8 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import { formatEstimatedSpendUsd } from "@ultrafuzz/artifacts";
+
 // One campaign through the shipped product path: `init`, `run`, `resume`, `status`, `stats`,
 // `report`, and `events` each run as their own `ultrafuzz` process, and the generated workflow runs
 // on the pinned Smithers engine under Bun: `run` installs it from npm into the run's execution
@@ -186,6 +188,12 @@ interface HealthValue {
 
 interface StatsValue {
   status: string;
+  totals: {
+    node_count: number;
+    status_counts: Record<string, number>;
+    usage: { estimated_spend_usd: number | null } | null;
+    accounting_cumulative: { estimated_spend_usd: number | null } | null;
+  };
   nodes: Array<{
     node_id: string;
     status: string;
@@ -193,7 +201,6 @@ interface StatsValue {
     executed_attempt_count: number | null;
     failure_categories: string[] | null;
   }>;
-  totals: { node_count: number; status_counts: Record<string, number> };
 }
 
 interface WorkflowEvent {
@@ -531,9 +538,40 @@ test(
         runId
       ]);
       assert.equal(report.source, "verified-runtime-report");
-      const reportJson = JSON.parse(fs.readFileSync(report.json_path, "utf8")) as { run_metadata: { run_id: string } };
+      const reportJson = JSON.parse(fs.readFileSync(report.json_path, "utf8")) as {
+        run_metadata: { run_id: string; target_commit: string | null };
+      };
       assert.equal(reportJson.run_metadata.run_id, runId);
-      assert.match(fs.readFileSync(report.markdown_path, "utf8"), /\S/u);
+      const markdown = fs.readFileSync(report.markdown_path, "utf8");
+      // The Commit row names the fixture commit the run was launched from.
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: campaign.project, encoding: "utf8" }).trim();
+      const runMetadata = JSON.parse(fs.readFileSync(path.join(runRoot, "run.json"), "utf8")) as {
+        source_revision?: string;
+        attempts_without_usage?: { cumulative_count: number };
+        accounting?: {
+          cumulative: { estimated_spend_usd?: number; unpriced_event_count: number; models: string[] };
+          pricing_catalog: { fallback?: { models: string[] } };
+        };
+      };
+      assert.equal(runMetadata.source_revision, head);
+      assert.equal(reportJson.run_metadata.target_commit, head);
+      assert.match(markdown, new RegExp(`^- Commit: \`${head}\`$`, "mu"));
+      // The stub reports usage only from attempts that complete, so the SIGKILLed attempts are counted
+      // instead of priced. The catalog is off, so gpt-5.5 is priced from the fallback list prices.
+      const accounting = runMetadata.accounting;
+      assert.ok(accounting, "the run has no accounting");
+      assert.deepEqual(accounting.pricing_catalog.fallback?.models, accounting.cumulative.models);
+      assert.ok(accounting.cumulative.models.includes("gpt-5.5"), JSON.stringify(accounting.cumulative.models));
+      assert.equal(accounting.cumulative.unpriced_event_count, 0);
+      const excluded = runMetadata.attempts_without_usage?.cumulative_count ?? 0;
+      assert.ok(excluded >= 1, `attempts without usage: ${JSON.stringify(runMetadata.attempts_without_usage)}`);
+      const spendUsd = accounting.cumulative.estimated_spend_usd;
+      assert.ok(spendUsd !== undefined && spendUsd > 0, `estimated spend: ${String(spendUsd)}`);
+      const clause = `(excludes ${excluded} agent attempt${excluded === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
+      assert.ok(
+        markdown.split("\n").includes(`- Estimated spend: \`${formatEstimatedSpendUsd(spendUsd)}\` ${clause}`),
+        markdown
+      );
 
       // `status` counts engine tasks and `stats` counts topology nodes; both must describe the same
       // complete run.
@@ -560,6 +598,9 @@ test(
         statusAttempts
       );
       assert.deepEqual(stats.nodes.find((node) => node.node_id === INTERRUPTED_NODE)?.failure_categories, ["canceled"]);
+      // stats reprices the usage from the same stored rates, so it agrees with the report's spend.
+      assert.equal(stats.totals.accounting_cumulative?.estimated_spend_usd, spendUsd);
+      assert.ok(Math.abs((stats.totals.usage?.estimated_spend_usd ?? Number.NaN) - spendUsd) < 1e-9);
       mark("checks done");
     } finally {
       process.removeListener("SIGINT", interrupted);
