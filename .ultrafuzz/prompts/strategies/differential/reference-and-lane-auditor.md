@@ -18,11 +18,11 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Sealed JSON authority for every declared ancestor differential plan:
+JSON authority for every declared ancestor differential plan:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/differential-plan@1}}
 
-Sealed JSON authority for every declared ancestor reference harness:
+JSON authority for every declared ancestor reference harness:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/reference-harness@1}}
 

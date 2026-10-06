@@ -41,7 +41,6 @@ import {
   parseSmithersTaskManifestBytes,
   readPlannedGraphDocument,
   readRunState,
-  promptArtifactAuthorityPathSelectorId,
   replayEvents,
   threatModelJsonSchema,
   validateRegisteredJsonBytesSync,
@@ -11247,118 +11246,6 @@ test("--refresh-controller keeps a hand-edited static prompt", async () => {
   }>;
   assert.equal(specs.find((spec) => spec.attemptId === planned.attempt_id)?.promptPath, planned.rendered_prompt_path);
   assert.equal(fs.readFileSync(planned.rendered_prompt_path, "utf8"), edited);
-});
-
-test("compileSmithersWorkflow seals the canonical selector union from rendered prompt provenance", async () => {
-  const project = tempProject();
-  initProject({ projectRoot: project, force: true });
-  writeOptionalSpecialistTopology(project);
-  const plan = await planRun({
-    projectRoot: project,
-    runId: "compiled-prompt-authority-selectors",
-    env: privateHomeEnv()
-  });
-  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const reportPrompt = plan.value!.rendered_prompts.find((prompt) => prompt.attempt_id === "final-report");
-  assert.ok(reportPrompt);
-  // Rendering orders each group by code unit, so "Z" precedes "a".
-  const firstPaths = ["reports/Zeta.json", "reports/alpha.json"];
-  const secondPaths = ["reports/alpha.json", "reports/beta.json"];
-  const firstPathSelector = {
-    kind: "path" as const,
-    id: promptArtifactAuthorityPathSelectorId(firstPaths),
-    paths: firstPaths
-  };
-  const secondPathSelector = {
-    kind: "path" as const,
-    id: promptArtifactAuthorityPathSelectorId(secondPaths),
-    paths: secondPaths
-  };
-  reportPrompt.artifact_references = [
-    { kind: "artifact_path" },
-    {
-      kind: "ancestor_contract_artifact_authority",
-      logicalIds: [],
-      contract: "ultrafuzz/generated-tests@3"
-    },
-    {
-      kind: "ancestor_artifact_path_authority",
-      logicalIds: [],
-      selectorId: firstPathSelector.id,
-      relativePaths: firstPaths
-    },
-    { kind: "ancestor_contract_artifact_authority", logicalIds: [], contract: "ultrafuzz/findings@2" },
-    {
-      kind: "ancestor_artifact_path_authority",
-      logicalIds: [],
-      selectorId: secondPathSelector.id,
-      relativePaths: secondPaths
-    },
-    {
-      kind: "ancestor_contract_artifact_authority",
-      logicalIds: [],
-      contract: "ultrafuzz/generated-tests@3"
-    }
-  ];
-  const { compileSmithersWorkflow } = await import("../src/smithers.js");
-  const compileInput = {
-    projectRoot: project,
-    config: plan.value!.resolved_config,
-    graph: plan.value!.expanded_graph,
-    runLayout: plan.value!.layout,
-    workflowName: "ultrafuzz-compiled-prompt-authority-selectors",
-    renderedPrompts: plan.value!.rendered_prompts
-  };
-  const compiled = compileSmithersWorkflow(compileInput);
-  const expectedSelectors = [
-    { kind: "contract", contract: "ultrafuzz/findings@2" },
-    { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
-    ...[firstPathSelector, secondPathSelector].sort((left, right) => (left.id < right.id ? -1 : 1))
-  ];
-
-  const taskManifest = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
-    tasks: Array<{ attemptId: string; promptArtifactAuthoritySelectors?: unknown[] }>;
-  };
-  const reportTask = taskManifest.tasks.find((task) => task.attemptId === "final-report");
-  const directTask = taskManifest.tasks.find((task) => task.attemptId === "direct-strategy");
-  assert.deepEqual(reportTask?.promptArtifactAuthoritySelectors, expectedSelectors);
-  assert.equal("promptArtifactAuthoritySelectors" in directTask!, false);
-
-  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
-  const specsPrefix = "const serializedTaskSpecs = ";
-  const specsStart = workflowSource.indexOf(specsPrefix);
-  const specsEnd = workflowSource.indexOf(" as const;", specsStart);
-  assert.ok(specsStart >= 0 && specsEnd > specsStart, workflowSource);
-  const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
-    attemptId: string;
-    promptArtifactAuthoritySelectors?: unknown[];
-  }>;
-  assert.deepEqual(
-    specs.find((task) => task.attemptId === "final-report")?.promptArtifactAuthoritySelectors,
-    expectedSelectors
-  );
-  assert.equal(
-    "promptArtifactAuthoritySelectors" in specs.find((task) => task.attemptId === "direct-strategy")!,
-    false
-  );
-
-  reportPrompt.artifact_references = [
-    {
-      kind: "ancestor_contract_artifact_authority",
-      logicalIds: [],
-      contract: "ultrafuzz/not-a-registered-contract@1"
-    }
-  ];
-  assert.throws(() => compileSmithersWorkflow(compileInput), /unknown prompt artifact authority contract/u);
-  reportPrompt.artifact_references = [
-    {
-      kind: "ancestor_artifact_path_authority",
-      logicalIds: [],
-      selectorId: firstPathSelector.id,
-      relativePaths: ["../controller-secret.json"]
-    }
-  ];
-  assert.throws(() => compileSmithersWorkflow(compileInput), /invalid prompt artifact authority path selector group/u);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -28017,12 +27904,12 @@ test("an edited prompt that does not validate keeps its tasks' prompts, and the 
   assert.ok(diagnostics.some((diagnostic) => diagnostic.code === "PROMPTS_REFRESHED"));
 });
 
-test("an edited prompt that names an artifact authority its task was not compiled with keeps the run's prompt", async () => {
+test("an edited prompt that names a new artifact authority is applied", async () => {
   const run = await launchPromptRefreshRun("prompt-refresh-authority", [
     { id: "node:project-discovery", state: "finished", attempt: 1 }
   ]);
-  // The workflow authorizes only the ancestor outputs a task was compiled with, so a new authority
-  // in the prompt would name outputs its agent is not allowed to read.
+  // Every agent task gets the index of its admitted ancestors' outputs, so a prompt can name an
+  // authority its launch prompt did not.
   appendProjectPrompt(
     run.project,
     "setup/actors-flows.md",
@@ -28032,14 +27919,11 @@ test("an edited prompt that names an artifact authority its task was not compile
   const diagnostics = await run.resume();
 
   assert.deepEqual(
-    diagnostics.map((diagnostic) => [diagnostic.code, diagnostic.path]),
-    [["PROMPT_REFRESH_REJECTED", ".ultrafuzz/prompts/setup/actors-flows.md"]]
+    diagnostics.map((diagnostic) => diagnostic.code),
+    ["PROMPTS_REFRESHED"],
+    JSON.stringify(diagnostics)
   );
-  assert.match(
-    diagnostics[0]?.message ?? "",
-    /names artifact authorities the task was not compiled with: contract ultrafuzz\/nonempty-markdown@1/u
-  );
-  assert.equal(run.prompt("actors-flows"), run.launchPrompts.actors);
+  assert.match(run.prompt("actors-flows"), /ancestor artifact authority JSON/u);
 });
 
 test("a topology changed since launch skips the prompt refresh with a warning", async () => {
@@ -28221,8 +28105,8 @@ test("resume applies an edited stock review prompt that names artifact authoriti
     readyGroupIds: ["threat-goals", "class-goals"]
   });
   assert.deepEqual(published.promptRenderFailures, []);
-  // Like dedupe-findings' and aggregate-test-files', the final report's prompt names artifact authorities,
-  // which no task whose prompt is rendered at runtime is compiled with (#1234).
+  // Like dedupe-findings' and aggregate-test-files', the final report's prompt is rendered at runtime and
+  // names artifact authorities.
   const reportPath = path.join(runRoot, "artifacts", "final-report", "prompt.rendered.md");
   assert.match(fs.readFileSync(reportPath, "utf8"), /ancestor artifact authority JSON/u);
   const resume = async () => {

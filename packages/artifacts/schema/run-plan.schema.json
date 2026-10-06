@@ -451,7 +451,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind", "logicalIds", "selectorId", "relativePaths"],
+          "required": ["kind", "logicalIds", "relativePaths"],
           "properties": {
             "kind": {
               "const": "ancestor_artifact_path_authority"
@@ -462,9 +462,6 @@
               "items": {
                 "$ref": "#/$defs/safeId"
               }
-            },
-            "selectorId": {
-              "$ref": "#/$defs/sha256"
             },
             "relativePaths": {
               "type": "array",

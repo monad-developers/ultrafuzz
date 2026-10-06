@@ -112,7 +112,6 @@ const {
   verifyThreatModelVulnerabilityDatabaseCapabilities,
   verifyPinnedSubmodulesFromExecutionSnapshot,
   parseRuntimeDocumentBytes,
-  parsePromptArtifactAuthorityBytes,
   serializeRuntimeDocument,
   serializeWorkspacePreparationAuthority,
   serializePromptArtifactAuthority,
@@ -271,12 +270,10 @@ const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_VERIFIED_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_VERIFIED_COMPANION_BYTES = MAX_GENERATED_TEST_COMPANION_BYTES;
 const MAX_PRE_AGENT_EVIDENCE_BYTES = 128 * 1024 * 1024;
-const MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES = 32 * 1024 * 1024;
 const MAX_TASK_PROMPT_BYTES = 64 * 1024 * 1024;
 const MAX_FINAL_REPORT_RUN_METADATA_BYTES = 64 * 1024 * 1024;
 const MAX_FINAL_REPORT_RUN_METADATA_PROJECTION_BYTES = 1024 * 1024;
 const MAX_FINAL_REPORT_PROMPT_AUTHORITY_BYTES = MAX_PRE_AGENT_EVIDENCE_BYTES;
-const MAX_SEALED_TASK_MANIFEST_BYTES = 64 * 1024 * 1024;
 const GOAL_SEARCH_TOPOLOGY_GROUP = "goals";
 const PROMPT_ARTIFACT_AUTHORITY_DIRECTORY = ".ultrafuzz/authorities";
 const unreachableCommitCountCommand =
@@ -353,10 +350,6 @@ const dynamicBaseGraphPath = sealedRuntimeControlPath("runtime-base-graph.json",
 const dynamicBaseTasksPath = sealedRuntimeControlPath("runtime-base-tasks.json", admittedWorkflowControls);
 function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
   const controlPaths = taskWorkflowControlPaths(admittedWorkflowControls);
-  const taskManifestPath =
-    controlPaths.executionSnapshotRoot === undefined
-      ? path.resolve(process.cwd(), task.sourceTaskManifestPath)
-      : path.join(controlPaths.executionSnapshotRoot, "controls", "tasks.json");
   // Every engine, launched from the execution snapshot or not, reads the attempt's own prompt file.
   const promptPath = task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath);
   return {
@@ -364,7 +357,6 @@ function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
     promptPath,
     workflowPath: controlPaths.workflowPath ?? path.resolve(process.cwd(), task.workflowPath),
     executionSnapshotRoot: controlPaths.executionSnapshotRoot,
-    taskManifestPath,
     workspacePath: path.resolve(process.cwd(), task.workspacePath),
     artifactDir: path.resolve(process.cwd(), task.artifactDir),
     dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
@@ -487,10 +479,6 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
         controlPaths.workflowPath ??
         currentProjectPath(path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__), "workflow path"),
       executionSnapshotRoot: controlPaths.executionSnapshotRoot,
-      taskManifestPath:
-        controlPaths.executionSnapshotRoot === undefined
-          ? path.resolve(process.cwd(), __ULTRAFUZZ_RUN_ROOT_RELATIVE__, "smithers", "tasks.json")
-          : path.join(controlPaths.executionSnapshotRoot, "controls", "tasks.json"),
       sourceProjectRoot,
       ...compiledTaskSourceIdentity(task),
       branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
@@ -505,7 +493,6 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
           ?.continueOnFail ??
         false,
       dependencyVerificationProducers: dependencyVerificationProducersFromCompiledTask(task),
-      promptArtifactAuthoritySelectors: task.promptArtifactAuthoritySelectors ?? [],
       campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
         INVARIANT_CAMPAIGN_RUNTIME_CONTRACTS.has(output.contract)
       )
@@ -936,20 +923,8 @@ function shellSingleQuotedContent(value: string): string {
   return value.replaceAll("'", `'"'"'`);
 }
 
-const promptArtifactAuthoritySnapshotsByTask = new Map<string, ImmutableFileSnapshot>();
-
-function promptArtifactAuthoritySelectors(
-  task: (typeof taskSpecs)[number]
-): readonly ({ kind: "contract"; contract: string } | { kind: "path"; id: string; paths: readonly string[] })[] {
-  return task.promptArtifactAuthoritySelectors ?? [];
-}
-
 function promptArtifactAuthorityRelativePath(task: (typeof taskSpecs)[number]): string {
   return path.posix.join(PROMPT_ARTIFACT_AUTHORITY_DIRECTORY, `${task.attemptId}.json`);
-}
-
-function promptArtifactAuthorityPath(task: (typeof taskSpecs)[number], workspaceRoot: string): string {
-  return path.resolve(workspaceRoot, ...promptArtifactAuthorityRelativePath(task).split("/"));
 }
 
 function prepareTaskLocalAuthorityPath(workspaceRoot: string, relativePath: string): string {
@@ -970,87 +945,26 @@ function prepareTaskLocalAuthorityPath(workspaceRoot: string, relativePath: stri
 }
 
 /**
- * Derive the least-authority ancestor declaration immediately before a model
- * attempt. The sealed task manifest stays controller-only; agents receive only
- * this task-local, portable projection inside their existing worktree.
+ * Write the task's index of admitted ancestor outputs immediately before each model attempt. It is
+ * built from the task plan this workflow is running, after dynamic expansion, so a task that waits
+ * on a dynamic group indexes the outputs of the children that group generated (#1234).
  */
 function materializePromptArtifactAuthority(task: (typeof taskSpecs)[number]): void {
-  const selectors = promptArtifactAuthoritySelectors(task);
-  if (selectors.length === 0) {
-    promptArtifactAuthoritySnapshotsByTask.delete(task.attemptId);
-    return;
+  const declarations = semanticArtifactTaskDeclarations();
+  const current = declarations.find((candidate) => candidate.attemptId === task.attemptId);
+  if (current === undefined) {
+    throw new Error(`artifact-contract failure: current task declaration is unavailable ${task.attemptId}`);
   }
-
-  const manifestPath = path.resolve(task.taskManifestPath);
-  const manifestParent = realpathSync(path.dirname(manifestPath));
-  if (path.dirname(manifestPath) !== manifestParent) {
-    throw new Error(`artifact-contract failure: workflow task manifest parent is unsafe ${task.attemptId}`);
-  }
-  const manifest = readBoundedRegularArtifactSnapshot(
-    manifestParent,
-    manifestPath,
-    `artifact-contract failure: workflow task manifest is unavailable ${task.attemptId}`,
-    MAX_SEALED_TASK_MANIFEST_BYTES,
-    true
-  );
-  const admission = assertDependencyArtifactAdmissionCurrent(task);
   const authority = derivePromptArtifactAuthority({
-    sealedTaskManifestBytes: manifest.bytes,
-    currentAttemptId: task.attemptId,
-    relocatedRunRoot: realpathSync(task.runRoot),
-    admittedDependencyArtifactDirs: admission.directories,
-    selectors
+    runId: task.metadata.run.ultrafuzzRunId,
+    current,
+    tasks: declarations,
+    artifactPathBase: realpathSync(task.runRoot),
+    admittedDependencyArtifactDirs: assertDependencyArtifactAdmissionCurrent(task).directories
   });
-  const expected = serializePromptArtifactAuthority(authority);
   const workspaceRoot = realpathSync(task.workspacePath);
   const authorityPath = prepareTaskLocalAuthorityPath(workspaceRoot, promptArtifactAuthorityRelativePath(task));
-  writeFileDurable(authorityPath, expected);
-  const captured = readBoundedRegularArtifactSnapshot(
-    workspaceRoot,
-    authorityPath,
-    `artifact-contract failure: prompt artifact authority is unavailable ${task.attemptId}`,
-    MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
-    true
-  );
-  parsePromptArtifactAuthorityBytes(captured.bytes);
-  if (!captured.bytes.equals(expected)) {
-    throw new Error(
-      `artifact-contract failure: prompt artifact authority changed while materialized ${task.attemptId}`
-    );
-  }
-  promptArtifactAuthoritySnapshotsByTask.set(
-    task.attemptId,
-    Object.freeze({
-      path: captured.path,
-      bytes: Buffer.from(captured.bytes),
-      identity: captured.identity
-    })
-  );
-}
-
-function assertPromptArtifactAuthorityUnchanged(task: (typeof taskSpecs)[number]): void {
-  if (promptArtifactAuthoritySelectors(task).length === 0) return;
-  const expected = promptArtifactAuthoritySnapshotsByTask.get(task.attemptId);
-  if (expected === undefined) {
-    throw new Error(`artifact-contract failure: prompt artifact authority was not prepared ${task.attemptId}`);
-  }
-  const workspaceRoot = realpathSync(task.workspacePath);
-  const authorityPath = promptArtifactAuthorityPath(task, workspaceRoot);
-  const captured = readBoundedRegularArtifactSnapshot(
-    workspaceRoot,
-    authorityPath,
-    `artifact-contract failure: prompt artifact authority is unavailable ${task.attemptId}`,
-    MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
-    true
-  );
-  parsePromptArtifactAuthorityBytes(captured.bytes);
-  if (
-    captured.path !== expected.path ||
-    !sameImmutableFileIdentity(captured.identity, expected.identity) ||
-    !captured.bytes.equals(expected.bytes)
-  ) {
-    throw new Error(`artifact-contract failure: prompt artifact authority was modified ${task.attemptId}`);
-  }
+  writeFileDurable(authorityPath, serializePromptArtifactAuthority(authority));
 }
 
 function verifiedDependencyJsonArtifact(
@@ -2563,7 +2477,6 @@ function artifactAwareAgent(
         assertWorkspaceSourceRevision(task);
         await resetTaskArtifactsForRetry(task, finalReportTaskRuntimeFromAgentArgs(task, args));
       } else {
-        assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
       }
@@ -2645,7 +2558,6 @@ function artifactAwareAgent(
         Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
         const result = await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
-        assertPromptArtifactAuthorityUnchanged(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
         return {
@@ -2655,7 +2567,6 @@ function artifactAwareAgent(
       } catch (error) {
         try {
           assertDependencyArtifactAdmissionCurrent(task);
-          assertPromptArtifactAuthorityUnchanged(task);
           assertFinalReportRunMetadataAuthorityUnchanged(task);
           assertFinalReportPromptAuthorityUnchanged(task);
         } catch (authorityError) {

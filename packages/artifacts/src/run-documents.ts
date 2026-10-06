@@ -4,7 +4,6 @@ import { isDeepStrictEqual } from "node:util";
 import { isArtifactContractId } from "./artifact-contract-ids.js";
 import { withJournalLock } from "./journal-lock.js";
 import { validateRegisteredJsonSchema, type JsonSchemaValidationResult } from "./json-schema-validator.js";
-import { promptArtifactAuthorityPathSelectorId } from "./prompt-artifact-authority-selectors.js";
 import { writeJsonDurable } from "./safe-paths.js";
 import { artifactSchemaDirectory, readRegularFileSnapshot } from "./schema-registry.js";
 import { parseStrictJsonBytes } from "./strict-json.js";
@@ -71,12 +70,7 @@ export interface RunPlanExecution {
 export type RunPlanArtifactReference =
   | { kind: "artifact_path"; logicalId?: string; suffix?: string }
   | { kind: "artifact_handoff"; logicalId: string }
-  | {
-      kind: "ancestor_artifact_path_authority";
-      logicalIds: string[];
-      selectorId: string;
-      relativePaths: string[];
-    }
+  | { kind: "ancestor_artifact_path_authority"; logicalIds: string[]; relativePaths: string[] }
   | { kind: "ancestor_contract_artifact_authority"; logicalIds: string[]; contract: string };
 
 export interface RunPlanRenderedPrompt {
@@ -358,14 +352,6 @@ export function assertRunPlanDocument(value: unknown, expectedRunId?: string): R
       if (reference.kind === "ancestor_contract_artifact_authority" && !isArtifactContractId(reference.contract)) {
         throw new Error(
           `run plan rendered prompt ${JSON.stringify(prompt.attempt_id)} has an unknown compact authority contract`
-        );
-      }
-      if (reference.kind !== "ancestor_artifact_path_authority") continue;
-      // The schema already makes the paths unique. Their order is not checked:
-      // plans sealed before code-unit ordering hold them in host-collation order.
-      if (reference.selectorId !== promptArtifactAuthorityPathSelectorId(reference.relativePaths)) {
-        throw new Error(
-          `run plan rendered prompt ${JSON.stringify(prompt.attempt_id)} has an invalid compact path authority group`
         );
       }
     }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
 import { ARTIFACTS_MODULE_URL, runWithRebuiltValidator } from "./rebuilt-validator.js";
 import { setRefreshPromptsOnResume } from "./prompt-refresh-config.js";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -40,6 +41,8 @@ import {
 } from "../src/smithers.js";
 import { bindSmithersExecutableCapability } from "../src/smithers-executable-capability.js";
 import { verifySealedTaskManifestSnapshot, verifyWorkflowControlSnapshot } from "../src/workflow-integrity.js";
+import { assertValidPromptArtifactAuthority } from "../src/prompt-artifact-authority.js";
+import { renderedComponents, renderWorkflowInProcess } from "./in-process-workflow.js";
 import type { RuntimeDiagnostic } from "../src/types.js";
 
 interface LifecycleStep {
@@ -73,6 +76,8 @@ interface DynamicFixture {
   plannerTask: CompiledSmithersTask;
   generatedTasks: CompiledSmithersTask[];
   joinTask: CompiledSmithersTask;
+  /** The task plan after the fixture's render expanded the group. */
+  tasks: CompiledSmithersTask[];
   generatedNodeId?: string;
   storageId?: string;
 }
@@ -92,7 +97,13 @@ function writePrompt(project: string, relativePath: string, id: string, body: st
 }
 
 /** `twinJoin` adds a second join whose prompt launches with the join's text, so both share one template copy. */
-function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup = false, twinJoin = false): void {
+function writeDynamicProject(
+  project: string,
+  modelFanout: boolean,
+  emptyGroup = false,
+  twinJoin = false,
+  joinPrompt = "Summarize completed work in {{artifact_path}}/report.md."
+): void {
   initProject({ projectRoot: project, force: true });
   // The fake runner never heartbeats, so a sync that runs one lease after launch parks every open node
   // as a lost controller. Slow CI setup alone can take longer than the default 30 s lease.
@@ -107,7 +118,7 @@ function writeDynamicProject(project: string, modelFanout: boolean, emptyGroup =
     "dynamic-worker",
     "Your /goal is {{item.goal_prompt}} using threat model threat {{liquidation:overdue}}.\n{{finding_reachability_vocabulary}}\n{{finding_note_key_vocabulary}}"
   );
-  writePrompt(project, "dynamic/join.md", "dynamic-join", "Summarize completed work in {{artifact_path}}/report.md.");
+  writePrompt(project, "dynamic/join.md", "dynamic-join", joinPrompt);
   if (twinJoin) {
     writePrompt(
       project,
@@ -290,12 +301,13 @@ async function createDynamicFixture(input: {
   goals?: Array<Record<string, unknown>>;
   modelFanout?: boolean;
   twinJoin?: boolean;
+  joinPrompt?: string;
   /** Runs after launch and before the fixture's render expands the group. */
   beforeExpansion?: (project: string, groups: readonly CompiledSmithersDynamicGroup[]) => void;
 }): Promise<DynamicFixture> {
   const project = tempProject();
   const emptyGroup = input.goals !== undefined && input.goals.length === 0;
-  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup, input.twinJoin ?? false);
+  writeDynamicProject(project, input.modelFanout ?? false, emptyGroup, input.twinJoin ?? false, input.joinPrompt);
   const lifecycle = lifecycleEnvironment(project);
   const started = await startRun({
     projectRoot: project,
@@ -415,6 +427,7 @@ async function createDynamicFixture(input: {
     plannerTask,
     generatedTasks,
     joinTask,
+    tasks: materialized.tasks,
     generatedNodeId: generatedNode?.id,
     storageId: generatedNode?.dynamic_generated?.storage_id
   };
@@ -2342,4 +2355,100 @@ test("prompts that share a template copy apply their own edits until a later ren
   }
   assert.equal(fs.readFileSync(copyPath, "utf8"), launchedCopy);
   assert.equal(fs.readFileSync(fixture.joinTask.renderedPromptPath, "utf8"), joinPrompt);
+});
+
+// #1234: a task that waits on a dynamic group, such as the stock dedupe-findings, has its prompt rendered
+// at runtime, and its inputs include the children the group generated, which the task manifest sealed in
+// the execution snapshot at launch does not list. The engine runs the snapshot's workflow, which writes
+// the join's prompt input index from the task plan it runs before the agent starts.
+test("a deferred join run from the execution snapshot gets a prompt input index listing its ancestors' outputs", async () => {
+  const fixture = await createDynamicFixture({
+    runId: "dynamic-deferred-authority",
+    joinPrompt:
+      "Summarize completed work in {{artifact_path}}/report.md.\n{{ancestor_artifact_path_authority:plan.json}}"
+  });
+  const join = fixture.joinTask;
+  const [child] = fixture.generatedTasks;
+  assert.ok(child && join.renderedPromptPath);
+  assert.deepEqual(join.deferredPromptGroups, ["fanout"]);
+  writeFinding(child);
+  const snapshotsRoot = path.join(fixture.runRoot, "smithers", "execution-snapshots");
+  const [generation, ...moreGenerations] = fs.readdirSync(snapshotsRoot);
+  assert.ok(generation !== undefined && moreGenerations.length === 0);
+  const snapshotRoot = path.join(snapshotsRoot, generation);
+  // The task manifest as compiled at launch, before the group expanded.
+  const sealedJoin = parseSmithersTaskManifestBytes(
+    fs.readFileSync(path.join(snapshotRoot, "controls", "runtime-base-tasks.json"))
+  ).tasks.find((task) => task.attemptId === join.attemptId);
+  assert.ok(sealedJoin);
+  assert.equal(sealedJoin.dependencyArtifactDirs.includes(child.artifactDir), false);
+  assert.ok(join.dependencyArtifactDirs.includes(child.artifactDir));
+
+  // The in-process render loads its program beside the workflow, in the read-only snapshot.
+  const workflows = path.join(snapshotRoot, ".smithers", "workflows");
+  const workflowsMode = fs.statSync(workflows).mode & 0o777;
+  fs.chmodSync(workflows, workflowsMode | 0o200);
+  const rendered = await renderWorkflowInProcess({
+    workflowPath: path.join(workflows, `ultrafuzz-${fixture.runId}.tsx`),
+    projectRoot: fixture.project,
+    dispatchInput: JSON.parse(fs.readFileSync(path.join(fixture.runRoot, "smithers", "input.json"), "utf8")) as unknown,
+    agentRefs: fixture.tasks.flatMap((task) => task.agentChain.map((entry) => entry.agentRef)),
+    artifactsModule: ARTIFACTS_MODULE_URL,
+    runtimeModule: new URL("../src/index.js", import.meta.url).href
+  }).finally(() => fs.chmodSync(workflows, workflowsMode));
+  const workflowTasks = new Map(
+    renderedComponents(rendered)
+      .filter((entry) => entry.component === "Task")
+      .map((entry) => [entry.props.id as string, entry.props])
+  );
+  type Agent = { generate(args: unknown): Promise<unknown> };
+  const preparation = workflowTasks.get(join.preparationSmithersNodeId) as { children: () => unknown } | undefined;
+  // The join's agent chain; its first agent runs the first attempt.
+  const agents = workflowTasks.get(join.smithersNodeId)?.agent as Agent | Agent[] | undefined;
+  const [agent] = agents === undefined ? [] : [agents].flat();
+  assert.ok(preparation && agent, [...workflowTasks.keys()].join(", "));
+  // The engine creates the join's worktree before its preparation.
+  fs.mkdirSync(join.workspacePath, { recursive: true });
+  for (const args of [
+    ["init", "-q"],
+    ["commit", "-q", "--allow-empty", "-m", "launch"]
+  ]) {
+    execFileSync("git", ["-c", "user.name=Ultrafuzz", "-c", "user.email=test@ultrafuzz.invalid", ...args], {
+      cwd: join.workspacePath,
+      stdio: "ignore"
+    });
+  }
+  const previousCwd = process.cwd();
+  process.chdir(fixture.project);
+  try {
+    assert.deepEqual(preparation.children(), { prepared: true });
+    assert.deepEqual(await agent.generate({ prompt: "Summarize.", taskContext: { attempt: 1 } }), {
+      _output: { completed: true }
+    });
+  } finally {
+    process.chdir(previousCwd);
+  }
+
+  const indexPath = path.join(join.workspacePath, ".ultrafuzz", "authorities", `${join.attemptId}.json`);
+  const index: unknown = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  assertValidPromptArtifactAuthority(index);
+  assert.equal(index.attempt_id, join.attemptId);
+  assert.deepEqual(index.producers, [
+    {
+      attempt_id: child.attemptId,
+      logical_node_id: child.logicalNodeId,
+      artifact_dir: `artifacts/${child.attemptId}`,
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2" }]
+    },
+    {
+      attempt_id: fixture.plannerTask.attemptId,
+      logical_node_id: "planner",
+      artifact_dir: `artifacts/${fixture.plannerTask.attemptId}`,
+      outputs: [{ path: "plan.json", contract: "ultrafuzz/goal-plan@1" }]
+    }
+  ]);
+  // The join's runtime-rendered prompt names that file and the output it reads from it.
+  const prompt = fs.readFileSync(join.renderedPromptPath, "utf8");
+  assert.ok(prompt.includes(`\`${indexPath}\``), prompt);
+  assert.ok(prompt.includes("whose declared `path` is `plan.json`;"), prompt);
 });

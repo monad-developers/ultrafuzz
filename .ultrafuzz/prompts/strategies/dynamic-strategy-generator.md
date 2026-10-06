@@ -86,7 +86,7 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Sealed JSON authority for generated-test manifests declared by every ancestor
+JSON authority for generated-test manifests declared by every ancestor
 producer in the effective topology:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}
@@ -96,7 +96,7 @@ schema-defined empty manifests. Do not expect an expanded manifest-path array
 in this prompt, substitute a hardcoded strategy list, or assume that every
 findings producer declares generated tests.
 
-Sealed JSON authority for findings artifacts declared by every ancestor
+JSON authority for findings artifacts declared by every ancestor
 producer in the effective topology:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/findings@2}}
@@ -104,11 +104,11 @@ producer in the effective topology:
 Read every findings artifact selected by that manifest definition when deciding
 what is already covered, including schema-defined empty findings artifacts. Do
 not expect an expanded findings-path array in this prompt. The two
-contract-derived sealed selectors above are the complete declared producer
+contract-derived authorities above are the complete declared producer
 intake for those artifact types. Never infer findings intake from a filename or
 a hard-coded strategy list.
 
-Sealed JSON authority for boundary-recipe artifacts declared by ancestor
+JSON authority for boundary-recipe artifacts declared by ancestor
 producers in the effective topology:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/boundary-recipes@1}}

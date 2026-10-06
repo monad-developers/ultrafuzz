@@ -164,10 +164,9 @@ Resume reports what the refresh did, and none of it fails the resume:
   lists every file it rewrites with its old and new SHA-256. It then copies
   each file there, at the file's path in the run, and replaces it atomically.
 - `PROMPT_REFRESH_REJECTED` (warning) names a prompt it did not apply, and why:
-  `ultrafuzz run` would reject it, it does not render for one of its tasks, it
-  names an artifact authority that one of its static tasks was not compiled
-  with, or it shares a template copy that a later render reads with another
-  prompt whose new text differs. A prompt is applied to every task rendered
+  `ultrafuzz run` would reject it, it does not render for one of its tasks, or
+  it shares a template copy that a later render reads with another prompt whose
+  new text differs. A prompt is applied to every task rendered
   from it or to none, and the other prompts still apply. Fix it and resume
   again.
 - `PROMPT_REFRESH_SKIPPED` (warning) means it applied nothing, and says why:

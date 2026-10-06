@@ -32,7 +32,7 @@ validate every selected lens JSON; it is the machine-readable source of truth.
 Use `{{schema_path}}/property-lens.schema.json` to validate each source catalog
 and assign every retained priority as `high`, `medium`, or `low`.
 
-Sealed JSON authority for every ancestor property-lens artifact that passed
+JSON authority for every ancestor property-lens artifact that passed
 verification:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/property-lens@2}}

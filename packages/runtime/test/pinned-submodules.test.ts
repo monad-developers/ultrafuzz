@@ -6,8 +6,6 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { parseSmithersTaskManifestBytes } from "@ultrafuzz/artifacts";
-
 import {
   capturePinnedSubmoduleSnapshot,
   enablePinnedSubmoduleWorktreeConfig,
@@ -573,9 +571,6 @@ test("pinned local compilation carries the exact manifest through sealed executi
     ULTRAFUZZ_TRUSTED_BIN: trustedBin
   };
   const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, executionEnvironment);
-  const sealedTaskManifest = executionFiles.find((file) => file.snapshotPath === "controls/tasks.json");
-  assert.ok(sealedTaskManifest !== undefined);
-  assert.equal(fs.realpathSync(sealedTaskManifest.sourcePath), fs.realpathSync(compiled.tasksPath));
   const pinnedPaths = executionFiles
     .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
     .map((file) => file.snapshotPath);
@@ -617,10 +612,6 @@ test("pinned local compilation carries the exact manifest through sealed executi
   assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bunfig.toml"), "utf8"), "\n");
   assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bun-empty.env"), "utf8"), "\n");
   assert.equal(fs.readFileSync(path.join(materialized.root, "tsconfig.json"), "utf8"), "{}\n");
-  assert.deepEqual(
-    parseSmithersTaskManifestBytes(fs.readFileSync(path.join(materialized.root, "controls", "tasks.json"))),
-    parseSmithersTaskManifestBytes(fs.readFileSync(compiled.tasksPath))
-  );
   assert.equal(
     sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
     expectation.manifest_sha256

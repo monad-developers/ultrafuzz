@@ -3,214 +3,85 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  artifactContractDefinition,
-  artifactContractSchemaBinding,
-  promptArtifactAuthorityPathSelectorId,
-  SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
-  SMITHERS_TASK_METADATA_SCHEMA_VERSION,
-  type ArtifactContractId,
-  type SmithersTaskManifestDocument,
-  type SmithersTaskManifestOutput,
-  type SmithersTaskManifestTask
-} from "@ultrafuzz/artifacts";
-
-import {
   assertValidPromptArtifactAuthority,
   derivePromptArtifactAuthority,
   MAX_PROMPT_ARTIFACT_AUTHORITY_BYTES,
-  parsePromptArtifactAuthorityBytes,
   PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION,
   serializePromptArtifactAuthority,
   type DerivePromptArtifactAuthorityInput,
   type PromptArtifactAuthorityDocument
 } from "../src/prompt-artifact-authority.js";
+import type { SemanticArtifactTaskDeclaration } from "../src/semantic-artifact-context.js";
 
-const controllerRunRoot = "/controller/project/.ultrafuzz/runs/run-1";
+const planRunRoot = "/controller/project/.ultrafuzz/runs/run-1";
 const relocatedRunRoot = "/modal/project/.ultrafuzz/runs/run-1";
 
-function pathSelector(paths: string[]) {
-  return { kind: "path" as const, id: promptArtifactAuthorityPathSelectorId(paths), paths };
-}
-
-function declaredOutput(outputPath: string, contract: ArtifactContractId, primary = false): SmithersTaskManifestOutput {
-  const binding = artifactContractSchemaBinding(contract);
-  return {
-    path: outputPath,
-    contract,
-    contractDigest: artifactContractDefinition(contract).digest,
-    ...(binding === undefined
-      ? {}
-      : {
-          schemaFile: binding.schema_file,
-          schemaId: binding.schema_id,
-          schemaSha256: binding.schema_sha256,
-          schemaBundleSha256: binding.schema_bundle_sha256,
-          validatorBuild: binding.validator_build
-        }),
-    primary
-  };
-}
-
-function sealedTask(input: {
+function declaredTask(input: {
   attemptId: string;
   logicalNodeId?: string;
-  outputs: SmithersTaskManifestOutput[];
+  outputs: Array<{ path: string; contract: string }>;
   dependencies?: string[];
   dependencyArtifactDirs?: string[];
-  optionalDependencyArtifactDirs?: string[];
-  promptArtifactAuthoritySelectors?: SmithersTaskManifestTask["promptArtifactAuthoritySelectors"];
-}): SmithersTaskManifestTask {
-  const dependencies = input.dependencies ?? [];
-  const dependencySmithersNodeIds = dependencies.map((attemptId) => `verify:${attemptId}`);
-  const artifactDir = path.join(controllerRunRoot, "artifacts", input.attemptId);
-  const workspacePath = path.join(controllerRunRoot, "workspaces", input.attemptId);
-  const logicalNodeId = input.logicalNodeId ?? input.attemptId;
-  const agentChain = [
-    {
-      profileId: "default",
-      agentRef: "CodexAgent",
-      modelName: "gpt-test",
-      reasoningEffort: "high",
-      role: "primary" as const
-    }
-  ];
-  const execution = {
-    mode: "local" as const,
-    resources: { cpu: 1, memoryMiB: 1_024, timeoutSeconds: 60 },
-    agentCredentialEnv: []
-  };
+}): SemanticArtifactTaskDeclaration {
   return {
     attemptId: input.attemptId,
-    concreteNodeId: input.attemptId,
-    logicalNodeId,
-    preparationSmithersNodeId: `prepare:${input.attemptId}`,
-    smithersNodeId: `node:${input.attemptId}`,
-    verifierSmithersNodeId: `verify:${input.attemptId}`,
-    agentRef: "CodexAgent",
-    agentChain,
-    modelName: "gpt-test",
-    reasoningEffort: "high",
-    dependencies,
-    dependencySmithersNodeIds,
-    timeoutMs: 60_000,
-    heartbeatTimeoutMs: 60_000,
-    retries: 0,
-    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000 },
-    workspacePath,
-    artifactDir,
+    logicalNodeId: input.logicalNodeId ?? input.attemptId,
+    artifactDir: path.join(planRunRoot, "artifacts", input.attemptId),
+    dependencies: input.dependencies ?? [],
     dependencyArtifactDirs: input.dependencyArtifactDirs ?? [],
-    ...(input.optionalDependencyArtifactDirs === undefined
-      ? {}
-      : { optionalDependencyArtifactDirs: input.optionalDependencyArtifactDirs }),
-    ...(input.promptArtifactAuthoritySelectors === undefined
-      ? {}
-      : { promptArtifactAuthoritySelectors: input.promptArtifactAuthoritySelectors }),
-    execution,
-    metadata: {
-      schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
-      run: {
-        ultrafuzzRunId: "run-1",
-        smithersWorkflowName: "workflow-run-1",
-        graphVersion: "4",
-        topologyVersion: 2
-      },
-      node: {
-        concreteNodeId: input.attemptId,
-        logicalNodeId,
-        attemptId: input.attemptId,
-        label: logicalNodeId,
-        kind: "agentic"
-      },
-      dependencies: {
-        concreteNodeIds: [...dependencies],
-        attemptIds: [...dependencies],
-        smithersNodeIds: dependencySmithersNodeIds
-      },
-      loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
-      model: {
-        profileId: "default",
-        agentRef: "CodexAgent",
-        modelName: "gpt-test",
-        reasoningEffort: "high",
-        modelIndex: 0,
-        attemptIndex: 0,
-        agentChain
-      },
-      workspace: {
-        primitive: "worktree",
-        path: workspacePath,
-        repoPath: "/controller/project",
-        trustModel: "skip-permissions"
-      },
-      artifacts: {
-        dir: artifactDir,
-        outputs: input.outputs,
-        manifestPath: path.join(artifactDir, "artifact-manifest.json")
-      },
-      retryPolicy: { maxAttempts: 1, sameAgentAttempts: 1, smithersRetries: 0 },
-      timeout: { milliseconds: 60_000, seconds: 60, heartbeatTimeoutMs: 60_000 },
-      execution: { mode: "local", resources: execution.resources }
-    }
+    outputs: input.outputs
   };
 }
 
-function fixtureManifest(): SmithersTaskManifestDocument {
-  const producerA = sealedTask({
+function fixturePlan(): { consumer: SemanticArtifactTaskDeclaration; tasks: SemanticArtifactTaskDeclaration[] } {
+  const producerA = declaredTask({
     attemptId: "producer-a",
     logicalNodeId: "strategy-a",
     outputs: [
-      declaredOutput("generated-tests/manifest.json", "ultrafuzz/generated-tests@3"),
-      declaredOutput("findings.json", "ultrafuzz/findings@2", true),
-      declaredOutput("notes.txt", "ultrafuzz/text@1")
+      { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" },
+      { path: "findings.json", contract: "ultrafuzz/findings@2" },
+      { path: "notes.txt", contract: "ultrafuzz/text@1" }
     ]
   });
-  const producerB = sealedTask({
+  const producerB = declaredTask({
     attemptId: "producer-b",
     logicalNodeId: "optional-strategy",
-    outputs: [declaredOutput("findings.json", "ultrafuzz/findings@2", true)]
+    outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2" }]
   });
-  const unrelated = sealedTask({
+  const unrelated = declaredTask({
     attemptId: "unrelated",
-    outputs: [declaredOutput("generated-tests/manifest.json", "ultrafuzz/generated-tests@3", true)]
+    outputs: [{ path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" }]
   });
-  const dependencyArtifactDirs = [producerA.artifactDir, producerB.artifactDir];
-  const consumer = sealedTask({
+  const consumer = declaredTask({
     attemptId: "consumer",
-    outputs: [declaredOutput("report.md", "ultrafuzz/nonempty-markdown@1", true)],
+    outputs: [{ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }],
     dependencies: [producerA.attemptId, producerB.attemptId],
-    dependencyArtifactDirs,
-    optionalDependencyArtifactDirs: [producerB.artifactDir],
-    promptArtifactAuthoritySelectors: [
-      { kind: "contract", contract: "ultrafuzz/generated-tests@3" },
-      pathSelector(["findings.json"])
+    // A reference ancestor has an artifact directory but no task declaration.
+    dependencyArtifactDirs: [
+      producerA.artifactDir,
+      producerB.artifactDir,
+      path.join(planRunRoot, "artifacts", "reference-docs")
     ]
   });
-  return {
-    schema_version: SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
-    run_id: "run-1",
-    smithers_run_id: "ultrafuzz-run-1",
-    workflow_name: "workflow-run-1",
-    pinned_submodules: null,
-    tasks: [producerA, producerB, unrelated, consumer]
-  };
-}
-
-function manifestBytes(manifest = fixtureManifest()): Buffer {
-  return Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return { consumer, tasks: [producerA, producerB, unrelated, consumer] };
 }
 
 function deriveInput(overrides: Partial<DerivePromptArtifactAuthorityInput> = {}): DerivePromptArtifactAuthorityInput {
+  const { consumer, tasks } = fixturePlan();
   return {
-    sealedTaskManifestBytes: manifestBytes(),
-    currentAttemptId: "consumer",
-    relocatedRunRoot,
-    admittedDependencyArtifactDirs: [path.join(relocatedRunRoot, "artifacts", "producer-a")],
-    selectors: [pathSelector(["findings.json"]), { kind: "contract", contract: "ultrafuzz/generated-tests@3" }],
+    runId: "run-1",
+    current: consumer,
+    tasks,
+    artifactPathBase: relocatedRunRoot,
+    admittedDependencyArtifactDirs: [
+      path.join(planRunRoot, "artifacts", "producer-a"),
+      path.join(planRunRoot, "artifacts", "reference-docs")
+    ],
     ...overrides
   };
 }
 
-test("per-task prompt authority is portable, minimized, deterministic, and round-trips", () => {
+test("the prompt input index is portable, lists every declared output of each admitted ancestor, and round-trips", () => {
   const authority = derivePromptArtifactAuthority(deriveInput());
 
   assert.deepEqual(authority, {
@@ -218,7 +89,6 @@ test("per-task prompt authority is portable, minimized, deterministic, and round
     run_id: "run-1",
     attempt_id: "consumer",
     artifact_path_base: relocatedRunRoot,
-    selectors: [{ kind: "contract", contract: "ultrafuzz/generated-tests@3" }, pathSelector(["findings.json"])],
     producers: [
       {
         attempt_id: "producer-a",
@@ -226,184 +96,116 @@ test("per-task prompt authority is portable, minimized, deterministic, and round
         artifact_dir: "artifacts/producer-a",
         outputs: [
           { path: "findings.json", contract: "ultrafuzz/findings@2" },
-          { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" }
+          { path: "generated-tests/manifest.json", contract: "ultrafuzz/generated-tests@3" },
+          { path: "notes.txt", contract: "ultrafuzz/text@1" }
         ]
       }
     ]
   });
 
   const bytes = serializePromptArtifactAuthority(authority);
-  assert.deepEqual(parsePromptArtifactAuthorityBytes(bytes), authority);
-  assert.deepEqual(serializePromptArtifactAuthority(parsePromptArtifactAuthorityBytes(bytes)), bytes);
   const json = bytes.toString("utf8");
-  assert.equal(json.includes(controllerRunRoot), false);
-  assert.doesNotMatch(json, /modelName|reasoningEffort|workspacePath|source_revision|dependencyArtifactDirs/u);
-  assert.doesNotMatch(json, /producer-b|unrelated|notes\.txt/u);
+  const parsed: unknown = JSON.parse(json);
+  assertValidPromptArtifactAuthority(parsed);
+  assert.deepEqual(parsed, authority);
+  assert.deepEqual(serializePromptArtifactAuthority(parsed), bytes);
+  assert.equal(json.includes(planRunRoot), false);
+  assert.doesNotMatch(json, /producer-b|unrelated|reference-docs/u);
 });
 
 test("optional producers appear only in the exact admitted dependency set", () => {
   const authority = derivePromptArtifactAuthority(
     deriveInput({
       admittedDependencyArtifactDirs: [
-        path.join(relocatedRunRoot, "artifacts", "producer-a"),
-        path.join(relocatedRunRoot, "artifacts", "producer-b")
+        path.join(planRunRoot, "artifacts", "producer-a"),
+        path.join(planRunRoot, "artifacts", "producer-b")
       ]
     })
-  );
-  assert.deepEqual(
-    authority.producers.map((producer) => producer.attempt_id),
-    ["producer-a", "producer-b"]
   );
   assert.deepEqual(
     authority.producers.map((producer) => producer.artifact_dir),
     ["artifacts/producer-a", "artifacts/producer-b"]
   );
+  assert.deepEqual(derivePromptArtifactAuthority(deriveInput({ admittedDependencyArtifactDirs: [] })).producers, []);
 });
 
-/** Derive the authority of a consumer that selects `paths` from every producer in `producerIds`. */
-function deriveFromProducers(producerIds: string[], paths: string[]): PromptArtifactAuthorityDocument {
-  const selector = pathSelector(paths);
-  const producers = producerIds.map((attemptId) =>
-    sealedTask({ attemptId, outputs: paths.map((output) => declaredOutput(output, "ultrafuzz/text@1")) })
+test("a directory admitted outside the task's ancestor closure is not indexed", () => {
+  const authority = derivePromptArtifactAuthority(
+    deriveInput({
+      admittedDependencyArtifactDirs: [
+        path.join(planRunRoot, "artifacts", "producer-a"),
+        path.join(planRunRoot, "artifacts", "unrelated")
+      ]
+    })
   );
-  const consumer = sealedTask({
-    attemptId: "consumer",
-    outputs: [declaredOutput("report.md", "ultrafuzz/nonempty-markdown@1", true)],
-    dependencies: producerIds,
-    dependencyArtifactDirs: producers.map((producer) => producer.artifactDir),
-    promptArtifactAuthoritySelectors: [selector]
-  });
-  return derivePromptArtifactAuthority({
-    sealedTaskManifestBytes: manifestBytes({ ...fixtureManifest(), tasks: [...producers, consumer] }),
-    currentAttemptId: "consumer",
-    relocatedRunRoot,
-    admittedDependencyArtifactDirs: producerIds.map((attemptId) => path.join(relocatedRunRoot, "artifacts", attemptId)),
-    selectors: [selector]
-  });
-}
+  assert.deepEqual(
+    authority.producers.map((producer) => producer.attempt_id),
+    ["producer-a"]
+  );
+});
 
 test("derivation orders producers whose attempt IDs share a prefix, such as loop iterations 1 and 10", () => {
-  const authority = deriveFromProducers(["strategy-1", "strategy-10"], ["findings.json"]);
+  const producers = ["strategy-10", "strategy-1"].map((attemptId) =>
+    declaredTask({ attemptId, outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@2" }] })
+  );
+  const consumer = declaredTask({
+    attemptId: "consumer",
+    outputs: [{ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1" }],
+    dependencies: producers.map((producer) => producer.attemptId),
+    dependencyArtifactDirs: producers.map((producer) => producer.artifactDir)
+  });
+  const authority = derivePromptArtifactAuthority({
+    runId: "run-1",
+    current: consumer,
+    tasks: [...producers, consumer],
+    artifactPathBase: relocatedRunRoot,
+    admittedDependencyArtifactDirs: producers.map((producer) => producer.artifactDir)
+  });
   assert.deepEqual(
     authority.producers.map((producer) => producer.attempt_id),
     ["strategy-1", "strategy-10"]
   );
 });
 
-test("derivation accepts selector paths in the order they were sealed", () => {
-  // "Report.md" sorts before "findings.json" by code unit ("R" is 0x52, "f" is
-  // 0x66), which planning now produces, and after it under the en-US collation
-  // that runs sealed before code-unit ordering used.
-  for (const paths of [
-    ["Report.md", "findings.json"],
-    ["findings.json", "Report.md"]
-  ]) {
-    const authority = deriveFromProducers(["strategy"], paths);
-    assert.deepEqual(authority.selectors, [pathSelector(paths)]);
-    assert.deepEqual(
-      authority.producers.flatMap((producer) => producer.outputs.map((output) => output.path)),
-      ["Report.md", "findings.json"]
-    );
-  }
-  assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ selectors: [pathSelector(["findings.json", "findings.json"])] })),
-    /input selector 0 paths are duplicated/u
-  );
-});
-
-test("derivation rejects missing required, foreign, and duplicate admitted roots", () => {
-  assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ admittedDependencyArtifactDirs: [] })),
-    /missing required admitted dependency/u
+test("derivation rejects a rebound ancestor directory, a duplicate output path and a relative path base", () => {
+  const { consumer, tasks } = fixturePlan();
+  const rebound = tasks.map((task) =>
+    task.attemptId === "producer-a" ? { ...task, artifactDir: path.join(planRunRoot, "artifacts", "elsewhere") } : task
   );
   assert.throws(
-    () =>
-      derivePromptArtifactAuthority(
-        deriveInput({
-          admittedDependencyArtifactDirs: [
-            path.join(relocatedRunRoot, "artifacts", "producer-a"),
-            path.join(relocatedRunRoot, "artifacts", "foreign")
-          ]
-        })
-      ),
-    /outside the sealed ancestor closure/u
-  );
-  const admittedA = path.join(relocatedRunRoot, "artifacts", "producer-a");
-  assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ admittedDependencyArtifactDirs: [admittedA, admittedA] })),
-    /repeats admitted dependency/u
-  );
-  assert.throws(
-    () =>
-      derivePromptArtifactAuthority(
-        deriveInput({ admittedDependencyArtifactDirs: ["/modal/project/.ultrafuzz/runs/foreign/artifacts/producer-a"] })
-      ),
-    /escapes the run root/u
-  );
-});
-
-test("derivation reparses the sealed manifest and rejects noncanonical declarations and duplicates", () => {
-  assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ sealedTaskManifestBytes: Buffer.from("{}") })),
-    /Smithers task manifest violates its registered schema/u
-  );
-  assert.throws(
-    () =>
-      derivePromptArtifactAuthority(
-        deriveInput({ selectors: [{ kind: "contract", contract: "ultrafuzz/findings@2" }] })
-      ),
-    /selectors do not match the sealed current-task declaration/u
+    () => derivePromptArtifactAuthority(deriveInput({ tasks: rebound })),
+    /does not match producer "producer-a" declaration/u
   );
 
-  const noncanonical = fixtureManifest();
-  const producer = noncanonical.tasks.find((task) => task.attemptId === "producer-a")!;
-  producer.artifactDir = `${controllerRunRoot}/artifacts/../producer-a`;
-  producer.metadata.artifacts.dir = producer.artifactDir;
-  producer.metadata.artifacts.manifestPath = path.join(producer.artifactDir, "artifact-manifest.json");
-  assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ sealedTaskManifestBytes: manifestBytes(noncanonical) })),
-    /canonical absolute path/u
+  const duplicated = tasks.map((task) =>
+    task.attemptId === "producer-a" ? { ...task, outputs: [...task.outputs, ...task.outputs.slice(0, 1)] } : task
   );
-
-  const duplicateOutput = fixtureManifest();
-  const duplicateProducer = duplicateOutput.tasks.find((task) => task.attemptId === "producer-a")!;
-  duplicateProducer.metadata.artifacts.outputs.push({ ...duplicateProducer.metadata.artifacts.outputs[0]! });
-  assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ sealedTaskManifestBytes: manifestBytes(duplicateOutput) })),
-    /repeats output path/u
-  );
+  assert.throws(() => derivePromptArtifactAuthority(deriveInput({ tasks: duplicated })), /repeats output path/u);
 
   assert.throws(
-    () =>
-      derivePromptArtifactAuthority(
-        deriveInput({
-          selectors: [pathSelector(["findings.json"]), pathSelector(["findings.json"])]
-        })
-      ),
-    /repeats selector/u
+    () => derivePromptArtifactAuthority(deriveInput({ current: { ...consumer, logicalNodeId: "other" } })),
+    /identity disagrees with the sealed task set/u
   );
   assert.throws(
-    () => derivePromptArtifactAuthority(deriveInput({ selectors: [pathSelector(["../findings.json"])] })),
-    /without traversal or an absolute prefix/u
+    () => derivePromptArtifactAuthority(deriveInput({ artifactPathBase: "runs/run-1" })),
+    /artifact path base must be a canonical absolute path/u
   );
 });
 
 test("serialization rejects an authority over 32 MiB before materialization", () => {
   const boundedPrefix = Array.from({ length: 32 }, () => "a".repeat(128)).join("/");
-  const paths = Array.from({ length: 4_096 }, (_, index) => `${boundedPrefix}/${String(index).padStart(4, "0")}.json`);
-  const selector = pathSelector(paths);
+  const paths = Array.from({ length: 10_000 }, (_, index) => `${boundedPrefix}/${String(index).padStart(5, "0")}.json`);
   const oversized: PromptArtifactAuthorityDocument = {
     schema_version: PROMPT_ARTIFACT_AUTHORITY_SCHEMA_VERSION,
     run_id: "run-1",
     attempt_id: "consumer",
     artifact_path_base: relocatedRunRoot,
-    selectors: [selector],
     producers: [
       {
         attempt_id: "producer-a",
         logical_node_id: "strategy-a",
         artifact_dir: "artifacts/producer-a",
-        outputs: paths.map((selectedPath) => ({ path: selectedPath, contract: "ultrafuzz/text@1" }))
+        outputs: paths.map((outputPath) => ({ path: outputPath, contract: "ultrafuzz/text@1" }))
       }
     ]
   };
@@ -464,15 +266,6 @@ test("authority validation rejects traversal, absolute run-relative fields, dupl
     /repeats output path/u
   );
   assert.throws(
-    () =>
-      assertValidPromptArtifactAuthority(
-        mutate((document) => {
-          document.selectors.push(structuredClone(document.selectors[0]!));
-        })
-      ),
-    /duplicated or not canonically ordered/u
-  );
-  assert.throws(
     () => assertValidPromptArtifactAuthority({ ...valid, model: { name: "secret-controller-metadata" } }),
     /unexpected or missing fields/u
   );
@@ -490,12 +283,9 @@ test("authority validation rejects traversal, absolute run-relative fields, dupl
     () =>
       assertValidPromptArtifactAuthority(
         mutate((document) => {
-          document.producers[0]!.outputs[0] = {
-            path: "unselected.txt",
-            contract: "ultrafuzz/text@1"
-          };
+          for (const producer of document.producers) producer.outputs.reverse();
         })
       ),
-    /outside the declared selectors/u
+    /outputs are not canonically ordered/u
   );
 });

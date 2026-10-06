@@ -36,7 +36,7 @@ import { renderRunStaticPrompts } from "./plan-run.js";
 import { applyPromptRefresh, type PromptFileChange } from "./prompt-history.js";
 import type { SmithersContinuationContext } from "./smithers.js";
 import { transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
-import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
+import type { RuntimeDiagnostic } from "./types.js";
 
 const MAX_RUN_DOCUMENT_BYTES = 128 * 1024 * 1024;
 const MAX_PROMPT_FILE_BYTES = 16 * 1024 * 1024;
@@ -72,9 +72,8 @@ interface PromptRejection {
  *   and the project's current topology and prompts, or the topology is not the one the run launched
  *   with, it changes nothing and returns one warning.
  * - A prompt is applied to every file rendered from it, or to none. One that `run` would reject, that
- *   cannot be rendered for one of its tasks, that would name an artifact authority a static task was
- *   not compiled with, or that shares a template copy with a prompt whose new text differs, is not
- *   applied; it returns one warning naming the prompt and the reason.
+ *   cannot be rendered for one of its tasks, or that shares a template copy with a prompt whose new
+ *   text differs, is not applied; it returns one warning naming the prompt and the reason.
  * - `prompt-history/<time>-<uuid>/refresh.json` lists every file it rewrites with its old and new
  *   digests before the first one changes, each old file is copied beside it, and each file is
  *   written atomically.
@@ -284,7 +283,7 @@ function refreshStaticPrompts(
       .map((row) => {
         const task = taskByAttempt.get(row.attempt_id);
         if (task === undefined) throw new Error(`planned task ${row.attempt_id} is missing from the task manifest`);
-        return [row.attempt_id, { task, prompt: promptOf(run, task) }] as const;
+        return [row.attempt_id, { prompt: promptOf(run, task) }] as const;
       })
   );
   for (const [attemptId, { prompt }] of targets) markTarget(state, prompt, attemptId);
@@ -310,10 +309,6 @@ function refreshStaticPrompts(
       if (path.resolve(result.renderedPromptPath) !== path.join(state.runRoot, relativePath)) {
         throw new Error(`its prompt path is not ${relativePath}`);
       }
-      const added = addedAuthoritySelectors(target.task, plan.artifact_references);
-      if (added.length > 0) {
-        throw new Error(`it names artifact authorities the task was not compiled with: ${added.join(", ")}`);
-      }
       return { relativePath, prompt: target.prompt, attemptId: plan.attempt_id, next: result.renderedMarkdown };
     });
   }
@@ -323,9 +318,6 @@ function refreshStaticPrompts(
  * Runtime prompts: the published prompts of unfinished generated or deferred tasks, rendered as the
  * next publishing render would render them, and the template copies that a later render reads: those
  * of groups that have not expanded, and those of unfinished tasks whose prompt is not published yet.
- * Their artifact authorities are not checked as a static prompt's are: a task whose prompt is rendered
- * at runtime is compiled with none (#1234), and the engine's render names whatever its template names,
- * so that check would reject every edit of the stock review prompts, which name some.
  */
 function refreshRuntimePrompts(
   input: RefreshInput,
@@ -527,26 +519,6 @@ function unfinishedAttempts(
       .filter((task) => context.nodeStates?.get(task.smithersNodeId) !== "finished" || reopened.has(task.attemptId))
       .map((task) => task.attemptId)
   );
-}
-
-/** Authority selectors the new render names that the task was not compiled with; dropping one is harmless. */
-function addedAuthoritySelectors(
-  task: SmithersTaskManifestTask,
-  references: RenderedPromptPlan["artifact_references"]
-): string[] {
-  const compiled = new Set(
-    (task.promptArtifactAuthoritySelectors ?? []).map((selector) =>
-      selector.kind === "contract" ? `contract ${selector.contract}` : `path ${selector.id}`
-    )
-  );
-  const named = references.flatMap((reference) =>
-    reference.kind === "ancestor_contract_artifact_authority"
-      ? [`contract ${reference.contract}`]
-      : reference.kind === "ancestor_artifact_path_authority"
-        ? [`path ${reference.selectorId}`]
-        : []
-  );
-  return [...new Set(named)].filter((selector) => !compiled.has(selector)).sort();
 }
 
 /** The file's bytes, or undefined when it is missing; anything else at the path is refused. */
