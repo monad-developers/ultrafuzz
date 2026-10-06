@@ -6064,6 +6064,18 @@ test("project discovery gate verifies immutable source proof after the discovery
   assert.ok(
     unsafeRecoveredProbe.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID")
   );
+  // A read of finalized output skips the worktree but still checks the published probe path (#1227).
+  const unsafeProbeOnRead = verifyRequiredArtifactsForAttempt(
+    layout,
+    node,
+    node.id,
+    undefined,
+    authenticatedSnapshotsForNode(layout, node, node.id, "skip")
+  );
+  assert.ok(
+    unsafeProbeOnRead.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"),
+    JSON.stringify(unsafeProbeOnRead.diagnostics)
+  );
 
   fs.writeFileSync(path.join(layout.root, "source-proofs", "project-discovery.invariant.json"), "{}");
   const invalidProof = verifyRequiredArtifactsForAttempt(layout, node, node.id);

@@ -268,8 +268,9 @@ export interface AuthenticatedArtifactGateSnapshots {
   taskWorktree: "read" | "skip";
 }
 
-function readsTaskWorktree(authenticated: AuthenticatedArtifactGateSnapshots | undefined): boolean {
-  return (authenticated?.taskWorktree ?? "read") === "read";
+/** Without snapshots, the controller is rechecking a failed verifier's output while its worktree exists. */
+function taskWorktreeMode(authenticated: AuthenticatedArtifactGateSnapshots | undefined): "read" | "skip" {
+  return authenticated?.taskWorktree ?? "read";
 }
 
 /**
@@ -638,21 +639,21 @@ function verifyInvariantLedgerProducerArtifacts(
       severity: "error" as const
     }))
   );
-  const taskWorktree = authenticated?.taskWorktree ?? "read";
+  const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
   // A read of finalized output checks the durable source proof only: the
   // discovery worktree may since have been deleted (#1227).
-  const discoveryWorkspace =
-    taskWorktree === "read" ? path.join(layout.workspacesDir, path.basename(artifactDir)) : undefined;
+  const taskWorktree = taskWorktreeMode(authenticated);
+  const discoveryWorkspacePresent = taskWorktree === "read" && fs.existsSync(discoveryWorkspace);
   const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
   const sourceProofPresent = fs.existsSync(sourceProofPath);
   const sourceProof = sourceProofPresent
     ? readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics, taskWorktree)
     : undefined;
-  if (!sourceProofPresent && (discoveryWorkspace === undefined || !fs.existsSync(discoveryWorkspace))) {
+  if (!sourceProofPresent && !discoveryWorkspacePresent) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
       message:
-        discoveryWorkspace === undefined
+        taskWorktree === "skip"
           ? "Invariant ledger source proof is unavailable"
           : "Invariant ledger source proof and discovery workspace are unavailable",
       severity: "error",
@@ -668,15 +669,21 @@ function verifyInvariantLedgerProducerArtifacts(
   // the claim "this target has no invariant". That claim needs `no_invariants_justification`,
   // which the ledger schema requires when `entries` is empty. Ledger entries remain
   // byte-checked against the pinned source below.
-  if (discoveryWorkspace !== undefined) {
-    for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-      verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
-    }
+  for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+    verifyInvariantProbePath(
+      layout,
+      discoveryWorkspace,
+      probe.source_path,
+      probeIndex,
+      ledgerPath,
+      diagnostics,
+      taskWorktree
+    );
   }
   for (const [entryIndex, entry] of parsed.value.entries.entries()) {
     if (sourceProof !== undefined) {
       verifyInvariantSourceProofEvidence(sourceProof, entry, entryIndex, ledgerPath, diagnostics);
-    } else if (!sourceProofPresent && discoveryWorkspace !== undefined && fs.existsSync(discoveryWorkspace)) {
+    } else if (!sourceProofPresent && discoveryWorkspacePresent) {
       verifyInvariantSourceEvidence(discoveryWorkspace, entry, entryIndex, ledgerPath, diagnostics);
     }
   }
@@ -787,12 +794,17 @@ function verifyCanonicalPropertiesProducerArtifacts(
   // call, so an escaping probe path only ever had to survive the discovery node. The ledger lives in
   // discovery's artifact directory, so its workspace is the one the probes are relative to; when
   // that workspace has already been reclaimed the check is a no-op, exactly as it is on discovery.
-  // A read of finalized output does not re-check it: finalization did (#1227).
-  if (readsTaskWorktree(authenticated)) {
-    const discoveryWorkspace = path.join(layout.workspacesDir, ledgerProducer.authority.attempt_id);
-    for (const [probeIndex, probe] of (ledger.value.scan_probes ?? []).entries()) {
-      verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
-    }
+  const discoveryWorkspace = path.join(layout.workspacesDir, ledgerProducer.authority.attempt_id);
+  for (const [probeIndex, probe] of (ledger.value.scan_probes ?? []).entries()) {
+    verifyInvariantProbePath(
+      layout,
+      discoveryWorkspace,
+      probe.source_path,
+      probeIndex,
+      ledgerPath,
+      diagnostics,
+      taskWorktreeMode(authenticated)
+    );
   }
 
   const ledgerIds = new Set(ledger.value.entries.map((entry) => entry.id));
@@ -1275,7 +1287,8 @@ function verifyInvariantProbePath(
   relativePath: string,
   probeIndex: number,
   ledgerPath: string,
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  taskWorktree: "read" | "skip"
 ): void {
   const probePath = path.resolve(workspacePath, relativePath);
   const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
@@ -1291,6 +1304,8 @@ function verifyInvariantProbePath(
     });
     return;
   }
+  // A read of finalized output checks the published path only: finalization checked the worktree (#1227).
+  if (taskWorktree === "skip") return;
   try {
     const workspaceStat = fs.lstatSync(workspacePath);
     if (
@@ -1730,7 +1745,7 @@ function verifyRequiredArtifactShape(
         schemaFilename: binding.schema_file as ArtifactSchemaFilename,
         document: contract.value,
         artifactPath: absolutePath,
-        taskWorktree: authenticated?.taskWorktree ?? "read",
+        taskWorktree: taskWorktreeMode(authenticated),
         context: semanticGateContextForArtifact({
           layout,
           artifactDir,
@@ -1959,7 +1974,7 @@ function semanticGateContextForArtifact(input: {
     }
   };
   const artifactSet = semanticArtifactSetForSchema(input);
-  const readsWorktree = readsTaskWorktree(input.authenticated);
+  const readsWorktree = taskWorktreeMode(input.authenticated) === "read";
   const git =
     readsWorktree && input.schemaFilename === "workspace-patch.schema.json"
       ? workspacePatchGitContext(input.layout, input.artifactDir, input.attemptId, input.authenticated)
@@ -3649,7 +3664,7 @@ function verifyCoverageProductionInventory(
     !Array.isArray(evidence.zero_coverage_components)
   )
     return diagnostics;
-  if (!readsTaskWorktree(authenticated)) return diagnostics;
+  if (taskWorktreeMode(authenticated) === "skip") return diagnostics;
   const workspacePath = getNodeWorkspaceDir(layout, attemptId);
   const productionRoots = configuredProductionSourceRoots(layout);
   if (!fs.existsSync(workspacePath) || productionRoots === undefined) {
