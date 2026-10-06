@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -51,7 +51,11 @@ nodes:
 async function plannedRunWithArtifact(project: string): Promise<{ runId: string; runRoot: string; nodeId: string }> {
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: `mat-${crypto.randomBytes(4).toString("hex")}`, env: {} });
+  const plan = await planRun({
+    projectRoot: project,
+    runId: `mat-${crypto.randomBytes(4).toString("hex")}`,
+    env: privateHomeEnv()
+  });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const nodeId = plan.value!.graph.nodes[0]!.id;
   assert.ok(nodeId);

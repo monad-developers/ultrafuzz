@@ -6,7 +6,7 @@ import test from "node:test";
 import { initProject, planRun } from "../src/index.js";
 import { compileSmithersWorkflow, type CompiledSmithersWorkflow } from "../src/smithers.js";
 import { renderedComponents, renderWorkflowInProcess } from "./in-process-workflow.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 async function compileTwoNodeWorkflow(): Promise<CompiledSmithersWorkflow> {
   const projectRoot = temporaryRoot("ufz-workflow-render-");
@@ -47,7 +47,7 @@ nodes:
     depends_on: [review]
 `
   );
-  const plan = await planRun({ projectRoot, runId: "workflow-render", env: {} });
+  const plan = await planRun({ projectRoot, runId: "workflow-render", env: privateHomeEnv() });
   assert.ok(plan.value, JSON.stringify(plan.diagnostics));
   return compileSmithersWorkflow({
     projectRoot,

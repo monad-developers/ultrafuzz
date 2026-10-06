@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 import crypto from "node:crypto";
 import {
   execFileSync,
@@ -97,6 +97,7 @@ import {
   initProject,
   listRuns,
   loadCurrentFinalReportSnapshot,
+  loadVerifiedRunOutputSnapshots,
   planRun,
   pauseRun,
   readRetainedFailureStateIds,
@@ -2914,7 +2915,7 @@ async function compileInvariantCampaignBudgetFixture(input: {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: input.runId, env: {} });
+  const plan = await planRun({ projectRoot: project, runId: input.runId, env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const node = plan.value!.expanded_graph.nodes.find((candidate) => candidate.id === "project-discovery");
   assert.notEqual(node, undefined);
@@ -3526,7 +3527,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(openCodeAgentText, /mkdirSync|writeFileSync|rmSync/);
   assert.doesNotMatch(openCodeAgentText, /model:\s*"openrouter\//);
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
   assert.equal(validate.value?.policy_posture.trust.status, "pass");
   assert.equal(validate.value?.policy_posture.agents.status, "pass");
@@ -9404,7 +9405,7 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.match(generatedConfig, /auth = "api-key"/);
   fs.writeFileSync(configPath, generatedConfig.replace('agent = "CodexAgent"', 'agent = "MissingAgent"'), "utf8");
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(validate.ok, false);
   assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "CONFIG_MODEL_AGENT_INVALID"));
 
@@ -9435,7 +9436,7 @@ test("validate requires agentFactories entries for every configured model profil
     "utf8"
   );
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(validate.ok, false);
   const unknownAgents = validate.diagnostics
     .filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN")
@@ -9469,7 +9470,7 @@ test("validate requires every configured agent factory after a default agent ove
     "utf8"
   );
 
-  const validate = await validateProject({ projectRoot: project, agent: "ClaudeAgent", env: {} });
+  const validate = await validateProject({ projectRoot: project, agent: "ClaudeAgent", env: privateHomeEnv() });
 
   assert.equal(validate.ok, false);
   assert.deepEqual(
@@ -9504,7 +9505,7 @@ test("legacy projects do not require newly added opt-in agent factories", async 
   fs.writeFileSync(registryPath, legacyRegistry, "utf8");
   fs.unlinkSync(path.join(project, ".smithers", "agents", "openrouter.ts"));
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
@@ -9536,7 +9537,7 @@ test("validate accepts a typed aliased registry composed from static spreads", a
     "utf8"
   );
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
@@ -9557,7 +9558,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
     factories + "const registry = { ...core, CodexAgent: undefined };\nexport { registry as agentFactories };\n",
     "utf8"
   );
-  const overwritten = await validateProject({ projectRoot: project, env: {} });
+  const overwritten = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(overwritten.ok, false);
   assert.equal(
     overwritten.diagnostics.filter(
@@ -9572,7 +9573,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
       "const unknown = dynamicRegistry();\nconst registry = { ...core, ...unknown };\nexport { registry as agentFactories };\n",
     "utf8"
   );
-  const unknownOverride = await validateProject({ projectRoot: project, env: {} });
+  const unknownOverride = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(unknownOverride.ok, false);
   assert.equal(
     unknownOverride.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
@@ -9586,7 +9587,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
       "export const agentFactories = Object.freeze(core);\n",
     "utf8"
   );
-  const shadowed = await validateProject({ projectRoot: project, env: {} });
+  const shadowed = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(shadowed.ok, false);
   assert.ok(shadowed.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
 
@@ -9595,7 +9596,7 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
     "const { Object } = customGlobals;\n" + factories + "export const agentFactories = Object.freeze(core);\n",
     "utf8"
   );
-  const destructuredShadow = await validateProject({ projectRoot: project, env: {} });
+  const destructuredShadow = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(destructuredShadow.ok, false);
   assert.ok(destructuredShadow.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
 
@@ -9608,14 +9609,14 @@ test("validate applies registry overwrite order and rejects nullish or shadowed 
     "import Object, { createClaudeAgent } from './claude';"
   ]) {
     fs.writeFileSync(registryPath, `${importShadow}\n${frozenRegistry}`, "utf8");
-    const imported = await validateProject({ projectRoot: project, env: {} });
+    const imported = await validateProject({ projectRoot: project, env: privateHomeEnv() });
     assert.ok(
       imported.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"),
       importShadow
     );
   }
   fs.writeFileSync(registryPath, `import { createClaudeAgent } from './claude';\n${frozenRegistry}`, "utf8");
-  const unrelatedImport = await validateProject({ projectRoot: project, env: {} });
+  const unrelatedImport = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.ok(!unrelatedImport.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
 });
 
@@ -9628,13 +9629,13 @@ test("validate rejects unsafe or oversized canonical agent registries with diagn
   fs.writeFileSync(outside, fs.readFileSync(registryPath));
   fs.unlinkSync(registryPath);
   fs.linkSync(outside, registryPath);
-  const hardlinked = await validateProject({ projectRoot: project, env: {} });
+  const hardlinked = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(hardlinked.ok, false);
   assert.ok(hardlinked.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
 
   fs.unlinkSync(registryPath);
   fs.writeFileSync(registryPath, `export const agentFactories = {};/*${"x".repeat(256 * 1024)}*/`, "utf8");
-  const oversized = await validateProject({ projectRoot: project, env: {} });
+  const oversized = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(oversized.ok, false);
   assert.ok(oversized.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_INVALID"));
 });
@@ -9654,7 +9655,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
     "utf8"
   );
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
 
   assert.equal(validate.ok, false);
   assert.deepEqual(
@@ -9669,7 +9670,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
     "const first = { ...second };\n" + "const second = { ...first };\n" + "export { first as agentFactories };\n",
     "utf8"
   );
-  const cyclic = await validateProject({ projectRoot: project, env: {} });
+  const cyclic = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(cyclic.ok, false);
   assert.equal(
     cyclic.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
@@ -9683,7 +9684,7 @@ test("validate ignores textual, type-only, and cyclic agentFactories lookalikes"
       "export { type registry as agentFactories };\n",
     "utf8"
   );
-  const typeSpecifier = await validateProject({ projectRoot: project, env: {} });
+  const typeSpecifier = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(typeSpecifier.ok, false);
   assert.equal(
     typeSpecifier.diagnostics.filter((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN").length,
@@ -9706,7 +9707,7 @@ test("validate accepts quoted factory keys for stock agent IDs", async () => {
     "utf8"
   );
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
 });
@@ -9718,7 +9719,7 @@ test("validate does not fall back to .smithers/agents.ts", async () => {
   writeSmallTopology(project);
   fs.renameSync(path.join(project, ".smithers/agents/index.ts"), path.join(project, ".smithers/agents.ts"));
 
-  const validate = await validateProject({ projectRoot: project, env: {} });
+  const validate = await validateProject({ projectRoot: project, env: privateHomeEnv() });
 
   assert.equal(validate.ok, false);
   assert.ok(validate.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REGISTRY_MISSING"));
@@ -9777,11 +9778,11 @@ test("validate warns when a packaged group timeout pin is below the run default 
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
-  const shipped = await validateProject({ projectRoot: project, env: {} });
+  const shipped = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.deepEqual(timeoutShadowingWarnings(shipped.diagnostics), []);
 
   setRunDefaultTimeout(project, 14_400);
-  const raised = await validateProject({ projectRoot: project, env: {} });
+  const raised = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   const warnings = timeoutShadowingWarnings(raised.diagnostics);
   assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
     "groups.goals.defaults.timeout_seconds",
@@ -9802,7 +9803,7 @@ test("validate stays silent when a timeout pin equals the default it overrides",
   initProject({ projectRoot: project, force: true });
   setRunDefaultTimeout(project, 7_200);
 
-  const equal = await validateProject({ projectRoot: project, env: {} });
+  const equal = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.deepEqual(timeoutShadowingWarnings(equal.diagnostics), []);
 });
 
@@ -9820,7 +9821,7 @@ test("validate warns when a packaged group timeout pin is below the model profil
     "utf8"
   );
 
-  const raised = await validateProject({ projectRoot: project, env: {} });
+  const raised = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   const warnings = timeoutShadowingWarnings(raised.diagnostics);
   assert.deepEqual(warnings.map((warning) => warning.path).sort(), [
     "groups.goals.defaults.timeout_seconds",
@@ -9835,7 +9836,7 @@ test("validate warns when a packaged group timeout pin is below the model profil
   // A longer run default does not apply to a profile with its own timeout, so the warning keeps
   // naming the profile.
   setRunDefaultTimeout(project, 14_400);
-  const both = await validateProject({ projectRoot: project, env: {} });
+  const both = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   const bothWarnings = timeoutShadowingWarnings(both.diagnostics);
   assert.equal(bothWarnings.length, 4, JSON.stringify(both.diagnostics));
   for (const warning of bothWarnings) {
@@ -9889,7 +9890,7 @@ nodes:
   );
   writeNeutralRuntimeFixturePrompt(project);
 
-  const result = await validateProject({ projectRoot: project, env: {} });
+  const result = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   const warnings = timeoutShadowingWarnings(result.diagnostics);
   assert.deepEqual(
     warnings.map((warning) => warning.path),
@@ -9964,7 +9965,7 @@ nodes:
   );
   writeNeutralRuntimeFixturePrompt(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "timeout-shadowing", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "timeout-shadowing", env: privateHomeEnv() });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const warnings = timeoutShadowingWarnings(plan.diagnostics);
@@ -9999,7 +10000,7 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "planned-run", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "planned-run", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "plan.json")), true);
   const renderedPromptPath = path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md");
@@ -10107,7 +10108,7 @@ Write findings to {{output_findings_path}}.
     "utf8"
   );
 
-  const plan = await planRun({ projectRoot: project, runId: "declared-findings-path", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "declared-findings-path", env: privateHomeEnv() });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const renderedPrompt = fs.readFileSync(plan.value!.rendered_prompts[0]!.rendered_prompt_path, "utf8");
@@ -10128,7 +10129,7 @@ test("planned graphs persist topology overrides and effective per-model timeouts
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "planned-timeout", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "planned-timeout", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const plannedNode = plan.value!.graph.nodes.find((node) => node.id === "project-discovery");
   assert.equal(plannedNode?.timeout_seconds, undefined);
@@ -10188,7 +10189,7 @@ nodes:
     "utf8"
   );
 
-  const plan = await planRun({ projectRoot: project, runId: "priority-plumbing", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "priority-plumbing", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
   const rendered = fs.readFileSync(promptPath, "utf8");
@@ -10210,7 +10211,7 @@ test("plan uses an eval topology override without replacing the project topology
     projectRoot: project,
     topologyPath: smokeTopology,
     runId: "topology-override",
-    env: {}
+    env: privateHomeEnv()
   });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -10360,7 +10361,7 @@ test("the shipped default topology expands against the shipped reference catalog
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
 
-  const shipped = await validateProject({ projectRoot: project, env: {} });
+  const shipped = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(shipped.ok, true, JSON.stringify(shipped.diagnostics));
   assert.ok((shipped.value!.topology?.expanded_nodes ?? 0) > 0);
 });
@@ -10378,9 +10379,9 @@ test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nod
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   let plan: Awaited<ReturnType<typeof planRun>>;
   try {
-    const validation = await validateProject({ projectRoot: project, env: {} });
+    const validation = await validateProject({ projectRoot: project, env: privateHomeEnv() });
     assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
-    plan = await planRun({ projectRoot: project, runId: "clean-scaffold", env: {} });
+    plan = await planRun({ projectRoot: project, runId: "clean-scaffold", env: privateHomeEnv() });
   } finally {
     if (previousXdgCacheHome === undefined) {
       delete process.env.XDG_CACHE_HOME;
@@ -10488,7 +10489,12 @@ test("every packaged audit profile compiles into a task plan the launch manifest
   try {
     for (const auditProfile of Object.keys(loadAuditProfileCatalog().profiles)) {
       const runId = `packaged-${auditProfile}`;
-      const plan = await planRun({ projectRoot: project, runId, env: {}, runtimeOverrides: { auditProfile } });
+      const plan = await planRun({
+        projectRoot: project,
+        runId,
+        env: privateHomeEnv(),
+        runtimeOverrides: { auditProfile }
+      });
       assert.ok(plan.ok && plan.value, `${auditProfile}: ${JSON.stringify(plan.diagnostics)}`);
       const { graph, expanded_graph, layout, rendered_prompts, resolved_config } = plan.value;
       const compiled = compileSmithersWorkflow({
@@ -10547,7 +10553,7 @@ test("project and runtime topology paths override a profile topology atomically"
   );
   fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
 
-  const projectSelected = await validateProject({ projectRoot: project, env: {} });
+  const projectSelected = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(projectSelected.ok, true, JSON.stringify(projectSelected.diagnostics));
   assert.equal(projectSelected.value!.topology?.origin, "project-config");
   assert.equal(projectSelected.value!.topology?.path, ".ultrafuzz/project-override.yml");
@@ -10555,7 +10561,7 @@ test("project and runtime topology paths override a profile topology atomically"
   const runtimeSelected = await validateProject({
     projectRoot: project,
     topologyPath: runtimeOverride,
-    env: {}
+    env: privateHomeEnv()
   });
   assert.equal(runtimeSelected.ok, true, JSON.stringify(runtimeSelected.diagnostics));
   assert.equal(runtimeSelected.value!.topology?.origin, "runtime-override");
@@ -10573,7 +10579,7 @@ test("audit profile selects its packaged topology and records portable provenanc
   );
   fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "not: [valid\n", "utf8");
 
-  const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "profile-smoke", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(plan.value!.resolved_config.run.maxParallelAgents, 4);
   assert.equal(plan.value!.resolved_config.run.workflowDeadlineSeconds, 14_400);
@@ -10632,7 +10638,7 @@ test("plan applies one smoke eval model profile to a normally initialized target
         }
       }
     },
-    env: {}
+    env: privateHomeEnv()
   });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -10651,7 +10657,7 @@ test("plan materializes pinned reference nodes before rendering dependent prompt
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   try {
-    const plan = await planRun({ projectRoot: project, runId: "reference-plan", env: {} });
+    const plan = await planRun({ projectRoot: project, runId: "reference-plan", env: privateHomeEnv() });
 
     assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
     const referenceArtifact = path.join(
@@ -10712,7 +10718,7 @@ test("compileSmithersWorkflow seals digest-only reference artifact-manifest auth
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   try {
-    const plan = await planRun({ projectRoot: project, runId: "reference-manifest-authority", env: {} });
+    const plan = await planRun({ projectRoot: project, runId: "reference-manifest-authority", env: privateHomeEnv() });
     assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
     const referenceArtifactDir = path.join(plan.value!.run_root, "artifacts", "reference-properties-example");
     const outerManifestPath = path.join(referenceArtifactDir, "artifact-manifest.json");
@@ -10784,7 +10790,7 @@ test("plan rejects compact authority selection of a pinned reference ancestor", 
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   try {
-    const plan = await planRun({ projectRoot: project, runId: "reference-compact-authority", env: {} });
+    const plan = await planRun({ projectRoot: project, runId: "reference-compact-authority", env: privateHomeEnv() });
 
     assert.equal(plan.ok, false);
     assert.match(
@@ -10821,7 +10827,7 @@ test("plan provisions a validated trusted expectation catalog through pinned ref
       projectRoot: project,
       runId: "reference-expectations-plan",
       referenceExpectationsPath: "reference-expectations.json",
-      env: {}
+      env: privateHomeEnv()
     });
 
     assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -10893,7 +10899,7 @@ test("plan rejects duplicate-key expectation bytes before any schema or handoff 
       projectRoot: project,
       runId: "duplicate-reference-expectations",
       referenceExpectationsPath: "reference-expectations.json",
-      env: {}
+      env: privateHomeEnv()
     });
 
     assert.equal(plan.ok, false);
@@ -10934,7 +10940,7 @@ test("plan rejects duplicate reference expectation IDs before publishing trusted
       projectRoot: project,
       runId: "duplicate-reference-expectation-ids",
       referenceExpectationsPath: "reference-expectations.json",
-      env: {}
+      env: privateHomeEnv()
     });
 
     assert.equal(plan.ok, false, JSON.stringify(plan.diagnostics));
@@ -10958,7 +10964,7 @@ test("plan renders prompt variables against attempt artifact directories for mod
   const project = tempProject();
   writeFanoutProject(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "fanout-prompts", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "fanout-prompts", env: privateHomeEnv() });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const setupFast = plan.value!.rendered_prompts.find(
@@ -10994,7 +11000,7 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   const project = tempProject();
   writeFanoutProject(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "native-deps", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "native-deps", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
@@ -11065,7 +11071,7 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeOptionalSpecialistTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "compiled-optional-specialist", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "compiled-optional-specialist", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
@@ -11116,7 +11122,7 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeOptionalSpecialistTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "refresh-leaf-continue", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "refresh-leaf-continue", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow, renderCurrentSmithersController } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
@@ -11252,7 +11258,11 @@ test("compileSmithersWorkflow seals the canonical selector union from rendered p
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeOptionalSpecialistTopology(project);
-  const plan = await planRun({ projectRoot: project, runId: "compiled-prompt-authority-selectors", env: {} });
+  const plan = await planRun({
+    projectRoot: project,
+    runId: "compiled-prompt-authority-selectors",
+    env: privateHomeEnv()
+  });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const reportPrompt = plan.value!.rendered_prompts.find((prompt) => prompt.attempt_id === "final-report");
   assert.ok(reportPrompt);
@@ -11362,7 +11372,7 @@ test("compileSmithersWorkflow escapes the evidence workflow import", async () =>
   fs.mkdirSync(project);
   writeFanoutProject(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const quotedProjectRoot = path.join(project, 'checkout"quoted');
@@ -11426,7 +11436,7 @@ nodes:
     "utf8"
   );
 
-  const plan = await planRun({ projectRoot: project, runId: "group-timeout", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "group-timeout", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
@@ -11467,7 +11477,7 @@ nodes:
   };
   // A disabled run seals none, so its prompts carry no friction instructions.
   assert.equal(sealedFrictionLog(workflowSource), null);
-  const frictionPlan = await planRun({ projectRoot: project, runId: "group-timeout-friction", env: {} });
+  const frictionPlan = await planRun({ projectRoot: project, runId: "group-timeout-friction", env: privateHomeEnv() });
   assert.ok(frictionPlan.ok && frictionPlan.value !== undefined, JSON.stringify(frictionPlan.diagnostics));
   const frictionRun = frictionPlan.value;
   const frictionCompiled = compileSmithersWorkflow({
@@ -11538,7 +11548,7 @@ test("compileSmithersWorkflow exhausts same-profile retries before ordered fallb
     "utf8"
   );
 
-  const plan = await planRun({ projectRoot: project, runId: "ordered-retry-chain", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "ordered-retry-chain", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
@@ -11594,7 +11604,7 @@ test("compileSmithersWorkflow enforces the 100-rung retry cap before expanding t
       ),
     "utf8"
   );
-  const plan = await planRun({ projectRoot: project, runId: "retry-chain-limit", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "retry-chain-limit", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compile = () =>
@@ -11650,7 +11660,12 @@ test("planRun rejects an oversized topology retry override before creating the r
   );
 
   const runId = "retry-chain-preflight-limit";
-  const result = await planRun({ projectRoot: project, runId, topologyPath: ".ultrafuzz/topology.yml", env: {} });
+  const result = await planRun({
+    projectRoot: project,
+    runId,
+    topologyPath: ".ultrafuzz/topology.yml",
+    env: privateHomeEnv()
+  });
   assert.equal(result.ok, false, JSON.stringify(result.value?.expanded_graph.nodes));
   assert.match(JSON.stringify(result.diagnostics), /retry chain expands to 101 attempts; maximum is 100/u);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "runs", runId)), false);
@@ -11712,7 +11727,7 @@ test("runtime model overrides apply to the retry policy's configured primary pro
     runId: "retry-primary-runtime-override",
     model: "gpt-5.6-sol-override",
     reasoning: "high",
-    env: {}
+    env: privateHomeEnv()
   });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(plan.value!.resolved_config.models.profiles["sol-xhigh"]?.model, "gpt-5.6-sol-override");
@@ -14086,7 +14101,7 @@ test("workflow synchronization preserves a quota-waiting run with parked tasks",
   assert.equal(status.value?.workflow?.status, "waiting-quota");
 });
 
-test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {
+test("startRun never lets the workflow engine reap task worktrees", async () => {
   for (const keepWorkspaces of [false, true]) {
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
@@ -14102,14 +14117,15 @@ test("startRun maps keep_workspaces to the Smithers worktree retention environme
     const keepLog = path.join(project, "keep-worktrees.log");
     const env = {
       ...fakeSmithersEnv(project),
-      SMITHERS_KEEP_WORKTREES: "1",
+      SMITHERS_KEEP_WORKTREES: "",
       SMITHERS_FAKE_KEEP_WORKTREES_LOG: keepLog
     };
 
     const run = await startRun({ projectRoot: project, runId: `keep-workspaces-${keepWorkspaces}`, env });
 
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-    assert.equal(fs.readFileSync(keepLog, "utf8"), keepWorkspaces ? "1\n" : "\n");
+    // Ultrafuzz deletes task worktrees itself after the run (#1227).
+    assert.equal(fs.readFileSync(keepLog, "utf8"), "1\n");
   }
 });
 
@@ -22406,6 +22422,224 @@ test("getRunStatus synchronizes without appending duplicate events", async () =>
   assert.equal(second.value?.events, first.value?.events);
 });
 
+/** Make a test project a Git repository, so its task worktrees are real linked worktrees. */
+function gitTaskWorktreeProject(project: string): (args: string[]) => string {
+  const git = (args: string[]): string =>
+    execFileSync("git", args, { cwd: project, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(["init", "--quiet", "--initial-branch=main"]);
+  git(["config", "user.name", "Ultrafuzz Test"]);
+  git(["config", "user.email", "test@invalid"]);
+  fs.writeFileSync(path.join(project, ".gitignore"), "/.ultrafuzz/runs/\n/.smithers/\n/fake-smithers-*\n", "utf8");
+  git(["add", "--all"]);
+  git(["commit", "--quiet", "-m", "project"]);
+  return git;
+}
+
+/** Create the task worktree the workflow engine would create, with an empty artifact mirror. */
+function addTaskWorktree(git: (args: string[]) => string, runRoot: string, runId: string, attemptId: string): string {
+  const worktree = path.join(runRoot, "workspaces", attemptId);
+  git(["worktree", "add", "--quiet", "-B", `ultrafuzz/${runId}/${attemptId}`, worktree, "HEAD"]);
+  fs.mkdirSync(path.join(worktree, "artifacts", attemptId), { recursive: true });
+  return worktree;
+}
+
+function taskWorktreeState(
+  git: (args: string[]) => string,
+  runId: string,
+  worktree: string
+): { directory: boolean; registered: boolean; branch: boolean } {
+  return {
+    directory: fs.existsSync(worktree),
+    registered: git(["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${worktree}`),
+    branch: git(["for-each-ref", "--format=%(refname)", `refs/heads/ultrafuzz/${runId}/`]).length > 0
+  };
+}
+
+test("status deletes a succeeded task's worktree once the run has ended, unless keep_workspaces is set", async () => {
+  for (const keepWorkspaces of [false, true]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+    if (keepWorkspaces) {
+      const configPath = path.join(project, "ultrafuzz.toml");
+      fs.writeFileSync(
+        configPath,
+        fs.readFileSync(configPath, "utf8").replace("keep_workspaces = false", "keep_workspaces = true"),
+        "utf8"
+      );
+    }
+    const git = gitTaskWorktreeProject(project);
+    const runId = `reap-succeeded-${String(keepWorkspaces)}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.ok(run.value, JSON.stringify(run.diagnostics));
+    const runRoot = run.value.run_root;
+    const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+    // Everything left in the worktree is Ultrafuzz-owned: schemas, the mirror of the
+    // published outputs, strategy scratch tests and a Forge lock file.
+    for (const [relativePath, contents] of [
+      [".ultrafuzz/schemas/findings.schema.json", "{}\n"],
+      ["artifacts/project-discovery/findings.json", "[]\n"],
+      ["test/foundry/project-discovery/Scratch.t.sol", "contract Scratch {}\n"],
+      ["foundry.lock", "{}\n"]
+    ] as const) {
+      fs.mkdirSync(path.dirname(path.join(worktree, relativePath)), { recursive: true });
+      fs.writeFileSync(path.join(worktree, relativePath), contents, "utf8");
+    }
+    writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+    for (const pass of ["first", "second"]) {
+      const status = await getRunStatus({ projectRoot: project, runId, env });
+      assert.equal(status.ok, true, `${pass}: ${JSON.stringify(status.diagnostics)}`);
+      assert.equal(status.value?.status, "succeeded");
+      assert.equal(
+        status.diagnostics.some((diagnostic) => diagnostic.code === "TASK_WORKTREE_REMOVAL_FAILED"),
+        false,
+        JSON.stringify(status.diagnostics)
+      );
+      assert.deepEqual(
+        taskWorktreeState(git, runId, worktree),
+        keepWorkspaces
+          ? { directory: true, registered: true, branch: true }
+          : { directory: false, registered: false, branch: false },
+        pass
+      );
+    }
+    assert.equal(fs.existsSync(path.join(runRoot, "workspaces", ".removing")), false);
+    // The published outputs stay verified without the worktree.
+    assert.deepEqual(
+      loadVerifiedRunOutputSnapshots(runRoot).map((snapshot) => snapshot.attempt_id),
+      ["project-discovery"]
+    );
+  }
+});
+
+test("status keeps the worktree of a failed task that holds its rejected output and deletes one that holds none", async () => {
+  for (const rejectedOutput of [true, false]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const git = gitTaskWorktreeProject(project);
+    const runId = `reap-failed-${String(rejectedOutput)}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.ok(run.value, JSON.stringify(run.diagnostics));
+    const runRoot = run.value.run_root;
+    const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+    const mirroredFindings = path.join(worktree, "artifacts", "project-discovery", "findings.json");
+    // The verifier never published this output, so the mirror holds its only copy.
+    if (rejectedOutput) fs.writeFileSync(mirroredFindings, "[not json\n", "utf8");
+
+    const status = await getRunStatus({ projectRoot: project, runId, env });
+
+    assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+    assert.equal(status.value?.status, "failed");
+    assert.equal(readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status, "failed");
+    assert.deepEqual(
+      taskWorktreeState(git, runId, worktree),
+      rejectedOutput
+        ? { directory: true, registered: true, branch: true }
+        : { directory: false, registered: false, branch: false }
+    );
+    if (rejectedOutput) assert.equal(fs.readFileSync(mirroredFindings, "utf8"), "[not json\n");
+  }
+});
+
+test("status deletes no task worktree while the run is still running", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const git = gitTaskWorktreeProject(project);
+  const runId = "reap-running";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.ok(run.value, JSON.stringify(run.diagnostics));
+  const runRoot = run.value.run_root;
+  const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+  writeRequiredArtifactSet(runRoot, "project-discovery", [GENERIC_RUNTIME_MARKDOWN_PATH, "findings.json"]);
+
+  const status = await getRunStatus({ projectRoot: project, runId, env });
+
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(readRunState(layoutForRunRoot(runRoot, runId)).nodes["project-discovery"]?.status, "succeeded");
+  assert.deepEqual(taskWorktreeState(git, runId, worktree), { directory: true, registered: true, branch: true });
+});
+
+test("resume --retry-failed can rerun a task whose worktree status deleted", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const git = gitTaskWorktreeProject(project);
+  const runId = "reap-then-retry";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { message: "the provider failed before writing output" },
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.ok(run.value, JSON.stringify(run.diagnostics));
+  const runRoot = run.value.run_root;
+  const worktree = addTaskWorktree(git, runRoot, runId, "project-discovery");
+
+  const status = await getRunStatus({ projectRoot: project, runId, env });
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(status.value?.status, "failed");
+  assert.deepEqual(taskWorktreeState(git, runId, worktree), { directory: false, registered: false, branch: false });
+
+  const commandLog = fakeRunnerPath(env, "SMITHERS_FAKE_LOG");
+  fs.writeFileSync(commandLog, "", "utf8");
+  const resumed = await resumeRun({ projectRoot: project, runId, force: true, retryFailed: true, env });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(
+    resumed.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_WORKTREE_REPAIR_FAILED"),
+    false,
+    JSON.stringify(resumed.diagnostics)
+  );
+  assert.match(fs.readFileSync(commandLog, "utf8"), /^timetravel .* --node-id node:project-discovery /mu);
+  // Nothing of the deleted worktree is left for the engine's `worktree add -B` to trip over.
+  addTaskWorktree(git, runRoot, runId, "project-discovery");
+  assert.deepEqual(taskWorktreeState(git, runId, worktree), { directory: true, registered: true, branch: true });
+});
+
 test("syncRun rejects workspace-mirrored outputs without copying or repairing them", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -25820,7 +26054,6 @@ test("fork child preflight receives sealed input and resolves it before creating
       inputJson: relaunchInput,
       logsDir: path.join(project, "logs")
     },
-    keepWorkspaces: false,
     controllerLeaseSeconds: 60,
     env
   });
@@ -25840,7 +26073,6 @@ test("fork child preflight receives sealed input and resolves it before creating
       workflowPath,
       projectRoot: project,
       forkFrame: 7,
-      keepWorkspaces: false,
       controllerLeaseSeconds: 60,
       env
     }),
@@ -27052,7 +27284,11 @@ test("planning errors that need no run directory leave none behind", async () =>
     fs.readFileSync(topologyPath, "utf8").replaceAll("project-discovery\n", "threat-model\n"),
     "utf8"
   );
-  const graphPlan = await planRun({ projectRoot: graphProject, runId: "no-vulnerability-database", env: {} });
+  const graphPlan = await planRun({
+    projectRoot: graphProject,
+    runId: "no-vulnerability-database",
+    env: privateHomeEnv()
+  });
   assert.equal(graphPlan.ok, false);
   assert.equal(
     graphPlan.diagnostics[0]?.code,
@@ -27072,7 +27308,7 @@ test("planning errors that need no run directory leave none behind", async () =>
   let preflights = 0;
   try {
     cachePlan = await planRun(
-      { projectRoot: cacheProject, runId: "unsynced-reference", env: {} },
+      { projectRoot: cacheProject, runId: "unsynced-reference", env: privateHomeEnv() },
       {
         beforeMaterialize: async () => {
           preflights += 1;
@@ -27100,7 +27336,7 @@ test("a planning step that fails after the run directory exists returns its fail
   writeSmallTopology(project);
   // A file where the rendered-prompt snapshot directory belongs makes the snapshot write fail.
   const plan = await planRun(
-    { projectRoot: project, runId: "blocked-prompt-snapshots", env: {} },
+    { projectRoot: project, runId: "blocked-prompt-snapshots", env: privateHomeEnv() },
     { afterLayoutCreated: (layout) => fs.writeFileSync(path.join(layout.root, "prompt-snapshots"), "") }
   );
   assert.equal(plan.ok, false);
@@ -27116,7 +27352,7 @@ test("incomplete launch is observable without granting execution authority or cl
   const env = fakeSmithersEnv(project);
   // Execute the real planning phase. No workflow has been submitted, and this
   // state also survives a launcher interruption immediately after planning.
-  const plan = await planRun({ projectRoot: project, runId, env });
+  const plan = await planRun({ projectRoot: project, runId, env: { ...env, ...privateHomeEnv() } });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   const layout = plan.value.layout;
@@ -28761,7 +28997,7 @@ test("a static prompt that cannot be read no longer stops the whole workflow ren
     path.join(project, ".smithers", "node_modules"),
     "dir"
   );
-  const plan = await planRun({ projectRoot: project, runId: "graph-missing-prompt", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "graph-missing-prompt", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
@@ -28845,7 +29081,7 @@ test("compiled Smithers workflow passes a real non-executing graph smoke", async
     "dir"
   );
 
-  const plan = await planRun({ projectRoot: project, runId: "graph-smoke", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "graph-smoke", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   const { compileSmithersWorkflow } = await import("../src/smithers.js");

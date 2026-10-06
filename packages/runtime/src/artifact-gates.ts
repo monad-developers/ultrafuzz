@@ -259,6 +259,18 @@ export interface AuthenticatedArtifactGateSnapshots {
   outputs: ReadonlyMap<string, AuthenticatedArtifactGateSnapshot>;
   publications: ReadonlyMap<string, Uint8Array>;
   files?: ReadonlyMap<string, Uint8Array>;
+  /**
+   * Whether gates may read the producing task's worktree. Controller
+   * finalization reads it while it still exists. A read of finalized output
+   * skips it and checks the published bytes only, because Ultrafuzz deletes
+   * task worktrees after the run (#1227).
+   */
+  taskWorktree: "read" | "skip";
+}
+
+/** Without snapshots, the controller is rechecking a failed verifier's output while its worktree exists. */
+function taskWorktreeMode(authenticated: AuthenticatedArtifactGateSnapshots | undefined): "read" | "skip" {
+  return authenticated?.taskWorktree ?? "read";
 }
 
 /**
@@ -628,15 +640,22 @@ function verifyInvariantLedgerProducerArtifacts(
     }))
   );
   const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
+  // A read of finalized output checks the durable source proof only: the
+  // discovery worktree may since have been deleted (#1227).
+  const taskWorktree = taskWorktreeMode(authenticated);
+  const discoveryWorkspacePresent = taskWorktree === "read" && fs.existsSync(discoveryWorkspace);
   const sourceProofPath = invariantSourceProofPath(layout.root, path.basename(artifactDir));
   const sourceProofPresent = fs.existsSync(sourceProofPath);
   const sourceProof = sourceProofPresent
-    ? readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics)
+    ? readInvariantSourceProof(sourceProofPath, ledgerPath, ledgerBytes, diagnostics, taskWorktree)
     : undefined;
-  if (!sourceProofPresent && !fs.existsSync(discoveryWorkspace)) {
+  if (!sourceProofPresent && !discoveryWorkspacePresent) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_SOURCE_PROOF_MISSING",
-      message: "Invariant ledger source proof and discovery workspace are unavailable",
+      message:
+        taskWorktree === "skip"
+          ? "Invariant ledger source proof is unavailable"
+          : "Invariant ledger source proof and discovery workspace are unavailable",
       severity: "error",
       source: "invariant-ledger",
       path: ledgerPath
@@ -651,12 +670,20 @@ function verifyInvariantLedgerProducerArtifacts(
   // which the ledger schema requires when `entries` is empty. Ledger entries remain
   // byte-checked against the pinned source below.
   for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-    verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+    verifyInvariantProbePath(
+      layout,
+      discoveryWorkspace,
+      probe.source_path,
+      probeIndex,
+      ledgerPath,
+      diagnostics,
+      taskWorktree
+    );
   }
   for (const [entryIndex, entry] of parsed.value.entries.entries()) {
     if (sourceProof !== undefined) {
       verifyInvariantSourceProofEvidence(sourceProof, entry, entryIndex, ledgerPath, diagnostics);
-    } else if (!sourceProofPresent && fs.existsSync(discoveryWorkspace)) {
+    } else if (!sourceProofPresent && discoveryWorkspacePresent) {
       verifyInvariantSourceEvidence(discoveryWorkspace, entry, entryIndex, ledgerPath, diagnostics);
     }
   }
@@ -769,7 +796,15 @@ function verifyCanonicalPropertiesProducerArtifacts(
   // that workspace has already been reclaimed the check is a no-op, exactly as it is on discovery.
   const discoveryWorkspace = path.join(layout.workspacesDir, ledgerProducer.authority.attempt_id);
   for (const [probeIndex, probe] of (ledger.value.scan_probes ?? []).entries()) {
-    verifyInvariantProbePath(layout, discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
+    verifyInvariantProbePath(
+      layout,
+      discoveryWorkspace,
+      probe.source_path,
+      probeIndex,
+      ledgerPath,
+      diagnostics,
+      taskWorktreeMode(authenticated)
+    );
   }
 
   const ledgerIds = new Set(ledger.value.entries.map((entry) => entry.id));
@@ -1252,7 +1287,8 @@ function verifyInvariantProbePath(
   relativePath: string,
   probeIndex: number,
   ledgerPath: string,
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  taskWorktree: "read" | "skip"
 ): void {
   const probePath = path.resolve(workspacePath, relativePath);
   const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
@@ -1268,6 +1304,8 @@ function verifyInvariantProbePath(
     });
     return;
   }
+  // A read of finalized output checks the published path only: finalization checked the worktree (#1227).
+  if (taskWorktree === "skip") return;
   try {
     const workspaceStat = fs.lstatSync(workspacePath);
     if (
@@ -1416,7 +1454,8 @@ function readInvariantSourceProof(
   proofPath: string,
   ledgerPath: string,
   ledgerBytes: Uint8Array,
-  diagnostics: RuntimeDiagnostic[]
+  diagnostics: RuntimeDiagnostic[],
+  taskWorktree: "read" | "skip"
 ): InvariantSourceProof | undefined {
   try {
     assertRegularFileInside(path.dirname(path.dirname(proofPath)), proofPath, "invariant source proof");
@@ -1490,11 +1529,15 @@ function readInvariantSourceProof(
       }
       durableGitContext = { commit: parsed.value.commit, tree: parsed.value.tree };
     }
-    const semanticContext = invariantSourceProofGitContext(proofPath, expectedAttemptId, durableGitContext);
+    const semanticContext =
+      taskWorktree === "read"
+        ? invariantSourceProofGitContext(proofPath, expectedAttemptId, durableGitContext)
+        : undefined;
     const semanticDiagnostics = runtimeSemanticGateDiagnostics({
       schemaFilename: "invariant-source-proof.schema.json",
       document: parsed.value,
       artifactPath: proofPath,
+      taskWorktree,
       ...(semanticContext === undefined ? {} : { context: { git: semanticContext } })
     });
     diagnostics.push(...semanticDiagnostics);
@@ -1702,6 +1745,7 @@ function verifyRequiredArtifactShape(
         schemaFilename: binding.schema_file as ArtifactSchemaFilename,
         document: contract.value,
         artifactPath: absolutePath,
+        taskWorktree: taskWorktreeMode(authenticated),
         context: semanticGateContextForArtifact({
           layout,
           artifactDir,
@@ -1930,12 +1974,13 @@ function semanticGateContextForArtifact(input: {
     }
   };
   const artifactSet = semanticArtifactSetForSchema(input);
+  const readsWorktree = taskWorktreeMode(input.authenticated) === "read";
   const git =
-    input.schemaFilename === "workspace-patch.schema.json"
+    readsWorktree && input.schemaFilename === "workspace-patch.schema.json"
       ? workspacePatchGitContext(input.layout, input.artifactDir, input.attemptId, input.authenticated)
       : undefined;
   const aggregation =
-    input.schemaFilename === "aggregation-manifest.schema.json"
+    readsWorktree && input.schemaFilename === "aggregation-manifest.schema.json"
       ? authenticatedAggregationSemanticContext({
           layout: input.layout,
           attemptId: input.attemptId,
@@ -3612,7 +3657,6 @@ function verifyCoverageProductionInventory(
       )
     );
   }
-  if (evidence.status === "unavailable") return diagnostics;
   if (
     evidence.status !== "measured" ||
     !Array.isArray(evidence.files) ||
@@ -3620,6 +3664,7 @@ function verifyCoverageProductionInventory(
     !Array.isArray(evidence.zero_coverage_components)
   )
     return diagnostics;
+  if (taskWorktreeMode(authenticated) === "skip") return diagnostics;
   const workspacePath = getNodeWorkspaceDir(layout, attemptId);
   const productionRoots = configuredProductionSourceRoots(layout);
   if (!fs.existsSync(workspacePath) || productionRoots === undefined) {

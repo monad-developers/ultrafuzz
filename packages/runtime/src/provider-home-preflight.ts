@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { ResolvedConfig } from "@ultrafuzz/config";
@@ -14,7 +15,8 @@ const PROVIDER_HOMES: Readonly<Record<string, { provider: string; env?: readonly
   ClaudeAgent: { provider: "claude", env: ["CLAUDE_CONFIG_DIR"], relative: ".claude" },
   CodexAgent: { provider: "codex", env: ["CODEX_HOME"], relative: ".codex" },
   KimiAgent: { provider: "kimi", env: ["KIMI_CODE_HOME", "KIMI_SHARE_DIR"], relative: ".kimi-code" },
-  DeepSeekAgent: { provider: "deepseek" }
+  DeepSeekAgent: { provider: "deepseek" },
+  OpenRouterAgent: { provider: "openrouter" }
 };
 
 export interface ProviderHomeProblem {
@@ -32,8 +34,8 @@ interface ProviderHomeLayout {
   home: string;
   /** The provider-home root, when the home is below one; the adapters require it to be private too. */
   root?: string;
-  /** A root the adapters reject outright. */
-  invalidRoot?: string;
+  /** A relative path the adapters reject outright, and the variable that set it. */
+  notAbsolute?: { variable: string; value: string };
 }
 
 function providerHomeLayout(
@@ -42,26 +44,33 @@ function providerHomeLayout(
   env: Record<string, string | undefined>
 ): ProviderHomeLayout | undefined {
   const rules = PROVIDER_HOMES[agentRef];
-  const home = env.HOME?.trim();
-  if (rules === undefined || !home) return undefined;
+  if (rules === undefined) return undefined;
+  const home = env.HOME?.trim() || os.homedir();
   const configDir = config.agents[agentRef]?.configDir;
   const selectedRoot = env.ULTRAFUZZ_PROVIDER_HOME_ROOT?.trim();
   if (configDir === undefined && !selectedRoot && rules.relative !== undefined) {
-    const envHome = (rules.env ?? []).map((name) => env[name]?.trim()).find(Boolean);
-    return { home: path.resolve(envHome ?? path.join(home, rules.relative)) };
+    const selected = (rules.env ?? [])
+      .map((variable) => ({ variable, value: env[variable]?.trim() ?? "" }))
+      .find(({ value }) => value !== "");
+    if (selected === undefined) return { home: path.resolve(home, rules.relative) };
+    return path.isAbsolute(selected.value)
+      ? { home: path.resolve(selected.value) }
+      : { home: selected.value, notAbsolute: selected };
   }
   const root = selectedRoot || path.join(home, ".ultrafuzz-provider-homes");
   const layout = {
     home: path.resolve(root, rules.provider, ...(configDir === undefined ? [] : configDir.split("/"))),
     root: path.resolve(root)
   };
-  return path.isAbsolute(root) ? layout : { ...layout, invalidRoot: root };
+  return path.isAbsolute(root)
+    ? layout
+    : { ...layout, notAbsolute: { variable: "ULTRAFUZZ_PROVIDER_HOME_ROOT", value: root } };
 }
 
 /**
  * The directory an agent adapter will use as its provider home, or undefined for an agent without
- * one. It is resolved from the launch environment's `HOME`, as the engine sees it, and is undefined
- * without one, as in tests that launch with an empty environment.
+ * one. It is resolved from the launch environment's `HOME`, as the engine sees it, or from
+ * `os.homedir()` without one, as the adapters fall back.
  */
 export function predictedProviderHome(
   agentRef: string,
@@ -89,13 +98,14 @@ export function providerHomeProblems(
     const layout = providerHomeLayout(agentRef, config, env);
     if (layout === undefined || checked.has(layout.home)) continue;
     checked.add(layout.home);
-    if (layout.invalidRoot !== undefined) {
+    if (layout.notAbsolute !== undefined) {
+      const { variable, value } = layout.notAbsolute;
       problems.push({
         agentRef,
         home: layout.home,
-        directory: layout.invalidRoot,
-        reason: "is not an absolute path, which ULTRAFUZZ_PROVIDER_HOME_ROOT must be",
-        remedy: "set ULTRAFUZZ_PROVIDER_HOME_ROOT to an absolute path"
+        directory: value,
+        reason: `is not an absolute path, which ${variable} must be`,
+        remedy: `set ${variable} to an absolute path`
       });
       continue;
     }
@@ -121,8 +131,15 @@ function directoryProblem(
     } catch (error) {
       // The adapter creates a missing directory, and fails on anything else it cannot inspect.
       const code = error instanceof Error && "code" in error ? String(error.code) : "unknown error";
-      return code === "ENOENT"
-        ? undefined
+      if (code === "ENOENT") return undefined;
+      // Every directory above `current` was inspected, so EACCES means its parent cannot be searched.
+      const parent = path.dirname(current);
+      return code === "EACCES"
+        ? {
+            directory: parent,
+            reason: "cannot be searched by you (EACCES)",
+            remedy: `run \`chmod u+x ${shellWord(parent)}\`, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
+          }
         : {
             directory: current,
             reason: `could not be inspected (${code})`,
@@ -140,7 +157,11 @@ function directoryProblem(
     const owned = typeof process.getuid !== "function" || stat.uid === process.getuid();
     if (privateDirectories.has(current) && (mode !== 0o700 || !owned)) {
       return owned
-        ? { directory: current, reason: `has mode ${mode.toString(8)}`, remedy: `run \`chmod 700 ${current}\`` }
+        ? {
+            directory: current,
+            reason: `has mode ${mode.toString(8)}`,
+            remedy: `run \`chmod 700 ${shellWord(current)}\``
+          }
         : {
             directory: current,
             reason: "is owned by another user",
@@ -151,11 +172,16 @@ function directoryProblem(
       return {
         directory: current,
         reason: `is group- or world-writable (mode ${mode.toString(8)})`,
-        remedy: `run \`chmod go-w ${current}\`, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
+        remedy: `run \`chmod go-w ${shellWord(current)}\`, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
       };
     }
   }
   return undefined;
+}
+
+/** A path as one shell word, so that a printed command pastes safely. */
+function shellWord(value: string): string {
+  return /^[\w./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /** One error per refused provider home, naming the directory and how to fix it. */

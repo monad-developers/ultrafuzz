@@ -532,6 +532,12 @@ test(
         },
         { status: "available", completion: "complete", verification: "verified" }
       );
+      // That status, the first sync after the run ended, deleted every task worktree: each task
+      // succeeded and its outputs are published (#1227). The report below is verified without them.
+      assert.deepEqual(fs.readdirSync(path.join(runRoot, "workspaces")), []);
+      const git = (args: string[]): string => execFileSync("git", args, { cwd: campaign.project, encoding: "utf8" });
+      assert.equal(git(["worktree", "list", "--porcelain"]).includes(runRoot), false);
+      assert.equal(git(["for-each-ref", `refs/heads/ultrafuzz/${runId}/`]), "");
 
       const report = await ultrafuzz<{ source: string; json_path: string; markdown_path: string }>(campaign, [
         "report",

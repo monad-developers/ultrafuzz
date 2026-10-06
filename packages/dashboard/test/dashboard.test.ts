@@ -92,7 +92,8 @@ test("serves logical topology flow with expanded attempt details", async () => {
 test("starts on the latest readable run when a half-launched run directory has no run.json", async () => {
   const projectRoot = makeProject();
   writeSmallTopology(projectRoot);
-  const plan = await planRun({ projectRoot, runId: "readable-run", env: {} });
+  // A HOME of its own: validation predicts each agent's provider home from it (#1265).
+  const plan = await planRun({ projectRoot, runId: "readable-run", env: { HOME: path.join(projectRoot, ".home") } });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   fs.mkdirSync(path.join(path.dirname(plan.value.layout.root), "half-launched"));
@@ -124,7 +125,8 @@ test("creates a topology node prompt as terminal work before finish", async () =
   const prompt =
     "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n\n" +
     "{{finding_reachability_vocabulary}}\n\n{{finding_note_key_vocabulary}}\n";
-  const handle = await serveDashboard({ projectRoot, port: 0 });
+  // Saving a prompt validates the project, which predicts each agent's provider home from HOME (#1265).
+  const handle = await serveDashboard({ projectRoot, port: 0, env: { HOME: path.join(projectRoot, ".home") } });
   try {
     const response = await fetch(apiUrl(handle.url, "/api/prompts/nodes"), {
       method: "POST",
@@ -434,7 +436,7 @@ test("dashboard validates persisted run-state v5 documents through the composed 
   const projectRoot = makeProject();
   writeSmallTopology(projectRoot);
   const runId = "dashboard-persisted";
-  const plan = await planRun({ projectRoot, runId, env: {} });
+  const plan = await planRun({ projectRoot, runId, env: { HOME: path.join(projectRoot, ".home") } });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const artifactDir = path.join(plan.value!.run_root, "artifacts", "project-discovery");
   fs.mkdirSync(artifactDir, { recursive: true });
@@ -503,7 +505,7 @@ test("dashboard events returns one captured journal epoch when the path is repla
   const projectRoot = makeProject();
   writeSmallTopology(projectRoot);
   const runId = "dashboard-event-snapshot";
-  const plan = await planRun({ projectRoot, runId, env: {} });
+  const plan = await planRun({ projectRoot, runId, env: { HOME: path.join(projectRoot, ".home") } });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
 
@@ -1064,7 +1066,7 @@ ${options.includeFinalReport === true ? "      - summary-review\n" : ""}
     "utf8"
   );
 
-  const plan = await planRun({ projectRoot, runId, env: {} });
+  const plan = await planRun({ projectRoot, runId, env: { HOME: path.join(projectRoot, ".home") } });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.ok(plan.value);
   const compiled = await compileDashboardFixtureWorkflow({

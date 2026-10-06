@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -1413,7 +1413,7 @@ test("diagnoseProject reports the installed runner that commands after launch ex
   // A project-local engine is target-owned and never becomes controller authority.
   writeFakeInstalledEngine(project, { version: "0.29.0" });
 
-  const doctor = await diagnoseProject({ projectRoot: project, env, offline: true });
+  const doctor = await diagnoseProject({ projectRoot: project, env: { ...env, ...privateHomeEnv() }, offline: true });
 
   assert.equal(doctor.value?.workflow_engine.installed_version, SMITHERS_VERSION);
   assert.equal(doctor.value?.workflow_engine.required_version, SMITHERS_VERSION);
@@ -1440,7 +1440,7 @@ test("diagnoseProject reports an installed runner inside the target project as r
 
   const doctor = await diagnoseProject({
     projectRoot: checkout,
-    env: { PATH: "/usr/bin" },
+    env: { ...privateHomeEnv(), PATH: "/usr/bin" },
     offline: true,
     requiredCommandProbe: allAvailable
   });
@@ -1480,7 +1480,7 @@ test("diagnoseProject reports a missing credential for a selected OpenRouter pro
 
   const missing = await diagnoseProject({
     projectRoot: project,
-    env: { PATH: "/usr/bin" },
+    env: { ...privateHomeEnv(), PATH: "/usr/bin" },
     offline: true,
     requiredCommandProbe: probe
   });
@@ -1489,7 +1489,7 @@ test("diagnoseProject reports a missing credential for a selected OpenRouter pro
 
   const ready = await diagnoseProject({
     projectRoot: project,
-    env: { PATH: "/usr/bin", OPENROUTER_API_KEY: "test-key" },
+    env: { ...privateHomeEnv(), PATH: "/usr/bin", OPENROUTER_API_KEY: "test-key" },
     offline: true,
     requiredCommandProbe: probe
   });
@@ -1521,7 +1521,7 @@ test("diagnoseProject checks an OpenRouter profile selected only by topology", a
 
   const missing = await diagnoseProject({
     projectRoot: project,
-    env: { PATH: "/usr/bin" },
+    env: { ...privateHomeEnv(), PATH: "/usr/bin" },
     offline: true,
     requiredCommandProbe: probe
   });
@@ -1552,7 +1552,7 @@ test("diagnoseProject checks an OpenRouter profile selected by a runtime topolog
 
   const configured = await diagnoseProject({
     projectRoot: project,
-    env: { PATH: "/usr/bin" },
+    env: { ...privateHomeEnv(), PATH: "/usr/bin" },
     offline: true,
     requiredCommandProbe: probe
   });
@@ -1561,7 +1561,7 @@ test("diagnoseProject checks an OpenRouter profile selected by a runtime topolog
   const overridden = await diagnoseProject({
     projectRoot: project,
     topologyPath: overrideTopologyPath,
-    env: { PATH: "/usr/bin" },
+    env: { ...privateHomeEnv(), PATH: "/usr/bin" },
     offline: true,
     requiredCommandProbe: probe
   });
@@ -1577,7 +1577,7 @@ test("diagnoseProject reports commands required by the active topology", async (
 
   const doctor = await diagnoseProject({
     projectRoot: project,
-    env: { PATH: path.join(project, "empty-bin") },
+    env: { ...privateHomeEnv(), PATH: path.join(project, "empty-bin") },
     offline: true
   });
 
@@ -1597,7 +1597,7 @@ test("diagnoseProject requires only the CLIs of agents the selected topology can
   const diagnose = () =>
     diagnoseProject({
       projectRoot: project,
-      env: { PATH: "/usr/bin" },
+      env: { ...privateHomeEnv(), PATH: "/usr/bin" },
       offline: true,
       requiredCommandProbe: async (names) =>
         names.map((name) => ({
@@ -1675,7 +1675,7 @@ test("diagnoseProject reports controller roots in the temporary directory and le
   const doctor = await withTemporaryDirectory(temporary, () =>
     diagnoseProject({
       projectRoot: project,
-      env: { PATH: "/usr/bin" },
+      env: { ...privateHomeEnv(), PATH: "/usr/bin" },
       offline: true,
       requiredCommandProbe: allAvailable
     })
@@ -1709,7 +1709,7 @@ test(
     const doctor = await withTemporaryDirectory(temporary, () =>
       diagnoseProject({
         projectRoot: project,
-        env: { PATH: "/usr/bin" },
+        env: { ...privateHomeEnv(), PATH: "/usr/bin" },
         offline: true,
         requiredCommandProbe: allAvailable
       })
@@ -1733,7 +1733,7 @@ test("diagnoseProject warns when the temporary directory has little free space",
   const doctor = await withTemporaryDirectory(temporary, () =>
     diagnoseProject({
       projectRoot: project,
-      env: { PATH: "/usr/bin" },
+      env: { ...privateHomeEnv(), PATH: "/usr/bin" },
       offline: true,
       requiredCommandProbe: allAvailable
     })
@@ -1767,7 +1767,7 @@ test("diagnoseProject reports a lower bound once sizing many controller roots ru
   const doctor = await withTemporaryDirectory(temporary, () =>
     diagnoseProject({
       projectRoot: project,
-      env: { PATH: "/usr/bin" },
+      env: { ...privateHomeEnv(), PATH: "/usr/bin" },
       offline: true,
       requiredCommandProbe: allAvailable
     })
@@ -1809,7 +1809,11 @@ test("diagnoseProject rejects cwd-dependent PATH entries that are unavailable in
     fs.writeFileSync(executable, "#!/bin/sh\necho recon test\n", "utf8");
     fs.chmodSync(executable, 0o755);
 
-    const doctor = await diagnoseProject({ projectRoot: project, env: { PATH: searchPath }, offline: true });
+    const doctor = await diagnoseProject({
+      projectRoot: project,
+      env: { ...privateHomeEnv(), PATH: searchPath },
+      offline: true
+    });
 
     assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
     assert.ok(doctor.diagnostics.some((entry) => entry.code === "DOCTOR_TOOLCHAIN_MISSING"));
@@ -1854,7 +1858,11 @@ test("diagnoseProject never executes a target-local required-command shim", asyn
   fs.writeFileSync(executable, `#!/bin/sh\nprintf hostile > ${shellQuote(marker)}\necho recon test\n`, "utf8");
   fs.chmodSync(executable, 0o755);
 
-  const doctor = await diagnoseProject({ projectRoot: project, env: { PATH: undefined }, offline: true });
+  const doctor = await diagnoseProject({
+    projectRoot: project,
+    env: { ...privateHomeEnv(), PATH: undefined },
+    offline: true
+  });
 
   assert.equal(doctor.value?.toolchain.find((entry) => entry.name === "recon")?.available, false);
   assert.equal(fs.existsSync(marker), false);
@@ -1919,7 +1927,8 @@ nodes:
 
   const validation = await validateProject({
     projectRoot: project,
-    topologyTransform: { excludedNodeIds: ["required-branch"] }
+    topologyTransform: { excludedNodeIds: ["required-branch"] },
+    env: privateHomeEnv()
   });
 
   assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
@@ -2048,7 +2057,7 @@ test("diagnoseProject keeps an offline registry lookup non-fatal", async () => {
 
   const doctor = await diagnoseProject({
     projectRoot: project,
-    env: { ...env, PATH: `${failingBin}${path.delimiter}${env.PATH ?? ""}` }
+    env: { ...env, ...privateHomeEnv(), PATH: `${failingBin}${path.delimiter}${env.PATH ?? ""}` }
   });
 
   assert.equal(doctor.value?.workflow_engine.latest_published_version, "unknown");

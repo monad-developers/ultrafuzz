@@ -295,7 +295,6 @@ export async function startRun(input: StartRunInput) {
       compiled,
       projectRoot: plan.validation.project_root,
       maxConcurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
-      keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       workflowPath: prepared.executionSnapshot.workflowPath,
       env: submissionEnvironment,
@@ -655,7 +654,6 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         runRoot: layout.root,
         logsDir: path.join(smithersRoot, "logs")
       },
-      keepWorkspaces: config.run.keepWorkspaces,
       controllerLeaseSeconds: config.run.controllerLeaseSeconds,
       env: lifecycleEnvironment,
       environmentVariableNames: mergeEnvironmentVariableNames(
@@ -1103,7 +1101,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
         inputJson: evidence.executionSnapshot.inputJson,
         logsDir: path.join(evidence.layout.root, "smithers", "logs")
       },
-      keepWorkspaces: sealedConfig.run.keepWorkspaces,
       controllerLeaseSeconds: sealedConfig.run.controllerLeaseSeconds,
       env: lifecycleEnvironment,
       environmentVariableNames: mergeEnvironmentVariableNames(

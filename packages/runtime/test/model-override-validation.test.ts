@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -23,7 +23,7 @@ function diagnosticCodes(result: Awaited<ReturnType<typeof validateProject>>): s
 test("validate rejects an OpenRouter override that drops the model", async () => {
   const project = tempProject();
 
-  const validate = await validateProject({ projectRoot: project, agent: "OpenRouterAgent", env: {} });
+  const validate = await validateProject({ projectRoot: project, agent: "OpenRouterAgent", env: privateHomeEnv() });
 
   assert.equal(validate.ok, false);
   assert.ok(
@@ -47,7 +47,7 @@ test("validate rejects OpenRouter model overrides that are whitespace, control c
       projectRoot: project,
       agent: "OpenRouterAgent",
       model,
-      env: {}
+      env: privateHomeEnv()
     });
 
     assert.equal(validate.ok, false, label);
@@ -65,7 +65,7 @@ test("validate accepts and preserves an opaque OpenRouter catalogue model overri
     projectRoot: project,
     agent: "OpenRouterAgent",
     model: ACCEPTED_OPENROUTER_MODEL,
-    env: {}
+    env: privateHomeEnv()
   });
 
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -86,7 +86,7 @@ test("validate still requires the pre-override configured agent factories", asyn
     projectRoot: project,
     agent: "OpenRouterAgent",
     model: ACCEPTED_OPENROUTER_MODEL,
-    env: {}
+    env: privateHomeEnv()
   });
 
   assert.equal(validate.ok, false);
@@ -121,7 +121,7 @@ model = "gpt-test-fast"
     );
 
   writeConfig('[models]\ndefault = "fast"');
-  const rejected = await validateProject({ projectRoot: project, env: {} });
+  const rejected = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.deepEqual(
     rejected.diagnostics
       .filter((diagnostic) => diagnostic.severity === "error")
@@ -136,6 +136,6 @@ model = "gpt-test-fast"
   assert.equal(await runsRootForProject(project), path.join(project, "custom-runs"));
 
   writeConfig('[retry]\nagents = ["fast"]');
-  const accepted = await validateProject({ projectRoot: project, env: {} });
+  const accepted = await validateProject({ projectRoot: project, env: privateHomeEnv() });
   assert.equal(accepted.ok, true, JSON.stringify(accepted.diagnostics));
 });

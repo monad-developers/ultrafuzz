@@ -10,7 +10,7 @@ import { loadReferenceCatalog } from "@ultrafuzz/references";
 import { initProject, planRun } from "../src/index.js";
 import { compileSmithersWorkflow, type CompiledSmithersWorkflow } from "../src/smithers.js";
 import { writeShippedDocumentReferenceCaches, writeShippedVulnerabilityDatabaseCache } from "./reference-fixtures.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 interface Inspection {
   status?: string;
@@ -99,7 +99,12 @@ async function compilePackagedDefaultTopology(): Promise<CompiledSmithersWorkflo
   process.env.XDG_CACHE_HOME = xdgCacheHome;
   try {
     const runId = "lens-failure";
-    const plan = await planRun({ projectRoot: project, runId, env: {}, runtimeOverrides: { auditProfile: "default" } });
+    const plan = await planRun({
+      projectRoot: project,
+      runId,
+      env: privateHomeEnv(),
+      runtimeOverrides: { auditProfile: "default" }
+    });
     assert.ok(plan.ok && plan.value, JSON.stringify(plan.diagnostics));
     return compileSmithersWorkflow({
       projectRoot: project,

@@ -118,7 +118,7 @@ empty path components, and dot components fail validation.
 | `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.          |
 | `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
 | `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.        |
-| `keep_workspaces`           | boolean | Retain successful-run node workspaces instead of reaping them.              |
+| `keep_workspaces`           | boolean | Keep every task worktree instead of deleting the disposable ones.           |
 | `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
 | `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
 | `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
@@ -180,9 +180,25 @@ them on stdout), or cancel it with `ultrafuzz cancel <run-id>`.
 Workflow-side enforcement is tracked in
 [#1110](https://github.com/monad-developers/ultrafuzz/issues/1110).
 
-Successful runs remove their generated workspaces by default. Setting
-`keep_workspaces = true` retains them; dirty or unpushed workspaces are always
-preserved by the workflow runner.
+Ultrafuzz, not the workflow engine, deletes task worktrees. With the default
+`keep_workspaces = false`, the first command that synchronizes a run after it
+ends (`status`, `inspect`, `stats`, the dashboard or an eval poll) deletes, for
+each task that succeeded, its worktree under `workspaces/<attempt>/`, the Git
+registration and the `ultrafuzz/<run-id>/<attempt>` branch: the task's outputs
+are already published under `artifacts/<attempt>/`. Everything else in that
+worktree goes with it: `.ultrafuzz/`, the `artifacts/` mirror, the strategy
+scratch directory `test/foundry/<node>/` (its verified tests are published as
+`generated-tests/` companions, which `ultrafuzz materialize` writes back into a
+tree), `foundry.lock` (a Forge byproduct) and any edit outside the declared
+outputs and `workspace.patch`. To keep something, declare it as an output. A
+task that did not succeed keeps its worktree while `artifacts/<attempt>/` inside
+it holds a file, so a rejected output stays at
+`workspaces/<attempt>/artifacts/<attempt>/`; a failed task that wrote no output
+is deleted. `resume --retry-failed`, `--reset-node` and `fork` rerun a task and
+replace its earlier output. With `keep_workspaces = true` nothing is deleted.
+The value is fixed at launch, so changing it, or `ULTRAFUZZ_KEEP_WORKSPACES`,
+for a `resume` has no effect. A deletion that fails is reported as a
+`TASK_WORKTREE_REMOVAL_FAILED` warning, and the next command retries it.
 
 The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
 resolves the real executable before launch, writes an executable wrapper under
