@@ -768,9 +768,9 @@ the synthetic holdout commit it evaluated. The public projection keeps
 restate it.
 
 `report.md` does not render `source_run_id`, `source_run_ids`,
-`partial_pricing`, or `artifact_validation_warnings`, and renders
-`attempts_without_usage` and `unpriced_attempts` only as the count in the
-spend line; `report.json.run_metadata` keeps them all. See
+`partial_pricing`, `attempts_without_usage`, `unpriced_attempts`, or
+`artifact_validation_warnings`; `report.json.run_metadata` keeps them all. The
+last three only decide whether the spend ends in `+`. See
 [Partial Agent Artifacts](../schemas.md#partial-agent-artifacts) for where
 artifact validation warnings are shown, and
 [Run accounting and estimated spend](#run-accounting-and-estimated-spend) for
@@ -998,35 +998,44 @@ upstream findings, renders as literal text.
 
 `Estimated spend` is the run's priced usage in accounting v4,
 `accounting.cumulative.estimated_spend_usd`, the same amount that
-`ultrafuzz stats`, eval scoring, and Modal accounting read.
-`report.json.run_metadata.estimated_spend` is always a USD amount matching
-`^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$`: two decimals from one cent up, such as
-`$38.72`, and enough decimals below one cent to show the amount, such as
-`$0.0008`. It never ends in `+` and is never `unavailable`; accounting that
-priced nothing shows `$0.00`. It is an estimate, not an invoice.
+`ultrafuzz stats`, eval scoring, and Modal accounting read. It is an estimate,
+not an invoice. `report.json.run_metadata.estimated_spend` is always a USD
+amount matching `^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}\+?$`: two decimals from one
+cent up, such as `$38.72`, and enough decimals below one cent to show the
+amount, such as `$0.0008`. Accounting that priced nothing shows `$0.00`. It is
+never `unavailable`.
 
-What the amount leaves out is counted, never estimated. When agent attempts
-recorded no usage, or recorded usage that no rule below could price, the spend
-line ends in a fixed clause with their total:
+Usage that was not recorded or could not be priced is never estimated. Instead,
+a trailing `+` means the amount is probably low: there is probably more. The
+spend ends in `+` exactly when at least one of these holds:
+
+- `run_metadata.partial_pricing` is true: the accounting the amount came from
+  priced only part of its usage;
+- `run_metadata.attempts_without_usage` is present: executed agent attempts
+  recorded no usage;
+- `run_metadata.unpriced_attempts` is present: recorded usage that no rule
+  below could price.
+
+The two counts are present only when they are at least one, and the report
+schema rejects a spend whose `+` disagrees with these fields. `report.md` shows
+only the amount:
 
 ```markdown
-- Estimated spend: `$38.72` (excludes 3 agent attempts whose usage was not recorded or could not be priced)
+- Estimated spend: `$38.72+`
 ```
 
-The total is `run_metadata.attempts_without_usage` plus
-`run_metadata.unpriced_attempts`, each present only when it is at least one.
-When nothing recorded usage, the usage lines read:
+When everything recorded was priced and every attempt recorded usage, the line
+is ``- Estimated spend: `$38.72` ``. When nothing recorded usage, the usage
+lines read:
 
 ```markdown
 - Models used: `none` (no model usage was recorded)
 - Tokens used: `0`
-- Estimated spend: `$0.00` (excludes 5 agent attempts whose usage was not recorded or could not be priced)
+- Estimated spend: `$0.00+`
 ```
 
 and when no agent attempt ran either, the spend line is just
-``- Estimated spend: `$0.00` ``. The required `run_metadata.partial_pricing` is
-the `partial_pricing` flag of the accounting the amount came from; it never
-counts attempts without usage and is never rendered.
+``- Estimated spend: `$0.00` ``.
 
 The report task's snapshot takes models, tokens, spend, `partial_pricing`, and
 `unpriced_attempts` together from the first source that applies:
@@ -1047,12 +1056,16 @@ and unchecked reports) restate the run summary instead: elapsed time from
 `partial_pricing`, and `unpriced_attempts` together from the current
 `accounting.cumulative`; and `attempts_without_usage` from the current
 `run.json` on its own. Without accounting, the agent's usage values stay. The
-terminal synchronization runs before terminal publication, so the restated
-values include the report task's own usage.
+`+` is then set again from the restated fields, so a report-start `+` goes away
+when the whole run turned out fully priced. The terminal synchronization runs
+before terminal publication, so the restated values include the report task's
+own usage.
 
-Accounting v4's own `estimated_spend` label is unchanged for `ultrafuzz stats`:
-it ends in `+` when some accounted usage had no price and is `unavailable` when
-none had one. Use `ultrafuzz stats` for the full accounting breakdown.
+Accounting v4's own `estimated_spend` label is unchanged for `ultrafuzz stats`
+and never reaches the report: it ends in `+` when some accounted usage had no
+price, is `unavailable` when none had one, does not consider attempts without
+usage, and rounds amounts below one cent to four decimals. Use
+`ultrafuzz stats` for the full accounting breakdown.
 
 #### Spend pricing
 
@@ -1065,13 +1078,13 @@ Accounting v4 prices the latest usage event of each attempt with the first of:
    whether the catalog was available, unavailable, or disabled.
 
 An event none of them prices counts in `unpriced_event_count`, which the report
-shows as `unpriced_attempts`, and makes `partial_pricing` true. Accounting keeps
-one event per attempt, so the event count is an attempt count. A component
-without a rate in an otherwise usable price, such as cache writes for a model
-whose price lists no cache-write rate, adds nothing to the amount; the event
-still counts as priced, so the clause does not count it, while
+records as `unpriced_attempts`, and makes `partial_pricing` true. Accounting
+keeps one event per attempt, so the event count is an attempt count. A
+component without a rate in an otherwise usable price, such as cache writes for
+a model whose price lists no cache-write rate, adds nothing to the amount; the
+event still counts as priced, so `unpriced_attempts` does not count it, while
 `pricing_incomplete_reasons` records `component-rate-unavailable` and
-`partial_pricing` is true.
+`partial_pricing` is true, so the spend still ends in `+`.
 
 Catalog routes depend only on the model ID. One leading `openrouter/` is
 stripped. An ID that contains `/` or starts with `~` is looked up only in the
@@ -1171,8 +1184,9 @@ plus provided costs sum to `estimated_spend_usd`. `usage_complete` and `pricing_
 remain independent: their typed `*_incomplete_reasons` arrays distinguish
 missing, estimated, or contradictory usage from missing pricing. In
 accounting v4, a trailing `+` on `estimated_spend` and `partial_pricing` mean
-that at least one accounted event still lacks a usable cost; these v4 values
-never reach `report.md`. Accounting v4 uses the catalog routes described above:
+that at least one accounted event still lacks a usable cost. The v4 label never
+reaches `report.md`; `partial_pricing` reaches it only through the report's own
+`+` rule. Accounting v4 uses the catalog routes described above:
 for example, a bare Kimi-family ID is priced only from the Moonshot provider
 entry and a bare DeepSeek-family ID only from the first-party DeepSeek entry. A
 model its route does not price stays listed in
