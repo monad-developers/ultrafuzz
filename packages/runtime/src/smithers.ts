@@ -3518,7 +3518,6 @@ export interface SubmitSmithersInput {
   compiled: CompiledSmithersWorkflow;
   projectRoot: string;
   maxConcurrency: number;
-  keepWorkspaces: boolean;
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
@@ -4338,8 +4337,7 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     args: command,
     projectRoot: input.projectRoot,
     env: input.env,
-    environmentVariableNames: input.environmentVariableNames,
-    keepWorkspaces: input.keepWorkspaces
+    environmentVariableNames: input.environmentVariableNames
   });
   writeRuntimeDocument(
     path.join(path.dirname(input.compiled.inputPath), "submission.json"),
@@ -4822,7 +4820,6 @@ export async function runSmithersLifecycleCommand(input: {
     inputJson?: string;
     logsDir: string;
   };
-  keepWorkspaces: boolean;
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
@@ -5011,8 +5008,7 @@ export async function runSmithersLifecycleCommand(input: {
         ],
         projectRoot: input.projectRoot,
         env: input.env,
-        environmentVariableNames: input.environmentVariableNames,
-        keepWorkspaces: input.keepWorkspaces
+        environmentVariableNames: input.environmentVariableNames
       });
       if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
     }
@@ -5057,8 +5053,7 @@ export async function runSmithersLifecycleCommand(input: {
         ],
         projectRoot: input.projectRoot,
         env: input.env,
-        environmentVariableNames: input.environmentVariableNames,
-        keepWorkspaces: input.keepWorkspaces
+        environmentVariableNames: input.environmentVariableNames
       });
       resetStderr = resetResult.stderr;
       if (resetMarkerPath !== undefined) {
@@ -5097,8 +5092,7 @@ export async function runSmithersLifecycleCommand(input: {
         ],
         projectRoot: input.projectRoot,
         env: input.env,
-        environmentVariableNames: input.environmentVariableNames,
-        keepWorkspaces: input.keepWorkspaces
+        environmentVariableNames: input.environmentVariableNames
       });
     } catch (error) {
       if (error instanceof Error && resetMarkerPath !== undefined) {
@@ -5145,8 +5139,7 @@ export async function runSmithersLifecycleCommand(input: {
       args: forkCommand,
       projectRoot: input.projectRoot,
       env: input.env,
-      environmentVariableNames: input.environmentVariableNames,
-      keepWorkspaces: input.keepWorkspaces
+      environmentVariableNames: input.environmentVariableNames
     });
     const forkedRunId = parseForkedRunId(forkResult.stdout);
     if (forkedRunId === undefined) {
@@ -5173,8 +5166,7 @@ export async function runSmithersLifecycleCommand(input: {
       args: resumeCommand,
       projectRoot: input.projectRoot,
       env: input.env,
-      environmentVariableNames: input.environmentVariableNames,
-      keepWorkspaces: input.keepWorkspaces
+      environmentVariableNames: input.environmentVariableNames
     });
     return {
       stdout: resumeResult.stdout,
@@ -5218,8 +5210,7 @@ export async function runSmithersLifecycleCommand(input: {
     args: command,
     projectRoot: input.projectRoot,
     env: input.env,
-    environmentVariableNames: input.environmentVariableNames,
-    keepWorkspaces: input.keepWorkspaces
+    environmentVariableNames: input.environmentVariableNames
   });
   return {
     ...result,
@@ -5901,7 +5892,6 @@ async function execSmithersCli(input: {
   projectRoot: string;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
-  keepWorkspaces?: boolean;
   acceptedExitCodes?: readonly number[];
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -5922,7 +5912,7 @@ async function execSmithersCli(input: {
       [...(executableAnchor?.argumentPrefix ?? []), ...anchored.args],
       {
         cwd: input.projectRoot,
-        env: smithersCommandEnv(input.projectRoot, anchored.env, input.environmentVariableNames, input.keepWorkspaces),
+        env: smithersCommandEnv(input.projectRoot, anchored.env, input.environmentVariableNames),
         maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
@@ -7164,8 +7154,7 @@ function localSmithersExecutable(projectRoot: string): string {
 function smithersCommandEnv(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined,
-  environmentVariableNames: readonly string[] = [],
-  keepWorkspaces?: boolean
+  environmentVariableNames: readonly string[] = []
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
   // A native continuation deliberately loads the persisted workflow from the
@@ -7175,9 +7164,9 @@ function smithersCommandEnv(
   // trusted path for the lifetime of the continued workflow (#973).
   const operatorNodePath = operatorSmithersNodePath(env);
   source.SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS ??= SMITHERS_DETACHED_ADMISSION_TIMEOUT_MS;
-  if (keepWorkspaces !== undefined) {
-    source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
-  }
+  // Ultrafuzz deletes task worktrees itself after controller finalization
+  // (workflow-sync); the engine's git-status reap never runs (#1227).
+  source.SMITHERS_KEEP_WORKTREES = "1";
   const forwarded = new Set(environmentVariableNames.map((name) => name.toUpperCase()));
   const merged: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
