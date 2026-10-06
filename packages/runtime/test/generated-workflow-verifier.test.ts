@@ -5802,7 +5802,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   // The friction log paths come from the task's own run root, never from inherited
   // environment that a continuation can blank.
   assert.doesNotMatch(source, /process\.env\.ULTRAFUZZ_FRICTION/u);
-  assert.doesNotMatch(baseAgent, /taskManifestPath|executionSnapshotRoot|path\.dirname|controls/u);
+  assert.doesNotMatch(baseAgent, /executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
   assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);

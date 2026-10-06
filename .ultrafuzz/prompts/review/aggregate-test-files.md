@@ -40,7 +40,7 @@ Project discovery:
 Base test setup (when rendered):
 {{artifact_path:base-test-setup}}/setup/base-test-setup.md
 
-Use this sealed JSON authority to select every generated-test manifest declared
+Use this JSON authority to select every generated-test manifest declared
 by ancestor nodes in the effective topology without expanding an unbounded path
 list or source-authority table into this prompt:
 
@@ -98,7 +98,7 @@ collide; never flatten files or overwrite one entry with another.
 
 Preserve attribution by strategy id, source node id, attempt index, source
 manifest path, source artifact path, source relative path, and destination path.
-The sealed selector above is binding: for each selected manifest, write its
+The authority above is binding: for each selected manifest, write its
 producer's exact `logical_node_id` as `source node_id` into every
 corresponding `source_bundles`, copied-entry, and skipped-entry row. Then
 confirm it is byte-for-byte equal to that manifest's root-level `node_id`. For

@@ -860,7 +860,7 @@ describe("prompt rendering", () => {
     // Survives end-to-end rendering, not just the on-disk prompt: the topology
     // supplies the authoritative source-node/manifest pair so an agent cannot
     // substitute an `attempt-<n>` destination segment for the source node id.
-    expect(rendered).toContain("The sealed selector above is binding");
+    expect(rendered).toContain("The authority above is binding");
     expect(rendered).toContain("producer's exact `logical_node_id` as `source node_id`");
     expect(rendered).toContain("producer `artifact_dir` joined with that declared path");
     expect(rendered).not.toContain("`logicalNodeId`");

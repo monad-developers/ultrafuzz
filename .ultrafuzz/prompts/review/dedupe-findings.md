@@ -11,7 +11,7 @@ The declared outputs are `deduped-findings.json`, `strategy-detections.json`,
 and `finding-lifecycle-ledger.json`. Do not write prompt-only `findings.json`,
 `duplicates.json`, or alternate compatibility handoffs.
 
-Inspect every findings artifact selected by this sealed JSON authority before
+Inspect every findings artifact selected by this JSON authority before
 deduping. It selects every ancestor that declares
 `ultrafuzz/findings@2` without expanding an unbounded source table into this
 prompt:
@@ -37,7 +37,7 @@ and `title`, and `family_variant_keys` is exactly the kept finding's
 `family_variants[*].dedupe_key` array in authored order. Use the schema-admitted
 absent or empty form only when the corresponding projection is empty.
 
-Select generated-test manifests through this sealed JSON authority:
+Select generated-test manifests through this JSON authority:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/generated-tests@3}}
 

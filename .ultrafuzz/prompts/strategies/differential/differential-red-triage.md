@@ -17,7 +17,7 @@ Build the semantic red registry from current lane validation output:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1}}
 
-Read the sealed manifest definition instead of expecting an expanded lane-result
+Read the manifest definition instead of expecting an expanded lane-result
 path array. Flatten every selected lane result in the selector's required
 run-relative `localeCompare` order: first all semantic reds in
 their lane-row order, then all compile/harness defects in their lane-row order.

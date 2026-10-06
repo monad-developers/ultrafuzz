@@ -90,11 +90,12 @@ checks pass for every row.
 
 ## Required Inputs
 
-Read every selected input below before writing the report. The sealed selector
-is filtered to the exact machine-readable report handoff paths declared by
-ancestors, so a topology can omit stages without leaving stale paths or
-exposing unrelated patches, raw campaign plans, or generated-test bundles. It
-does not expand a path or source array into this prompt:
+Read every selected input below before writing the report. The authority lists
+every declared output of the admitted ancestors; use only the machine-readable
+report handoff paths named below, so a topology can omit stages without leaving
+stale paths. Ignore any other output it lists, such as patches, raw campaign
+plans, or generated-test bundles. Producer paths are not expanded into this
+prompt:
 
 {{ancestor_artifact_path_authority:aggregation.json,severity-classified-findings.json,deduped-findings.json,strategy-detections.json,finding-lifecycle-ledger.json,properties.json,implemented-properties.json,recon-fuzzer-results.json,campaign-summary.json,coverage-evidence.json}}
 
