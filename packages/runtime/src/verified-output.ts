@@ -197,7 +197,9 @@ function loadVerifiedNodeOutputAuthority(input: LoadVerifiedNodeOutputInput): Fi
       ),
       files: new Map(
         [...authority.gateContextFiles].map(([relativePath, file]) => [relativePath, Buffer.from(file.bytes)])
-      )
+      ),
+      // Finalization checked the task worktree; Ultrafuzz may since have deleted it (#1227).
+      taskWorktree: "skip"
     }
   );
   const gateErrors = gate.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
@@ -952,7 +954,7 @@ function selectFinalizedAttempt(
   return { attemptId: selectedAttemptId, state: selectedState };
 }
 
-function hasSuccessfulFinalizationAuthority(node: NodeState): boolean {
+export function hasSuccessfulFinalizationAuthority(node: NodeState): boolean {
   if (node.status !== "succeeded") return false;
   const provenance = node.provenance;
   if (!isRecord(provenance) || !isRecord(provenance.output_contracts)) return false;

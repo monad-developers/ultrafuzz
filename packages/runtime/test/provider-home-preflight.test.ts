@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -43,13 +44,19 @@ test("predictedProviderHome follows the adapters' resolution order", () => {
     predictedProviderHome("CodexAgent", config(), { HOME: home, ULTRAFUZZ_PROVIDER_HOME_ROOT: "/srv/homes" }),
     path.join("/srv/homes", "codex")
   );
-  assert.equal(
-    predictedProviderHome("DeepSeekAgent", config(), { HOME: home }),
-    path.join(home, ".ultrafuzz-provider-homes", "deepseek")
-  );
-  // Agents without a provider home, and launches without HOME (as tests run), are not predicted.
-  assert.equal(predictedProviderHome("OpenRouterAgent", config(), { HOME: home }), undefined);
-  assert.equal(predictedProviderHome("CodexAgent", config(), {}), undefined);
+  for (const [agentRef, provider] of [
+    ["DeepSeekAgent", "deepseek"],
+    ["OpenRouterAgent", "openrouter"]
+  ] as const) {
+    assert.equal(
+      predictedProviderHome(agentRef, config(), { HOME: home }),
+      path.join(home, ".ultrafuzz-provider-homes", provider)
+    );
+  }
+  // A launch without HOME falls back to os.homedir(), as the adapters do.
+  assert.equal(predictedProviderHome("CodexAgent", config(), {}), path.join(os.homedir(), ".codex"));
+  assert.equal(predictedProviderHome("CodexAgent", config(), { HOME: " " }), path.join(os.homedir(), ".codex"));
+  assert.equal(predictedProviderHome("OpenCodeAgent", config(), { HOME: home }), undefined);
 });
 
 // #1265: Codex and Claude Code create their homes from the umask, so 755 or 775 is the norm.
@@ -94,6 +101,59 @@ test("providerHomeProblems refuses what the adapters refuse and accepts private 
     nested.map(({ directory, remedy }) => [directory, remedy.startsWith(`run \`chmod go-w ${shared}\``)]),
     [[shared, true]]
   );
+});
+
+test("providerHomeProblems prints a chmod command that pastes safely for any path", () => {
+  const home = path.join(temporaryRoot("ufz-provider-home-"), "it's a home");
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.chmodSync(home, 0o700);
+  fs.chmodSync(path.join(home, ".codex"), 0o755);
+  const remedy = providerHomeProblems(["CodexAgent"], config(), { HOME: home })[0]?.remedy ?? "";
+  assert.equal(remedy, `run \`chmod 700 '${home.replaceAll("'", "'\\''")}/.codex'\``);
+
+  const command = /`(?<command>[^`]+)`/u.exec(remedy)?.groups?.command ?? "";
+  assert.equal(spawnSync("sh", ["-c", command]).status, 0);
+  assert.deepEqual(providerHomeProblems(["CodexAgent"], config(), { HOME: home }), []);
+});
+
+// The adapters refuse a relative path from these variables rather than resolve it against the cwd.
+test("providerHomeProblems reports a relative provider home from the environment", () => {
+  const home = privateHome();
+  for (const [agentRef, variable] of [
+    ["CodexAgent", "CODEX_HOME"],
+    ["ClaudeAgent", "CLAUDE_CONFIG_DIR"],
+    ["KimiAgent", "KIMI_CODE_HOME"],
+    ["KimiAgent", "KIMI_SHARE_DIR"]
+  ] as const) {
+    assert.deepEqual(
+      providerHomeProblems([agentRef], config(), { HOME: home, [variable]: "relative/home" }).map(
+        ({ directory, reason, remedy }) => [directory, reason, remedy]
+      ),
+      [["relative/home", `is not an absolute path, which ${variable} must be`, `set ${variable} to an absolute path`]],
+      variable
+    );
+  }
+});
+
+test("providerHomeProblems checks os.homedir() when the launch environment has no HOME", () => {
+  const home = privateHome();
+  fs.mkdirSync(path.join(home, ".codex"));
+  fs.chmodSync(path.join(home, ".codex"), 0o755);
+  const processHome = process.env.HOME;
+  // Node's os.homedir() reads HOME from this process.
+  process.env.HOME = home;
+  try {
+    for (const env of [{}, { HOME: "" }, { HOME: " " }]) {
+      assert.deepEqual(
+        providerHomeProblems(["CodexAgent"], config(), env).map(({ directory }) => directory),
+        [path.join(home, ".codex")],
+        JSON.stringify(env)
+      );
+    }
+  } finally {
+    if (processHome === undefined) Reflect.deleteProperty(process.env, "HOME");
+    else process.env.HOME = processHome;
+  }
 });
 
 // The adapters require the provider-home root itself to be private too, not only the home below it.
@@ -154,13 +214,13 @@ test(
       { agentRef: "ClaudeAgent", provider: "claude" },
       { agentRef: "KimiAgent", provider: "kimi" },
       { agentRef: "DeepSeekAgent", provider: "deepseek" },
+      { agentRef: "OpenRouterAgent", provider: "openrouter" },
       { agentRef: "ClaudeAgent", provider: "claude", configDir: "work/a" },
       { agentRef: "CodexAgent", provider: "codex", env: { CODEX_HOME: path.join(home, "codex-home") } },
       { agentRef: "CodexAgent", provider: "codex", env: { ULTRAFUZZ_PROVIDER_HOME_ROOT: path.join(home, "root") } }
     ];
-    for (const { agentRef, provider, configDir, env = {} } of cases) {
-      const launch = { HOME: home, ...env };
-      const resolved = spawnSync(
+    const resolveInAdapter = (provider: string, configDir: string | undefined, launch: Record<string, string>) =>
+      spawnSync(
         "bun",
         [
           "-e",
@@ -168,6 +228,9 @@ test(
         ],
         { encoding: "utf8", env: { PATH: process.env.PATH, ...launch } }
       );
+    for (const { agentRef, provider, configDir, env = {} } of cases) {
+      const launch = { HOME: home, ...env };
+      const resolved = resolveInAdapter(provider, configDir, launch);
       assert.equal(resolved.status, 0, resolved.stderr);
       const agents = configDir === undefined ? {} : { [agentRef]: { auth: "subscription" as const, configDir } };
       assert.equal(
@@ -175,6 +238,17 @@ test(
         fs.realpathSync(resolved.stdout),
         `${agentRef} ${JSON.stringify({ configDir, env })}`
       );
+    }
+    // The adapter refuses a relative home from the environment, so the preflight reports it.
+    for (const [agentRef, provider, variable] of [
+      ["CodexAgent", "codex", "CODEX_HOME"],
+      ["ClaudeAgent", "claude", "CLAUDE_CONFIG_DIR"],
+      ["KimiAgent", "kimi", "KIMI_CODE_HOME"],
+      ["KimiAgent", "kimi", "KIMI_SHARE_DIR"]
+    ] as const) {
+      const launch = { HOME: home, [variable]: "relative/home" };
+      assert.match(resolveInAdapter(provider, undefined, launch).stderr, /provider-home paths must be absolute/u);
+      assert.equal(providerHomeProblems([agentRef], config(), launch)[0]?.directory, "relative/home", variable);
     }
   }
 );
@@ -200,9 +274,17 @@ test(
         HOME: home,
         CODEX_HOME: path.join(locked, "codex")
       });
-      assert.equal(problems.length, 1, JSON.stringify(problems));
-      assert.match(problems[0]?.reason ?? "", /could not be inspected \(EACCES\)/u);
-      assert.doesNotMatch(problems[0]?.remedy ?? "", /chmod 700/u);
+      // The fix is to the directory that cannot be searched, not to the home below it.
+      assert.deepEqual(
+        problems.map(({ directory, reason, remedy }) => [directory, reason, remedy]),
+        [
+          [
+            locked,
+            "cannot be searched by you (EACCES)",
+            `run \`chmod u+x ${locked}\`, or set ULTRAFUZZ_PROVIDER_HOME_ROOT to a private directory`
+          ]
+        ]
+      );
     } finally {
       fs.chmodSync(locked, 0o700);
     }

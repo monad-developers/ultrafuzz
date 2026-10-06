@@ -4,7 +4,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { runCli } from "../src/index.js";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-lifecycle-cli-run";
 const RUN_ID = "lifecycle-cli-run";
@@ -28,7 +28,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
     cwd: project,
-    env,
+    env: { ...privateHomeEnv(), ...env },
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);

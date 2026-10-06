@@ -21,6 +21,23 @@ export function temporaryRoot(prefix: string, t: TestContext): string {
   return root;
 }
 
+let privateHome: string | undefined;
+
+/**
+ * A launch environment with a private HOME, which the tests of one process share and which is
+ * removed when it exits. Validation predicts each agent's provider home from HOME, and from the
+ * operator's own home without one (#1265), so a test that launches with an environment of its own
+ * needs a HOME of its own.
+ */
+export function privateHomeEnv(): { HOME: string } {
+  if (privateHome === undefined) {
+    const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-home-"));
+    process.on("exit", () => fs.rmSync(home, { recursive: true, force: true }));
+    privateHome = home;
+  }
+  return { HOME: privateHome };
+}
+
 function restoreOwnerWrite(directory: string): void {
   const stat = fs.lstatSync(directory, { throwIfNoEntry: false });
   if (stat === undefined || !stat.isDirectory()) return;

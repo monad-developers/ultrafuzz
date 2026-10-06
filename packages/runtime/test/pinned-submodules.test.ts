@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { temporaryRoot } from "./temporary-root.js";
+import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -551,7 +551,7 @@ test("pinned local compilation carries the exact manifest through sealed executi
   const initialized = initProject({ projectRoot: fixture.source, force: true });
   assert.equal(initialized.ok, true, JSON.stringify(initialized.diagnostics));
   writeSmallTopology(fixture.source);
-  const plan = await planRun({ projectRoot: fixture.source, runId: "pinned-closure", env: {} });
+  const plan = await planRun({ projectRoot: fixture.source, runId: "pinned-closure", env: privateHomeEnv() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const compiled = compileSmithersWorkflow({
     projectRoot: fixture.source,

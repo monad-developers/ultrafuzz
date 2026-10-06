@@ -34,6 +34,15 @@ export function temporaryRoot(prefix: string): string {
 }
 
 /**
+ * A launch environment with nothing but a private HOME. Validation predicts each agent's provider
+ * home from the launch environment's HOME, and from the operator's own home without one, as the
+ * adapters do (#1265), so a test that launches with an environment of its own needs a HOME of its own.
+ */
+export function privateHomeEnv(): { HOME: string } {
+  return { HOME: temporaryRoot("ufz-home-") };
+}
+
+/**
  * Register a directory a fixture created itself, so it is removed with the
  * rest. Fixtures that place a directory beside their root rather than inside it
  * are otherwise invisible to this module and survive the run.

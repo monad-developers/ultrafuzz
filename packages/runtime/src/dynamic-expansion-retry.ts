@@ -34,8 +34,9 @@ const MAX_RETRY_WITHDRAWAL_BYTES = 16 * 1024 * 1024;
 
 /**
  * Attempt-owned state that belongs to a generated dynamic attempt. The
- * `workspaces/` root is deliberately absent: a durable worktree stays where
- * Smithers registered it and the reopened attempt reuses it.
+ * `workspaces/` root is deliberately absent: Git registration owns the task
+ * worktree (Smithers creates it, the ended-run sweep deletes it), and the
+ * reopened attempt reuses or recreates it.
  */
 const ATTEMPT_STATE_ROOTS = [
   { name: "artifacts", kind: "directory", suffix: "" },
