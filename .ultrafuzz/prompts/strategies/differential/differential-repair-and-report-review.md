@@ -13,16 +13,16 @@ Use only the authoritative report-bound note vocabulary:
 
 Repair only consensus harness or reference defects from the looped triage outputs:
 
-Sealed JSON authority for every declared semantic-red registry:
+JSON authority for every declared semantic-red registry:
 {{ancestor_contract_artifact_authority:ultrafuzz/semantic-red-registry@1}}
 
-Sealed JSON authority for every declared A/B triage artifact:
+JSON authority for every declared A/B triage artifact:
 {{ancestor_contract_artifact_authority:ultrafuzz/differential-red-triage@1}}
 
-Sealed JSON authority for every declared lane result:
+JSON authority for every declared lane result:
 {{ancestor_contract_artifact_authority:ultrafuzz/differential-lane-result@1}}
 
-Sealed JSON authority for every declared audited-lanes artifact:
+JSON authority for every declared audited-lanes artifact:
 {{ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1}}
 
 Read those manifest definitions instead of expecting expanded path or source
@@ -37,7 +37,7 @@ check whether the expected lane file exists in this workspace before marking
 the campaign incomplete.
 
 Trust only the exact declared semantic-red registry and A/B triage artifacts
-selected from the sealed manifest. Group them by the exact producer task and
+selected through those authorities. Group them by the exact producer task and
 `artifact_dir`; require that producer's one registry plus its declared `pass: a`
 and `pass: b` siblings. The authenticated producer `attempt_id` establishes
 freshness and independence. Do not probe for, count, or require nested attempt

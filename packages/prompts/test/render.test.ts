@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
-import { promptArtifactAuthorityPathSelectorId } from "@ultrafuzz/artifacts";
 import {
   loadBuiltInPromptAssets,
   PromptError,
@@ -597,8 +596,13 @@ describe("prompt rendering", () => {
       )
     ).toBe(2);
     expect(occurrences(rendered, `Confirm its \`attempt_id\` is \`${input.node.concreteId}\``)).toBe(2);
-    const machineSelectorId = promptArtifactAuthorityPathSelectorId(
-      [
+    const listed = (paths: string[]) =>
+      `whose declared \`path\` is one of ${paths
+        .sort()
+        .map((artifactPath) => `\`${artifactPath}\``)
+        .join(", ")};`;
+    expect(rendered).toContain(
+      listed([
         "aggregation.json",
         "severity-classified-findings.json",
         "deduped-findings.json",
@@ -609,13 +613,11 @@ describe("prompt rendering", () => {
         "recon-fuzzer-results.json",
         "campaign-summary.json",
         "coverage-evidence.json"
-      ].sort()
+      ])
     );
-    const contextSelectorId = promptArtifactAuthorityPathSelectorId(
-      ["setup/project-discovery.md", "setup/setup-foundry.md", "setup/base-test-setup.md", "smoke-context.md"].sort()
+    expect(rendered).toContain(
+      listed(["setup/project-discovery.md", "setup/setup-foundry.md", "setup/base-test-setup.md", "smoke-context.md"])
     );
-    expect(rendered).toContain(`path entry whose \`id\` is \`${machineSelectorId}\``);
-    expect(rendered).toContain(`path entry whose \`id\` is \`${contextSelectorId}\``);
     expect(rendered).not.toContain(path.join(runArtifacts, "smoke-context", "smoke-context.md"));
     expect(rendered).toContain("`deduped-findings.json`");
     expect(rendered).not.toContain(path.join(runArtifacts, "dedupe-findings", "deduped-findings.json"));
@@ -858,7 +860,7 @@ describe("prompt rendering", () => {
     // Survives end-to-end rendering, not just the on-disk prompt: the topology
     // supplies the authoritative source-node/manifest pair so an agent cannot
     // substitute an `attempt-<n>` destination segment for the source node id.
-    expect(rendered).toContain("The sealed selector above is binding");
+    expect(rendered).toContain("The authority above is binding");
     expect(rendered).toContain("producer's exact `logical_node_id` as `source node_id`");
     expect(rendered).toContain("producer `artifact_dir` joined with that declared path");
     expect(rendered).not.toContain("`logicalNodeId`");
@@ -976,7 +978,7 @@ describe("prompt rendering", () => {
     }
   });
 
-  it("renders a bounded sealed authority while retaining transitive findings-contract selection", () => {
+  it("renders a bounded authority while retaining transitive findings-contract selection", () => {
     const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
@@ -1154,10 +1156,7 @@ describe("prompt rendering", () => {
 
     expect(manyProducerAttempts.renderedMarkdown).toBe(oneProducerAttempt.renderedMarkdown);
     expectTaskLocalArtifactAuthority(manyProducerAttempts.renderedMarkdown, input);
-    expect(manyProducerAttempts.renderedMarkdown).toContain(
-      `entry whose \`id\` is \`${promptArtifactAuthorityPathSelectorId(["setup/base-test-setup.md"])}\``
-    );
-    expect(manyProducerAttempts.renderedMarkdown).not.toContain("setup/base-test-setup.md");
+    expect(manyProducerAttempts.renderedMarkdown).toContain("whose declared `path` is `setup/base-test-setup.md`;");
     expect(manyProducerAttempts.renderedMarkdown).not.toContain("setup-model-attempt-");
     expect(manyProducerAttempts.renderedMarkdown).not.toContain("setup-ancestor-");
     const authorityReference = manyProducerAttempts.artifactReferences.find(
@@ -1167,7 +1166,6 @@ describe("prompt rendering", () => {
     );
     expect(authorityReference).toMatchObject({
       kind: "ancestor_artifact_path_authority",
-      selectorId: promptArtifactAuthorityPathSelectorId(["setup/base-test-setup.md"]),
       relativePaths: ["setup/base-test-setup.md"]
     });
     expect(
@@ -1235,9 +1233,7 @@ describe("prompt rendering", () => {
       expect(hundredsOfAttempts.renderedMarkdown, promptPath).toBe(oneAttempt.renderedMarkdown);
       expect(hundredsOfAttempts.renderedMarkdown.length, promptPath).toBe(oneAttempt.renderedMarkdown.length);
       expectTaskLocalArtifactAuthority(hundredsOfAttempts.renderedMarkdown, input);
-      expect(hundredsOfAttempts.renderedMarkdown).toContain(
-        `path entry whose \`id\` is \`${promptArtifactAuthorityPathSelectorId(["coverage-report.md"])}\``
-      );
+      expect(hundredsOfAttempts.renderedMarkdown).toContain("whose declared `path` is `coverage-report.md`;");
       expect(hundredsOfAttempts.renderedMarkdown).not.toContain("synthetic-coverage-attempt-");
     }
   });
@@ -1259,9 +1255,7 @@ describe("prompt rendering", () => {
     expect(occurrences(rendered, `Confirm its \`attempt_id\` is \`${input.node.concreteId}\``)).toBe(2);
     expect(occurrences(rendered, "`artifact_path_base`")).toBe(2);
     expect(rendered).toContain("entries whose `contract` is `ultrafuzz/findings@2`");
-    expect(rendered).toContain(
-      `path entry whose \`id\` is \`${promptArtifactAuthorityPathSelectorId(["findings.json"])}\``
-    );
+    expect(rendered).toContain("entries whose declared `path` is `findings.json`");
     expect(rendered).not.toContain("project-discovery");
     expect(rendered).not.toContain("base-test-setup");
   });
@@ -1311,7 +1305,6 @@ describe("prompt rendering", () => {
     expect(result.artifactReferences).toContainEqual({
       kind: "ancestor_artifact_path_authority",
       logicalIds: [],
-      selectorId: promptArtifactAuthorityPathSelectorId(["missing.json"]),
       relativePaths: ["missing.json"]
     });
   });
@@ -1326,7 +1319,6 @@ describe("prompt rendering", () => {
     expect(renderPrompt(input).artifactReferences).toContainEqual({
       kind: "ancestor_artifact_path_authority",
       logicalIds: [],
-      selectorId: promptArtifactAuthorityPathSelectorId(paths),
       relativePaths: paths
     });
   });
@@ -1334,7 +1326,7 @@ describe("prompt rendering", () => {
   it("rejects unknown contracts in compact ancestor authority selectors", () => {
     expect(() =>
       validatePromptVariables("{{ancestor_contract_artifact_authority:ultrafuzz/not-a-registered-contract@1}}")
-    ).toThrow(/unknown ancestor artifact contract for sealed authority/u);
+    ).toThrow(/unknown ancestor artifact contract for compact authority/u);
     expect(() => validatePromptVariables("{{ancestor_contract_artifact_authority}}")).toThrow(
       /requires an exact registered artifact contract/u
     );
@@ -1349,23 +1341,21 @@ describe("prompt rendering", () => {
     ).toThrow(/duplicate ancestor_artifact_path_authority target/u);
   });
 
-  it("keeps exact-path authority prose constant-size as the selected path group grows", () => {
+  it("lists an exact-path authority's paths in the prompt", () => {
     const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    input.prompt = "Setup:\n{{ancestor_artifact_path_authority:reports/0000.json}}";
-    const onePath = renderPrompt(input);
-    const paths = Array.from({ length: 1_000 }, (_, index) => `reports/${String(index).padStart(4, "0")}.json`);
+    const paths = ["reports/0000.json", "reports/0001.json", "reports/0002.json"];
     input.prompt = `Setup:\n{{ancestor_artifact_path_authority:${paths.join(",")}}}`;
     const manyPaths = renderPrompt(input);
 
-    expect(manyPaths.renderedMarkdown).toHaveLength(onePath.renderedMarkdown.length);
     expectTaskLocalArtifactAuthority(manyPaths.renderedMarkdown, input);
-    expect(manyPaths.renderedMarkdown).not.toContain("reports/0000.json");
+    expect(manyPaths.renderedMarkdown).toContain(
+      "whose declared `path` is one of `reports/0000.json`, `reports/0001.json`, `reports/0002.json`;"
+    );
     expect(manyPaths.artifactReferences).toContainEqual({
       kind: "ancestor_artifact_path_authority",
       logicalIds: [],
-      selectorId: promptArtifactAuthorityPathSelectorId(paths),
       relativePaths: paths
     });
   });

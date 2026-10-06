@@ -216,7 +216,7 @@ describe("shipped prompt structure", () => {
     expect(references).toBeGreaterThan(0);
   });
 
-  it("keeps the template variables that gates, budgets and sealed authorities depend on", () => {
+  it("keeps the template variables that gates, budgets and authority indexes depend on", () => {
     const assetsByPath = new Map(loadBuiltInPromptAssets().map((asset) => [asset.relativePath, asset]));
 
     for (const [promptPath, variables] of Object.entries(REQUIRED_PROMPT_VARIABLES)) {

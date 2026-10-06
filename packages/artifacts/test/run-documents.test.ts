@@ -14,7 +14,6 @@ import {
   readRunMetadataDocument,
   readRunPlanDocument,
   readSourceRunDocument,
-  promptArtifactAuthorityPathSelectorId,
   StrictJsonError,
   updateRunMetadataDocument,
   writeConfigRedactionsDocument,
@@ -111,7 +110,6 @@ function canonicalRunPlan(): RunPlanDocument {
           {
             kind: "ancestor_artifact_path_authority",
             logicalIds: [],
-            selectorId: promptArtifactAuthorityPathSelectorId(["optional/context.md"]),
             relativePaths: ["optional/context.md"]
           }
         ]
@@ -257,7 +255,7 @@ test("canonical runtime documents round-trip through their validated writers and
   assert.deepEqual(readRunMetadataDocument(metadataPath, runMetadata.run_id), runMetadata);
 });
 
-test("run plans round-trip compact selector groups in either path order and reject mismatched path IDs", (t) => {
+test("run plans round-trip compact authority references", (t) => {
   const root = temporaryDirectory();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -267,32 +265,23 @@ test("run plans round-trip compact selector groups in either path order and reje
     logicalIds: [],
     contract: "ultrafuzz/findings@2"
   };
-  const pathAuthority = (paths: string[]) => ({
+  const pathReference = {
     kind: "ancestor_artifact_path_authority" as const,
     logicalIds: [],
-    selectorId: promptArtifactAuthorityPathSelectorId(paths),
-    relativePaths: paths
-  });
-  // Code-unit order, which planning now produces ("F" sorts before "c"), and the
-  // host-collation order that plans sealed before it hold.
-  const pathReference = pathAuthority(["reports/Final.json", "reports/context.md"]);
-  const collatedReference = pathAuthority(["reports/context.md", "reports/Final.json"]);
+    relativePaths: ["reports/Final.json", "reports/context.md"]
+  };
   const [prompt] = runPlan.rendered_prompts;
   assert.ok(prompt);
-  prompt.artifact_references.push(emptyContractReference, pathReference, collatedReference);
+  prompt.artifact_references.push(emptyContractReference, pathReference);
   const planPath = path.join(root, "plan.json");
 
   writeRunPlanDocument(planPath, runPlan);
 
   const roundTripped = readRunPlanDocument(planPath, runPlan.run_id);
-  assert.deepEqual(roundTripped.rendered_prompts[0]?.artifact_references.slice(-3), [
+  assert.deepEqual(roundTripped.rendered_prompts[0]?.artifact_references.slice(-2), [
     emptyContractReference,
-    pathReference,
-    collatedReference
+    pathReference
   ]);
-
-  pathReference.selectorId = "0".repeat(64);
-  assert.throws(() => assertRunPlanDocument(runPlan), /invalid compact path authority group/u);
 });
 
 test("every runtime document rejects its historical schema version", () => {

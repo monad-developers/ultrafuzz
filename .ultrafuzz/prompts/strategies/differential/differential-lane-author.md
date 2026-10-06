@@ -16,7 +16,7 @@ You are one fresh-context lane author attempt. Your attempt index is `{{attempt_
 Read the audited lanes and select exactly one `ready_lanes` entry whose
 `attempt_index` and `auditor_attempt_index` both equal `{{attempt_index}}`:
 
-Sealed JSON authority for every declared ancestor audited-lanes artifact:
+JSON authority for every declared ancestor audited-lanes artifact:
 
 {{ancestor_contract_artifact_authority:ultrafuzz/audited-differential-lanes@1}}
 
