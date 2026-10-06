@@ -123,9 +123,14 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 //
 // The rule for moving it: choose a fixed instant after every new pin has
 // published and propagated, but already in the past when release validation
-// runs -- npm does not freeze a future `--before` view. This instant is more
-// than eight hours after the newest pin (`smthrs@0.35.0`, at 20:35:37Z).
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-08-18T06:00:00Z";
+// runs -- npm does not freeze a future `--before` view. The cutoff also decides
+// which transitive releases launch installs, so it is also what moves a security
+// fix in an open range into the launched engine; `pnpm-lock.yaml` does not reach
+// this install. This instant is about ten hours after `source-map-js@1.2.2`
+// (2026-09-30T14:08:09Z), the newest of the releases that fix the October 2026
+// advisories in `proxy-addr`, `@vue/server-renderer`, `source-map-js` and
+// `prosemirror-view`, and well after every pin.
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-10-01T00:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the
