@@ -1002,7 +1002,7 @@ upstream findings, renders as literal text.
 not an invoice. `report.json.run_metadata.estimated_spend` is always a USD
 amount matching `^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}\+?$`: two decimals from one
 cent up, such as `$38.72`, and enough decimals below one cent to show the
-amount, such as `$0.0008`. Accounting that priced nothing shows `$0.00`. It is
+amount, such as `$0.0012`. Accounting that priced nothing shows `$0.00`. It is
 never `unavailable`.
 
 Usage that was not recorded or could not be priced is never estimated. Instead,
