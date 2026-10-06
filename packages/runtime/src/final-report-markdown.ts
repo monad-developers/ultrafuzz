@@ -262,7 +262,7 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   if (!markdown.startsWith(opening) || !markdown.includes("\n## Run summary\n")) {
     return "missing report title or run summary";
   }
-  const runSummaryViolation = runSummaryLabelsViolation(markdown);
+  const runSummaryViolation = runSummaryLabelsViolation(markdown, report);
   if (runSummaryViolation !== undefined) return runSummaryViolation;
   const completionViolation = completionMarkdownViolation(markdown, report, completion, observed, verification);
   if (completionViolation !== undefined) return completionViolation;
@@ -383,23 +383,23 @@ function coverageEvidenceNotice(value: unknown): string | undefined {
 /**
  * The Run summary bullets carry exactly the summary labels, in order, so a stale row (such as the
  * former `Source run ID`) or a dropped `Commit` row cannot pass as the current report shape. The
- * spend is a numeric estimate, optionally followed by the fixed exclusion clause, so a `+`-suffixed
- * or `unavailable` spend cannot render either.
+ * spend row is exactly the report's `estimated_spend` as inline code: a numeric estimate, with a
+ * `+` only when the report says the amount is probably low, and never `unavailable` or annotated.
  */
-function runSummaryLabelsViolation(markdown: string): string | undefined {
+function runSummaryLabelsViolation(markdown: string, report: JsonRecord): string | undefined {
   const [, summary, ...repeated] = markdownOutsideFencedCode(markdown).split("\n## Run summary\n\n");
   if (summary === undefined || repeated.length > 0) return "missing or repeated run summary";
   const bullets = (summary.split("\n\n")[0] ?? "").split("\n");
   const labels = bullets.map((line) => /^- ([^:\n]+): /u.exec(line)?.[1]);
   const expected = reportSummaryFields.map(([label]) => label);
   if (!isDeepStrictEqual(labels, expected)) return "run summary labels do not match the report contract";
-  const spend =
-    /^- Estimated spend: `([^`]*)`(?: \(excludes [1-9][0-9]* agent attempts? whose usage was not recorded or could not be priced\))?$/u.exec(
-      bullets[labels.indexOf("Estimated spend")] ?? ""
-    )?.[1];
-  return spend !== undefined && ESTIMATED_SPEND_PATTERN.test(spend)
+  const spend = /^- Estimated spend: `([^`]*)`$/u.exec(bullets[labels.indexOf("Estimated spend")] ?? "")?.[1];
+  if (spend === undefined || !ESTIMATED_SPEND_PATTERN.test(spend)) {
+    return "run summary estimated spend is not a numeric USD estimate";
+  }
+  return spend === recordField(report, "run_metadata")?.estimated_spend
     ? undefined
-    : "run summary estimated spend is not a numeric USD estimate";
+    : "run summary estimated spend does not match the report";
 }
 
 function completionMarkdownViolation(
@@ -1054,24 +1054,8 @@ function appendRunSummary(lines: string[], metadata: JsonRecord): void {
       lines.push(UNRECORDED_MODELS_SUMMARY);
       continue;
     }
-    const clause = key === "estimated_spend" ? spendExclusionClause(metadata) : "";
-    lines.push(`- ${label}: \`${inlineValue(metadata[key])}\`${clause}`);
+    lines.push(`- ${label}: \`${inlineValue(metadata[key])}\``);
   }
-}
-
-/**
- * The spend is the usage that was recorded and priced; this fixed clause counts the agent attempts it
- * leaves out, both those that recorded no usage and those whose usage had no price. It carries no
- * `%`, `/`, `of` or `+`, so the coverage-score scan never reads it as a claim.
- */
-function spendExclusionClause(metadata: JsonRecord): string {
-  const excluded = exclusionCount(metadata.attempts_without_usage) + exclusionCount(metadata.unpriced_attempts);
-  if (excluded === 0) return "";
-  return ` (excludes ${String(excluded)} agent attempt${excluded === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
-}
-
-function exclusionCount(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : 0;
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {

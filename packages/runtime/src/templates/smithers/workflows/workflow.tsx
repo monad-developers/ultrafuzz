@@ -73,6 +73,7 @@ const {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  reportEstimatedSpend,
   RUN_METADATA_SCHEMA_VERSION,
   sensitiveEnvironmentValues,
   validateArtifactContractBytes,
@@ -1805,12 +1806,20 @@ function deriveAuthoritativeFinalReportRunMetadata(
   // accounting, which includes its source runs; for a continuation without its own accounting yet,
   // the source run's; and for a direct run, this workflow run's live Smithers usage. Without any,
   // nothing was recorded. Attempts without usage are run.json's own count, which includes lineage.
+  // The spend ends in `+` when any of them says the amount is probably low.
   const recorded = runSummaryUsage(metadata);
   const usage =
     recorded.accounting ??
     (metadata.source_run_id === undefined
       ? finalReportLiveUsage(workflowMetrics)
       : runSummaryUsage(finalReportSourceRunMetadata(runRoot, metadata.source_run_id, task.attemptId)).accounting);
+  const spendCompleteness = {
+    partial_pricing: usage?.partial_pricing ?? false,
+    ...(recorded.attempts_without_usage === undefined
+      ? {}
+      : { attempts_without_usage: recorded.attempts_without_usage }),
+    ...(usage?.unpriced_attempts === undefined ? {} : { unpriced_attempts: usage.unpriced_attempts })
+  };
   const validationWarnings = finalReportArtifactValidationWarnings(task);
   const elapsedTime = finalReportElapsedTime(
     metadata.created_at,
@@ -1824,12 +1833,8 @@ function deriveAuthoritativeFinalReportRunMetadata(
     elapsed_time: elapsedTime,
     models_used: usage?.models_used ?? [],
     tokens_used: usage?.tokens_used ?? "0",
-    estimated_spend: usage?.estimated_spend ?? "$0.00",
-    partial_pricing: usage?.partial_pricing ?? false,
-    ...(recorded.attempts_without_usage === undefined
-      ? {}
-      : { attempts_without_usage: recorded.attempts_without_usage }),
-    ...(usage?.unpriced_attempts === undefined ? {} : { unpriced_attempts: usage.unpriced_attempts }),
+    estimated_spend: reportEstimatedSpend(usage?.estimated_spend ?? "$0.00", spendCompleteness),
+    ...spendCompleteness,
     strategy_loops: strategyLoops,
     audit_profile: finalReportOptionalString(auditProfile.effective, "effective audit profile"),
     audit_profile_catalog_digest: finalReportOptionalSha256(

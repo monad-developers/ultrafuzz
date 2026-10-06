@@ -7,6 +7,7 @@ import {
   formatEstimatedSpendUsd,
   layoutForRunRoot,
   readRunMetadataDocument,
+  reportEstimatedSpend,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
@@ -124,11 +125,19 @@ function expectedAccountingFromRunMetadata(metadataPath: string): ExpectedAccoun
   const cumulative = metadata.accounting?.cumulative;
   if (cumulative === undefined) return undefined;
   const tokensUsed = cumulative.tokens_used;
-  // A report shows accounting's USD amount in the same format, never its `+`-labelled estimated_spend.
+  // A report shows accounting's USD amount in its own format, with a `+` when the amount is probably
+  // low (the report's rule, not accounting's own `estimated_spend` label).
   const estimatedSpendUsd = cumulative.estimated_spend_usd;
+  const spendCompleteness = {
+    partial_pricing: cumulative.partial_pricing,
+    unpriced_attempts: cumulative.unpriced_event_count,
+    attempts_without_usage: metadata.attempts_without_usage?.cumulative_count
+  };
   const expected = {
     ...(isAvailableLabel(tokensUsed) ? { tokens_used: tokensUsed } : {}),
-    ...(estimatedSpendUsd === undefined ? {} : { estimated_spend: formatEstimatedSpendUsd(estimatedSpendUsd) })
+    ...(estimatedSpendUsd === undefined
+      ? {}
+      : { estimated_spend: reportEstimatedSpend(formatEstimatedSpendUsd(estimatedSpendUsd), spendCompleteness) })
   };
   return expected.tokens_used === undefined && expected.estimated_spend === undefined ? undefined : expected;
 }
@@ -241,6 +250,9 @@ function accountingValueProblem(
   }
   if (expectedSpend !== undefined && actualSpend > expectedSpend + 0.000001) {
     return "greater than current run metadata";
+  }
+  if (expected.endsWith("+") && !actual.trim().endsWith("+")) {
+    return "missing the + of an amount that is probably low";
   }
   return undefined;
 }

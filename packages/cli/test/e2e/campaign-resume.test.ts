@@ -557,19 +557,22 @@ test(
       assert.equal(reportJson.run_metadata.target_commit, head);
       assert.match(markdown, new RegExp(`^- Commit: \`${head}\`$`, "mu"));
       // The stub reports usage only from attempts that complete, so the SIGKILLed attempts are counted
-      // instead of priced. The catalog is off, so gpt-5.5 is priced from the fallback list prices.
+      // instead of priced, and the spend ends in `+`. The catalog is off, so gpt-5.5 is priced from the
+      // fallback list prices.
       const accounting = runMetadata.accounting;
       assert.ok(accounting, "the run has no accounting");
       assert.deepEqual(accounting.pricing_catalog.fallback?.models, accounting.cumulative.models);
       assert.ok(accounting.cumulative.models.includes("gpt-5.5"), JSON.stringify(accounting.cumulative.models));
       assert.equal(accounting.cumulative.unpriced_event_count, 0);
-      const excluded = runMetadata.attempts_without_usage?.cumulative_count ?? 0;
-      assert.ok(excluded >= 1, `attempts without usage: ${JSON.stringify(runMetadata.attempts_without_usage)}`);
+      const attemptsWithoutUsage = runMetadata.attempts_without_usage?.cumulative_count ?? 0;
+      assert.ok(
+        attemptsWithoutUsage >= 1,
+        `attempts without usage: ${JSON.stringify(runMetadata.attempts_without_usage)}`
+      );
       const spendUsd = accounting.cumulative.estimated_spend_usd;
       assert.ok(spendUsd !== undefined && spendUsd > 0, `estimated spend: ${String(spendUsd)}`);
-      const clause = `(excludes ${excluded} agent attempt${excluded === 1 ? "" : "s"} whose usage was not recorded or could not be priced)`;
       assert.ok(
-        markdown.split("\n").includes(`- Estimated spend: \`${formatEstimatedSpendUsd(spendUsd)}\` ${clause}`),
+        markdown.split("\n").includes(`- Estimated spend: \`${formatEstimatedSpendUsd(spendUsd)}+\``),
         markdown
       );
 

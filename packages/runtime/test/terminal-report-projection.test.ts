@@ -200,7 +200,7 @@ test("terminal projection enforces bounded and internally consistent completion 
 });
 
 /** A valid run.json whose cumulative accounting already includes the report task's own usage. */
-function metadataWithAccounting(priced = true): RunMetadataDocument {
+function metadataWithAccounting(priced: boolean | "all" = true): RunMetadataDocument {
   return runMetadataWithAccounting({ runId: RUN_ID, createdAt: CREATED_AT, updatedAt: FINISHED_AT, priced });
 }
 
@@ -218,13 +218,13 @@ test("terminal projection restates whole-run accounting instead of the report-st
     agentReport: agentReport()
   };
   const result = projectTerminalReport(input);
-  // The USD amount of accounting v4, never its `+`-labelled estimated_spend, and the count of the
-  // events it could not price.
+  // The USD amount of accounting v4 in the report's format, with a `+` because accounting could not
+  // price one event; the count itself stays in report.json.
   assert.deepEqual(runSummaryLines(result.markdown), [
     "- Elapsed time: `6h 02m`",
     "- Models used: `model-a, model-b`",
     "- Tokens used: `12,345,678`",
-    "- Estimated spend: `$41.20` (excludes 1 agent attempt whose usage was not recorded or could not be priced)"
+    "- Estimated spend: `$41.20+`"
   ]);
   const runMetadata = result.report.run_metadata as Record<string, unknown>;
   assert.equal(runMetadata.partial_pricing, true);
@@ -239,9 +239,41 @@ test("terminal projection restates whole-run accounting instead of the report-st
     "- Elapsed time: `6h 02m`",
     "- Models used: `model-a, model-b`",
     "- Tokens used: `12,345,678`",
-    "- Estimated spend: `$0.00` (excludes 2 agent attempts whose usage was not recorded or could not be priced)"
+    "- Estimated spend: `$0.00+`"
   ]);
   assert.equal((unpriced.report.run_metadata as Record<string, unknown>).partial_pricing, true);
+  assert.equal((unpriced.report.run_metadata as Record<string, unknown>).unpriced_attempts, 2);
+});
+
+test("terminal projection drops the agent's + when whole-run accounting priced everything", () => {
+  // The agent copied a probably-low snapshot at report start; the whole run was then fully priced.
+  const agent = agentReport();
+  Object.assign(agent.run_metadata as Record<string, unknown>, {
+    estimated_spend: "$0.01+",
+    partial_pricing: true,
+    unpriced_attempts: 1
+  });
+  const result = projectTerminalReport({
+    completion: completion(),
+    state: { ...terminalState(), finished_at: "2026-09-01T06:02:00.000Z" },
+    metadata: metadataWithAccounting("all"),
+    agentReport: agent
+  });
+  const runMetadata = result.report.run_metadata as Record<string, unknown>;
+  assert.equal(runMetadata.estimated_spend, "$41.20");
+  assert.equal(runMetadata.partial_pricing, false);
+  assert.equal(Object.hasOwn(runMetadata, "unpriced_attempts"), false);
+  assert.deepEqual(runSummaryLines(result.markdown).at(-1), "- Estimated spend: `$41.20`");
+
+  // An attempt without usage in run.json still puts the `+` back.
+  const withAttempt = projectTerminalReport({
+    completion: completion(),
+    state: { ...terminalState(), finished_at: "2026-09-01T06:02:00.000Z" },
+    metadata: { ...metadataWithAccounting("all"), attempts_without_usage: { attempts: [], cumulative_count: 1 } },
+    agentReport: agent
+  });
+  assert.equal((withAttempt.report.run_metadata as Record<string, unknown>).estimated_spend, "$41.20+");
+  assert.deepEqual(runSummaryLines(withAttempt.markdown).at(-1), "- Estimated spend: `$41.20+`");
 });
 
 test("terminal projection restates the attempts without usage on their own", () => {
@@ -263,18 +295,19 @@ test("terminal projection restates the attempts without usage on their own", () 
   const counted = project(withCount(2));
   assert.equal((counted.report.run_metadata as Record<string, unknown>).attempts_without_usage, 2);
   assert.equal((counted.report.run_metadata as Record<string, unknown>).unpriced_attempts, 1);
-  assert.match(counted.markdown, /^- Estimated spend: `\$41\.20` \(excludes 3 agent attempts whose usage/mu);
+  assert.match(counted.markdown, /^- Estimated spend: `\$41\.20\+`$/mu);
 
   const none = project(withCount());
   assert.equal(Object.hasOwn(none.report.run_metadata as object, "attempts_without_usage"), false);
-  assert.match(none.markdown, /^- Estimated spend: `\$41\.20` \(excludes 1 agent attempt whose usage/mu);
+  assert.match(none.markdown, /^- Estimated spend: `\$41\.20\+`$/mu);
 
   // Without accounting the agent's usage stays, but run.json's own count still replaces the agent's.
   const { accounting: _accounting, ...withoutAccounting } = withCount(2);
   const unaccounted = project(withoutAccounting);
   assert.equal((unaccounted.report.run_metadata as Record<string, unknown>).attempts_without_usage, 2);
   assert.equal((unaccounted.report.run_metadata as Record<string, unknown>).unpriced_attempts, 2);
-  assert.match(unaccounted.markdown, /^- Estimated spend: `\$0\.01` \(excludes 4 agent attempts whose usage/mu);
+  assert.equal((unaccounted.report.run_metadata as Record<string, unknown>).estimated_spend, "$0.01+");
+  assert.match(unaccounted.markdown, /^- Estimated spend: `\$0\.01\+`$/mu);
 });
 
 test("terminal projection keeps the agent's usage without run accounting", () => {

@@ -41,6 +41,7 @@ import {
   PROPERTIES_SCHEMA_VERSION,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
+  reportEstimatedSpend,
   RUN_METADATA_SCHEMA_VERSION,
   schemaRegistryBundleDigest,
   SMITHERS_TASK_MANIFEST_SCHEMA_VERSION,
@@ -695,6 +696,7 @@ function loadFinalReportRunMetadataAuthorityHarness(
     "dependencyArtifactAdmissionsByTask",
     "boundArtifactValidationWarnings",
     "runSummaryUsage",
+    "reportEstimatedSpend",
     `${helper}; return {
       normalize: normalizeFinalReportGitHubRemote,
       latestElapsedThrough: finalReportLatestElapsedThrough,
@@ -747,7 +749,8 @@ function loadFinalReportRunMetadataAuthorityHarness(
     async () => workflowMetrics,
     admissions,
     boundArtifactValidationWarnings,
-    runSummaryUsage
+    runSummaryUsage,
+    reportEstimatedSpend
   ) as ReturnType<typeof loadFinalReportRunMetadataAuthorityHarness>;
 }
 
@@ -9281,7 +9284,7 @@ test("final-report Run summary copies run accounting, else a direct run's live u
       elapsed_time: "1m 30s",
       models_used: ["model-priced", "model-unpriced"],
       tokens_used: "300",
-      estimated_spend: "$0.05",
+      estimated_spend: "$0.05+",
       partial_pricing: true,
       unpriced_attempts: 1
     });
@@ -9294,7 +9297,8 @@ test("final-report Run summary copies run accounting, else a direct run's live u
       partial_pricing: false
     });
 
-    // Run accounting replaces the live usage, with its USD amount rather than its `+` label.
+    // Run accounting replaces the live usage, with its USD amount in the report's format and a `+`
+    // because accounting could not price one event and two attempts recorded no usage.
     const cumulative = {
       models: ["model-a"],
       tokens_used: "9,999",
@@ -9308,15 +9312,31 @@ test("final-report Run summary copies run accounting, else a direct run's live u
       elapsed_time: "1h 00m",
       models_used: ["model-a"],
       tokens_used: "9,999",
-      estimated_spend: "$41.20",
+      estimated_spend: "$41.20+",
       partial_pricing: true,
       attempts_without_usage: 2,
       unpriced_attempts: 1
     });
-    // Accounting that priced nothing has no USD amount and shows zero spend.
+    // Fully priced accounting with every attempt's usage recorded has no `+`, and an attempt without
+    // usage alone brings it back.
+    const priced = { ...cumulative, estimated_spend: "$41.20", partial_pricing: false, unpriced_event_count: 0 };
+    writeRunMetadata({ accounting: { cumulative: priced } });
+    assert.deepEqual(await usageOf(full), {
+      elapsed_time: "1h 00m",
+      models_used: ["model-a"],
+      tokens_used: "9,999",
+      estimated_spend: "$41.20",
+      partial_pricing: false
+    });
+    writeRunMetadata({
+      accounting: { cumulative: priced },
+      attempts_without_usage: { attempts: [], cumulative_count: 1 }
+    });
+    assert.equal((await usageOf(full)).estimated_spend, "$41.20+");
+    // Accounting that priced nothing has no USD amount and shows zero spend, probably low.
     const { estimated_spend_usd: _amount, ...unpriced } = cumulative;
     writeRunMetadata({ accounting: { cumulative: { ...unpriced, estimated_spend: "unavailable" } } });
-    assert.equal((await usageOf(full)).estimated_spend, "$0.00");
+    assert.equal((await usageOf(full)).estimated_spend, "$0.00+");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -9345,7 +9365,7 @@ test("final-report Run summary of a continuation without accounting copies its s
       elapsed_time: "1h 00m",
       models_used: ["model-a", "model-b"],
       tokens_used: "12,345,678",
-      estimated_spend: "$41.20",
+      estimated_spend: "$41.20+",
       partial_pricing: true,
       unpriced_attempts: 1
     });

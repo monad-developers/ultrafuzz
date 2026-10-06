@@ -14433,6 +14433,21 @@ function addCoverageProseFinding(fixture: ReturnType<typeof finalReportCoverageF
   return coverageProseIssue;
 }
 
+test("final report coverage scans do not read a probably-low spend's + as a coverage score", () => {
+  const { layout, reportNode, reportMarkdown } = finalReportCoverageFixture();
+  for (const spend of ["$38.72+", "$0.00+", "$0.0008+", "$38.72"]) {
+    const markdown = `${reportMarkdown}- Models used: \`model-a\`\n- Tokens used: \`1,234\`\n- Estimated spend: \`${spend}\`\n`;
+    writeArtifact(layout, reportNode.id, "report.md", markdown);
+    const result = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);
+    assert.equal(result.ok, true, `${spend}: ${JSON.stringify(result.diagnostics)}`);
+    assert.equal(
+      result.diagnostics.some((diagnostic) => /COVERAGE/u.test(diagnostic.code)),
+      false,
+      `${spend}: ${JSON.stringify(result.diagnostics)}`
+    );
+  }
+});
+
 test("final report Markdown carries no scoped coverage section or exact-scope coverage score", () => {
   const { layout, reportNode, scopedMarkdown, reportMarkdown } = finalReportCoverageFixture();
   const valid = verifyRequiredArtifactsForAttempt(layout, reportNode, reportNode.id);

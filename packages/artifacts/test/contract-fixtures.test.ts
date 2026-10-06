@@ -1572,7 +1572,7 @@ test("report target commits are exact lowercase 40-hex object IDs or null in Ajv
   }
 });
 
-test("report estimated spend is a numeric USD estimate without a + or unavailable label in Ajv and Zod", () => {
+test("report estimated spend is a numeric USD estimate, never unavailable, in Ajv and Zod", () => {
   const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "report.schema.json");
   assert.ok(entry?.zodParser !== undefined);
   const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
@@ -1583,8 +1583,13 @@ test("report estimated spend is a numeric USD estimate without a + or unavailabl
     ["$12.35", true],
     ["$0.0042", true],
     ["$1234567.1234567891", true],
+    // The fixture priced everything it recorded, so its spend takes no `+`.
     ["$1.00+", false],
     ["unavailable", false],
+    ["unavailable+", false],
+    ["$1+", false],
+    ["$1.00++", false],
+    ["$1.00 +", false],
     ["$1", false],
     ["$1.0", false],
     ["1.00", false],
@@ -1598,23 +1603,76 @@ test("report estimated spend is a numeric USD estimate without a + or unavailabl
   ];
   for (const [estimatedSpend, accepted] of cases) {
     const report = structuredClone(fixture.valid) as { run_metadata: Record<string, unknown> };
+    assert.equal(report.run_metadata.partial_pricing, false);
     report.run_metadata.estimated_spend = estimatedSpend;
     const label = JSON.stringify(estimatedSpend);
     assert.equal(validateRegisteredJsonSchema(entry.id, report).ok, accepted, `Ajv ${label}`);
     assert.equal(parser.safeParse(report).success, accepted, `Zod ${label}`);
     assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, accepted, label);
-    if (typeof estimatedSpend === "string") {
+    if (typeof estimatedSpend === "string" && estimatedSpend !== "$1.00+") {
       assert.equal(artifactExports.ESTIMATED_SPEND_PATTERN.test(estimatedSpend), accepted, `pattern ${label}`);
     }
   }
-  // Every label the shared formatter produces is accepted.
+  assert.equal(artifactExports.ESTIMATED_SPEND_PATTERN.test("$1.00+"), true);
+  // Every label the shared formatter produces is accepted, with or without the `+`.
   for (const amount of [0, 0.004, 0.00000000004, 0.01, 1.005, 12.345, 41.2, 1e6]) {
-    assert.match(
-      artifactExports.formatEstimatedSpendUsd(amount),
-      artifactExports.ESTIMATED_SPEND_PATTERN,
-      String(amount)
-    );
+    const formatted = artifactExports.formatEstimatedSpendUsd(amount);
+    assert.match(formatted, artifactExports.ESTIMATED_SPEND_PATTERN, String(amount));
+    assert.match(`${formatted}+`, artifactExports.ESTIMATED_SPEND_PATTERN, String(amount));
   }
+});
+
+test("report estimated spend ends in + exactly when the amount is probably low, in Ajv and Zod", () => {
+  const entry = artifactSchemaRegistry().find((candidate) => candidate.filename === "report.schema.json");
+  assert.ok(entry?.zodParser !== undefined);
+  const parser = (artifactExports as unknown as Record<string, unknown>)[entry.zodParser] as ZodLikeParser;
+  const fixture = contractFixtures["ultrafuzz/report@3"];
+  assert.ok(fixture !== undefined);
+  const probablyLow: Array<Record<string, unknown>> = [
+    { partial_pricing: true },
+    { attempts_without_usage: 2 },
+    { unpriced_attempts: 1 },
+    { partial_pricing: true, attempts_without_usage: 3, unpriced_attempts: 1 }
+  ];
+  const cases: Array<[Record<string, unknown>, string, boolean]> = [
+    [{}, "$38.72", true],
+    [{}, "$38.72+", false],
+    [{}, "$0.00", true],
+    [{}, "$0.00+", false],
+    ...probablyLow.flatMap((summary): Array<[Record<string, unknown>, string, boolean]> => [
+      [summary, "$38.72+", true],
+      [summary, "$0.00+", true],
+      [summary, "$0.0008+", true],
+      [summary, "$38.72", false],
+      [summary, "$0.00", false],
+      [summary, "unavailable", false]
+    ])
+  ];
+  for (const [summary, estimatedSpend, accepted] of cases) {
+    const report = structuredClone(fixture.valid) as { run_metadata: Record<string, unknown> };
+    Object.assign(report.run_metadata, summary, { estimated_spend: estimatedSpend });
+    const label = `${JSON.stringify(summary)} ${estimatedSpend}`;
+    assert.equal(validateRegisteredJsonSchema(entry.id, report).ok, accepted, `Ajv ${label}`);
+    assert.equal(parser.safeParse(report).success, accepted, `Zod ${label}`);
+    assert.equal(validateArtifactContract("ultrafuzz/report@3", JSON.stringify(report)).ok, accepted, label);
+    assert.equal(artifactExports.reportSpendIsProbablyLow(report.run_metadata), Object.keys(summary).length > 0, label);
+  }
+  // The shared helper sets the `+` from the same fields, whatever the amount label already carried.
+  for (const amount of ["$38.72", "$38.72+"]) {
+    assert.equal(artifactExports.reportEstimatedSpend(amount, { partial_pricing: false }), "$38.72");
+    for (const summary of probablyLow) {
+      assert.equal(artifactExports.reportEstimatedSpend(amount, summary), "$38.72+", JSON.stringify(summary));
+    }
+  }
+  // Malformed counts are not counts.
+  for (const count of [0, -1, 1.5, "2", null]) {
+    assert.equal(
+      artifactExports.reportSpendIsProbablyLow({ partial_pricing: false, attempts_without_usage: count }),
+      false
+    );
+    assert.equal(artifactExports.reportSpendIsProbablyLow({ partial_pricing: false, unpriced_attempts: count }), false);
+  }
+  assert.equal(artifactExports.reportSpendIsProbablyLow({ partial_pricing: "true" }), false);
 });
 
 test("portable generated-test paths and implementation selection uniqueness agree bidirectionally", () => {

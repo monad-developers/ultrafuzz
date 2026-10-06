@@ -19796,8 +19796,8 @@ test("syncRun publishes a report after a resumed report agent succeeds", async (
   assert.equal(recoveredReport.completion?.counts.failed, 0);
   assert.doesNotMatch(recoveredReport.markdown, /^# Ultrafuzz report — PARTIAL/u);
   // The run summary restates elapsed time from run.json and state.json, and the count of agent
-  // attempts that recorded no usage: both report attempts ran without reporting any. All review
-  // content is the agent's.
+  // attempts that recorded no usage: both report attempts ran without reporting any, so the spend
+  // gets its `+`. All review content is the agent's.
   const elapsed = (recoveredReport.json as { run_metadata: { elapsed_time: string } }).run_metadata.elapsed_time;
   assert.match(elapsed, /^(?:\d+\.\ds|\d+m \d{2}s)$/u);
   const attemptsWithoutUsage = readRunMetadataDocument(
@@ -19810,14 +19810,12 @@ test("syncRun publishes a report after a resumed report agent succeeds", async (
     run_metadata: {
       ...(finalReport.report.run_metadata as Record<string, unknown>),
       elapsed_time: elapsed,
+      estimated_spend: "$0.01+",
       attempts_without_usage: 2
     },
     completion: recoveredReport.completion
   });
-  assert.match(
-    recoveredReport.markdown,
-    /^- Estimated spend: `[^`]+` \(excludes 2 agent attempts whose usage was not recorded or could not be priced\)$/mu
-  );
+  assert.match(recoveredReport.markdown, /^- Estimated spend: `\$0\.01\+`$/mu);
 });
 
 test("syncRun follows the runner past a retry-failed recovery a pre-#961 build left prepared", async () => {

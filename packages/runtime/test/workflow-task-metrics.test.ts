@@ -143,7 +143,7 @@ test("current task workflow metrics mark mixed recorded and unavailable pricing 
     const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
 
     assert.equal(metrics?.tokens_used, "300");
-    // The priced usage, never `+`-labelled; the attempt it could not price is counted instead.
+    // The priced amount alone; the attempt it could not price is counted, and the Run summary adds the `+`.
     assert.equal(metrics?.estimated_spend, "$0.05");
     assert.equal(metrics?.partial_pricing, true);
     assert.equal(metrics?.unpriced_attempts, 1);
@@ -266,7 +266,7 @@ test("current task workflow metrics dedupe cumulative spend while preserving the
   assert.equal(metrics?.tokens_used, "99,999");
   assert.equal(metrics?.estimated_spend, "$0.25");
   assert.equal(metrics?.partial_pricing, true);
-  // The third aggregated attempt has no usage event, so the figure excludes it.
+  // The third aggregated attempt has no usage event, so it counts as unpriced.
   assert.equal(metrics?.unpriced_attempts, 1);
   assert.deepEqual(metrics?.models_used, ["model-a", "model-b"]);
 });

@@ -381,17 +381,26 @@ test("unchecked reports restate whole-run accounting from run.json", () => {
   assert.match(report.markdown, /^- Elapsed time: `3h 30m`$/mu);
   assert.match(report.markdown, /^- Models used: `model-a`$/mu);
   assert.match(report.markdown, /^- Tokens used: `4,321`$/mu);
-  assert.match(report.markdown, /^- Estimated spend: `\$3\.00`$/mu);
+  // Partial pricing means there is probably more.
+  assert.match(report.markdown, /^- Estimated spend: `\$3\.00\+`$/mu);
   assert.equal(reportSchema.parse(report.json).run_metadata.partial_pricing, true);
   assertReportSnapshotRemainedCurrent(report);
 
-  // The spend line counts what the figure excludes, from accounting and run.json's own count.
+  // Fully priced, with every attempt's usage recorded: no `+`.
+  writeRunMetadata({ ...cumulative, estimated_spend: "$3.00", partial_pricing: false });
+  assert.match(loadReportSnapshot(root).markdown, /^- Estimated spend: `\$3\.00`$/mu);
+
+  // Attempts without usage, from run.json's own count, put the `+` on a fully priced amount; the
+  // counts stay in report.json and are not rendered.
+  writeRunMetadata({ ...cumulative, estimated_spend: "$3.00", partial_pricing: false }, 2);
+  const unrecorded = loadReportSnapshot(root);
+  assert.match(unrecorded.markdown, /^- Estimated spend: `\$3\.00\+`$/mu);
+  assert.equal(reportSchema.parse(unrecorded.json).run_metadata.attempts_without_usage, 2);
   writeRunMetadata({ ...cumulative, unpriced_event_count: 1 }, 2);
   const counted = loadReportSnapshot(root);
-  assert.match(
-    counted.markdown,
-    /^- Estimated spend: `\$3\.00` \(excludes 3 agent attempts whose usage was not recorded or could not be priced\)$/mu
-  );
+  assert.match(counted.markdown, /^- Estimated spend: `\$3\.00\+`$/mu);
+  assert.doesNotMatch(counted.markdown, /agent attempts?|excludes/u);
+  assert.equal(reportSchema.parse(counted.json).run_metadata.estimated_spend, "$3.00+");
   assert.equal(reportSchema.parse(counted.json).run_metadata.attempts_without_usage, 2);
   assert.equal(reportSchema.parse(counted.json).run_metadata.unpriced_attempts, 1);
 

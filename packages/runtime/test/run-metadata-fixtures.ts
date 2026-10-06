@@ -4,17 +4,19 @@ const DIGEST = "a".repeat(64);
 
 /**
  * A valid run.json with accounting v4 over two usage events, `model-a` on `review` and `model-b` on
- * `final-report`. When `priced` is false the ledger priced neither event, so v4's spend is
- * `unavailable` and it has no USD amount.
+ * `final-report`. By default the ledger priced only `model-a`'s event. When `priced` is false it
+ * priced neither, so v4's spend is `unavailable` and it has no USD amount; when `priced` is `"all"`
+ * it priced both, so pricing is complete.
  */
 export function runMetadataWithAccounting(input: {
   runId: string;
   createdAt: string;
   updatedAt: string;
-  priced?: boolean;
+  priced?: boolean | "all";
 }): RunMetadataDocument {
   const priced = input.priced ?? true;
-  const unpricedModels = priced ? ["model-b"] : ["model-a", "model-b"];
+  const unpricedModels = priced === "all" ? [] : priced ? ["model-b"] : ["model-a", "model-b"];
+  const complete = unpricedModels.length === 0;
   const summary = {
     uncached_input_tokens: 9_000_000,
     input_tokens: 9_000_000,
@@ -28,7 +30,7 @@ export function runMetadataWithAccounting(input: {
     tokens_used: "12,345,678",
     ...(priced
       ? {
-          estimated_spend: "$41.20+",
+          estimated_spend: complete ? "$41.20" : "$41.20+",
           estimated_spend_usd: 41.2,
           component_costs_usd: { uncached_input: 30, cache_read: 0, cache_write: 0, output: 11.2, reasoning: 0 }
         }
@@ -38,15 +40,15 @@ export function runMetadataWithAccounting(input: {
         }),
     usage_complete: true,
     usage_incomplete_reasons: [],
-    pricing_complete: false,
+    pricing_complete: complete,
     pricing_incomplete_reasons: (["output", "uncached_input"] as const).flatMap((component) =>
       unpricedModels.map((model) => ({ code: "model-pricing-unavailable" as const, component, model }))
     ),
-    partial_pricing: true,
+    partial_pricing: !complete,
     cache_read_pricing_estimated: false,
     event_count: 2,
-    priced_event_count: priced ? 1 : 0,
-    unpriced_event_count: priced ? 1 : 2,
+    priced_event_count: 2 - unpricedModels.length,
+    unpriced_event_count: unpricedModels.length,
     models: ["model-a", "model-b"],
     agents: ["agent-a"]
   };
@@ -102,9 +104,13 @@ export function runMetadataWithAccounting(input: {
         source: "configured-catalog",
         status: "available",
         fetched_at: input.createdAt,
-        resolved_models: priced ? ["model-a"] : [],
+        resolved_models: ["model-a", "model-b"].filter((model) => !unpricedModels.includes(model)),
         unresolved_models: unpricedModels,
-        model_prices: priced ? { "model-a": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 } } : {}
+        model_prices: Object.fromEntries(
+          ["model-a", "model-b"]
+            .filter((model) => !unpricedModels.includes(model))
+            .map((model) => [model, { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }])
+        )
       },
       updated_at: input.updatedAt
     }

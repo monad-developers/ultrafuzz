@@ -9,10 +9,13 @@ export interface CurrentTaskWorkflowMetrics {
   elapsed_through?: string;
   models_used: string[];
   tokens_used?: string;
-  /** The priced usage in USD (formatEstimatedSpendUsd), whenever a usage event or an exact aggregate exists. */
+  /**
+   * The priced usage in USD (formatEstimatedSpendUsd), whenever a usage event or an exact aggregate
+   * exists. It carries no `+`; the Run summary adds one when the amount is probably low.
+   */
   estimated_spend?: string;
   partial_pricing: boolean;
-  /** Attempts the figure excludes (usage that could not be priced, or no usage event), when at least one. */
+  /** Attempts not in the amount (usage that could not be priced, or no usage event), when at least one. */
   unpriced_attempts?: number;
 }
 
@@ -219,7 +222,7 @@ async function deriveWorkflowSpend(input: {
     return { estimated_spend: formatEstimatedSpendUsd(input.aggregate_cost), partial_pricing: false };
   }
   // Without usage events nothing can be priced per attempt (Smithers' aggregate cost is null
-  // unless every attempt has one), so the figure is zero and excludes every attempt.
+  // unless every attempt has one), so the amount is zero and every attempt counts as unpriced.
   if (input.events.length === 0) {
     return {
       partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts,
@@ -250,7 +253,7 @@ async function deriveWorkflowSpend(input: {
     }
     if (!projected.partial_pricing) fullyPricedEvents += 1;
   }
-  // Attempts Smithers aggregated without a usage event of their own are excluded from the figure too.
+  // Attempts Smithers aggregated without a usage event of their own count as unpriced too.
   const unpricedAttempts = input.events.length - knownCostEvents + Math.max(0, input.attempts - input.events.length);
   return {
     estimated_spend: formatEstimatedSpendUsd(knownCost),

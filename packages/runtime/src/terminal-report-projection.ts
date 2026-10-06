@@ -3,6 +3,7 @@ import {
   assertRunStateDocument,
   formatEstimatedSpendUsd,
   reportCompletionSchema,
+  reportEstimatedSpend,
   TERMINAL_RUN_STATE_STATUSES,
   type ReportCompletion,
   type RunMetadataDocument,
@@ -65,7 +66,8 @@ export function projectTerminalReport(input: TerminalReportProjectionInput): Can
  * presentations restate them from run.json and the recorded finish time. Models, tokens, spend,
  * partial pricing, and the unpriced-attempt count move together and come only from
  * `accounting.cumulative`; without it they keep the agent's copy. The count of attempts without
- * usage is restated on its own. Malformed records are ignored, never thrown.
+ * usage is restated on its own, and the spend's `+` is then set again from the restated fields.
+ * Malformed records are ignored, never thrown.
  */
 export function withWholeRunSummary(
   runMetadata: Record<string, unknown>,
@@ -84,6 +86,9 @@ export function withWholeRunSummary(
     if (usage.attempts_without_usage === undefined) delete summary.attempts_without_usage;
     else summary.attempts_without_usage = usage.attempts_without_usage;
   }
+  if (typeof summary.estimated_spend === "string") {
+    summary.estimated_spend = reportEstimatedSpend(summary.estimated_spend, summary);
+  }
   return summary;
 }
 
@@ -93,7 +98,10 @@ export interface RunSummaryUsage {
   accounting?: {
     models_used: string[];
     tokens_used: string;
-    /** `accounting.cumulative.estimated_spend_usd`, `$0.00` when no usage could be priced. */
+    /**
+     * `accounting.cumulative.estimated_spend_usd` without a `+`, `$0.00` when no usage could be
+     * priced. `reportEstimatedSpend` adds the `+` once the whole Run summary is known.
+     */
     estimated_spend: string;
     partial_pricing: boolean;
     /** `accounting.cumulative.unpriced_event_count`, when at least one. */
@@ -106,8 +114,9 @@ export interface RunSummaryUsage {
 /**
  * The one place a Run summary's usage figures are read from run.json, for the report-start
  * projection and both runtime presentations. Accounting v4's own `estimated_spend` label (with its
- * `+` and `unavailable`) stays in run.json for `ultrafuzz stats`; the report shows its USD amount and
- * counts what that amount excludes. Reads are defensive: a malformed record yields nothing.
+ * `unavailable` and its own `+` rule) stays in run.json for `ultrafuzz stats`; the report shows its
+ * USD amount, with the `+` the report's rule gives (`reportEstimatedSpend`). Reads are defensive: a
+ * malformed record yields nothing.
  */
 export function runSummaryUsage(metadata: unknown): RunSummaryUsage {
   const attemptsWithoutUsage = field(field(metadata, "attempts_without_usage"), "cumulative_count");

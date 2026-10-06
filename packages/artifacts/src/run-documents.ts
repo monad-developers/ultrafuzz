@@ -316,18 +316,52 @@ export interface RunAttemptsWithoutUsage {
 }
 
 /**
- * Every label `formatEstimatedSpendUsd` can produce, and the only form a report's
- * `run_metadata.estimated_spend` and its rendered `Estimated spend` may take: no `+`, no
- * `unavailable`, no leading zeros, two to ten decimals.
+ * The only form a report's `run_metadata.estimated_spend` and its rendered `Estimated spend` may
+ * take: a `formatEstimatedSpendUsd` amount (no leading zeros, two to ten decimals), followed by `+`
+ * when `reportSpendIsProbablyLow`. Never `unavailable`.
  */
-export const ESTIMATED_SPEND_PATTERN = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u;
+export const ESTIMATED_SPEND_PATTERN = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}\+?$/u;
+
+/** The Run summary fields that decide whether its spend carries a `+`. */
+export interface ReportSpendCompleteness {
+  partial_pricing?: unknown;
+  attempts_without_usage?: unknown;
+  unpriced_attempts?: unknown;
+}
 
 /**
- * Formats the report's estimated spend: two decimals from one cent up (and for exactly zero),
- * otherwise enough decimals (four to ten) to show the leading significant digits, so a nonzero
+ * A report's spend is probably low, so its `estimated_spend` ends in `+` ("there is probably more"),
+ * when accounting priced only part of the usage (`partial_pricing`), when executed agent attempts
+ * recorded no usage (`attempts_without_usage`), or when recorded usage could not be priced
+ * (`unpriced_attempts`). Values of any other type count as absent.
+ */
+export function reportSpendIsProbablyLow(summary: ReportSpendCompleteness): boolean {
+  return (
+    summary.partial_pricing === true ||
+    isPositiveSafeInteger(summary.attempts_without_usage) ||
+    isPositiveSafeInteger(summary.unpriced_attempts)
+  );
+}
+
+/**
+ * A report's `estimated_spend`: the amount label with any `+` it already carries removed, then a `+`
+ * exactly when `reportSpendIsProbablyLow(summary)`.
+ */
+export function reportEstimatedSpend(amount: string, summary: ReportSpendCompleteness): string {
+  const base = amount.endsWith("+") ? amount.slice(0, -1) : amount;
+  return reportSpendIsProbablyLow(summary) ? `${base}+` : base;
+}
+
+function isPositiveSafeInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+/**
+ * Formats the amount of a report's estimated spend: two decimals from one cent up (and for exactly
+ * zero), otherwise enough decimals (four to ten) to show the leading significant digits, so a nonzero
  * amount never reads as `$0.00`, though one below the ten-decimal floor (about `5e-11`) rounds to
- * `$0.0000000000`. There is never a `+` or `unavailable` suffix; what the figure
- * excludes is reported separately.
+ * `$0.0000000000`. It is never `unavailable`; `reportEstimatedSpend` adds the `+` when the amount is
+ * probably low.
  *
  * `toFixed` rounds the exact binary value, so decimal ties that binary cannot represent may round
  * either way (`12.345` is stored just above the tie and formats as `$12.35`; `1.005` is stored just
