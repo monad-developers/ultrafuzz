@@ -12,7 +12,7 @@ export interface CurrentTaskWorkflowMetrics {
   /** The priced usage in USD (formatEstimatedSpendUsd), whenever a usage event or an exact aggregate exists. */
   estimated_spend?: string;
   partial_pricing: boolean;
-  /** Usage events whose cost could not be priced, when there is at least one. */
+  /** Attempts the figure excludes (usage that could not be priced, or no usage event), when at least one. */
   unpriced_attempts?: number;
 }
 
@@ -218,8 +218,15 @@ async function deriveWorkflowSpend(input: {
   if (input.aggregate_cost !== undefined && input.priced_attempts === input.attempts) {
     return { estimated_spend: formatEstimatedSpendUsd(input.aggregate_cost), partial_pricing: false };
   }
+  // Without usage events nothing can be priced per attempt (Smithers' aggregate cost is null
+  // unless every attempt has one), so the figure is zero and excludes every attempt.
   if (input.events.length === 0) {
-    return { partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts };
+    return {
+      partial_pricing: input.coverage_partial || input.priced_attempts < input.attempts,
+      ...(input.attempts === 0
+        ? {}
+        : { estimated_spend: formatEstimatedSpendUsd(0), unpriced_attempts: input.attempts })
+    };
   }
 
   const pricing = await resolveLiveModelPricing({ models: input.models, env: process.env, signal: input.signal });
@@ -243,7 +250,8 @@ async function deriveWorkflowSpend(input: {
     }
     if (!projected.partial_pricing) fullyPricedEvents += 1;
   }
-  const unpricedAttempts = input.events.length - knownCostEvents;
+  // Attempts Smithers aggregated without a usage event of their own are excluded from the figure too.
+  const unpricedAttempts = input.events.length - knownCostEvents + Math.max(0, input.attempts - input.events.length);
   return {
     estimated_spend: formatEstimatedSpendUsd(knownCost),
     partial_pricing: input.coverage_partial || fullyPricedEvents < input.events.length,

@@ -9,7 +9,7 @@ export * from "./dynamic-expansion.js";
 export * from "./dynamic-runtime.js";
 export * from "./final-report-markdown.js";
 export * from "./terminal-report.js";
-export * from "./terminal-report-projection.js";
+export { runSummaryUsage, type RunSummaryUsage } from "./terminal-report-projection.js";
 export * from "./unverified-report.js";
 export * from "./report-publication-status.js";
 export * from "./init.js";

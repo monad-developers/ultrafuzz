@@ -325,7 +325,8 @@ export const ESTIMATED_SPEND_PATTERN = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u;
 /**
  * Formats the report's estimated spend: two decimals from one cent up (and for exactly zero),
  * otherwise enough decimals (four to ten) to show the leading significant digits, so a nonzero
- * amount never reads as `$0.00`. There is never a `+` or `unavailable` suffix; what the figure
+ * amount never reads as `$0.00`, though one below the ten-decimal floor (about `5e-11`) rounds to
+ * `$0.0000000000`. There is never a `+` or `unavailable` suffix; what the figure
  * excludes is reported separately.
  *
  * `toFixed` rounds the exact binary value, so decimal ties that binary cannot represent may round

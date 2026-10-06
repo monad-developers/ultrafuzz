@@ -182,6 +182,19 @@ test("current task workflow metrics show zero spend and count every attempt they
   }
 });
 
+test("current task workflow metrics show zero spend excluding every attempt when no usage event exists", async () => {
+  const runtime = runtimeWithEvidence({
+    usage: { attempts: 2, totalTokens: 300, pricedAttempts: 1, costUsd: null }
+  });
+
+  const metrics = await deriveCurrentTaskWorkflowMetrics(runtime);
+
+  assert.equal(metrics?.tokens_used, "300");
+  assert.equal(metrics?.estimated_spend, "$0.00");
+  assert.equal(metrics?.partial_pricing, true);
+  assert.equal(metrics?.unpriced_attempts, 2);
+});
+
 test("current task workflow metrics keep a complete aggregate cost exact when event rows are missing", async () => {
   const runtime = runtimeWithEvidence({
     usage: { attempts: 2, totalTokens: 300, pricedAttempts: 2, costUsd: 0.4 },
@@ -253,7 +266,8 @@ test("current task workflow metrics dedupe cumulative spend while preserving the
   assert.equal(metrics?.tokens_used, "99,999");
   assert.equal(metrics?.estimated_spend, "$0.25");
   assert.equal(metrics?.partial_pricing, true);
-  assert.equal(metrics?.unpriced_attempts, undefined);
+  // The third aggregated attempt has no usage event, so the figure excludes it.
+  assert.equal(metrics?.unpriced_attempts, 1);
   assert.deepEqual(metrics?.models_used, ["model-a", "model-b"]);
 });
 

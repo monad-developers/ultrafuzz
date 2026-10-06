@@ -1035,7 +1035,8 @@ The report task's snapshot takes models, tokens, spend, `partial_pricing`, and
 2. for a continuation whose own accounting has not been written yet, its source
    run's `accounting.cumulative`;
 3. for a run without a source run, the live Smithers usage of its workflow run,
-   priced the same way;
+   priced the same way, where `unpriced_attempts` also counts the attempts
+   Smithers aggregated without a usage event;
 4. otherwise no usage: models `[]`, tokens `0`, and spend `$0.00`.
 
 `attempts_without_usage` comes from the run's own `run.json`, whose count
@@ -1064,7 +1065,8 @@ Accounting v4 prices the latest usage event of each attempt with the first of:
    whether the catalog was available, unavailable, or disabled.
 
 An event none of them prices counts in `unpriced_event_count`, which the report
-shows as `unpriced_attempts`, and makes `partial_pricing` true. A component
+shows as `unpriced_attempts`, and makes `partial_pricing` true. Accounting keeps
+one event per attempt, so the event count is an attempt count. A component
 without a rate in an otherwise usable price, such as cache writes for a model
 whose price lists no cache-write rate, adds nothing to the amount; the event
 still counts as priced, so the clause does not count it, while
@@ -1123,7 +1125,12 @@ reachable, and a later table version never reprices it.
   event of its workflow run, Smithers task, iteration, and attempt falls between
   its start and terminal events, so each occurrence that a reset reran is judged
   on its own. Every synchronization recomputes the member from the ledgers, also
-  while `usage.jsonl` is empty and accounting is absent.
+  while `usage.jsonl` is empty and accounting is absent. Two cases are judged
+  imperfectly. An occurrence that a reset superseded before any synchronization
+  recorded it has no agent provenance, so it is never listed even if its model
+  ran without reporting usage. Usage that an adapter reports after the
+  occurrence's terminal event is priced by accounting, yet the occurrence is
+  still listed.
 
 #### Accounting v4
 
