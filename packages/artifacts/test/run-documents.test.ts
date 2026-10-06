@@ -518,7 +518,7 @@ test("estimated spend formats without suffixes and keeps a nonzero amount visibl
   ]) {
     assert.throws(
       () => formatEstimatedSpendUsd(value),
-      /spend estimate is outside the supported range/u,
+      /estimated spend is outside the supported range/u,
       String(value)
     );
   }

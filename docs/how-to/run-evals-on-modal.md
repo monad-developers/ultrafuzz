@@ -471,7 +471,9 @@ artifacts. Pricing provenance restates the run's accounting v4 catalog source,
 status, and resolved and unresolved model counts. A status of `available` can
 still count unresolved models, which have no pricing route or no usable price
 on it; their events without a recorded cost count in
-`usage.unpriced_event_count`, and `usage.partial_pricing` is then true. By default,
+`usage.unpriced_event_count`, and `usage.partial_pricing` is then true. A model
+priced from the versioned fallback list prices also counts as unresolved, under
+any status, while its events count as priced. By default,
 `collect` copies `status.json`, `result.json`, the generic worker lifecycle log,
 and an allowlisted `public-eval-diagnostics.json` when a public worker reached
 the post-eval gate. It also writes

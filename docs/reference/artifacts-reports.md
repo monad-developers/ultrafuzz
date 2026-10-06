@@ -107,7 +107,10 @@ snapshot inventory rather than a standalone workflow-origin attestation.
 ## Run Metadata
 
 `run.json` records the run schema version, run ID, creation timestamp, mode,
-linked workflow IDs, and workflow evidence pointers. Strict inspection,
+linked workflow IDs, and workflow evidence pointers, and, once workflows ran,
+usage accounting and the agent attempts that recorded no usage (see
+[Run accounting and estimated spend](#run-accounting-and-estimated-spend)).
+Strict inspection,
 `replay`, and `fork` use the complete linked-workflow evidence. Ordinary
 `resume` needs only the safe run root, persisted workflow path, and Smithers run
 identity; newer projections and authorization journals do not gate native
@@ -667,7 +670,11 @@ of production issues and, in bounded classification mode, the triage
 classification, lifecycle enrichment, and severity assessment of production
 issues. A `recommendation` is carried, never added: a report row that has a
 `recommendation` its source finding lacks fails verification in both strict
-and bounded classification mode.
+and bounded classification mode. A production issue renders its
+`recommendation` as `### Remediation`, so on a `report.json.issues` row a
+changed or omitted `recommendation` fails verification too, while on a
+`non_production_outcomes` row, which never renders it, it is a warning like
+the other narrative fields.
 
 New runs use `run.completion_policy = "best-effort"` by default. The stock
 property-lens, goal, strategy, and specialist groups continue after ordinary
@@ -742,41 +749,32 @@ The `## Run summary` section of `report.md` lists exactly `Run ID`,
 code. The report task receives these values as a host-generated projection
 when it starts. The agent copies the complete projection into
 `report.json.run_metadata`, adding only `agent_execution`, and verification
-requires the copy to equal the projection exactly. The workflow also records
-the projection in `smithers/final-report-run-metadata/<attempt-id>.json` under
-the run directory, outside the agent's worktree and artifact roots. A verifier
-in a restarted controller compares the report with that record instead of
-deriving the projection again from a `run.json` whose accounting has moved
-since the report task started; without the record, verification fails with an
-`artifact-contract` failure that names the
-`ultrafuzz resume <run-id> --refresh-controller --reset-node <node>` command
-that reruns the producer.
+requires the copy to equal the projection exactly.
 
-`Commit` renders the required `run_metadata.target_commit`: the 40- or
-64-character lowercase hex commit of the evaluated target, taken from the
-run's sealed data-governance record (`data-governance.json`, `target.commit`),
-or JSON `null` when no Git commit identity was recorded for that target. A
-`null` commit renders as:
+`Commit` renders the required `run_metadata.target_commit`: the run's source
+revision, the 40-character lowercase hex commit recorded at launch as
+`run.json` `source_revision`, which every task worktree is created from, or
+JSON `null` when the run recorded none. A `null` commit renders as:
 
 ```markdown
 - Commit: `none` (no Git commit was recorded for the evaluated target)
 ```
 
-If the record is unavailable or invalid, the report task fails with an
-`artifact-contract` failure instead of publishing a placeholder. Task
-worktrees are created from that commit, so it names the tree the campaign
-evaluated: uncommitted changes in the launch checkout were not evaluated. The
-dirty flag, worktree digest, and run lineage stay in structured records. A
-Modal holdout row shows the synthetic holdout commit it evaluated. The public
-projection keeps `target_commit` unredacted, and terminal and unchecked
-presentations never restate it.
+Because task worktrees are created from that commit, it names the tree the
+campaign evaluated: uncommitted changes in the launch checkout were not
+evaluated. Run lineage stays in structured records. A Modal holdout row shows
+the synthetic holdout commit it evaluated. The public projection keeps
+`target_commit` unredacted, and terminal and unchecked presentations never
+restate it.
 
 `report.md` does not render `source_run_id`, `source_run_ids`,
-`partial_pricing`, or `artifact_validation_warnings`; `report.json.run_metadata`
-keeps them. See [Partial Agent Artifacts](../schemas.md#partial-agent-artifacts)
-for where artifact validation warnings are shown, and
-[Run accounting and spend estimate](#run-accounting-and-spend-estimate) for
-`Tokens used` and `Estimated spend`.
+`partial_pricing`, or `artifact_validation_warnings`, and renders
+`attempts_without_usage` and `unpriced_attempts` only as the count in the
+spend line; `report.json.run_metadata` keeps them all. See
+[Partial Agent Artifacts](../schemas.md#partial-agent-artifacts) for where
+artifact validation warnings are shown, and
+[Run accounting and estimated spend](#run-accounting-and-estimated-spend) for
+`Models used`, `Tokens used`, and `Estimated spend`.
 
 ### Issue sections and remediation
 
@@ -996,212 +994,136 @@ the dedicated threat-model artifacts and is not duplicated into the report.
 syntax inside report prose, including prose preserved byte-for-byte from
 upstream findings, renders as literal text.
 
-### Run accounting and spend estimate
+### Run accounting and estimated spend
 
-`Estimated spend` comes from the run's spend estimate, not from accounting v4's
-display string. `report.json.run_metadata.estimated_spend` is always a numeric
-USD estimate matching `^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$`: two decimals from
-one cent up, such as `$12.35`, and enough decimals below one cent to show the
-amount, such as `$0.0042`. It never ends in `+` and is never `unavailable`. It
-is an estimate, not an invoice. The required `run_metadata.partial_pricing`
-records whether the estimate is incomplete. It, `run.json#spend_estimate`, and
-the assumptions recorded there live only in structured artifacts; `report.md`
-never renders them.
+`Estimated spend` is the run's priced usage in accounting v4,
+`accounting.cumulative.estimated_spend_usd`, the same amount that
+`ultrafuzz stats`, eval scoring, and Modal accounting read.
+`report.json.run_metadata.estimated_spend` is always a USD amount matching
+`^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$`: two decimals from one cent up, such as
+`$38.72`, and enough decimals below one cent to show the amount, such as
+`$0.0008`. It never ends in `+` and is never `unavailable`; accounting that
+priced nothing shows `$0.00`. It is an estimate, not an invoice.
 
-The final-report producer receives its run summary when its task starts. The
-snapshot takes its spend from the first source that applies, and its tokens as
-that item states:
+What the amount leaves out is counted, never estimated. When agent attempts
+recorded no usage, or recorded usage that no rule below could price, the spend
+line ends in a fixed clause with their total:
 
-1. the validated `run.json#spend_estimate`, when a synchronization has written
-   one, with tokens from the `accounting.cumulative` written beside it (for a
-   run without a source run, the live Smithers token count when accounting has
-   none);
-2. for a run without a source run, a live estimate of the run's Smithers usage
-   made by the same estimator, with attempts that Smithers' usage totals count
-   but whose usage events are missing imputed: at what remains of Smithers'
-   total cost when every attempt and usage event recorded one, and at the mean
-   of accounted attempts otherwise; tokens are the live Smithers count;
-3. for a continuation whose current workflow has no synchronized estimate yet,
-   the source run's contribution, read as synchronization reads it (step 5 of
-   the method below) and counted as zero when the source cannot be read, plus
-   the live estimate of the current run. Tokens then come only from
-   `accounting.cumulative`, because the current run's live count would
-   undercount the lineage, and are `unavailable` without it.
+```markdown
+- Estimated spend: `$38.72` (excludes 3 agent attempts whose usage was not recorded or could not be priced)
+```
 
-Accounting v4's `estimated_spend` label and `partial_pricing` never reach the
-snapshot. The projection then adds one imputed attempt for the report task
-itself, on its first configured model: the mean of accounted attempts on that
-model, else the mean of all accounted attempts, else the default attempt usage
-below, at the base route-catalog rates stored in `run.json` when they price
-that model and at its fallback rates otherwise. The snapshot's
-`partial_pricing` is therefore always `true`, and its spend is never `$0.00`
-unless every price it used is zero. The agent's `report.json` and `report.md`
-keep that snapshot.
+The total is `run_metadata.attempts_without_usage` plus
+`run_metadata.unpriced_attempts`, each present only when it is at least one.
+When nothing recorded usage, the usage lines read:
 
-Runtime presentations (the verified terminal publication and unchecked reports)
-restate the run summary instead: elapsed time from `run.json#created_at` to
-`state.json#finished_at`, and models from the current `accounting.cumulative`.
-When `run.json` has `spend_estimate`, they also restate `estimated_spend` as
-`spend_estimate.estimated_spend`, `partial_pricing` as the negation of
-`spend_estimate.complete`, and `tokens_used` from `accounting.cumulative` when
-it records a token count. The terminal synchronization runs before terminal
-publication, so the restated spend includes the report task's own usage,
-recorded or imputed. Without `spend_estimate`, and for any value those records
-lack, the agent's numeric copy stays.
+```markdown
+- Models used: `none` (no model usage was recorded)
+- Tokens used: `0`
+- Estimated spend: `$0.00` (excludes 5 agent attempts whose usage was not recorded or could not be priced)
+```
 
-`ultrafuzz stats`, eval scoring, and Modal accounting still read accounting v4.
-Its `estimated_spend` ends in `+` when some accounted usage had no price, and
-can be `unavailable`, so it can differ from the report's figure. Use
-`ultrafuzz stats` for the full accounting breakdown.
+and when no agent attempt ran either, the spend line is just
+``- Estimated spend: `$0.00` ``. The required `run_metadata.partial_pricing` is
+the `partial_pricing` flag of the accounting the amount came from; it never
+counts attempts without usage and is never rendered.
 
-#### Spend estimate method
+The report task's snapshot takes models, tokens, spend, `partial_pricing`, and
+`unpriced_attempts` together from the first source that applies:
 
-Every workflow synchronization computes `run.json#spend_estimate` after
-accounting and writes both in the same `run.json` update. It also writes one
-when `usage.jsonl` is empty but the run's workflows ran agent attempts;
-accounting then stays absent. The estimate is labelled derived accounting: it
-never writes to `usage.jsonl` or to accounting v4 fields, and a pass that would
-change only its `updated_at` leaves `run.json` untouched. A run with neither
-usage nor an executed agent attempt has no estimate, and a stale one is
-removed.
+1. the run's `accounting.cumulative`, which includes its source runs;
+2. for a continuation whose own accounting has not been written yet, its source
+   run's `accounting.cumulative`;
+3. for a run without a source run, the live Smithers usage of its workflow run,
+   priced the same way;
+4. otherwise no usage: models `[]`, tokens `0`, and spend `$0.00`.
 
-Accounting v4 and the estimate synchronize independently. When accounting v4
-fails, for example because a source run has no accounting, the pass reports
-`WORKFLOW_ACCOUNTING_FAILED` and still writes the estimate. When the estimate
-cannot be computed, the pass reports a `WORKFLOW_SPEND_ESTIMATE_FAILED` warning,
-still writes accounting, and removes the stored estimate rather than leave it
-to disagree with that accounting.
+`attempts_without_usage` comes from the run's own `run.json`, whose count
+already includes its source runs. The agent's `report.json` and `report.md`
+keep that snapshot. Runtime presentations (the verified terminal publication
+and unchecked reports) restate the run summary instead: elapsed time from
+`run.json#created_at` to `state.json#finished_at`; models, tokens, spend,
+`partial_pricing`, and `unpriced_attempts` together from the current
+`accounting.cumulative`; and `attempts_without_usage` from the current
+`run.json` on its own. Without accounting, the agent's usage values stay. The
+terminal synchronization runs before terminal publication, so the restated
+values include the report task's own usage.
 
-For the latest usage event of each attempt occurrence, the estimator applies the
-first rule that fits. An occurrence is an `attempts.jsonl` entry, and a usage
-event belongs to the entry of its workflow run, Smithers task, iteration, and
-attempt whose start and terminal events span its sequence. A reset
-(`resume --retry-failed`, `--reset-node`) restarts attempt numbering in the same
-workflow run, so unlike accounting v4, which keeps only the latest snapshot of
-each attempt number, the estimate prices each occurrence. Usage that no
-recorded occurrence spans, such as that of an attempt still running, is priced
-from the latest event of its attempt number.
+Accounting v4's own `estimated_spend` label is unchanged for `ultrafuzz stats`:
+it ends in `+` when some accounted usage had no price and is `unavailable` when
+none had one. Use `ultrafuzz stats` for the full accounting breakdown.
 
-1. A recorded cost (the adapter's `costUsd`, stored as `recorded_cost_usd`) is
-   used as is when it is positive, when the event has no component activity, or
-   when the model ID ends in `:free`. A recorded `0` with activity on any other
-   model is repriced by the next rules (`zero-recorded-cost-repriced`).
-2. When the model's catalog route priced every component and the usage
-   breakdown is available, the catalog price is used.
-3. Otherwise, components with a catalog rate keep it, and a component without
-   one uses the fallback family's rate for that component
-   (`component-rate-missing`). A model with no catalog price at all is priced
-   entirely at fallback rates, recording `catalog-unavailable`,
-   `catalog-disabled`, or `model-not-in-route-catalog` from accounting v4's
-   `pricing_catalog.status`, or `zero-catalog-rate-ignored` when its route
-   lists it only at zero rates. A zero-rate price that accounting v4 stored
-   for such a model before these routes existed is ignored the same way. When
-   the usage breakdown is unavailable, for example an unknown cache-read count
-   or a contradictory breakdown, provider-inclusive input is priced at the
-   uncached input rate and output (or the reasoning count, when it exceeds
-   output) at the output rate, from the catalog when known and the fallback
-   table otherwise (`usage-breakdown-estimated`). Cache reads split from input
-   by `ULTRAFUZZ_CACHE_READ_RATIO` keep their price but also record
-   `usage-breakdown-estimated`.
+#### Spend pricing
 
-Two further contributions complete the estimate:
+Accounting v4 prices the latest usage event of each attempt with the first of:
 
-4. Each executed agent attempt occurrence (an attempt-ledger entry with
-   `reuse.status` `executed` and agent provenance) that no usage event belongs
-   to is imputed, in every one of the run's workflow runs: a replay or fork
-   rebinds the run to a new workflow run, and the replaced run's attempts stay
-   in the estimate beside its usage. The ledger names the strategy attempt,
-   whose Smithers task ID is `node:<strategy_attempt_id>` in every task
-   manifest. Each occurrence is imputed from the mean of accounted attempts on
-   the same model, else the mean of all accounted attempts, else the default
-   attempt usage at the model's base catalog rates when known and fallback
-   rates otherwise (`unaccounted-attempt-imputed`, plus
-   `default-attempt-usage` for the last).
-   Synchronization imputes default usage only before any usage is recorded,
-   when it has no catalog prices, so there it always uses fallback rates.
-5. Each source run contributes its persisted `spend_estimate.estimated_spend_usd`
-   and its completeness. A source run without `spend_estimate` contributes its
-   accounting v4 `accounting.cumulative.estimated_spend_usd` (or `0`), and one
-   with neither contributes what its own source run would, so its lineage
-   survives; either makes the estimate incomplete
-   (`source-run-estimate-unavailable`).
+1. the cost the adapter recorded (`recorded_cost_usd`), as is, including a
+   recorded `0` from a subscription adapter;
+2. the price of the model's catalog route;
+3. the versioned fallback table below, for a model the catalog left unpriced,
+   whether the catalog was available, unavailable, or disabled.
+
+An event none of them prices counts in `unpriced_event_count`, which the report
+shows as `unpriced_attempts`, and makes `partial_pricing` true. A component
+without a rate in an otherwise usable price, such as cache writes for a model
+whose price lists no cache-write rate, adds nothing to the amount; the event
+still counts as priced, so the clause does not count it, while
+`pricing_incomplete_reasons` records `component-rate-unavailable` and
+`partial_pricing` is true.
 
 Catalog routes depend only on the model ID. One leading `openrouter/` is
 stripped. An ID that contains `/` or starts with `~` is looked up only in the
 `openrouter` catalog provider, as is and then with a leading `~`. An ID starting
 with `claude-` uses only `anthropic`; `gpt-`, `chatgpt-`, or `o` and a digit
 only `openai`; `deepseek` only `deepseek`; and `kimi` or `moonshot` only
-`moonshotai`. Any other ID has no catalog route and is priced at fallback
-rates. A trailing context alias, such as `[1m]` in `claude-opus-4-8[1m]`, is
-stripped for the lookup only. A catalog entry whose input and output rates are
-both zero counts as unpriced unless the ID ends in `:free`. When no model to
-price has a route, no catalog is downloaded. Accounting v4 reuses its stored
-`model_prices`, so these routes change v4 only for models it has not priced
-before.
+`moonshotai`. Any other ID has no route and stays unpriced. A trailing context
+alias, such as `[1m]` in `claude-opus-4-8[1m]`, is stripped for the lookup
+only. A catalog entry whose input and output rates are both zero counts as
+unpriced unless the ID ends in `:free`. When no model to price has a route, no
+catalog is downloaded.
 
-The fallback table `ultrafuzz.fallback-pricing.2026-10-01` is in USD per
-million tokens, anchored to first-party models.dev list prices fetched on
-2026-10-02 for each family's current-generation flagship. A model ID matches a
-family, ignoring case, after `openrouter/`, `~`, a `vendor/` prefix, and a
-trailing `[...]` are stripped; a Claude ID that puts its version first, such as
-`claude-3-5-sonnet`, matches its family too:
+The fallback table `ultrafuzz.fallback-pricing.2026-10-05` copies the
+first-party list prices that <https://models.dev/api.json> published on
+2026-10-05 for the packaged default models, in USD per million tokens. It is
+looked up through the same routes, so it prices `claude-opus-4-8[1m]` or
+`openrouter/claude-opus-4-8`, but never a gateway, proxy, or custom ID such as
+`azure/gpt-5.5` or `openai/gpt-mini-latest`, which stays unpriced:
 
-| Family                                      | Input | Output | Cache read | Cache write |
-| ------------------------------------------- | ----- | ------ | ---------- | ----------- |
-| `claude-fable`                              | 10    | 50     | 1          | 12.5        |
-| `claude-opus`                               | 5     | 25     | 0.5        | 6.25        |
-| `claude-sonnet`                             | 3     | 15     | 0.3        | 3.75        |
-| `claude-haiku`                              | 1     | 5      | 0.1        | 1.25        |
-| `gpt` (`gpt-`, `chatgpt-`, `o` and a digit) | 5     | 30     | 0.5        | 5           |
-| `deepseek`                                  | 0.435 | 0.87   | 0.003625   | 0.435       |
-| `kimi` (`kimi`, `moonshot`)                 | 3     | 15     | 0.3        | 3           |
-| `generic` (any other ID)                    | 5     | 30     | 0.5        | 6.25        |
+| Model             | Provider     | Input | Output | Cache read | Cache write |
+| ----------------- | ------------ | ----- | ------ | ---------- | ----------- |
+| `claude-opus-4-8` | `anthropic`  | 5     | 25     | 0.5        | 6.25        |
+| `deepseek-v4-pro` | `deepseek`   | 0.66  | 1.98   | 0.022      | none        |
+| `gpt-5.5`         | `openai`     | 5     | 30     | 0.5        | none        |
+| `kimi-k3`         | `moonshotai` | 3     | 15     | 0.3        | none        |
 
-The default attempt usage `ultrafuzz.default-attempt-usage.v1`, used only when
-a run has no accounted attempt to take a mean from, is 200,000 uncached input,
-1,800,000 cache-read, and 40,000 output tokens. It is a whole attempt's total
-across requests of unknown size, so a catalog price for it uses the model's base
-rates and never a context tier. The fallback rates used for an accounted model
-are saved in `models[].fallback_rates` and reused for that model on later
-passes, so a later table version does not reprice its accounted attempts.
-Default-usage imputations have no model entry to save rates in, so they use the
-table of the build that synchronizes.
+Above 272,000 input tokens, `gpt-5.5` is priced at 10 input, 45 output, and 1
+cache read. Accounting stores every rate it priced a model at in
+`pricing_catalog.model_prices` and reuses it on later passes, so a model first
+priced from the table keeps those rates even after the catalog becomes
+reachable, and a later table version never reprices it.
 
-`run.json#spend_estimate` (`ultrafuzz.spend-estimate.v1`) is optional and
-requires `workflow`. Its fields:
+#### Where run.json records the method and completeness
 
-- `workflow_run_id`, equal to `workflow.run_id`;
-- `estimated_spend_usd`, and `estimated_spend`, its formatted string;
-- `complete`: `true` only when there are no assumptions and no unaccounted
-  attempts, every event was recorded or catalog-priced, and every source run is
-  complete;
-- `fallback_pricing_table`, the fallback table version;
-- `basis_usd`: `recorded`, `catalog`, `fallback`, `imputed`, and `source_runs`,
-  which sum to `estimated_spend_usd`;
-- `accounted_attempts`, the attempt occurrences priced from usage evidence;
-- `models`, one entry per model of the accounted attempts, sorted: `attempts`,
-  `estimated_spend_usd`, `price_source` (`recorded`, `catalog`, `fallback`, or
-  `mixed`; a snapshot without activity costs nothing and counts toward
-  `catalog` or `fallback` only when the model has no other source),
-  `catalog_provider` and `catalog_model_id` naming the route-catalog entry
-  when one prices the model, and `fallback_family` and `fallback_rates` when a
-  fallback rate was used;
-- `assumptions`, sorted entries with `code`, `count`, and an optional `model`;
-- `unaccounted_attempts`: `count`, `imputed_spend_usd`, `omitted`, and up to
-  256 `entries`, unique by the occurrence's attempt-ledger identity
-  `workflow_run_id` and `source_event_sequence`, each also naming `node_id` (the
-  Smithers task ID that usage events name), `iteration`, `attempt`,
-  `model_name`, and `imputation` (`same-model-mean`, `run-mean`, or
-  `default-usage`);
-- `source_run_ids`; and
-- `updated_at`, which change detection ignores.
-
-Assumption codes are `catalog-unavailable`, `catalog-disabled`,
-`model-not-in-route-catalog`, `zero-catalog-rate-ignored`,
-`zero-recorded-cost-repriced`, `component-rate-missing`,
-`usage-breakdown-estimated`, `unaccounted-attempt-imputed`,
-`default-attempt-usage`, and `source-run-estimate-unavailable`. The imputed
-report attempt that the report-start snapshot adds is never persisted.
+- `accounting.pricing_catalog`: the catalog `source` and `status`,
+  `resolved_models` (priced by the catalog), `unresolved_models` (not priced by
+  it), `fallback` with the `table` version and the unresolved `models` it
+  priced, and the `model_prices` every amount was computed from.
+  `ultrafuzz stats`, eval scoring, and Modal reprice from the same
+  `model_prices`, so they report the same spend.
+- `accounting.cumulative`: `estimated_spend_usd`, `partial_pricing`,
+  `priced_event_count`, `unpriced_event_count`, and the typed
+  `usage_incomplete_reasons` and `pricing_incomplete_reasons`.
+- `attempts_without_usage`, present only when at least one executed agent
+  attempt recorded no usage. `attempts` lists this run's attempt occurrences,
+  across every workflow run it was bound to, each with `workflow_run_id`,
+  `source_event_sequence`, `node_id` (`node:<strategy attempt ID>`),
+  `iteration`, `attempt`, and `model_name` when known; `cumulative_count` adds
+  the source run's own count. An occurrence is an `attempts.jsonl` entry with
+  `reuse.status` `executed` and agent provenance. It has no usage when no usage
+  event of its workflow run, Smithers task, iteration, and attempt falls between
+  its start and terminal events, so each occurrence that a reset reran is judged
+  on its own. Every synchronization recomputes the member from the ledgers, also
+  while `usage.jsonl` is empty and accounting is absent.
 
 #### Accounting v4
 
@@ -1248,10 +1170,10 @@ for example, a bare Kimi-family ID is priced only from the Moonshot provider
 entry and a bare DeepSeek-family ID only from the first-party DeepSeek entry. A
 model its route does not price stays listed in
 `pricing_catalog.unresolved_models` rather than borrowing a same-named rate
-from another provider, and the spend estimate prices it at fallback rates. A
+from another provider, and is priced only if the fallback table lists it. A
 model that a fetched catalog does not list stays unresolved without another
 catalog download; only an unavailable catalog is retried on a later
-synchronization.
+synchronization, and never for a model already priced from the fallback table.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

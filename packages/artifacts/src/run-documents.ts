@@ -335,7 +335,7 @@ export const ESTIMATED_SPEND_PATTERN = /^\$(?:0|[1-9][0-9]*)\.[0-9]{2,10}$/u;
  */
 export function formatEstimatedSpendUsd(value: number): string {
   if (!Number.isFinite(value) || value < 0 || value >= 1e21) {
-    throw new Error("spend estimate is outside the supported range");
+    throw new Error("estimated spend is outside the supported range");
   }
   if (value === 0 || value >= 0.01) return `$${value.toFixed(2)}`;
   return `$${value.toFixed(Math.min(10, Math.max(4, 1 - Math.floor(Math.log10(value)))))}`;

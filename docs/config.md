@@ -219,10 +219,10 @@ what it does not know. An unreadable wire, including inherited history torn by
 a killed attempt, leaves that invocation's usage absent instead of failing the
 invocation. Kimi model pricing resolves against the Moonshot
 provider entry in the pricing catalog, so the configured alias must match a
-Moonshot catalog model id such as `kimi-k3`. Anything else stays an unresolved
-model in accounting v4 instead of being priced from a same-named third-party
-entry, and the report's spend estimate prices it at the documented
-[fallback rates](reference/artifacts-reports.md#spend-estimate-method).
+Moonshot catalog model id such as `kimi-k3`. Anything else stays an unresolved,
+unpriced model instead of being priced from a same-named third-party entry.
+When the catalog cannot price `kimi-k3` itself, accounting uses its
+[fallback list price](reference/artifacts-reports.md#spend-pricing).
 Subscription runs are not billed per token, so the published cost is an
 API-comparison estimate at Moonshot list rates.
 

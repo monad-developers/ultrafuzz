@@ -509,11 +509,12 @@ any other synchronization of a live run still renews its controller lease.
 Custom pricing catalogs must use HTTPS without credentials, query parameters,
 or fragments and must resolve entirely to public addresses. The validated DNS
 address is pinned for the request, redirects are rejected, and response bodies
-are streamed with a 25 MiB limit before strict JSON parsing. When the catalog is
-disabled or unreachable, accounting v4 leaves usage without a recorded cost
-unpriced, while the final report's spend estimate prices it at the documented
-[fallback rates](artifacts-reports.md#spend-estimate-method) and records
-`catalog-disabled` or `catalog-unavailable`.
+are streamed with a 25 MiB limit before strict JSON parsing. Whether the
+catalog is available, disabled, or unreachable, accounting prices a packaged
+default model the catalog leaves unpriced at the versioned
+[fallback list prices](artifacts-reports.md#spend-pricing) and records them in
+`pricing_catalog.fallback`; any other model without a recorded cost stays
+unpriced.
 
 ## Completion policy
 
