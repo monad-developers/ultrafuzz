@@ -113,6 +113,9 @@ const {
   validateWorkspacePatchCapture,
   verifyThreatModelVulnerabilityDatabaseCapabilities,
   checkTaskSubmodulesAfterAgent,
+  clearPersistedTaskDependencyChanges,
+  persistTaskDependencyChanges,
+  readPersistedTaskDependencyChanges,
   parseRuntimeDocumentBytes,
   serializeRuntimeDocument,
   serializeWorkspacePreparationAuthority,
@@ -1389,19 +1392,32 @@ type TaskDependencyChanges = { changed_path_count: number; changed_paths: string
 /** Ordinary-checkout tasks whose dependencies could not be hydrated or checked, with the reason (#1251). */
 const dependencyHydrationUnavailableByTask = new Map<string, string>();
 
-function recordTaskDependencyHydration(attemptId: string, result: { unavailable_reason: string } | undefined): void {
+function recordTaskDependencyHydration(
+  runRoot: string,
+  attemptId: string,
+  result: { unavailable_reason: string } | undefined
+): void {
   dependencyChangesByTask.delete(attemptId);
+  clearPersistedTaskDependencyChanges(runRoot, attemptId);
   if (result === undefined) dependencyHydrationUnavailableByTask.delete(attemptId);
   else dependencyHydrationUnavailableByTask.set(attemptId, result.unavailable_reason);
 }
 
 function recordTaskDependencyCheck(
+  runRoot: string,
   attemptId: string,
   result: { changes: TaskDependencyChanges } | { unavailable_reason: string } | undefined
 ): void {
   if (result === undefined) return;
-  if ("unavailable_reason" in result) dependencyHydrationUnavailableByTask.set(attemptId, result.unavailable_reason);
-  else if (result.changes.changed_path_count > 0) dependencyChangesByTask.set(attemptId, result.changes);
+  if ("unavailable_reason" in result) {
+    dependencyHydrationUnavailableByTask.set(attemptId, result.unavailable_reason);
+    return;
+  }
+  // A check that finds clean files after a controller restart may follow a
+  // restore whose record was persisted before the restart; keep that record.
+  const changes =
+    result.changes.changed_path_count > 0 ? result.changes : readPersistedTaskDependencyChanges(runRoot, attemptId);
+  if (changes !== undefined) dependencyChangesByTask.set(attemptId, changes);
 }
 
 function finalReportRunMetadataAuthorityRelativePath(task: (typeof taskSpecs)[number]): string {
@@ -3079,12 +3095,15 @@ function prepareArtifactMirror(
     if (!dependencyHydrationUnavailableByTask.has(task.attemptId)) {
       preparationStep(task.attemptId, "verify-pinned-submodules", () =>
         recordTaskDependencyCheck(
+          task.runRoot,
           task.attemptId,
           checkTaskSubmodulesAfterAgent({
             sourceRoot: sourceProjectRoot,
             workspaceRoot,
             expectation: task.pinnedSubmodules ?? undefined,
-            sourceRef: task.sourceRef
+            sourceRef: task.sourceRef,
+            onChanges: (changes: TaskDependencyChanges) =>
+              persistTaskDependencyChanges(task.runRoot, task.attemptId, changes)
           })
         )
       );
@@ -3092,6 +3111,7 @@ function prepareArtifactMirror(
   } else {
     preparationStep(task.attemptId, "hydrate-pinned-submodules", () =>
       recordTaskDependencyHydration(
+        task.runRoot,
         task.attemptId,
         hydrateTaskSubmodules({
           sourceRoot: sourceProjectRoot,

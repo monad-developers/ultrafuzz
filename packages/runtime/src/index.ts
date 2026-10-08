@@ -19,6 +19,7 @@ export * from "./model-pricing.js";
 export * from "./npm-install-retry.js";
 export * from "./plan-run.js";
 export * from "./checkout-submodules.js";
+export * from "./dependency-change-records.js";
 export * from "./pinned-submodules.js";
 export * from "./prompt-artifact-authority.js";
 export * from "./provider-credential-environment.js";

@@ -136,7 +136,19 @@ export const artifactVerificationJsonSchema = {
       required: ["changed_path_count", "changed_paths"],
       properties: {
         changed_path_count: { type: "integer", minimum: 1 },
-        changed_paths: { type: "array", minItems: 1, maxItems: 50, items: { $ref: "#/$defs/safePath" } }
+        changed_paths: {
+          type: "array",
+          minItems: 1,
+          maxItems: 50,
+          // Dependency files may use any name the filesystem allows, unlike artifact paths: a
+          // relative path with no empty, `.`, or `..` segment and no NUL byte.
+          items: {
+            type: "string",
+            minLength: 1,
+            maxLength: 4096,
+            pattern: "^(?!/)(?!.*//)(?!(?:.*/)?\\.{1,2}(?:/|$))[^\\u0000]*[^/\\u0000]$"
+          }
+        }
       }
     },
     dependency_hydration_unavailable: {

@@ -1,11 +1,4 @@
-import {
-  capturePinnedSubmoduleSnapshot,
-  fillSubmoduleDependencyCache,
-  pinnedSubmoduleExpectation,
-  readPinnedSubmoduleSnapshot,
-  writePinnedSubmoduleSnapshot,
-  type PinnedSubmoduleExpectation
-} from "./pinned-submodules.js";
+import { recordCheckoutSubmodules, type PinnedSubmoduleExpectation } from "./pinned-submodules.js";
 
 export type CheckoutSubmoduleExpectation =
   | { expectation: PinnedSubmoduleExpectation | undefined; unavailableReason?: undefined }
@@ -20,15 +13,7 @@ export type CheckoutSubmoduleExpectation =
  */
 export function checkoutSubmoduleExpectationForProject(projectRoot: string): CheckoutSubmoduleExpectation {
   try {
-    const captured = capturePinnedSubmoduleSnapshot(projectRoot, "checkout");
-    if (captured === undefined) return { expectation: undefined };
-    writePinnedSubmoduleSnapshot(projectRoot, captured);
-    // Reading back in checkout mode re-verifies the bytes and rejects local URL rewrites.
-    const snapshot = readPinnedSubmoduleSnapshot(projectRoot, "checkout");
-    if (snapshot === undefined) throw new Error("checkout submodule manifest was not persisted");
-    const expectation = pinnedSubmoduleExpectation(snapshot);
-    fillSubmoduleDependencyCache(projectRoot, expectation, "checkout");
-    return { expectation };
+    return { expectation: recordCheckoutSubmodules(projectRoot) };
   } catch (error) {
     return { expectation: undefined, unavailableReason: error instanceof Error ? error.message : String(error) };
   }

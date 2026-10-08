@@ -3,7 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { readRunDependencyChanges } from "../src/dependency-change-records.js";
+import {
+  clearPersistedTaskDependencyChanges,
+  persistTaskDependencyChanges,
+  readPersistedTaskDependencyChanges,
+  readRunDependencyChanges
+} from "../src/dependency-change-records.js";
 import { withWholeRunSummary } from "../src/terminal-report-projection.js";
 import { temporaryRoot } from "./temporary-root.js";
 
@@ -55,4 +60,17 @@ test("the runtime restates dependency changes into the Run summary metadata, rep
     withWholeRunSummary(agentCopy, undefined, undefined).dependency_changes,
     agentCopy.dependency_changes
   );
+});
+
+test("a task's dependency record survives a restart until its next attempt clears it", (context) => {
+  const runRoot = temporaryRoot("ufz-pending-dependency-changes-");
+  context.after(() => fs.rmSync(runRoot, { recursive: true, force: true }));
+  const changes = { changed_path_count: 2, changed_paths: ["lib/a/one.sol", "lib/a/two words.sol"] };
+  assert.equal(readPersistedTaskDependencyChanges(runRoot, "task-a"), undefined);
+  persistTaskDependencyChanges(runRoot, "task-a", changes);
+  assert.deepEqual(readPersistedTaskDependencyChanges(runRoot, "task-a"), changes);
+  assert.equal(readPersistedTaskDependencyChanges(runRoot, "task-b"), undefined);
+  clearPersistedTaskDependencyChanges(runRoot, "task-a");
+  assert.equal(readPersistedTaskDependencyChanges(runRoot, "task-a"), undefined);
+  clearPersistedTaskDependencyChanges(runRoot, "task-a");
 });

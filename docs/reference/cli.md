@@ -248,7 +248,9 @@ directory, `.git/ultrafuzz/submodule-cache/`, keyed by the recorded commits.
 The cache never appears in `git status`, and later runs on the same commits
 reuse it. Each task copies its files from the cache and checks them against the
 recorded hashes. A missing or damaged cache entry is rebuilt from the
-submodules' Git objects at the recorded commits, never from the working tree.
+submodules' Git objects at the recorded commits, never from the working tree,
+including after `git submodule deinit`, which keeps those objects under
+`.git/modules`.
 Task-local Git configuration points each submodule at an unreachable URL with
 `update = none`, so `forge` reports `Skipping submodule` instead of fetching.
 

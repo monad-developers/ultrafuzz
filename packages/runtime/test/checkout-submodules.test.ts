@@ -10,7 +10,6 @@ import {
   enablePinnedSubmoduleWorktreeConfig,
   hydratePinnedSubmodules,
   PINNED_SUBMODULE_EXECUTION_ROOT,
-  pinnedSubmoduleExecutionFiles,
   restoreCheckoutSubmodulesAfterAgent,
   submoduleDependencyCacheRoot,
   verifyPinnedSubmodules
@@ -63,7 +62,10 @@ test("an ordinary checkout's initialized submodules hydrate its task worktrees (
     ]
   );
   // The pinned policy keeps refusing a source that has shared submodule metadata.
-  assert.throws(() => pinnedSubmoduleExecutionFiles(fixture.source, expectation), /shared Git submodule metadata/u);
+  assert.throws(
+    () => enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation, "pinned"),
+    /shared Git submodule metadata/u
+  );
   enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation, "checkout");
 
   const dependencySource = fixture.source;

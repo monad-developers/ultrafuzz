@@ -1165,6 +1165,13 @@ test("a verification marker may record restored dependency changes, bounded and 
   assert.equal(withChanges({ changed_path_count: 60, changed_paths: ["lib/forge-std/src/Test.sol"] }).ok, true);
   assert.equal(withChanges({ changed_path_count: 0, changed_paths: [] }).ok, false);
   assert.equal(withChanges({ changed_path_count: 1, changed_paths: ["../escape"] }).ok, false);
+  // Dependency files may use any name the filesystem allows.
+  for (const name of ["lib/dep/test data.txt", "lib/dep/café.sol", `lib/dep/${"x".repeat(200)}.sol`]) {
+    assert.equal(withChanges({ changed_path_count: 1, changed_paths: [name] }).ok, true, name);
+  }
+  for (const name of ["/abs", "a//b", "a/./b", "a/../b", "a/"]) {
+    assert.equal(withChanges({ changed_path_count: 1, changed_paths: [name] }).ok, false, name);
+  }
   assert.equal(
     withChanges({ changed_path_count: 51, changed_paths: Array.from({ length: 51 }, (_, i) => `lib/x/${i}.sol`) }).ok,
     false

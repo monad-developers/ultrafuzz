@@ -1418,6 +1418,8 @@ export function restoreCheckoutSubmodulesAfterAgent(input: {
   sourceRoot: string;
   workspaceRoot: string;
   expectation?: PinnedSubmoduleExpectation;
+  /** Called with the record before any file is restored, so a caller can persist it first. */
+  onChanges?: (changes: DependencyFileChanges) => void;
 }): DependencyFileChanges | undefined {
   if (input.expectation === undefined) return undefined;
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
@@ -1427,7 +1429,14 @@ export function restoreCheckoutSubmodulesAfterAgent(input: {
   assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot, "checkout");
 
   const changed = changedDependencyPaths(workspaceRoot, loaded.snapshot);
+  const changes = {
+    changed_path_count: changed.length,
+    changed_paths: changed.slice(0, MAX_RECORDED_DEPENDENCY_CHANGES)
+  };
   if (changed.length > 0) {
+    // Persist the record before restoring: a controller restart after the
+    // restore would otherwise find clean files and lose the record.
+    input.onChanges?.(changes);
     // Hydration replaces only physical directory roots; drop a root the agent
     // turned into a file or symlink first. Removing a symlink never follows it.
     for (const root of loaded.snapshot.top_level_roots) {
@@ -1439,7 +1448,7 @@ export function restoreCheckoutSubmodulesAfterAgent(input: {
     hydratePinnedSubmodules({ ...input, workspaceRoot, sourcePolicy: "checkout" });
   }
   verifyPinnedSubmodules({ ...input, workspaceRoot, sourcePolicy: "checkout" });
-  return { changed_path_count: changed.length, changed_paths: changed.slice(0, MAX_RECORDED_DEPENDENCY_CHANGES) };
+  return changes;
 }
 
 /**
@@ -1448,6 +1457,9 @@ export function restoreCheckoutSubmodulesAfterAgent(input: {
  * change to record, not an error. Symlinks are never followed.
  */
 function changedDependencyPaths(workspaceRoot: string, snapshot: PinnedSubmoduleSnapshot): string[] {
+  const sealedFiles = new Map(
+    snapshot.entries.flatMap((entry) => (entry.type === "file" ? [[entry.path, entry] as const] : []))
+  );
   const observed = new Map<string, string>();
   const walk = (relative: string): void => {
     const absolute = trackedPath(workspaceRoot, relative, "task dependency entry");
@@ -1464,7 +1476,11 @@ function changedDependencyPaths(workspaceRoot: string, snapshot: PinnedSubmodule
       }
     } else if (stat.isFile()) {
       const mode = (stat.mode & 0o111) === 0 ? 0o644 : 0o755;
-      observed.set(relative, `file:${String(mode)}:${sha256(fs.readFileSync(absolute))}`);
+      // Hash only a file whose size matches its sealed entry, streamed, so a
+      // large file an agent leaves behind never has to fit in memory.
+      const sealed = sealedFiles.get(relative);
+      const digest = sealed?.size_bytes === stat.size ? streamedSha256(absolute) : `size:${String(stat.size)}`;
+      observed.set(relative, `file:${String(mode)}:${digest}`);
     } else {
       observed.set(relative, "unsupported");
     }
@@ -1541,6 +1557,7 @@ export function checkTaskSubmodulesAfterAgent(input: {
   workspaceRoot: string;
   expectation?: PinnedSubmoduleExpectation;
   sourceRef?: string | null;
+  onChanges?: (changes: DependencyFileChanges) => void;
 }): TaskSubmoduleCheck | undefined {
   if (resolvedSourcePolicy(input) === "pinned") {
     verifyPinnedSubmodules({ ...input, sourcePolicy: "pinned" });
@@ -1550,7 +1567,10 @@ export function checkTaskSubmodulesAfterAgent(input: {
     const changes = restoreCheckoutSubmodulesAfterAgent(input);
     return changes === undefined ? undefined : { changes };
   } catch (error) {
-    return { unavailable_reason: errorMessage(error) };
+    // Only a missing dependency source is recorded. A changed Git isolation
+    // setting, changed gitlinks, or an incomplete rollback still fails the task.
+    if (error instanceof DependencySourceUnavailableError) return { unavailable_reason: errorMessage(error) };
+    throw error;
   }
 }
 
@@ -1578,8 +1598,31 @@ export function hydrateTaskSubmodules(input: {
     hydratePinnedSubmodules({ ...input, sourcePolicy: "checkout" });
     return undefined;
   } catch (error) {
-    return { unavailable_reason: errorMessage(error) };
+    if (error instanceof DependencySourceUnavailableError) return { unavailable_reason: errorMessage(error) };
+    throw error;
   }
+}
+
+/** Neither the dependency cache nor the source repository's Git objects can supply the recorded files. */
+export class DependencySourceUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "DependencySourceUnavailableError";
+  }
+}
+
+function streamedSha256(filePath: string): string {
+  const hash = crypto.createHash("sha256");
+  const descriptor = fs.openSync(filePath, FILE_OPEN_FLAGS);
+  try {
+    const chunk = Buffer.allocUnsafe(1024 * 1024);
+    for (let read = fs.readSync(descriptor, chunk); read > 0; read = fs.readSync(descriptor, chunk)) {
+      hash.update(chunk.subarray(0, read));
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return hash.digest("hex");
 }
 
 function errorMessage(error: unknown): string {
@@ -1632,7 +1675,7 @@ function loadDependencyCache(sourceRoot: string, expectation: PinnedSubmoduleExp
       refillDependencyCacheFromGit(sourceRoot, expectation);
     } catch {
       // Without the source objects (a pinned checkout keeps none), the cache error says what is wrong.
-      throw cacheError;
+      throw new DependencySourceUnavailableError(errorMessage(cacheError), { cause: cacheError });
     }
     return loadSealedSnapshot(root, expectation);
   }
@@ -1646,10 +1689,16 @@ function loadDependencyCache(sourceRoot: string, expectation: PinnedSubmoduleExp
 function refillDependencyCacheFromGit(sourceRoot: string, expectation: PinnedSubmoduleExpectation): string {
   const parsed = parseExpectation(expectation);
   const root = submoduleDependencyCacheRoot(sourceRoot, parsed);
-  const manifestPath = pinnedSubmoduleManifestPath(sourceRoot, parsed.source_commit);
+  // An ordinary checkout's manifest is content-addressed; a pinned one is keyed by commit.
+  const manifestPath = [
+    checkoutManifestPath(sourceRoot, parsed.manifest_sha256),
+    pinnedSubmoduleManifestPath(sourceRoot, parsed.source_commit)
+  ].find((candidate) => pathEntryExists(candidate));
+  if (manifestPath === undefined) throw new Error("submodule manifest does not exist");
   const manifestBytes = readBoundedRegularFile(manifestPath, MAX_GIT_OUTPUT_BYTES, "submodule manifest");
   if (sha256(manifestBytes) !== parsed.manifest_sha256) throw new Error("submodule manifest changed");
   const snapshot = parseCanonicalSnapshot(manifestBytes);
+  const gitDirectories = new Map<string, string>();
   return publishDependencyCache(root, parsed, (staging) => {
     writeCacheFile(staging, MANIFEST_SNAPSHOT_PATH, manifestBytes, 0o644);
     for (const entry of snapshot.entries) {
@@ -1657,9 +1706,13 @@ function refillDependencyCacheFromGit(sourceRoot: string, expectation: PinnedSub
       const repositoryPath = owningRepositoryPath(snapshot, entry.path);
       const commit = snapshot.recursive_gitlinks.find((link) => link.path === repositoryPath)?.commit;
       if (commit === undefined) throw new Error(`submodule entry has no recorded commit: ${entry.path}`);
-      const repositoryRoot = trackedPath(sourceRoot, repositoryPath, "source submodule repository");
+      const gitDirectory = sourceRepositoryGitDirectory(sourceRoot, snapshot, repositoryPath, gitDirectories);
       const relative = path.posix.relative(repositoryPath, entry.path);
-      const bytes = gitBuffer(repositoryRoot, ["cat-file", "blob", `${commit}:${relative}`], entry.size_bytes + 1);
+      const bytes = gitBuffer(
+        sourceRoot,
+        [...storedGitDirectoryArgs(gitDirectory, sourceRoot), "cat-file", "blob", `${commit}:${relative}`],
+        entry.size_bytes + 1
+      );
       if (bytes.length !== entry.size_bytes || sha256(bytes) !== entry.sha256) {
         throw new Error(`source submodule blob does not match its recorded hash: ${entry.path}`);
       }
@@ -1722,4 +1775,135 @@ function makeFilesReadOnly(directory: string): void {
     if (entry.isDirectory()) makeFilesReadOnly(absolute);
     else if (entry.isFile()) fs.chmodSync(absolute, fs.statSync(absolute).mode & ~0o222);
   }
+}
+
+/**
+ * Resolve the Git directory that holds a submodule's objects. An initialized
+ * submodule is read through its working directory; one that was deinitialized
+ * keeps its objects under its parent's `modules/<name>`, where `<name>` comes
+ * from the parent's `.gitmodules` at the recorded parent commit.
+ */
+function sourceRepositoryGitDirectory(
+  sourceRoot: string,
+  snapshot: PinnedSubmoduleSnapshot,
+  repositoryPath: string,
+  resolved: Map<string, string>
+): string {
+  const cached = resolved.get(repositoryPath);
+  if (cached !== undefined) return cached;
+  const workingDirectory = trackedPath(sourceRoot, repositoryPath, "source submodule repository");
+  let gitDirectory: string;
+  if (pathEntryExists(path.join(workingDirectory, ".git"))) {
+    gitDirectory = git(workingDirectory, ["rev-parse", "--absolute-git-dir"]);
+  } else {
+    const parent = snapshot.recursive_gitlinks
+      .filter((link) => link.path !== repositoryPath && isAtOrBelow(repositoryPath, link.path))
+      .sort((left, right) => pathDepth(right.path) - pathDepth(left.path))[0];
+    const parentGitDirectory =
+      parent === undefined
+        ? commonGitDirectory(sourceRoot)
+        : sourceRepositoryGitDirectory(sourceRoot, snapshot, parent.path, resolved);
+    const parentCommit = parent === undefined ? snapshot.source_commit : parent.commit;
+    const relative = parent === undefined ? repositoryPath : path.posix.relative(parent.path, repositoryPath);
+    const mappings = parseGitConfigEntries(
+      gitBuffer(
+        sourceRoot,
+        [
+          ...storedGitDirectoryArgs(parentGitDirectory, sourceRoot),
+          "config",
+          "--blob",
+          `${parentCommit}:.gitmodules`,
+          "--null",
+          "--get-regexp",
+          "^submodule\\..*\\.path$"
+        ],
+        MAX_GIT_OUTPUT_BYTES
+      ),
+      "recorded .gitmodules"
+    );
+    // Git names the stored directory after the submodule's name at clone time,
+    // which a later `.gitmodules` rename does not move; the path is the common
+    // default. Accept only a candidate that holds the recorded commit.
+    const names = mappings
+      .filter((entry) => entry.value === relative)
+      .flatMap((entry) => /^submodule\.(.+)\.path$/iu.exec(entry.name)?.[1] ?? []);
+    const commit = snapshot.recursive_gitlinks.find((link) => link.path === repositoryPath)?.commit;
+    const candidate = [...new Set([...names, relative])]
+      .map((name) => safeResolveInside(parentGitDirectory, `modules/${name}`, "stored submodule Git directory"))
+      .find(
+        (directory) =>
+          commit !== undefined &&
+          fs.statSync(directory, { throwIfNoEntry: false })?.isDirectory() === true &&
+          spawnSync("git", [...storedGitDirectoryArgs(directory, sourceRoot), "cat-file", "-e", `${commit}^{commit}`], {
+            stdio: "ignore"
+          }).status === 0
+      );
+    if (candidate === undefined) throw new Error(`stored submodule Git directory is missing for ${repositoryPath}`);
+    gitDirectory = candidate;
+  }
+  resolved.set(repositoryPath, gitDirectory);
+  return gitDirectory;
+}
+
+/**
+ * Read objects from a stored Git directory. A deinitialized submodule's
+ * `core.worktree` names a directory that may no longer exist, which Git refuses
+ * to enter; an explicit work tree overrides it and object reads never use it.
+ */
+function storedGitDirectoryArgs(gitDirectory: string, workTree: string): string[] {
+  return ["--git-dir", gitDirectory, "--work-tree", workTree];
+}
+
+function checkoutManifestPath(projectRoot: string, manifestSha256: string): string {
+  if (!/^[0-9a-f]{64}$/u.test(manifestSha256)) throw new Error("checkout submodule manifest digest is invalid");
+  return safeResolveInside(
+    commonGitDirectory(projectRoot),
+    `${MANIFEST_COMMON_GIT_DIRECTORY}/checkout/${manifestSha256}.json`,
+    "checkout submodule manifest"
+  );
+}
+
+/**
+ * Record an ordinary checkout's initialized submodules for this launch (#1251).
+ * The manifest is content-addressed, so launches on the same commit with
+ * different nested-submodule state keep separate records instead of colliding,
+ * and an earlier run can still rebuild its own cache. The checked-out bytes are
+ * verified, then copied into the dependency cache.
+ */
+export function recordCheckoutSubmodules(projectRootInput: string): PinnedSubmoduleExpectation | undefined {
+  const projectRoot = canonicalDirectory(projectRootInput, "checkout source root");
+  assertNoSharedSubmoduleMetadata(projectRoot, commonGitDirectory(projectRoot), "checkout");
+  const captured = capturePinnedSubmoduleSnapshot(projectRoot, "checkout");
+  if (captured === undefined) return undefined;
+  const snapshot = parseSnapshot(captured);
+  assertSnapshotShape(snapshot);
+  const expectation = pinnedSubmoduleExpectation(snapshot);
+  const bytes = Buffer.from(canonicalSnapshotBytes(snapshot), "utf8");
+  const manifestPath = checkoutManifestPath(projectRoot, expectation.manifest_sha256);
+  if (!pathEntryExists(manifestPath)) {
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true, mode: 0o700 });
+    assertNoSymlinkComponents(
+      commonGitDirectory(projectRoot),
+      path.dirname(manifestPath),
+      "checkout submodule manifest"
+    );
+    writeFileDurable(manifestPath, bytes);
+    fs.chmodSync(manifestPath, 0o600);
+  } else if (!readBoundedRegularFile(manifestPath, MAX_GIT_OUTPUT_BYTES, "checkout submodule manifest").equals(bytes)) {
+    throw new Error("checkout submodule manifest does not match its digest");
+  }
+  assertSnapshotMatchesSource(projectRoot, snapshot, "checkout");
+  verifySnapshotBytes(projectRoot, snapshot, { allowChildGitMetadata: true, sourcePolicy: "checkout" });
+  const root = submoduleDependencyCacheRoot(projectRoot, expectation);
+  if (!loadsCleanly(root, expectation)) {
+    publishDependencyCache(root, expectation, (staging) => {
+      writeCacheFile(staging, MANIFEST_SNAPSHOT_PATH, bytes, 0o644);
+      for (const entry of snapshot.entries) {
+        if (entry.type !== "file") continue;
+        const source = trackedPath(projectRoot, entry.path, "checkout submodule file");
+        writeCacheFile(staging, path.posix.join(TREE_SNAPSHOT_ROOT, entry.path), fs.readFileSync(source), entry.mode);
+      }
+    });
+  }
+  return expectation;
 }

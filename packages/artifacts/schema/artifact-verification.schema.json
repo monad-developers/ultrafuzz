@@ -248,7 +248,10 @@
           "minItems": 1,
           "maxItems": 50,
           "items": {
-            "$ref": "#/$defs/safePath"
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "^(?!/)(?!.*//)(?!(?:.*/)?\\.{1,2}(?:/|$))[^\\u0000]*[^/\\u0000]$"
           }
         }
       }
