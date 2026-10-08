@@ -9,12 +9,14 @@ import test from "node:test";
 import {
   capturePinnedSubmoduleSnapshot,
   enablePinnedSubmoduleWorktreeConfig,
-  hydratePinnedSubmodulesFromExecutionSnapshot,
+  fillSubmoduleDependencyCache,
+  hydratePinnedSubmodules,
   PINNED_SUBMODULE_EXECUTION_ROOT,
   pinnedSubmoduleExpectation,
   pinnedSubmoduleExecutionFiles,
   readPinnedSubmoduleSnapshot,
-  verifyPinnedSubmodulesFromExecutionSnapshot,
+  submoduleDependencyCacheRoot,
+  verifyPinnedSubmodules,
   writePinnedSubmoduleSnapshot
 } from "../src/pinned-submodules.js";
 import { initProject } from "../src/init.js";
@@ -101,30 +103,14 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation);
   const sharedPrerequisiteConfigSha = sha256(fs.readFileSync(path.join(gitCommonDirectory(fixture.source), "config")));
 
-  const executionRoot = path.join(fixture.root, "execution-snapshot");
-  fs.mkdirSync(executionRoot);
-  for (const file of pinnedSubmoduleExecutionFiles(fixture.source, expectation)) {
-    const destination = path.join(executionRoot, ...file.snapshotPath.split("/"));
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(file.sourcePath, destination);
-  }
+  // The commit-keyed dependency cache in the repository's Git directory is the hydration source.
+  const executionRoot = fillSubmoduleDependencyCache(fixture.source, expectation);
 
   const task = path.join(fixture.root, "task-worktree");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/task", task, "ultrafuzz-pinned"]);
   assert.equal(fs.readdirSync(path.join(task, "vendor/dependency")).length, 0);
 
-  const executionDescriptor = fs.openSync(executionRoot, fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0));
-  let hydrated: ReturnType<typeof hydratePinnedSubmodulesFromExecutionSnapshot>;
-  try {
-    const descriptorRoot = `/proc/self/fd/${executionDescriptor}`;
-    hydrated = hydratePinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: fs.existsSync(descriptorRoot) ? descriptorRoot : executionRoot,
-      workspaceRoot: task,
-      expectation
-    });
-  } finally {
-    fs.closeSync(executionDescriptor);
-  }
+  const hydrated = hydratePinnedSubmodules({ sourceRoot: fixture.source, workspaceRoot: task, expectation });
   assert.deepEqual(hydrated, captured);
   assert.equal(fs.readFileSync(path.join(task, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
   assert.equal(
@@ -161,8 +147,8 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   assert.equal(fs.existsSync(path.join(taskGitRoot, "modules")), false);
   assert.deepEqual(childGitMetadata(task, captured.top_level_roots), []);
   assert.deepEqual(
-    verifyPinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: executionRoot,
+    verifyPinnedSubmodules({
+      sourceRoot: fixture.source,
       workspaceRoot: task,
       expectation
     }),
@@ -171,8 +157,8 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
 
   const secondTask = path.join(fixture.root, "second-task-worktree");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/second-task", secondTask, "ultrafuzz-pinned"]);
-  hydratePinnedSubmodulesFromExecutionSnapshot({
-    executionSnapshotRoot: executionRoot,
+  hydratePinnedSubmodules({
+    sourceRoot: fixture.source,
     workspaceRoot: secondTask,
     expectation
   });
@@ -180,8 +166,8 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   assert.equal(git(fixture.source, ["config", "--local", "--get-all", "extensions.worktreeConfig"]), "true");
   assert.equal(fs.existsSync(path.join(gitDirectory(secondTask), "modules")), false);
   assert.deepEqual(
-    verifyPinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: executionRoot,
+    verifyPinnedSubmodules({
+      sourceRoot: fixture.source,
       workspaceRoot: secondTask,
       expectation
     }),
@@ -202,24 +188,13 @@ test("sealed recursive submodules hydrate a real task worktree without child Git
   assert.equal(persistedSubmoduleConfig.status, 1);
   assert.equal(persistedSubmoduleConfig.stdout, "");
 
-  const linkedExecutionRoot = path.join(fixture.root, "linked-execution-snapshot");
-  fs.symlinkSync(executionRoot, linkedExecutionRoot, "dir");
-  assert.throws(
-    () =>
-      hydratePinnedSubmodulesFromExecutionSnapshot({
-        executionSnapshotRoot: linkedExecutionRoot,
-        workspaceRoot: task,
-        expectation
-      }),
-    /canonical or descriptor-rooted directory/u
-  );
-
   const sealedFile = path.join(executionRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "tree/vendor/dependency/dependency.txt");
-  fs.writeFileSync(sealedFile, "tampered\n");
+  assert.equal(fs.statSync(sealedFile).mode & 0o222, 0, "cached dependency files are read-only");
+  writeCachedFile(sealedFile, "tampered\n");
   assert.throws(
     () =>
-      hydratePinnedSubmodulesFromExecutionSnapshot({
-        executionSnapshotRoot: executionRoot,
+      hydratePinnedSubmodules({
+        sourceRoot: fixture.source,
         workspaceRoot: task,
         expectation
       }),
@@ -237,17 +212,15 @@ test("the next hydration clears a transaction an interrupted one left behind", (
   const expectation = pinnedSubmoduleExpectation(captured);
   removeChildGitMetadata(fixture.source, captured.top_level_roots);
 
-  const executionRoot = path.join(fixture.root, "rollback-execution-snapshot");
-  fs.mkdirSync(executionRoot);
-  copyExecutionFiles(fixture.source, executionRoot, expectation);
+  fillSubmoduleDependencyCache(fixture.source, expectation);
 
   const task = path.join(fixture.root, "rollback-task-worktree");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/rollback-task", task, "ultrafuzz-pinned"]);
   git(fixture.source, ["config", "--local", "--add", "extensions.worktreeConfig", "true"]);
   const dependencyRoot = path.join(task, "vendor/dependency");
   fs.writeFileSync(path.join(dependencyRoot, "preexisting.txt"), "recoverable bytes\n");
-  const snapshotInput = { executionSnapshotRoot: executionRoot, workspaceRoot: task, expectation };
-  const hydrate = () => hydratePinnedSubmodulesFromExecutionSnapshot(snapshotInput);
+  const snapshotInput = { sourceRoot: fixture.source, workspaceRoot: task, expectation };
+  const hydrate = () => hydratePinnedSubmodules(snapshotInput);
   const transactions = () =>
     fs.readdirSync(task).filter((entry) => entry.startsWith(".ultrafuzz-submodule-transaction-"));
 
@@ -279,7 +252,7 @@ test("the next hydration clears a transaction an interrupted one left behind", (
   assert.deepEqual(hydrate(), captured);
   assert.deepEqual(transactions(), []);
   assert.equal(fs.existsSync(path.join(dependencyRoot, "preexisting.txt")), false);
-  assert.deepEqual(verifyPinnedSubmodulesFromExecutionSnapshot(snapshotInput), captured);
+  assert.deepEqual(verifyPinnedSubmodules(snapshotInput), captured);
 });
 
 test("Aave-shaped nine-pin task worktree is restored transactionally and verified after agent work", (context) => {
@@ -315,9 +288,7 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   assert.deepEqual(childGitMetadata(fixture.source, captured.top_level_roots), []);
   assert.deepEqual(readPinnedSubmoduleSnapshot(fixture.source), captured);
 
-  const executionRoot = path.join(fixture.root, "aave-execution-snapshot");
-  fs.mkdirSync(executionRoot);
-  copyExecutionFiles(fixture.source, executionRoot, expectation);
+  const executionRoot = fillSubmoduleDependencyCache(fixture.source, expectation);
   const manifestSnapshotPath = path.join(executionRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json");
   const sealedDependencyPath = path.join(
     executionRoot,
@@ -332,16 +303,16 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   }
 
   const hydrate = (): void => {
-    const hydrated = hydratePinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: executionRoot,
+    const hydrated = hydratePinnedSubmodules({
+      sourceRoot: fixture.source,
       workspaceRoot: task,
       expectation
     });
     assert.deepEqual(hydrated, captured);
   };
   const verify = (): void => {
-    const verified = verifyPinnedSubmodulesFromExecutionSnapshot({
-      executionSnapshotRoot: executionRoot,
+    const verified = verifyPinnedSubmodules({
+      sourceRoot: fixture.source,
       workspaceRoot: task,
       expectation
     });
@@ -452,10 +423,10 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
 
   const sealedDependencyBytes = fs.readFileSync(sealedDependencyPath);
   fs.writeFileSync(taskDependencyPath, "prior task bytes\n");
-  fs.writeFileSync(sealedDependencyPath, "sealed mutation\n");
+  writeCachedFile(sealedDependencyPath, "sealed mutation\n");
   assert.throws(hydrate, /sealed submodule file/u);
   assert.equal(fs.readFileSync(taskDependencyPath, "utf8"), "prior task bytes\n");
-  fs.writeFileSync(sealedDependencyPath, sealedDependencyBytes);
+  writeCachedFile(sealedDependencyPath, sealedDependencyBytes);
   hydrate();
 
   const unexpectedSealedDirectory = path.join(executionRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "tree/unexpected-empty");
@@ -469,10 +440,10 @@ test("Aave-shaped nine-pin task worktree is restored transactionally and verifie
   fs.rmSync(manifestSnapshotPath);
   assert.throws(hydrate, /does not exist/u);
   assert.equal(fs.readFileSync(taskDependencyPath, "utf8"), "preserve before missing manifest\n");
-  fs.writeFileSync(manifestSnapshotPath, manifestBytes);
-  fs.writeFileSync(manifestSnapshotPath, Buffer.concat([manifestBytes, Buffer.from(" ")]));
+  writeCachedFile(manifestSnapshotPath, manifestBytes);
+  writeCachedFile(manifestSnapshotPath, Buffer.concat([manifestBytes, Buffer.from(" ")]));
   assert.throws(hydrate, /manifest changed/u);
-  fs.writeFileSync(manifestSnapshotPath, manifestBytes);
+  writeCachedFile(manifestSnapshotPath, manifestBytes);
   hydrate();
 
   const staleTransaction = path.join(task, ".ultrafuzz-submodule-transaction-crashed");
@@ -571,11 +542,16 @@ test("pinned local compilation carries the exact manifest through sealed executi
     ULTRAFUZZ_TRUSTED_BIN: trustedBin
   };
   const executionFiles = await smithersExecutionControlFiles(compiled, plan.value!.layout, executionEnvironment);
-  const pinnedPaths = executionFiles
-    .filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`))
-    .map((file) => file.snapshotPath);
-  assert.equal(pinnedPaths.length, 1 + snapshot.entries.filter((entry) => entry.type === "file").length);
-  assert.ok(pinnedPaths.some((snapshotPath) => snapshotPath.endsWith("/manifest.json")));
+  // Dependency files no longer travel in the sealed execution snapshot (#921); launch filled the cache.
+  assert.deepEqual(
+    executionFiles.filter((file) => file.snapshotPath.startsWith(`${PINNED_SUBMODULE_EXECUTION_ROOT}/`)),
+    []
+  );
+  const cacheRoot = submoduleDependencyCacheRoot(fixture.source, expectation);
+  assert.equal(
+    sha256(fs.readFileSync(path.join(cacheRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
+    expectation.manifest_sha256
+  );
 
   for (const node of plan.value!.graph.nodes) {
     const taskNodeIds = compiled.tasks
@@ -612,15 +588,12 @@ test("pinned local compilation carries the exact manifest through sealed executi
   assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bunfig.toml"), "utf8"), "\n");
   assert.equal(fs.readFileSync(path.join(materialized.root, "controls", "bun-empty.env"), "utf8"), "\n");
   assert.equal(fs.readFileSync(path.join(materialized.root, "tsconfig.json"), "utf8"), "{}\n");
-  assert.equal(
-    sha256(fs.readFileSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT, "manifest.json"))),
-    expectation.manifest_sha256
-  );
+  assert.equal(fs.existsSync(path.join(materialized.root, PINNED_SUBMODULE_EXECUTION_ROOT)), false);
 
   const task = path.join(fixture.root, "compiled-closure-task");
   git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/compiled-closure", task, "ultrafuzz-pinned"]);
-  hydratePinnedSubmodulesFromExecutionSnapshot({
-    executionSnapshotRoot: materialized.root,
+  hydratePinnedSubmodules({
+    sourceRoot: fixture.source,
     workspaceRoot: task,
     expectation: compiled.pinnedSubmodules
   });
@@ -776,16 +749,10 @@ function commitAll(repository: string, message: string): void {
   git(repository, ["commit", "--quiet", "-m", message]);
 }
 
-function copyExecutionFiles(
-  source: string,
-  executionRoot: string,
-  expectation: Parameters<typeof pinnedSubmoduleExecutionFiles>[1]
-): void {
-  for (const file of pinnedSubmoduleExecutionFiles(source, expectation)) {
-    const destination = path.join(executionRoot, ...file.snapshotPath.split("/"));
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(file.sourcePath, destination);
-  }
+/** Cached dependency files are read-only; a test that tampers with one must make it writable first. */
+function writeCachedFile(filePath: string, bytes: string | Buffer): void {
+  if (fs.existsSync(filePath)) fs.chmodSync(filePath, 0o644);
+  fs.writeFileSync(filePath, bytes);
 }
 
 function sha256(bytes: Buffer): string {

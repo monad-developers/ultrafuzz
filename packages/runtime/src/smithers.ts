@@ -68,10 +68,12 @@ import {
 } from "./friction-log.js";
 import { withTransientNpmRegistryRetry } from "./npm-install-retry.js";
 import { resolveOperatorNpmAuthority, type OperatorNpmProvision } from "./operator-npm.js";
+import { checkoutSubmoduleExpectationForProject } from "./checkout-submodules.js";
 import {
   enablePinnedSubmoduleWorktreeConfig,
-  pinnedSubmoduleExecutionFiles,
+  fillSubmoduleDependencyCache,
   pinnedSubmoduleExpectationForProject,
+  submoduleSourcePolicyForRef,
   type PinnedSubmoduleExpectation
 } from "./pinned-submodules.js";
 import { renderRuntimeTemplate } from "./runtime-template.js";
@@ -3393,6 +3395,8 @@ export interface CompiledSmithersWorkflow {
   tasksPath: string;
   logsDir: string;
   pinnedSubmodules?: PinnedSubmoduleExpectation;
+  /** Launch warnings found while compiling, such as a checkout whose submodules could not be sealed. */
+  diagnostics?: RuntimeDiagnostic[];
   productionSourceRoots?: string[];
   controllerSourceDigest: string;
 }
@@ -3726,9 +3730,32 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
   // Every task worktree is created locally, so Git's shared worktree-config
-  // prerequisite is enabled whenever a pinned expectation exists.
-  const pinnedSubmodules = source?.pinned === true ? pinnedSubmoduleExpectationForProject(projectRoot) : undefined;
-  enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules);
+  // prerequisite is enabled whenever a submodule expectation exists. A pinned
+  // source must carry an authenticated manifest; an ordinary checkout is
+  // sealed from its initialized submodules when it can be (#1251).
+  const submoduleSourcePolicy = submoduleSourcePolicyForRef(source?.ref);
+  const checkoutSubmodules =
+    source !== undefined && !source.pinned ? checkoutSubmoduleExpectationForProject(projectRoot) : undefined;
+  const pinnedSubmodules =
+    source?.pinned === true ? pinnedSubmoduleExpectationForProject(projectRoot) : checkoutSubmodules?.expectation;
+  enablePinnedSubmoduleWorktreeConfig(projectRoot, pinnedSubmodules, submoduleSourcePolicy);
+  // Tasks hydrate from the commit-keyed dependency cache, not the sealed execution snapshot.
+  if (source?.pinned === true && pinnedSubmodules !== undefined) {
+    fillSubmoduleDependencyCache(projectRoot, pinnedSubmodules, "pinned");
+  }
+  const compileDiagnostics: RuntimeDiagnostic[] =
+    checkoutSubmodules?.unavailableReason === undefined
+      ? []
+      : [
+          {
+            code: "SUBMODULE_HYDRATION_UNAVAILABLE",
+            message:
+              "Task worktrees will not get this checkout's submodules, so a task that builds may fetch them over the network. " +
+              `Initialize them at their recorded commits and leave them clean to enable hydration: ${checkoutSubmodules.unavailableReason}`,
+            severity: "warning",
+            source: "workflow"
+          }
+        ];
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     runId: input.runLayout.runId,
@@ -3752,7 +3779,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     logsDir,
     productionSourceRoots: input.config.permissions.productionSourceRoots,
     controllerSourceDigest: input.controllerSourceDigest ?? inspectControllerSource(projectRoot).digest,
-    ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules })
+    ...(pinnedSubmodules === undefined ? {} : { pinnedSubmodules }),
+    ...(compileDiagnostics.length === 0 ? {} : { diagnostics: compileDiagnostics })
   };
   writePreparedWorkflowFile(
     input.runLayout.root,
@@ -3887,10 +3915,6 @@ export async function smithersExecutionControlFiles(
     writeFileDurable(candidate, "{}\n");
     add(candidate, "tsconfig.json");
   })();
-
-  for (const file of pinnedSubmoduleExecutionFiles(compiled.projectRoot, compiled.pinnedSubmodules)) {
-    add(file.sourcePath, file.snapshotPath);
-  }
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");

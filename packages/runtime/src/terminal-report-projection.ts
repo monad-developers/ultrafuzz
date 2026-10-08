@@ -10,6 +10,7 @@ import {
   type RunState
 } from "@ultrafuzz/artifacts";
 
+import type { RunDependencyChange } from "./dependency-change-records.js";
 import { projectCanonicalFinalReport, type CanonicalFinalReportProjection } from "./final-report-markdown.js";
 import { ReportUnavailableError } from "./report-unavailable.js";
 
@@ -20,6 +21,8 @@ export interface TerminalReportProjectionInput {
   /** Independently verified final-review output. This helper does not admit agent artifacts. */
   agentReport?: Record<string, unknown>;
   goalSearchCoverage?: unknown;
+  /** Restored dependency edits read from the run's verification markers (#1251). */
+  dependencyChanges?: readonly RunDependencyChange[];
 }
 
 /** Render authenticated terminal evidence without starting work or inventing findings. */
@@ -53,7 +56,12 @@ export function projectTerminalReport(input: TerminalReportProjectionInput): Can
     if (sourceRunId !== undefined && Reflect.get(reportMetadata, "source_run_id") !== sourceRunId) {
       throw new Error("Verified final report has a different source run identity");
     }
-    report.run_metadata = withWholeRunSummary(reportMetadata as Record<string, unknown>, metadata, state.finished_at);
+    report.run_metadata = withWholeRunSummary(
+      reportMetadata as Record<string, unknown>,
+      metadata,
+      state.finished_at,
+      input.dependencyChanges
+    );
     report.completion = completion;
     return projectCanonicalFinalReport(report, context);
   }
@@ -72,9 +80,19 @@ export function projectTerminalReport(input: TerminalReportProjectionInput): Can
 export function withWholeRunSummary(
   runMetadata: Record<string, unknown>,
   metadata: unknown,
-  finishedAt: unknown
+  finishedAt: unknown,
+  dependencyChanges?: readonly RunDependencyChange[]
 ): Record<string, unknown> {
   const summary = { ...runMetadata };
+  // The report agent never sees these; the runtime restates them from the run's own records.
+  if (dependencyChanges !== undefined) {
+    if (dependencyChanges.length === 0) delete summary.dependency_changes;
+    else
+      summary.dependency_changes = dependencyChanges.map((change) => ({
+        ...change,
+        changed_paths: [...change.changed_paths]
+      }));
+  }
   const elapsed = elapsedTime(field(metadata, "created_at"), finishedAt);
   if (elapsed !== undefined) summary.elapsed_time = elapsed;
   const usage = runSummaryUsage(metadata);

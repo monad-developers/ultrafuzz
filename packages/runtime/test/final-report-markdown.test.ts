@@ -2721,3 +2721,38 @@ test("a property ID with angle brackets renders as escaped text, not as raw HTML
   assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, projection.report), true);
   assertPublicProjectionFixedPoint(projectPublicCanonicalFinalReport(report));
 });
+
+test("report.md carries the fixed dependency notice exactly when report.json records restored dependency edits (#1251)", () => {
+  const notice =
+    "An agent changed hydrated dependency files during this run. Ultrafuzz restored them before later tasks ran, but results from the tasks that changed them may rely on the modified dependency code. report.json lists those tasks under run_metadata.dependency_changes.";
+  const clean = renderableReport();
+  const cleanProjection = projectCanonicalFinalReport(clean);
+  assert.equal(cleanProjection.markdown.includes(notice), false);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(
+      cleanProjection.markdown.replace("\n## Run summary\n\n", `\n## Run summary\n\n${notice}\n\n`),
+      clean
+    ),
+    false
+  );
+
+  const report = renderableReport();
+  (report.run_metadata as Record<string, unknown>).dependency_changes = [
+    {
+      attempt_id: "invariant-handlers",
+      changed_path_count: 2,
+      changed_paths: ["lib/forge-std/src/Test.sol", "lib/forge-std/x.sol"]
+    }
+  ];
+  const projection = projectCanonicalFinalReport(report);
+  assert.equal(projection.markdown.split(notice).length - 1, 1);
+  const summary = projection.markdown.split("\n## Run summary\n\n")[1]?.split("\n## ")[0] ?? "";
+  assert.ok(summary.includes(notice), "the notice sits in the Run summary block");
+  assert.doesNotMatch(projection.markdown, /invariant-handlers|lib\/forge-std/u);
+  assert.deepEqual(projection.report, report);
+  assert.equal(isDirectiveConformingFinalReportMarkdown(projection.markdown, report), true);
+  assert.equal(
+    isDirectiveConformingFinalReportMarkdown(projection.markdown.replace(`\n\n${notice}`, ""), report),
+    false
+  );
+});

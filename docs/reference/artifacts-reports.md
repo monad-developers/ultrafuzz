@@ -776,6 +776,29 @@ artifact validation warnings are shown, and
 [Run accounting and estimated spend](#run-accounting-and-estimated-spend) for
 `Models used`, `Tokens used`, and `Estimated spend`.
 
+### Dependency changes
+
+In an ordinary run, task worktrees get the launch checkout's submodule files
+(see [Run](cli.md#run)). When an agent changes, adds, or removes any of them,
+Ultrafuzz restores the cached files after the agent finishes and records the
+change instead of failing the task. The runtime restates every such record in
+`report.json` as `run_metadata.dependency_changes`. Each entry names the task's
+`attempt_id`, the exact `changed_path_count`, and up to fifty
+`changed_paths`. The report agent never writes this field: the runtime reads it
+from the run's verification markers when it publishes the report, and drops it
+when there is nothing to record.
+
+When the field is present, `report.md` carries this fixed notice in the Run
+summary, after any coverage notice:
+
+```text
+An agent changed hydrated dependency files during this run. Ultrafuzz restored them before later tasks ran, but results from the tasks that changed them may rely on the modified dependency code. report.json lists those tasks under run_metadata.dependency_changes.
+```
+
+The record covers edits still present when the agent finishes. An edit the
+agent reverts before it finishes, or a dependency copied elsewhere and wired in
+through `foundry.toml` or `remappings.txt`, is not detected.
+
 ### Issue sections and remediation
 
 Each production issue renders its description, `### Severity`,

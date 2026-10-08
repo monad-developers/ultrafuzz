@@ -1142,3 +1142,31 @@ test("updateNodeState accepts an explicit transition timestamp", () => {
   assert.equal(running.last_transition_at, "2026-01-01T00:00:05.000Z");
   assert.equal(running.nodes["node-a"]?.wait_since, "2026-01-01T00:00:05.000Z");
 });
+
+test("a verification marker may record restored dependency changes, bounded and non-empty (#1251)", () => {
+  const marker = {
+    schema_version: "ultrafuzz.artifact-verification.v2",
+    attempt_id: "node-a.0",
+    node_id: "node-a",
+    artifacts: [
+      {
+        path: "stdout.txt",
+        contract: "ultrafuzz/text@1",
+        contract_digest: "a".repeat(64),
+        sha256: "b".repeat(64),
+        primary: true
+      }
+    ],
+    publications: [{ path: "stdout.txt", sha256: "b".repeat(64) }]
+  };
+  const withChanges = (changes: unknown) =>
+    validateArtifactVerificationMarker({ ...marker, dependency_changes: changes });
+  assert.equal(validateArtifactVerificationMarker(marker).ok, true);
+  assert.equal(withChanges({ changed_path_count: 60, changed_paths: ["lib/forge-std/src/Test.sol"] }).ok, true);
+  assert.equal(withChanges({ changed_path_count: 0, changed_paths: [] }).ok, false);
+  assert.equal(withChanges({ changed_path_count: 1, changed_paths: ["../escape"] }).ok, false);
+  assert.equal(
+    withChanges({ changed_path_count: 51, changed_paths: Array.from({ length: 51 }, (_, i) => `lib/x/${i}.sol`) }).ok,
+    false
+  );
+});

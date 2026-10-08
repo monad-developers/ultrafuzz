@@ -232,6 +232,32 @@
         "required": ["code", "artifact_path", "field_path", "message", "gate"],
         "additionalProperties": false
       }
+    },
+    "dependency_changes": {
+      "description": "Hydrated dependency paths the agent changed, added, or removed; the runtime restored them before publication.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["changed_path_count", "changed_paths"],
+      "properties": {
+        "changed_path_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "changed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/safePath"
+          }
+        }
+      }
+    },
+    "dependency_hydration_unavailable": {
+      "description": "Why this ordinary-checkout task ran without its hydrated dependencies, or why the post-agent check could not run.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
     }
   },
   "$defs": {

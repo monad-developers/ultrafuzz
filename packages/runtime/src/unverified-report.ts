@@ -13,6 +13,7 @@ import {
   type ObservedReportCompletion
 } from "@ultrafuzz/artifacts";
 
+import { readRunDependencyChanges } from "./dependency-change-records.js";
 import { projectCanonicalFinalReport } from "./final-report-markdown.js";
 import { withWholeRunSummary } from "./terminal-report-projection.js";
 import {
@@ -118,7 +119,8 @@ function captureUnverifiedReport(inputs: UnverifiedReportInputs): ReportSnapshot
       run_metadata: withWholeRunSummary(
         inputs.agentReport.run_metadata as Record<string, unknown>,
         inputs.metadata,
-        inputs.state?.finished_at
+        inputs.state?.finished_at,
+        readRunDependencyChanges(inputs.root)
       ),
       verification: inputs.verification,
       observed_completion: inputs.observed

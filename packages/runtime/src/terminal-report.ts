@@ -26,6 +26,7 @@ import {
   type RunState
 } from "@ultrafuzz/artifacts";
 
+import { readRunDependencyChanges } from "./dependency-change-records.js";
 import { loadGoalSearchCoverageSnapshot } from "./final-report-markdown.js";
 import {
   TERMINAL_REPORT_RECEIPT_JSON_SCHEMA_ID,
@@ -203,7 +204,8 @@ function captureTerminalReport(runRoot: string): TerminalReportCapture {
     state: inputs.state,
     metadata: inputs.metadata,
     agentReport: agentReport.json as Record<string, unknown>,
-    goalSearchCoverage: inputs.goalSearchCoverage
+    goalSearchCoverage: inputs.goalSearchCoverage,
+    dependencyChanges: readRunDependencyChanges(inputs.layout.root)
   });
   const gate = executeSemanticGate("report-completion-authority", {
     document: projection.report,
