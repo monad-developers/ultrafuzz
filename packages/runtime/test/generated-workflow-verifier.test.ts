@@ -7606,8 +7606,12 @@ test("only the preparation before the agent checks its prompt, never the verify 
       "assertWorkspaceSourceRevision",
       "replaceSupersededWorkspacePreparation",
       "restorePersistedWorkspacePatchPreparationBeforeReplay",
-      "verifyPinnedSubmodulesFromExecutionSnapshot",
-      "hydratePinnedSubmodulesFromExecutionSnapshot",
+      "checkTaskSubmodulesAfterAgent",
+      "recordTaskDependencyCheck",
+      "dependencyHydrationUnavailableByTask",
+      "sourceProjectRoot",
+      "hydrateTaskSubmodules",
+      "recordTaskDependencyHydration",
       "preservePinnedSourceProof",
       "plannedSchemaBundle",
       "materializePromptSchemas",
@@ -7650,7 +7654,11 @@ test("only the preparation before the agent checks its prompt, never the verify 
       ...steps.map((step) =>
         step === "isMissingTaskPromptError"
           ? (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT"
-          : () => undefined
+          : step === "dependencyHydrationUnavailableByTask"
+            ? new Map<string, string>()
+            : step === "sourceProjectRoot"
+              ? "/"
+              : () => undefined
       )
     ) as (candidate: typeof task, options?: Record<string, unknown>) => unknown;
     const verifyPass = { replayWorkspacePatches: false, evidenceMode: "require", pinnedSubmodules: "verify" };

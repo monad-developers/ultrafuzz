@@ -119,7 +119,7 @@ function preparationHarness(
     if (!ts.isVariableStatement(statement)) return [];
     const names = statement.declarationList.declarations.map((entry) => entry.name.getText(source));
     const included = names.every((name) =>
-      /^(?:INVARIANT_|MAX_INVARIANT_|WORKSPACE_|MAX_PRE_AGENT_|MAX_VERIFIED_|ARTIFACT_VERIFICATION_|invariantSuite.*(?:Snapshots|Ids|Tombstones)$|workspacePatch.*Trees$|dependencyArtifactAdmissionsByTask$|authenticatedAggregationSourcesByTask$|runtimePromptRenderFailures$|taskPromptReadFailures$)/u.test(
+      /^(?:INVARIANT_|MAX_INVARIANT_|WORKSPACE_|MAX_PRE_AGENT_|MAX_VERIFIED_|ARTIFACT_VERIFICATION_|invariantSuite.*(?:Snapshots|Ids|Tombstones)$|workspacePatch.*Trees$|dependencyArtifactAdmissionsByTask$|dependencyChangesByTask$|dependencyHydrationUnavailableByTask$|authenticatedAggregationSourcesByTask$|runtimePromptRenderFailures$|taskPromptReadFailures$)/u.test(
         name
       )
     );
@@ -151,10 +151,16 @@ function preparationHarness(
       }
     },
     taskSpecs: tasks,
-    hydratePinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>
-      options.onPinnedSubmodules?.("hydrate", input.expectation),
-    verifyPinnedSubmodulesFromExecutionSnapshot: (input: { expectation: unknown }) =>
-      options.onPinnedSubmodules?.("verify", input.expectation)
+    // The stubs below ignore the source root the template passes as `sourceRoot`.
+    sourceProjectRoot: "/",
+    hydrateTaskSubmodules: (input: { expectation: unknown }) => {
+      options.onPinnedSubmodules?.("hydrate", input.expectation);
+      return undefined;
+    },
+    checkTaskSubmodulesAfterAgent: (input: { expectation: unknown }) => {
+      options.onPinnedSubmodules?.("verify", input.expectation);
+      return undefined;
+    }
   };
   for (const name of localConstants) Reflect.deleteProperty(collaborators, name);
   return new Function(

@@ -329,7 +329,7 @@ export async function startRun(input: StartRunInput) {
         config_fingerprint: plan.config_fingerprint,
         workflow_ids: [compiled.smithersRunId]
       },
-      [...planned.diagnostics, ...forgeGuard.diagnostics]
+      [...planned.diagnostics, ...(compiled.diagnostics ?? []), ...forgeGuard.diagnostics]
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");

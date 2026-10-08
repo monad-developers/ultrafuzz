@@ -97,7 +97,7 @@ const {
   deriveCurrentTaskWorkflowMetrics,
   GOAL_SEARCH_COVERAGE_FILE,
   GOAL_SEARCH_COVERAGE_SCHEMA_VERSION,
-  hydratePinnedSubmodulesFromExecutionSnapshot,
+  hydrateTaskSubmodules,
   hasPendingWorkspacePreparationReplacement,
   invariantLedgerMarkdownParityIssues,
   materializeDynamicRuntime,
@@ -112,7 +112,10 @@ const {
   topologyRuntimeContextForTimeout,
   validateWorkspacePatchCapture,
   verifyThreatModelVulnerabilityDatabaseCapabilities,
-  verifyPinnedSubmodulesFromExecutionSnapshot,
+  checkTaskSubmodulesAfterAgent,
+  clearPersistedTaskDependencyChanges,
+  persistTaskDependencyChanges,
+  readPersistedTaskDependencyChanges,
   parseRuntimeDocumentBytes,
   serializeRuntimeDocument,
   serializeWorkspacePreparationAuthority,
@@ -1382,6 +1385,40 @@ type FinalReportRunMetadataAuthority = {
 };
 
 const finalReportRunMetadataAuthoritiesByTask = new Map<string, FinalReportRunMetadataAuthority>();
+/** Dependency edits an ordinary-checkout task made and had restored, keyed by attempt. */
+const dependencyChangesByTask = new Map<string, TaskDependencyChanges>();
+type TaskDependencyChanges = { changed_path_count: number; changed_paths: string[] };
+
+/** Ordinary-checkout tasks whose dependencies could not be hydrated or checked, with the reason (#1251). */
+const dependencyHydrationUnavailableByTask = new Map<string, string>();
+
+function recordTaskDependencyHydration(
+  runRoot: string,
+  attemptId: string,
+  result: { unavailable_reason: string } | undefined
+): void {
+  dependencyChangesByTask.delete(attemptId);
+  clearPersistedTaskDependencyChanges(runRoot, attemptId);
+  if (result === undefined) dependencyHydrationUnavailableByTask.delete(attemptId);
+  else dependencyHydrationUnavailableByTask.set(attemptId, result.unavailable_reason);
+}
+
+function recordTaskDependencyCheck(
+  runRoot: string,
+  attemptId: string,
+  result: { changes: TaskDependencyChanges } | { unavailable_reason: string } | undefined
+): void {
+  if (result === undefined) return;
+  if ("unavailable_reason" in result) {
+    dependencyHydrationUnavailableByTask.set(attemptId, result.unavailable_reason);
+    return;
+  }
+  // A check that finds clean files after a controller restart may follow a
+  // restore whose record was persisted before the restart; keep that record.
+  const changes =
+    result.changes.changed_path_count > 0 ? result.changes : readPersistedTaskDependencyChanges(runRoot, attemptId);
+  if (changes !== undefined) dependencyChangesByTask.set(attemptId, changes);
+}
 
 function finalReportRunMetadataAuthorityRelativePath(task: (typeof taskSpecs)[number]): string {
   return path.posix.join(PROMPT_ARTIFACT_AUTHORITY_DIRECTORY, `${task.attemptId}.final-report-run-metadata.json`);
@@ -3052,20 +3089,37 @@ function prepareArtifactMirror(
     );
   }
   if (options.pinnedSubmodules === "verify") {
-    preparationStep(task.attemptId, "verify-pinned-submodules", () =>
-      verifyPinnedSubmodulesFromExecutionSnapshot({
-        executionSnapshotRoot: task.executionSnapshotRoot,
-        workspaceRoot,
-        expectation: task.pinnedSubmodules ?? undefined
-      })
-    );
+    // A pinned benchmark source fails on any dependency edit. An ordinary
+    // checkout restores the sealed files and records what changed (#1251).
+    // Nothing was hydrated when preparation recorded the dependencies as unavailable.
+    if (!dependencyHydrationUnavailableByTask.has(task.attemptId)) {
+      preparationStep(task.attemptId, "verify-pinned-submodules", () =>
+        recordTaskDependencyCheck(
+          task.runRoot,
+          task.attemptId,
+          checkTaskSubmodulesAfterAgent({
+            sourceRoot: sourceProjectRoot,
+            workspaceRoot,
+            expectation: task.pinnedSubmodules ?? undefined,
+            sourceRef: task.sourceRef,
+            onChanges: (changes: TaskDependencyChanges) =>
+              persistTaskDependencyChanges(task.runRoot, task.attemptId, changes)
+          })
+        )
+      );
+    }
   } else {
     preparationStep(task.attemptId, "hydrate-pinned-submodules", () =>
-      hydratePinnedSubmodulesFromExecutionSnapshot({
-        executionSnapshotRoot: task.executionSnapshotRoot,
-        workspaceRoot,
-        expectation: task.pinnedSubmodules ?? undefined
-      })
+      recordTaskDependencyHydration(
+        task.runRoot,
+        task.attemptId,
+        hydrateTaskSubmodules({
+          sourceRoot: sourceProjectRoot,
+          workspaceRoot,
+          expectation: task.pinnedSubmodules ?? undefined,
+          sourceRef: task.sourceRef
+        })
+      )
     );
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
@@ -8449,7 +8503,14 @@ function verifyArtifacts(
     assertArtifactPublicationsContainNoSecrets(publications, sensitiveEnvironmentValues(process.env));
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
-    const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings);
+    const verificationMarker = writeArtifactVerificationMarker(
+      task,
+      artifacts,
+      publications,
+      validationWarnings,
+      dependencyChangesByTask.get(task.attemptId),
+      dependencyHydrationUnavailableByTask.get(task.attemptId)
+    );
     return {
       artifacts,
       primary_artifact: primary.path,
@@ -8916,7 +8977,9 @@ function writeArtifactVerificationMarker(
     primary: boolean;
   }[],
   publications: ReadonlyMap<string, Buffer>,
-  validationWarnings: readonly ArtifactValidationWarning[] = []
+  validationWarnings: readonly ArtifactValidationWarning[] = [],
+  dependencyChanges?: TaskDependencyChanges,
+  dependencyHydrationUnavailable?: string
 ): { marker_sha256: string; size_bytes: number } {
   const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, true);
   if (location === undefined) {
@@ -8941,7 +9004,11 @@ function writeArtifactVerificationMarker(
     admitted_dependency_attempt_ids: admittedDependencyArtifactDirs(task).map((directory) => path.basename(directory)),
     artifacts,
     publications: publicationEntries,
-    ...(validationWarnings.length === 0 ? {} : { validation_warnings: validationWarnings })
+    ...(validationWarnings.length === 0 ? {} : { validation_warnings: validationWarnings }),
+    ...(dependencyChanges === undefined ? {} : { dependency_changes: dependencyChanges }),
+    ...(dependencyHydrationUnavailable === undefined
+      ? {}
+      : { dependency_hydration_unavailable: dependencyHydrationUnavailable })
   };
   const markerShape = validateArtifactVerificationMarker(markerValue);
   if (!markerShape.ok) {

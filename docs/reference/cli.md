@@ -239,6 +239,45 @@ record. Choose another `--run-id`, or continue a run whose directory still
 exists with `ultrafuzz resume <run-id>`. `run` asks the engine only once the
 project has engine records, so a project's first launch skips the query.
 
+Each task runs in a Git worktree created from the launch commit. When that
+commit has submodules, such as Foundry's `lib/` dependencies, every task
+worktree gets the launch checkout's submodule files, so tasks build without
+cloning dependencies over the network. At launch, `run` records the files and
+their hashes and copies them into a dependency cache in the repository's Git
+directory, `.git/ultrafuzz/submodule-cache/`, keyed by the recorded commits.
+The cache never appears in `git status`, and later runs on the same commits
+reuse it. Each task copies its files from the cache and checks them against the
+recorded hashes. A missing or damaged cache entry is rebuilt from the
+submodules' Git objects at the recorded commits, never from the working tree,
+including after `git submodule deinit`, which keeps those objects under
+`.git/modules`.
+Task-local Git configuration points each submodule at an unreachable URL with
+`update = none`, so `forge` reports `Skipping submodule` instead of fetching.
+
+After the agent finishes, Ultrafuzz compares each task's submodule files with
+the recorded hashes. If the agent changed, added, or removed any, the task still
+succeeds: Ultrafuzz restores the files, records the changed paths in the task's
+verification marker, and the report flags that results from that task may rely
+on the modified code (see
+[Dependency changes](artifacts-reports.md#dependency-changes)). Edits inside a
+submodule never reach later tasks, which always start from the cached files.
+Changes to the task's Git submodule configuration or gitlinks still fail the
+task.
+
+Recording needs each top-level submodule initialized at its recorded commit with
+no local changes or untracked files. A nested submodule that was never
+initialized is copied as the empty directory Git leaves for it. When the
+checkout cannot be recorded, for example because a submodule is not initialized
+or the repository config has a `url.*.insteadOf` rewrite, `run` still launches
+and reports a `SUBMODULE_HYDRATION_UNAVAILABLE` warning with the reason. Run
+`git submodule update --init` and relaunch to enable it. When a task cannot get
+its files, because the cache and the submodules' Git objects are both gone, the
+task runs without them and its verification marker records why in
+`dependency_hydration_unavailable`. Runs launched from the invariant-pinned
+branch stay strict: they fail the task when hydration fails or the agent edits a
+dependency. The first hydrated run also sets `extensions.worktreeConfig = true`
+in the repository's Git config.
+
 ## Audit Profiles and Packaged Topologies
 
 ```bash

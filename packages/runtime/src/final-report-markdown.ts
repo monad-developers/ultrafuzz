@@ -264,6 +264,8 @@ function finalReportMarkdownDirectiveViolation(markdown: string, report: JsonRec
   }
   const runSummaryViolation = runSummaryLabelsViolation(markdown, report);
   if (runSummaryViolation !== undefined) return runSummaryViolation;
+  const dependencyViolation = dependencyChangesNoticeViolation(markdown, report);
+  if (dependencyViolation !== undefined) return dependencyViolation;
   const completionViolation = completionMarkdownViolation(markdown, report, completion, observed, verification);
   if (completionViolation !== undefined) return completionViolation;
   if (!markdown.includes("\n## Property implementation coverage\n")) {
@@ -786,6 +788,7 @@ function renderCanonicalReport(report: JsonRecord, goalSearchCoverage: unknown):
   // only the fixed notice that coverage was unmeasured or incomplete.
   const coverageNotice = coverageEvidenceNotice(report.coverage_evidence);
   if (coverageNotice !== undefined) lines.push("", coverageNotice);
+  if (dependencyChangesRecorded(report)) lines.push("", DEPENDENCY_CHANGES_NOTICE);
   const campaignDidNotRun = appendCampaignOutcome(lines, report.campaign_outcome);
   const goalCoverage = summarizeGoalSearchCoverage(goalSearchCoverage);
   if (issues.length > 0) appendRunCompletion(lines, completion, observed, verification);
@@ -2089,4 +2092,28 @@ function trimTrailingBlankLines(lines: string[]): string[] {
     lines.pop();
   }
   return lines;
+}
+
+/**
+ * Fixed disclosure that an agent changed hydrated dependency files, which the runtime restored
+ * (#1251). The affected tasks stay in report.json `run_metadata.dependency_changes`; like the other
+ * fixed notices it carries no digits or counts.
+ */
+const DEPENDENCY_CHANGES_NOTICE =
+  "An agent changed hydrated dependency files during this run. Ultrafuzz restored them before later tasks ran, but results from the tasks that changed them may rely on the modified dependency code. report.json lists those tasks under run_metadata.dependency_changes.";
+
+function dependencyChangesRecorded(report: JsonRecord): boolean {
+  const changes = recordField(report, "run_metadata")?.dependency_changes;
+  return Array.isArray(changes) && changes.length > 0;
+}
+
+/** The dependency notice appears exactly once, in the Run summary block, exactly when changes are recorded. */
+function dependencyChangesNoticeViolation(markdown: string, report: JsonRecord): string | undefined {
+  const summaryBlock =
+    (markdownOutsideFencedCode(markdown).split("\n## Run summary\n\n")[1] ?? "").split("\n## ")[0] ?? "";
+  const occurrences = markdown.split(DEPENDENCY_CHANGES_NOTICE).length - 1;
+  const expected = dependencyChangesRecorded(report) ? 1 : 0;
+  return occurrences === expected && summaryBlock.split(DEPENDENCY_CHANGES_NOTICE).length - 1 === expected
+    ? undefined
+    : "dependency change notice does not match the recorded dependency changes";
 }

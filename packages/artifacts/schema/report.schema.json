@@ -280,6 +280,38 @@
             "minLength": 1
           },
           "uniqueItems": true
+        },
+        "dependency_changes": {
+          "minItems": 1,
+          "maxItems": 10000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "attempt_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "changed_path_count": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "changed_paths": {
+                "minItems": 1,
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              }
+            },
+            "required": ["attempt_id", "changed_path_count", "changed_paths"],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

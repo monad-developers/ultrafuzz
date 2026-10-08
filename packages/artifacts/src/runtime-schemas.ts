@@ -128,6 +128,36 @@ export const artifactVerificationJsonSchema = {
     },
     artifacts: { type: "array", minItems: 1, items: artifactVerificationEntryJsonSchema },
     validation_warnings: artifactValidationWarningsJsonSchema,
+    dependency_changes: {
+      description:
+        "Hydrated dependency paths the agent changed, added, or removed; the runtime restored them before publication.",
+      type: "object",
+      additionalProperties: false,
+      required: ["changed_path_count", "changed_paths"],
+      properties: {
+        changed_path_count: { type: "integer", minimum: 1 },
+        changed_paths: {
+          type: "array",
+          minItems: 1,
+          maxItems: 50,
+          // Dependency files may use any name the filesystem allows, unlike artifact paths: a
+          // relative path with no empty, `.`, or `..` segment and no NUL byte.
+          items: {
+            type: "string",
+            minLength: 1,
+            maxLength: 4096,
+            pattern: "^(?!/)(?!.*//)(?!(?:.*/)?\\.{1,2}(?:/|$))[^\\u0000]*[^/\\u0000]$"
+          }
+        }
+      }
+    },
+    dependency_hydration_unavailable: {
+      description:
+        "Why this ordinary-checkout task ran without its hydrated dependencies, or why the post-agent check could not run.",
+      type: "string",
+      minLength: 1,
+      maxLength: 2000
+    },
     publications: {
       type: "array",
       minItems: 1,
@@ -213,6 +243,10 @@ export interface ArtifactVerificationMarker {
   admitted_dependency_attempt_ids?: string[];
   artifacts: ArtifactVerificationEntry[];
   validation_warnings?: ArtifactValidationWarning[];
+  /** Dependency edits restored after the agent ran (#1251); `changed_paths` lists at most 50. */
+  dependency_changes?: { changed_path_count: number; changed_paths: string[] };
+  /** Why an ordinary-checkout task ran without hydrated dependencies (#1251). */
+  dependency_hydration_unavailable?: string;
   publications: Array<{ path: string; sha256: string }>;
 }
 

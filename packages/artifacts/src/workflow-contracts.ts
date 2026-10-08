@@ -1685,7 +1685,21 @@ export const reportSchema = withDocumentMetadata(
         expanded_graph_fingerprint: nonEmptyString,
         agent_execution: reportAgentExecutionSchema.optional(),
         artifact_validation_warnings: artifactValidationWarningsSchema.optional(),
-        source_run_ids: uniqueStrings().optional()
+        source_run_ids: uniqueStrings().optional(),
+        // Restated by the runtime from verification markers, never written by the report agent:
+        // tasks whose agent changed hydrated dependency files, which the runtime restored (#1251).
+        // report.md shows only a fixed notice; results from these tasks may rely on the edits.
+        dependency_changes: z
+          .array(
+            z.strictObject({
+              attempt_id: nonEmptyString.max(128),
+              changed_path_count: positiveInteger,
+              changed_paths: z.array(nonEmptyString.max(4_096)).min(1).max(50)
+            })
+          )
+          .min(1)
+          .max(10_000)
+          .optional()
       }),
       completion: reportCompletionSchema.optional(),
       verification: reportVerificationSchema.optional(),
