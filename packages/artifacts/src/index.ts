@@ -1,6 +1,7 @@
 export * from "./analysis-bundle.js";
 export * from "./artifact-limits.js";
 export * from "./artifact-validation.js";
+export * from "./invariant-oracle-warnings.js";
 export * from "./lang-primitives.js";
 export * from "./artifact-path-primitives.js";
 export * from "./attempt-ledger.js";

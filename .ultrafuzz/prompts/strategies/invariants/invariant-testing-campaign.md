@@ -83,10 +83,16 @@ Use this configured invariant testing fuzzer timeout:
      into a `require`, handler guard, or other precondition that prevents Recon
      from observing the violating post-state. Preconditions may admit valid
      actions; they may not assume the property under test.
-   - Record every reached protocol revert, panic, or out-of-gas failure as a
-     raw backend failure with its entrypoint, sequence, precondition evidence,
-     and exact property IDs when the failure exercises an implemented catalog
-     property. Treat a protocol error as an expected result only when the
+   - Recon runs in assertion mode, so only a failed `assert` is a finding. A
+     target call that reverts for any other reason, including a custom error,
+     a failed `require`, or an arithmetic panic, is discarded without a
+     report. Record every
+     reported assertion failure as a raw backend failure with its entrypoint,
+     sequence, precondition evidence, and exact property IDs when the failure
+     exercises an implemented catalog property. A liveness property reports a
+     violation only through its selector-aware oracle: the typed call in `try`,
+     documented selectors accepted in `catch`, and `assert(false)` for any
+     other failure. Treat a protocol error as an expected result only when the
      property catalog supplies its exact selector and expected outcome.
    - recon-fuzzer is the single final bug-finding backend. Do not run Echidna,
      Medusa, or any other fuzzer as an additional final backend, and do not

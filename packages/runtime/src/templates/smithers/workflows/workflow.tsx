@@ -52,6 +52,8 @@ const {
   executeSchemaSemanticGates,
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
+  INVARIANT_ORACLE_GATE,
+  invariantOracleWarnings,
   invariantPinnedSourceRefExists,
   materializeCanonicalThreatModelMarkdown,
   materializePromptSchemas,
@@ -1609,6 +1611,48 @@ async function deriveAuthoritativeFinalReportWorkflowMetrics(
   return (await deriveCurrentTaskWorkflowMetrics(runtime)) as FinalReportWorkflowMetricsProjection | undefined;
 }
 
+/**
+ * Generated invariant checks that Recon cannot fail (#687), read from the
+ * suite the campaign ran. Warnings only: they never fail the node.
+ */
+function campaignInvariantOracleWarnings(
+  task: (typeof taskSpecs)[number],
+  publications: ReadonlyMap<string, Buffer>
+): ArtifactValidationWarning[] {
+  return task.outputs.some((output) => output.contract === "ultrafuzz/property-campaign@3")
+    ? invariantOracleWarnings(publications)
+    : [];
+}
+
+/**
+ * The final report reads warnings only from its direct dependencies. The node
+ * that writes the finding lifecycle ledger consumes the campaign, so it carries
+ * the campaign's oracle warnings to the report, located at their source.
+ */
+function forwardedInvariantOracleWarnings(task: (typeof taskSpecs)[number]): ArtifactValidationWarning[] {
+  if (!task.outputs.some((output) => output.contract === "ultrafuzz/finding-lifecycle-ledger@1")) return [];
+  const admission = dependencyArtifactAdmissionsByTask.get(task.attemptId);
+  if (admission === undefined) return [];
+  const warnings: ArtifactValidationWarning[] = [];
+  for (const [attemptId, snapshot] of [...admission.snapshotsByProducerAttempt].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    const marker = parseStrictJsonSnapshot(snapshot.marker, "verified dependency diagnostics") as {
+      validation_warnings?: ArtifactValidationWarning[];
+    };
+    for (const warning of marker.validation_warnings ?? []) {
+      if (warning.gate !== INVARIANT_ORACLE_GATE) continue;
+      warnings.push({
+        ...warning,
+        artifact_path: warning.artifact_path.startsWith("artifacts/")
+          ? warning.artifact_path
+          : `artifacts/${attemptId}/${warning.artifact_path}`
+      });
+    }
+  }
+  return warnings;
+}
+
 function finalReportArtifactValidationWarnings(task: (typeof taskSpecs)[number]): ArtifactValidationWarning[] {
   const admission = dependencyArtifactAdmissionsByTask.get(task.attemptId);
   if (admission === undefined) return [];
@@ -1623,7 +1667,10 @@ function finalReportArtifactValidationWarnings(task: (typeof taskSpecs)[number])
     for (const warning of marker.validation_warnings ?? []) {
       warnings.push({
         ...warning,
-        artifact_path: `artifacts/${attemptId}/${warning.artifact_path}`,
+        // A forwarded warning is already located under its producer's artifacts.
+        artifact_path: warning.artifact_path.startsWith("artifacts/")
+          ? warning.artifact_path
+          : `artifacts/${attemptId}/${warning.artifact_path}`,
         ...(warning.source_path === undefined
           ? {}
           : {
@@ -8449,7 +8496,16 @@ function verifyArtifacts(
     assertArtifactPublicationsContainNoSecrets(publications, sensitiveEnvironmentValues(process.env));
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
-    const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings);
+    const verificationMarker = writeArtifactVerificationMarker(
+      task,
+      artifacts,
+      publications,
+      boundArtifactValidationWarnings([
+        ...validationWarnings,
+        ...campaignInvariantOracleWarnings(task, publications),
+        ...forwardedInvariantOracleWarnings(task)
+      ])
+    );
     return {
       artifacts,
       primary_artifact: primary.path,

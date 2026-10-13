@@ -49,6 +49,40 @@ test("report.md drops the warning and scoped coverage sections while report.json
   assert.deepEqual(projectPublicArtifactValidationWarnings(companion.warnings), companion);
 });
 
+test("the warnings companion counts invariant checks that cannot fail apart from metadata warnings (#687)", () => {
+  const oracle = (line: string, code: string) => ({
+    code,
+    artifact_path: "artifacts/stateful-invariant-campaign/invariant-suite/test/recon/Properties.sol",
+    field_path: line,
+    message: "assert(...) is true whatever the target does, so it can never report a violation",
+    gate: "invariant-oracle-falsifiability"
+  });
+  const metadata = {
+    code: "ARTIFACT_OPTIONAL_METADATA_MISSING",
+    artifact_path: "artifacts/dedupe/strategy-detections.json",
+    field_path: "$[5].family_id",
+    message: "Optional metadata is missing; the original artifact is accepted unchanged",
+    gate: "strategy-detection-review-stage-reconciliation"
+  };
+  assert.equal(
+    renderArtifactValidationWarningsMarkdown([
+      oracle("line 12", "INVARIANT_ORACLE_CONSTANT_TRUE"),
+      metadata,
+      oracle("line 25", "INVARIANT_ORACLE_REQUIRE_DISCARDED")
+    ]),
+    "## Invariant checks that cannot fail (2)\n\n" +
+      "Recon reports only a failed `assert`. These generated checks can never fail, so the properties they encode were not tested, whatever the campaign found.\n\n" +
+      "- INVARIANT_ORACLE_CONSTANT_TRUE — `artifacts/stateful-invariant-campaign/invariant-suite/test/recon/Properties.sol#line 12`: " +
+      "assert(...) is true whatever the target does, so it can never report a violation\n" +
+      "- INVARIANT_ORACLE_REQUIRE_DISCARDED — `artifacts/stateful-invariant-campaign/invariant-suite/test/recon/Properties.sol#line 25`: " +
+      "assert(...) is true whatever the target does, so it can never report a violation\n\n" +
+      "## Artifact validation warnings\n\n" +
+      "The run continued with partial metadata. Producer artifacts were preserved unchanged.\n\n" +
+      "- ARTIFACT_OPTIONAL_METADATA_MISSING — `artifacts/dedupe/strategy-detections.json#$[5].family_id`: " +
+      "Optional metadata is missing; the original artifact is accepted unchanged\n"
+  );
+});
+
 import { validateSafeId, type ReportCompletion } from "@ultrafuzz/artifacts";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import { fromMarkdown } from "mdast-util-from-markdown";

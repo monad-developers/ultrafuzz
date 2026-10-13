@@ -105,9 +105,16 @@ an unselected expected check is not implemented or fulfilled.
      set, a property reachable only after all handlers return at guards, or a
      property whose relevant actions never complete is not implemented; repair
      the suite or record the property as blocked with the concrete reason.
-   - Every assertion observes state after a directly invoked protocol action;
-     preserve any target revert, panic, or out-of-gas failure as Recon evidence
-     and connect it to the selected property when the catalog requires it.
+   - Every assertion observes state after a directly invoked protocol action.
+     Recon runs in assertion mode: only a failed `assert` is a finding, and a
+     call that reverts for any other reason, including a failed `require` or
+     an arithmetic panic, is discarded. Write every invariant check as `assert`, never as `require`.
+   - Implement a liveness property (a documented action that must succeed in a
+     reachable state) with a selector-aware oracle: make the typed call inside
+     `try`, and in `catch (bytes memory reason)` accept only the selectors the
+     catalog documents for that action; any other selector, an empty reason,
+     or a panic calls `assert(false)`. A plain direct call cannot fail a
+     liveness property, because Recon discards its revert.
    - Put new Foundry-compatible invariant test or reproducer files under the
      repository's test root, for example
      `test/foundry/stateful-invariant-implement-properties/` or

@@ -26,6 +26,8 @@ import {
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  INVARIANT_ORACLE_GATE,
+  invariantOracleWarnings,
   installedArtifactSchemaBundle,
   materializePromptSchemas,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
@@ -1845,6 +1847,9 @@ function loadVerifyArtifactsHarness(
     "sensitiveEnvironmentValues",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
+    "invariantOracleWarnings",
+    "INVARIANT_ORACLE_GATE",
+    "dependencyArtifactAdmissionsByTask",
     "taskPublishesWorkspacePatch",
     "declaredAncestorOutputsByContract",
     "declaredFinalReportOutputPair",
@@ -1935,6 +1940,9 @@ function loadVerifyArtifactsHarness(
       markerWrites.push(args);
       return { marker_sha256: "f".repeat(64), size_bytes: 123 };
     },
+    invariantOracleWarnings,
+    INVARIANT_ORACLE_GATE,
+    new Map(),
     (task: VerifyArtifactsTask) =>
       task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
       task.outputs.some(

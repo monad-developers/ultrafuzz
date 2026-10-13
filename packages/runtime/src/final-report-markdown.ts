@@ -6,6 +6,7 @@ import {
   assertRegularFileInside,
   artifactValidationWarningsSchema,
   ESTIMATED_SPEND_PATTERN,
+  INVARIANT_ORACLE_GATE,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   reportCompletionSchema,
@@ -919,6 +920,36 @@ export function projectPublicArtifactValidationWarnings(warnings: readonly Artif
 
 function appendArtifactValidationWarnings(lines: string[], value: unknown): void {
   if (!Array.isArray(value) || value.length === 0) return;
+  const warnings = value.filter(isRecord);
+  appendInvariantOracleWarnings(
+    lines,
+    warnings.filter((warning) => warning.gate === INVARIANT_ORACLE_GATE)
+  );
+  appendGenericValidationWarnings(
+    lines,
+    warnings.filter((warning) => warning.gate !== INVARIANT_ORACLE_GATE)
+  );
+}
+
+/**
+ * Generated invariant checks that Recon cannot fail (#687). A campaign with no
+ * findings is clean only if its checks could have failed, so they are counted
+ * apart from metadata warnings.
+ */
+function appendInvariantOracleWarnings(lines: string[], warnings: readonly Record<string, unknown>[]): void {
+  if (warnings.length === 0) return;
+  lines.push(
+    "",
+    `## Invariant checks that cannot fail (${String(warnings.length)})`,
+    "",
+    "Recon reports only a failed `assert`. These generated checks can never fail, so the properties they encode were not tested, whatever the campaign found.",
+    ""
+  );
+  for (const warning of warnings) appendValidationWarningLine(lines, warning);
+}
+
+function appendGenericValidationWarnings(lines: string[], warnings: readonly Record<string, unknown>[]): void {
+  if (warnings.length === 0) return;
   lines.push(
     "",
     "## Artifact validation warnings",
@@ -926,14 +957,16 @@ function appendArtifactValidationWarnings(lines: string[], value: unknown): void
     "The run continued with partial metadata. Producer artifacts were preserved unchanged.",
     ""
   );
-  for (const warning of value.filter(isRecord)) {
-    // Codes render as plain text. Only `](` is escaped, so the bytes of real gate codes do not change.
-    const code = inlineValue(warning.code).replaceAll("](", "]\\(");
-    lines.push(
-      `- ${code} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
-    );
-    if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
-  }
+  for (const warning of warnings) appendValidationWarningLine(lines, warning);
+}
+
+function appendValidationWarningLine(lines: string[], warning: Record<string, unknown>): void {
+  // Codes render as plain text. Only `](` is escaped, so the bytes of real gate codes do not change.
+  const code = inlineValue(warning.code).replaceAll("](", "]\\(");
+  lines.push(
+    `- ${code} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+  );
+  if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
 }
 
 /** The coverage producer's canonical section; report.md no longer renders it. */
