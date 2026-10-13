@@ -1217,6 +1217,15 @@ test("publication secret gate finds configured values in encodings agents produc
   );
   assert.equal(rejects("setup/notes.md", `key ${credential.replace("_", "\\_")}`), true, "Markdown escape");
   assert.equal(rejects("report.md", `key ${credential.slice(0, 9)}\n  ${credential.slice(9)}`), true, "line break");
+  // A wrapped value that holds a backslash before punctuation is still found.
+  const escapedCredential = "Zq9\\_KpLm77xYw";
+  assert.equal(
+    publicationContainsSecrets(Buffer.from(`key ${escapedCredential.slice(0, 8)}\n${escapedCredential.slice(8)}`), [
+      escapedCredential
+    ]),
+    true,
+    "wrapped value holding a backslash"
+  );
   assert.equal(
     rejects("report.json", JSON.stringify({ url: `https://rpc.example/${encodeURIComponent(credential)}` })),
     true,

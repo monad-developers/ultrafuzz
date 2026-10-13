@@ -144,13 +144,15 @@ function containsEncodedSecret(text: string, secrets: readonly MatchableSecret[]
       return encoded;
     }
   });
-  const withoutWhitespace = markdownUnescaped.replace(/\s+/gu, "");
+  // A line break is checked against the text as written and as unescaped, so
+  // a wrapped value is found whether or not it holds a backslash itself.
+  const withoutWhitespace = [text.replace(/\s+/gu, ""), markdownUnescaped.replace(/\s+/gu, "")];
   return secrets.some(
     (secret) =>
       markdownUnescaped.includes(secret.value) ||
       percentDecoded.includes(secret.value) ||
       (secret.withoutWhitespace.length >= MIN_EXACT_SECRET_VALUE_LENGTH &&
-        withoutWhitespace.includes(secret.withoutWhitespace))
+        withoutWhitespace.some((candidate) => candidate.includes(secret.withoutWhitespace)))
   );
 }
 

@@ -173,6 +173,29 @@ test("a report its verifier rejected stays unavailable when it fails the artifac
   assert.equal(fs.existsSync(path.join(root, "review")), false);
 });
 
+// The gate's verdict is recorded on the task. Once the credential it matched is
+// unset or rotated, a rescan would pass, so the draft must not reappear (#1217).
+test("a report the artifact secret gate withheld stays unavailable after its credential is unset", () => {
+  const root = reportRun("verifier-withheld-secret");
+  writeAgentReport(root);
+  failReportAttempt(root, "verify:final-report");
+  const statePath = path.join(root, "state.json");
+  const unflagged = fs.readFileSync(statePath, "utf8");
+  // Without the recorded verdict, the same draft is published unchecked.
+  assert.equal(loadReportSnapshot(root).verification, "not-checked");
+  fs.rmSync(path.join(root, "review"), { recursive: true, force: true });
+
+  const state = JSON.parse(unflagged) as {
+    nodes: Record<string, { provenance: { failure: Record<string, unknown> } }>;
+  };
+  const failure = state.nodes["final-report"]?.provenance.failure;
+  assert.ok(failure);
+  failure.reason_code = "ARTIFACT_SECRET_GATE_REJECTED";
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  assert.throws(() => loadReportSnapshot(root), /Report unavailable: .* withheld by the artifact secret gate/u);
+  assert.equal(fs.existsSync(path.join(root, "review")), false);
+});
+
 // JSON escapes a quote, a backslash and a control character, so the report's
 // JSON text never holds such a credential verbatim.
 test("a report its verifier rejected stays unavailable when it holds a credential that JSON escapes", () => {

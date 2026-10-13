@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  ARTIFACT_SECRET_GATE_ERROR_CODE,
   assertArtifactPublicationsContainNoSecrets,
   assertNoSymlinkComponents,
   NODE_REFERENCE_PATTERN,
@@ -250,6 +251,10 @@ function readAgentReport(
   // only output it accepts, and the controller rejects a publication that then
   // changed. The agent's own output is still in the workspace mirror.
   if (attempt.rejected) reader.reasons.add("record-invalid");
+  // The secret gate's verdict on this draft stands even after the credential it
+  // matched is unset or rotated: only a fresh attempt replaces it (#1217).
+  if (attempt.rejected && secretGateRejected(nodes[attempt.id]))
+    throw new ReportUnavailableError("the report-agent JSON was withheld by the artifact secret gate");
   const directory = attempt.rejected ? `workspaces/${attempt.id}/artifacts/${attempt.id}` : `artifacts/${attempt.id}`;
   const value = reader.record(`${directory}/${outputPath}`, false, MAX_REPORT_BYTES);
   const parsed = reportSchema.safeParse(value);
@@ -284,6 +289,11 @@ function assertRejectedReportHasNoSecrets(runRoot: string, outputPath: string, r
   } catch {
     throw new ReportUnavailableError("the rejected report-agent JSON did not pass the artifact secret gate");
   }
+}
+
+function secretGateRejected(value: unknown): boolean {
+  const failure = asRecord(asRecord(asRecord(value)?.provenance)?.failure);
+  return failure?.reason_code === ARTIFACT_SECRET_GATE_ERROR_CODE;
 }
 
 /** A unique successful attempt, else a unique attempt whose agent finished but whose output was rejected. */

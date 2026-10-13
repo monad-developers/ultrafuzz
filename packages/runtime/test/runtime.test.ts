@@ -11189,7 +11189,12 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
     { attemptId: "direct-strategy", verifierId: "verify:direct-strategy", optional: false },
     { attemptId: "optional-specialist", verifierId: "verify:optional-specialist", optional: true }
   ]);
-  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
+  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 2);
+  // The report verifier also tolerates failure, so a secret-gate rejection withholds the report (#1217).
+  assert.equal(
+    workflowSource.match(/continueOnFail=\{task\.continueOnFail \|\| producesFinalReport\(task\)\}/gu)?.length,
+    1
+  );
 });
 
 test("current-controller rendering preserves prompts idempotently and continue policy for a leaf task", async () => {

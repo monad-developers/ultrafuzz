@@ -703,7 +703,8 @@ ARTIFACT_SECRET_GATE_REJECTED`, and the run ends `succeeded` if every other task
 succeeded. `ultrafuzz status` reports the report unavailable with reason
 `report-withheld-secret`, synchronization adds a `TERMINAL_REPORT_WITHHELD`
 warning, and `ultrafuzz report` fails as it does for any unavailable report. The
-unchecked fallback below is withheld too, because it passes the same gate. The
+unchecked fallback below is withheld too, even after the credential it matched
+is unset or rotated: the recorded `reason_code` keeps the draft unavailable. The
 agent's draft stays in its task worktree. `ultrafuzz resume <run-id>
 --retry-failed` runs the report agent again; the rest of the run is reused. Under
 `--require-complete` a withheld report still makes the run unsuccessful. The runtime does
