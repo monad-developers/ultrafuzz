@@ -156,6 +156,7 @@ if (runningUnderBun) process.env.ULTRAFUZZ_RUNTIME_MODULE ??= new URL("../src/in
 const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_ADMISSION_TIMEOUT_LOG",
   "SMITHERS_FAKE_CONTEXT_LOG",
+  "SMITHERS_FAKE_CLAUDE_ENV_LOG",
   "SMITHERS_FAKE_DEEPSEEK_ENV_LOG",
   "SMITHERS_FAKE_ENV_LOG",
   "SMITHERS_FAKE_EXECUTED_AS_LOG",
@@ -1616,6 +1617,12 @@ function readOpenRouterRetryFixtureJournal(pathname: string): OpenRouterRetryFix
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
+  createClaudeAgent(options?: Record<string, unknown>): {
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      env?: Record<string, string>;
+      cleanup?: () => void | Promise<void>;
+    }>;
+  };
   createDeepSeekAgent(options?: Record<string, unknown>): {
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       env?: Record<string, string>;
@@ -1726,6 +1733,12 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     };
   };
   const claudeModule = (await import(pathToFileURL(path.join(fixture, "claude.mjs")).href)) as {
+    createClaudeAgent(options?: Record<string, unknown>): {
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        env?: Record<string, string>;
+        cleanup?: () => void | Promise<void>;
+      }>;
+    };
     CompatibleClaudeCodeAgent: new (options: Record<string, unknown>) => {
       buildCommand(params: {
         prompt: string;
@@ -1735,6 +1748,7 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     };
   };
   return {
+    createClaudeAgent: claudeModule.createClaudeAgent,
     createDeepSeekAgent: deepSeekModule.createDeepSeekAgent,
     CompatibleClaudeCodeAgent: claudeModule.CompatibleClaudeCodeAgent,
     DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent
@@ -1873,6 +1887,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$KIMI_CODE_HOME" "$KIMI_SHARE_DIR" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_CLAUDE_ENV_LOG" ]; then',
+      '  printf \'%s|%s\\n\' "$CLAUDE_CODE_OAUTH_TOKEN" "$ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES" > "$SMITHERS_FAKE_CLAUDE_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$DEEPSEEK_API_KEY" "$ANTHROPIC_API_KEY" > "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG"',
@@ -6729,6 +6746,64 @@ for (const adapter of ["Claude", "DeepSeek"] as const) {
     assert.equal(silent.details?.agentStatedFailure, undefined);
   });
 }
+
+bunAdapterTest(
+  "generated subscription Claude adapter receives the setup-token login no other model child sees (#1266)",
+  { timeout: 30_000 },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { createClaudeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const { workflowControlChildEnvironment } = (await import(
+      pathToFileURL(path.join(project, "deepseek-agent-executable-test", "environment.mjs")).href
+    )) as {
+      workflowControlChildEnvironment(
+        additions?: Record<string, string | undefined>,
+        source?: Record<string, string | undefined>,
+        route?: { agent: string }
+      ): Record<string, string>;
+    };
+    const token = "sk-ant-oat01-headless-setup-token-fixture";
+    const saved = {
+      CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      ULTRAFUZZ_CONFIG_PATH: process.env.ULTRAFUZZ_CONFIG_PATH,
+      ULTRAFUZZ_PROVIDER_HOME_ROOT: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT
+    };
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = path.join(project, ".ultrafuzz", "provider-homes");
+    try {
+      const command = await createClaudeAgent({ model: "claude-opus-4-8" }).buildCommand({
+        prompt: "Contract only",
+        cwd: project,
+        options: {}
+      });
+      try {
+        assert.equal(command.env?.CLAUDE_CODE_OAUTH_TOKEN, token);
+      } finally {
+        await command.cleanup?.();
+      }
+      // Every other route has the login blanked, even when it is allowlisted.
+      const source = {
+        ...process.env,
+        ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "CLAUDE_CODE_OAUTH_TOKEN",
+        CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "3"
+      };
+      for (const agent of ["CodexAgent", "KimiAgent", "OpenRouterAgent"]) {
+        const child = workflowControlChildEnvironment({}, source, { agent });
+        assert.equal(child.CLAUDE_CODE_OAUTH_TOKEN, "", `${agent} must not receive the Claude login`);
+        assert.equal(child.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, "", agent);
+      }
+      assert.equal(workflowControlChildEnvironment({}, source).CLAUDE_CODE_OAUTH_TOKEN, "");
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  }
+);
 
 bunAdapterTest(
   "generated DeepSeek adapter uses the official endpoint and isolates Claude routing",
@@ -11759,7 +11834,8 @@ test("startRun --agent does not carry the previous agent's model onto the new ag
     env: { ...fakeSmithersEnv(project), CLAUDE_CONFIG_DIR: claudeHome, SMITHERS_FAKE_ENV_LOG: environmentLog }
   });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.equal(fs.readFileSync(environmentLog, "utf8"), `|||${claudeHome}||\n`);
+  // A subscription Claude run names its setup-token login as its provider credential (#1266).
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), `|||${claudeHome}||CLAUDE_CODE_OAUTH_TOKEN\n`);
 
   const smithersTasks = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
@@ -14569,6 +14645,34 @@ test("startRun forwards only the configured DeepSeek API key for DeepSeek runs",
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(deepSeekEnvironmentLog, "utf8"), "deepseek-agent-key|\n");
+});
+
+test("startRun forwards the Claude setup-token login only to subscription Claude runs (#1266)", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const claudeEnvironmentLog = path.join(project, "smithers-claude-environment.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_FAKE_CLAUDE_ENV_LOG: claudeEnvironmentLog,
+    CLAUDE_CODE_OAUTH_TOKEN: "claude-setup-token-login"
+  };
+
+  // The controller carries the login and names it as the Claude route's own
+  // credential, which keeps it from every other model child and through resume.
+  const claude = await startRun({
+    projectRoot: project,
+    runId: "claude-subscription-token",
+    agent: "ClaudeAgent",
+    env
+  });
+  assert.equal(claude.ok, true, JSON.stringify(claude.diagnostics));
+  assert.equal(fs.readFileSync(claudeEnvironmentLog, "utf8"), "claude-setup-token-login|CLAUDE_CODE_OAUTH_TOKEN\n");
+
+  // A run without a subscription Claude agent never receives it.
+  const codex = await startRun({ projectRoot: project, runId: "codex-ignores-claude-token", agent: "CodexAgent", env });
+  assert.equal(codex.ok, true, JSON.stringify(codex.diagnostics));
+  assert.equal(fs.readFileSync(claudeEnvironmentLog, "utf8"), "|OPENAI_API_KEY\n");
 });
 
 test("startRun preflights and isolates the dedicated OpenRouter credential while preserving the model ID", async () => {

@@ -6,6 +6,30 @@ const ROUTE_ENV_PREFIXES: Readonly<Record<string, readonly string[]>> = {
   KimiAgent: ["KIMI_", "MOONSHOT_"]
 };
 
+/**
+ * Claude Code's documented non-interactive login: a long-lived token from
+ * `claude setup-token`. A subscription-mode ClaudeAgent receives it the way an
+ * api-key agent receives its key, and every other model child has it blanked
+ * (#1266).
+ */
+export const CLAUDE_SUBSCRIPTION_TOKEN_ENVIRONMENT_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/** The credential variables an agent's adapter reads for its configured authentication. */
+export function agentAuthenticationEnvironmentVariableNames(
+  agentRef: string,
+  agent: { auth?: string; apiKeyEnv?: string }
+): string[] {
+  if (agent.auth === "api-key" && agent.apiKeyEnv !== undefined) {
+    return agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY"
+      ? [agent.apiKeyEnv, "MOONSHOT_API_KEY"]
+      : [agent.apiKeyEnv];
+  }
+  if (agentRef === "ClaudeAgent" && agent.auth === "subscription") {
+    return [CLAUDE_SUBSCRIPTION_TOKEN_ENVIRONMENT_VARIABLE];
+  }
+  return [];
+}
+
 export function isCredentialLikeEnvironmentVariableName(name: string): boolean {
   return isSensitiveEnvironmentName(name);
 }

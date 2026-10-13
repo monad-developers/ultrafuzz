@@ -140,6 +140,14 @@ for running multiple Claude subscriptions side by side. Set `auth = "api-key"`
 to bill against the Anthropic API using canonical `ANTHROPIC_API_KEY`. Both modes drive the `claude` CLI, so it must be
 installed either way; `auth` only changes how that CLI authenticates.
 
+On a headless host such as a container or CI runner, where `claude auth login`
+cannot open a browser, generate a long-lived token with `claude setup-token`
+on any machine and export it as `CLAUDE_CODE_OAUTH_TOKEN` before `ultrafuzz
+run`. In subscription mode `ClaudeAgent` receives it, with no
+`ULTRAFUZZ_AGENT_ENV_ALLOWLIST` entry, and every other agent has it blanked.
+Export it again before `ultrafuzz resume`. `ClaudeAgent` in `api-key` mode does
+not receive it.
+
 When a Claude profile sets `reasoning`, the generated adapter passes it to the
 current Claude Code CLI as `--effort <value>`. Pin the model through the
 profile's `model` field rather than under `[agents.ClaudeAgent]`.

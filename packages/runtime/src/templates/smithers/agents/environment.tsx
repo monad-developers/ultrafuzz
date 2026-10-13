@@ -41,6 +41,10 @@ const BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "AZURE_OPENAI_API_KEY",
+  // Claude Code's `claude setup-token` login; only the subscription Claude
+  // adapter puts it back (#1266).
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
   "CODEX_API_KEY",
   "DEEPSEEK_API_KEY",
   "KIMI_API_KEY",
