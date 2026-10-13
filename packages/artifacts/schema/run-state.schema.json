@@ -962,6 +962,9 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "reason_code": {
+          "enum": ["ARTIFACT_SECRET_GATE_REJECTED"]
         }
       }
     },

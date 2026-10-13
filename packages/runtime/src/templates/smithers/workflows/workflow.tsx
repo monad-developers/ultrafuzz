@@ -75,7 +75,7 @@ const {
   readRegularFileSnapshot,
   reportEstimatedSpend,
   RUN_METADATA_SCHEMA_VERSION,
-  sensitiveEnvironmentValues,
+  publicationForbiddenSecretValues,
   validateArtifactContractBytes,
   validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
@@ -1305,6 +1305,10 @@ function verifiedCanonicalPropertyCatalog(
   return { path: catalog.relativePath, value: parsed.value };
 }
 
+function producesFinalReport(task: (typeof taskSpecs)[number]): boolean {
+  return task.outputs.some((output) => output.contract === "ultrafuzz/report@3");
+}
+
 function declaredFinalReportOutputPair(task: (typeof taskSpecs)[number]):
   | {
       report: (typeof taskSpecs)[number]["outputs"][number];
@@ -2397,7 +2401,7 @@ function artifactAwareAgent(
   const freshNormalizedAgentFailure = (error: unknown): Error => {
     const fallback = "agent execution failed";
     // Snapshot credentials before hostile getters can mutate the environment.
-    const forbiddenSecretValues = sensitiveEnvironmentValues(process.env);
+    const forbiddenSecretValues = publicationForbiddenSecretValues(process.env);
     const safeSmithersControlCodes = new Set([
       "AGENT_QUOTA_EXCEEDED",
       "AGENT_CONFIG_INVALID",
@@ -8446,7 +8450,9 @@ function verifyArtifacts(
     if (primary === undefined) {
       throw new Error("artifact-contract failure: primary artifact is missing");
     }
-    assertArtifactPublicationsContainNoSecrets(publications, sensitiveEnvironmentValues(process.env));
+    // The controller's environment names every credential an agent can see,
+    // including a configured api_key_env whose name does not say so (#1217).
+    assertArtifactPublicationsContainNoSecrets(publications, publicationForbiddenSecretValues(process.env));
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
     const verificationMarker = writeArtifactVerificationMarker(task, artifacts, publications, validationWarnings);
@@ -9169,7 +9175,10 @@ export default smithers((ctx) => {
                 needs={{ agent: task.id }}
                 deps={{ agent: outputs.agentProcess }}
                 depsOptional
-                continueOnFail={task.continueOnFail}
+                // A report the secret gate rejects is withheld, not a failed
+                // campaign (#1217). The runtime still fails the run for any
+                // other report verification failure.
+                continueOnFail={task.continueOnFail || producesFinalReport(task)}
                 retries={0}
                 metadata={{
                   category: "artifact-contract",

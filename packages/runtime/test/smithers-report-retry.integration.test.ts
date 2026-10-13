@@ -52,7 +52,7 @@ import { isDeepStrictEqual } from "node:util";
 import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
 const { assertRegularFileInside, normalizeNodeAttemptFailureMessage, parseStrictJsonBytes,
-  prepareSafeFilePath, readRegularFileSnapshot, sensitiveEnvironmentValues,
+  prepareSafeFilePath, publicationForbiddenSecretValues, readRegularFileSnapshot, sensitiveEnvironmentValues,
   validateArtifactContractBytes, writeFileDurable } = await import(${JSON.stringify(artifactsModule)});
 const { smithersTaskAgentId, projectCanonicalFinalReport } = await import(${JSON.stringify(runtimeModule)});
 const root = ${JSON.stringify(root)};

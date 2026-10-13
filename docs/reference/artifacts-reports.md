@@ -694,7 +694,19 @@ incomplete. If every strategy fails, review can still report missing coverage
 when its execution prerequisites and time limits permit it. If the report
 agent cannot start, fails, or exhausts its allowed attempts, the run ends with
 **report unavailable** and preserves the saved task results; a report rejected
-at verification is the exception described below. The runtime does
+at verification is the exception described below.
+
+A report the artifact secret gate rejects, because it contains a run credential
+or a recognized secret, is withheld rather than failing the run (#1217). The
+report task stays failed, its failure records `reason_code:
+ARTIFACT_SECRET_GATE_REJECTED`, and the run ends `succeeded` if every other task
+succeeded. `ultrafuzz status` reports the report unavailable with reason
+`report-withheld-secret`, synchronization adds a `TERMINAL_REPORT_WITHHELD`
+warning, and `ultrafuzz report` fails as it does for any unavailable report. The
+unchecked fallback below is withheld too, because it passes the same gate. The
+agent's draft stays in its task worktree. `ultrafuzz resume <run-id>
+--retry-failed` runs the report agent again; the rest of the run is reused. Under
+`--require-complete` a withheld report still makes the run unsuccessful. The runtime does
 not synthesize a replacement report from raw findings. `ultrafuzz report`
 returns a clear error when no current report-agent output is available.
 

@@ -36,12 +36,12 @@ import {
   parseStrictJsonBytes,
   prepareSafeFilePath,
   PROPERTIES_SCHEMA_VERSION,
+  publicationForbiddenSecretValues,
   publishFileDurableExclusive,
   readRegularFileSnapshot,
   reportEstimatedSpend,
   RUN_METADATA_SCHEMA_VERSION,
   schemaRegistryBundleDigest,
-  sensitiveEnvironmentValues,
   validateArtifactContract,
   validateArtifactContractBytes,
   validatePropertiesSchema,
@@ -231,7 +231,7 @@ function loadArtifactAwareAgent(
     "declaredFinalReportOutputPair",
     "smithersTaskAgentId",
     "normalizeNodeAttemptFailureMessage",
-    "sensitiveEnvironmentValues",
+    "publicationForbiddenSecretValues",
     "assertDependencyArtifactAdmissionCurrent",
     "assertFinalReportRunMetadataAuthorityUnchanged",
     "assertFinalReportPromptAuthorityUnchanged",
@@ -249,7 +249,7 @@ function loadArtifactAwareAgent(
     () => undefined,
     () => "ultrafuzz-agent:test",
     normalizeNodeAttemptFailureMessage,
-    sensitiveEnvironmentValues,
+    publicationForbiddenSecretValues,
     () => options.onCheck?.("dependency-admission"),
     () => options.onCheck?.("report-run-metadata"),
     () => options.onCheck?.("report-prompt"),
@@ -1842,7 +1842,7 @@ function loadVerifyArtifactsHarness(
     "rememberInvariantSuitePublications",
     "createHash",
     "assertArtifactPublicationsContainNoSecrets",
-    "sensitiveEnvironmentValues",
+    "publicationForbiddenSecretValues",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
     "taskPublishesWorkspacePatch",
@@ -1926,7 +1926,7 @@ function loadVerifyArtifactsHarness(
     () => undefined,
     createHash,
     assertArtifactPublicationsContainNoSecrets,
-    options.scanProcessEnvironment === true ? sensitiveEnvironmentValues : () => [],
+    options.scanProcessEnvironment === true ? publicationForbiddenSecretValues : () => [],
     (_artifactDir: string, values: ReadonlyMap<string, Buffer>) => {
       for (const [relativePath, bytes] of values) publications.set(relativePath, Buffer.from(bytes));
       options.onPublishArtifacts?.();
@@ -5816,7 +5816,10 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.doesNotMatch(baseAgent, /executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
-  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 2);
+  // The report verifier alone also tolerates failure, so the runtime can
+  // withhold a report the secret gate rejects instead of failing the run (#1217).
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail \|\| producesFinalReport\(task\)\}/gu)?.length, 1);
 });
 
 test("generated optional admission rejects a present malformed marker before publishing agent access", () => {

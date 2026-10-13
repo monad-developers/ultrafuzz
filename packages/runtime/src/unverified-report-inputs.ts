@@ -9,13 +9,13 @@ import {
   parseStrictJsonBytes,
   readSinglyLinkedRegularFileSnapshotInside,
   safeResolveInside,
-  sensitiveEnvironmentValues,
   sha256Bytes,
   type ObservedReportCompletion,
   reportSchema,
   type ReportVerification
 } from "@ultrafuzz/artifacts";
 import { loadGoalSearchCoverageSnapshot } from "./final-report-markdown.js";
+import { runPublicationForbiddenSecretValues } from "./publication-secret-values.js";
 import { ReportUnavailableError } from "./report-unavailable.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -263,7 +263,7 @@ function readAgentReport(
     parsed.data.observed_completion !== undefined
   )
     throw new ReportUnavailableError("the agent report contains runtime-owned completion metadata");
-  if (attempt.rejected) assertRejectedReportHasNoSecrets(outputPath, parsed.data);
+  if (attempt.rejected) assertRejectedReportHasNoSecrets(reader.root, outputPath, parsed.data);
   return parsed.data;
 }
 
@@ -271,25 +271,15 @@ function readAgentReport(
  * The verifier runs its secret gate just before it publishes, so a report it
  * rejected may never have passed that gate. Scan the parsed report, which holds
  * all agent-written presentation content, for the values the verifier refuses,
- * and keep it unavailable on a hit rather than rewrite agent content. JSON
- * escapes a quote, a backslash and a control character, so the decoded strings
- * are scanned beside the JSON text. They are joined by NUL, which no pattern
- * treats as a word gap, so words that end one field and start the next never
- * read as one phrase.
+ * and keep it unavailable on a hit rather than rewrite agent content. The gate
+ * also scans the decoded strings of the JSON, which escapes a quote, a
+ * backslash and a control character (#1217).
  */
-function assertRejectedReportHasNoSecrets(outputPath: string, report: unknown): void {
-  const strings: string[] = [];
-  const json = JSON.stringify(report, (_key, value: unknown) => {
-    if (typeof value === "string") strings.push(value);
-    return value;
-  });
+function assertRejectedReportHasNoSecrets(runRoot: string, outputPath: string, report: unknown): void {
   try {
     assertArtifactPublicationsContainNoSecrets(
-      new Map([
-        [outputPath, Buffer.from(json, "utf8")],
-        [`${outputPath} strings`, Buffer.from(strings.join("\0"), "utf8")]
-      ]),
-      sensitiveEnvironmentValues(process.env)
+      new Map([[outputPath, Buffer.from(JSON.stringify(report), "utf8")]]),
+      runPublicationForbiddenSecretValues(runRoot)
     );
   } catch {
     throw new ReportUnavailableError("the rejected report-agent JSON did not pass the artifact secret gate");

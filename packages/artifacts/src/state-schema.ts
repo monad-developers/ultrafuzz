@@ -9,6 +9,7 @@ import {
 } from "./portable-json-primitives.js";
 import {
   CONTROLLER_LEASE_STATUSES,
+  NODE_FAILURE_REASON_CODES,
   NODE_PROVENANCE_FAILURE_CATEGORIES,
   NODE_PROVENANCE_REASON_CODES,
   NODE_NEXT_ELIGIBLE_ACTIONS,
@@ -170,7 +171,8 @@ const failureProvenanceSchema = z.strictObject({
   category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES),
   causal_task_id: nonEmptyString,
   causal_failure_category: z.enum(NODE_PROVENANCE_FAILURE_CATEGORIES),
-  dependent_task_ids: uniqueNonEmptyStrings
+  dependent_task_ids: uniqueNonEmptyStrings,
+  reason_code: z.enum(NODE_FAILURE_REASON_CODES).optional()
 });
 export const terminalDispositionSchema = z.strictObject({
   schema_version: z.literal(TERMINAL_DISPOSITION_SCHEMA_VERSION),
@@ -778,7 +780,8 @@ export const runStateJsonSchema = {
         category: { enum: [...NODE_PROVENANCE_FAILURE_CATEGORIES] },
         causal_task_id: { type: "string", minLength: 1 },
         causal_failure_category: { enum: [...NODE_PROVENANCE_FAILURE_CATEGORIES] },
-        dependent_task_ids: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } }
+        dependent_task_ids: { type: "array", uniqueItems: true, items: { type: "string", minLength: 1 } },
+        reason_code: { enum: [...NODE_FAILURE_REASON_CODES] }
       }
     },
     terminalDisposition: terminalDispositionShape,
