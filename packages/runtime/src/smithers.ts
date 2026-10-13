@@ -3452,23 +3452,56 @@ export function renderCurrentSmithersController(input: {
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
   const baseTaskDocument = currentControllerBaseTasks(input.layout, input.tasks);
-  const tasks = baseTaskDocument.tasks;
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
   for (const file of packagedController.files) {
     writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
   }
+  const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
+  const groups = isObjectRecord(graph.groups) ? graph.groups : {};
+  const nonBlockingGroupIds = new Set(
+    Object.entries(groups).flatMap(([groupId, group]) => {
+      const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
+      return defaults.failure_policy === "continue" ? [groupId] : [];
+    })
+  );
+  const allPolicyTasks = [
+    ...baseTaskDocument.tasks,
+    ...(baseTaskDocument.dynamic_groups ?? []).flatMap((group) => group.taskTemplates)
+  ];
+  const producerGroupByArtifactDir = new Map(
+    allPolicyTasks.map((task) => [path.resolve(task.artifactDir), task.metadata.node.group] as const)
+  );
+  const applyCurrentDependencyPolicy = (
+    candidates: readonly SmithersTaskManifestTask[]
+  ): SmithersTaskManifestTask[] => {
+    return candidates.map((task) => {
+      const optional = new Set((task.optionalDependencyArtifactDirs ?? []).map((directory) => path.resolve(directory)));
+      for (const directory of task.dependencyArtifactDirs) {
+        const producerGroup = producerGroupByArtifactDir.get(path.resolve(directory));
+        if (
+          producerGroup !== undefined &&
+          nonBlockingGroupIds.has(producerGroup) &&
+          reconcilesPartialResults(task, producerGroup)
+        ) {
+          optional.add(path.resolve(directory));
+        }
+      }
+      return { ...task, optionalDependencyArtifactDirs: [...optional] };
+    });
+  };
+  const tasks = applyCurrentDependencyPolicy(baseTaskDocument.tasks);
   const nonBlockingAttempts = new Set(
     tasks.flatMap((task) => (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory)))
   );
-  const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
-  const groups = isObjectRecord(graph.groups) ? graph.groups : {};
+  const dynamicGroups = (baseTaskDocument.dynamic_groups ?? []).map((group) => ({
+    ...group,
+    taskTemplates: applyCurrentDependencyPolicy(group.taskTemplates)
+  }));
   for (const task of tasks) {
     const groupId = task.metadata.node.group;
-    const group = groupId === undefined ? undefined : groups[groupId];
-    const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
-    if (defaults.failure_policy === "continue") nonBlockingAttempts.add(task.attemptId);
+    if (groupId !== undefined && nonBlockingGroupIds.has(groupId)) nonBlockingAttempts.add(task.attemptId);
   }
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
@@ -3476,7 +3509,7 @@ export function renderCurrentSmithersController(input: {
     smithersRunId: input.smithersRunId,
     workflowName: baseTaskDocument.workflow_name,
     tasks,
-    dynamicGroups: baseTaskDocument.dynamic_groups ?? [],
+    dynamicGroups,
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
     projectRoot,

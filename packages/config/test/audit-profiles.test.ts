@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { parse as parseYaml } from "yaml";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -33,8 +34,14 @@ describe("audit profile catalog", () => {
 
     const exhaustive = auditProfile("exhaustive", catalog);
     expect(exhaustive.topologyPath).toBe("topologies/exhaustive.yml");
-    expect(packagedTopologyPath(exhaustive, catalog)).toBeDefined();
+    const exhaustivePath = packagedTopologyPath(exhaustive, catalog);
+    expect(exhaustivePath).toBeDefined();
+    if (exhaustivePath === undefined) throw new Error("exhaustive topology path is unavailable");
     expect(packagedTopologyDigest(exhaustive, catalog)).toMatch(/^[0-9a-f]{64}$/u);
+    const exhaustiveTopology = parseYaml(fs.readFileSync(exhaustivePath, "utf8")) as {
+      groups: Record<string, { defaults?: { failure_policy?: string } }>;
+    };
+    expect(exhaustiveTopology.groups["property-catalog"]?.defaults?.failure_policy).toBe("continue");
 
     const invariantOnly = auditProfile("invariant-only", catalog);
     expect(invariantOnly.settings.dynamic_strategies_enumerator).toBe(0);
