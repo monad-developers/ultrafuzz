@@ -52,6 +52,7 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun } from "./plan-run.js";
+import { agentAuthenticationEnvironmentVariableNames } from "./provider-credential-environment.js";
 import { refreshRunPrompts } from "./prompt-refresh.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
@@ -2047,10 +2048,11 @@ function agentCredentialEnvironmentVariableNames(config: ResolvedConfig, agentRe
   const activeAgentRefs = new Set(agentRefs);
   const names: string[] = [];
   for (const [agentRef, agent] of Object.entries(config.agents)) {
-    if (!activeAgentRefs.has(agentRef) || agent.auth !== "api-key" || agent.apiKeyEnv === undefined) continue;
-    assertCredentialEnvironmentVariableName(agent.apiKeyEnv);
-    names.push(agent.apiKeyEnv);
-    if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+    if (!activeAgentRefs.has(agentRef)) continue;
+    for (const name of agentAuthenticationEnvironmentVariableNames(agentRef, agent)) {
+      assertCredentialEnvironmentVariableName(name);
+      names.push(name);
+    }
   }
   return [...new Set(names)].sort();
 }
@@ -2065,10 +2067,9 @@ function agentEnvironmentVariableNames(
   if (activeAgentRefs.size > 0) names.push("ULTRAFUZZ_PROVIDER_HOME_ROOT", ...MODEL_ROUTE_PROXY_ENVIRONMENT_VARIABLES);
   for (const [agentRef, agent] of Object.entries(config.agents)) {
     if (!activeAgentRefs.has(agentRef)) continue;
-    if (agent.auth === "api-key" && agent.apiKeyEnv !== undefined) {
-      assertCredentialEnvironmentVariableName(agent.apiKeyEnv);
-      names.push(agent.apiKeyEnv);
-      if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+    for (const name of agentAuthenticationEnvironmentVariableNames(agentRef, agent)) {
+      assertCredentialEnvironmentVariableName(name);
+      names.push(name);
     }
     if (agentRef === "KimiAgent") {
       names.push("KIMI_BASE_URL", "KIMI_CODE_HOME", "KIMI_SHARE_DIR");

@@ -253,6 +253,9 @@ children and omitted from unrelated Modal task secrets. A recognized
 provider-route prefix such as `AWS_` scopes the value to that route. Arbitrary
 unrecognized credentials are not supported and reach no model task. Stock
 agent API keys use their validated canonical `api_key_env`; the active adapter
-restores only its own key. Use only a credential-free RPC endpoint when an RPC
+restores only its own key. A subscription `ClaudeAgent` likewise restores only
+`CLAUDE_CODE_OAUTH_TOKEN`, Claude Code's headless login. `ultrafuzz validate`
+warns when an allowlisted credential is owned by no selected agent, since every
+agent would receive it blank. Use only a credential-free RPC endpoint when an RPC
 URL must remain a global input.
 Do not add unrelated credentials merely to make them available to prompts.

@@ -57,9 +57,17 @@ export class CompatibleClaudeCodeAgent extends StatedFailureClaudeCodeAgent {
     this.opts.settingSources = "user";
     const command = await super.buildCommand(params);
     try {
+      // The command environment is applied last when Smithers spawns, so the
+      // subscription login set on this agent (#1266) has to be carried into it,
+      // or the blanked provider credential would override it.
+      const login = this.opts.env?.CLAUDE_CODE_OAUTH_TOKEN;
       return {
         ...command,
-        env: workflowControlChildEnvironment(command.env, process.env, { agent: "ClaudeAgent" })
+        env: workflowControlChildEnvironment(
+          login === undefined || login === "" ? command.env : { CLAUDE_CODE_OAUTH_TOKEN: login, ...command.env },
+          process.env,
+          { agent: "ClaudeAgent" }
+        )
       };
     } catch (error) {
       await command.cleanup?.();
@@ -100,7 +108,15 @@ function claudeAuthOptions(): ClaudeAuthOptions {
     // ClaudeCodeAgent clears ANTHROPIC_API_KEY so the logged-in subscription (`claude -p`)
     // is used. configDir is always forwarded; without config_dir or ULTRAFUZZ_PROVIDER_HOME_ROOT,
     // resolveProviderHome falls back to $CLAUDE_CONFIG_DIR, then ~/.claude.
-    return { configDir };
+    // On a headless host the subscription is a `claude setup-token` token instead of a login
+    // in the provider home. Every other model child has it blanked (#1266).
+    const token = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    return token === undefined || token === ""
+      ? { configDir }
+      : {
+          configDir,
+          env: { CLAUDE_CODE_OAUTH_TOKEN: workflowControlCredentialValue(token, "CLAUDE_CODE_OAUTH_TOKEN") }
+        };
   }
   throw new Error(`unsupported ClaudeAgent auth mode in ultrafuzz.toml: ${auth}`);
 }

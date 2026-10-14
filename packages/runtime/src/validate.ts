@@ -26,6 +26,13 @@ import { effectiveAuditPolicy } from "./audit-profile-policy.js";
 import { timeoutShadowingDiagnostics } from "./timeout-shadowing.js";
 import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.js";
 import { providerHomeDiagnostics, providerHomeProblems } from "./provider-home-preflight.js";
+import {
+  agentAuthenticationEnvironmentVariableNames,
+  BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES,
+  CLAUDE_SUBSCRIPTION_TOKEN_ENVIRONMENT_VARIABLE,
+  isCredentialLikeEnvironmentVariableName,
+  routeOwnsCredentialLikeEnvironmentVariable
+} from "./provider-credential-environment.js";
 import { promptTextsForCatalog, transformPromptCatalogForRun, transformTopologyForRun } from "./topology-transform.js";
 import {
   configDiagnostics,
@@ -372,6 +379,7 @@ function evaluatePolicies(
   // The adapters refuse an unsafe provider home only once the engine renders the workflow, after
   // planning and the execution snapshot (#1265). Refusing it here fails `run` before either.
   const providerHomes = providerHomeDiagnostics(providerHomeProblems(selectedAgentRefs, config, env));
+  const blankedCredentials = blankedAllowlistedCredentialDiagnostics(selectedAgentRefs, config, env);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -380,7 +388,7 @@ function evaluatePolicies(
         providerHomes.length === 0
           ? "agent references resolve before launch"
           : "agent references resolve, but an agent's provider home would be refused at launch",
-        [...agentRegistry, ...providerHomes]
+        [...agentRegistry, ...providerHomes, ...blankedCredentials]
       ),
       trust: postureFromDiagnostics(
         "trust",
@@ -439,4 +447,46 @@ function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput
     model: input.model,
     reasoning: input.reasoning
   });
+}
+
+/**
+ * An allowlisted variable that looks like a credential reaches only the agent
+ * route that owns it. When no selected agent owns it, every agent receives it
+ * blank, which surfaces only as that agent's own authentication failure. Say
+ * so before launch (#1266).
+ */
+function blankedAllowlistedCredentialDiagnostics(
+  selectedAgentRefs: readonly string[],
+  config: ResolvedConfig,
+  env: Record<string, string | undefined>
+): RuntimeDiagnostic[] {
+  const consumed = new Set(
+    selectedAgentRefs.flatMap((agentRef) => {
+      const agent = config.agents[agentRef];
+      return agent === undefined ? [] : agentAuthenticationEnvironmentVariableNames(agentRef, agent);
+    })
+  );
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const name of new Set((env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",").map((entry) => entry.trim()))) {
+    const upper = name.toUpperCase();
+    if (name === "" || !isCredentialLikeEnvironmentVariableName(upper) || consumed.has(upper)) continue;
+    // A route restores an allowlisted credential under its prefix, but never a
+    // built-in provider credential: only that provider's own configured
+    // authentication restores one, which `consumed` already covers.
+    const builtIn = (BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES as readonly string[]).includes(upper);
+    if (!builtIn && selectedAgentRefs.some((agentRef) => routeOwnsCredentialLikeEnvironmentVariable(agentRef, upper)))
+      continue;
+    diagnostics.push({
+      code: "AGENT_ENV_ALLOWLIST_CREDENTIAL_BLANKED",
+      message:
+        `${name} is in ULTRAFUZZ_AGENT_ENV_ALLOWLIST but looks like a credential that no selected agent uses, ` +
+        "so every agent receives it blank" +
+        (upper === CLAUDE_SUBSCRIPTION_TOKEN_ENVIRONMENT_VARIABLE
+          ? `; ClaudeAgent with auth = "subscription" receives ${CLAUDE_SUBSCRIPTION_TOKEN_ENVIRONMENT_VARIABLE} without the allowlist`
+          : ""),
+      severity: "warning",
+      source: "agents"
+    });
+  }
+  return diagnostics;
 }
