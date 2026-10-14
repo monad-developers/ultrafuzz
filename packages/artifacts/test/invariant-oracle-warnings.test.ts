@@ -109,3 +109,50 @@ test("invariant oracle warnings read only the suite's test sources", () => {
     ["invariant-suite/tests/Handlers.sol"]
   );
 });
+
+// A selector-aware catch ends in an assertion. Checking it must not move the
+// start of the next search past assertions earlier in the file or in later files.
+test("invariant oracle warnings keep finding assertions after a selector-aware catch", () => {
+  const padding = "        uint256 unused = 0;\n".repeat(40);
+  const first = `
+pragma solidity 0.8.24;
+import {MathLib as ML} from "contracts/libraries/MathLib.sol";
+contract Properties {
+    function property_expected() public {
+        assert(observed == ML.mulDiv(a, b, c));
+    }
+    function handler_exit() public {
+        try vault.withdraw(1) returns (uint256) {} catch (bytes memory reason) {
+${padding}            if (bytes4(reason) != Vault.ZeroAmount.selector) assert(false);
+        }
+    }
+}
+`;
+  const second = `
+pragma solidity 0.8.24;
+contract Later {
+    function property_trivial() public {
+        assert(true);
+    }
+}
+`;
+  assert.deepEqual(
+    warningsFor({ "invariant-suite/test/a/Properties.sol": first, "invariant-suite/test/b/Later.sol": second }).map(
+      ({ code, path }) => `${code} ${path}`
+    ),
+    [
+      "INVARIANT_ORACLE_IMPLEMENTATION_CALL invariant-suite/test/a/Properties.sol",
+      "INVARIANT_ORACLE_CONSTANT_TRUE invariant-suite/test/b/Later.sol"
+    ]
+  );
+});
+
+// Recon discards an ordinary revert, so a catch that only rethrows cannot report the failure.
+test("a catch that only rethrows is an oracle warning", () => {
+  const handler =
+    "contract C { function f() public { try vault.withdraw(1) returns (uint256) {} catch { revert(); } } }";
+  assert.deepEqual(
+    warningsFor({ "invariant-suite/test/C.sol": handler }).map(({ code }) => code),
+    ["INVARIANT_ORACLE_BLANKET_CATCH"]
+  );
+});

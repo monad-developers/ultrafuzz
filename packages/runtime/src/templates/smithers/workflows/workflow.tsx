@@ -1612,8 +1612,9 @@ async function deriveAuthoritativeFinalReportWorkflowMetrics(
 }
 
 /**
- * Generated invariant checks that Recon cannot fail (#687), read from the
- * suite the campaign ran. Warnings only: they never fail the node.
+ * Generated invariant checks that match a pattern Recon usually cannot fail
+ * (#687), read from the suite the campaign ran. Warnings only: they never fail
+ * the node.
  */
 function campaignInvariantOracleWarnings(
   task: (typeof taskSpecs)[number],

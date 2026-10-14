@@ -49,7 +49,7 @@ test("report.md drops the warning and scoped coverage sections while report.json
   assert.deepEqual(projectPublicArtifactValidationWarnings(companion.warnings), companion);
 });
 
-test("the warnings companion counts invariant checks that cannot fail apart from metadata warnings (#687)", () => {
+test("the warnings companion counts invariant checks that may not be able to fail apart from other warnings (#687)", () => {
   const oracle = (line: string, code: string) => ({
     code,
     artifact_path: "artifacts/stateful-invariant-campaign/invariant-suite/test/recon/Properties.sol",
@@ -68,10 +68,18 @@ test("the warnings companion counts invariant checks that cannot fail apart from
     renderArtifactValidationWarningsMarkdown([
       oracle("line 12", "INVARIANT_ORACLE_CONSTANT_TRUE"),
       metadata,
-      oracle("line 25", "INVARIANT_ORACLE_REQUIRE_DISCARDED")
+      oracle("line 25", "INVARIANT_ORACLE_REQUIRE_DISCARDED"),
+      // A truncation notice takes the oracle gate of the warning that overflowed, but names no check.
+      {
+        code: "ARTIFACT_VALIDATION_WARNINGS_TRUNCATED",
+        artifact_path: "$",
+        field_path: "$",
+        gate: "invariant-oracle-falsifiability",
+        message: "3 further validation warnings omitted from this summary; producer artifacts remain available"
+      }
     ]),
-    "## Invariant checks that cannot fail (2)\n\n" +
-      "Recon reports only a failed `assert`. These generated checks can never fail, so the properties they encode were not tested, whatever the campaign found.\n\n" +
+    "## Invariant checks that may not be able to fail (2)\n\n" +
+      "Recon reports only a failed `assert`. These generated checks match patterns that usually cannot report a violation. Review each one before reading the campaign's results as clean.\n\n" +
       "- INVARIANT_ORACLE_CONSTANT_TRUE — `artifacts/stateful-invariant-campaign/invariant-suite/test/recon/Properties.sol#line 12`: " +
       "assert(...) is true whatever the target does, so it can never report a violation\n" +
       "- INVARIANT_ORACLE_REQUIRE_DISCARDED — `artifacts/stateful-invariant-campaign/invariant-suite/test/recon/Properties.sol#line 25`: " +
@@ -79,7 +87,9 @@ test("the warnings companion counts invariant checks that cannot fail apart from
       "## Artifact validation warnings\n\n" +
       "The run continued with partial metadata. Producer artifacts were preserved unchanged.\n\n" +
       "- ARTIFACT_OPTIONAL_METADATA_MISSING — `artifacts/dedupe/strategy-detections.json#$[5].family_id`: " +
-      "Optional metadata is missing; the original artifact is accepted unchanged\n"
+      "Optional metadata is missing; the original artifact is accepted unchanged\n" +
+      "- ARTIFACT_VALIDATION_WARNINGS_TRUNCATED — `$#$`: " +
+      "3 further validation warnings omitted from this summary; producer artifacts remain available\n"
   );
 });
 

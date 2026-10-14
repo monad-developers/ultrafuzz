@@ -3,17 +3,20 @@ import path from "node:path";
 import type { ArtifactValidationWarning } from "./artifact-validation.js";
 
 /**
- * The gate that names a generated invariant check Recon cannot fail (#687).
+ * The gate that names a generated invariant check that may not be able to
+ * fail under Recon (#687).
  * Recon runs in assertion mode: only a failed `assert` is a finding, and a
  * call that reverts for any other reason is discarded. These warnings never
- * fail a node; they make a suite that cannot fail visible in the report.
+ * fail a node; they mark checks for review in the report.
  */
 export const INVARIANT_ORACLE_GATE = "invariant-oracle-falsifiability" as const;
 
 const SUITE_PREFIX = "invariant-suite/";
 const TEST_ROOTS = ["test/", "tests/"] as const;
 const PRODUCTION_ROOTS = ["src/", "contracts/"] as const;
-const ASSERTION_CALLS = /\b(assert|assertTrue|assertEq|assertLe|assertLt|assertGe|assertGt|t|eq|gt|gte|lt|lte)\s*\(/gu;
+// A source, not a shared RegExp: a global matcher keeps `lastIndex` between
+// uses, and `matchAll` starts from it, which would skip earlier assertions.
+const ASSERTION_CALL_SOURCE = String.raw`\b(assert|assertTrue|assertEq|assertLe|assertLt|assertGe|assertGt|t|eq|gt|gte|lt|lte)\s*\(`;
 // Receivers whose calls are cheatcodes, encoding or logging rather than the target.
 const NON_TARGET_RECEIVERS = new Set(["abi", "vm", "hevm", "console", "console2", "string", "bytes", "type", "super"]);
 
@@ -110,8 +113,9 @@ function blanketCatches(source: SoliditySource): Finding[] {
     const close = matchingBrace(source.text, open);
     if (close === undefined) continue;
     const body = source.text.slice(open + 1, close);
-    ASSERTION_CALLS.lastIndex = 0;
-    if (ASSERTION_CALLS.test(body) || /\brevert\b/u.test(body)) continue;
+    // Rethrowing is no exception: Recon discards an ordinary revert, so only an
+    // assertion in the catch can report the failure.
+    if (new RegExp(ASSERTION_CALL_SOURCE, "u").test(body)) continue;
     findings.push({
       code: "INVARIANT_ORACLE_BLANKET_CATCH",
       offset: match.index,
@@ -133,7 +137,7 @@ function implementationCallsInAssertions(source: SoliditySource): Finding[] {
       findings.push({
         code: "INVARIANT_ORACLE_IMPLEMENTATION_CALL",
         offset: call.offset,
-        message: `${call.name}(...) computes its expected value with ${alias}.${match[2] ?? ""} from the code under test, so it agrees with the implementation by construction`
+        message: `${call.name}(...) computes its expected value with ${alias}.${match[2] ?? ""} from the code under test, so it may agree with the implementation by construction; check that the expected value is independent`
       });
       break;
     }
@@ -167,7 +171,7 @@ function productionImportAliases(source: SoliditySource): Set<string> {
 
 function assertionCalls(text: string): Array<{ name: string; args: string; offset: number }> {
   const calls: Array<{ name: string; args: string; offset: number }> = [];
-  for (const match of text.matchAll(ASSERTION_CALLS)) {
+  for (const match of text.matchAll(new RegExp(ASSERTION_CALL_SOURCE, "gu"))) {
     // `x.assert(` or `function t(` is not an assertion call.
     const before = text.slice(Math.max(0, match.index - 9), match.index);
     if (/\.\s*$/u.test(before) || /\bfunction\s+$/u.test(before)) continue;

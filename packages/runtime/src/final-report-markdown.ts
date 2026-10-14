@@ -921,28 +921,38 @@ export function projectPublicArtifactValidationWarnings(warnings: readonly Artif
 function appendArtifactValidationWarnings(lines: string[], value: unknown): void {
   if (!Array.isArray(value) || value.length === 0) return;
   const warnings = value.filter(isRecord);
-  appendInvariantOracleWarnings(
-    lines,
-    warnings.filter((warning) => warning.gate === INVARIANT_ORACLE_GATE)
-  );
+  appendInvariantOracleWarnings(lines, warnings.filter(isInvariantOracleWarning));
   appendGenericValidationWarnings(
     lines,
-    warnings.filter((warning) => warning.gate !== INVARIANT_ORACLE_GATE)
+    warnings.filter((warning) => !isInvariantOracleWarning(warning))
   );
 }
 
 /**
- * Generated invariant checks that Recon cannot fail (#687). A campaign with no
- * findings is clean only if its checks could have failed, so they are counted
- * apart from metadata warnings.
+ * A finding of the invariant oracle checks. A truncation notice can carry the
+ * oracle gate (it takes the gate of the warning that overflowed) but names no
+ * check, so it stays with the other warnings and out of the count.
+ */
+function isInvariantOracleWarning(warning: Record<string, unknown>): boolean {
+  return (
+    warning.gate === INVARIANT_ORACLE_GATE &&
+    typeof warning.code === "string" &&
+    warning.code.startsWith("INVARIANT_ORACLE_")
+  );
+}
+
+/**
+ * Generated invariant checks that match a pattern Recon usually cannot fail
+ * (#687). The checks are heuristics over source text, so each one needs review
+ * rather than proving its property untested.
  */
 function appendInvariantOracleWarnings(lines: string[], warnings: readonly Record<string, unknown>[]): void {
   if (warnings.length === 0) return;
   lines.push(
     "",
-    `## Invariant checks that cannot fail (${String(warnings.length)})`,
+    `## Invariant checks that may not be able to fail (${String(warnings.length)})`,
     "",
-    "Recon reports only a failed `assert`. These generated checks can never fail, so the properties they encode were not tested, whatever the campaign found.",
+    "Recon reports only a failed `assert`. These generated checks match patterns that usually cannot report a violation. Review each one before reading the campaign's results as clean.",
     ""
   );
   for (const warning of warnings) appendValidationWarningLine(lines, warning);
