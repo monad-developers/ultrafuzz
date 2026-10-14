@@ -52,7 +52,7 @@ import {
   finishInterruptedDynamicExpansionRetry,
   planDynamicExpansionRetryArchive
 } from "./dynamic-expansion-retry.js";
-import { reconcilesPartialResults } from "./dynamic-runtime.js";
+import { applyDependencyFailurePolicy, reconcilesPartialResults } from "./dynamic-runtime.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -3466,39 +3466,14 @@ export function renderCurrentSmithersController(input: {
       return defaults.failure_policy === "continue" ? [groupId] : [];
     })
   );
-  const allPolicyTasks = [
-    ...baseTaskDocument.tasks,
-    ...(baseTaskDocument.dynamic_groups ?? []).flatMap((group) => group.taskTemplates)
-  ];
-  const producerGroupByArtifactDir = new Map(
-    allPolicyTasks.map((task) => [path.resolve(task.artifactDir), task.metadata.node.group] as const)
+  const { tasks, groups: dynamicGroups } = applyDependencyFailurePolicy(
+    baseTaskDocument.tasks,
+    baseTaskDocument.dynamic_groups ?? [],
+    nonBlockingGroupIds
   );
-  const applyCurrentDependencyPolicy = (
-    candidates: readonly SmithersTaskManifestTask[]
-  ): SmithersTaskManifestTask[] => {
-    return candidates.map((task) => {
-      const optional = new Set((task.optionalDependencyArtifactDirs ?? []).map((directory) => path.resolve(directory)));
-      for (const directory of task.dependencyArtifactDirs) {
-        const producerGroup = producerGroupByArtifactDir.get(path.resolve(directory));
-        if (
-          producerGroup !== undefined &&
-          nonBlockingGroupIds.has(producerGroup) &&
-          reconcilesPartialResults(task, producerGroup)
-        ) {
-          optional.add(path.resolve(directory));
-        }
-      }
-      return { ...task, optionalDependencyArtifactDirs: [...optional] };
-    });
-  };
-  const tasks = applyCurrentDependencyPolicy(baseTaskDocument.tasks);
   const nonBlockingAttempts = new Set(
     tasks.flatMap((task) => (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory)))
   );
-  const dynamicGroups = (baseTaskDocument.dynamic_groups ?? []).map((group) => ({
-    ...group,
-    taskTemplates: applyCurrentDependencyPolicy(group.taskTemplates)
-  }));
   for (const task of tasks) {
     const groupId = task.metadata.node.group;
     if (groupId !== undefined && nonBlockingGroupIds.has(groupId)) nonBlockingAttempts.add(task.attemptId);

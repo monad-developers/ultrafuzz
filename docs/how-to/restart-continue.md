@@ -66,6 +66,13 @@ workflow is not refreshed. Accepting changed workflow source transfers replay
 determinism responsibility to Smithers and the operator; review the retained
 source and Smithers workflow hash when that distinction matters.
 
+For dynamic runs, refresh restores optional cross-group inputs from the failure
+policy already recorded in the run's sealed graph. Existing runtime records stay
+readable before refresh, and unchanged task templates keep their original form.
+Refresh does not adopt later topology changes: start a new run to use a changed
+group failure policy, including the exhaustive profile's updated
+`property-catalog` policy.
+
 A run keeps the artifact schemas it was planned with, with or without
 `--refresh-controller`. After an upgrade that changes a schema, its tasks copy,
 validate against, and preflight their validator with the bundle sealed in the
