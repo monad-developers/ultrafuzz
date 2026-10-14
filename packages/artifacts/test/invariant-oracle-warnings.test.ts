@@ -52,6 +52,50 @@ test("a falsifiable invariant suite produces no oracle warnings (#687)", () => {
   assert.deepEqual(warningsFor({ "invariant-suite/test/recon/TargetFunctions.sol": FALSIFIABLE_SUITE }), []);
 });
 
+test("constant comparisons preserve string literals and ignore punctuation inside them", () => {
+  const source = `contract Properties {
+    function property_strings() public {
+        assert(keccak256("a") == keccak256("b"));
+        assertEq("a b", "ab");
+        assertEq("a,b", "a)c");
+        assertEq("assert(true)", "assert(false)");
+        assertEq("a\\"b", "a\\"c");
+        assertEq('a', 'b');
+        assert(keccak256("same") == keccak256("same"));
+        assertEq("a,b", "a,b");
+    }
+}`;
+  assert.deepEqual(
+    warningsFor({ "invariant-suite/test/Properties.sol": source }).map(({ code, line }) => ({ code, line })),
+    [
+      { code: "INVARIANT_ORACLE_CONSTANT_TRUE", line: "line 9" },
+      { code: "INVARIANT_ORACLE_CONSTANT_TRUE", line: "line 10" }
+    ]
+  );
+});
+
+test("production implementation imports support either Solidity quote style", () => {
+  for (const quote of ['"', "'"]) {
+    const source = `import {MathLib as ML} from ${quote}contracts/MathLib.sol${quote};
+import * as Math from ${quote}../src/Math.sol${quote};
+import {Test} from ${quote}forge-std/Test.sol${quote};
+contract Properties {
+    function property_expected() public {
+        assert(observed == ML.f(x));
+        assertEq(observed, Math.f(x));
+        assertEq(observed, Test.f(x));
+    }
+}`;
+    assert.deepEqual(
+      warningsFor({ "invariant-suite/test/Properties.sol": source }).map(({ code, line }) => ({ code, line })),
+      [
+        { code: "INVARIANT_ORACLE_IMPLEMENTATION_CALL", line: "line 6" },
+        { code: "INVARIANT_ORACLE_IMPLEMENTATION_CALL", line: "line 7" }
+      ]
+    );
+  }
+});
+
 test("invariant oracle warnings name each check Recon cannot fail (#687)", () => {
   const properties = `
 pragma solidity 0.8.24;

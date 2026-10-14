@@ -24,7 +24,7 @@ interface SoliditySource {
   path: string;
   /** Comments and string contents blanked, for reading code. */
   text: string;
-  /** Comments blanked and strings kept, for reading import paths. */
+  /** Comments blanked and strings kept, for import paths and expression identity. */
   withStrings: string;
 }
 
@@ -68,14 +68,15 @@ interface Finding {
 function constantTrueAssertions(source: SoliditySource): Finding[] {
   const findings: Finding[] = [];
   for (const call of assertionCalls(source.text)) {
-    const args = splitTopLevel(call.args);
-    const first = args[0]?.replace(/\s+/gu, "") ?? "";
+    const rawArgs = source.withStrings.slice(call.argsOffset, call.argsOffset + call.args.length);
+    const args = splitTopLevel(call.args, rawArgs).map(expressionIdentity);
+    const first = args[0] ?? "";
     const literalTrue = ["assert", "assertTrue", "t"].includes(call.name) && /^(true|!false|\(true\))$/u.test(first);
     const sameOperands =
       ["assertEq", "eq", "assertLe", "assertGe", "lte", "gte"].includes(call.name) &&
       args.length >= 2 &&
       first !== "" &&
-      first === args[1]?.replace(/\s+/gu, "");
+      first === args[1];
     const selfComparison = call.name === "assert" && /^(.+)(==|<=|>=)\1$/u.test(first);
     if (literalTrue || sameOperands || selfComparison) {
       findings.push({
@@ -149,8 +150,8 @@ function implementationCallsInAssertions(source: SoliditySource): Finding[] {
 function productionImportAliases(source: SoliditySource): Set<string> {
   const aliases = new Set<string>();
   const directory = path.posix.dirname(source.path);
-  for (const match of source.withStrings.matchAll(/\bimport\s+([^;]*?)\s+from\s+"([^"]+)"\s*;/gu)) {
-    const target = match[2] ?? "";
+  for (const match of source.withStrings.matchAll(/\bimport\s+([^;]*?)\s+from\s+(["'])([^"']+)\2\s*;/gu)) {
+    const target = match[3] ?? "";
     const resolved = target.startsWith(".") ? path.posix.normalize(path.posix.join(directory, target)) : target;
     if (!PRODUCTION_ROOTS.some((root) => resolved.startsWith(root))) continue;
     const clause = match[1] ?? "";
@@ -169,8 +170,8 @@ function productionImportAliases(source: SoliditySource): Set<string> {
   return aliases;
 }
 
-function assertionCalls(text: string): Array<{ name: string; args: string; offset: number }> {
-  const calls: Array<{ name: string; args: string; offset: number }> = [];
+function assertionCalls(text: string): Array<{ name: string; args: string; argsOffset: number; offset: number }> {
+  const calls: Array<{ name: string; args: string; argsOffset: number; offset: number }> = [];
   for (const match of text.matchAll(new RegExp(ASSERTION_CALL_SOURCE, "gu"))) {
     // `x.assert(` or `function t(` is not an assertion call.
     const before = text.slice(Math.max(0, match.index - 9), match.index);
@@ -178,7 +179,7 @@ function assertionCalls(text: string): Array<{ name: string; args: string; offse
     const open = match.index + match[0].length - 1;
     const close = matchingParen(text, open);
     if (close === undefined) continue;
-    calls.push({ name: match[1] ?? "", args: text.slice(open + 1, close), offset: match.index });
+    calls.push({ name: match[1] ?? "", args: text.slice(open + 1, close), argsOffset: open + 1, offset: match.index });
   }
   return calls;
 }
@@ -208,7 +209,7 @@ function firstTargetCall(body: string): number | undefined {
   return undefined;
 }
 
-function splitTopLevel(args: string): string[] {
+function splitTopLevel(args: string, rawArgs: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
@@ -217,12 +218,19 @@ function splitTopLevel(args: string): string[] {
     if (char === "(" || char === "[" || char === "{") depth += 1;
     else if (char === ")" || char === "]" || char === "}") depth -= 1;
     else if (char === "," && depth === 0) {
-      parts.push(args.slice(start, index));
+      parts.push(rawArgs.slice(start, index));
       start = index + 1;
     }
   }
-  parts.push(args.slice(start));
+  parts.push(rawArgs.slice(start));
   return parts;
+}
+
+/** Keep literal identity and hide its punctuation before comparing normalized code. */
+function expressionIdentity(expression: string): string {
+  return expression
+    .replace(STRING_OR_COMMENT, (literal) => `"${Buffer.from(literal).toString("hex")}"`)
+    .replace(/\s+/gu, "");
 }
 
 function matchingBrace(text: string, open: number): number | undefined {
