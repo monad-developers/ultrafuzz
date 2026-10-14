@@ -793,7 +793,7 @@ export async function synchronizeLinkedWorkflowRun(
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const nonBlockingNodeIds = requiresCompleteRun(evidence)
     ? new Set<string>()
-    : new Set([...nonBlockingRuntimeNodeIds(loaded.graph), ...withheldReportNodeIds(readRunState(layout).nodes)]);
+    : nonBlockingRuntimeNodeIds(loaded.graph);
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
       code: "WORKFLOW_TASK_EVIDENCE_MISSING",
@@ -4945,8 +4945,8 @@ function producesFinalReport(node: PlannedGraphNode): boolean {
 }
 
 /**
- * Report tasks whose output the secret gate rejected. The run withholds that
- * report instead of failing; `resume --retry-failed` generates it again (#1217).
+ * Report tasks whose output the secret gate rejected. The rejected draft stays
+ * unavailable until `resume --retry-failed` generates it again (#1217).
  */
 function withheldReportNodeIds(nodes: Readonly<Record<string, NodeState>>): ReadonlySet<string> {
   return new Set(

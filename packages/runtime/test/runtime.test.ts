@@ -11189,12 +11189,7 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
     { attemptId: "direct-strategy", verifierId: "verify:direct-strategy", optional: false },
     { attemptId: "optional-specialist", verifierId: "verify:optional-specialist", optional: true }
   ]);
-  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 2);
-  // The report verifier also tolerates failure, so a secret-gate rejection withholds the report (#1217).
-  assert.equal(
-    workflowSource.match(/continueOnFail=\{task\.continueOnFail \|\| producesFinalReport\(task\)\}/gu)?.length,
-    1
-  );
+  assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
 });
 
 test("current-controller rendering preserves prompts idempotently and continue policy for a leaf task", async () => {
@@ -19831,15 +19826,15 @@ test("syncRun publishes a report after a resumed report agent succeeds", async (
 });
 
 for (const variant of ["secret-gate", "other-verifier-failure", "require-complete"] as const) {
-  test(`syncRun withholds a report the secret gate rejects instead of failing the run (#1217, ${variant})`, async () => {
+  test(`syncRun records secret-gate rejection without changing completion policy (#1217, ${variant})`, async () => {
     const { readReportPublicationStatus } = await import("../src/report-publication-status.js");
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
     writeSingleFinalReportTopology(project);
     const runId = `sync-withheld-report-${variant}`;
     const workflowRunId = `ultrafuzz-${runId}`;
-    // The verifier task tolerates failure, so the runner ends the run
-    // succeeded-with-failures whatever rejected the report.
+    // Even a runner that tolerated the wrapper failure must not override
+    // this required report node's failed completion status.
     const verifierError =
       variant === "other-verifier-failure"
         ? { name: "Error", message: "artifact-contract failure: report parity failed" }
@@ -19904,12 +19899,12 @@ for (const variant of ["secret-gate", "other-verifier-failure", "require-complet
       ),
       JSON.stringify(sync.diagnostics)
     );
-    // Strict completion still treats the missing report as an unsuccessful run.
+    assert.equal(sync.value?.status, "failed", JSON.stringify(sync.diagnostics));
+    // Both default and strict completion retain the report node's failure.
     if (variant === "require-complete") {
       assert.equal(sync.value?.status, "failed");
       return;
     }
-    assert.equal(sync.value?.status, "succeeded", JSON.stringify(sync.diagnostics));
 
     // `resume --retry-failed` reruns the report task; its accepted output is published.
     const recoveredEnv = fakeLifecycleSmithersEnv(project, {

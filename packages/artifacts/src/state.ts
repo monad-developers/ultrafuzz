@@ -143,7 +143,7 @@ export const NODE_PROVENANCE_FAILURE_CATEGORIES = [
 /**
  * Why a failed task failed, where the category alone does not say enough to
  * act on. ARTIFACT_SECRET_GATE_REJECTED: the verifier's secret gate refused to
- * publish the final report, which the run withholds rather than fail on (#1217).
+ * publish the final report, whose rejected draft must remain unavailable (#1217).
  */
 export const NODE_FAILURE_REASON_CODES = ["ARTIFACT_SECRET_GATE_REJECTED"] as const;
 

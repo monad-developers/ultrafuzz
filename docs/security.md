@@ -56,8 +56,12 @@ itself:
   backslash escapes, or broken across lines; a deliberate encoding such as
   base64 is not. The run credentials are the values of variables named like
   credentials, the configured `api_key_env` variables, and the
-  `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` variables whose values hold a credential. The final report is the exception to failing: a report the
-  gate rejects is withheld, and the run ends as it would have without it.
+  `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` variables recognized as sensitive by name or
+  value. Unrecognized credential formats in ordinary variable names are not
+  included automatically in the exact-value scan.
+  A rejected final-report draft stays unavailable even after the credential
+  that matched it is unset or rotated; generate a fresh report with
+  `ultrafuzz resume <run-id> --retry-failed`.
   Exact-value substring matching ignores credentials shorter than eight
   characters to avoid rejecting unrelated content on collision-prone values.
 - Materialization requires explicit selected copies and confirmation. Patch
