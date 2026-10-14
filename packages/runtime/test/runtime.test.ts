@@ -6748,7 +6748,7 @@ for (const adapter of ["Claude", "DeepSeek"] as const) {
 }
 
 bunAdapterTest(
-  "generated subscription Claude adapter receives the setup-token login no other model child sees (#1266)",
+  "generated Claude adapters isolate subscription and API-key credentials (#1266)",
   { timeout: 30_000 },
   async () => {
     const project = tempProject();
@@ -6766,13 +6766,17 @@ bunAdapterTest(
     };
     const token = "sk-ant-oat01-headless-setup-token-fixture";
     const saved = {
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
       ULTRAFUZZ_CONFIG_PATH: process.env.ULTRAFUZZ_CONFIG_PATH,
       ULTRAFUZZ_PROVIDER_HOME_ROOT: process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT
     };
     process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    process.env.ANTHROPIC_API_KEY = "anthropic-api-key-fixture";
     process.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "ultrafuzz.toml");
-    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = path.join(project, ".ultrafuzz", "provider-homes");
+    // initProject's .ultrafuzz directory follows the umask and can be group writable.
+    // Keep the provider home directly under the private temporary project instead.
+    process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = path.join(project, "provider-homes");
     try {
       const command = await createClaudeAgent({ model: "claude-opus-4-8" }).buildCommand({
         prompt: "Contract only",
@@ -6781,6 +6785,7 @@ bunAdapterTest(
       });
       try {
         assert.equal(command.env?.CLAUDE_CODE_OAUTH_TOKEN, token);
+        assert.equal(command.env?.ANTHROPIC_API_KEY, "");
       } finally {
         await command.cleanup?.();
       }
@@ -6796,6 +6801,27 @@ bunAdapterTest(
         assert.equal(child.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, "", agent);
       }
       assert.equal(workflowControlChildEnvironment({}, source).CLAUDE_CODE_OAUTH_TOKEN, "");
+
+      const configPath = process.env.ULTRAFUZZ_CONFIG_PATH;
+      const config = fs.readFileSync(configPath, "utf8");
+      const apiKeyConfig = config.replace(
+        /(\[agents\.ClaudeAgent\][\s\S]*?)^auth = "subscription"/mu,
+        '$1auth = "api-key"'
+      );
+      assert.notEqual(apiKeyConfig, config);
+      fs.writeFileSync(configPath, apiKeyConfig);
+      const apiKeyCommand = await createClaudeAgent().buildCommand({
+        prompt: "Contract only",
+        cwd: project,
+        options: {}
+      });
+      try {
+        assert.equal(apiKeyCommand.env?.ANTHROPIC_API_KEY, "anthropic-api-key-fixture");
+        assert.equal(apiKeyCommand.env?.CLAUDE_CODE_OAUTH_TOKEN, "");
+        assert.equal(apiKeyCommand.env?.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, "");
+      } finally {
+        await apiKeyCommand.cleanup?.();
+      }
     } finally {
       for (const [name, value] of Object.entries(saved)) {
         if (value === undefined) Reflect.deleteProperty(process.env, name);
@@ -14647,12 +14673,12 @@ test("startRun forwards only the configured DeepSeek API key for DeepSeek runs",
   assert.equal(fs.readFileSync(deepSeekEnvironmentLog, "utf8"), "deepseek-agent-key|\n");
 });
 
-test("startRun forwards the Claude setup-token login only to subscription Claude runs (#1266)", async () => {
+test("startRun and resumeRun forward the current Claude setup-token login only to subscription runs (#1266)", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const claudeEnvironmentLog = path.join(project, "smithers-claude-environment.log");
-  const env = {
+  const env: Record<string, string | undefined> = {
     ...fakeSmithersEnv(project),
     SMITHERS_FAKE_CLAUDE_ENV_LOG: claudeEnvironmentLog,
     CLAUDE_CODE_OAUTH_TOKEN: "claude-setup-token-login"
@@ -14668,6 +14694,32 @@ test("startRun forwards the Claude setup-token login only to subscription Claude
   });
   assert.equal(claude.ok, true, JSON.stringify(claude.diagnostics));
   assert.equal(fs.readFileSync(claudeEnvironmentLog, "utf8"), "claude-setup-token-login|CLAUDE_CODE_OAUTH_TOKEN\n");
+
+  setFakeSmithersInspectState(project, "paused");
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "claude-subscription-token",
+    env: {
+      ...env,
+      CLAUDE_CODE_OAUTH_TOKEN: "rotated-claude-setup-token-login",
+      ULTRAFUZZ_AGENT_ENV_ALLOWLIST: `${env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST},CLAUDE_CODE_OAUTH_TOKEN`
+    }
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.equal(
+    fs.readFileSync(claudeEnvironmentLog, "utf8"),
+    "rotated-claude-setup-token-login|CLAUDE_CODE_OAUTH_TOKEN\n"
+  );
+
+  const withoutToken = await resumeRun({
+    projectRoot: project,
+    runId: "claude-subscription-token",
+    env: { ...env, CLAUDE_CODE_OAUTH_TOKEN: undefined }
+  });
+  assert.equal(withoutToken.ok, true, JSON.stringify(withoutToken.diagnostics));
+  assert.equal(withoutToken.value?.submitted, true);
+  assert.equal(fs.readFileSync(claudeEnvironmentLog, "utf8"), "|CLAUDE_CODE_OAUTH_TOKEN\n");
 
   // A run without a subscription Claude agent never receives it.
   const codex = await startRun({ projectRoot: project, runId: "codex-ignores-claude-token", agent: "CodexAgent", env });
