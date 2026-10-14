@@ -130,6 +130,33 @@ warning-bearing artifact is not proof of complete audit coverage or analysis
 quality. Missing required evidence or a final classification still blocks
 admission; the runtime must not invent it to make an artifact valid.
 
+The invariant campaign also reports generated checks that cannot fail, under
+the gate `invariant-oracle-falsifiability` (#687). Recon runs in assertion
+mode, so only a failed `assert` is a finding; a call that reverts for any other
+reason, including a failed `require`, a custom error, or an arithmetic panic,
+is discarded. The verifier reads the test sources of the suite the campaign
+ran (`test/` and `tests/`, never production code) and warns about:
+
+- `INVARIANT_ORACLE_CONSTANT_TRUE`: an assertion that is true whatever the
+  target does, such as `assert(true)` or `assertEq(x, x)`.
+- `INVARIANT_ORACLE_REQUIRE_DISCARDED`: a `require` after a call made for its
+  effect, which checks an outcome Recon then discards.
+- `INVARIANT_ORACLE_BLANKET_CATCH`: a `catch` that asserts nothing, so it
+  accepts every failure. Rethrowing does not count, because Recon discards the
+  rethrown revert. A liveness check catches the error, accepts only the
+  selectors the property catalog documents, and calls `assert(false)` for any
+  other.
+- `INVARIANT_ORACLE_IMPLEMENTATION_CALL`: an assertion that computes its
+  expected value with a library or contract imported from `src/` or
+  `contracts/`, so it may agree with the implementation by construction.
+
+These warnings never fail the campaign. The finding dedupe node carries them to
+the final report, whose warnings companion lists them first under "Invariant
+checks that may not be able to fail", with their count. They are heuristics
+over source text: a check can fail to be flagged, and a flagged line can be a
+deliberate choice, so each one needs review rather than proving its property
+untested.
+
 The following agent-output fields are optional:
 
 - Findings, triaged findings, and severity-classified findings: `confidence`

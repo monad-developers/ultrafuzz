@@ -6,6 +6,7 @@ import {
   assertRegularFileInside,
   artifactValidationWarningsSchema,
   ESTIMATED_SPEND_PATTERN,
+  INVARIANT_ORACLE_GATE,
   parseStrictJsonBytes,
   readRegularFileSnapshot,
   reportCompletionSchema,
@@ -922,6 +923,46 @@ export function projectPublicArtifactValidationWarnings(warnings: readonly Artif
 
 function appendArtifactValidationWarnings(lines: string[], value: unknown): void {
   if (!Array.isArray(value) || value.length === 0) return;
+  const warnings = value.filter(isRecord);
+  appendInvariantOracleWarnings(lines, warnings.filter(isInvariantOracleWarning));
+  appendGenericValidationWarnings(
+    lines,
+    warnings.filter((warning) => !isInvariantOracleWarning(warning))
+  );
+}
+
+/**
+ * A finding of the invariant oracle checks. A truncation notice can carry the
+ * oracle gate (it takes the gate of the warning that overflowed) but names no
+ * check, so it stays with the other warnings and out of the count.
+ */
+function isInvariantOracleWarning(warning: Record<string, unknown>): boolean {
+  return (
+    warning.gate === INVARIANT_ORACLE_GATE &&
+    typeof warning.code === "string" &&
+    warning.code.startsWith("INVARIANT_ORACLE_")
+  );
+}
+
+/**
+ * Generated invariant checks that match a pattern Recon usually cannot fail
+ * (#687). The checks are heuristics over source text, so each one needs review
+ * rather than proving its property untested.
+ */
+function appendInvariantOracleWarnings(lines: string[], warnings: readonly Record<string, unknown>[]): void {
+  if (warnings.length === 0) return;
+  lines.push(
+    "",
+    `## Invariant checks that may not be able to fail (${String(warnings.length)})`,
+    "",
+    "Recon reports only a failed `assert`. These generated checks match patterns that usually cannot report a violation. Review each one before reading the campaign's results as clean.",
+    ""
+  );
+  for (const warning of warnings) appendValidationWarningLine(lines, warning);
+}
+
+function appendGenericValidationWarnings(lines: string[], warnings: readonly Record<string, unknown>[]): void {
+  if (warnings.length === 0) return;
   lines.push(
     "",
     "## Artifact validation warnings",
@@ -929,14 +970,16 @@ function appendArtifactValidationWarnings(lines: string[], value: unknown): void
     "The run continued with partial metadata. Producer artifacts were preserved unchanged.",
     ""
   );
-  for (const warning of value.filter(isRecord)) {
-    // Codes render as plain text. Only `](` is escaped, so the bytes of real gate codes do not change.
-    const code = inlineValue(warning.code).replaceAll("](", "]\\(");
-    lines.push(
-      `- ${code} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
-    );
-    if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
-  }
+  for (const warning of warnings) appendValidationWarningLine(lines, warning);
+}
+
+function appendValidationWarningLine(lines: string[], warning: Record<string, unknown>): void {
+  // Codes render as plain text. Only `](` is escaped, so the bytes of real gate codes do not change.
+  const code = inlineValue(warning.code).replaceAll("](", "]\\(");
+  lines.push(
+    `- ${code} — \`${inlineValue(warning.artifact_path)}#${inlineValue(warning.field_path)}\`: ${publicProse(String(warning.message))}`
+  );
+  if (warning.source_path !== undefined) lines.push(`  - Available context: \`${inlineValue(warning.source_path)}\``);
 }
 
 /** The coverage producer's canonical section; report.md no longer renders it. */

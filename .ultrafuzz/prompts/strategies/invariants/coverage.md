@@ -66,9 +66,11 @@ Apply these Recon/Chimera rules:
   failure behavior. Repair each entry that lacks a documented dependency or
   property-scoped expected-revert reason, then rebuild and rerun the bounded
   Recon smoke before collecting coverage.
-- Every reached protocol revert, panic, or out-of-gas failure remains part of
-  the coverage evidence. Keep the target call direct, retain its raw failure,
-  and record the documented precondition that selected the call.
+- Keep each target call direct and record the documented precondition that
+  selected it. Recon runs in assertion mode and discards a call that reverts
+  without a failed `assert`, so a revert shows in coverage only as code that
+  was reached; it is never a finding. Report a call that keeps reverting as a
+  reachability gap, not as evidence that a property was checked.
 - Confirm Recon, `recon-generate`, and `covg-eval` inputs and flags with their
   official documentation or direct CLI `--help`. Run only allowlisted workspace
   commands, optionally wrapped directly by `timeout`; do not probe `lcov` as a

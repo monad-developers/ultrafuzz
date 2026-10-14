@@ -26,6 +26,8 @@ import {
   artifactValidationWarnings,
   boundArtifactValidationWarnings,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+  INVARIANT_ORACLE_GATE,
+  invariantOracleWarnings,
   installedArtifactSchemaBundle,
   materializePromptSchemas,
   MAX_PROPERTY_CAMPAIGN_EVIDENCE_FILES,
@@ -1657,6 +1659,8 @@ function loadVerifyArtifactsHarness(
   };
   publications: Map<string, Buffer>;
   markerWrites: unknown[];
+  dependencyChangesByTask: Map<string, { changed_path_count: number; changed_paths: string[] }>;
+  dependencyHydrationUnavailableByTask: Map<string, string>;
   clearedMarkers: string[];
   authenticatedDependencyChecks: Array<{ consumerAttemptId: string; dependency: string }>;
 } {
@@ -1845,6 +1849,9 @@ function loadVerifyArtifactsHarness(
     "sensitiveEnvironmentValues",
     "publishVerifiedArtifacts",
     "writeArtifactVerificationMarker",
+    "invariantOracleWarnings",
+    "INVARIANT_ORACLE_GATE",
+    "dependencyArtifactAdmissionsByTask",
     "taskPublishesWorkspacePatch",
     "declaredAncestorOutputsByContract",
     "declaredFinalReportOutputPair",
@@ -1857,7 +1864,7 @@ function loadVerifyArtifactsHarness(
     "CANONICAL_PROPERTIES_MARKDOWN_CONVENTIONAL_PATH",
     "canonicalPropertiesMarkdownParityIssues",
     "validatePropertiesSchema",
-    `${emitted}; return { captureTaskOutputs, verifyArtifacts };`
+    `${emitted}; return { captureTaskOutputs, verifyArtifacts, dependencyChangesByTask, dependencyHydrationUnavailableByTask };`
   )(
     path,
     fs.realpathSync,
@@ -1935,6 +1942,9 @@ function loadVerifyArtifactsHarness(
       markerWrites.push(args);
       return { marker_sha256: "f".repeat(64), size_bytes: 123 };
     },
+    invariantOracleWarnings,
+    INVARIANT_ORACLE_GATE,
+    new Map(),
     (task: VerifyArtifactsTask) =>
       task.outputs.some((output) => output.path === "workspace.patch" && output.contract === "ultrafuzz/text@1") &&
       task.outputs.some(
@@ -1958,6 +1968,10 @@ function loadVerifyArtifactsHarness(
   ) as {
     captureTaskOutputs: ReturnType<typeof loadVerifyArtifactsHarness>["captureTaskOutputs"];
     verifyArtifacts: ReturnType<typeof loadVerifyArtifactsHarness>["verifyArtifacts"];
+    dependencyChangesByTask: ReturnType<typeof loadVerifyArtifactsHarness>["dependencyChangesByTask"];
+    dependencyHydrationUnavailableByTask: ReturnType<
+      typeof loadVerifyArtifactsHarness
+    >["dependencyHydrationUnavailableByTask"];
   };
   return { ...factory, publications, markerWrites, clearedMarkers, authenticatedDependencyChecks };
 }
@@ -2125,12 +2139,18 @@ test("1091: generated verifier publishes 41 detections with six family omissions
     fs.writeFileSync(path.join(dedupeDir, "strategies.json"), JSON.stringify(detections));
     fs.writeFileSync(path.join(dedupeDir, "lifecycle.json"), JSON.stringify(lifecycle));
     const harness = loadVerifyArtifactsHarness({ taskSpecs: [rawTask, task], authenticatedDependencyDirs: [rawDir] });
+    // Both warning aggregation (#1296) and dependency diagnostics (#1287) reach the same marker.
+    const dependencyChanges = { changed_path_count: 1, changed_paths: ["lib/dependency/Contract.sol"] };
+    harness.dependencyChangesByTask.set(task.attemptId, dependencyChanges);
+    harness.dependencyHydrationUnavailableByTask.set(task.attemptId, "recorded dependency source unavailable");
     const result = harness.verifyArtifacts(task);
     assert.equal(result.artifacts.length, 3);
     assert.equal(harness.markerWrites.length, 1);
     const warnings = (harness.markerWrites[0] as unknown[])[3] as Array<Record<string, unknown>>;
     assert.equal(warnings.length, 6);
     assert.equal(warnings[0]?.field_path, "$[0].family_id");
+    assert.deepEqual((harness.markerWrites[0] as unknown[])[4], dependencyChanges);
+    assert.equal((harness.markerWrites[0] as unknown[])[5], "recorded dependency source unavailable");
     assert.equal(harness.publications.get("strategies.json")?.toString(), JSON.stringify(detections));
     assert.equal(fs.readFileSync(path.join(dedupeDir, "strategies.json"), "utf8"), JSON.stringify(detections));
     // The report receives the exact verifier diagnostics even before controller synchronization.

@@ -83,20 +83,33 @@ Apply these Recon/Chimera rules:
 - Invoke each protocol entrypoint as a direct call. Construct its arguments
   from documented valid preconditions so every reached call represents a
   realistic user, keeper, liquidator, or protocol-role action.
-- Every reached target revert, panic, or out-of-gas failure propagates to Recon;
-  that observable failure is the signal the campaign records. When a
-  documented precondition cannot be met, return before invoking the target and
-  record the guard and its source in the handler inventory.
-- Use a typed high-level function call for every protocol action, check each
-  ABI-declared return value, and preserve its failure status for Recon. A
-  property-scoped expected-revert case is valid only when the catalog names the
-  expected protocol error and the handler matches its exact documented selector
-  while recording the property ID and expected outcome.
-- A blanket `try/catch` or an ignored return or status is an audit violation;
-  represent protocol actions with the typed call and checked result that keeps
-  failures observable. When a documented protocol boundary has no typed ABI,
-  a low-level `.call` or `.delegatecall` is valid only with its source-backed
-  selector, checked success and return data, and explicit failure propagation.
+- Recon runs in assertion mode (`--test-mode assertion`). Only a failed
+  `assert` is a finding. A target call that reverts for any other reason,
+  including a custom error, a failed `require`, or an arithmetic panic, ends
+  that call as an ordinary revert, and Recon discards it without reporting
+  anything. A revert
+  is therefore never an oracle by itself. When a documented precondition
+  cannot be met, return before invoking the target and record the guard and
+  its source in the handler inventory.
+- Use a typed high-level function call for every protocol action and check
+  each ABI-declared return value with `assert`.
+- Write every invariant or correctness check as `assert`. A `require` in a
+  handler or property is a precondition: when it fails, Recon discards the
+  call, so it can never report a violation.
+- A liveness property (a documented action that must succeed in a reachable
+  state) needs a selector-aware oracle. Make the typed call inside `try`, and
+  in `catch (bytes memory reason)` compare `bytes4(reason)` with the errors
+  the catalog documents for that action. A documented selector passes; any
+  other selector, an empty reason, or a panic calls `assert(false)`. Record
+  the property ID and the documented selectors in the handler inventory.
+- That selector-aware `try/catch` is the only accepted `try/catch` around a
+  protocol action. A blanket `try/catch` that accepts every failure, or an
+  ignored return or status, is an audit violation; represent protocol actions
+  with the typed call and checked result.
+- When a documented protocol boundary has no typed ABI, a low-level `.call` or
+  `.delegatecall` is valid only with its source-backed selector, checked
+  success and return data, and an `assert` for any failure the property must
+  report.
 - Use a narrowly documented non-protocol dependency boundary only when the
   dependency contract explicitly defines an expected failure result; preserve
   the target protocol call and its failure semantics in all other cases.
@@ -110,8 +123,8 @@ Before handoff, audit every handler source. Enumerate each protocol call with
 its typed call form, valid precondition, return-value handling, and failure
 behavior. Scan `try/catch`, `.call`, and `.delegatecall` occurrences and
 classify every low-level dependency boundary or catch with its
-documented dependency or property-scoped expected-revert reason, repair any
-unclassified entry, and rerun the bounded Recon smoke.
+documented dependency or its liveness property and documented selectors,
+repair any unclassified entry, and rerun the bounded Recon smoke.
 
 ## Work
 
