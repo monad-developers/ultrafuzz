@@ -5836,7 +5836,10 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.doesNotMatch(baseAgent, /executionSnapshotRoot|path\.dirname|controls/u);
   assert.doesNotMatch(source, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflow, /continueOnFail=\{task\.continueOnFail\}/u);
-  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 2);
+  // The report verifier alone also tolerates failure, so the runtime can
+  // withhold a report the secret gate rejects instead of failing the run (#1217).
+  assert.equal(workflow.match(/continueOnFail=\{task\.continueOnFail \|\| producesFinalReport\(task\)\}/gu)?.length, 1);
 });
 
 test("generated optional admission rejects a present malformed marker before publishing agent access", () => {

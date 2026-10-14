@@ -61,7 +61,9 @@ itself:
   included automatically in the exact-value scan.
   A rejected final-report draft stays unavailable even after the credential
   that matched it is unset or rotated; generate a fresh report with
-  `ultrafuzz resume <run-id> --retry-failed`.
+  `ultrafuzz resume <run-id> --retry-failed`. With default best-effort completion,
+  a secret-withheld report does not fail an otherwise successful run;
+  `--require-complete` still fails the run when its report is withheld.
   Exact-value substring matching ignores credentials shorter than eight
   characters to avoid rejecting unrelated content on collision-prone values.
 - Materialization requires explicit selected copies and confirmation. Patch

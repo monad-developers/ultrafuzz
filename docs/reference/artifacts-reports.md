@@ -698,8 +698,11 @@ at verification is the exception described below.
 
 A report the artifact secret gate rejects, because it contains a run credential
 or a recognized secret, remains unavailable (#1217). The report task's failure
-records `reason_code: ARTIFACT_SECRET_GATE_REJECTED`; the run retains its configured
-completion policy. `ultrafuzz status` reports the report unavailable with reason
+records `reason_code: ARTIFACT_SECRET_GATE_REJECTED`. Under the default best-effort
+completion policy, withholding this report does not fail an otherwise successful
+run. Other report verification failures still fail the run, and
+`--require-complete` treats a withheld report as unsuccessful too.
+`ultrafuzz status` reports the report unavailable with reason
 `report-withheld-secret`, synchronization adds a `TERMINAL_REPORT_WITHHELD`
 warning, and `ultrafuzz report` fails as it does for any unavailable report. The
 unchecked fallback below is withheld too, even after the credential it matched
