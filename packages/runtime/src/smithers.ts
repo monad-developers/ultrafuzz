@@ -3395,7 +3395,7 @@ export interface CompiledSmithersWorkflow {
   tasksPath: string;
   logsDir: string;
   pinnedSubmodules?: PinnedSubmoduleExpectation;
-  /** Launch warnings found while compiling, such as a checkout whose submodules could not be sealed. */
+  /** Launch warnings found while compiling, such as a checkout whose submodules could not be recorded. */
   diagnostics?: RuntimeDiagnostic[];
   productionSourceRoots?: string[];
   controllerSourceDigest: string;
@@ -3731,8 +3731,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const logsDir = path.join(smithersDir, "logs");
   // Every task worktree is created locally, so Git's shared worktree-config
   // prerequisite is enabled whenever a submodule expectation exists. A pinned
-  // source must carry an authenticated manifest; an ordinary checkout is
-  // sealed from its initialized submodules when it can be (#1251).
+  // source must carry an authenticated manifest; an ordinary checkout's
+  // initialized submodules are recorded when they can be (#1251).
   const submoduleSourcePolicy = submoduleSourcePolicyForRef(source?.ref);
   const checkoutSubmodules =
     source !== undefined && !source.pinned ? checkoutSubmoduleExpectationForProject(projectRoot) : undefined;

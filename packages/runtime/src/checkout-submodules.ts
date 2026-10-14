@@ -7,7 +7,7 @@ export type CheckoutSubmoduleExpectation =
 /**
  * Capture and authenticate the initialized submodules of an ordinary checkout
  * (#1251), so its task worktrees are hydrated like a pinned run's. A checkout
- * whose submodules cannot be sealed, for example because they are not
+ * whose submodules cannot be recorded, for example because they are not
  * initialized, are dirty, are not at their gitlinks, or sit behind a local URL
  * rewrite, keeps running without hydration and reports why.
  */

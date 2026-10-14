@@ -7,7 +7,9 @@ import {
   INVARIANT_PINNED_SOURCE_REF,
   assertNoSymlinkComponents,
   assertRegularFileInside,
+  layoutForRunRoot,
   parseStrictJsonBytes,
+  readRunState,
   safeResolveInside,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
@@ -35,8 +37,7 @@ const FULL_SHA = /^[0-9a-f]{40}$/u;
 const MAX_ENTRIES = 100_000;
 const MAX_PATH_BYTES = 4_096;
 const MAX_PATH_DEPTH = 128;
-// Every regular dependency and the manifest becomes one workflow-control file;
-// keep the producer bound identical to workflow-integrity's per-file ceiling.
+// Keep dependency files compatible with historical workflow snapshots' per-file ceiling.
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
 const MAX_TOTAL_FILE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -62,6 +63,13 @@ interface GitTreeEntry {
 interface LoadedSealedSnapshot {
   executionSnapshotRoot: string;
   snapshot: PinnedSubmoduleSnapshot;
+}
+
+interface HistoricalSubmoduleSource {
+  /** Older runs stored dependency files in their execution snapshot instead of the shared cache. */
+  executionSnapshotRoot?: string;
+  /** Refreshed controllers recover the original snapshot location from the run's recorded provenance. */
+  runRoot?: string;
 }
 
 interface CaptureState {
@@ -170,7 +178,7 @@ export function readPinnedSubmoduleSnapshot(
   const snapshot = parseCanonicalSnapshot(bytes);
   assertSnapshotMatchesSource(projectRoot, snapshot, sourcePolicy);
   // An ordinary checkout's submodules are repositories with their own .git
-  // entries; only regular files are sealed into the execution snapshot.
+  // entries; only dependency content belongs in the recorded byte tree.
   verifySnapshotBytes(projectRoot, snapshot, { allowChildGitMetadata: sourcePolicy === "checkout", sourcePolicy });
   return snapshot;
 }
@@ -211,7 +219,7 @@ export function pinnedSubmoduleExpectationForProject(projectRootInput: string): 
   return pinnedSubmoduleExpectation(snapshot);
 }
 
-/** Add the manifest and regular dependency files to the authenticated execution closure. */
+/** Enumerate the manifest and regular dependency files for a cache or historical execution snapshot. */
 export function pinnedSubmoduleExecutionFiles(
   projectRootInput: string,
   expectation: PinnedSubmoduleExpectation | undefined,
@@ -266,17 +274,19 @@ export function enablePinnedSubmoduleWorktreeConfig(
  * any existing dependency root is replaced. A transaction left
  * by a hydration that did not finish is removed first.
  */
-export function hydratePinnedSubmodules(input: {
-  sourceRoot: string;
-  workspaceRoot: string;
-  expectation?: PinnedSubmoduleExpectation;
-  sourcePolicy?: SubmoduleSourcePolicy;
-  sourceRef?: string | null;
-}): PinnedSubmoduleSnapshot | undefined {
+export function hydratePinnedSubmodules(
+  input: {
+    sourceRoot: string;
+    workspaceRoot: string;
+    expectation?: PinnedSubmoduleExpectation;
+    sourcePolicy?: SubmoduleSourcePolicy;
+    sourceRef?: string | null;
+  } & HistoricalSubmoduleSource
+): PinnedSubmoduleSnapshot | undefined {
   if (input.expectation === undefined) return undefined;
   const sourcePolicy = resolvedSourcePolicy(input);
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
-  const loaded = loadDependencyCache(input.sourceRoot, input.expectation);
+  const loaded = loadDependencyCache(input.sourceRoot, input.expectation, input);
   assertSourceIdentity(workspaceRoot, loaded.snapshot);
   removeStaleTransactions(workspaceRoot);
   configureTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot, sourcePolicy);
@@ -302,22 +312,57 @@ export function hydratePinnedSubmodules(input: {
 }
 
 /** Verify-only post-agent check; this function never repairs model mutations. */
-export function verifyPinnedSubmodules(input: {
-  sourceRoot: string;
-  workspaceRoot: string;
-  expectation?: PinnedSubmoduleExpectation;
-  sourcePolicy?: SubmoduleSourcePolicy;
-  sourceRef?: string | null;
-}): PinnedSubmoduleSnapshot | undefined {
+export function verifyPinnedSubmodules(
+  input: {
+    sourceRoot: string;
+    workspaceRoot: string;
+    expectation?: PinnedSubmoduleExpectation;
+    sourcePolicy?: SubmoduleSourcePolicy;
+    sourceRef?: string | null;
+  } & HistoricalSubmoduleSource
+): PinnedSubmoduleSnapshot | undefined {
   if (input.expectation === undefined) return undefined;
   const sourcePolicy = resolvedSourcePolicy(input);
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
-  const loaded = loadDependencyCache(input.sourceRoot, input.expectation);
+  const loaded = loadDependencyCache(input.sourceRoot, input.expectation, input);
   assertSourceIdentity(workspaceRoot, loaded.snapshot);
   assertNoStaleTransactions(workspaceRoot);
   assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot, sourcePolicy);
   verifySnapshotBytes(workspaceRoot, loaded.snapshot, { allowChildGitMetadata: false, sourcePolicy });
   return loaded.snapshot;
+}
+
+/** Keep persisted pre-cache workflows callable when resume loads the currently installed runtime. */
+export function hydratePinnedSubmodulesFromExecutionSnapshot(
+  input: { workspaceRoot: string; expectation?: PinnedSubmoduleExpectation } & HistoricalSubmoduleSource
+): PinnedSubmoduleSnapshot | undefined {
+  return hydratePinnedSubmodules(legacySubmoduleInput(input, true));
+}
+
+/** Historical workflows retain their strict post-agent check, including after a runtime upgrade. */
+export function verifyPinnedSubmodulesFromExecutionSnapshot(
+  input: { workspaceRoot: string; expectation?: PinnedSubmoduleExpectation } & HistoricalSubmoduleSource
+): PinnedSubmoduleSnapshot | undefined {
+  return verifyPinnedSubmodules(legacySubmoduleInput(input, false));
+}
+
+function legacySubmoduleInput(
+  input: { workspaceRoot: string; expectation?: PinnedSubmoduleExpectation } & HistoricalSubmoduleSource,
+  bind: boolean
+) {
+  if (input.expectation !== undefined) {
+    // A historical call has no independent sourceRoot. Check the linked-worktree backpointer and
+    // any existing binding before using its .git file to locate or refill the shared cache.
+    taskGitDirectories(canonicalDirectory(input.workspaceRoot, "task workspace"), bind);
+  }
+  // Native resume loads a project workflow, so its historical executionSnapshotRoot may be absent.
+  // Persisted workflows place task worktrees directly in <run>/workspaces/<attempt>.
+  const parent = path.dirname(input.workspaceRoot);
+  return {
+    ...input,
+    sourceRoot: input.workspaceRoot,
+    runRoot: input.runRoot ?? (path.basename(parent) === "workspaces" ? path.dirname(parent) : undefined)
+  };
 }
 
 function captureRepository(
@@ -1414,16 +1459,18 @@ function compareStrings(left: string, right: string): number {
  * restore keeps this task's own workspace clean. Changes to the task's Git
  * isolation or gitlinks are not dependency files and still fail.
  */
-export function restoreCheckoutSubmodulesAfterAgent(input: {
-  sourceRoot: string;
-  workspaceRoot: string;
-  expectation?: PinnedSubmoduleExpectation;
-  /** Called with the record before any file is restored, so a caller can persist it first. */
-  onChanges?: (changes: DependencyFileChanges) => void;
-}): DependencyFileChanges | undefined {
+export function restoreCheckoutSubmodulesAfterAgent(
+  input: {
+    sourceRoot: string;
+    workspaceRoot: string;
+    expectation?: PinnedSubmoduleExpectation;
+    /** Called with the record before any file is restored, so a caller can persist it first. */
+    onChanges?: (changes: DependencyFileChanges) => void;
+  } & HistoricalSubmoduleSource
+): DependencyFileChanges | undefined {
   if (input.expectation === undefined) return undefined;
   const workspaceRoot = canonicalDirectory(input.workspaceRoot, "task workspace");
-  const loaded = loadDependencyCache(input.sourceRoot, input.expectation);
+  const loaded = loadDependencyCache(input.sourceRoot, input.expectation, input);
   assertSourceIdentity(workspaceRoot, loaded.snapshot);
   assertNoStaleTransactions(workspaceRoot);
   assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot, "checkout");
@@ -1552,13 +1599,15 @@ function resolvedSourcePolicy(input: {
  * dependency edit; an ordinary checkout restores the sealed files and returns
  * what changed (#1251). A task without an expectation has nothing to check.
  */
-export function checkTaskSubmodulesAfterAgent(input: {
-  sourceRoot: string;
-  workspaceRoot: string;
-  expectation?: PinnedSubmoduleExpectation;
-  sourceRef?: string | null;
-  onChanges?: (changes: DependencyFileChanges) => void;
-}): TaskSubmoduleCheck | undefined {
+export function checkTaskSubmodulesAfterAgent(
+  input: {
+    sourceRoot: string;
+    workspaceRoot: string;
+    expectation?: PinnedSubmoduleExpectation;
+    sourceRef?: string | null;
+    onChanges?: (changes: DependencyFileChanges) => void;
+  } & HistoricalSubmoduleSource
+): TaskSubmoduleCheck | undefined {
   if (resolvedSourcePolicy(input) === "pinned") {
     verifyPinnedSubmodules({ ...input, sourcePolicy: "pinned" });
     return undefined;
@@ -1584,12 +1633,14 @@ export type TaskSubmoduleCheck = { changes: DependencyFileChanges } | { unavaila
  * both gone, runs without hydration and reports why (#1251), as the run did
  * before hydration existed.
  */
-export function hydrateTaskSubmodules(input: {
-  sourceRoot: string;
-  workspaceRoot: string;
-  expectation?: PinnedSubmoduleExpectation;
-  sourceRef?: string | null;
-}): { unavailable_reason: string } | undefined {
+export function hydrateTaskSubmodules(
+  input: {
+    sourceRoot: string;
+    workspaceRoot: string;
+    expectation?: PinnedSubmoduleExpectation;
+    sourceRef?: string | null;
+  } & HistoricalSubmoduleSource
+): { unavailable_reason: string } | undefined {
   if (resolvedSourcePolicy(input) === "pinned") {
     hydratePinnedSubmodules({ ...input, sourcePolicy: "pinned" });
     return undefined;
@@ -1665,8 +1716,12 @@ export function fillSubmoduleDependencyCache(
   });
 }
 
-/** Load the cache, rebuilding it from the source repository's Git objects when it is missing or damaged. */
-function loadDependencyCache(sourceRoot: string, expectation: PinnedSubmoduleExpectation): LoadedSealedSnapshot {
+/** Load the cache, recovering recorded bytes from Git or an older run's authenticated snapshot. */
+function loadDependencyCache(
+  sourceRoot: string,
+  expectation: PinnedSubmoduleExpectation,
+  historicalSource: HistoricalSubmoduleSource
+): LoadedSealedSnapshot {
   const root = submoduleDependencyCacheRoot(sourceRoot, expectation);
   try {
     return loadSealedSnapshot(root, expectation);
@@ -1674,11 +1729,41 @@ function loadDependencyCache(sourceRoot: string, expectation: PinnedSubmoduleExp
     try {
       refillDependencyCacheFromGit(sourceRoot, expectation);
     } catch {
-      // Without the source objects (a pinned checkout keeps none), the cache error says what is wrong.
-      throw new DependencySourceUnavailableError(errorMessage(cacheError), { cause: cacheError });
+      // Old pinned checkouts have no submodule objects and never created a cache. Their recorded
+      // snapshot still supplies the exact launch bytes, even after a controller refresh.
+      try {
+        refillDependencyCacheFromSnapshot(root, expectation, historicalSource);
+      } catch {
+        throw new DependencySourceUnavailableError(errorMessage(cacheError), { cause: cacheError });
+      }
     }
     return loadSealedSnapshot(root, expectation);
   }
+}
+
+function refillDependencyCacheFromSnapshot(
+  root: string,
+  expectation: PinnedSubmoduleExpectation,
+  historicalSource: HistoricalSubmoduleSource
+): void {
+  let snapshotRoot = historicalSource.executionSnapshotRoot;
+  if (snapshotRoot === undefined && historicalSource.runRoot !== undefined) {
+    const layout = layoutForRunRoot(historicalSource.runRoot);
+    const recorded = readRunState(layout).provenance?.workflow.executionSnapshot;
+    if (recorded !== undefined) {
+      snapshotRoot = safeResolveInside(layout.root, recorded, "historical dependency snapshot");
+    }
+  }
+  const loaded = loadSealedSnapshot(snapshotRoot, expectation);
+  publishDependencyCache(root, expectation, (staging) => {
+    writeCacheFile(staging, MANIFEST_SNAPSHOT_PATH, Buffer.from(canonicalSnapshotBytes(loaded.snapshot)), 0o644);
+    for (const entry of loaded.snapshot.entries) {
+      if (entry.type !== "file") continue;
+      const source = sealedFilePath(loaded.executionSnapshotRoot, entry.path);
+      const bytes = readBoundedRegularFile(source, entry.size_bytes, `historical dependency file ${entry.path}`);
+      writeCacheFile(staging, path.posix.join(TREE_SNAPSHOT_ROOT, entry.path), bytes, entry.mode);
+    }
+  });
 }
 
 /**

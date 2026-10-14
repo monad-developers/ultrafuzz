@@ -278,6 +278,12 @@ branch stay strict: they fail the task when hydration fails or the agent edits a
 dependency. The first hydrated run also sets `extensions.worktreeConfig = true`
 in the repository's Git config.
 
+Runs launched before dependency caching keep their original hydration behavior
+when resumed after an upgrade. If their cache is missing, Ultrafuzz verifies the
+dependency files in the run's recorded execution snapshot and copies them into
+the cache. This also works with `resume --refresh-controller`; pinned runs keep
+their strict dependency checks.
+
 ## Audit Profiles and Packaged Topologies
 
 ```bash

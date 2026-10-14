@@ -3090,7 +3090,7 @@ function prepareArtifactMirror(
   }
   if (options.pinnedSubmodules === "verify") {
     // A pinned benchmark source fails on any dependency edit. An ordinary
-    // checkout restores the sealed files and records what changed (#1251).
+    // checkout restores the recorded files and records what changed (#1251).
     // Nothing was hydrated when preparation recorded the dependencies as unavailable.
     if (!dependencyHydrationUnavailableByTask.has(task.attemptId)) {
       preparationStep(task.attemptId, "verify-pinned-submodules", () =>
@@ -3099,6 +3099,8 @@ function prepareArtifactMirror(
           task.attemptId,
           checkTaskSubmodulesAfterAgent({
             sourceRoot: sourceProjectRoot,
+            runRoot: task.runRoot,
+            executionSnapshotRoot: task.executionSnapshotRoot,
             workspaceRoot,
             expectation: task.pinnedSubmodules ?? undefined,
             sourceRef: task.sourceRef,
@@ -3115,6 +3117,8 @@ function prepareArtifactMirror(
         task.attemptId,
         hydrateTaskSubmodules({
           sourceRoot: sourceProjectRoot,
+          runRoot: task.runRoot,
+          executionSnapshotRoot: task.executionSnapshotRoot,
           workspaceRoot,
           expectation: task.pinnedSubmodules ?? undefined,
           sourceRef: task.sourceRef
