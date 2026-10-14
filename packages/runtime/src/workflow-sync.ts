@@ -6,6 +6,7 @@ import lockfile from "proper-lockfile";
 
 import {
   ARTIFACT_MANIFEST_FILE,
+  ARTIFACT_SECRET_GATE_ERROR_CODE,
   appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
@@ -36,7 +37,6 @@ import {
   plannedArtifactSchemaBundle,
   replayUsageEvents,
   safeResolveInside,
-  sensitiveEnvironmentValues,
   sha256Bytes,
   sha256File,
   updateNodeState,
@@ -112,6 +112,7 @@ import {
 } from "./types.js";
 import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { hasSuccessfulFinalizationAuthority, loadFinalizedNodeOutputSnapshot } from "./verified-output.js";
+import { runPublicationForbiddenSecretValues } from "./publication-secret-values.js";
 import { removeRunTaskWorktrees } from "./stale-worktree-recovery.js";
 import { publishBestEffortTerminalReport } from "./unverified-report.js";
 import { hasCurrentReportPublicationStatus, writeReportPublicationStatus } from "./report-publication-status.js";
@@ -339,6 +340,8 @@ interface NodeWorkflowEvidence {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** The typed code of the error a failed task threw, when it carried one. */
+  errorCode?: string;
   timedOut?: boolean;
 }
 
@@ -649,7 +652,7 @@ export async function synchronizeLinkedWorkflowRun(
     return { ok: false, diagnostics: loaded.diagnostics };
   }
   const previousControlState = structuredClone(readRunState(layout));
-  const forbiddenSecretValues = sensitiveEnvironmentValues(input.env ?? process.env);
+  const forbiddenSecretValues = runPublicationForbiddenSecretValues(layout.root, input.env ?? process.env);
 
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
@@ -998,25 +1001,35 @@ export async function synchronizeLinkedWorkflowRun(
       writeReportPublicationStatus({
         runRoot: layout.root,
         state: readRunState(layout),
-        ...(report === undefined ? { unavailableReason: "report-agent-output-unavailable" as const } : { report })
+        ...(report === undefined ? { unavailableReason: agentReportUnavailableReason(layout) } : { report })
       });
     } catch (error) {
       const interrupted = synchronizationInterruptionDiagnostic(error);
       if (interrupted !== undefined) return { ok: false, diagnostics: [interrupted] };
-      diagnostics.push({
-        code: "TERMINAL_REPORT_UNAVAILABLE",
-        message: "No current agent-written final report is available, or report publication failed.",
-        severity: "warning",
-        source: "report"
-      });
+      const unavailableReason =
+        error instanceof Error && error.name === "ReportUnavailableError"
+          ? agentReportUnavailableReason(layout)
+          : "report-publication-failed";
+      diagnostics.push(
+        unavailableReason === "report-withheld-secret"
+          ? {
+              code: "TERMINAL_REPORT_WITHHELD",
+              message: `The final report was withheld because the artifact secret gate found sensitive data in it. Run \`ultrafuzz resume ${layout.runId} --retry-failed\` to generate it again.`,
+              severity: "warning",
+              source: "report"
+            }
+          : {
+              code: "TERMINAL_REPORT_UNAVAILABLE",
+              message: "No current agent-written final report is available, or report publication failed.",
+              severity: "warning",
+              source: "report"
+            }
+      );
       try {
         writeReportPublicationStatus({
           runRoot: layout.root,
           state: readRunState(layout),
-          unavailableReason:
-            error instanceof Error && error.name === "ReportUnavailableError"
-              ? "report-agent-output-unavailable"
-              : "report-publication-failed"
+          unavailableReason
         });
       } catch {
         diagnostics.push({
@@ -3483,6 +3496,12 @@ async function finalizeTerminalTask(input: {
     const preparationFailure = wrapperFailure && input.evidenceSource === "preparation";
     const wrapperTaskId = preparationFailure ? input.task.preparationSmithersNodeId : input.task.verifierSmithersNodeId;
     const wrapperLabel = preparationFailure ? "artifact preparation" : "artifact verifier";
+    // The code is set only by the verifier's own secret gate, never by agent output.
+    const reportWithheld =
+      wrapperFailure &&
+      !preparationFailure &&
+      input.evidence.errorCode === ARTIFACT_SECRET_GATE_ERROR_CODE &&
+      producesFinalReport(input.node);
     let verifierOutputGate: ReturnType<typeof verifyRequiredArtifactsForAttempt> | undefined;
     if (
       wrapperFailure &&
@@ -3534,7 +3553,8 @@ async function finalizeTerminalTask(input: {
                 category,
                 causal_task_id: wrapperFailure ? wrapperTaskId : input.task.smithersNodeId,
                 causal_failure_category: category,
-                dependent_task_ids: []
+                dependent_task_ids: [],
+                ...(reportWithheld ? { reason_code: ARTIFACT_SECRET_GATE_ERROR_CODE } : {})
               },
         ...(verifierOutputGate !== undefined
           ? {
@@ -4772,6 +4792,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         break;
       case "NodeFailed": {
         const error = errorText(payload.error);
+        const errorCode = isRecord(payload.error) ? stringField(payload.error, "code") : undefined;
         const timedOut = evidence?.timedOut === true || workflowErrorIsTimeout(payload.error);
         evidence = {
           ...evidence,
@@ -4780,7 +4801,8 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           timedOut,
           ...attemptPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
-          ...(error ? { error } : {})
+          ...(error ? { error } : {}),
+          ...(errorCode === undefined ? {} : { errorCode })
         };
         break;
       }
@@ -4909,6 +4931,33 @@ function finalRunStatus(
       : "failed";
   }
   return currentStatus;
+}
+
+/** Why no agent report is available: withheld by the secret gate, or never produced. */
+function agentReportUnavailableReason(layout: RunLayout): "report-agent-output-unavailable" | "report-withheld-secret" {
+  return withheldReportNodeIds(readRunState(layout).nodes).size > 0
+    ? "report-withheld-secret"
+    : "report-agent-output-unavailable";
+}
+
+function producesFinalReport(node: PlannedGraphNode): boolean {
+  return node.outputs.some((output) => output.contract === "ultrafuzz/report@3");
+}
+
+/**
+ * Report tasks whose output the secret gate rejected. The rejected draft stays
+ * unavailable until `resume --retry-failed` generates it again (#1217).
+ */
+function withheldReportNodeIds(nodes: Readonly<Record<string, NodeState>>): ReadonlySet<string> {
+  return new Set(
+    Object.entries(nodes)
+      .filter(
+        ([, node]) =>
+          node.status === "failed" &&
+          recordField(node.provenance, "failure")?.reason_code === ARTIFACT_SECRET_GATE_ERROR_CODE
+      )
+      .map(([nodeId]) => nodeId)
+  );
 }
 
 function nonBlockingRuntimeNodeIds(graph: PlannedGraph): ReadonlySet<string> {

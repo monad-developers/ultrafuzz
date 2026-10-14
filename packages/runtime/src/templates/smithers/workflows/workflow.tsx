@@ -77,7 +77,7 @@ const {
   readRegularFileSnapshot,
   reportEstimatedSpend,
   RUN_METADATA_SCHEMA_VERSION,
-  sensitiveEnvironmentValues,
+  publicationForbiddenSecretValues,
   validateArtifactContractBytes,
   validateArtifactVerificationMarker,
   validateImplementedPropertiesSchema,
@@ -2482,7 +2482,7 @@ function artifactAwareAgent(
   const freshNormalizedAgentFailure = (error: unknown): Error => {
     const fallback = "agent execution failed";
     // Snapshot credentials before hostile getters can mutate the environment.
-    const forbiddenSecretValues = sensitiveEnvironmentValues(process.env);
+    const forbiddenSecretValues = publicationForbiddenSecretValues(process.env);
     const safeSmithersControlCodes = new Set([
       "AGENT_QUOTA_EXCEEDED",
       "AGENT_CONFIG_INVALID",
@@ -8552,7 +8552,9 @@ function verifyArtifacts(
     if (primary === undefined) {
       throw new Error("artifact-contract failure: primary artifact is missing");
     }
-    assertArtifactPublicationsContainNoSecrets(publications, sensitiveEnvironmentValues(process.env));
+    // The controller's environment names every credential an agent can see,
+    // including a configured api_key_env whose name does not say so (#1217).
+    assertArtifactPublicationsContainNoSecrets(publications, publicationForbiddenSecretValues(process.env));
     publishVerifiedArtifacts(artifactDir, publications);
     assertVerifiedDependencySnapshotEpochRemainedCurrent(task, dependencySnapshotEpoch);
     const verificationMarker = writeArtifactVerificationMarker(

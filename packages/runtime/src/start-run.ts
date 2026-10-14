@@ -37,7 +37,7 @@ import {
   type SmithersTaskManifestDocument
 } from "@ultrafuzz/artifacts";
 import { parseResolvedConfigJsonBytes, validateAgentConfigs, type ResolvedConfig } from "@ultrafuzz/config";
-import { isSensitiveEnvironmentName, isSensitiveSecretValue } from "@ultrafuzz/security";
+import { sensitiveAllowlistedEnvironmentVariableNames } from "./publication-secret-values.js";
 import { assertExpandedGraphSchema, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import {
@@ -2003,27 +2003,6 @@ function providerScopedControllerEnvironment(
       ...source
     }).join(",")
   };
-}
-
-function sensitiveAllowlistedEnvironmentVariableNames(source: Record<string, string | undefined>): string[] {
-  const names = new Set<string>();
-  for (const entry of (source.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",")) {
-    const name = entry.trim();
-    if (name.length === 0) continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
-      throw new Error("ULTRAFUZZ_AGENT_ENV_ALLOWLIST must be a comma-separated list of environment variable names");
-    }
-    const upper = name.toUpperCase();
-    const matchingSourceNames = Object.keys(source).filter((sourceName) => sourceName.toUpperCase() === upper);
-    const values = matchingSourceNames
-      .map((sourceName) => source[sourceName])
-      .filter((value): value is string => value !== undefined);
-    if (!isSensitiveEnvironmentName(name) && !values.some((value) => isSensitiveSecretValue(value))) continue;
-    names.add(name);
-    names.add(upper);
-    for (const sourceName of matchingSourceNames) names.add(sourceName);
-  }
-  return [...names].sort();
 }
 
 function withoutSensitiveAllowlistedEnvironment(

@@ -10,6 +10,8 @@ import {
   ARTIFACT_MANIFEST_FILE,
   appendUsageEvents,
   assertArtifactPublicationsContainNoSecrets,
+  publicationContainsSecrets,
+  publicationForbiddenSecretValues,
   assertPathInside,
   appendNodeAttempt,
   appendEvent,
@@ -980,6 +982,26 @@ test("attempt failures redact key, token, mnemonic, URL, entropy, and exact run 
   assert.match(persisted, /<redacted>/u);
 });
 
+// Every credential format the previous hand-rolled patterns could name, each
+// found by a secretlint library finding or a documented supplemental pattern.
+const PUBLICATION_CREDENTIAL_FIXTURES = [
+  ["k01.txt", "sk-ant-api03-AbCdEf1234567890AbCdEf1234567890AbCdEf"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k02.txt", "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"], // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
+  ["k03.txt", "AKIAIOSFODNN7EXAMPLE"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k04.txt", "AIzaSyD-1234567890abcdefghijklmnopqrstuv"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k05.txt", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k06.txt", "npm_AbCdEf1234567890AbCdEf1234567890AbCd"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k07.txt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k08.txt", "https://admin:hunter2hunter2@example.com/x"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k09.txt", "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k10.txt", "modal ak-0123456789abcdefghijklmnop"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k11.txt", "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k12.txt", "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k13.txt", `github fine-grained github_pat_${"A1".repeat(41)}`], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k14.txt", "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"], // gitleaks:allow -- fake credential fixture for the redaction tests
+  ["k15.txt", `signing key: ${"2b".repeat(32)}`] // gitleaks:allow -- fake credential fixture for the redaction tests
+] as const;
+
 test("canonical publication secret gate fails closed without rewriting bytes", () => {
   const maintainedFixtures = new Map<string, Buffer>([
     ["generated/Exploit.t.sol", Buffer.from(`constant TOKEN = "${entropyAtRestSecret}";`, "utf8")],
@@ -1082,23 +1104,7 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
   // Every credential format the previous hand-rolled patterns could name is
   // still rejected — via a secretlint library finding or a documented
   // supplemental pattern.
-  for (const [artifactPath, body] of [
-    ["k01.txt", "sk-ant-api03-AbCdEf1234567890AbCdEf1234567890AbCdEf"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k02.txt", "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"], // gitleaks:allow -- fixed placeholder asserted on by the redaction tests
-    ["k03.txt", "AKIAIOSFODNN7EXAMPLE"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k04.txt", "AIzaSyD-1234567890abcdefghijklmnopqrstuv"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k05.txt", "xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrSt"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k06.txt", "npm_AbCdEf1234567890AbCdEf1234567890AbCd"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k07.txt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k08.txt", "https://admin:hunter2hunter2@example.com/x"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k09.txt", "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k10.txt", "modal ak-0123456789abcdefghijklmnop"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k11.txt", "oauth ya29.a0AfH6SMB0123456789abcdefghijklmnop"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k12.txt", "rpc wss://mainnet.infura.io/v3/0123456789abcdefghijklmnopqrstuv"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k13.txt", `github fine-grained github_pat_${"A1".repeat(41)}`], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k14.txt", "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----"], // gitleaks:allow -- fake credential fixture for the redaction tests
-    ["k15.txt", `signing key: ${"2b".repeat(32)}`] // gitleaks:allow -- fake credential fixture for the redaction tests
-  ] as const) {
+  for (const [artifactPath, body] of PUBLICATION_CREDENTIAL_FIXTURES) {
     assert.throws(
       () => assertArtifactPublicationsContainNoSecrets(new Map([[artifactPath, Buffer.from(body, "utf8")]])),
       new RegExp(artifactPath.replaceAll(".", "\\."), "u"),
@@ -1120,6 +1126,147 @@ test("canonical publication secret gate fails closed without rewriting bytes", (
       ])
     )
   );
+});
+
+test("publication secret gate scans the decoded strings of a JSON publication (#1217)", () => {
+  const reportWith = (value: unknown): ReadonlyMap<string, Buffer> =>
+    new Map([["report.json", Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8")]]);
+
+  // JSON escapes each of these characters, so the credential is never in the
+  // bytes verbatim, and only the decoded value can match it.
+  for (const credential of [
+    "configured\\credential-123",
+    "configured\tcredential-123",
+    "configured\ncredential-123",
+    'configured"credential-123'
+  ]) {
+    const publications = reportWith({ issues: [{ description: `copied from the environment: ${credential}.` }] });
+    assert.equal(publications.get("report.json")?.toString("utf8").includes(credential), false);
+    assert.throws(
+      () => assertArtifactPublicationsContainNoSecrets(publications, [credential]),
+      (error: unknown) => error instanceof ArtifactSecretGateError && error.artifactPath === "report.json",
+      JSON.stringify(credential)
+    );
+  }
+  // An object key is a decoded string too.
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(reportWith({ "configured\tcredential-123": 1 }), [
+        "configured\tcredential-123"
+      ]),
+    ArtifactSecretGateError
+  );
+
+  // A pattern that needs whitespace is found when a line break inside one
+  // field splits it, but never assembled from two adjacent fields.
+  const words = mnemonicAtRestSecret.split(" ");
+  const half = Math.floor(words.length / 2);
+  const firstHalf = words.slice(0, half).join(" ");
+  const secondHalf = words.slice(half).join(" ");
+  assert.throws(
+    () => assertArtifactPublicationsContainNoSecrets(reportWith({ summary: `${firstHalf}\n${secondHalf}` })),
+    ArtifactSecretGateError
+  );
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(reportWith({ summary: firstHalf, details: secondHalf }))
+  );
+  assert.doesNotThrow(() => assertArtifactPublicationsContainNoSecrets(reportWith([firstHalf, secondHalf])));
+
+  // Every credential format is still found inside a JSON field. A quoted
+  // Bearer header and a recovery phrase split by a line break were not:
+  // JSON escapes the quote and the line break they depend on.
+  for (const [name, body] of [
+    ...PUBLICATION_CREDENTIAL_FIXTURES,
+    ["quoted-bearer", 'header "Authorization: Bearer AbCdEf1234567890AbCdEf1234567890"'], // gitleaks:allow -- fake credential fixture for the redaction tests
+    ["split-mnemonic", `${firstHalf}\n${secondHalf}`]
+  ] as const) {
+    assert.throws(
+      () => assertArtifactPublicationsContainNoSecrets(reportWith({ issues: [{ description: `evidence: ${body}` }] })),
+      ArtifactSecretGateError,
+      `${name} must be rejected inside report.json`
+    );
+  }
+
+  // Escaped characters in ordinary report prose are not findings.
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(
+      reportWith({
+        summary: 'The vault "repays"\tthe flash loan\nbefore C:\\settle runs.',
+        repository: "example\tvault"
+      }),
+      ["unrelated configured value"]
+    )
+  );
+});
+
+test("publication secret gate finds configured values in encodings agents produce (#1217)", () => {
+  const credential = "Zq9/Kp+Lm=Rt_77xYw";
+  const rejects = (artifactPath: string, body: string): boolean => {
+    try {
+      assertArtifactPublicationsContainNoSecrets(new Map([[artifactPath, Buffer.from(body, "utf8")]]), [credential]);
+      return false;
+    } catch (error) {
+      return error instanceof ArtifactSecretGateError;
+    }
+  };
+  assert.equal(rejects("report.md", `key ${credential}`), true);
+  assert.equal(
+    rejects("report.md", `RPC https://rpc.example/${encodeURIComponent(credential)}/`),
+    true,
+    "percent-encoded"
+  );
+  assert.equal(rejects("setup/notes.md", `key ${credential.replace("_", "\\_")}`), true, "Markdown escape");
+  assert.equal(rejects("report.md", `key ${credential.slice(0, 9)}\n  ${credential.slice(9)}`), true, "line break");
+  // A wrapped value that holds a backslash before punctuation is still found.
+  const escapedCredential = "Zq9\\_KpLm77xYw";
+  assert.equal(
+    publicationContainsSecrets(Buffer.from(`key ${escapedCredential.slice(0, 8)}\n${escapedCredential.slice(8)}`), [
+      escapedCredential
+    ]),
+    true,
+    "wrapped value holding a backslash"
+  );
+  assert.equal(
+    rejects("report.json", JSON.stringify({ url: `https://rpc.example/${encodeURIComponent(credential)}` })),
+    true,
+    "percent-encoded inside a JSON string"
+  );
+  // Deliberate encodings are beyond any scan, and ordinary escapes are not findings.
+  assert.equal(rejects("report.md", `key ${Buffer.from(credential).toString("base64")}`), false);
+  assert.equal(rejects("report.md", "Call `pause\\_all()` at https://example.com/a%20b, then\nretry."), false);
+
+  // The same checks serve publications outside the artifact verifier.
+  assert.equal(publicationContainsSecrets(Buffer.from(JSON.stringify({ k: `a"${credential}` })), [credential]), true);
+  assert.equal(publicationContainsSecrets(Buffer.from("nothing sensitive here"), [credential]), false);
+});
+
+test("publication credentials include the variables the controller names as credentials (#1217)", () => {
+  const environment = {
+    AZURE_OPENAI_KEY: "azure-configured-credential",
+    RPC_URL: "https://example.invalid/allowlisted-credential",
+    FORK_BLOCK: "19000000",
+    OPENAI_API_KEY: "named-configured-credential",
+    ULTRAFUZZ_PROVIDER_CREDENTIAL_ENV_NAMES: "AZURE_OPENAI_KEY",
+    ULTRAFUZZ_SENSITIVE_AGENT_ENV_NAMES: "RPC_URL"
+  };
+  assert.deepEqual(
+    [...publicationForbiddenSecretValues(environment)].sort(),
+    [
+      "azure-configured-credential",
+      "https://example.invalid/allowlisted-credential",
+      "named-configured-credential"
+    ].sort()
+  );
+  // The lists hold names, so an output may mention a credential variable.
+  assert.equal(
+    publicationContainsSecrets(
+      Buffer.from("Set AZURE_OPENAI_KEY before the run."),
+      publicationForbiddenSecretValues(environment)
+    ),
+    false
+  );
+  // Without the controller's lists, only the value named like a credential counts.
+  assert.deepEqual(publicationForbiddenSecretValues({ AZURE_OPENAI_KEY: "azure-configured-credential" }), []);
 });
 
 test("updateNodeState accepts an explicit transition timestamp", () => {

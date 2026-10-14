@@ -17,7 +17,9 @@ const REPORT_REASONS: Readonly<Record<string, string>> = {
   "report-publication-not-recorded": "No current report publication result was recorded.",
   "published-report-files-changed-or-unreadable": "The published report files changed or could not be read.",
   "report-agent-output-unavailable": "The report agent did not produce usable output.",
-  "report-publication-failed": "The agent report could not be published."
+  "report-publication-failed": "The agent report could not be published.",
+  "report-withheld-secret":
+    "The report was withheld because it contains sensitive data. Run `ultrafuzz resume <run-id> --retry-failed` to generate it again."
 };
 
 /** The watch may also stop for attention; callers must read ended before treating it as completion. */

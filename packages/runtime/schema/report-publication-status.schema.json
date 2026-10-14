@@ -17,7 +17,9 @@
     "schema_version": { "const": "ultrafuzz.report-publication-status.v1" },
     "state_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "status": { "enum": ["available", "unavailable"] },
-    "reason": { "enum": ["report-agent-output-unavailable", "report-publication-failed", null] },
+    "reason": {
+      "enum": ["report-agent-output-unavailable", "report-publication-failed", "report-withheld-secret", null]
+    },
     "completion": { "enum": ["complete", "partial", "unknown"] },
     "verification": { "enum": ["verified", "not-checked", "unknown"] },
     "json_file": { "oneOf": [{ "$ref": "#/$defs/file" }, { "type": "null" }] },
@@ -36,7 +38,9 @@
       },
       "else": {
         "properties": {
-          "reason": { "enum": ["report-agent-output-unavailable", "report-publication-failed"] },
+          "reason": {
+            "enum": ["report-agent-output-unavailable", "report-publication-failed", "report-withheld-secret"]
+          },
           "completion": { "const": "unknown" },
           "verification": { "const": "unknown" },
           "json_file": { "type": "null" },

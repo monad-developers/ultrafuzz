@@ -19825,6 +19825,117 @@ test("syncRun publishes a report after a resumed report agent succeeds", async (
   assert.match(recoveredReport.markdown, /^- Estimated spend: `\$0\.01\+`$/mu);
 });
 
+for (const variant of ["secret-gate", "other-verifier-failure", "require-complete"] as const) {
+  test(`syncRun records secret-gate rejection without changing completion policy (#1217, ${variant})`, async () => {
+    const { readReportPublicationStatus } = await import("../src/report-publication-status.js");
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSingleFinalReportTopology(project);
+    const runId = `sync-withheld-report-${variant}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    // Even a runner that tolerated the wrapper failure must not override
+    // this required report node's failed completion status.
+    const verifierError =
+      variant === "other-verifier-failure"
+        ? { name: "Error", message: "artifact-contract failure: report parity failed" }
+        : {
+            name: "ArtifactSecretGateError",
+            message: "artifact publication contains sensitive data: report.json",
+            code: "ARTIFACT_SECRET_GATE_REJECTED",
+            artifactPath: "report.json"
+          };
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "finished",
+        state: "succeeded-with-failures",
+        steps: [
+          { id: "node:final-report", state: "finished", attempt: 1 },
+          { id: "verify:final-report", state: "failed", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:final-report", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+        { type: "NodeFailed", nodeId: "verify:final-report", attempt: 1, error: verifierError },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({
+      projectRoot: project,
+      runId,
+      env,
+      ...(variant === "require-complete"
+        ? { runtimeOverrides: { run: { completionPolicy: "require-complete" as const } } }
+        : {})
+    });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const runRoot = run.value.run_root;
+
+    const sync = await syncRun({ projectRoot: project, runId, env });
+
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    const node = readRunState(path.join(runRoot, "state.json")).nodes["final-report"];
+    assert.equal(node?.status, "failed");
+    const failure = (node?.provenance as { failure?: { reason_code?: string } } | undefined)?.failure;
+    assert.throws(() => loadReportSnapshot(runRoot), /Report unavailable/u);
+    const reportStatus = readReportPublicationStatus(runRoot, readRunState(path.join(runRoot, "state.json")), true);
+    assert.equal(reportStatus.status, "unavailable");
+    if (variant === "other-verifier-failure") {
+      assert.equal(failure?.reason_code, undefined);
+      assert.equal(sync.value?.status, "failed");
+      assert.equal(reportStatus.reason, "report-agent-output-unavailable");
+      return;
+    }
+    assert.equal(failure?.reason_code, "ARTIFACT_SECRET_GATE_REJECTED");
+    assert.equal(reportStatus.reason, "report-withheld-secret");
+    assert.ok(
+      sync.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === "TERMINAL_REPORT_WITHHELD" &&
+          diagnostic.severity === "warning" &&
+          diagnostic.message.includes(`ultrafuzz resume ${runId} --retry-failed`)
+      ),
+      JSON.stringify(sync.diagnostics)
+    );
+    assert.equal(sync.value?.status, "failed", JSON.stringify(sync.diagnostics));
+    // Both default and strict completion retain the report node's failure.
+    if (variant === "require-complete") {
+      assert.equal(sync.value?.status, "failed");
+      return;
+    }
+
+    // `resume --retry-failed` reruns the report task; its accepted output is published.
+    const recoveredEnv = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "finished",
+        state: "succeeded",
+        steps: [{ id: "node:final-report", state: "finished", attempt: 2 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:final-report", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:final-report", attempt: 1 },
+        { type: "NodeFailed", nodeId: "verify:final-report", attempt: 1, error: verifierError },
+        { type: "RunFinished" },
+        { type: "NodeStarted", nodeId: "node:final-report", attempt: 2 },
+        { type: "NodeFinished", nodeId: "node:final-report", attempt: 2 },
+        { type: "NodeFinished", nodeId: "verify:final-report", attempt: 2 },
+        { type: "RunFinished" }
+      ])
+    });
+    writeEmptyFinalReportArtifactSet(runRoot, runId);
+
+    const recovered = await syncRun({ projectRoot: project, runId, env: recoveredEnv });
+
+    assert.equal(recovered.ok, true, JSON.stringify(recovered.diagnostics));
+    assert.equal(recovered.value?.status, "succeeded", JSON.stringify(recovered.diagnostics));
+    assert.equal(readRunState(path.join(runRoot, "state.json")).nodes["final-report"]?.status, "succeeded");
+    assert.equal(loadCurrentFinalReportSnapshot(runRoot).artifacts.source, "verified-runtime-report");
+  });
+}
+
 test("syncRun follows the runner past a retry-failed recovery a pre-#961 build left prepared", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

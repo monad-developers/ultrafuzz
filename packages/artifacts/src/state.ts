@@ -140,6 +140,13 @@ export const NODE_PROVENANCE_FAILURE_CATEGORIES = [
   "agent-failure"
 ] as const;
 
+/**
+ * Why a failed task failed, where the category alone does not say enough to
+ * act on. ARTIFACT_SECRET_GATE_REJECTED: the verifier's secret gate refused to
+ * publish the final report, whose rejected draft must remain unavailable (#1217).
+ */
+export const NODE_FAILURE_REASON_CODES = ["ARTIFACT_SECRET_GATE_REJECTED"] as const;
+
 export const NODE_PROVENANCE_REASON_CODES = ["CAUSAL_MANIFEST_MISMATCH", "DEPENDENCY_NOT_SATISFIED"] as const;
 
 export type NodeProvenanceReasonCode = (typeof NODE_PROVENANCE_REASON_CODES)[number];
@@ -223,6 +230,7 @@ export interface NodeFailureProvenance {
   causal_task_id: string;
   causal_failure_category: (typeof NODE_PROVENANCE_FAILURE_CATEGORIES)[number];
   dependent_task_ids: string[];
+  reason_code?: (typeof NODE_FAILURE_REASON_CODES)[number];
 }
 
 export interface NodeReferenceExpectationProvenance {

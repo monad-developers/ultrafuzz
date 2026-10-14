@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   assertRegularFileInside,
   normalizeNodeAttemptFailureMessage,
+  publicationContainsSecrets,
   readRunState,
   writeJsonDurable
 } from "@ultrafuzz/artifacts";
@@ -30,7 +31,6 @@ import {
   type PublicEvalFailedNode,
   type PublicEvalDiagnosticsRow
 } from "@ultrafuzz/evals";
-import { containsSensitiveSecrets } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import type { PublicModalBenchmarkConfig } from "./config.js";
@@ -203,12 +203,13 @@ export function assertPublicEvalDiagnosticsContainsNoSecrets(
   if ([...new Set(forbiddenSecretValues)].filter(Boolean).some((secret) => text.includes(secret))) {
     throw new Error("public eval diagnostics contains an injected secret value");
   }
-  // "positive-only": this gate FAILS on a hit and cannot rewrite the
-  // diagnostics, so the speculative heuristics must stay off — the
-  // high-entropy pass flags `lineage.logical_run_id` (`ci-<run_id>-…`) as a
-  // secret and kills the sandbox worker as dependency-unreachable (#883),
-  // exactly the class the artifacts secret gate excludes (#819).
-  if (containsSensitiveSecrets(text, [], "positive-only")) {
+  // The artifact secret gate's own checks, "positive-only": this gate FAILS
+  // on a hit and cannot rewrite the diagnostics, so the speculative heuristics
+  // must stay off — the high-entropy pass flags `lineage.logical_run_id`
+  // (`ci-<run_id>-…`) as a secret and kills the sandbox worker as
+  // dependency-unreachable (#883), exactly the class the artifacts secret gate
+  // excludes (#819). It also reads the decoded strings of the JSON (#1217).
+  if (publicationContainsSecrets(Buffer.from(text, "utf8"), forbiddenSecretValues)) {
     throw new Error("public eval diagnostics contains secret-like content");
   }
 }

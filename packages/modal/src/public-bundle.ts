@@ -8,6 +8,7 @@ import {
   artifactValidationWarningsSchema,
   executeOfflineSchemaSemanticGates,
   parseStrictJsonBytes,
+  publicationContainsSecrets,
   readSinglyLinkedRegularFileSnapshotInside,
   validateRegisteredJsonSchema,
   type TerminalReport
@@ -19,7 +20,6 @@ import {
   parsePublicEvalDiagnostics,
   publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
-import { containsSensitiveSecrets } from "@ultrafuzz/security";
 import { projectPublicArtifactValidationWarnings, projectPublicCanonicalFinalReport } from "@ultrafuzz/runtime";
 
 import {
@@ -225,12 +225,13 @@ function assertPublicBenchmarkFileContainsNoSecrets(
   if (forbiddenSecretValues.some((secret) => contents.includes(Buffer.from(secret, "utf8")))) {
     throw new Error(`public benchmark file contains an injected secret value: ${bundlePath}`);
   }
-  const text = contents.toString("utf8");
-  // "positive-only": this gate FAILS on a hit and cannot rewrite the file, so
-  // the speculative heuristics must stay off — the high-entropy pass flags
-  // the bundle's own `ci-<run_id>-…` run ids and volume names as secrets
-  // (#883), exactly the class the artifacts secret gate excludes (#819).
-  if (containsSensitiveSecrets(text, [], "positive-only")) {
+  // The artifact secret gate's own checks, "positive-only": this gate FAILS
+  // on a hit and cannot rewrite the file, so the speculative heuristics must
+  // stay off — the high-entropy pass flags the bundle's own `ci-<run_id>-…`
+  // run ids and volume names as secrets (#883), exactly the class the
+  // artifacts secret gate excludes (#819). It also reads a JSON file's decoded
+  // strings (#1217).
+  if (publicationContainsSecrets(contents, forbiddenSecretValues)) {
     throw new Error(`public benchmark file contains secret-like content: ${bundlePath}`);
   }
 }

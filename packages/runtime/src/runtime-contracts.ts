@@ -304,7 +304,7 @@ export interface ReportPublicationStatusDocument {
   schema_version: typeof REPORT_PUBLICATION_STATUS_SCHEMA_VERSION;
   state_fingerprint: string;
   status: "available" | "unavailable";
-  reason: "report-agent-output-unavailable" | "report-publication-failed" | null;
+  reason: "report-agent-output-unavailable" | "report-publication-failed" | "report-withheld-secret" | null;
   completion: "complete" | "partial" | "unknown";
   verification: "verified" | "not-checked" | "unknown";
   json_file: ReportPublicationFileIdentity | null;
