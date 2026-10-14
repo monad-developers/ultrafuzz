@@ -299,7 +299,6 @@
                 "maximum": 9007199254740991
               },
               "changed_paths": {
-                "minItems": 1,
                 "maxItems": 50,
                 "type": "array",
                 "items": {

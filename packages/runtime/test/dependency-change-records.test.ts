@@ -74,3 +74,30 @@ test("a task's dependency record survives a restart until its next attempt clear
   assert.equal(readPersistedTaskDependencyChanges(runRoot, "task-a"), undefined);
   clearPersistedTaskDependencyChanges(runRoot, "task-a");
 });
+
+test("direct writes and pending rereads durably omit sensitive names while preserving counts", (context) => {
+  const runRoot = temporaryRoot("ufz-safe-dependency-changes-");
+  const name = "ULTRAFUZZ_TEST_DEPENDENCY_PASSWORD";
+  const previous = process.env[name];
+  const credential = 'dependency-"quoted"-secret-value';
+  process.env[name] = credential;
+  context.after(() => {
+    if (previous === undefined) Reflect.deleteProperty(process.env, name);
+    else process.env[name] = previous;
+  });
+  const input = { changed_path_count: 1, changed_paths: [`lib/dependency/${credential}.sol`] };
+  const expected = { changed_path_count: 1, changed_paths: [] };
+  persistTaskDependencyChanges(runRoot, "write", input);
+  const pending = path.join(runRoot, ".ultrafuzz-dependency-changes");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pending, "write.json"), "utf8")), expected);
+  fs.writeFileSync(path.join(pending, "read.json"), JSON.stringify(input));
+  assert.deepEqual(readPersistedTaskDependencyChanges(runRoot, "read"), expected);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pending, "read.json"), "utf8")), expected);
+  Reflect.deleteProperty(process.env, name);
+  assert.deepEqual(readPersistedTaskDependencyChanges(runRoot, "write"), expected);
+  assert.deepEqual(readPersistedTaskDependencyChanges(runRoot, "read"), expected);
+  const markers = path.join(runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markers);
+  fs.writeFileSync(path.join(markers, "write.json"), JSON.stringify(marker("write", expected)));
+  assert.deepEqual(readRunDependencyChanges(runRoot), [{ attempt_id: "write", ...expected }]);
+});

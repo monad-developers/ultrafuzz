@@ -1310,6 +1310,7 @@ test("a verification marker may record restored dependency changes, bounded and 
     validateArtifactVerificationMarker({ ...marker, dependency_changes: changes });
   assert.equal(validateArtifactVerificationMarker(marker).ok, true);
   assert.equal(withChanges({ changed_path_count: 60, changed_paths: ["lib/forge-std/src/Test.sol"] }).ok, true);
+  assert.equal(withChanges({ changed_path_count: 1, changed_paths: [] }).ok, true);
   assert.equal(withChanges({ changed_path_count: 0, changed_paths: [] }).ok, false);
   assert.equal(withChanges({ changed_path_count: 1, changed_paths: ["../escape"] }).ok, false);
   // Dependency files may use any name the filesystem allows.

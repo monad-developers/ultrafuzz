@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   parseStrictJsonBytes,
+  publicationContainsSecrets,
   safeResolveInside,
   validateArtifactVerificationMarker,
   writeFileDurable,
@@ -10,12 +11,26 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { ARTIFACT_VERIFICATION_DIRECTORY } from "./artifact-verification-authority.js";
+import { runPublicationForbiddenSecretValues } from "./publication-secret-values.js";
 
 /** One task whose agent changed hydrated dependency files, which the runtime then restored (#1251). */
 export interface RunDependencyChange {
   attempt_id: string;
   changed_path_count: number;
   changed_paths: string[];
+}
+
+/** Keep the exact change count while omitting filenames that cannot be published safely. */
+export function sanitizeDependencyChanges(
+  changes: Omit<RunDependencyChange, "attempt_id">,
+  forbiddenSecretValues: readonly string[]
+): Omit<RunDependencyChange, "attempt_id"> {
+  return {
+    changed_path_count: changes.changed_path_count,
+    changed_paths: changes.changed_paths.filter(
+      (entry) => !publicationContainsSecrets(Buffer.from(JSON.stringify(entry), "utf8"), forbiddenSecretValues)
+    )
+  };
 }
 
 const MAX_DEPENDENCY_CHANGE_RECORDS = 10_000;
@@ -84,7 +99,8 @@ export function persistTaskDependencyChanges(
 ): void {
   const filePath = pendingDependencyChangesPath(runRoot, attemptId);
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  writeFileDurable(filePath, Buffer.from(`${JSON.stringify(changes)}\n`, "utf8"));
+  const safeChanges = sanitizeDependencyChanges(changes, runPublicationForbiddenSecretValues(runRoot));
+  writeFileDurable(filePath, Buffer.from(`${JSON.stringify(safeChanges)}\n`, "utf8"));
 }
 
 /** The record a restarted verification left behind, if any. Malformed records contribute nothing. */
@@ -92,6 +108,7 @@ export function readPersistedTaskDependencyChanges(
   runRoot: string,
   attemptId: string
 ): Omit<RunDependencyChange, "attempt_id"> | undefined {
+  let changes: Omit<RunDependencyChange, "attempt_id">;
   try {
     const value = parseStrictJsonBytes(fs.readFileSync(pendingDependencyChangesPath(runRoot, attemptId))) as {
       changed_path_count?: unknown;
@@ -106,10 +123,17 @@ export function readPersistedTaskDependencyChanges(
     ) {
       return undefined;
     }
-    return { changed_path_count: value.changed_path_count, changed_paths: value.changed_paths };
+    changes = { changed_path_count: value.changed_path_count, changed_paths: value.changed_paths };
   } catch {
     return undefined;
   }
+  const safeChanges = sanitizeDependencyChanges(changes, runPublicationForbiddenSecretValues(runRoot));
+  if (safeChanges.changed_paths.length !== changes.changed_paths.length) {
+    // Pending records are mutable runtime metadata. Remove rejected names before
+    // returning, so a later restart with rotated credentials cannot revive them.
+    persistTaskDependencyChanges(runRoot, attemptId, safeChanges);
+  }
+  return safeChanges;
 }
 
 /** A new attempt starts from freshly hydrated files, so an earlier attempt's record no longer applies. */

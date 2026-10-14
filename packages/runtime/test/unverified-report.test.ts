@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createInitialRunState, reportSchema } from "@ultrafuzz/artifacts";
+import { persistTaskDependencyChanges, readPersistedTaskDependencyChanges } from "../src/dependency-change-records.js";
 import {
   readReportPublicationStatus,
   writeReportPublicationStatus,
@@ -93,6 +94,52 @@ test("readable agent-written reports remain available when verification records 
   assert.deepEqual(fs.readFileSync(report.artifacts.markdown_path), report.markdown_bytes);
   assert.throws(() => loadReportSnapshot(root, { requireVerified: true }));
   assertReportSnapshotRemainedCurrent(report);
+});
+
+test("report publication preserves dependency counts after sensitive path details were omitted", (context) => {
+  const root = reportRun("safe-dependency-paths");
+  writeAgentReport(root);
+  const name = "ULTRAFUZZ_TEST_DEPENDENCY_PASSWORD";
+  const previous = process.env[name];
+  const credential = 'dependency-"escaped"-secret-value';
+  process.env[name] = credential;
+  context.after(() => {
+    if (previous === undefined) Reflect.deleteProperty(process.env, name);
+    else process.env[name] = previous;
+  });
+  persistTaskDependencyChanges(root, "strategy", {
+    changed_path_count: 1,
+    changed_paths: [`lib/dependency/${credential}.sol`]
+  });
+  Reflect.deleteProperty(process.env, name);
+  const changes = readPersistedTaskDependencyChanges(root, "strategy");
+  assert.deepEqual(changes, { changed_path_count: 1, changed_paths: [] });
+  const markers = path.join(root, ".ultrafuzz-verification");
+  fs.mkdirSync(markers);
+  fs.writeFileSync(
+    path.join(markers, "strategy.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.artifact-verification.v2",
+      attempt_id: "strategy",
+      node_id: "strategy",
+      artifacts: [
+        {
+          path: "stdout.txt",
+          contract: "ultrafuzz/text@1",
+          contract_digest: "a".repeat(64),
+          sha256: "b".repeat(64),
+          primary: true
+        }
+      ],
+      publications: [{ path: "stdout.txt", sha256: "b".repeat(64) }],
+      dependency_changes: changes
+    })
+  );
+  const report = loadReportSnapshot(root);
+  const published = reportSchema.parse(JSON.parse(fs.readFileSync(report.artifacts.json_path, "utf8")));
+  assert.deepEqual(published.run_metadata.dependency_changes, [{ attempt_id: "strategy", ...changes }]);
+  assert.match(report.markdown, /changed hydrated dependency files/u);
+  assert.equal(JSON.stringify(published).includes("secret-value"), false);
 });
 
 test("saved strategy findings never become a replacement report", () => {

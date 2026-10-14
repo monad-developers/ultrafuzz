@@ -795,7 +795,9 @@ Ultrafuzz restores the cached files after the agent finishes and records the
 change instead of failing the task. The runtime restates every such record in
 `report.json` as `run_metadata.dependency_changes`. Each entry names the task's
 `attempt_id`, the exact `changed_path_count`, and up to fifty
-`changed_paths`. The report agent never writes this field: the runtime reads it
+`changed_paths`. Filenames containing detected credentials are omitted before
+the change record is saved; the count remains exact even when the path list is
+empty. The report agent never writes this field: the runtime reads it
 from the run's verification markers when it publishes the report, and drops it
 when there is nothing to record.
 

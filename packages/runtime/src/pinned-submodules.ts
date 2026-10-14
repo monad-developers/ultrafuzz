@@ -24,6 +24,8 @@ import {
   type PinnedSubmoduleSnapshotEntryDocument
 } from "./runtime-contracts.js";
 import { assertRuntimeDocument } from "./runtime-document-codec.js";
+import { sanitizeDependencyChanges } from "./dependency-change-records.js";
+import { runPublicationForbiddenSecretValues } from "./publication-secret-values.js";
 
 export { PINNED_SUBMODULE_EXPECTATION_SCHEMA_VERSION, PINNED_SUBMODULE_SNAPSHOT_SCHEMA_VERSION };
 export const PINNED_SUBMODULE_MANIFEST_LOCATION = "git-common-dir" as const;
@@ -1476,10 +1478,16 @@ export function restoreCheckoutSubmodulesAfterAgent(
   assertTaskSubmoduleIsolation(workspaceRoot, loaded.snapshot, "checkout");
 
   const changed = changedDependencyPaths(workspaceRoot, loaded.snapshot);
-  const changes = {
-    changed_path_count: changed.length,
-    changed_paths: changed.slice(0, MAX_RECORDED_DEPENDENCY_CHANGES)
-  };
+  // These names become runtime-owned report metadata after artifact validation.
+  // Omit sensitive names before either the pending record or verifier marker can
+  // retain them; later report reads may run with different credentials.
+  const changes = sanitizeDependencyChanges(
+    {
+      changed_path_count: changed.length,
+      changed_paths: changed.slice(0, MAX_RECORDED_DEPENDENCY_CHANGES)
+    },
+    runPublicationForbiddenSecretValues(input.runRoot ?? input.sourceRoot)
+  );
   if (changed.length > 0) {
     // Persist the record before restoring: a controller restart after the
     // restore would otherwise find clean files and lose the record.

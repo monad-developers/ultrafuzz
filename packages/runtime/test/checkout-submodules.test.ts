@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { checkoutSubmoduleExpectationForProject } from "../src/checkout-submodules.js";
+import { persistTaskDependencyChanges, readPersistedTaskDependencyChanges } from "../src/dependency-change-records.js";
 import {
   capturePinnedSubmoduleSnapshot,
   checkTaskSubmodulesAfterAgent,
@@ -277,6 +278,51 @@ test("after the agent, an ordinary checkout records dependency edits and restore
   assert.equal(fs.readFileSync(path.join(outside, "keep.txt"), "utf8"), "not a dependency\n");
   assert.equal(fs.lstatSync(path.join(replaced, "vendor/dependency")).isDirectory(), true);
   assert.equal(fs.readFileSync(path.join(replaced, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
+});
+
+test("dependency filenames are sanitized before recording and stay omitted after credential rotation", (context) => {
+  const credential = 'dependency-review-"secret"-value';
+  const rawCredential = "dependency-review-raw-secret-value";
+  const names = ["ULTRAFUZZ_TEST_DEPENDENCY_PASSWORD", "ULTRAFUZZ_TEST_DEPENDENCY_TOKEN"] as const;
+  const previous = names.map((name) => process.env[name]);
+  context.after(() => {
+    for (const [index, name] of names.entries()) {
+      if (previous[index] === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = previous[index];
+    }
+  });
+  process.env[names[0]] = credential;
+  process.env[names[1]] = rawCredential;
+  const fixture = nestedSubmoduleFixture();
+  git(fixture.source, ["branch", "-M", "main"]);
+  const { expectation } = checkoutSubmoduleExpectationForProject(fixture.source);
+  assert.ok(expectation !== undefined);
+  enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation, "checkout");
+  const workspaceRoot = path.join(fixture.root, "task-worktree");
+  const runRoot = path.join(fixture.root, "run");
+  fs.mkdirSync(runRoot);
+  git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/safe-paths", workspaceRoot, "main"]);
+  const input = { sourceRoot: fixture.source, workspaceRoot, expectation, runRoot };
+  hydratePinnedSubmodules({ ...input, sourcePolicy: "checkout" });
+  for (const name of ["ordinary.sol", `${credential}.sol`, `${rawCredential}.sol`]) {
+    fs.writeFileSync(path.join(workspaceRoot, "vendor/dependency", name), "changed\n");
+  }
+  const expected = { changed_path_count: 3, changed_paths: ["vendor/dependency/ordinary.sol"] };
+  const changes = restoreCheckoutSubmodulesAfterAgent({
+    ...input,
+    onChanges: (recorded) => {
+      assert.deepEqual(recorded, expected, "the pre-restore callback never sees sensitive names");
+      persistTaskDependencyChanges(runRoot, "task", recorded);
+    }
+  });
+  assert.deepEqual(changes, expected, "the verifier's in-memory record is also safe");
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(runRoot, ".ultrafuzz-dependency-changes/task.json"), "utf8")),
+    expected
+  );
+  for (const name of names) Reflect.deleteProperty(process.env, name);
+  assert.deepEqual(restoreCheckoutSubmodulesAfterAgent(input), { changed_path_count: 0, changed_paths: [] });
+  assert.deepEqual(readPersistedTaskDependencyChanges(runRoot, "task"), expected);
 });
 
 test("the post-agent step fails a pinned run on a dependency edit and restores an ordinary one", (context) => {

@@ -1694,7 +1694,7 @@ export const reportSchema = withDocumentMetadata(
             z.strictObject({
               attempt_id: nonEmptyString.max(128),
               changed_path_count: positiveInteger,
-              changed_paths: z.array(nonEmptyString.max(4_096)).min(1).max(50)
+              changed_paths: z.array(nonEmptyString.max(4_096)).max(50)
             })
           )
           .min(1)
