@@ -4,13 +4,18 @@ import { fileURLToPath } from "node:url";
 export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
   "ultrafuzz.provider-scoped-sensitive-environment.v1" as const;
 
-// Credential classification and ownership come from these @ultrafuzz/runtime
-// functions, loaded from the module the rendered workflow imports, rather than
-// from copies kept in step with them.
-const { isCredentialLikeEnvironmentVariableName, routeOwnsCredentialLikeEnvironmentVariable } = (await import(
+// Credential classification, ownership and the built-in provider credentials
+// come from @ultrafuzz/runtime, loaded from the module the rendered workflow
+// imports, rather than from copies kept in step with them.
+const {
+  BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES,
+  isCredentialLikeEnvironmentVariableName,
+  routeOwnsCredentialLikeEnvironmentVariable
+} = (await import(
   process.env.ULTRAFUZZ_RUNTIME_MODULE ??
     new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href
 )) as {
+  BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES: readonly string[];
   isCredentialLikeEnvironmentVariableName: (name: string) => boolean;
   routeOwnsCredentialLikeEnvironmentVariable: (agent: string, name: string) => boolean;
 };
@@ -37,17 +42,6 @@ const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH"
 ] as const;
 
-const BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "AZURE_OPENAI_API_KEY",
-  "CODEX_API_KEY",
-  "DEEPSEEK_API_KEY",
-  "KIMI_API_KEY",
-  "MOONSHOT_API_KEY",
-  "OPENAI_API_KEY",
-  "OPENROUTER_API_KEY"
-] as const;
 const BUILT_IN_PROVIDER_HOME_ENVIRONMENT_VARIABLES = [
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
