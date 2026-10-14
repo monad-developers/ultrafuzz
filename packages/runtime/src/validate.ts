@@ -28,6 +28,7 @@ import { agentRegistryRegisters, inspectAgentRegistry } from "./agent-registry.j
 import { providerHomeDiagnostics, providerHomeProblems } from "./provider-home-preflight.js";
 import {
   agentAuthenticationEnvironmentVariableNames,
+  BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES,
   CLAUDE_SUBSCRIPTION_TOKEN_ENVIRONMENT_VARIABLE,
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
@@ -469,7 +470,12 @@ function blankedAllowlistedCredentialDiagnostics(
   for (const name of new Set((env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? "").split(",").map((entry) => entry.trim()))) {
     const upper = name.toUpperCase();
     if (name === "" || !isCredentialLikeEnvironmentVariableName(upper) || consumed.has(upper)) continue;
-    if (selectedAgentRefs.some((agentRef) => routeOwnsCredentialLikeEnvironmentVariable(agentRef, upper))) continue;
+    // A route restores an allowlisted credential under its prefix, but never a
+    // built-in provider credential: only that provider's own configured
+    // authentication restores one, which `consumed` already covers.
+    const builtIn = (BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES as readonly string[]).includes(upper);
+    if (!builtIn && selectedAgentRefs.some((agentRef) => routeOwnsCredentialLikeEnvironmentVariable(agentRef, upper)))
+      continue;
     diagnostics.push({
       code: "AGENT_ENV_ALLOWLIST_CREDENTIAL_BLANKED",
       message:

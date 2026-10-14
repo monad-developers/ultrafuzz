@@ -230,6 +230,28 @@ test("validate warns when an allowlisted credential reaches no selected agent (#
   // A subscription Claude agent consumes its own login; with no Codex agent, OPENAI_* reaches nobody.
   const claude = await validateProject({ projectRoot: project, env, agent: "ClaudeAgent" });
   assert.deepEqual(blanked(claude).sort(), ["MY_SERVICE_TOKEN", "OPENAI_ORG_TOKEN"]);
+
+  // A route never restores a built-in provider key from the allowlist, even
+  // under its own prefix: subscription Codex runs with OPENAI_API_KEY blank.
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const config = fs.readFileSync(configPath, "utf8");
+  const subscriptionCodex = config.replace(
+    /\[agents\.CodexAgent\]\n(?:[^[]*\n)?/u,
+    '[agents.CodexAgent]\nauth = "subscription"\n\n'
+  );
+  assert.notEqual(subscriptionCodex, config);
+  fs.writeFileSync(configPath, subscriptionCodex);
+  const codexEnv = {
+    ...env,
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: `${env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST},OPENAI_API_KEY`,
+    OPENAI_API_KEY: "codex-api-key"
+  };
+  const subscription = await validateProject({ projectRoot: project, env: codexEnv, agent: "CodexAgent" });
+  assert.deepEqual(blanked(subscription).sort(), ["CLAUDE_CODE_OAUTH_TOKEN", "MY_SERVICE_TOKEN", "OPENAI_API_KEY"]);
+  fs.writeFileSync(configPath, config);
+  // In api-key mode Codex consumes OPENAI_API_KEY itself.
+  const apiKey = await validateProject({ projectRoot: project, env: codexEnv, agent: "CodexAgent" });
+  assert.deepEqual(blanked(apiKey).sort(), ["CLAUDE_CODE_OAUTH_TOKEN", "MY_SERVICE_TOKEN"]);
 });
 
 // The prediction duplicates the adapters' rules, so check it against the adapter code itself.
