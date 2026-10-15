@@ -10232,7 +10232,15 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   // R49) died at `prepare:stateful-invariant-implement-properties` without this.
   assert.match(source, /function firstDependencyRequiringReplay\(/u);
   assert.match(helper, /replayWorkspacePatches && captures\.length > 0/u);
-  assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot\),/u);
+  assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot, treeAuthority\),/u);
+  // #1308: every tree reconstruction retains authenticated legacy membership,
+  // including preparation state, without admitting unrelated new scratch paths.
+  assert.match(helper, /const captures = authenticatedWorkspacePatchCaptures\(task, workspaceRoot\);/u);
+  assert.match(helper, /const treeAuthority = \{\s*trees: \[/u);
+  assert.match(helper, /\.\.\.captures\.map\(\(capture\) => capture\.manifest\.base_tree\)/u);
+  assert.match(helper, /\.\.\.\(persistedPreparation === undefined \? \[\] : \[persistedPreparation\]\)/u);
+  assert.match(helper, /files: captures\.flatMap\(\(capture\) => capture\.manifest\.files\)/u);
+  assert.doesNotMatch(helper, /captureWorkspaceTree\(workspaceRoot\)/u);
   assert.match(helper, /captures\.map\(\(entry\) => entry\.manifest\)/u);
   // Every capture is validated even when replay skips it: the manifest schema, object ids, digest and
   // sensitive-path checks all live inside `applyWorkspacePatch`, so a skipped patch would otherwise go
