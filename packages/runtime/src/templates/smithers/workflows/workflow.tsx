@@ -9298,9 +9298,9 @@ export default smithers((ctx) => {
                 needs={{ agent: task.id }}
                 deps={{ agent: outputs.agentProcess }}
                 depsOptional
-                // A report the secret gate rejects is withheld, not a failed
-                // campaign (#1217). The runtime still fails the run for any
-                // other report verification failure.
+                // Let the runtime apply completion policy to a report the
+                // secret gate rejects (#1217). Strict completion and other
+                // report verification failures still fail the campaign.
                 continueOnFail={task.continueOnFail || producesFinalReport(task)}
                 retries={0}
                 metadata={{

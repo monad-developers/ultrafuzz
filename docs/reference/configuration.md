@@ -542,6 +542,12 @@ attempt eligible agent-written reporting. A failed report agent leaves report
 availability unavailable; no replacement report is synthesized. Custom
 topologies keep their declared group failure policies.
 
+Under best-effort completion, a final report rejected by the artifact secret
+gate does not fail an otherwise successful run. The report remains unavailable
+and its task stays failed; `ultrafuzz resume <run-id> --retry-failed` regenerates
+it. Strict completion still fails the run, as do other report verification
+failures under either policy.
+
 `ultrafuzz report --require-verified` is independent: it requires verification of
 an available agent-written report, not complete execution coverage.
 

@@ -578,7 +578,11 @@ counts:
 - `report`: `status` (`available`, `unavailable`, `pending`, or `unknown`),
   `reason`, `completion` (`complete`, `partial`, or `unknown`), `verification`
   (`verified`, `not-checked`, or `unknown`), `json_path`, and `markdown_path`.
-  A failed run may have an available PARTIAL report. If the report agent did not
+  A failed run may have an available PARTIAL report. A successful best-effort run
+  may have an unavailable report with reason `report-withheld-secret` when the
+  artifact secret gate rejects it; `resume <run-id> --retry-failed` regenerates
+  the report. Strict completion treats that rejection as a failed run.
+  If the report agent did not
   produce usable output, the report is unavailable; status does not create a
   replacement. Missing or unreadable publication records leave availability
   unknown. Unavailable and unknown reports expose no stale report paths.
