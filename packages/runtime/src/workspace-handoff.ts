@@ -15,6 +15,7 @@ import {
   type WorkspacePatchOverflowAttribution,
   type WorkspacePatchOverflowContributor
 } from "./git-capture-diagnostics.js";
+import { isGeneratedWorkspaceOutput } from "./workspace-generated-output.js";
 
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
@@ -88,9 +89,10 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * index would simply keep the baseline blob and an authored edit would vanish from the patch with no
  * error and a manifest that still validates.
  *
- * The pathspecs are root-anchored, matching where `recon fuzz .` writes. Agent-chosen variants are not
- * guessed here. `captureWorkspacePatch` handles those only after a real diff crosses the patch ceiling,
- * then excludes measured untracked contributors at exact-file granularity (issue #368).
+ * The pathspecs are root-anchored, matching where `recon fuzz .` writes. Per-file classification below
+ * also excludes recognizable nested build/coverage/corpus output before it can poison a baseline or
+ * fail the secret gate below the patch ceiling (#1308). Unknown output retains measured overflow
+ * recovery at exact-file granularity (issue #368).
  */
 const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic", "out"] as const;
 
@@ -555,7 +557,8 @@ function stageableWorkspacePaths(
       ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`),
       // The prompt-owned destinations remain exact. Prefix matching was added as an incident stopgap,
       // but silently dropped authored paths such as `echidna-config/NewAuthored.sol`. Unknown, nested,
-      // case-variant and slash-less generated paths are handled by measured overflow recovery instead.
+      // case-variant and slash-less paths remain eligible unless classified as generated output below
+      // or excluded by measured overflow recovery.
       ...WORKSPACE_GENERATED_ROOTS.map((root) => `:(exclude)${root}/**`),
       ...WORKSPACE_DEPENDENCY_ROOTS.map((root) => `:(exclude)${root}/**`)
     ],
@@ -583,6 +586,21 @@ function stageableWorkspacePaths(
     // decode into one. Covers a top-level *file* named like a root, which the pathspecs above do not.
     const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
     if (top === ".git" || runtimeRoots.has(top)) return;
+    if (isUntracked) {
+      const relativePath = entry.toString("utf8");
+      // Never classify a lossy decoded path or bypass a sensitive/path-safety failure.
+      if (Buffer.from(relativePath).equals(entry)) {
+        try {
+          normalizeWorkspacePatchPath(relativePath);
+          rejectSensitivePath(relativePath);
+        } catch {
+          pathspecs.push(entry);
+          untrackedPaths.set(workspacePathKey(entry), entry);
+          return;
+        }
+        if (isGeneratedWorkspaceOutput(workspaceRoot, relativePath)) return;
+      }
+    }
     const key = workspacePathKey(entry);
     pathspecs.push(entry);
     if (isUntracked) untrackedPaths.set(key, entry);

@@ -200,6 +200,21 @@ The value is fixed at launch, so changing it, or `ULTRAFUZZ_KEEP_WORKSPACES`,
 for a `resume` has no effect. A deletion that fails is reported as a
 `TASK_WORKTREE_REMOVAL_FAILED` warning, and the next command retries it.
 
+Workspace patches hand off authored changes, not raw build and coverage output.
+In addition to the existing generated roots, capture excludes untracked compiler
+JSON in `out/`, `build-info/`, `build-snapshot/`, and contract `.sol/` output
+directories at any depth; `solidity-files-cache.json`; `lcov.info`, `*.lcov`, and
+`covered.<number>.html`/`.txt`; and JSON, binary, or text corpus files under
+`recon-corpus/` and `echidna/`. In `.cov-work/` and `.recon/`, `build.json`,
+`build-info.json`, `compilation.json`, `compiler-input.json`, `compiler-output.json`,
+`standard-input.json`, `standard-output.json`, `recon-coverage.json`, and `corpus/`
+output are also excluded. Authored test sources and ordinary configuration beside
+those files remain eligible. These generated-output rules do not omit tracked
+edits or deletions. Unknown files retain the
+existing measured diff-overflow handling. Raw evidence needed downstream belongs
+in declared artifacts, which still undergo the publication secret gate; excluding
+scratch from a workspace patch never exempts a declared artifact from scanning.
+
 The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
 resolves the real executable before launch, writes an executable wrapper under
 the run directory, and places that wrapper ahead of Foundry on worker `PATH`.

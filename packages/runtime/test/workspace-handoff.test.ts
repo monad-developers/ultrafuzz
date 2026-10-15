@@ -1689,7 +1689,7 @@ test("excludes agent-chosen variants of the generated corpus roots", () => {
   }
 });
 
-// The exclusion unit must be the measured FILE, never its first path segment. PR #372 dropped `test/`
+// The exclusion unit must be the generated FILE, never its first path segment. PR #372 dropped `test/`
 // wholesale in this shape, destroying the Solidity suite the node existed to hand off.
 test("excludes a nested corpus file without dropping authored source beside it", () => {
   const root = fixture();
@@ -1706,10 +1706,7 @@ test("excludes a nested corpus file without dropping authored source beside it",
       captured.manifest.files.map((entry) => entry.path),
       ["test/recon/Handlers.t.sol"]
     );
-    assert.deepEqual(
-      captured.manifest.excluded_files?.map((entry) => entry.path),
-      ["test/recon/recon-corpus/seed.bin"]
-    );
+    assert.equal(captured.manifest.excluded_files, undefined, "known nested corpus is classified before diff overflow");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
