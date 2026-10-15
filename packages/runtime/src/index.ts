@@ -3,6 +3,7 @@ export * from "./artifact-verification-authority.js";
 export * from "./aggregation-semantic-context.js";
 export * from "./audit-contracts.js";
 export * from "./clean.js";
+export * from "./command-invocations.js";
 export * from "./canonical-properties-markdown.js";
 export * from "./doctor.js";
 export * from "./dynamic-expansion.js";

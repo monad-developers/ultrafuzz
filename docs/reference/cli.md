@@ -1033,3 +1033,14 @@ performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](evals.md) for configuration and architecture details.
+
+## Internal command hook
+
+`ultrafuzz command-hook` consumes the provider's hook JSON on stdin. It is an
+internal integration command and emits the provider hook protocol rather than
+the public CLI result envelope. Within a guarded node attempt,
+`ultrafuzz command-hook --status HANDLE` polls the durable invocation identity
+reported by a coalesced command. It returns status and native session/tool-call
+identities, without executing or cancelling the command. Use the native session
+handle to retrieve output. See [command invocation admission](agent-adapter-boundaries.md#command-invocation-admission)
+for qualified providers, explicit concurrent invocations and recovery limits.

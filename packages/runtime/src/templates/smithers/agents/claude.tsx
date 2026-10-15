@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smthrs";
-import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import {
+  configureCommandInvocationGuard,
+  workflowControlChildEnvironment,
+  workflowControlCredentialValue
+} from "./environment";
 import { resolveProviderHome } from "./provider-home";
 import { readStringTable, stringField } from "./toml";
 
@@ -17,6 +21,15 @@ const GENERIC_CLAUDE_FAILURE = "Claude run failed";
 
 // Shared by ClaudeAgent and DeepSeekAgent, which both run Claude Code.
 export class StatedFailureClaudeCodeAgent extends SmithersClaudeCodeAgent {
+  override async buildCommand(params: ClaudeCommandParams): Promise<ClaudeCommand> {
+    return configureCommandInvocationGuard({
+      engine: "claude",
+      command: await super.buildCommand(params),
+      cwd: params.cwd,
+      taskContext: params.options?.taskContext
+    });
+  }
+
   // Smithers reports a failed result without an `error` field as "Claude run
   // failed" and drops the `result` text in which Claude Code states the cause,
   // such as a contended OAuth refresh (#1084). Smithers classifies the thrown

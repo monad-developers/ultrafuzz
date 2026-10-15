@@ -3803,6 +3803,53 @@ bunAdapterTest(
   }
 );
 
+bunAdapterTest(
+  "generated Codex adapter carries the same guarded attempt through fresh and resumed commands",
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project }).ok, true);
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+    const bin = path.join(project, "fake-guard-bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nprintf 'codex-cli 0.146.0\\n'\n", { mode: 0o700 });
+    const names = ["PATH", "ULTRAFUZZ_TRUSTED_BIN"] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+    process.env.ULTRAFUZZ_TRUSTED_BIN = bin;
+    try {
+      const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
+      const taskContext = { runId: "run", nodeId: "node", iteration: 0, attempt: 1 };
+      const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: { taskContext } });
+      const resumed = await agent.buildCommand({
+        prompt: "test",
+        cwd: project,
+        options: { taskContext, resumeSession: "session-123" }
+      });
+      try {
+        assert.match(fresh.args.join(" "), /hooks\.PreToolUse/u);
+        assert.match(resumed.args.join(" "), /hooks\.PreToolUse/u);
+        assert.deepEqual(fresh.args.slice(0, 2), ["exec", "-c"]);
+        assert.deepEqual(resumed.args.slice(0, 3), ["exec", "resume", "-c"]);
+        assert.equal(fresh.args.filter((arg) => arg === "--add-dir").length, 2);
+        assert.equal(resumed.args.includes("--add-dir"), false);
+        assert.ok(fresh.env?.ULTRAFUZZ_COMMAND_INVOCATIONS);
+        assert.equal(resumed.env?.ULTRAFUZZ_COMMAND_INVOCATIONS, fresh.env.ULTRAFUZZ_COMMAND_INVOCATIONS);
+        assert.equal(fresh.env.ULTRAFUZZ_COMMAND_INVOCATION_ENGINE, "codex");
+        assert.equal(fresh.env.ULTRAFUZZ_TRUSTED_BIN, "");
+      } finally {
+        await fresh.cleanup?.();
+        await resumed.cleanup?.();
+      }
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
 test("linked workflow classifies sensitive allowlist values from the ambient environment", () => {
   const names = ["ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "AMBIENT_RPC_URL"] as const;
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -11529,6 +11576,8 @@ nodes:
     "- Working budget before finalization: 1000 seconds.",
     "- Clock: `date -u +%s` once at start = START; working deadline START+1000, hard deadline START+1200.",
     "- Re-run `date -u +%s` before each expensive step; compare, never estimate.",
+    "- Keep the session handle returned by a long-running command and poll that handle until completion. Do not relaunch the command to check progress.",
+    "- When a command is coalesced, poll its original native session or the reported `ultrafuzz command-hook --status HANDLE`. Use a unique first-line `# ultrafuzz-command-key: NAME` comment only when you deliberately need another concurrent invocation.",
     "- Stop starting new delegated or tool work when the finalization reserve begins.",
     "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
     "- Crossing the hard deadline kills this node with no output at all."

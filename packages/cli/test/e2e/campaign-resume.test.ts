@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { formatEstimatedSpendUsd } from "@ultrafuzz/artifacts";
+import { configureCommandInvocationGuard } from "@ultrafuzz/runtime";
 
 // One campaign through the shipped product path: `init`, `run`, `resume`, `status`, `stats`,
 // `report`, and `events` each run as their own `ultrafuzz` process, and the generated workflow runs
@@ -70,6 +71,7 @@ nodes:
 
 interface StubConfig {
   logPath: string;
+  versionLogPath: string;
   holdPath: string;
   holdNode: string;
   promptMarker: string;
@@ -98,6 +100,13 @@ function stubCodex(config: StubConfig): void {
   const path = process.getBuiltinModule("node:path");
   const { execFileSync } = process.getBuiltinModule("node:child_process");
   const args = process.argv.slice(2);
+  // Capability probes are not model attempts and must not read a prompt or
+  // enter the held-node path. Keep separate evidence that the probe ran.
+  if (args.length === 1 && args[0] === "--version") {
+    fs.appendFileSync(config.versionLogPath, `${JSON.stringify({ pid: process.pid, args })}\n`);
+    process.stdout.write("codex-cli 0.146.0\n");
+    return;
+  }
   const prompt = fs.readFileSync(0, "utf8");
   const node = (process.env.SMITHERS_NODE_ID ?? "").replace(/^node:/u, "");
   const edited = prompt.includes(config.promptMarker);
@@ -174,6 +183,7 @@ interface Campaign {
   runId: string;
   env: NodeJS.ProcessEnv;
   logPath: string;
+  versionLogPath: string;
   holdPath: string;
 }
 
@@ -221,6 +231,7 @@ function prepareCampaign(): Campaign {
     project,
     runId: `e2e-${process.pid}-${Date.now().toString(36)}`,
     logPath: path.join(root, "agent-calls.jsonl"),
+    versionLogPath: path.join(root, "version-probes.jsonl"),
     holdPath: path.join(root, `hold-${INTERRUPTED_NODE}`),
     env: {
       ...Object.fromEntries(
@@ -242,6 +253,7 @@ function prepareCampaign(): Campaign {
   );
   const stubConfig: StubConfig = {
     logPath: campaign.logPath,
+    versionLogPath: campaign.versionLogPath,
     holdPath: campaign.holdPath,
     holdNode: INTERRUPTED_NODE,
     promptMarker: PROMPT_EDIT_MARKER
@@ -261,6 +273,60 @@ function prepareCampaign(): Campaign {
   }
   return campaign;
 }
+
+test("campaign stub separates configure-only version probes from real model starts", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("command guard process identity requires Linux /proc");
+    return;
+  }
+  const campaign = prepareCampaign();
+  const savedBin = process.env.ULTRAFUZZ_TRUSTED_BIN;
+  process.env.ULTRAFUZZ_TRUSTED_BIN = path.join(campaign.root, "bin");
+  try {
+    const diagnostics: string[] = [];
+    const binary = path.join(campaign.root, "bin", "codex");
+    const configured = configureCommandInvocationGuard({
+      engine: "codex",
+      command: { command: binary, args: ["exec", "--json", "-"], env: {} },
+      cwd: campaign.project,
+      taskContext: { runId: campaign.runId, nodeId: "probe", iteration: 0, attempt: 1 },
+      diagnostic: (message) => diagnostics.push(message)
+    });
+    assert.match(diagnostics.join("\n"), /enabled: codex 0\.146\.0/u);
+    assert.ok(configured.args.some((arg) => arg.startsWith("hooks.PreToolUse=")));
+    assert.equal(fs.existsSync(campaign.logPath), false, "configuration must not log a model start or failure");
+    const probes = fs
+      .readFileSync(campaign.versionLogPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { args: string[] });
+    assert.deepEqual(
+      probes.map((probe) => probe.args),
+      [["--version"]]
+    );
+
+    // Positive control: the real exec path still logs its start and completion.
+    execFileSync(binary, configured.args, {
+      cwd: campaign.project,
+      env: { ...campaign.env, ...configured.env, SMITHERS_NODE_ID: "node:probe" },
+      input: "- Path: `probe.txt`\n  Contract: `ultrafuzz/text@1`\n",
+      encoding: "utf8"
+    });
+    assert.deepEqual(
+      agentCalls(campaign).map((call) => [call.node, call.event]),
+      [
+        ["probe", "started"],
+        ["probe", "completed"]
+      ]
+    );
+    assert.equal(fs.readFileSync(path.join(campaign.project, "probe.txt"), "utf8"), "stub output for probe\n");
+    assert.equal(fs.readFileSync(campaign.versionLogPath, "utf8").trim().split("\n").length, 1);
+  } finally {
+    if (savedBin === undefined) delete process.env.ULTRAFUZZ_TRUSTED_BIN;
+    else process.env.ULTRAFUZZ_TRUSTED_BIN = savedBin;
+    removeTree(campaign.root);
+  }
+});
 
 async function ultrafuzz<T>(campaign: Campaign, args: string[], timeoutMs = 5 * MINUTE): Promise<T> {
   const command = `ultrafuzz ${args.join(" ")}`;
