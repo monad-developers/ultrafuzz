@@ -4747,6 +4747,166 @@ bunAdapterTest(
   }
 );
 
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves real Smithers quota controls through terminal diagnostics",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const classifierPath = path.join(
+      pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent"),
+      "BaseCliAgent",
+      "BaseCliAgent.js"
+    );
+    const { classifyQuotaError } = (await import(pathToFileURL(classifierPath).href)) as {
+      classifyQuotaError(
+        message: string,
+        command: string,
+        context: { nowMs: () => number }
+      ): (Error & { code: string; details: Record<string, unknown> }) | null;
+    };
+    const providerText =
+      "provider diagnostic prefix ".repeat(20) + "HTTP 429 Too Many Requests; retry after 360 seconds";
+    const quota = classifyQuotaError(providerText, "codex", { nowMs: () => 1_800_000_000_000 });
+    assert.ok(quota);
+    assert.equal(quota.code, "AGENT_QUOTA_EXCEEDED");
+    assert.equal(quota.details.quotaResetAtMs, 1_800_000_360_000);
+    assert.doesNotMatch(quota.message, /HTTP 429|429 Too Many Requests/u);
+    for (const channel of ["stderr", "event"]) {
+      clock.nowMs = 0;
+      await assert.rejects(
+        new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 12_000 }, async (options) => {
+          clock.nowMs = 9_500;
+          if (channel === "stderr") {
+            (options.onStderr as (text: string) => void)(`${providerText}\n`);
+          } else {
+            (options.onEvent as (event: Record<string, unknown>) => void)({
+              type: "completed",
+              ok: false,
+              error: providerText
+            });
+          }
+          throw quota;
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, "AGENT_QUOTA_EXCEEDED");
+          assert.deepEqual((error as { details: unknown }).details, quota.details);
+          assert.equal(((error as Error).cause as Error).cause, quota);
+          assert.match(String(error), /finalization-reserved/u);
+          return true;
+        }
+      );
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves direct scheduler controls without promoting arbitrary causes",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const staleQuota = Object.assign(new Error("earlier provider quota"), { code: "AGENT_QUOTA_EXCEEDED" });
+    const details = { failureRetryable: false, discardResumeSession: true, discardAgentCheckpoint: true };
+    for (const code of ["AGENT_CONFIG_INVALID", "AGENT_CHECKPOINT_INVALID", "UNKNOWN_PROVIDER_CODE"]) {
+      clock.nowMs = 0;
+      const providerFailure = Object.assign(new Error("HTTP 429 route rejected", { cause: staleQuota }), {
+        code,
+        details
+      });
+      await assert.rejects(
+        new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 12_000 }, async () => {
+          clock.nowMs = 9_500;
+          throw providerFailure;
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, code === "UNKNOWN_PROVIDER_CODE" ? "AGENT_CLI_ERROR" : code);
+          assert.deepEqual((error as { details: unknown }).details, details);
+          assert.equal((error as Error).cause, providerFailure);
+          return true;
+        }
+      );
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub rechecks terminal callback errors cancellation and deadlines at budget stops",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const providerText = "HTTP 429 terminal provider output\n";
+    for (const stop of ["initial-decision", "headroom-recheck"]) {
+      for (const outcome of ["abort", "deadline", "callback-error"]) {
+        clock.nowMs = 0;
+        const controller = new AbortController();
+        const cancelled = new Error("caller cancelled during terminal release");
+        const callbackFailure = new Error("terminal callback failed");
+        let invocations = 0;
+        let terminalCallbacks = 0;
+        await assert.rejects(
+          new OpenRouterCodexAgent().withOpenRouterRecovery(
+            {
+              timeout: 12_000,
+              abortSignal: controller.signal,
+              onStderr: (text: string) => {
+                if (stop === "headroom-recheck" && text.includes("returned HTTP 429")) clock.nowMs = 9_500;
+                if (text !== providerText) return;
+                terminalCallbacks += 1;
+                if (outcome !== "deadline") controller.abort(cancelled);
+                if (outcome !== "abort") clock.nowMs = 12_000;
+                if (outcome === "callback-error") throw callbackFailure;
+              }
+            },
+            async (options) => {
+              invocations += 1;
+              clock.nowMs = stop === "initial-decision" ? 9_500 : 5_000;
+              (options.onStderr as (text: string) => void)(providerText);
+              throw Object.assign(new Error("HTTP 429 quota"), { code: "AGENT_QUOTA_EXCEEDED" });
+            }
+          ),
+          (error: unknown) => {
+            if (outcome === "callback-error") assert.equal(error, callbackFailure);
+            else {
+              assert.equal(
+                (error as { code: string }).code,
+                outcome === "abort" ? "PROCESS_ABORTED" : "PROCESS_TIMEOUT"
+              );
+              if (outcome === "abort") assert.equal((error as Error).cause, cancelled);
+              else assert.equal(openRouterBudgetDiagnostics(error).remainingMs, 0);
+            }
+            return true;
+          }
+        );
+        assert.equal(invocations, 1);
+        assert.equal(terminalCallbacks, 1);
+      }
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
 function emitOpenRouterCheckpoint(options: Record<string, unknown>, id: string): void {
   const onEvent = options.onEvent as (event: Record<string, unknown>) => void;
   onEvent({ type: "started", resume: "budget-session" });

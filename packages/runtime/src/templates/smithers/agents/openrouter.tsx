@@ -30,6 +30,16 @@ const OPENROUTER_RATE_LIMIT_PATTERN = /(?:\bHTTP(?:\s+status)?\s+429\b|\b429\s+T
 const OPENROUTER_RECOVERY_DEADLINE_MARKER = "ULTRAFUZZ_OPENROUTER_RECOVERY_DEADLINE";
 const OPENROUTER_TOTAL_DEADLINE_MARKER = "ULTRAFUZZ_OPENROUTER_TOTAL_DEADLINE";
 const OPENROUTER_ATTEMPT_DEADLINES = Symbol("ultrafuzz.openrouter.attempt-deadlines");
+const OPENROUTER_SCHEDULER_ERROR_CODES = new Set([
+  "AGENT_QUOTA_EXCEEDED",
+  "AGENT_CONFIG_INVALID",
+  "AGENT_SESSION_LOST",
+  "AGENT_CHECKPOINT_INVALID",
+  "TASK_ABORTED",
+  "PROCESS_ABORTED",
+  "PROCESS_TIMEOUT",
+  "PROCESS_IDLE_TIMEOUT"
+]);
 const OPENROUTER_SESSION_CONTINUATION_PROMPT =
   "Continue the existing task from the current session state. Do not repeat completed work. Finish the requested deliverable.";
 const OPENROUTER_TERMINAL_CONTINUATION_PROMPT =
@@ -348,7 +358,7 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     decision: OpenRouter429RecoveryDecision
   ): Promise<void> {
     if (decision.kind === "rate-limit-exhausted") {
-      releaseRelayOrThrow(relay);
+      this.releaseOpenRouterTerminalRelay(context, relay);
       throw effectiveRateLimitError;
     }
     if (decision.kind === "total-timeout") {
@@ -356,7 +366,7 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       throw this.retryTimeout(context);
     }
     if (decision.kind === "backoff-budget-exhausted" || decision.kind === "finalization-reserved") {
-      releaseRelayOrThrow(relay);
+      this.releaseOpenRouterTerminalRelay(context, relay);
       throw openRouterRecoveryBudgetError(context, decision.kind);
     }
     relay.rememberActionSnapshotsForResume();
@@ -364,10 +374,10 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     const timeoutRemaining = this.assertOpenRouterRetryDeadline(context, relay, effectiveRateLimitError, false);
     const retryRemaining = Math.max(0, context.retryDeadline - performance.now());
     const waitDelayMs = minimumDefined(decision.delayMs, retryRemaining, timeoutRemaining);
-    assertOpenRouterBackoffHeadroom(context, relay, waitDelayMs);
+    this.assertOpenRouterBackoffHeadroom(context, relay, waitDelayMs);
     await this.waitForOpenRouterRetry(context, relay, waitDelayMs);
     this.assertOpenRouterRetryDeadline(context, relay, effectiveRateLimitError, true);
-    assertOpenRouterBackoffHeadroom(context, relay, 0);
+    this.assertOpenRouterBackoffHeadroom(context, relay, 0);
     // The backoff decision was made from this attempt, but buildCommand can
     // cross the recovery deadline before the replacement child starts. Retain
     // one bounded relay until that child has an authoritative outcome.
@@ -376,6 +386,36 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
     context.retainedRateLimitRelay = relay;
     context.retryAttempt += 1;
     context.retryCount += 1;
+  }
+
+  private releaseOpenRouterTerminalRelay<T>(context: OpenRouterRecoveryContext<T>, relay: BufferedAttemptRelay): void {
+    // A terminal release synchronously invokes buffered caller callbacks.
+    // Preserve callback errors first, then cancellation and the fixed deadline.
+    releaseRelayOrThrow(relay);
+    if (context.options?.abortSignal?.aborted === true) throw abortReason(context.options.abortSignal);
+    if (context.totalDeadline !== undefined && performance.now() >= context.totalDeadline) {
+      throw this.retryTimeout(context);
+    }
+  }
+
+  private assertOpenRouterBackoffHeadroom<T>(
+    context: OpenRouterRecoveryContext<T>,
+    relay: BufferedAttemptRelay,
+    delayMs: number
+  ): void {
+    if (context.options?.abortSignal?.aborted === true) {
+      relay.discard();
+      throw abortReason(context.options.abortSignal);
+    }
+    const reason = openRouterBackoffLimit({
+      delayMs,
+      totalRemainingMs: remainingUntil(context.totalDeadline),
+      finalizationReserveMs: context.finalizationReserveMs,
+      backoffRemainingMs: OPENROUTER_429_BACKOFF_BUDGET_MS - context.backoffMs
+    });
+    if (reason === undefined) return;
+    this.releaseOpenRouterTerminalRelay(context, relay);
+    throw openRouterRecoveryBudgetError(context, reason);
   }
 
   private assertOpenRouterRetryDeadline<T>(
@@ -390,7 +430,7 @@ export class OpenRouterCodexAgent extends CompatibleCodexAgent {
       throw this.retryTimeout(context);
     }
     if (performance.now() >= context.retryDeadline) {
-      releaseRelayOrThrow(relay);
+      this.releaseOpenRouterTerminalRelay(context, relay);
       throw effectiveRateLimitError;
     }
     if (afterDelay) return undefined;
@@ -571,38 +611,24 @@ function openRouterRecoveryBudgetError<T>(
   context: OpenRouterRecoveryContext<T>,
   reason: "backoff-budget-exhausted" | "finalization-reserved"
 ): Error {
-  const providerError = openRouterRecord(context.lastRateLimitError);
-  const providerCode = providerError === undefined ? undefined : safeOpenRouterProperty(providerError, "code");
-  const providerDetails =
-    providerError === undefined ? undefined : openRouterRecord(safeOpenRouterProperty(providerError, "details"));
-  // Smithers parks quota failures instead of spending another task attempt.
-  // Exhausting the adapter's wait budget must retain that scheduler authority.
+  const controls = openRouterSchedulerControls(context.lastRateLimitError);
   return new SmithersErrorInstance(
-    providerCode === "AGENT_QUOTA_EXCEEDED" ? providerCode : "AGENT_CLI_ERROR",
+    controls.code ?? "AGENT_CLI_ERROR",
     `OpenRouter HTTP 429 recovery stopped (${reason}); ${openRouterRecoveryDiagnosticText(context)}`,
-    providerDetails ?? { command: "codex", args: [], cwd: context.options?.rootDir ?? process.cwd() },
+    controls.details ?? { command: "codex", args: [], cwd: context.options?.rootDir ?? process.cwd() },
     { cause: context.lastRateLimitError }
   );
 }
 
-function assertOpenRouterBackoffHeadroom<T>(
-  context: OpenRouterRecoveryContext<T>,
-  relay: BufferedAttemptRelay,
-  delayMs: number
-): void {
-  if (context.options?.abortSignal?.aborted === true) {
-    relay.discard();
-    throw abortReason(context.options.abortSignal);
-  }
-  const reason = openRouterBackoffLimit({
-    delayMs,
-    totalRemainingMs: remainingUntil(context.totalDeadline),
-    finalizationReserveMs: context.finalizationReserveMs,
-    backoffRemainingMs: OPENROUTER_429_BACKOFF_BUDGET_MS - context.backoffMs
-  });
-  if (reason === undefined) return;
-  releaseRelayOrThrow(relay);
-  throw openRouterRecoveryBudgetError(context, reason);
+function openRouterSchedulerControls(error: unknown): { code?: string; details?: Record<PropertyKey, unknown> } {
+  const record = openRouterRecord(error);
+  if (record === undefined) return {};
+  const code = safeOpenRouterProperty(record, "code");
+  const details = openRouterRecord(safeOpenRouterProperty(record, "details"));
+  return {
+    ...(typeof code === "string" && OPENROUTER_SCHEDULER_ERROR_CODES.has(code) ? { code } : {}),
+    ...(details === undefined ? {} : { details })
+  };
 }
 
 function openRouterBackoffLimit(input: {
@@ -1337,7 +1363,13 @@ class BufferedAttemptRelay {
       this.#terminalRateLimitDiagnostic ??
       this.#terminalRateLimitStderr ??
       "OpenRouter returned HTTP 429 Too Many Requests";
-    return new Error(boundedRateLimitDiagnostic(diagnostic), { cause });
+    // The diagnostic text may carry a 429 omitted from Smithers' abbreviated
+    // error message. This wrapper must keep the original scheduler controls;
+    // callers deliberately do not infer authority from arbitrary cause chains.
+    return Object.assign(
+      new Error(boundedRateLimitDiagnostic(diagnostic), { cause }),
+      openRouterSchedulerControls(cause)
+    );
   }
 
   #emitEvent(event: OpenRouterAgentEvent, callback: () => void): void {
