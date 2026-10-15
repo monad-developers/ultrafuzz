@@ -2700,14 +2700,14 @@ function artifactAwareAgent(
         // arbitrary or absent terminal text cannot become a second contract.
         const unstructuredArgs = { ...attemptArgs };
         Reflect.deleteProperty(unstructuredArgs, "outputSchema");
-        // This is a privileged engine-to-wrapper capability. It must never
-        // cross into an adapter, model process, callback, or serialized event.
-        Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
         if (continuationAgent.cliEngine !== "codex" && continuationAgent.cliEngine !== "claude-code") {
           process.stderr.write(
             "ultrafuzz.command_invocation unavailable: provider has no qualified prelaunch hook; command guard inactive\n"
           );
         }
+        // This is a privileged engine-to-wrapper capability. It must never
+        // cross into an adapter, model process, callback, or serialized event.
+        Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
         const result = await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
