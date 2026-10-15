@@ -2408,7 +2408,8 @@ test("a deferred join run from the execution snapshot gets a prompt input index 
       .map((entry) => [entry.props.id as string, entry.props])
   );
   type Agent = { generate(args: unknown): Promise<unknown> };
-  const preparation = workflowTasks.get(join.preparationSmithersNodeId) as { children: () => unknown } | undefined;
+  const preparation = workflowTasks.get(join.preparationSmithersNodeId) as
+    { children: (context: { ultrafuzzAbortSignal: AbortSignal }) => Promise<{ prepared: boolean }> } | undefined;
   // The join's agent chain; its first agent runs the first attempt.
   const agents = workflowTasks.get(join.smithersNodeId)?.agent as Agent | Agent[] | undefined;
   const [agent] = agents === undefined ? [] : [agents].flat();
@@ -2425,12 +2426,14 @@ test("a deferred join run from the execution snapshot gets a prompt input index 
     });
   }
   const previousCwd = process.cwd();
+  const controller = new AbortController();
   process.chdir(fixture.project);
   try {
-    assert.deepEqual(preparation.children(), { prepared: true });
-    assert.deepEqual(await agent.generate({ prompt: "Summarize.", taskContext: { attempt: 1 } }), {
-      _output: { completed: true }
-    });
+    assert.deepEqual(await preparation.children({ ultrafuzzAbortSignal: controller.signal }), { prepared: true });
+    assert.deepEqual(
+      await agent.generate({ prompt: "Summarize.", taskContext: { attempt: 1 }, abortSignal: controller.signal }),
+      { _output: { completed: true } }
+    );
   } finally {
     process.chdir(previousCwd);
   }

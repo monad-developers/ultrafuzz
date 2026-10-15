@@ -35,6 +35,12 @@ type Task = {
   };
 };
 
+type PreparationOptions = {
+  replayWorkspacePatches?: boolean;
+  evidenceMode?: "create" | "require";
+  pinnedSubmodules?: "restore" | "verify";
+};
+
 function dependencySnapshot(dependency: string) {
   const read = (filename: string) => {
     const candidate = path.join(dependency, filename);
@@ -86,7 +92,7 @@ function preparationHarness(
   tasks: Task[],
   options: {
     rejectAdmission?: boolean;
-    onPreflight?: () => void;
+    onPreflight?: (signal: AbortSignal) => void | Promise<void>;
     onPinnedSubmodules?: (
       step: "hydrate" | "verify",
       expectation: unknown,
@@ -105,7 +111,8 @@ function preparationHarness(
   const replacements: Record<string, unknown> = {
     assertWorkspaceSourceRevision: () => undefined,
     preservePinnedSourceProof: () => undefined,
-    preflightJsonValidator: () => options.onPreflight?.(),
+    preflightJsonValidator: async (_directory: string, _bundle: unknown, _runRoot: string, signal: AbortSignal) =>
+      options.onPreflight?.(signal),
     plannedSchemaBundle: () => undefined,
     materializePromptSchemas: (root: string) => {
       fs.mkdirSync(root, { recursive: true });
@@ -176,6 +183,7 @@ function preparationHarness(
     ...Object.keys(collaborators),
     `${emitted}; return {
     prepare: prepareArtifactMirror,
+    prepareForAgent: prepareArtifactMirrorForAgent,
     baseline: readWorkspacePatchBaseline,
     preparation: readWorkspacePatchPreparation,
     snapshot: loadInvariantSuiteWorkspaceSnapshot,
@@ -183,14 +191,12 @@ function preparationHarness(
     verifyHandoff: requireInvariantSuiteDependencyHandoff
   };`
   )(...Object.values(collaborators)) as {
-    prepare(
+    prepare(task: Task, options?: PreparationOptions): { prepared: boolean };
+    prepareForAgent(
       task: Task,
-      options?: {
-        replayWorkspacePatches?: boolean;
-        evidenceMode?: "create" | "require";
-        pinnedSubmodules?: "restore" | "verify";
-      }
-    ): { prepared: boolean };
+      options: PreparationOptions | undefined,
+      signal: AbortSignal
+    ): Promise<{ prepared: boolean }>;
     baseline(task: Task): string;
     preparation(task: Task): string;
     snapshot(task: Task): Map<string, Buffer>;
@@ -199,7 +205,7 @@ function preparationHarness(
   };
 }
 
-function lifecycleFixture(
+async function lifecycleFixture(
   body: (fixture: {
     tasks: Task[];
     task: Task;
@@ -208,8 +214,8 @@ function lifecycleFixture(
     second: string;
     root: string;
     publishSecond: () => void;
-  }) => void
-): void {
+  }) => void | Promise<void>
+): Promise<void> {
   const root = fs.realpathSync(temporaryRoot("uf-preparation-lifecycle-"));
   const previousCwd = process.cwd();
   try {
@@ -272,7 +278,7 @@ function lifecycleFixture(
         dependencies: { attemptIds: [], smithersNodeIds: [] }
       }
     };
-    body({
+    await body({
       tasks: [producer, task],
       task,
       base,
@@ -401,9 +407,9 @@ test("a pre-agent preparation pass restores inherited invariant sources, and onl
     assert.equal(fs.readFileSync(target, "utf8"), edited);
   }));
 
-test("#1081 invalid previous evidence or unauthenticated replacement leaves the worktree untouched", () => {
+test("#1081 invalid previous evidence or unauthenticated replacement leaves the worktree untouched", async () => {
   for (const fault of ["preparation", "snapshot", "baseline", "patch", "admission", "forged-tree", "legacy"] as const)
-    lifecycleFixture((fixture) => {
+    await lifecycleFixture((fixture) => {
       preparationHarness(fixture.tasks).prepare(fixture.task);
       fixture.publishSecond();
       if (fault === "preparation")
@@ -440,9 +446,9 @@ test("#1081 invalid previous evidence or unauthenticated replacement leaves the 
     });
 });
 
-test("#1081 initial protected authority survives interruption before each mutable preparation publication", () => {
+test("#1081 initial protected authority survives interruption before each mutable preparation publication", async () => {
   for (const publication of ["authority", "preparation", "baseline"] as const)
-    lifecycleFixture((fixture) => {
+    await lifecycleFixture((fixture) => {
       const target =
         publication === "authority"
           ? runtime.workspacePreparationAuthorityPath(fixture.task.runRoot, fixture.task.attemptId)
@@ -470,9 +476,9 @@ test("#1081 initial protected authority survives interruption before each mutabl
     });
 });
 
-test("#1081 unchanged dependency epochs preserve duplicate-result fan-in and changed non-linear replacements refuse", () => {
+test("#1081 unchanged dependency epochs preserve duplicate-result fan-in and changed non-linear replacements refuse", async () => {
   for (const legacy of [false, true])
-    lifecycleFixture((fixture) => {
+    await lifecycleFixture((fixture) => {
       const producer = fixture.tasks[0];
       assert.ok(producer);
       const siblingDirectory = path.join(fixture.task.runRoot, "artifacts/zz-sibling");
@@ -508,10 +514,10 @@ test("#1081 unchanged dependency epochs preserve duplicate-result fan-in and cha
     });
 });
 
-test("#1115 property-only republishing preserves preparation with and without workspace patches", () => {
+test("#1115 property-only republishing preserves preparation with and without workspace patches", async () => {
   for (const mixed of [false, true])
     for (const interrupted of [false, true])
-      lifecycleFixture((fixture) => {
+      await lifecycleFixture((fixture) => {
         const setup = fixture.tasks[0];
         assert.ok(setup);
         const directory = mixed ? path.join(fixture.task.runRoot, "artifacts/properties") : setup.artifactDir;
@@ -609,14 +615,17 @@ test("#1115 an interrupted workspace replacement still binds property-only depen
   }));
 
 test("the post-agent verify pass checks the task's pinned submodules and does not preflight the agent-facing validator CLI", () =>
-  lifecycleFixture((fixture) => {
+  lifecycleFixture(async (fixture) => {
     let preflights = 0;
+    const controller = new AbortController();
     const submoduleSteps: Array<[string, unknown]> = [];
     const pinnedSubmodules = { submodules: [{ path: "lib/forge-std", commit: "a".repeat(40) }] };
     fixture.task.pinnedSubmodules = pinnedSubmodules;
     fixture.task.executionSnapshotRoot = path.join(fixture.task.runRoot, "historical-snapshot");
     const harness = preparationHarness(fixture.tasks, {
-      onPreflight: () => {
+      onPreflight: async (signal) => {
+        assert.equal(signal, controller.signal);
+        await Promise.resolve();
         preflights += 1;
       },
       onPinnedSubmodules: (step, expectation, source) => {
@@ -626,16 +635,28 @@ test("the post-agent verify pass checks the task's pinned submodules and does no
       }
     });
     // prepare:* and the reset before each agent attempt run ahead of an agent that uses the CLI.
-    harness.prepare(fixture.task);
-    harness.prepare(fixture.task, { replayWorkspacePatches: false, evidenceMode: "require" });
+    assert.deepEqual(await harness.prepareForAgent(fixture.task, undefined, controller.signal), { prepared: true });
+    assert.equal(preflights, 1, "preparation must await validator completion before the agent can start");
+    assert.deepEqual(
+      await harness.prepareForAgent(
+        fixture.task,
+        { replayWorkspacePatches: false, evidenceMode: "require" },
+        controller.signal
+      ),
+      { prepared: true }
+    );
     assert.equal(preflights, 2);
     // finalizeAndVerifyArtifacts' options: verify checks the finished agent's outputs in-process and
     // has no retry, so a CLI cold start that timed out there would discard completed agent work.
-    harness.prepare(fixture.task, {
-      replayWorkspacePatches: false,
-      evidenceMode: "require",
-      pinnedSubmodules: "verify"
-    });
+    assert.deepEqual(
+      harness.prepare(fixture.task, {
+        replayWorkspacePatches: false,
+        evidenceMode: "require",
+        pinnedSubmodules: "verify"
+      }),
+      { prepared: true },
+      "post-agent preparation remains synchronous"
+    );
     assert.equal(preflights, 2);
     // Without the task's expectation the verify pass has nothing to compare, so it would accept any
     // submodule state the agent left behind.
