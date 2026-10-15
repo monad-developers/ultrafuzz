@@ -519,6 +519,54 @@ describe("public post-eval diagnostics", () => {
     ).toThrow(/canonical schema/u);
   });
 
+  it("preserves tool-unavailable in public diagnostics", () => {
+    const fixture = evalFixture();
+    const message = "tool_unavailable: trusted validator missing (ENOENT)";
+    fs.writeFileSync(
+      path.join(fixture.runRoot, "state.json"),
+      JSON.stringify(
+        currentRunState({
+          "failed-node": {
+            node_id: "failed-node",
+            status: "failed",
+            timed_out: false,
+            last_error: message,
+            provenance: {
+              failure: {
+                category: "tool-unavailable",
+                causal_task_id: "prepare:failed-node",
+                causal_failure_category: "tool-unavailable",
+                dependent_task_ids: []
+              }
+            }
+          }
+        })
+      )
+    );
+    for (const record of fixture.runSummary.records) {
+      record.final_status = "failed";
+      record.workflow = workflowLifecycle("failed");
+    }
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+    expect(diagnostics.rows[0]?.failed_nodes).toEqual([
+      {
+        node_id: "failed-node",
+        status: "failed",
+        timed_out: false,
+        failure_category: "tool-unavailable",
+        failure_message: message
+      }
+    ]);
+    expect(parsePublicEvalDiagnostics(diagnostics)).toEqual(diagnostics);
+  });
+
   it("projects only bounded allowlisted failed-node diagnostics from durable state", () => {
     const fixture = evalFixture();
     const nodes = Object.fromEntries(
