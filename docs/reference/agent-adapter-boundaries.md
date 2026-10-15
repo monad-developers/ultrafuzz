@@ -16,7 +16,7 @@ and the gate requires an explicit policy for every adapter actually registered
 in `agentFactories`, including a factory imported under an alias or registered
 without a matching re-export.
 
-### Command invocation admission
+## Command invocation admission
 
 The shared runtime command registry addresses the Codex/OpenRouter incident
 path in [#1317](https://github.com/monad-developers/ultrafuzz/issues/1317).
