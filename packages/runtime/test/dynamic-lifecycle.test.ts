@@ -1963,6 +1963,12 @@ test("refreshed controller compiles the pre-expansion base task set", async () =
     config: JSON.parse(resolvedConfig.contents.toString("utf8"))
   });
   const compiled = compiledControllerConstants(fs.readFileSync(workflowPath, "utf8"));
+  const sealedBase = parseSmithersTaskManifestBytes(fs.readFileSync(basePath));
+  assert.deepEqual(
+    compiled.groups,
+    sealedBase.dynamic_groups,
+    "a refresh without a policy change must preserve absent optional-input fields in dynamic templates"
+  );
 
   // The controller's compiled constant is the dynamic runtime's `baseTasks`. Compiling the
   // already-generated tasks into it reserves their own attempt IDs against the very expansion

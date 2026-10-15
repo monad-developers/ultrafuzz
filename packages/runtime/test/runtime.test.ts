@@ -11192,7 +11192,7 @@ test("compileSmithersWorkflow marks specialist attempts and their artifact hando
   assert.equal(workflowSource.match(/continueOnFail=\{task\.continueOnFail\}/gu)?.length, 3);
 });
 
-test("current-controller rendering preserves prompts idempotently and continue policy for a leaf task", async () => {
+test("current-controller rendering reapplies continue policy and optional dependencies", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeOptionalSpecialistTopology(project);
@@ -11211,6 +11211,13 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const leaf = tasks.tasks.find((task) => task.attemptId === "final-report");
   assert.ok(leaf);
   leaf.metadata.node.group = "leaf-continue";
+  const producer = tasks.tasks.find((task) =>
+    tasks.tasks.some((candidate) => candidate.metadata.dependencies.attemptIds.includes(task.attemptId))
+  );
+  assert.ok(producer);
+  const consumer = tasks.tasks.find((task) => task.metadata.dependencies.attemptIds.includes(producer.attemptId));
+  assert.ok(consumer);
+  producer.metadata.node.group = "upgraded-continue";
   const historicalTask = tasks.tasks.find((task) => task.metadata.artifacts.outputs.some((output) => output.primary));
   const historicalOutput = historicalTask?.metadata.artifacts.outputs.find((output) => output.primary);
   assert.ok(historicalTask && historicalOutput);
@@ -11232,7 +11239,12 @@ test("current-controller rendering preserves prompts idempotently and continue p
     smithersRunId: compiled.smithersRunId,
     tasks,
     config: plan.value!.resolved_config,
-    expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
+    expandedGraph: {
+      groups: {
+        "leaf-continue": { defaults: { failure_policy: "continue" } },
+        "upgraded-continue": { defaults: { failure_policy: "continue" } }
+      }
+    }
   });
   const workflowSource = fs.readFileSync(workflowPath, "utf8");
   const specsPrefix = "const serializedTaskSpecs = ";
@@ -11242,10 +11254,17 @@ test("current-controller rendering preserves prompts idempotently and continue p
   const specs = JSON.parse(workflowSource.slice(specsStart + specsPrefix.length, specsEnd)) as Array<{
     attemptId: string;
     continueOnFail: boolean;
+    optionalDependencyArtifactDirs: string[];
     outputs: Array<Record<string, unknown>>;
     promptPath?: string;
   }>;
   assert.equal(specs.find((task) => task.attemptId === "final-report")?.continueOnFail, true);
+  assert.equal(specs.find((task) => task.attemptId === producer.attemptId)?.continueOnFail, true);
+  assert.ok(
+    specs
+      .find((task) => task.attemptId === consumer.attemptId)
+      ?.optionalDependencyArtifactDirs.includes(producer.artifactDir)
+  );
   // #921: the refreshed controller validates each output against the schema it was planned with, so it
   // keeps the whole recorded binding instead of rebinding it to this build's bundle (#982). Its markers
   // then still match the run's plan after an upgrade that changed a schema.
@@ -11267,7 +11286,12 @@ test("current-controller rendering preserves prompts idempotently and continue p
     smithersRunId: compiled.smithersRunId,
     tasks,
     config: plan.value!.resolved_config,
-    expandedGraph: { groups: { "leaf-continue": { defaults: { failure_policy: "continue" } } } }
+    expandedGraph: {
+      groups: {
+        "leaf-continue": { defaults: { failure_policy: "continue" } },
+        "upgraded-continue": { defaults: { failure_policy: "continue" } }
+      }
+    }
   });
   const repeatedSource = fs.readFileSync(repeatedWorkflowPath, "utf8");
   const repeatedStart = repeatedSource.indexOf(specsPrefix);

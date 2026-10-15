@@ -52,7 +52,7 @@ import {
   finishInterruptedDynamicExpansionRetry,
   planDynamicExpansionRetryArchive
 } from "./dynamic-expansion-retry.js";
-import { reconcilesPartialResults } from "./dynamic-runtime.js";
+import { applyDependencyFailurePolicy, reconcilesPartialResults } from "./dynamic-runtime.js";
 import {
   assertControllerSourceDigest,
   inspectControllerSource,
@@ -3456,23 +3456,31 @@ export function renderCurrentSmithersController(input: {
 }): string {
   const projectRoot = path.resolve(input.projectRoot);
   const baseTaskDocument = currentControllerBaseTasks(input.layout, input.tasks);
-  const tasks = baseTaskDocument.tasks;
   const generationRoot = path.join(projectRoot, ".smithers", "continuations", crypto.randomUUID());
   const workflowPath = path.join(generationRoot, "workflows", `ultrafuzz-${input.layout.runId}.tsx`);
   const packagedController = loadPackagedControllerSource();
   for (const file of packagedController.files) {
     writePreparedWorkflowFile(projectRoot, path.join(generationRoot, "agents", file.name), file.contents, "controller");
   }
+  const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
+  const groups = isObjectRecord(graph.groups) ? graph.groups : {};
+  const nonBlockingGroupIds = new Set(
+    Object.entries(groups).flatMap(([groupId, group]) => {
+      const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
+      return defaults.failure_policy === "continue" ? [groupId] : [];
+    })
+  );
+  const { tasks, groups: dynamicGroups } = applyDependencyFailurePolicy(
+    baseTaskDocument.tasks,
+    baseTaskDocument.dynamic_groups ?? [],
+    nonBlockingGroupIds
+  );
   const nonBlockingAttempts = new Set(
     tasks.flatMap((task) => (task.optionalDependencyArtifactDirs ?? []).map((directory) => path.basename(directory)))
   );
-  const graph = isObjectRecord(input.expandedGraph) ? input.expandedGraph : {};
-  const groups = isObjectRecord(graph.groups) ? graph.groups : {};
   for (const task of tasks) {
     const groupId = task.metadata.node.group;
-    const group = groupId === undefined ? undefined : groups[groupId];
-    const defaults = isObjectRecord(group) && isObjectRecord(group.defaults) ? group.defaults : {};
-    if (defaults.failure_policy === "continue") nonBlockingAttempts.add(task.attemptId);
+    if (groupId !== undefined && nonBlockingGroupIds.has(groupId)) nonBlockingAttempts.add(task.attemptId);
   }
   const compiled: CompiledSmithersWorkflow = {
     schemaVersion: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
@@ -3480,7 +3488,7 @@ export function renderCurrentSmithersController(input: {
     smithersRunId: input.smithersRunId,
     workflowName: baseTaskDocument.workflow_name,
     tasks,
-    dynamicGroups: baseTaskDocument.dynamic_groups ?? [],
+    dynamicGroups,
     maxDynamicNodes: input.config.run.maxDynamicNodes,
     nonBlockingAttemptIds: [...nonBlockingAttempts].sort(compareWorkflowExecutionStrings),
     projectRoot,

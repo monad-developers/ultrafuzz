@@ -95,7 +95,8 @@ function publishedGroupIds(input: Pick<DynamicRuntimeMaterializeInput, "groups" 
 
 function deriveDynamicRuntime(
   input: DynamicRuntimeMaterializeInput,
-  mode: "publish" | "verify" | "derive"
+  mode: "publish" | "verify" | "derive",
+  deriveFailurePolicy = true
 ): DynamicRuntimeMaterialization {
   const runId = validateSafeId(input.runId, "run ID");
   const projectRoot = path.resolve(input.projectRoot);
@@ -107,8 +108,20 @@ function deriveDynamicRuntime(
   const baseGraphPath = checkedRunFile(runRoot, input.baseGraphPath ?? graphPath, "base runtime graph");
   const baseTasksPath = checkedRunFile(runRoot, input.baseTasksPath ?? tasksPath, "base runtime task plan");
   const graph = readPlannedGraph(baseGraphPath);
+  // Publication and admission derive policy from the same immutable graph. A
+  // refreshed controller can add an optional edge missing from an older task
+  // template, but mutable runtime controls cannot authorize that edge themselves.
+  const policy = applyDependencyFailurePolicy(
+    input.baseTasks,
+    input.groups,
+    new Set(
+      Object.entries(graph.groups)
+        .filter(([, group]) => deriveFailurePolicy && group.defaults?.failure_policy === "continue")
+        .map(([groupId]) => groupId)
+    )
+  );
   const ready = new Set(input.readyGroupIds);
-  const groups = [...input.groups].sort((left, right) => left.groupNodeId.localeCompare(right.groupNodeId));
+  const groups = [...policy.groups].sort((left, right) => left.groupNodeId.localeCompare(right.groupNodeId));
   const groupIds = new Set(groups.map((group) => validateSafeId(group.groupNodeId, "dynamic group node ID")));
   for (const readyId of ready) {
     if (!groupIds.has(readyId)) throw new Error(`unknown ready dynamic group ${readyId}`);
@@ -161,7 +174,7 @@ function deriveDynamicRuntime(
     generatedNodesByGroup.set(group.groupNodeId, nodes);
   }
 
-  const staticTasks = input.baseTasks.map((task) =>
+  const staticTasks = policy.tasks.map((task) =>
     lowerTaskDynamicDependencies(task, groups, manifests, generatedTasksByGroup, runRoot)
   );
   const generatedTasks = groups.flatMap((group) => generatedTasksByGroup.get(group.groupNodeId) ?? []);
@@ -209,6 +222,10 @@ function deriveDynamicRuntime(
     const observedTasks = readRecord(tasksPath);
     const observedGraph = readPlannedGraph(graphPath);
     if (jsonFingerprint(observedTasks) !== jsonFingerprint(runtimeTaskDocument)) {
+      // Before a refresh, an older controller may still have published the exact
+      // recorded template policy. Accept that one sealed derivation too, without
+      // modifying it. Neither branch trusts optional edges from mutable controls.
+      if (deriveFailurePolicy) return deriveDynamicRuntime(input, mode, false);
       throw new Error("persisted dynamic runtime task plan does not match its sealed templates and manifests");
     }
     if (jsonFingerprint(observedGraph) !== jsonFingerprint(runtimeGraph)) {
@@ -354,6 +371,48 @@ function instantiateDynamicGraphNode(input: {
             task_node_ids: itemTasks.map((task) => task.smithersNodeId)
           }
         })
+  };
+}
+
+/**
+ * Reapply the graph's failure policy without changing unrelated task bytes.
+ * Shared by controller refresh and the sealed dynamic-runtime derivation so
+ * both authorize exactly the same optional dependency edges.
+ */
+export function applyDependencyFailurePolicy(
+  tasks: readonly CompiledSmithersTask[],
+  groups: readonly CompiledSmithersDynamicGroup[],
+  nonBlockingGroupIds: ReadonlySet<string>
+): { tasks: CompiledSmithersTask[]; groups: CompiledSmithersDynamicGroup[] } {
+  const producerGroups = new Map(
+    [...tasks, ...groups.flatMap((group) => group.taskTemplates)].map((task) => [
+      path.resolve(task.artifactDir),
+      task.metadata.node.group
+    ])
+  );
+  const apply = (task: CompiledSmithersTask): CompiledSmithersTask => {
+    const optional = [...(task.optionalDependencyArtifactDirs ?? [])];
+    const included = new Set(optional.map((directory) => path.resolve(directory)));
+    for (const directory of task.dependencyArtifactDirs) {
+      const resolved = path.resolve(directory);
+      const producerGroup = producerGroups.get(resolved);
+      if (
+        !included.has(resolved) &&
+        producerGroup !== undefined &&
+        nonBlockingGroupIds.has(producerGroup) &&
+        reconcilesPartialResults(task, producerGroup)
+      ) {
+        optional.push(directory);
+        included.add(resolved);
+      }
+    }
+    return optional.length === (task.optionalDependencyArtifactDirs?.length ?? 0)
+      ? task
+      : { ...task, optionalDependencyArtifactDirs: optional };
+  };
+  return {
+    tasks: tasks.map(apply),
+    groups: groups.map((group) => ({ ...group, taskTemplates: group.taskTemplates.map(apply) }))
   };
 }
 

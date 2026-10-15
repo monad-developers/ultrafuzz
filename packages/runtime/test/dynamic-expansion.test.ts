@@ -116,7 +116,7 @@ function sealedDynamicRun(
   fs.writeFileSync(templatePath, template, "utf8");
   fs.writeFileSync(joinTemplatePath, "Join {{artifact_path:fanout}}.\n", "utf8");
   const templateTask = compiledTask(projectRoot, runRoot, "fanout", "fanout", templatePath);
-  const joinTask = {
+  const joinTask: CompiledSmithersTask = {
     ...compiledTask(projectRoot, runRoot, "join", "join", joinTemplatePath, ["fanout"]),
     deferredPromptGroups: ["fanout"]
   };
@@ -830,6 +830,86 @@ test("runtime materialization keeps inputs inside the fan-out's group required a
       assert.match(fs.readFileSync(generated.renderedPromptPath!, "utf8"), /goal 0 using context 0/u);
     }
   }
+});
+
+test("refreshed optional inputs re-derive from the sealed graph and cannot promote required inputs", () => {
+  const { controls } = sealedDynamicRun("refresh-optional-inputs", [item(0)]);
+  const planner = compiledTask(controls.projectRoot, controls.runRoot, "planner", "planner");
+  planner.metadata.node.group = "continuing";
+  const required = compiledTask(controls.projectRoot, controls.runRoot, "required", "required");
+  required.metadata.node.group = "setup";
+  controls.baseTasks.unshift(planner, required);
+  const template = controls.groups[0]?.taskTemplates[0];
+  assert.ok(template);
+  template.metadata.node.group = "workers";
+  template.dependencyArtifactDirs = [planner.artifactDir, required.artifactDir];
+  assert.equal(template.optionalDependencyArtifactDirs, undefined);
+
+  const graph = plannedGraph(controls.runId);
+  graph.groups.continuing = { defaults: { failure_policy: "continue" } };
+  graph.groups.setup = {};
+  const plannerNode = graph.nodes.find((node) => node.id === "planner");
+  assert.ok(plannerNode);
+  plannerNode.group = "continuing";
+  graph.nodes.push({
+    ...plannerNode,
+    id: "required",
+    logical_id: "required",
+    group: "setup",
+    artifact_dir: "artifacts/required"
+  });
+  fs.writeFileSync(controls.baseGraphPath, JSON.stringify(graph));
+  fs.writeFileSync(controls.graphPath, JSON.stringify(graph));
+  // An older compiler recorded the continuing group but omitted its optional
+  // edge from the task template. Keep these base bytes immutable across refresh.
+  const base = {
+    schema_version: "1.0",
+    run_id: controls.runId,
+    tasks: controls.baseTasks,
+    dynamic_groups: controls.groups
+  };
+  const sealedTasks = JSON.stringify(base);
+  fs.writeFileSync(controls.baseTasksPath, sealedTasks);
+  fs.writeFileSync(controls.tasksPath, sealedTasks);
+
+  const refreshed = materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  const child = refreshed.tasks.find((task) => task.metadata.node.dynamic !== undefined);
+  assert.ok(child);
+  assert.deepEqual(child.optionalDependencyArtifactDirs, [planner.artifactDir]);
+  assert.equal(fs.readFileSync(controls.baseTasksPath, "utf8"), sealedTasks);
+  assert.equal(template.optionalDependencyArtifactDirs, undefined, "derivation must not mutate the sealed input");
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).tasks, refreshed.tasks);
+
+  const published = JSON.parse(fs.readFileSync(controls.tasksPath, "utf8")) as typeof base;
+  const publishedChild = published.tasks.find((task) => task.attemptId === child.attemptId);
+  const publishedTemplate = published.dynamic_groups[0]?.taskTemplates[0];
+  assert.ok(publishedChild?.optionalDependencyArtifactDirs && publishedTemplate?.optionalDependencyArtifactDirs);
+  // The exact old derivation is still valid before refresh: it preserved the
+  // template's absent optional edge. Merely inspecting it must not rewrite it.
+  delete publishedChild.optionalDependencyArtifactDirs;
+  delete publishedTemplate.optionalDependencyArtifactDirs;
+  const legacyTasks = JSON.stringify(published);
+  fs.writeFileSync(controls.tasksPath, legacyTasks);
+  const legacy = verifyDynamicRuntimeMaterialization(controls);
+  assert.equal(
+    legacy.tasks.find((task) => task.attemptId === child.attemptId)?.optionalDependencyArtifactDirs,
+    undefined
+  );
+  assert.equal(fs.readFileSync(controls.tasksPath, "utf8"), legacyTasks);
+  materializeDynamicRuntime({ ...controls, readyGroupIds: ["fanout"] });
+  assert.deepEqual(verifyDynamicRuntimeMaterialization(controls).tasks, refreshed.tasks);
+
+  publishedChild.optionalDependencyArtifactDirs = [planner.artifactDir, required.artifactDir];
+  publishedTemplate.optionalDependencyArtifactDirs = [planner.artifactDir, required.artifactDir];
+  fs.writeFileSync(controls.tasksPath, JSON.stringify(published));
+  // A mutable graph cannot authorize an extra optional input either.
+  const mutableGraph = JSON.parse(fs.readFileSync(controls.graphPath, "utf8")) as PlannedGraph;
+  mutableGraph.groups.setup = { defaults: { failure_policy: "continue" } };
+  fs.writeFileSync(controls.graphPath, JSON.stringify(mutableGraph));
+  assert.throws(
+    () => verifyDynamicRuntimeMaterialization(controls),
+    /persisted dynamic runtime task plan does not match its sealed templates and manifests/u
+  );
 });
 
 test("a re-run dynamic source keeps the published fan-out for renders and admission", () => {

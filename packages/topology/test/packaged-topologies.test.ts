@@ -146,11 +146,13 @@ describe("packaged topology collection", () => {
     const topology = loadedTopology(path.join(TOPOLOGY_ROOT, `${id}.yml`));
     expect(topology.groups.strategies?.defaults?.failure_policy).toBe("continue");
     expect(topology.groups.setup?.defaults?.failure_policy).toBeUndefined();
-    // A failed lens leaves the fan-in, in its own halting group, to consolidate the other lenses.
+    // A failed lens leaves the fan-in to consolidate the other lenses. Exhaustive also tolerates a failed fan-in.
     const faninGroup = topology.nodes.find((node) => node.id === "property-specification-fanin")?.group;
     expect(topology.groups.properties?.defaults?.failure_policy).toBe(id === "smoke" ? undefined : "continue");
     expect(faninGroup).toBe(id === "smoke" ? undefined : "property-catalog");
-    expect(topology.groups["property-catalog"]?.defaults?.failure_policy).toBeUndefined();
+    expect(topology.groups["property-catalog"]?.defaults?.failure_policy).toBe(
+      id === "exhaustive" ? "continue" : undefined
+    );
     const expanded = expandedTopology(path.join(TOPOLOGY_ROOT, `${id}.yml`));
     expect(expanded.groups.strategies?.defaults?.failure_policy).toBe("continue");
     expect(expanded.nodes.some((node) => node.group === "strategies")).toBe(true);
