@@ -238,6 +238,7 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
     frictionLogEnabled: required(run.frictionLogEnabled, "run.friction_log_enabled", filePath),
     workspaceMode: required(run.workspaceMode, "run.workspace_mode", filePath),
     defaultTimeoutSeconds: required(run.defaultTimeoutSeconds, "run.default_timeout_seconds", filePath),
+    finalizationGraceMs: required(run.finalizationGraceMs, "run.finalization_grace_ms", filePath),
     workflowDeadlineSeconds: required(run.workflowDeadlineSeconds, "run.workflow_deadline_seconds", filePath),
     controllerLeaseSeconds: required(run.controllerLeaseSeconds, "run.controller_lease_seconds", filePath)
   };

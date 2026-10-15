@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { backendCheckpointDirectory } from "@ultrafuzz/runtime";
 
 import { runCli } from "../src/index.js";
 import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
@@ -519,7 +520,7 @@ test("events --watch streams one line per event and terminates", async (t) => {
 });
 
 test("node reports focused status and only expands tool payloads with --tools", async (t) => {
-  const { project, env } = await launchedProject(t);
+  const { project, env, runRoot } = await launchedProject(t);
 
   const human = await cli(project, ["node", RUN_ID, "node:project-discovery"], env);
   assert.equal(human.code, 0, human.stderr);
@@ -530,19 +531,36 @@ test("node reports focused status and only expands tool payloads with --tools", 
   assert.match(human.stdout, /^Output: not recorded$/mu);
   assert.doesNotMatch(human.stdout, /forge build/u);
 
+  const checkpoint = backendCheckpointDirectory(runRoot, "node:project-discovery");
+  fs.mkdirSync(checkpoint, { recursive: true });
+  const backendFinalization = {
+    phase: "finalization",
+    started_at_ms: 1_000,
+    execution_deadline_ms: 2_000,
+    finalization_deadline_ms: 2_500,
+    finalization_grace_ms: 500,
+    last_activity_at_ms: 1_900,
+    checkpoint_available: true
+  };
+  fs.writeFileSync(path.join(checkpoint, "status.json"), JSON.stringify(backendFinalization));
+
   const attempts = await cli(project, ["node", RUN_ID, "node:project-discovery", "--attempts"], env);
   assert.equal(attempts.code, 0, attempts.stderr);
   assert.match(attempts.stdout, /- attempt 1: in-progress/u);
   assert.match(attempts.stdout, /tool 1 shell: ok/u);
   assert.doesNotMatch(attempts.stdout, /forge build/u);
+  assert.match(attempts.stdout, /Backend phase: finalization; checkpoint: available/u);
+  assert.match(attempts.stdout, /Execution deadline: .*; finalization deadline:/u);
 
   const tools = await cli(project, ["node", RUN_ID, "node:project-discovery", "--tools", "--json"], env);
   assert.equal(tools.code, 0, tools.stderr);
   const data = parseJson(tools).data as {
+    backend_finalization: unknown;
     tool_details_included: boolean;
     attempts: Array<{ tool_calls: Array<{ input?: unknown }> }>;
   };
   assert.equal(data.tool_details_included, true);
+  assert.deepEqual(data.backend_finalization, backendFinalization);
   assert.deepEqual(data.attempts[0]?.tool_calls[0]?.input, { command: "forge build" });
 });
 
@@ -561,6 +579,43 @@ test("node --watch emits NDJSON envelopes and terminates", async (t) => {
     fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8"),
     /node node:project-discovery --run-id ultrafuzz-lifecycle-cli-run --format jsonl --watch/u
   );
+});
+
+test("node and node --watch keep tool evidence and warn when optional backend status is invalid", async (t) => {
+  const { project, env, runRoot } = await launchedProject(t);
+  const args = ["node", RUN_ID, "node:project-discovery", "--tools"];
+  const baseline = await cli(project, [...args, "--json"], env);
+  assert.equal(baseline.code, 0, baseline.stderr);
+  const baselineData = parseJson(baseline).data;
+  const checkpoint = backendCheckpointDirectory(runRoot, "node:project-discovery");
+  fs.mkdirSync(checkpoint, { recursive: true });
+  const outOfDateRange = JSON.stringify({
+    phase: "finalization",
+    started_at_ms: 1_000,
+    execution_deadline_ms: 9_000_000_000_000_000,
+    finalization_deadline_ms: null,
+    finalization_grace_ms: 500,
+    last_activity_at_ms: 1_900,
+    checkpoint_available: true
+  });
+  for (const contents of ["{", "{}", outOfDateRange]) {
+    fs.writeFileSync(path.join(checkpoint, "status.json"), contents);
+    for (const watch of [[], ["--watch"]]) {
+      const json = await cli(project, [...args, ...watch, "--json"], env);
+      assert.equal(json.code, 0, json.stderr);
+      const envelope = parseJson(json);
+      assert.equal(envelope.ok, true);
+      assert.deepEqual(envelope.data, baselineData);
+      const diagnostics = envelope.diagnostics as Array<{ code: string; severity: string }>;
+      assert.equal(diagnostics.length, 1);
+      assert.equal(diagnostics[0]?.code, "BACKEND_FINALIZATION_STATUS_UNAVAILABLE");
+      assert.equal(diagnostics[0]?.severity, "warning");
+      const human = await cli(project, [...args, ...watch], env);
+      assert.equal(human.code, 0, human.stderr);
+      assert.match(human.stdout, /forge build/u);
+      assert.match(human.stdout, /warning: BACKEND_FINALIZATION_STATUS_UNAVAILABLE/u);
+    }
+  }
 });
 
 test("events rejects a raw event category instead of widening the view", async (t) => {

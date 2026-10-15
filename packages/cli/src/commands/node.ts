@@ -1,9 +1,10 @@
 import { Args, Command, Flags } from "@oclif/core";
-import { getWorkflowNode, watchWorkflowNode, type WorkflowNodeValue } from "@ultrafuzz/runtime";
+import { getWorkflowNode, watchWorkflowNode, type RuntimeDiagnostic, type WorkflowNodeValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
   commandFromRuntime,
+  diagnosticsText,
   emitCommandResult,
   emitWatchFailure,
   envelope,
@@ -59,8 +60,8 @@ export default class Node extends Command {
     const result = await watchWorkflowNode({
       ...query,
       intervalSeconds: flags.interval,
-      onSnapshot: (value) => {
-        emitWatchSnapshot(value, json);
+      onSnapshot: (value, diagnostics) => {
+        emitWatchSnapshot(value, json, diagnostics);
       }
     });
     if (!result.ok) {
@@ -69,13 +70,13 @@ export default class Node extends Command {
   }
 }
 
-function emitWatchSnapshot(value: WorkflowNodeValue, json: boolean): void {
+function emitWatchSnapshot(value: WorkflowNodeValue, json: boolean, diagnostics: RuntimeDiagnostic[]): void {
   const io = cliIo();
   if (!json) {
-    io.stdout.write(renderNode(value));
+    io.stdout.write(`${renderNode(value)}${diagnosticsText(diagnostics)}`);
     return;
   }
-  const result: CommandResult = { ok: true, command: "node", data: toCliWorkflowNodeData(value), diagnostics: [] };
+  const result: CommandResult = { ok: true, command: "node", data: toCliWorkflowNodeData(value), diagnostics };
   io.stdout.write(`${JSON.stringify(envelope("node", result))}\n`);
 }
 
@@ -92,6 +93,14 @@ function renderNode(value: WorkflowNodeValue): string {
     `Output: ${value.output.present ? `recorded (${value.output.source ?? "unknown source"})` : "not recorded"}`,
     `Updated: ${value.updated_at ?? "unknown"}`
   ];
+  const phase = value.backend_finalization;
+  if (phase !== undefined) {
+    lines.push(
+      `Backend phase: ${phase.phase}; checkpoint: ${phase.checkpoint_available ? "available" : "not available"}`,
+      `Execution deadline: ${new Date(phase.execution_deadline_ms).toISOString()}; finalization deadline: ${phase.finalization_deadline_ms === null ? "not entered" : new Date(phase.finalization_deadline_ms).toISOString()}`,
+      `Finalization grace: ${String(phase.finalization_grace_ms)}ms; last activity: ${new Date(phase.last_activity_at_ms).toISOString()}`
+    );
+  }
   for (const attempt of value.attempts) {
     lines.push(
       `- attempt ${attempt.attempt ?? "?"}: ${attempt.state ?? "unknown"}${attempt.cached ? " (cached)" : ""}${

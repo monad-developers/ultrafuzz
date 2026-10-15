@@ -91,6 +91,8 @@ export interface RunConfig {
   frictionLogEnabled?: boolean;
   workspaceMode: WorkspaceMode;
   defaultTimeoutSeconds: number;
+  /** Absent in historical sealed runs: no additional backend finalization grace. */
+  finalizationGraceMs?: number;
   workflowDeadlineSeconds: number;
   controllerLeaseSeconds: number;
 }

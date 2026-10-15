@@ -70,6 +70,11 @@ import {
   declaredAncestorOutputsByContract,
   declaredSiblingOutputsByContract
 } from "../src/semantic-artifact-context.js";
+import {
+  backendCheckpointDirectory,
+  runCheckpointedBackend,
+  withBackendFinalization
+} from "../src/backend-finalization.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -238,6 +243,10 @@ function loadArtifactAwareAgent(
     "assertFinalReportRunMetadataAuthorityUnchanged",
     "assertFinalReportPromptAuthorityUnchanged",
     "finalReportTaskRuntimeFromAgentArgs",
+    "backendCheckpointDirectory",
+    "withBackendFinalization",
+    "path",
+    "createHash",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onSourceVerify?.(),
@@ -252,10 +261,17 @@ function loadArtifactAwareAgent(
     () => "ultrafuzz-agent:test",
     normalizeNodeAttemptFailureMessage,
     publicationForbiddenSecretValues,
-    () => options.onCheck?.("dependency-admission"),
+    () => {
+      options.onCheck?.("dependency-admission");
+      return { snapshotsByProducerAttempt: new Map() };
+    },
     () => options.onCheck?.("report-run-metadata"),
     () => options.onCheck?.("report-prompt"),
-    () => undefined
+    () => undefined,
+    backendCheckpointDirectory,
+    withBackendFinalization,
+    path,
+    createHash
   ) as ReturnType<typeof loadArtifactAwareAgent>;
 }
 
@@ -335,6 +351,56 @@ test("artifact-aware agents own process completion without constraining terminal
       assert.equal(result.text, (terminalResult as Record<string, unknown>).text);
     }
   }
+});
+
+test("the generated campaign wrapper enters checkpoint finalization without leaking privileged engine args", async () => {
+  const root = temporaryRoot("workflow-backend-");
+  const workspacePath = path.join(root, "workspace");
+  const artifactDir = path.join(root, "artifacts", "campaign");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.mkdirSync(path.join(workspacePath, "artifacts", "campaign"), { recursive: true });
+  const git = (args: string[]): void => {
+    execFileSync("git", args, { cwd: workspacePath, stdio: "pipe" });
+  };
+  git(["init", "--quiet"]);
+  git(["config", "user.name", "Test"]);
+  git(["config", "user.email", "test@example.invalid"]);
+  git(["commit", "--quiet", "--allow-empty", "-m", "fixture"]);
+  const task = {
+    id: "node:campaign",
+    attemptId: "campaign",
+    runRoot: root,
+    workspacePath,
+    artifactDir,
+    agentChain: [{}],
+    finalizationGraceMs: 800,
+    timeoutMs: 3_000,
+    productionSourceRoots: ["src", "contracts"]
+  };
+  const wrapped = loadArtifactAwareAgent()(task, 0, "sealed prompt", {
+    generate: async (value) => {
+      assert.ok(value !== null && typeof value === "object");
+      assert.equal(Reflect.has(value, "ultrafuzzTaskRuntime"), false);
+      assert.equal(Reflect.has(value, "outputSchema"), false);
+      assert.match(String(Reflect.get(value, "prompt")), /Checkpointed backend finalization/u);
+      assert.equal(
+        await runCheckpointedBackend(backendCheckpointDirectory(root, task.id), [
+          process.execPath,
+          "-e",
+          "process.exit(0)"
+        ]),
+        0
+      );
+      return { text: "finalized" };
+    }
+  });
+  const result = await wrapped.generate({
+    prompt: "campaign",
+    taskContext: { attempt: 1 },
+    outputSchema: {},
+    ultrafuzzTaskRuntime: { privileged: true }
+  });
+  assert.deepEqual(result, { text: "finalized", _output: { completed: true } });
 });
 
 test("artifact-aware agents recheck every task-local authority after the model returns, succeeding or failing", async () => {
@@ -2846,6 +2912,33 @@ test("generated Smithers verifies a v3 property campaign against authenticated s
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("checkpoint-wrapped campaigns retain backend exit evidence during later artifact finalization", () => {
+  const root = temporaryRoot("checkpoint-campaign-gates-");
+  const fixture = generatedCampaignVerificationFixture(root);
+  const plan = generatedCampaignPlanFixture();
+  const result = generatedPropertyCampaignFixture();
+  const command = `ultrafuzz backend run '/run/backend-checkpoints/task' -- ${GENERATED_CAMPAIGN_COMMAND}`;
+  (plan.backend as Record<string, unknown>).exact_shell_escaped_command = command;
+  plan.command_plan = [{ phase: "campaign", command }];
+  result.exact_command = command;
+  (result.execution as Record<string, unknown>).command = command;
+  // The fixture's backend finished in its execution window. Validation happens
+  // much later; finalization must preserve its original exit/deadline facts.
+  for (const [name, document] of [
+    ["campaign-plan.json", plan],
+    ["campaign.json", result]
+  ] as const) {
+    fs.writeFileSync(path.join(fixture.task.artifactDir, name), JSON.stringify(document));
+  }
+  const harness = loadVerifyArtifactsHarness({
+    taskSpecs: [fixture.implementationProducer, fixture.task],
+    authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+  });
+  const verified = harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task));
+  assert.equal(verified.primary_artifact, "campaign.json");
+  assert.equal(harness.markerWrites.length, 1);
 });
 
 test("generated Smithers requires exactly one declaration for every current campaign tuple member", () => {
@@ -5829,7 +5922,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
     taskProjection,
     /optionalDependencyArtifactDirs: task\.optionalDependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
   );
-  assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\b/u);
+  assert.match(baseAgent, /addDir:\s*\[\s*task\.artifactDir,\s*\.\.\.dependencyArtifactDirs\b/u);
   // The friction log paths come from the task's own run root, never from inherited
   // environment that a continuation can blank.
   assert.doesNotMatch(source, /process\.env\.ULTRAFUZZ_FRICTION/u);
@@ -8604,7 +8697,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(
     agentSource,
-    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\)\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\)\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);[\s\S]*?args: unstructuredArgs[\s\S]*?: await executionAgent\.generate\(unstructuredArgs\)/u
   );
   const coverageSource = workflowSource.slice(
     workflowSource.indexOf("function authoritativeFinalReportCoverage"),
