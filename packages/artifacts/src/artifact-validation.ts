@@ -134,7 +134,9 @@ export function boundArtifactValidationWarnings(
         artifact_path: "$",
         field_path: "$",
         gate: warning.gate,
-        message: `${String(warnings.length - result.length)} further validation warnings omitted from this summary; producer artifacts remain available`
+        message: warnings.some((entry) => entry.code === "ARTIFACT_VALIDATION_WARNINGS_TRUNCATED")
+          ? "Further validation warnings omitted from this summary, including an already truncated set; producer artifacts remain available"
+          : `${String(warnings.length - result.length)} further validation warnings omitted from this summary; producer artifacts remain available`
       });
       break;
     }

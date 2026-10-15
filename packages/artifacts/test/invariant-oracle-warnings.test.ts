@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { INVARIANT_ORACLE_GATE, invariantOracleWarnings } from "../src/index.js";
+import {
+  INVARIANT_ORACLE_GATE,
+  MAX_ARTIFACT_VALIDATION_WARNINGS,
+  MAX_ARTIFACT_VALIDATION_WARNING_BYTES,
+  invariantOracleWarnings
+} from "../src/index.js";
 
 function warningsFor(files: Record<string, string>): Array<{ code: string; path: string; line: string }> {
   return invariantOracleWarnings(new Map(Object.entries(files).map(([path, text]) => [path, Buffer.from(text)]))).map(
@@ -199,4 +204,34 @@ test("a catch that only rethrows is an oracle warning", () => {
     warningsFor({ "invariant-suite/test/C.sol": handler }).map(({ code }) => code),
     ["INVARIANT_ORACLE_BLANKET_CATCH"]
   );
+});
+
+test("dense suites stop scanning at the warning budget without inventing an omitted count", () => {
+  const artifactPath = "invariant-suite/test/a-λ.sol";
+  const source = (count: number) =>
+    Buffer.from(`contract C {\nfunction property() public {\n${"assert(true);\n".repeat(count)}}\n}\n`);
+  const unreadable = new Proxy(Buffer.from("assert(true);"), {
+    get() {
+      throw new Error("a source after the exhausted warning budget must not be read");
+    }
+  });
+  const warnings = invariantOracleWarnings(
+    new Map([
+      [artifactPath, source(100_000)],
+      ["invariant-suite/test/z.sol", unreadable]
+    ])
+  );
+  assert.ok(warnings.length <= MAX_ARTIFACT_VALIDATION_WARNINGS);
+  assert.ok(Buffer.byteLength(JSON.stringify(warnings)) <= MAX_ARTIFACT_VALIDATION_WARNING_BYTES);
+  assert.equal(warnings.at(-1)?.code, "ARTIFACT_VALIDATION_WARNINGS_TRUNCATED");
+  assert.match(warnings.at(-1)?.message ?? "", /scanning stopped/u);
+  assert.doesNotMatch(warnings.at(-1)?.message ?? "", /\d+ further/u);
+  const retained = warnings.slice(0, -1);
+  assert.ok(retained.length > 0);
+  for (const [index, warning] of retained.entries()) {
+    assert.equal(warning.code, "INVARIANT_ORACLE_CONSTANT_TRUE");
+    assert.equal(warning.field_path, `line ${String(index + 3)}`);
+  }
+  // Exhausting the input exactly at the retained prefix needs no truncation notice.
+  assert.deepEqual(invariantOracleWarnings(new Map([[artifactPath, source(retained.length)]])), retained);
 });

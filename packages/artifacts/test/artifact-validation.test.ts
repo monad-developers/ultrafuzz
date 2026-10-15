@@ -469,3 +469,28 @@ test("large warning sets neither fail validation nor conceal identity errors", (
     )
   );
 });
+
+test("warning bounds keep exact counts only when their input was fully enumerated", () => {
+  const warning = {
+    code: "EXAMPLE_WARNING",
+    artifact_path: "test.sol",
+    field_path: "line 1",
+    gate: "example-gate",
+    message: "A check needs review"
+  };
+  const input = Array.from({ length: 1_000 }, () => warning);
+  const bounded = boundArtifactValidationWarnings(input);
+  assert.equal(
+    bounded.at(-1)?.message,
+    `${String(input.length - bounded.length + 1)} further validation warnings omitted from this summary; producer artifacts remain available`
+  );
+  const truncated = {
+    ...warning,
+    code: "ARTIFACT_VALIDATION_WARNINGS_TRUNCATED",
+    message: "Scanning stopped; further warnings omitted"
+  };
+  const boundedAgain = boundArtifactValidationWarnings([...input, truncated]);
+  assert.match(boundedAgain.at(-1)?.message ?? "", /including an already truncated set/u);
+  assert.doesNotMatch(boundedAgain.at(-1)?.message ?? "", /\d+ further/u);
+  assert.deepEqual(boundArtifactValidationWarnings([warning, truncated]), [warning, truncated]);
+});

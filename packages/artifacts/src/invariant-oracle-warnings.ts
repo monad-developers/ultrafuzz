@@ -1,6 +1,10 @@
 import path from "node:path";
 
-import type { ArtifactValidationWarning } from "./artifact-validation.js";
+import {
+  MAX_ARTIFACT_VALIDATION_WARNINGS,
+  MAX_ARTIFACT_VALIDATION_WARNING_BYTES,
+  type ArtifactValidationWarning
+} from "./artifact-validation.js";
 
 /**
  * The gate that names a generated invariant check that may not be able to
@@ -35,25 +39,40 @@ interface SoliditySource {
  */
 export function invariantOracleWarnings(publications: ReadonlyMap<string, Uint8Array>): ArtifactValidationWarning[] {
   const warnings: ArtifactValidationWarning[] = [];
+  let warningBytes = 2;
   for (const [artifactPath, bytes] of [...publications].sort(([left], [right]) => left.localeCompare(right))) {
     if (!artifactPath.startsWith(SUITE_PREFIX) || !artifactPath.endsWith(".sol")) continue;
     const suitePath = artifactPath.slice(SUITE_PREFIX.length);
     if (!TEST_ROOTS.some((root) => suitePath.startsWith(root))) continue;
     const withStrings = withoutComments(Buffer.from(bytes).toString("utf8"));
     const source = { path: suitePath, text: withoutStrings(withStrings), withStrings };
-    for (const finding of [
-      ...constantTrueAssertions(source),
-      ...discardedRequires(source),
-      ...blanketCatches(source),
-      ...implementationCallsInAssertions(source)
-    ]) {
-      warnings.push({
+    let lines: number[] | undefined;
+    for (const finding of sourceFindings(source)) {
+      lines ??= lineStarts(source.text);
+      const warning = {
         code: finding.code,
         artifact_path: artifactPath,
-        field_path: `line ${String(lineOf(source.text, finding.offset))}`,
+        field_path: `line ${String(lineOf(lines, finding.offset))}`,
         message: finding.message,
         gate: INVARIANT_ORACLE_GATE
-      });
+      };
+      const size = Buffer.byteLength(JSON.stringify(warning), "utf8") + 1;
+      if (
+        warnings.length >= MAX_ARTIFACT_VALIDATION_WARNINGS - 1 ||
+        warningBytes + size > MAX_ARTIFACT_VALIDATION_WARNING_BYTES - 1024
+      ) {
+        warnings.push({
+          code: "ARTIFACT_VALIDATION_WARNINGS_TRUNCATED",
+          artifact_path: "$",
+          field_path: "$",
+          gate: INVARIANT_ORACLE_GATE,
+          message:
+            "Further invariant oracle warnings omitted because the diagnostic budget was reached; scanning stopped, and producer artifacts remain available"
+        });
+        return warnings;
+      }
+      warnings.push(warning);
+      warningBytes += size;
     }
   }
   return warnings;
@@ -65,8 +84,14 @@ interface Finding {
   message: string;
 }
 
-function constantTrueAssertions(source: SoliditySource): Finding[] {
-  const findings: Finding[] = [];
+function* sourceFindings(source: SoliditySource): IterableIterator<Finding> {
+  yield* constantTrueAssertions(source);
+  yield* discardedRequires(source);
+  yield* blanketCatches(source);
+  yield* implementationCallsInAssertions(source);
+}
+
+function* constantTrueAssertions(source: SoliditySource): IterableIterator<Finding> {
   for (const call of assertionCalls(source.text)) {
     const rawArgs = source.withStrings.slice(call.argsOffset, call.argsOffset + call.args.length);
     const args = splitTopLevel(call.args, rawArgs).map(expressionIdentity);
@@ -79,36 +104,32 @@ function constantTrueAssertions(source: SoliditySource): Finding[] {
       first === args[1];
     const selfComparison = call.name === "assert" && /^(.+)(==|<=|>=)\1$/u.test(first);
     if (literalTrue || sameOperands || selfComparison) {
-      findings.push({
+      yield {
         code: "INVARIANT_ORACLE_CONSTANT_TRUE",
         offset: call.offset,
         message: `${call.name}(...) is true whatever the target does, so it can never report a violation`
-      });
+      };
     }
   }
-  return findings;
 }
 
-function discardedRequires(source: SoliditySource): Finding[] {
-  const findings: Finding[] = [];
+function* discardedRequires(source: SoliditySource): IterableIterator<Finding> {
   for (const body of functionBodies(source.text)) {
     const firstCall = firstTargetCall(body.text);
     if (firstCall === undefined) continue;
     for (const match of body.text.matchAll(/\brequire\s*\(/gu)) {
       if (match.index <= firstCall) continue;
-      findings.push({
+      yield {
         code: "INVARIANT_ORACLE_REQUIRE_DISCARDED",
         offset: body.offset + match.index,
         message:
           "require after a target call is a post-condition that Recon discards in assertion mode; check an outcome with assert"
-      });
+      };
     }
   }
-  return findings;
 }
 
-function blanketCatches(source: SoliditySource): Finding[] {
-  const findings: Finding[] = [];
+function* blanketCatches(source: SoliditySource): IterableIterator<Finding> {
   for (const match of source.text.matchAll(/\bcatch\b[^{]*\{/gu)) {
     const open = match.index + match[0].length - 1;
     const close = matchingBrace(source.text, open);
@@ -117,33 +138,30 @@ function blanketCatches(source: SoliditySource): Finding[] {
     // Rethrowing is no exception: Recon discards an ordinary revert, so only an
     // assertion in the catch can report the failure.
     if (new RegExp(ASSERTION_CALL_SOURCE, "u").test(body)) continue;
-    findings.push({
+    yield {
       code: "INVARIANT_ORACLE_BLANKET_CATCH",
       offset: match.index,
       message:
         "catch accepts every failure without an assertion; a liveness check must assert(false) for any selector the catalog does not document"
-    });
+    };
   }
-  return findings;
 }
 
-function implementationCallsInAssertions(source: SoliditySource): Finding[] {
+function* implementationCallsInAssertions(source: SoliditySource): IterableIterator<Finding> {
   const aliases = productionImportAliases(source);
-  if (aliases.size === 0) return [];
-  const findings: Finding[] = [];
+  if (aliases.size === 0) return;
   for (const call of assertionCalls(source.text)) {
     for (const match of call.args.matchAll(/\b([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(/gu)) {
       const alias = match[1] ?? "";
       if (!aliases.has(alias)) continue;
-      findings.push({
+      yield {
         code: "INVARIANT_ORACLE_IMPLEMENTATION_CALL",
         offset: call.offset,
         message: `${call.name}(...) computes its expected value with ${alias}.${match[2] ?? ""} from the code under test, so it may agree with the implementation by construction; check that the expected value is independent`
-      });
+      };
       break;
     }
   }
-  return findings;
 }
 
 /** Names a test file imports from production sources (`src/`, `contracts/`). */
@@ -170,8 +188,9 @@ function productionImportAliases(source: SoliditySource): Set<string> {
   return aliases;
 }
 
-function assertionCalls(text: string): Array<{ name: string; args: string; argsOffset: number; offset: number }> {
-  const calls: Array<{ name: string; args: string; argsOffset: number; offset: number }> = [];
+function* assertionCalls(
+  text: string
+): IterableIterator<{ name: string; args: string; argsOffset: number; offset: number }> {
   for (const match of text.matchAll(new RegExp(ASSERTION_CALL_SOURCE, "gu"))) {
     // `x.assert(` or `function t(` is not an assertion call.
     const before = text.slice(Math.max(0, match.index - 9), match.index);
@@ -179,19 +198,16 @@ function assertionCalls(text: string): Array<{ name: string; args: string; argsO
     const open = match.index + match[0].length - 1;
     const close = matchingParen(text, open);
     if (close === undefined) continue;
-    calls.push({ name: match[1] ?? "", args: text.slice(open + 1, close), argsOffset: open + 1, offset: match.index });
+    yield { name: match[1] ?? "", args: text.slice(open + 1, close), argsOffset: open + 1, offset: match.index };
   }
-  return calls;
 }
 
-function functionBodies(text: string): Array<{ text: string; offset: number }> {
-  const bodies: Array<{ text: string; offset: number }> = [];
+function* functionBodies(text: string): IterableIterator<{ text: string; offset: number }> {
   for (const match of text.matchAll(/\bfunction\b[^{;]*\{/gu)) {
     const open = match.index + match[0].length - 1;
     const close = matchingBrace(text, open);
-    if (close !== undefined) bodies.push({ text: text.slice(open + 1, close), offset: open + 1 });
+    if (close !== undefined) yield { text: text.slice(open + 1, close), offset: open + 1 };
   }
-  return bodies;
 }
 
 /**
@@ -269,8 +285,20 @@ function withoutStrings(text: string): string {
   );
 }
 
-function lineOf(text: string, offset: number): number {
-  let line = 1;
-  for (let index = 0; index < offset && index < text.length; index += 1) if (text[index] === "\n") line += 1;
-  return line;
+function lineStarts(text: string): number[] {
+  const starts = [0];
+  for (let index = 0; index < text.length; index += 1) if (text[index] === "\n") starts.push(index + 1);
+  return starts;
+}
+
+function lineOf(starts: readonly number[], offset: number): number {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const start = starts[middle];
+    if (start !== undefined && start <= offset) low = middle;
+    else high = middle - 1;
+  }
+  return low + 1;
 }
