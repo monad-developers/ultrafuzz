@@ -749,13 +749,16 @@ async function loadGeneratedOpenRouterAgent(
     provisionalCallbackLimit?: number;
     actionSnapshotLimit?: number;
     actionSnapshotBytes?: number;
+    backoffBudgetMs?: number;
   },
   testInstrumentation?: {
     acknowledgeProvisionalRateLimit?: boolean;
     acknowledgeTerminalRateLimit?: boolean;
     expireRetryDeadlineBeforeReplacementBuild?: number;
+    manualClock?: boolean;
   }
 ): Promise<{
+  openRouterTestClock?: { nowMs: number; waits: number[]; onWait?: () => void };
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
     generate(options?: Record<string, unknown>): Promise<{ text: string }>;
     withOpenRouterRecovery<T>(
@@ -773,11 +776,14 @@ async function loadGeneratedOpenRouterAgent(
     nowMs: number;
     retryDeadlineMs: number;
     totalDeadlineMs?: number;
+    finalizationReserveMs?: number;
+    backoffRemainingMs?: number;
     random: number;
   }):
     | { kind: "rate-limit-exhausted" }
     | { kind: "total-timeout" }
-    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
+    | { kind: "backoff-budget-exhausted" | "finalization-reserved" }
+    | { kind: "backoff"; delayMs: number; afterDelay: "retry" };
   createOpenRouterAgent(options?: Record<string, unknown>): {
     opts: Record<string, unknown> & { env?: Record<string, string> };
     generate(options?: {
@@ -888,13 +894,32 @@ async function loadGeneratedOpenRouterAgent(
     }
     for (const [from, value] of [
       ["const OPENROUTER_ACTION_SNAPSHOT_LIMIT = 256;", retryPolicy.actionSnapshotLimit],
-      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes]
+      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes],
+      ["const OPENROUTER_429_BACKOFF_BUDGET_MS = 120_000;", retryPolicy.backoffBudgetMs]
     ] as const) {
       if (value === undefined) continue;
       const replaced = openRouterSource.replace(from, from.replace(/= .*;/u, `= ${value};`));
       assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
       openRouterSource = replaced;
     }
+  }
+  if (testInstrumentation?.manualClock === true) {
+    openRouterSource = openRouterSource.replaceAll("performance.now()", "openRouterTestClock.nowMs");
+    const waitStart = openRouterSource.indexOf("function waitForRetry(");
+    const waitEnd = openRouterSource.indexOf("function abortReason(", waitStart);
+    assert.ok(waitStart > 0 && waitEnd > waitStart, "missing generated OpenRouter retry wait source");
+    openRouterSource =
+      openRouterSource.slice(0, waitStart) +
+      `function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted === true) return Promise.reject(abortReason(signal));
+  openRouterTestClock.waits.push(delayMs);
+  openRouterTestClock.nowMs += delayMs;
+  openRouterTestClock.onWait?.();
+  return signal?.aborted === true ? Promise.reject(abortReason(signal)) : Promise.resolve();
+}
+export const openRouterTestClock = { nowMs: 0, waits: [] as number[], onWait: undefined as (() => void) | undefined };
+` +
+      openRouterSource.slice(waitEnd);
   }
   if (testInstrumentation?.acknowledgeProvisionalRateLimit === true) {
     const from = 'this.#provisionalRateLimit = matchState === "provisional";';
@@ -979,6 +1004,7 @@ ${deadlineFrom}`
   );
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
+    openRouterTestClock?: { nowMs: number; waits: number[]; onWait?: () => void };
     OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
       generate(options?: Record<string, unknown>): Promise<{ text: string }>;
       withOpenRouterRecovery<T>(
@@ -996,11 +1022,14 @@ ${deadlineFrom}`
       nowMs: number;
       retryDeadlineMs: number;
       totalDeadlineMs?: number;
+      finalizationReserveMs?: number;
+      backoffRemainingMs?: number;
       random: number;
     }):
       | { kind: "rate-limit-exhausted" }
       | { kind: "total-timeout" }
-      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
+      | { kind: "backoff-budget-exhausted" | "finalization-reserved" }
+      | { kind: "backoff"; delayMs: number; afterDelay: "retry" };
     createOpenRouterAgent(options?: Record<string, unknown>): {
       opts: Record<string, unknown> & { env?: Record<string, string> };
       generate(options?: {
@@ -4405,7 +4434,7 @@ bunAdapterTest(
         totalDeadlineMs: 500,
         random: 0
       }),
-      { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
+      { kind: "finalization-reserved" }
     );
     assert.deepEqual(
       decideOpenRouter429Recovery({
@@ -4428,6 +4457,482 @@ bunAdapterTest(
     );
   }
 );
+
+bunAdapterTest(
+  "generated OpenRouter provider stub recovers near the deadline using one checkpoint and fixed headroom",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    const timeouts: number[] = [];
+    const resumed: unknown[] = [];
+    const notices: string[] = [];
+    let expensiveWork = 0;
+    let invocation = 0;
+    const result = await agent.withOpenRouterRecovery(
+      { prompt: "Run the expensive work once", timeout: 6_000, onStderr: (text: string) => notices.push(text) },
+      async (options) => {
+        invocation += 1;
+        timeouts.push(options.timeout as number);
+        resumed.push(options.resumeSession);
+        if (invocation === 1) {
+          expensiveWork += 1;
+          clock.nowMs = 3_800;
+          emitOpenRouterCheckpoint(options, "work-complete");
+          throw new Error("HTTP 429 after expensive work");
+        }
+        assert.equal(options.resumeSession, "budget-session");
+        assert.match(String(options.prompt), /Do not repeat completed work/u);
+        if (invocation === 2) {
+          clock.nowMs += 100;
+          throw new Error("HTTP 429 still recovering");
+        }
+        clock.nowMs += 400;
+        emitOpenRouterCheckpoint(options, "final-answer");
+        return { text: "OK" };
+      }
+    );
+    assert.equal(result.text, "OK");
+    assert.equal(expensiveWork, 1);
+    assert.deepEqual(resumed, [undefined, "budget-session", "budget-session"]);
+    assert.deepEqual(timeouts, [6_000, 1_700, 1_100]);
+    assert.deepEqual(clock.waits, [500, 500]);
+    const diagnostics = openRouterBudgetDiagnostics(result);
+    assert.equal(diagnostics.elapsedMs, 5_300);
+    assert.equal(diagnostics.productiveRuntimeMs, 4_300);
+    assert.equal(diagnostics.backoffMs, 1_000);
+    assert.equal(diagnostics.retryCount, 2);
+    assert.equal(diagnostics.rateLimitCount, 2);
+    assert.equal(diagnostics.finalizationReserveMs, 1_000);
+    assert.equal(diagnostics.remainingMs, 700);
+    assert.equal(diagnostics.configuredTimeoutMs, 6_000);
+    assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+    assert.ok(diagnostics.deadlineAt);
+    assert.ok(diagnostics.lastCheckpoint);
+    assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 700);
+    assert.match(notices.at(-1) ?? "", /providerRecovery=.*"backoffMs":1000.*"retryCount":2/u);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub stops sustained late 429s before consuming its reserve",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    const providerFailure = new Error("HTTP 429 sustained near deadline");
+    await assert.rejects(
+      agent.withOpenRouterRecovery({ timeout: { totalMs: 6_000, idleMs: 500 } }, async (options) => {
+        invocation += 1;
+        if (invocation === 1) clock.nowMs = 3_800;
+        else assert.equal(options.resumeSession, "budget-session");
+        assert.equal((options.timeout as { idleMs: number }).idleMs, 500);
+        // Provider replay is not new work and cannot refresh this checkpoint.
+        emitOpenRouterCheckpoint(options, "work-complete");
+        throw providerFailure;
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "AGENT_CLI_ERROR");
+        assert.match(String(error), /finalization-reserved.*"backoffMs":1000/u);
+        assert.equal((error as Error).cause, providerFailure);
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.remainingMs, 1_200);
+        assert.equal(diagnostics.productiveRuntimeMs, 3_800);
+        assert.equal(diagnostics.retryCount, 2);
+        assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+        assert.ok(diagnostics.deadlineAt);
+        assert.ok(diagnostics.lastCheckpoint);
+        assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 2_200);
+        return true;
+      }
+    );
+    assert.equal(invocation, 3);
+    assert.deepEqual(clock.waits, [500, 500]);
+    assert.equal(clock.nowMs, 4_800);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub cannot replenish cumulative backoff by making new progress",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 1_000, maxDelayMs: 1_000, jitterFraction: 0, backoffBudgetMs: 2_500 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    await assert.rejects(
+      agent.withOpenRouterRecovery({ timeout: 0 }, async (options) => {
+        invocation += 1;
+        clock.nowMs += 100;
+        emitOpenRouterCheckpoint(options, `new-progress-${invocation}`);
+        throw new Error("HTTP 429 after new progress");
+      }),
+      (error: unknown) => {
+        assert.match(String(error), /backoff-budget-exhausted/u);
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.configuredTimeoutMs, null);
+        assert.equal(diagnostics.deadlineAt, null);
+        assert.equal(diagnostics.backoffBudgetMs, 2_500);
+        assert.equal(diagnostics.backoffMs, 2_000);
+        assert.equal(diagnostics.productiveRuntimeMs, 300);
+        assert.equal(diagnostics.retryCount, 2);
+        assert.equal(diagnostics.rateLimitCount, 3);
+        assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+        return true;
+      }
+    );
+    assert.equal(invocation, 3);
+    assert.deepEqual(clock.waits, [1_000, 1_000]);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub rechecks headroom after callbacks and retains the original hard deadline",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    await assert.rejects(
+      agent.withOpenRouterRecovery(
+        {
+          timeout: 6_000,
+          onStderr: (text: string) => {
+            if (text.includes("returned HTTP 429")) clock.nowMs = 5_100;
+          }
+        },
+        async (options) => {
+          invocation += 1;
+          clock.nowMs = 3_800;
+          emitOpenRouterCheckpoint(options, "work-complete");
+          throw new Error("HTTP 429 before a slow status callback");
+        }
+      ),
+      /finalization-reserved/u
+    );
+    assert.equal(invocation, 1);
+    assert.deepEqual(clock.waits, []);
+
+    clock.nowMs = 0;
+    invocation = 0;
+    await assert.rejects(
+      agent.withOpenRouterRecovery({ timeout: 6_000 }, async (options) => {
+        invocation += 1;
+        clock.nowMs = invocation === 1 ? 1_000 : 6_000;
+        emitOpenRouterCheckpoint(options, `progress-${invocation}`);
+        if (invocation === 1) throw new Error("HTTP 429 before a long resumed operation");
+        return { text: "Too late" };
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "PROCESS_TIMEOUT");
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.elapsedMs, 6_000);
+        assert.equal(diagnostics.backoffMs, 500);
+        assert.equal(diagnostics.productiveRuntimeMs, 5_500);
+        assert.equal(diagnostics.remainingMs, 0);
+        assert.ok(diagnostics.deadlineAt);
+        assert.ok(diagnostics.lastCheckpoint);
+        assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 5_000);
+        return true;
+      }
+    );
+    assert.equal(invocation, 2);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub accounts actual aborted backoff without launching a retry",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const controller = new AbortController();
+    clock.onWait = () => {
+      clock.nowMs = 1_200;
+      controller.abort(new Error("cancelled 200ms into the wait"));
+    };
+    let invocation = 0;
+    await assert.rejects(
+      new OpenRouterCodexAgent().withOpenRouterRecovery(
+        { timeout: 6_000, abortSignal: controller.signal },
+        async (options) => {
+          invocation += 1;
+          clock.nowMs = 1_000;
+          emitOpenRouterCheckpoint(options, "work-complete");
+          throw new Error("HTTP 429 before cancellation");
+        }
+      ),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "PROCESS_ABORTED");
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.elapsedMs, 1_200);
+        assert.equal(diagnostics.backoffMs, 200);
+        assert.equal(diagnostics.productiveRuntimeMs, 1_000);
+        assert.equal(diagnostics.retryCount, 0);
+        assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+        return true;
+      }
+    );
+    assert.equal(invocation, 1);
+    assert.deepEqual(clock.waits, [500]);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves quota controls when headroom prevents recovery",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const details = { failureQuota: true, failureRetryable: true, quotaResetAtMs: 1_800_000_000_000 };
+    const providerFailure = Object.assign(new Error("HTTP 429 provider quota"), {
+      code: "AGENT_QUOTA_EXCEEDED",
+      details
+    });
+    await assert.rejects(
+      new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 6_000 }, async () => {
+        clock.nowMs = 4_900;
+        throw providerFailure;
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "AGENT_QUOTA_EXCEEDED");
+        assert.deepEqual((error as { details: unknown }).details, details);
+        assert.equal((error as Error).cause, providerFailure);
+        assert.match(String(error), /finalization-reserved/u);
+        assert.equal(openRouterBudgetDiagnostics(error).backoffMs, 0);
+        return true;
+      }
+    );
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves real Smithers quota controls through terminal diagnostics",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const classifierPath = path.join(
+      pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent"),
+      "BaseCliAgent",
+      "BaseCliAgent.js"
+    );
+    const { classifyQuotaError } = (await import(pathToFileURL(classifierPath).href)) as {
+      classifyQuotaError(
+        message: string,
+        command: string,
+        context: { nowMs: () => number }
+      ): (Error & { code: string; details: Record<string, unknown> }) | null;
+    };
+    const providerText =
+      "provider diagnostic prefix ".repeat(20) + "HTTP 429 Too Many Requests; retry after 360 seconds";
+    const quota = classifyQuotaError(providerText, "codex", { nowMs: () => 1_800_000_000_000 });
+    assert.ok(quota);
+    assert.equal(quota.code, "AGENT_QUOTA_EXCEEDED");
+    assert.equal(quota.details.quotaResetAtMs, 1_800_000_360_000);
+    assert.doesNotMatch(quota.message, /HTTP 429|429 Too Many Requests/u);
+    for (const channel of ["stderr", "event"]) {
+      clock.nowMs = 0;
+      await assert.rejects(
+        new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 12_000 }, async (options) => {
+          clock.nowMs = 9_500;
+          if (channel === "stderr") {
+            (options.onStderr as (text: string) => void)(`${providerText}\n`);
+          } else {
+            (options.onEvent as (event: Record<string, unknown>) => void)({
+              type: "completed",
+              ok: false,
+              error: providerText
+            });
+          }
+          throw quota;
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, "AGENT_QUOTA_EXCEEDED");
+          assert.deepEqual((error as { details: unknown }).details, quota.details);
+          assert.equal(((error as Error).cause as Error).cause, quota);
+          assert.match(String(error), /finalization-reserved/u);
+          return true;
+        }
+      );
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves direct scheduler controls without promoting arbitrary causes",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const staleQuota = Object.assign(new Error("earlier provider quota"), { code: "AGENT_QUOTA_EXCEEDED" });
+    const details = { failureRetryable: false, discardResumeSession: true, discardAgentCheckpoint: true };
+    for (const code of ["AGENT_CONFIG_INVALID", "AGENT_CHECKPOINT_INVALID", "UNKNOWN_PROVIDER_CODE"]) {
+      clock.nowMs = 0;
+      const providerFailure = Object.assign(new Error("HTTP 429 route rejected", { cause: staleQuota }), {
+        code,
+        details
+      });
+      await assert.rejects(
+        new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 12_000 }, async () => {
+          clock.nowMs = 9_500;
+          throw providerFailure;
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, code === "UNKNOWN_PROVIDER_CODE" ? "AGENT_CLI_ERROR" : code);
+          assert.deepEqual((error as { details: unknown }).details, details);
+          assert.equal((error as Error).cause, providerFailure);
+          return true;
+        }
+      );
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub rechecks terminal callback errors cancellation and deadlines at budget stops",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const providerText = "HTTP 429 terminal provider output\n";
+    for (const stop of ["initial-decision", "headroom-recheck"]) {
+      for (const outcome of ["abort", "deadline", "callback-error"]) {
+        clock.nowMs = 0;
+        const controller = new AbortController();
+        const cancelled = new Error("caller cancelled during terminal release");
+        const callbackFailure = new Error("terminal callback failed");
+        let invocations = 0;
+        let terminalCallbacks = 0;
+        await assert.rejects(
+          new OpenRouterCodexAgent().withOpenRouterRecovery(
+            {
+              timeout: 12_000,
+              abortSignal: controller.signal,
+              onStderr: (text: string) => {
+                if (stop === "headroom-recheck" && text.includes("returned HTTP 429")) clock.nowMs = 9_500;
+                if (text !== providerText) return;
+                terminalCallbacks += 1;
+                if (outcome !== "deadline") controller.abort(cancelled);
+                if (outcome !== "abort") clock.nowMs = 12_000;
+                if (outcome === "callback-error") throw callbackFailure;
+              }
+            },
+            async (options) => {
+              invocations += 1;
+              clock.nowMs = stop === "initial-decision" ? 9_500 : 5_000;
+              (options.onStderr as (text: string) => void)(providerText);
+              throw Object.assign(new Error("HTTP 429 quota"), { code: "AGENT_QUOTA_EXCEEDED" });
+            }
+          ),
+          (error: unknown) => {
+            if (outcome === "callback-error") assert.equal(error, callbackFailure);
+            else {
+              assert.equal(
+                (error as { code: string }).code,
+                outcome === "abort" ? "PROCESS_ABORTED" : "PROCESS_TIMEOUT"
+              );
+              if (outcome === "abort") assert.equal((error as Error).cause, cancelled);
+              else assert.equal(openRouterBudgetDiagnostics(error).remainingMs, 0);
+            }
+            return true;
+          }
+        );
+        assert.equal(invocations, 1);
+        assert.equal(terminalCallbacks, 1);
+      }
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+function emitOpenRouterCheckpoint(options: Record<string, unknown>, id: string): void {
+  const onEvent = options.onEvent as (event: Record<string, unknown>) => void;
+  onEvent({ type: "started", resume: "budget-session" });
+  onEvent({
+    type: "action",
+    phase: "completed",
+    action: { id, kind: "note", title: "assistant" },
+    message: id
+  });
+}
+
+function openRouterBudgetDiagnostics(outcome: unknown): {
+  configuredTimeoutMs: number | null;
+  deadlineAt: string | null;
+  elapsedMs: number;
+  productiveRuntimeMs: number;
+  backoffMs: number;
+  backoffBudgetMs: number;
+  retryCount: number;
+  rateLimitCount: number;
+  finalizationReserveMs: number;
+  remainingMs: number | null;
+  lastCheckpoint: { sessionId: string; observedAt: string } | null;
+} {
+  return (outcome as { providerRecovery: ReturnType<typeof openRouterBudgetDiagnostics> }).providerRecovery;
+}
 
 bunAdapterTest(
   "generated OpenRouter recovery telemetry cannot replace the original provider failure",
