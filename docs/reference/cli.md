@@ -227,7 +227,14 @@ not infer, repair, normalize, or convert its domain shape. Model-only overrides
 keep the configured agent and reasoning. When `--agent` selects another agent,
 backend-specific reasoning is cleared, including when `--model` also pins a
 replacement model.
-`--max-concurrency` caps workflow task submission concurrency.
+`--max-concurrency` caps workflow task submission concurrency and the total
+backend workers requested by each task. Backend prompts receive the smaller
+of this ceiling and the executing host's available CPUs; the invariant campaign
+records that worker count in its plan and passes it to Recon. For example,
+`--max-concurrency 16` requests at most 16 backend workers on a 32-vCPU host.
+Without a flag, a new run uses `run.max_parallel_agents`. Resume and fork retain
+the previous run ceiling unless a new flag overrides it. This is a worker-count
+policy per task, not a kernel-enforced CPU quota across concurrent tasks.
 `--audit-profile` selects a profile for one command, while `--topology-path`
 atomically replaces the project or profile topology for that command.
 

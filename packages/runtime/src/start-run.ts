@@ -535,6 +535,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // Modal sandboxes would run its remaining attempts on this host instead. The mode comes from
     // the config, not the optional task manifest, and a run whose config cannot be read is refused.
     const config = readContinuationResolvedConfig(layout.root, configPath, runId);
+    const requestedConcurrency = continuationConcurrency(layout, config, input.maxConcurrency);
     if (config.execution.mode === "cloud") return cloudExecutionRemovedFailure(runId);
     if (input.refreshController !== true && workflowPredatesPlannedSchemaBundles(workflowPath)) {
       return controllerRefreshRequiredFailure(runId);
@@ -643,7 +644,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       smithersRunId,
       workflowPath,
       projectRoot,
-      maxConcurrency: input.maxConcurrency ?? config.run.maxParallelAgents,
+      maxConcurrency: requestedConcurrency,
       resetNode: input.resetNode,
       force: input.force,
       retryFailed: input.retryFailed,
@@ -693,7 +694,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       recordNativeContinuationState({
         layout,
         config,
-        requestedConcurrency: input.maxConcurrency,
+        requestedConcurrency,
         forgeGuardActive: forgeGuard.active
       });
     }
@@ -839,6 +840,17 @@ function readContinuationExpandedGraph(layout: RunLayout): unknown {
   // Graph provenance only restores failure-policy rendering when available.
   // Its absence must not become refresh authorization.
   return undefined;
+}
+
+/** Keep a previous one-run override when a continuation does not provide a new one. */
+function continuationConcurrency(layout: RunLayout, config: ResolvedConfig, override?: number): number {
+  if (override !== undefined) return override;
+  try {
+    return readRunState(layout).concurrency.requested_concurrency;
+  } catch {
+    // Legacy/malformed projections must not prevent native continuation.
+    return config.run.maxParallelAgents;
+  }
 }
 
 function recordNativeContinuationState(input: {
@@ -1051,7 +1063,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
     if (hasRuntimeErrors(preflightDiagnostics)) {
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
-    const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
+    const requestedConcurrency = continuationConcurrency(evidence.layout, sealedConfig, input.maxConcurrency);
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       projectRoot: path.resolve(input.projectRoot),

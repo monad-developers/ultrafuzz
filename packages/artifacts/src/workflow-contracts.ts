@@ -632,6 +632,7 @@ export const invariantCampaignPlanSchema = withDocumentMetadata(
   z.strictObject({
     schema_version: z.literal(INVARIANT_CAMPAIGN_PLAN_SCHEMA_VERSION),
     available_vcpus: positiveInteger,
+    configured_concurrency_limit: positiveInteger.optional(),
     workers: positiveInteger,
     configured_budget_seconds: positiveInteger,
     deadline: timestamp,

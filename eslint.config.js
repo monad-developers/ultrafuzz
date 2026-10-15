@@ -136,6 +136,7 @@ export default tseslint.config(
           "DYNAMIC_GROUPS",
           "FRICTION_LOG",
           "MAX_DYNAMIC_NODES",
+          "MAX_PARALLEL_AGENTS",
           "RUN_ID_LITERAL",
           "RUN_ROOT_RELATIVE",
           "SOURCE_PROJECT_ROOT",

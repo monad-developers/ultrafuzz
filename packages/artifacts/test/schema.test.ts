@@ -2024,8 +2024,22 @@ test("the current invariant campaign plan contract requires v2 timeout evidence"
     }
   };
   assert.equal(validateArtifactContract("ultrafuzz/invariant-campaign-plan@2", JSON.stringify(plan)).ok, true);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/invariant-campaign-plan@2",
+      JSON.stringify({
+        ...plan,
+        available_vcpus: 32,
+        configured_concurrency_limit: 16,
+        workers: 16
+      })
+    ).ok,
+    true
+  );
   for (const malformed of [
     { ...plan, schema_version: "ultrafuzz.invariant-campaign-plan.v1" },
+    { ...plan, configured_concurrency_limit: 0 },
+    { ...plan, configured_concurrency_limit: 1.5 },
     { ...plan, configured_fuzzer_timeout_seconds: 0 },
     { ...plan, recon_sequence_length: 0 },
     { ...plan, backend_started_at: "not-a-timestamp" },
