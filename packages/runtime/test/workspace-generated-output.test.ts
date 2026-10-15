@@ -6,12 +6,14 @@ import test from "node:test";
 
 import { assertArtifactPublicationsContainNoSecrets } from "@ultrafuzz/artifacts";
 
+import { isGeneratedWorkspaceOutput } from "../src/workspace-generated-output.js";
 import {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
   validateWorkspacePatchCapture
 } from "../src/workspace-handoff.js";
+import { foundryHarnessArtifact } from "./fixtures/foundry-artifact.js";
 import { captureLegacyWorkspacePatch } from "./fixtures/legacy-workspace-patch.js";
 import { temporaryRoot } from "./temporary-root.js";
 
@@ -38,12 +40,28 @@ function fixture(): string {
 
 const compilerDump = JSON.stringify({ input: { language: "Solidity", sources: {} }, output: { contracts: {} } });
 
+function compilerArtifact(source: string, type: string, name = "testExample"): string {
+  const abi = foundryHarnessArtifact.abi.map((entry) => ({ ...entry, name }));
+  const metadata = {
+    ...foundryHarnessArtifact.metadata,
+    output: { ...foundryHarnessArtifact.metadata.output, abi },
+    settings: { ...foundryHarnessArtifact.metadata.settings, compilationTarget: { [source]: type } }
+  };
+  return JSON.stringify({
+    ...foundryHarnessArtifact,
+    abi,
+    metadata,
+    rawMetadata: JSON.stringify(metadata),
+    methodIdentifiers: { [`${name}()`]: "3f5a4a2a" }
+  });
+}
+
 test("classifies nested build, coverage and corpus output without dropping neighboring authored files", () => {
   const root = fixture();
   const downstream = path.join(temporaryRoot("ultrafuzz-generated-downstream-"), "workspace");
   const baseline = captureWorkspaceTree(root);
   const generated: Record<string, string> = {
-    ".cov-work/out/Fixture.sol/Fixture.json": "{}",
+    ".cov-work/out/Fixture.sol/Fixture.json": compilerArtifact("src/Fixture.sol", "Fixture"),
     ".cov-work/compilation.json": compilerDump,
     ".recon/build.json": compilerDump,
     ".recon/compiler-input.json": compilerDump,
@@ -57,7 +75,7 @@ test("classifies nested build, coverage and corpus output without dropping neigh
     "test/recon/echidna/coverage/seed.txt": "corpus",
     "custom-output/out/build-info/0123456789abcdef.json": "{}",
     ".recon/build-snapshot/0123456789abcdef.json": "{}",
-    "custom-output/out/Fixture.sol/Fixture.json": "{}",
+    "custom-output/out/Fixture.sol/Fixture.json": compilerArtifact("src/Fixture.sol", "Fixture"),
     ".cov-work/cache/solidity-files-cache.json": "{}"
   };
   const authored: Record<string, string> = {
@@ -78,7 +96,9 @@ test("classifies nested build, coverage and corpus output without dropping neigh
     "test/fixtures/build-snapshot/config.json": '{"workers":1}\n',
     "test/fixtures/build-info/0123456789abcdef.json": '{"cases":[1,2,3]}\n',
     "test/fixtures/out/Fixture.sol/cases.json": '{"cases":[1,2,3]}\n',
-    "custom-output/Fixture.sol/Fixture.json": compilerDump
+    "test/fixtures/out/Fixture.sol/Fixture.json": '{"cases":[1,2,3]}\n',
+    ".cov-work/out/Fixture.sol/cases.json": '{"cases":[1,2,3]}\n',
+    "custom-output/Fixture.sol/Fixture.json": compilerArtifact("src/Fixture.sol", "Fixture")
   };
   for (const [filename, contents] of Object.entries({ ...generated, ...authored })) write(root, filename, contents);
 
@@ -97,6 +117,115 @@ test("classifies nested build, coverage and corpus output without dropping neigh
     assert.equal(fs.existsSync(path.join(downstream, filename)), false, filename);
     assert.equal(fs.existsSync(path.join(root, filename)), true, "capture must not delete scratch");
   }
+});
+
+test("recognizes Foundry test, script, interface and multiple-type artifacts without source/type basename equality", () => {
+  const root = fixture();
+  const baseline = captureWorkspaceTree(root);
+  const layouts = [
+    ["test/Harness.t.sol", "Harness"],
+    ["script/Deploy.s.sol", "Deploy"],
+    ["src/Fixture.sol", "Fixture"],
+    ["src/Fixture.sol", "DifferentName"],
+    ["src/Interfaces.sol", "IFixture"]
+  ] as const;
+  for (const directory of [".cov-work/out", ".recon/out", "nested/out"]) {
+    for (const [source, type] of layouts) {
+      write(root, `${directory}/${path.basename(source)}/${type}.json`, compilerArtifact(source, type));
+    }
+  }
+  // Abstract contracts/interfaces have empty bytecode; it is still generated.
+  write(
+    root,
+    ".cov-work/out/Interfaces.sol/IFixture.json",
+    JSON.stringify({
+      ...foundryHarnessArtifact,
+      bytecode: { object: "0x" },
+      deployedBytecode: { object: "0x" },
+      metadata: {
+        ...foundryHarnessArtifact.metadata,
+        settings: { compilationTarget: { "src/Interfaces.sol": "IFixture" } }
+      }
+    })
+  );
+  write(root, "test/Harness.t.sol", "contract Harness {}\n");
+  const captured = captureWorkspacePatch(root, baseline);
+  assert.deepEqual(captured.manifest.files, [{ path: "test/Harness.t.sol" }]);
+  assert.equal(captured.manifest.excluded_files, undefined);
+  assert.equal(captureWorkspaceTree(root), captured.manifest.result_tree);
+});
+
+test("keeps real-layout Foundry metadata out of the fail-closed secret gate below the patch limit", () => {
+  const root = fixture();
+  const configuredSecret = "fixture-configured-credential-value";
+  const fakeCredential = "ghp_AbCdEf1234567890AbCdEf1234567890AbCd"; // gitleaks:allow -- fixed synthetic scanner fixture
+  write(root, "src/Fixture.sol", `contract DifferentName { function ${fakeCredential}() public pure {} }\n`);
+  git(root, ["add", "src/Fixture.sol"]);
+  git(root, ["commit", "--quiet", "-m", "synthetic compiler input"]);
+  const baseline = captureWorkspaceTree(root);
+  write(root, "test/Harness.t.sol", "contract Harness { function testExample() public pure { assert(true); } }\n");
+  write(root, ".cov-work/out/Harness.t.sol/Harness.json", JSON.stringify(foundryHarnessArtifact));
+  write(root, ".cov-work/out/Fixture.sol/Fixture.json", compilerArtifact("src/Fixture.sol", "Fixture"));
+  write(
+    root,
+    ".cov-work/out/Fixture.sol/DifferentName.json",
+    compilerArtifact("src/Fixture.sol", "DifferentName", fakeCredential)
+  );
+  const legacy = captureLegacyWorkspacePatch(root, baseline);
+  assert.ok(Buffer.byteLength(legacy.patch) < 16 * 1024 * 1024);
+  assert.equal(legacy.patch.includes(configuredSecret), false);
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(new Map([["workspace.patch", Buffer.from(legacy.patch)]]), [
+        configuredSecret
+      ]),
+    /artifact publication contains sensitive data/u
+  );
+
+  const captured = captureWorkspacePatch(root, baseline);
+  assert.deepEqual(captured.manifest.files, [{ path: "test/Harness.t.sol" }]);
+  assert.ok(Buffer.byteLength(captured.patch) < 1024);
+  assert.doesNotThrow(() =>
+    assertArtifactPublicationsContainNoSecrets(new Map([["workspace.patch", Buffer.from(captured.patch)]]), [
+      configuredSecret
+    ])
+  );
+  validateWorkspacePatchCapture(root, captured, ["src", "contracts"]);
+});
+
+test("retains ambiguous compiler-looking JSON and bounds inspection of oversized candidates", () => {
+  const root = fixture();
+  const baseline = captureWorkspaceTree(root);
+  const candidates = [
+    "{}",
+    "{incomplete",
+    JSON.stringify({ ...foundryHarnessArtifact, abi: null }),
+    JSON.stringify({ ...foundryHarnessArtifact, bytecode: "0x6000" }),
+    JSON.stringify({ ...foundryHarnessArtifact, deployedBytecode: null }),
+    JSON.stringify({ ...foundryHarnessArtifact, metadata: null }),
+    compilerArtifact("test/Other.t.sol", "Harness"),
+    compilerArtifact("test/Harness.t.sol", "Other"),
+    JSON.stringify(foundryHarnessArtifact).replace('"abi":', '"abi":[],"abi":')
+  ];
+  const paths = candidates.map((contents, index) => {
+    const filename = `case-${index}/out/Harness.t.sol/Harness.json`;
+    write(root, filename, contents);
+    assert.equal(isGeneratedWorkspaceOutput(root, filename), false, filename);
+    return filename;
+  });
+  assert.deepEqual(
+    captureWorkspacePatch(root, baseline).manifest.files.map((entry) => entry.path),
+    paths.sort()
+  );
+
+  const oversized = "large/out/Harness.t.sol/Harness.json";
+  write(root, oversized, JSON.stringify(foundryHarnessArtifact));
+  fs.truncateSync(path.join(root, oversized), 1024 * 1024 * 1024);
+  assert.equal(
+    isGeneratedWorkspaceOutput(root, oversized),
+    false,
+    "oversized candidates stay eligible for measured overflow recovery"
+  );
 });
 
 test("keeps a below-limit generated compiler dump out of the fail-closed artifact secret gate", () => {
@@ -173,6 +302,40 @@ test("replays authored scratch JSON across generations even when it acquires com
   assert.equal(fs.readFileSync(path.join(downstream, ".recon/config.json"), "utf8"), compilerDump);
 });
 
+test("preserves authenticated authored JSON when it becomes a compiler artifact, including secrets and deletions", () => {
+  const root = fixture();
+  const downstream = path.join(temporaryRoot("ultrafuzz-generated-shaped-chain-"), "workspace");
+  const filename = ".cov-work/out/Harness.t.sol/Harness.json";
+  const baseline = captureWorkspaceTree(root);
+  write(root, filename, '{"cases":[1,2,3]}\n');
+  const first = captureWorkspacePatch(root, baseline);
+  assert.deepEqual(first.manifest.files, [{ path: filename }]);
+  write(root, filename, JSON.stringify(foundryHarnessArtifact));
+  const second = captureWorkspacePatch(root, first.manifest.result_tree);
+  assert.deepEqual(second.manifest.files, [{ path: filename }]);
+  git(root, ["worktree", "add", "--quiet", "--detach", downstream, "HEAD"]);
+  applyWorkspacePatch(downstream, first, ["src", "contracts"]);
+  applyWorkspacePatch(downstream, second, ["src", "contracts"]);
+  assert.equal(captureWorkspaceTree(downstream, { trees: [second.manifest.result_tree] }), second.manifest.result_tree);
+
+  const configuredSecret = "fixture-configured-credential-value";
+  write(root, filename, compilerArtifact("test/Harness.t.sol", "Harness", configuredSecret));
+  const contaminated = captureWorkspacePatch(root, second.manifest.result_tree);
+  assert.deepEqual(contaminated.manifest.files, [{ path: filename }]);
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(new Map([["workspace.patch", Buffer.from(contaminated.patch)]]), [
+        configuredSecret
+      ]),
+    /artifact publication contains sensitive data/u
+  );
+  fs.unlinkSync(path.join(root, filename));
+  const deleted = captureWorkspacePatch(root, second.manifest.result_tree);
+  assert.deepEqual(deleted.manifest.files, [{ path: filename }]);
+  applyWorkspacePatch(downstream, deleted, ["src", "contracts"]);
+  assert.equal(fs.existsSync(path.join(downstream, filename)), false);
+});
+
 test("replays retained v1 generated entries and preserves their authority across updates and deletions", () => {
   const root = fixture();
   const downstream = path.join(temporaryRoot("ultrafuzz-legacy-downstream-"), "workspace");
@@ -180,6 +343,7 @@ test("replays retained v1 generated entries and preserves their authority across
   git(root, ["worktree", "add", "--quiet", "--detach", downstream, "HEAD"]);
   write(root, ".recon/build.json", "{}\n");
   write(root, "lcov.info", "legacy coverage\n");
+  write(root, ".cov-work/out/Harness.t.sol/Harness.json", JSON.stringify(foundryHarnessArtifact));
   write(root, "test/Harness.t.sol", "contract Harness {}\n");
   const first = captureLegacyWorkspacePatch(root, baseline);
   validateWorkspacePatchCapture(downstream, first, ["src", "contracts"]);
@@ -219,6 +383,10 @@ test("replays retained v1 generated entries and preserves their authority across
   assert.equal(captureWorkspaceTree(downstream, { trees: [third.manifest.result_tree] }), third.manifest.result_tree);
   assert.equal(fs.existsSync(path.join(downstream, ".recon/build.json")), false);
   assert.equal(fs.readFileSync(path.join(downstream, "lcov.info"), "utf8"), "legacy coverage\n");
+  assert.equal(
+    fs.readFileSync(path.join(downstream, ".cov-work/out/Harness.t.sol/Harness.json"), "utf8"),
+    JSON.stringify(foundryHarnessArtifact)
+  );
 });
 
 test("still rejects configured and credential-shaped secrets in included authored files", () => {
@@ -232,7 +400,9 @@ test("still rejects configured and credential-shaped secrets in included authore
       ".recon/config.json",
       "test/Replay.t.sol",
       "test/recon/out/config.json",
-      "test/fixtures/Fixture.sol/cases.json"
+      "test/fixtures/Fixture.sol/cases.json",
+      ".cov-work/out/Fixture.sol/Fixture.json",
+      "test/fixtures/out/Fixture.sol/cases.json"
     ]) {
       const root = fixture();
       const baseline = captureWorkspaceTree(root);
@@ -259,6 +429,12 @@ test("leaves invalid scratch JSON and unsafe generated-looking paths to normal v
   fs.symlinkSync("foundry.toml", path.join(root, "lcov.info"));
   assert.throws(() => captureWorkspacePatch(root, baseline), /symlink/u);
   fs.unlinkSync(path.join(root, "lcov.info"));
+  const artifact = ".cov-work/out/Harness.t.sol/Harness.json";
+  fs.mkdirSync(path.dirname(path.join(root, artifact)), { recursive: true });
+  fs.symlinkSync(path.join(root, "foundry.toml"), path.join(root, artifact));
+  assert.equal(isGeneratedWorkspaceOutput(root, artifact), false);
+  assert.throws(() => captureWorkspacePatch(root, baseline), /symlink/u);
+  fs.unlinkSync(path.join(root, artifact));
   write(root, ".recon/.env.json", compilerDump);
   assert.throws(() => captureWorkspacePatch(root, baseline), /secret|sensitive|\.env/u);
 });

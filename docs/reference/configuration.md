@@ -202,7 +202,9 @@ for a `resume` has no effect. A deletion that fails is reported as a
 
 Workspace patches hand off authored changes, not raw build and coverage output.
 In addition to the existing generated roots, capture excludes untracked compiler
-JSON with matching source/artifact names (`out/<name>.sol/<name>.json`) and
+JSON in `out/<source>.sol/<type>.json` with ABI, bytecode, and Solidity compiler
+metadata whose compilation target matches that source and type (including test,
+script, and multiple-type source files), and
 hash-named JSON directly in `build-info/` or `build-snapshot/` inside compiler,
 corpus, or recognized scratch directories; `solidity-files-cache.json`;
 `lcov.info`, `*.lcov`, and `covered.<number>.html`/`.txt`; and JSON, binary, or
@@ -214,7 +216,8 @@ output are also excluded. Authored test sources and ordinary configuration besid
 those files remain eligible, including JSON config directly in nested `out/`
 directories and test vectors under source-named fixture directories. These rules
 do not omit tracked edits/deletions or paths already authenticated by retained
-handoffs and preparation trees. Unknown files retain the existing measured
+handoffs and preparation trees. Compiler inspection is bounded to 16 MiB per
+file; oversized, malformed, and otherwise unknown files retain the existing measured
 diff-overflow handling. Raw evidence needed downstream belongs
 in declared artifacts, which still undergo the publication secret gate; excluding
 scratch from a workspace patch never exempts a declared artifact from scanning.
