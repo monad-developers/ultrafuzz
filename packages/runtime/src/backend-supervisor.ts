@@ -38,6 +38,9 @@ export interface BackendSupervisorInput {
   signal: AbortSignal;
   reusable: boolean;
   evidence: () => CheckpointDirectory;
+  /** Observed successful exit admits grace; logs may still be draining. */
+  exited: (completedAt: number) => void;
+  /** Logs are sealed and cancellation/log failures have been ruled out. */
   completed: (completedAt: number) => void;
 }
 
@@ -137,6 +140,11 @@ function backendCancellation(input: ExecutionInput, child: ChildProcess) {
   return {
     cancel,
     requested: () => requested,
+    exited: () => {
+      clearTimeout(deadline);
+      // Descendants may keep inherited pipes open after waitpid reports success.
+      killGroup(child, "SIGKILL");
+    },
     close: () => {
       clearTimeout(deadline);
       if (killTimer !== undefined) clearTimeout(killTimer);
@@ -146,6 +154,26 @@ function backendCancellation(input: ExecutionInput, child: ChildProcess) {
       killGroup(child, "SIGKILL");
     }
   };
+}
+
+async function drainBackendStreams(child: ChildProcess, closed: Promise<void>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      closed.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => {
+          // A descendant can escape the process group while retaining the pipes.
+          // Never let that delay completion or cancellation indefinitely.
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          resolve(false);
+        }, 250);
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function executeBackend(input: ExecutionInput): Promise<number> {
@@ -181,19 +209,43 @@ async function launchAndWait(input: ExecutionInput, stdout: (chunk: Buffer) => v
     logError = error instanceof Error ? error : new Error("backend log capture failed", { cause: error });
     cancellation.cancel();
   };
-  child.stdout.on("data", boundedLogWriter(stdout, failed));
-  child.stderr.on("data", boundedLogWriter(stderr, failed));
+  const writeStdout = boundedLogWriter(stdout, failed);
+  const writeStderr = boundedLogWriter(stderr, failed);
+  child.stdout.on("data", writeStdout);
+  child.stderr.on("data", writeStderr);
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => {
+      resolve();
+    });
+  });
   try {
-    const code = await new Promise<number>((resolve, reject) => {
+    const result = await new Promise<{ code: number; completedAt: number }>((resolve, reject) => {
       child.once("error", reject);
-      child.once("close", (exitCode) => {
-        resolve(exitCode ?? 1);
+      child.once("exit", (exitCode) => {
+        resolve({ code: exitCode ?? 1, completedAt: Date.now() });
       });
     });
-    const completedAt = Date.now();
+    cancellation.exited();
+    if (
+      result.code === 0 &&
+      !cancellation.requested() &&
+      logError === undefined &&
+      result.completedAt <= input.executionDeadline
+    ) {
+      // Admit the fixed grace before draining, but do not publish a reusable
+      // checkpoint until the logs are closed and all evidence is captured.
+      input.exited(result.completedAt);
+    }
+    if (!(await drainBackendStreams(child, closed))) {
+      const notice = Buffer.from("\n[backend log drain stopped after 250 ms; inherited pipes remained open]\n");
+      writeStdout(notice);
+      writeStderr(notice);
+    }
     if (logError !== undefined) throw logError;
-    return { code, completedAt, canceled: cancellation.requested() };
+    return { ...result, canceled: cancellation.requested() };
   } finally {
+    child.stdout.destroy();
+    child.stderr.destroy();
     cancellation.close();
   }
 }

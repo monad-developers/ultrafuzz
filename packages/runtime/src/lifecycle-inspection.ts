@@ -609,23 +609,24 @@ export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
     return runtimeFailure<WorkflowNodeValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_NODE_FAILED")]);
   }
   let detail: CurrentNodeDetail;
-  let backendFinalization: BackendFinalizationStatus | undefined;
   try {
     detail = parseCurrentNodeEnvelope(snapshot, input, evidence.smithersRunId);
-    backendFinalization = readBackendFinalizationStatus(
-      backendCheckpointDirectory(evidence.layout.root, detail.node.nodeId)
-    );
   } catch (error) {
     return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID", error)]);
   }
+  const backend = optionalBackendFinalizationStatus(evidence.layout.root, detail.node.nodeId);
   return runtimeResult<WorkflowNodeValue>(
     true,
-    adaptNodeDetail(input, evidence.smithersRunId, detail, backendFinalization)
+    adaptNodeDetail(input, evidence.smithersRunId, detail, backend.status),
+    backend.diagnostics
   );
 }
 
 export async function watchWorkflowNode(
-  input: WorkflowNodeQueryInput & { intervalSeconds?: number; onSnapshot: (value: WorkflowNodeValue) => void }
+  input: WorkflowNodeQueryInput & {
+    intervalSeconds?: number;
+    onSnapshot: (value: WorkflowNodeValue, diagnostics: RuntimeDiagnostic[]) => void;
+  }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
@@ -633,6 +634,7 @@ export async function watchWorkflowNode(
     return runtimeFailure<WorkflowNodeValue>(evidence.diagnostics);
   }
   let last: WorkflowNodeValue | undefined;
+  let diagnostics: RuntimeDiagnostic[] = [];
   let stream: SmithersStreamResult;
   try {
     stream = await streamSmithersCommand({
@@ -651,14 +653,11 @@ export async function watchWorkflowNode(
           input,
           evidence.smithersRunId
         );
-        const value = adaptNodeDetail(
-          input,
-          evidence.smithersRunId,
-          detail,
-          readBackendFinalizationStatus(backendCheckpointDirectory(evidence.layout.root, detail.node.nodeId))
-        );
+        const backend = optionalBackendFinalizationStatus(evidence.layout.root, detail.node.nodeId);
+        const value = adaptNodeDetail(input, evidence.smithersRunId, detail, backend.status);
         last = value;
-        input.onSnapshot(value);
+        diagnostics = backend.diagnostics;
+        input.onSnapshot(value, diagnostics);
       }
     });
   } catch (error) {
@@ -674,7 +673,32 @@ export async function watchWorkflowNode(
   if (last === undefined) {
     return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
   }
-  return runtimeResult<WorkflowNodeValue>(true, last);
+  return runtimeResult<WorkflowNodeValue>(true, last, diagnostics);
+}
+
+function optionalBackendFinalizationStatus(
+  runRoot: string,
+  nodeId: string
+): { status: BackendFinalizationStatus | undefined; diagnostics: RuntimeDiagnostic[] } {
+  const directory = backendCheckpointDirectory(runRoot, nodeId);
+  try {
+    return { status: readBackendFinalizationStatus(directory), diagnostics: [] };
+  } catch {
+    // Optional diagnostics must never mask the authoritative node/attempt data.
+    // Keep the warning bounded and do not echo untrusted checkpoint contents.
+    return {
+      status: undefined,
+      diagnostics: [
+        {
+          code: "BACKEND_FINALIZATION_STATUS_UNAVAILABLE",
+          message: "Backend finalization status is unavailable; workflow node evidence remains available.",
+          severity: "warning",
+          source: "runtime",
+          path: path.join(directory, "status.json")
+        }
+      ]
+    };
+  }
 }
 
 /**

@@ -581,6 +581,34 @@ test("node --watch emits NDJSON envelopes and terminates", async (t) => {
   );
 });
 
+test("node and node --watch keep tool evidence and warn when optional backend status is invalid", async (t) => {
+  const { project, env, runRoot } = await launchedProject(t);
+  const args = ["node", RUN_ID, "node:project-discovery", "--tools"];
+  const baseline = await cli(project, [...args, "--json"], env);
+  assert.equal(baseline.code, 0, baseline.stderr);
+  const baselineData = parseJson(baseline).data;
+  const checkpoint = backendCheckpointDirectory(runRoot, "node:project-discovery");
+  fs.mkdirSync(checkpoint, { recursive: true });
+  for (const contents of ["{", "{}"]) {
+    fs.writeFileSync(path.join(checkpoint, "status.json"), contents);
+    for (const watch of [[], ["--watch"]]) {
+      const json = await cli(project, [...args, ...watch, "--json"], env);
+      assert.equal(json.code, 0, json.stderr);
+      const envelope = parseJson(json);
+      assert.equal(envelope.ok, true);
+      assert.deepEqual(envelope.data, baselineData);
+      const diagnostics = envelope.diagnostics as Array<{ code: string; severity: string }>;
+      assert.equal(diagnostics.length, 1);
+      assert.equal(diagnostics[0]?.code, "BACKEND_FINALIZATION_STATUS_UNAVAILABLE");
+      assert.equal(diagnostics[0]?.severity, "warning");
+      const human = await cli(project, [...args, ...watch], env);
+      assert.equal(human.code, 0, human.stderr);
+      assert.match(human.stdout, /forge build/u);
+      assert.match(human.stdout, /warning: BACKEND_FINALIZATION_STATUS_UNAVAILABLE/u);
+    }
+  }
+});
+
 test("events rejects a raw event category instead of widening the view", async (t) => {
   const { project, env } = await launchedProject(t);
 

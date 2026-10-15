@@ -1,9 +1,10 @@
 import { Args, Command, Flags } from "@oclif/core";
-import { getWorkflowNode, watchWorkflowNode, type WorkflowNodeValue } from "@ultrafuzz/runtime";
+import { getWorkflowNode, watchWorkflowNode, type RuntimeDiagnostic, type WorkflowNodeValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
   commandFromRuntime,
+  diagnosticsText,
   emitCommandResult,
   emitWatchFailure,
   envelope,
@@ -59,8 +60,8 @@ export default class Node extends Command {
     const result = await watchWorkflowNode({
       ...query,
       intervalSeconds: flags.interval,
-      onSnapshot: (value) => {
-        emitWatchSnapshot(value, json);
+      onSnapshot: (value, diagnostics) => {
+        emitWatchSnapshot(value, json, diagnostics);
       }
     });
     if (!result.ok) {
@@ -69,13 +70,13 @@ export default class Node extends Command {
   }
 }
 
-function emitWatchSnapshot(value: WorkflowNodeValue, json: boolean): void {
+function emitWatchSnapshot(value: WorkflowNodeValue, json: boolean, diagnostics: RuntimeDiagnostic[]): void {
   const io = cliIo();
   if (!json) {
-    io.stdout.write(renderNode(value));
+    io.stdout.write(`${renderNode(value)}${diagnosticsText(diagnostics)}`);
     return;
   }
-  const result: CommandResult = { ok: true, command: "node", data: toCliWorkflowNodeData(value), diagnostics: [] };
+  const result: CommandResult = { ok: true, command: "node", data: toCliWorkflowNodeData(value), diagnostics };
   io.stdout.write(`${JSON.stringify(envelope("node", result))}\n`);
 }
 

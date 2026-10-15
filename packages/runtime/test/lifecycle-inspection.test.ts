@@ -42,6 +42,7 @@ import { bindSmithersExecutableCapability } from "../src/smithers-executable-cap
 import { SMITHERS_BIN_PATH, SMITHERS_VERSION } from "../src/smithers-package.js";
 import { acquireWorkflowControlLock } from "../src/workflow-integrity.js";
 import { addOpenRouterProfile } from "./openrouter-profile-fixture.js";
+import { backendCheckpointDirectory } from "../src/backend-finalization.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
 const startRun = (input: Parameters<typeof runtimeStartRun>[0]): ReturnType<typeof runtimeStartRun> =>
@@ -1317,6 +1318,44 @@ test("watchWorkflowNode rejects terminal control bytes instead of repairing JSON
 
   assert.equal(watched.ok, false);
   assert.equal(watched.diagnostics[0]?.code, "WORKFLOW_NODE_INVALID");
+});
+
+test("optional backend status failures preserve node evidence and bounded watch warnings", async () => {
+  const detail = nodeDetailFixture();
+  const { project, env, runRoot } = await launchedProject({ node: detail });
+  const query = { projectRoot: project, runId: "inspect-run", nodeId: "node:project-discovery", tools: true, env };
+  const baseline = await getWorkflowNode(query);
+  assert.equal(baseline.ok, true, JSON.stringify(baseline.diagnostics));
+  assert.deepEqual(baseline.diagnostics, []);
+  const checkpoint = backendCheckpointDirectory(runRoot, query.nodeId);
+  fs.mkdirSync(checkpoint, { recursive: true });
+  const status = path.join(checkpoint, "status.json");
+  for (const contents of ["{", "{}", "x".repeat(64 * 1024 + 1)]) {
+    fs.writeFileSync(status, contents);
+    const result = await getWorkflowNode(query);
+    assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+    assert.deepEqual(result.value, baseline.value);
+    assert.equal(result.diagnostics.length, 1);
+    assert.equal(result.diagnostics[0]?.code, "BACKEND_FINALIZATION_STATUS_UNAVAILABLE");
+    assert.equal(result.diagnostics[0]?.severity, "warning");
+    writeInspectionFixtures(project, { nodeWatchLines: `${JSON.stringify(detail)}\n${JSON.stringify(detail)}\n` });
+    let snapshots = 0;
+    const watched = await watchWorkflowNode({
+      ...query,
+      onSnapshot: (value, diagnostics) => {
+        snapshots += 1;
+        assert.deepEqual(value, baseline.value);
+        assert.deepEqual(diagnostics, result.diagnostics);
+      }
+    });
+    assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
+    assert.equal(snapshots, 2);
+    assert.deepEqual(watched.value, baseline.value);
+    assert.deepEqual(watched.diagnostics, result.diagnostics);
+    writeInspectionFixtures(project, { node: detail });
+  }
+  fs.unlinkSync(status);
+  assert.deepEqual(await getWorkflowNode(query), baseline);
 });
 
 test("cancelRun converges when the engine reports the run is already terminal", async () => {

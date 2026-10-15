@@ -168,6 +168,11 @@ parent workflow's limits remain authoritative. Set the value to zero to retain
 the original single-deadline behavior; historical sealed configs without this
 field also keep that behavior.
 
+Completion is timestamped when the backend leader exits, not when inherited
+stdout/stderr pipes close. The supervisor kills remaining process-group members
+and drains logs for at most 250 ms; grace may begin during that drain, but a
+checkpoint is reusable only after its logs and evidence are sealed.
+
 The runtime supervisor saves bounded raw logs (16 MiB per stream), backend evidence (up to
 512 MiB and 10,000 entries in the complete checkpoint), the preliminary campaign plan,
 and a validated workspace patch under the run's `backend-checkpoints` directory
@@ -191,7 +196,9 @@ the receipt key is intentionally unavailable: automatic reuse fails closed with
 an authentication diagnostic, preserving raw evidence for diagnosis instead of
 trusting writable disk state. `ultrafuzz node` reports the phase,
 both deadlines, checkpoint availability, and last observed agent activity;
-timeout errors include those fields and elapsed time.
+timeout errors include those fields and elapsed time. If that optional status
+file is unreadable or invalid, `node` and `node --watch` warn while still showing
+the independently validated node, attempt, and tool evidence.
 
 `workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
 records `workflow_deadline_at` in run state when the run is created, and again

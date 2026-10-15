@@ -186,20 +186,27 @@ class FinalizationMonitor {
     else this.check();
   }
 
+  backendExited(completedAt: number): void {
+    const { policy, status } = this;
+    if (
+      this.ended ||
+      status.phase !== "execution" ||
+      completedAt < policy.startedAt ||
+      completedAt > policy.executionDeadline
+    )
+      return;
+    status.phase = "finalization";
+    // Preserve already-budgeted finalization time for early completion.
+    status.finalization_deadline_ms = Math.max(policy.executionDeadline, completedAt + policy.graceMs);
+    this.save();
+  }
+
   refreshCompletion(): void {
     const completion = this.completion();
     const { policy, status } = this;
     const before = JSON.stringify(status);
-    if (
-      status.phase === "execution" &&
-      completion?.binding === policy.binding &&
-      completion.token === policy.token &&
-      completion.completedAt >= policy.startedAt &&
-      completion.completedAt <= policy.executionDeadline
-    ) {
-      status.phase = "finalization";
-      // Preserve already-budgeted finalization time for early completion.
-      status.finalization_deadline_ms = Math.max(policy.executionDeadline, completion.completedAt + policy.graceMs);
+    if (status.phase === "execution" && completion?.binding === policy.binding && completion.token === policy.token) {
+      this.backendExited(completion.completedAt);
     }
     if (status.phase === "finalization") {
       status.checkpoint_available = completion?.binding === policy.binding && completion.evidenceReady;
@@ -283,6 +290,9 @@ export async function withBackendFinalization<T, TArgs extends BackendGeneration
     executionDeadline: policy.executionDeadline,
     signal: monitor.controller.signal,
     reusable,
+    exited: (completedAt) => {
+      monitor.backendExited(completedAt);
+    },
     evidence: () => {
       const root = CheckpointDirectory.open(input.directory);
       try {
