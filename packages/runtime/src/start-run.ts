@@ -54,6 +54,7 @@ import {
 import { planRun } from "./plan-run.js";
 import { agentAuthenticationEnvironmentVariableNames } from "./provider-credential-environment.js";
 import { refreshRunPrompts } from "./prompt-refresh.js";
+import { previewResumeReset } from "./reset-preview.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import {
@@ -467,6 +468,19 @@ function openRouterCredentialPreflightDiagnostics(
 }
 
 export async function resumeRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
+  if (
+    (input.dryRun === true || input.resetGeneration !== undefined) &&
+    (input.resetNode === undefined || input.retryFailed === true)
+  ) {
+    return runtimeFailure<WorkflowLifecycleValue>([
+      {
+        code: "WORKFLOW_RESET_PREVIEW_OPTIONS",
+        message: "--dry-run and --reset-generation require --reset-node and cannot be combined with --retry-failed",
+        severity: "error",
+        source: "runtime"
+      }
+    ]);
+  }
   return submitSmithersContinuation(input);
 }
 
@@ -485,7 +499,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       ? recordedLaunchFailure(layout)
       : undefined;
     if (launchFailure !== undefined) return runtimeFailure<WorkflowLifecycleValue>([launchFailure]);
-    releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
+    // Preview must not create the lifecycle lock or prepare controller/prompt files.
+    if (input.dryRun !== true) releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
 
     assertRegularFileInside(layout.root, layout.runMetadataPath, "run metadata");
     const metadata = objectRecord(
@@ -504,6 +519,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         : (historicalWorkflowIds.at(-1) ?? `ultrafuzz-${runId}`),
       "Smithers run ID"
     );
+    const preview = await previewResumeReset(input, layout.root, smithersRunId);
+    if (preview !== undefined) return runtimeResult(true, preview, []);
     let workflowPath: string;
     // Refresh proves ownership before rendering; the resume below reuses that
     // evidence rather than inspecting the same run a second time (#968).
@@ -645,6 +662,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       projectRoot,
       maxConcurrency: input.maxConcurrency ?? config.run.maxParallelAgents,
       resetNode: input.resetNode,
+      resetGeneration: input.resetGeneration,
       force: input.force,
       retryFailed: input.retryFailed,
       tasks,
@@ -703,7 +721,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         run_id: runId,
         workflow_run_id: smithersRunId,
         action: "resume" as const,
-        submitted: !result.alreadyRunning
+        submitted: !result.alreadyRunning,
+        ...(result.resetPlan === undefined ? {} : { reset_plan: result.resetPlan }),
+        ...(result.resetAlreadyApplied === undefined ? {} : { reset_already_applied: result.resetAlreadyApplied })
       },
       diagnostics
     );

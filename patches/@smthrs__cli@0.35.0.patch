@@ -1,5 +1,5 @@
 diff --git a/src/index.js b/src/index.js
-index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..25e8fe9c14792d527400adc40a6893d2039d535d 100644
+index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..21f24d2085fb2394794664f759269be5939bebd4 100644
 --- a/src/index.js
 +++ b/src/index.js
 @@ -21,10 +21,12 @@ import { resolve, dirname, basename, relative, join, isAbsolute } from "node:pat
@@ -314,7 +314,49 @@ index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..25e8fe9c14792d527400adc40a6893d2
                enabled: true,
              });
            } else {
-@@ -12556,6 +12797,18 @@ const cli = Cli.create({
+@@ -12292,7 +12533,9 @@ const cli = Cli.create({
+     options: z.object({
+       runId: z.string().describe("Run ID"),
+       nodeId: z.string().describe("Task/node ID to travel back to"),
+-      iteration: z.number().int().default(0).describe("Loop iteration"),
++      dryRun: z.boolean().default(false).describe("Preview the exact reset without loading the workflow"),
++      expectedGeneration: z.string().optional().describe("Refuse a reset whose preview generation changed"),
++      iteration: z.number().int().optional().describe("Loop iteration (default: 0; preview resolves a failed iteration)"),
+       attempt: z.number().int().optional().describe("Attempt number (default: latest)"),
+       vcs: z.boolean().default(true).describe("Revert filesystem state. Use --no-vcs to skip (DB only)."),
+       deps: z.boolean().default(true).describe("Also reset dependents. Use --no-deps to reset only this node."),
+@@ -12310,6 +12553,14 @@ const cli = Cli.create({
+     async run(c) {
+       const fail = makeFail(c);
+       try {
++        if (c.options.dryRun) {
++          const ultrafuzzPreviewReset = (await import("@smthrs/time-travel/timetravel")).ultrafuzzPreviewReset;
++          const resetPlan = await ultrafuzzPreviewReset(resolve(cliWorkspace.cwd(), "smithers.db"), {
++            runId: c.options.runId, nodeId: c.options.nodeId, iteration: c.options.iteration,
++            attempt: c.options.attempt, resetDependents: c.options.deps,
++          });
++          return c.ok({ resetPlan });
++        }
+         const { adapter, cleanup } = await loadWorkflowDb(c.args.workflow);
+         try {
+           const run = await adapter.getRun(c.options.runId);
+@@ -12336,12 +12587,14 @@ const cli = Cli.create({
+             iteration: c.options.iteration,
+             attempt: c.options.attempt,
+             resetDependents: c.options.deps,
++            expectedGeneration: c.options.expectedGeneration,
+             restoreVcs: c.options.vcs,
+             force: c.options.force,
+             stealOwnership: c.options.stealOwnership,
+             noRevert: !c.options.revert,
+             caller: "cli",
+-            onProgress: (e) => console.log(JSON.stringify(e)),
++            // A generation-checked reset returns one machine-readable receipt.
++            onProgress: c.options.expectedGeneration === undefined ? (e) => console.log(JSON.stringify(e)) : undefined,
+           });
+           process.stderr.write(renderEffectBoundaryReport(result.effectBoundary));
+           if (!result.success || !c.options.resume) {
+@@ -12556,6 +12809,18 @@ const cli = Cli.create({
            const inputOverrides = parsedOverrides.value;
            const resetNodes = parseResetNodeList(c.options.node);
            const resolvedReplayWorkflowPath = resolve(c.args.workflow);
@@ -333,7 +375,7 @@ index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..25e8fe9c14792d527400adc40a6893d2
            const result = await replayFromCheckpoint(adapter, {
              parentRunId: c.options.runId,
              frameNo: c.options.frame,
-@@ -12566,8 +12819,11 @@ const cli = Cli.create({
+@@ -12566,8 +12831,11 @@ const cli = Cli.create({
              // Re-bless durable metadata to the workflow being replayed so a
              // replay that carries an edited workflow resumes (mirrors `fork`);
              // otherwise the resume guard rejects it with RESUME_METADATA_MISMATCH.
@@ -347,7 +389,7 @@ index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..25e8fe9c14792d527400adc40a6893d2
              entryWorkflowHash: await readWorkflowEntryHash(resolvedReplayWorkflowPath),
              force: c.options.force,
            });
-@@ -12846,14 +13102,29 @@ const cli = Cli.create({
+@@ -12846,14 +13114,29 @@ const cli = Cli.create({
            const inputOverrides = parsedOverrides.value;
            const resetNodes = parseResetNodeList(c.options.resetNode);
            const resolvedForkWorkflowPath = resolve(c.args.workflow);
@@ -379,7 +421,7 @@ index 790804029d59e2c9c1dd8077a0b8b1ed670f913d..25e8fe9c14792d527400adc40a6893d2
              entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),
              force: c.options.force,
              autoRun: c.options.run,
-@@ -14166,16 +14437,16 @@ async function relaunchForConflictedWorkspaceManifest() {
+@@ -14166,16 +14449,16 @@ async function relaunchForConflictedWorkspaceManifest() {
    // preserving pid/signal semantics for a long-running gateway, this avoids
    // letting the original Bun process perform another lazy resolution from
    // the conflicted cwd while it waits for a child.

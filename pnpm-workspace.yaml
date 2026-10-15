@@ -46,6 +46,7 @@ allowBuilds:
 # The Smithers entries are generated from SMITHERS_COMPATIBILITY_PATCHES by
 # scripts/smithers-patches.mjs; CI fails when they drift from the registry.
 patchedDependencies:
+  "@smthrs/time-travel@0.35.0": patches/@smthrs__time-travel@0.35.0.patch
   "@smthrs/agents@0.35.0": patches/@smthrs__agents@0.35.0.patch
   "@smthrs/cli@0.35.0": patches/@smthrs__cli@0.35.0.patch
   "@smthrs/db@0.35.0": patches/@smthrs__db@0.35.0.patch

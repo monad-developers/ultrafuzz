@@ -353,7 +353,8 @@ ultrafuzz node <run-id> <node-id> \
   [--project <path>] \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
-  [--reset-node <workflow-node-id>] [--retry-failed] [--refresh-controller] [--json]
+  [--reset-node <workflow-node-id>] [--dry-run] [--reset-generation <generation>] \
+  [--retry-failed] [--refresh-controller] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -642,6 +643,28 @@ workflow node and its dependents in the same linked run; the applied reset is
 recorded so retrying the command after a failed continuation resumes the
 already-reset run instead of repeating the reset. `fork` may start from a
 checkpoint frame and may reset one workflow node before starting the fork.
+
+Use `resume <run-id> --reset-node <node-id> --dry-run` to see the exact reset
+closure and its generation before changing the run. Preview reads one persisted
+database snapshot, including dynamically expanded nodes, without loading the
+workflow, refreshing prompts, acquiring a lifecycle lock, archiving evidence,
+or starting a controller. It also works with `--refresh-controller`; that flag
+does not render a controller during preview. JSON includes a versioned
+`reset_plan` containing only node identities, iteration/attempt numbers, the
+closure size, and an opaque generation hash.
+
+The pinned runner's reset policy includes nodes attempted at or after the
+selected attempt, and later iterations. This can include independent work;
+preview lists the actual reset set, not only dependencies in the topology.
+Normal execution recomputes and reports its plan. To require the previewed
+generation, pass `--reset-generation <generation>` when executing the same
+reset. The runner checks it again inside the reset transaction and refuses a
+changed generation. `--dry-run` and `--reset-generation` require `--reset-node`
+and cannot be combined with `--retry-failed`.
+
+If launching the controller fails after a reset, the saved receipt retains the
+plan. Retrying the same reset reports `reset_already_applied: true` and that
+original plan; preview also reports the receipt without repeating the reset.
 
 Every command in this section takes an Ultrafuzz run ID and resolves the linked
 workflow run from existing product evidence; none of them require the

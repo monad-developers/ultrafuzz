@@ -197,6 +197,11 @@ function fakeSmithersEnv(
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
+      "  timetravel)",
+      `    ${shellQuote(process.execPath)} -e ${shellQuote(
+        'const args = process.argv.slice(1); const option = (key) => args[args.indexOf(key) + 1]; const runId = option("--run-id"); const nodeId = option("--node-id"); const iteration = args.includes("--iteration") ? Number(option("--iteration")) : 0; const resetPlan = { schema_version: "ultrafuzz.reset-plan.v1", workflow_run_id: runId, generation: "sha256:" + "a".repeat(64), requested_node_id: nodeId, iteration, attempt: 1, reset_dependents: true, policy: "attempt-order", node_count: 1, nodes: [{ workflow_run_id: runId, node_id: nodeId, iteration }] }; console.log(JSON.stringify({ ok: true, data: { success: true, resetPlan }, meta: { command: "timetravel", duration: "1ms" } }));'
+      )} "$@"`,
+      "    ;;",
       "  ps)",
       `    if [ -f ${shellQuote(psOverridePath)} ]; then`,
       `      cat ${shellQuote(psOverridePath)}`,
@@ -1751,6 +1756,27 @@ async function assertReportAndLifecycleCommands(
     );
   }
 
+  const previewArgs = ["resume", runData.run_id, "--reset-node", "node:project-discovery", "--dry-run"];
+  const preview = await cli(project, [...previewArgs, "--refresh-controller", "--json"], env);
+  assert.equal(preview.code, 0, preview.stderr + preview.stdout);
+  const previewData = parseJson(preview).data as {
+    submitted: boolean;
+    dry_run: boolean;
+    reset_plan: { generation: string; node_count: number; nodes: Array<{ node_id: string }> };
+  };
+  assert.equal(previewData.submitted, false);
+  assert.equal(previewData.dry_run, true);
+  assert.equal(previewData.reset_plan.node_count, 1);
+  assert.deepEqual(
+    previewData.reset_plan.nodes.map((node) => node.node_id),
+    ["node:project-discovery"]
+  );
+  const humanPreview = await cli(project, previewArgs, env);
+  assert.equal(humanPreview.code, 0, humanPreview.stderr);
+  assert.match(humanPreview.stdout, /Reset preview: 1 nodes; generation sha256:/u);
+  assert.match(humanPreview.stdout, / {2}node:project-discovery \(iteration 0\)/u);
+  assert.match(humanPreview.stdout, /Dry run: no reset or controller launch performed/u);
+
   const retried = await cli(
     project,
     ["resume", runData.run_id, "--reset-node", "node:project-discovery", "--max-concurrency", "8", "--json"],
@@ -1759,9 +1785,10 @@ async function assertReportAndLifecycleCommands(
   assert.equal(retried.code, 0, `resume reset: ${retried.stderr}${retried.stdout}`);
   const retriedBody = parseJson(retried);
   assertNoSmithersSurface(retriedBody);
-  const retriedData = retriedBody.data as { submitted: boolean; workflow_run_id: string };
+  const retriedData = retriedBody.data as { submitted: boolean; workflow_run_id: string; reset_plan: unknown };
   assert.equal(retriedData.submitted, true);
   assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run-replayed");
+  assert.deepEqual(retriedData.reset_plan, previewData.reset_plan);
 
   const controllerRefreshed = await cli(
     project,
@@ -1816,6 +1843,41 @@ async function assertReportAndLifecycleCommands(
   assert.equal(pauseData.status, "pause-requested");
   assert.equal(pauseData.submitted, true);
 }
+
+test("resume --dry-run previews a reset without a controller or persisted execution config", async (t) => {
+  const project = tempProject(t);
+  const env = fakeSmithersEnv(project);
+  const runRoot = path.join(project, ".ultrafuzz", "runs", "preview");
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(runRoot, "run.json"),
+    JSON.stringify({ run_id: "preview", workflow: { run_id: "preview-workflow" } })
+  );
+  const args = ["resume", "preview", "--reset-node", "node:producer", "--dry-run", "--refresh-controller"];
+  const result = await cli(project, [...args, "--json"], env);
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  const value = parseJson(result);
+  assertNoSmithersSurface(value);
+  const data = value.data as { submitted: boolean; dry_run: boolean; reset_plan: { node_count: number } };
+  assert.equal(data.submitted, false);
+  assert.equal(data.dry_run, true);
+  assert.equal(data.reset_plan.node_count, 1);
+  assert.deepEqual(fs.readdirSync(runRoot), ["run.json"]);
+  const log = fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8");
+  assert.equal(log.trim().split("\n").length, 1);
+  assert.match(log, /^timetravel reset-preview .* --dry-run /u);
+  const human = await cli(project, args, env);
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /Reset preview: 1 nodes; generation sha256:/u);
+  assert.match(human.stdout, /node:producer \(iteration 0\)/u);
+  for (const invalid of [
+    ["resume", "preview", "--dry-run"],
+    [...args, "--retry-failed"]
+  ]) {
+    assert.notEqual((await cli(project, invalid, env)).code, 0);
+  }
+  assert.equal(fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8").trim().split("\n").length, 2);
+});
 
 test("status --watch --json keeps a failing poll on one NDJSON line", async (t) => {
   const project = tempProject(t);

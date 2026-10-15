@@ -14,10 +14,11 @@ overrides:
 
 patchedDependencies:
   '@smthrs/agents@0.35.0': 6c7e092e67112f48e5901c085270115738882b26d5257d8c6e1c6666e05509f4
-  '@smthrs/cli@0.35.0': 253f1b37f6ebc4e01de94af483530b1511295c2af3c017d2f8cd9a72105c65e5
+  '@smthrs/cli@0.35.0': a356f2e48bb57af73a975b6d78fd97691224b1e8422fe598c926f5bcb08f46f1
   '@smthrs/db@0.35.0': 3d6ab391da1469d46217fad8d8eeebd47900f3c7f439214d51cb72313c7182a2
   '@smthrs/engine@0.35.0': 45c811e44c8b0aa6a979ebf9dc90e16efb845e8e4fe52ce9933e9229927955d3
   '@smthrs/scheduler@0.35.0': 41661e581dddd4dcfd3da5982c0756e0e381b6de61a2502fef634d75ba41f293
+  '@smthrs/time-travel@0.35.0': 12738e9080e479e9daa123bf485b77990910c69a03cedab8cbd8551565aa3ac7
   npm@11.19.0: cb8c755821fe95a7872b93902d79f4626a7591f7c83cd1b74647c2d658c5bcba
   smthrs@0.35.0: 15a6e1dbcb4965e517f85607dc8a86b29a75effab6ea9cb541e73654f4eee1b5
 
@@ -7631,7 +7632,7 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  ? '@smthrs/cli@0.35.0(patch_hash=253f1b37f6ebc4e01de94af483530b1511295c2af3c017d2f8cd9a72105c65e5)(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(pg@8.22.0)(postgres@3.4.9)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.3)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)'
+  ? '@smthrs/cli@0.35.0(patch_hash=a356f2e48bb57af73a975b6d78fd97691224b1e8422fe598c926f5bcb08f46f1)(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(pg@8.22.0)(postgres@3.4.9)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.3)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)'
   : dependencies:
       '@clack/core': 1.4.3
       '@clack/prompts': 1.7.0
@@ -7657,7 +7658,7 @@ snapshots:
       '@smthrs/scheduler': 0.35.0(patch_hash=41661e581dddd4dcfd3da5982c0756e0e381b6de61a2502fef634d75ba41f293)(@electric-sql/pglite@0.5.4)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/scorers': 0.35.0(@electric-sql/pglite@0.5.4)(@modelcontextprotocol/sdk@1.31.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/server': 0.35.0(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@modelcontextprotocol/sdk@1.31.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
-      '@smthrs/time-travel': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
+      '@smthrs/time-travel': 0.35.0(patch_hash=12738e9080e479e9daa123bf485b77990910c69a03cedab8cbd8551565aa3ac7)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/usage': 0.35.0
       '@smthrs/vcs': 0.35.0(@opentelemetry/semantic-conventions@1.43.0)
       '@toon-format/toon': 2.3.1
@@ -8025,7 +8026,7 @@ snapshots:
       '@smthrs/sandbox': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/scheduler': 0.35.0(patch_hash=41661e581dddd4dcfd3da5982c0756e0e381b6de61a2502fef634d75ba41f293)(@electric-sql/pglite@0.5.4)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/scorers': 0.35.0(@electric-sql/pglite@0.5.4)(@modelcontextprotocol/sdk@1.31.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
-      '@smthrs/time-travel': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
+      '@smthrs/time-travel': 0.35.0(patch_hash=12738e9080e479e9daa123bf485b77990910c69a03cedab8cbd8551565aa3ac7)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/tool-context': 0.35.0
       '@smthrs/vcs': 0.35.0(@opentelemetry/semantic-conventions@1.43.0)
       ai: 7.0.37(zod@4.4.3)
@@ -8683,7 +8684,7 @@ snapshots:
       '@smthrs/observability': 0.35.0(@opentelemetry/semantic-conventions@1.43.0)
       '@smthrs/protocol': 0.35.0
       '@smthrs/scheduler': 0.35.0(patch_hash=41661e581dddd4dcfd3da5982c0756e0e381b6de61a2502fef634d75ba41f293)(@electric-sql/pglite@0.5.4)(pg@8.22.0)(postgres@3.4.9)
-      '@smthrs/time-travel': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
+      '@smthrs/time-travel': 0.35.0(patch_hash=12738e9080e479e9daa123bf485b77990910c69a03cedab8cbd8551565aa3ac7)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/ui-styleguide': 0.35.0
       '@smthrs/usage': 0.35.0
       cron-parser: 5.6.2
@@ -8809,7 +8810,7 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smthrs/time-travel@0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)':
+  '@smthrs/time-travel@0.35.0(patch_hash=12738e9080e479e9daa123bf485b77990910c69a03cedab8cbd8551565aa3ac7)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)':
     dependencies:
       '@effect/platform-bun': 4.0.0-beta.105(effect@4.0.0-beta.105)
       '@effect/platform-node-shared': 4.0.0-beta.105(effect@4.0.0-beta.105)
@@ -11666,7 +11667,7 @@ snapshots:
       '@mdx-js/esbuild': 3.1.1(esbuild@0.28.1)
       '@smthrs/agents': 0.35.0(patch_hash=6c7e092e67112f48e5901c085270115738882b26d5257d8c6e1c6666e05509f4)(@electric-sql/pglite@0.5.4)(@modelcontextprotocol/sdk@1.31.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/aws': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
-      '@smthrs/cli': 0.35.0(patch_hash=253f1b37f6ebc4e01de94af483530b1511295c2af3c017d2f8cd9a72105c65e5)(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(pg@8.22.0)(postgres@3.4.9)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.3)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)
+      '@smthrs/cli': 0.35.0(patch_hash=a356f2e48bb57af73a975b6d78fd97691224b1e8422fe598c926f5bcb08f46f1)(@cfworker/json-schema@4.1.1)(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(pg@8.22.0)(postgres@3.4.9)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.3)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(redux@5.0.1)(typescript@6.0.3)
       '@smthrs/cloudflare': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/components': 0.35.0(@electric-sql/pglite@0.5.4)(@modelcontextprotocol/sdk@1.31.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/control-plane': 0.35.0
@@ -11691,7 +11692,7 @@ snapshots:
       '@smthrs/server': 0.35.0(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_textsearch@0.0.5(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.4))(@electric-sql/pglite@0.5.4)(@modelcontextprotocol/sdk@1.31.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/telegram': 0.35.0
       '@smthrs/testing': 0.35.0(184c351c21e9f2157edeacc843c3a528)
-      '@smthrs/time-travel': 0.35.0(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
+      '@smthrs/time-travel': 0.35.0(patch_hash=12738e9080e479e9daa123bf485b77990910c69a03cedab8cbd8551565aa3ac7)(@electric-sql/pglite@0.5.4)(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)(postgres@3.4.9)
       '@smthrs/tool-context': 0.35.0
       '@smthrs/ui': 0.35.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.3)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
       '@smthrs/vcs': 0.35.0(@opentelemetry/semantic-conventions@1.43.0)
