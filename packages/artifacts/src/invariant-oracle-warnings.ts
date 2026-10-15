@@ -242,10 +242,10 @@ function splitTopLevel(args: string, rawArgs: string): string[] {
   return parts;
 }
 
-/** Keep literal identity and hide its punctuation before comparing normalized code. */
+/** Keep literal contents and hide punctuation; either Solidity quote style has the same value. */
 function expressionIdentity(expression: string): string {
   return expression
-    .replace(STRING_OR_COMMENT, (literal) => `"${Buffer.from(literal).toString("hex")}"`)
+    .replace(STRING_OR_COMMENT, (literal) => `"${Buffer.from(literal.slice(1, -1)).toString("hex")}"`)
     .replace(/\s+/gu, "");
 }
 

@@ -79,6 +79,27 @@ test("constant comparisons preserve string literals and ignore punctuation insid
   );
 });
 
+test("constant comparisons treat matching literal contents as equal across quote styles", () => {
+  const source = `contract Properties {
+    function property_strings() public {
+        assertEq("a", 'a');
+        assert(keccak256("a") == keccak256('a'));
+        assertEq("a,b", 'a,b');
+        assertEq("a", 'b');
+        assert(keccak256("a") == keccak256('b'));
+        assertEq("a,b", 'a)c');
+    }
+}`;
+  assert.deepEqual(
+    warningsFor({ "invariant-suite/test/Properties.sol": source }).map(({ code, line }) => ({ code, line })),
+    [
+      { code: "INVARIANT_ORACLE_CONSTANT_TRUE", line: "line 3" },
+      { code: "INVARIANT_ORACLE_CONSTANT_TRUE", line: "line 4" },
+      { code: "INVARIANT_ORACLE_CONSTANT_TRUE", line: "line 5" }
+    ]
+  );
+});
+
 test("production implementation imports support either Solidity quote style", () => {
   for (const quote of ['"', "'"]) {
     const source = `import {MathLib as ML} from ${quote}contracts/MathLib.sol${quote};
