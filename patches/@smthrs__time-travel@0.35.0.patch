@@ -1,8 +1,8 @@
 diff --git a/src/timetravel.js b/src/timetravel.js
-index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb364dd2512d 100644
+index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d2344943b2a8e8d 100644
 --- a/src/timetravel.js
 +++ b/src/timetravel.js
-@@ -235,6 +235,100 @@ async function resolveExistingChildResetPlans(adapter, childRun, seen, resetWhol
+@@ -235,6 +235,150 @@ async function resolveExistingChildResetPlans(adapter, childRun, seen, resetWhol
   * @param {TimeTravelOptions} opts
   * @returns {Promise<TimeTravelResult>}
   */
@@ -28,8 +28,12 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
 +  const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 +  const generations = [];
 +  const addGeneration = (id, workflow, allNodes, attempts) => {
-+    generations.push([id, workflow?.workflowHash ?? null,
-+      allNodes.map((node) => [node.nodeId, node.iteration ?? 0, node.state, node.lastAttempt ?? null, node.updatedAtMs])
++    const config = parseRunConfig(workflow);
++    generations.push([id, workflow?.workflowHash ?? null, workflow?.status ?? null,
++      workflow?.parentRunId ?? null, workflow?.createdAtMs ?? null,
++      config?.subflowWorkspaceParentRunId ?? null, config?.continuation?.parentRunId ?? null,
++      allNodes.map((node) => [node.nodeId, node.iteration ?? 0, node.state, node.lastAttempt ?? null, node.updatedAtMs,
++        node.outputTable ?? null])
 +        .sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right))),
 +      attempts.map((attempt) => [attempt.nodeId, attempt.iteration ?? 0, attempt.attempt, attempt.state,
 +        attempt.startedAtMs, attempt.finishedAtMs ?? null]),
@@ -41,8 +45,6 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
 +      await adapter.listAttemptsForRun(child.runId));
 +  }
 +  generations.sort((left, right) => compare(left[0], right[0]));
-+  const { createHash } = await import("node:crypto");
-+  const generation = "sha256:" + createHash("sha256").update(JSON.stringify(generations)).digest("hex");
 +  const publicNodes = [{ runId, nodes: resetNodes }, ...childResetPlans]
 +    .flatMap((group) => group.nodes.map((node) => ({
 +      workflow_run_id: group.runId, node_id: node.nodeId, iteration: node.iteration ?? 0,
@@ -52,7 +54,6 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
 +  const plan = {
 +    schema_version: "ultrafuzz.reset-plan.v1",
 +    workflow_run_id: runId,
-+    generation,
 +    requested_node_id: opts.nodeId,
 +    iteration,
 +    attempt: targetAttempt.attempt,
@@ -61,12 +62,66 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
 +    node_count: publicNodes.length,
 +    nodes: publicNodes,
 +  };
-+  return { plan, targetAttempt, targetNode, attemptsForRun, resetNodes, childResetPlans };
++  // The exact selection is part of the token, not just the rows in its runs.
++  // This also binds newly eligible children and continuation successors.
++  const { createHash } = await import("node:crypto");
++  const generation = "sha256:" + createHash("sha256").update(JSON.stringify([plan, generations])).digest("hex");
++  return { plan: { ...plan, generation }, targetAttempt, targetNode, attemptsForRun, resetNodes, childResetPlans };
++}
++
++async function ultrafuzzCopyPreviewSnapshot(databasePath) {
++  const fs = (await import("node:fs")).default;
++  const { tmpdir } = await import("node:os");
++  const { join } = await import("node:path");
++  const files = [databasePath, databasePath + "-wal", databasePath + "-journal"];
++  const versions = () => files.map((file, index) => {
++    try {
++      const stat = fs.lstatSync(file, { bigint: true });
++      if (!stat.isFile()) throw new Error("Reset preview requires regular database files");
++      return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
++    } catch (error) {
++      if (index !== 0 && error?.code === "ENOENT") return null;
++      throw error;
++    }
++  });
++  const directory = fs.mkdtempSync(join(tmpdir(), "ultrafuzz-reset-preview-"));
++  const snapshotPath = join(directory, "smithers.db");
++  const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
++  try {
++    // Never open the source with SQLite: even readonly connections can create
++    // or update WAL/SHM sidecars. Copy only a stable DB + WAL/journal version;
++    // the private copy recovers committed WAL data without touching source SHM.
++    for (let attempt = 0; attempt < 3; attempt += 1) {
++      const before = versions();
++      for (let index = 0; index < files.length; index += 1) {
++        const destination = snapshotPath + ["", "-wal", "-journal"][index];
++        if (before[index] === null) fs.rmSync(destination, { force: true });
++        else fs.copyFileSync(files[index], destination);
++      }
++      if (JSON.stringify(before) === JSON.stringify(versions())) return { snapshotPath, cleanup };
++    }
++    throw new Error("Reset preview database changed while taking a snapshot; retry the preview");
++  } catch (error) {
++    cleanup();
++    throw error;
++  }
 +}
 +
 +export async function ultrafuzzPreviewReset(databasePath, opts) {
 +  const { Database } = await import("bun:sqlite");
-+  const db = new Database(databasePath, { readonly: true, strict: true });
++  const snapshot = await ultrafuzzCopyPreviewSnapshot(databasePath);
++  let db;
++  try {
++    // Recovery/checkpoint writes are confined to the private temporary copy.
++    db = new Database(snapshot.snapshotPath, { strict: true });
++    return await ultrafuzzReadPreviewSnapshot(db, opts);
++  } finally {
++    db?.close();
++    snapshot.cleanup();
++  }
++}
++
++async function ultrafuzzReadPreviewSnapshot(db, opts) {
 +  const rows = (sql, args) => db.query(sql).all(...args).map((row) => Object.fromEntries(
 +    Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]),
 +  ));
@@ -76,26 +131,21 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
 +    listAttemptsForRun: async (id) => rows("SELECT * FROM _smithers_attempts WHERE run_id = ? ORDER BY started_at_ms ASC, node_id ASC, iteration ASC, attempt ASC", [id]),
 +    listRuns: async (_limit, _status, _workflow, options) => rows("SELECT * FROM _smithers_runs WHERE parent_run_id = ?", [options.parentRunId]),
 +  };
-+  try {
-+    // One SQLite snapshot for every read, including dynamically added nodes and child runs.
-+    db.exec("BEGIN");
-+    let iteration = opts.iteration;
-+    if (iteration === undefined) {
-+      const failed = (await adapter.listNodes(opts.runId)).filter((node) =>
-+        node.nodeId === opts.nodeId && (node.state === "failed" || node.state === "stalled"));
-+      if (failed.length > 1) throw new Error("Reset preview has multiple failed iterations; an explicit iteration is required");
-+      iteration = failed[0]?.iteration ?? 0;
-+    }
-+    return (await ultrafuzzResolveResetPlan(adapter, { ...opts, iteration })).plan;
-+  } finally {
-+    db.close();
++  // One SQLite snapshot for every read, including dynamically added nodes and child runs.
++  db.exec("BEGIN");
++  let iteration = opts.iteration;
++  if (iteration === undefined) {
++    const failed = (await adapter.listNodes(opts.runId)).filter((node) =>
++      node.nodeId === opts.nodeId && (node.state === "failed" || node.state === "stalled"));
++    if (failed.length > 1) throw new Error("Reset preview has multiple failed iterations; an explicit iteration is required");
++    iteration = failed[0]?.iteration ?? 0;
 +  }
++  return (await ultrafuzzResolveResetPlan(adapter, { ...opts, iteration })).plan;
 +}
 +
 +async function ultrafuzzAssertResetGeneration(adapter, opts, generation) {
-+  if (opts.expectedGeneration === undefined) return;
 +  const current = await ultrafuzzResolveResetPlan(adapter, opts);
-+  if (generation !== opts.expectedGeneration || current.plan.generation !== generation) {
++  if ((opts.expectedGeneration !== undefined && generation !== opts.expectedGeneration) || current.plan.generation !== generation) {
 +    throw new Error("Reset plan generation changed; preview the reset again before resuming");
 +  }
 +}
@@ -103,7 +153,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
  export async function timeTravel(adapter, opts) {
    const cleanReport = { blocking: [], revertible: [], warnings: [] };
    const runId = opts.runId;
-@@ -242,37 +336,11 @@ export async function timeTravel(adapter, opts) {
+@@ -242,37 +386,11 @@ export async function timeTravel(adapter, opts) {
    const iteration = opts.iteration ?? 0;
    const resetDependents = opts.resetDependents ?? true;
    const restoreVcs = opts.restoreVcs ?? true;
@@ -144,7 +194,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
    const startedAtMs = nowMs();
    const lock = await acquireRewindLock(adapter, runId);
    if (!lock) {
-@@ -372,7 +440,7 @@ export async function timeTravel(adapter, opts) {
+@@ -372,7 +490,7 @@ export async function timeTravel(adapter, opts) {
          ),
        );
      }
@@ -153,7 +203,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
      for (const plan of childResetPlans) {
        plan.attemptsByNode = new Map();
        for (const childNode of plan.nodes) {
-@@ -425,6 +493,8 @@ export async function timeTravel(adapter, opts) {
+@@ -425,6 +543,8 @@ export async function timeTravel(adapter, opts) {
            if (!stillHeld) {
              throw new Error(`Time-travel lease ownership was lost for ${runId} during database mutation.`);
            }
@@ -162,7 +212,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..e015b22f0790d724d988968f15bbbb36
            const frames = yield* adapter.listFrames(runId, 1_000_000);
            const cutoff = targetAttempt.startedAtMs;
            let lastValidFrameNo = -1;
-@@ -579,6 +649,7 @@ export async function timeTravel(adapter, opts) {
+@@ -579,6 +699,7 @@ export async function timeTravel(adapter, opts) {
        jjPointer,
        vcsRestored,
        resetNodes: resetNodeIds,

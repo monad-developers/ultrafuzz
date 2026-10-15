@@ -24,8 +24,12 @@ export async function ultrafuzzResolveResetPlan(adapter, opts) {
   const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
   const generations = [];
   const addGeneration = (id, workflow, allNodes, attempts) => {
-    generations.push([id, workflow?.workflowHash ?? null,
-      allNodes.map((node) => [node.nodeId, node.iteration ?? 0, node.state, node.lastAttempt ?? null, node.updatedAtMs])
+    const config = parseRunConfig(workflow);
+    generations.push([id, workflow?.workflowHash ?? null, workflow?.status ?? null,
+      workflow?.parentRunId ?? null, workflow?.createdAtMs ?? null,
+      config?.subflowWorkspaceParentRunId ?? null, config?.continuation?.parentRunId ?? null,
+      allNodes.map((node) => [node.nodeId, node.iteration ?? 0, node.state, node.lastAttempt ?? null, node.updatedAtMs,
+        node.outputTable ?? null])
         .sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right))),
       attempts.map((attempt) => [attempt.nodeId, attempt.iteration ?? 0, attempt.attempt, attempt.state,
         attempt.startedAtMs, attempt.finishedAtMs ?? null]),
@@ -37,8 +41,6 @@ export async function ultrafuzzResolveResetPlan(adapter, opts) {
       await adapter.listAttemptsForRun(child.runId));
   }
   generations.sort((left, right) => compare(left[0], right[0]));
-  const { createHash } = await import("node:crypto");
-  const generation = "sha256:" + createHash("sha256").update(JSON.stringify(generations)).digest("hex");
   const publicNodes = [{ runId, nodes: resetNodes }, ...childResetPlans]
     .flatMap((group) => group.nodes.map((node) => ({
       workflow_run_id: group.runId, node_id: node.nodeId, iteration: node.iteration ?? 0,
@@ -48,7 +50,6 @@ export async function ultrafuzzResolveResetPlan(adapter, opts) {
   const plan = {
     schema_version: "ultrafuzz.reset-plan.v1",
     workflow_run_id: runId,
-    generation,
     requested_node_id: opts.nodeId,
     iteration,
     attempt: targetAttempt.attempt,
@@ -57,12 +58,66 @@ export async function ultrafuzzResolveResetPlan(adapter, opts) {
     node_count: publicNodes.length,
     nodes: publicNodes,
   };
-  return { plan, targetAttempt, targetNode, attemptsForRun, resetNodes, childResetPlans };
+  // The exact selection is part of the token, not just the rows in its runs.
+  // This also binds newly eligible children and continuation successors.
+  const { createHash } = await import("node:crypto");
+  const generation = "sha256:" + createHash("sha256").update(JSON.stringify([plan, generations])).digest("hex");
+  return { plan: { ...plan, generation }, targetAttempt, targetNode, attemptsForRun, resetNodes, childResetPlans };
+}
+
+async function ultrafuzzCopyPreviewSnapshot(databasePath) {
+  const fs = (await import("node:fs")).default;
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const files = [databasePath, databasePath + "-wal", databasePath + "-journal"];
+  const versions = () => files.map((file, index) => {
+    try {
+      const stat = fs.lstatSync(file, { bigint: true });
+      if (!stat.isFile()) throw new Error("Reset preview requires regular database files");
+      return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+    } catch (error) {
+      if (index !== 0 && error?.code === "ENOENT") return null;
+      throw error;
+    }
+  });
+  const directory = fs.mkdtempSync(join(tmpdir(), "ultrafuzz-reset-preview-"));
+  const snapshotPath = join(directory, "smithers.db");
+  const cleanup = () => fs.rmSync(directory, { recursive: true, force: true });
+  try {
+    // Never open the source with SQLite: even readonly connections can create
+    // or update WAL/SHM sidecars. Copy only a stable DB + WAL/journal version;
+    // the private copy recovers committed WAL data without touching source SHM.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const before = versions();
+      for (let index = 0; index < files.length; index += 1) {
+        const destination = snapshotPath + ["", "-wal", "-journal"][index];
+        if (before[index] === null) fs.rmSync(destination, { force: true });
+        else fs.copyFileSync(files[index], destination);
+      }
+      if (JSON.stringify(before) === JSON.stringify(versions())) return { snapshotPath, cleanup };
+    }
+    throw new Error("Reset preview database changed while taking a snapshot; retry the preview");
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 }
 
 export async function ultrafuzzPreviewReset(databasePath, opts) {
   const { Database } = await import("bun:sqlite");
-  const db = new Database(databasePath, { readonly: true, strict: true });
+  const snapshot = await ultrafuzzCopyPreviewSnapshot(databasePath);
+  let db;
+  try {
+    // Recovery/checkpoint writes are confined to the private temporary copy.
+    db = new Database(snapshot.snapshotPath, { strict: true });
+    return await ultrafuzzReadPreviewSnapshot(db, opts);
+  } finally {
+    db?.close();
+    snapshot.cleanup();
+  }
+}
+
+async function ultrafuzzReadPreviewSnapshot(db, opts) {
   const rows = (sql, args) => db.query(sql).all(...args).map((row) => Object.fromEntries(
     Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]),
   ));
@@ -72,26 +127,21 @@ export async function ultrafuzzPreviewReset(databasePath, opts) {
     listAttemptsForRun: async (id) => rows("SELECT * FROM _smithers_attempts WHERE run_id = ? ORDER BY started_at_ms ASC, node_id ASC, iteration ASC, attempt ASC", [id]),
     listRuns: async (_limit, _status, _workflow, options) => rows("SELECT * FROM _smithers_runs WHERE parent_run_id = ?", [options.parentRunId]),
   };
-  try {
-    // One SQLite snapshot for every read, including dynamically added nodes and child runs.
-    db.exec("BEGIN");
-    let iteration = opts.iteration;
-    if (iteration === undefined) {
-      const failed = (await adapter.listNodes(opts.runId)).filter((node) =>
-        node.nodeId === opts.nodeId && (node.state === "failed" || node.state === "stalled"));
-      if (failed.length > 1) throw new Error("Reset preview has multiple failed iterations; an explicit iteration is required");
-      iteration = failed[0]?.iteration ?? 0;
-    }
-    return (await ultrafuzzResolveResetPlan(adapter, { ...opts, iteration })).plan;
-  } finally {
-    db.close();
+  // One SQLite snapshot for every read, including dynamically added nodes and child runs.
+  db.exec("BEGIN");
+  let iteration = opts.iteration;
+  if (iteration === undefined) {
+    const failed = (await adapter.listNodes(opts.runId)).filter((node) =>
+      node.nodeId === opts.nodeId && (node.state === "failed" || node.state === "stalled"));
+    if (failed.length > 1) throw new Error("Reset preview has multiple failed iterations; an explicit iteration is required");
+    iteration = failed[0]?.iteration ?? 0;
   }
+  return (await ultrafuzzResolveResetPlan(adapter, { ...opts, iteration })).plan;
 }
 
 async function ultrafuzzAssertResetGeneration(adapter, opts, generation) {
-  if (opts.expectedGeneration === undefined) return;
   const current = await ultrafuzzResolveResetPlan(adapter, opts);
-  if (generation !== opts.expectedGeneration || current.plan.generation !== generation) {
+  if ((opts.expectedGeneration !== undefined && generation !== opts.expectedGeneration) || current.plan.generation !== generation) {
     throw new Error("Reset plan generation changed; preview the reset again before resuming");
   }
 }
@@ -198,7 +248,7 @@ export const SMITHERS_RESET_PLAN_PATCHES: readonly SmithersCompatibilityPatch[] 
           const run = await adapter.getRun(c.options.runId);
           if (!c.options.stealOwnership) {`,
     patched: `        if (c.options.dryRun) {
-          const { ultrafuzzPreviewReset } = await import("@smthrs/time-travel/timetravel");
+          const ultrafuzzPreviewReset = (await import("@smthrs/time-travel/timetravel")).ultrafuzzPreviewReset;
           const resetPlan = await ultrafuzzPreviewReset(resolve(cliWorkspace.cwd(), "smithers.db"), {
             runId: c.options.runId, nodeId: c.options.nodeId, iteration: c.options.iteration,
             attempt: c.options.attempt, resetDependents: c.options.deps,
