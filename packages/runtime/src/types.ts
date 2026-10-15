@@ -518,6 +518,10 @@ export interface WorkflowLifecycleInput {
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;
+  /** Preview a targeted reset without preparing or launching a controller. */
+  dryRun?: boolean;
+  /** Optional generation returned by a prior reset preview. */
+  resetGeneration?: string;
   force?: boolean;
   retryFailed?: boolean;
   /** Render the current controller source for this same Smithers run. */
@@ -532,6 +536,23 @@ export interface WorkflowLifecycleValue {
   workflow_path?: string;
   action: "resume" | "replay" | "fork";
   submitted: boolean;
+  dry_run?: boolean;
+  reset_plan?: ResetPlan;
+  /** A previous invocation already committed this reset and failed to launch. */
+  reset_already_applied?: boolean;
+}
+
+export interface ResetPlan {
+  schema_version: "ultrafuzz.reset-plan.v1";
+  workflow_run_id: string;
+  generation: string;
+  requested_node_id: string;
+  iteration: number;
+  attempt: number;
+  reset_dependents: boolean;
+  policy: "attempt-order";
+  node_count: number;
+  nodes: Array<{ workflow_run_id: string; node_id: string; iteration: number }>;
 }
 
 export interface PauseRunInput {

@@ -1916,6 +1916,11 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       '  command -v forge > "$SMITHERS_FAKE_FORGE_GUARD_LOG"',
       "fi",
       'case "$1" in',
+      "  timetravel)",
+      `    ${shellQuote(process.execPath)} -e ${shellQuote(
+        'const args = process.argv.slice(1); const option = (key) => args[args.indexOf(key) + 1]; const runId = option("--run-id"); const nodeId = option("--node-id"); const iteration = args.includes("--iteration") ? Number(option("--iteration")) : 0; const resetPlan = { schema_version: "ultrafuzz.reset-plan.v1", workflow_run_id: runId, generation: "sha256:" + "a".repeat(64), requested_node_id: nodeId, iteration, attempt: 1, reset_dependents: true, policy: "attempt-order", node_count: 1, nodes: [{ workflow_run_id: runId, node_id: nodeId, iteration }] }; console.log(JSON.stringify({ ok: true, data: { success: true, resetPlan }, meta: { command: "timetravel", duration: "1ms" } }));'
+      )} "$@"`,
+      "    ;;",
       "  fork)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-lifecycle-run-forked"}}\'',
       "    ;;",
@@ -2251,6 +2256,11 @@ function fakeLifecycleSmithersEnv(
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
+      "  timetravel)",
+      `    ${shellQuote(process.execPath)} -e ${shellQuote(
+        'const args = process.argv.slice(1); const option = (key) => args[args.indexOf(key) + 1]; const runId = option("--run-id"); const nodeId = option("--node-id"); const iteration = args.includes("--iteration") ? Number(option("--iteration")) : 0; const resetPlan = { schema_version: "ultrafuzz.reset-plan.v1", workflow_run_id: runId, generation: "sha256:" + "a".repeat(64), requested_node_id: nodeId, iteration, attempt: 1, reset_dependents: true, policy: "attempt-order", node_count: 1, nodes: [{ workflow_run_id: runId, node_id: nodeId, iteration }] }; console.log(JSON.stringify({ ok: true, data: { success: true, resetPlan }, meta: { command: "timetravel", duration: "1ms" } }));'
+      )} "$@"`,
+      "    ;;",
       "  inspect)",
       `    inspect_count=$(cat ${shellQuote(inspectCountPath)})`,
       "    inspect_count=$((inspect_count + 1))",
@@ -28557,7 +28567,7 @@ test("resume --retry-failed --reset-node does not report the reset task as skipp
   const resets = fs
     .readFileSync(commandLog, "utf8")
     .split("\n")
-    .filter((line) => /^timetravel .* --node-id node:lens /u.test(line));
+    .filter((line) => /^timetravel .* --node-id node:lens /u.test(line) && !line.includes("--dry-run"));
   assert.equal(resets.length, 1, resets.join("\n"));
   assert.equal(
     resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED"),
@@ -28669,6 +28679,22 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   );
   const failedCommands = fs.readFileSync(commandLog, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
+  const resetPreview = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:actors-flows",
+    dryRun: true,
+    refreshController: true,
+    env
+  });
+  assert.equal(resetPreview.ok, true, JSON.stringify(resetPreview.diagnostics));
+  assert.equal(resetPreview.value?.reset_already_applied, true);
+  assert.equal(resetPreview.value?.submitted, false);
+  assert.deepEqual(
+    resetPreview.value?.reset_plan?.nodes.map((node) => node.node_id),
+    ["node:actors-flows"]
+  );
+  assert.equal(fs.readFileSync(commandLog, "utf8"), failedCommands, "receipt preview must not invoke the runner");
   // A launch copy is the only source of a deleted static prompt, and it is restored as it is: a run's
   // prompt files may be edited, so no digest recorded at launch can refuse it.
   fs.rmSync(plannedPrompt.rendered_prompt_path);
@@ -28686,6 +28712,8 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
   assert.equal(retried.value?.submitted, true);
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
+  assert.equal(retried.value?.reset_already_applied, true);
+  assert.deepEqual(retried.value?.reset_plan, resetPreview.value?.reset_plan);
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
   assert.equal(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path, "utf8"), "edited launch copy\n");
   const retriedCommands = fs.readFileSync(commandLog, "utf8");

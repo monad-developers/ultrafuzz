@@ -1,3 +1,5 @@
+import type { ResetPlan } from "./types.js";
+
 export const WORKSPACE_PATCH_BASELINE_JSON_SCHEMA_ID =
   "urn:ultrafuzz:schema:runtime:workspace-patch-baseline:1" as const;
 export const WORKSPACE_PATCH_PREPARATION_JSON_SCHEMA_ID =
@@ -204,6 +206,7 @@ export interface SmithersSubmissionDocument {
 }
 
 export interface SmithersResetNodeDocument {
+  reset_plan?: ResetPlan;
   schema_version: typeof SMITHERS_RESET_NODE_SCHEMA_VERSION;
   smithers_run_id: string;
   node_id: string;
