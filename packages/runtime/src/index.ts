@@ -23,6 +23,7 @@ export * from "./dependency-change-records.js";
 export * from "./pinned-submodules.js";
 export * from "./prompt-artifact-authority.js";
 export * from "./provider-credential-environment.js";
+export { runProcessGroup } from "./process-group.js";
 export * from "./references.js";
 export * from "./retry-chain.js";
 export * from "./retry-failed-omissions.js";

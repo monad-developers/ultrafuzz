@@ -1,5 +1,18 @@
+diff --git a/src/effect/compute-task-bridge.js b/src/effect/compute-task-bridge.js
+index cf39fa359cf48a71613f4589828b2c2927af4377..fe52714b1479947fd5dfff9dc8459dffcb725bc6 100644
+--- a/src/effect/compute-task-bridge.js
++++ b/src/effect/compute-task-bridge.js
+@@ -825,7 +825,7 @@ export const executeComputeTaskBridge = async (
+                 },
+                 lastHeartbeat: previousHeartbeat,
+               },
+-              () => runWithToolContext(computeToolContext, () => desc.computeFn()),
++              () => runWithToolContext(computeToolContext, () => desc.computeFn({ ultrafuzzAbortSignal: computeAbortController.signal })),
+             ),
+           )
+           .finally(() => {
 diff --git a/src/engine.js b/src/engine.js
-index e4f801c88081e3e19e0f2a3ecc02b2612589888b..29a97879bd54a904bebcdc00f89b6f3c05f60033 100644
+index e4f801c88081e3e19e0f2a3ecc02b2612589888b..1311690fa475c908b442ed363518cf0df0cd1580 100644
 --- a/src/engine.js
 +++ b/src/engine.js
 @@ -89,7 +89,7 @@ import { runScorersAsync } from "@smthrs/scorers/run-scorers";
@@ -563,6 +576,15 @@ index e4f801c88081e3e19e0f2a3ecc02b2612589888b..29a97879bd54a904bebcdc00f89b6f3c
              await captureResultCheckpoint(retryResult, "schema-correction");
              if (
                checkpointPublicationCount === checkpointPublicationBeforeCorrection &&
+@@ -8126,7 +8306,7 @@ async function legacyExecuteTask(
+           // parent resume that accepted edited workflow source does not fail
+           // again when it reaches an existing child run.
+           taskRuntime.acceptWorkflowChange = toolConfig.acceptWorkflowChange === true;
+-          return withTaskRuntime(taskRuntime, () => runWithToolContext(computeToolContext, () => desc.computeFn()));
++          return withTaskRuntime(taskRuntime, () => runWithToolContext(computeToolContext, () => desc.computeFn({ ultrafuzzAbortSignal: taskSignal })));
+         });
+         const races = [computePromise];
+         const abort = abortPromise(taskSignal);
 @@ -8286,6 +8466,7 @@ async function legacyExecuteTask(
        // Append the correction as a user message to the conversation
        const retryMessages = [...schemaCorrectionMessages, { role: "user", content: schemaRetryPrompt }];

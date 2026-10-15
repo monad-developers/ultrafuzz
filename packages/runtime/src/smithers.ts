@@ -1872,6 +1872,15 @@ const SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PATCH = `                      const
                           {
                           ultrafuzzTaskRuntime: agentTaskRuntime,`;
 
+// The sealed closure preserves issuer symlinks, which gives a workflow's
+// @smthrs/driver import a separate AsyncLocalStorage from the engine's. Hand
+// compute callbacks their cancellation signal explicitly, like agent.generate.
+// Preparation has no deps projection, so taskCore retains this callback as-is.
+const SMITHERS_ENGINE_COMPUTE_ABORT_SOURCE = `return withTaskRuntime(taskRuntime, () => runWithToolContext(computeToolContext, () => desc.computeFn()));`;
+const SMITHERS_ENGINE_COMPUTE_ABORT_PATCH = `return withTaskRuntime(taskRuntime, () => runWithToolContext(computeToolContext, () => desc.computeFn({ ultrafuzzAbortSignal: taskSignal })));`;
+const SMITHERS_ENGINE_EFFECT_COMPUTE_ABORT_SOURCE = `() => runWithToolContext(computeToolContext, () => desc.computeFn()),`;
+const SMITHERS_ENGINE_EFFECT_COMPUTE_ABORT_PATCH = `() => runWithToolContext(computeToolContext, () => desc.computeFn({ ultrafuzzAbortSignal: computeAbortController.signal })),`;
+
 const SMITHERS_ENGINE_JSON_CORRECTION_USAGE_INVOCATION_SOURCE = `            const checkpointPublicationBeforeCorrection = checkpointPublicationCount;
             cliTurnCompletion.begin();
             const retryResult = await raceAgentCallAbort(`;
@@ -2539,6 +2548,8 @@ export type SmithersCompatibilityPatchId =
   | "engine_worktree_create_fetch"
   | "engine_agent_usage_progress"
   | "engine_main_usage_invocation"
+  | "engine_compute_abort"
+  | "engine_effect_compute_abort"
   | "engine_json_correction_usage_invocation"
   | "engine_json_correction_usage_result"
   | "engine_schema_correction_usage_invocation"
@@ -2761,6 +2772,22 @@ export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch
     patched: SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PATCH,
     predecessors: [SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PREDECESSOR_PATCH],
     upstreamAbsent: ["beginAgentUsageInvocation"]
+  },
+  {
+    id: "engine_compute_abort",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/engine.js",
+    patchable: SMITHERS_ENGINE_COMPUTE_ABORT_SOURCE,
+    patched: SMITHERS_ENGINE_COMPUTE_ABORT_PATCH,
+    upstreamAbsent: ["ultrafuzzAbortSignal"]
+  },
+  {
+    id: "engine_effect_compute_abort",
+    packageName: "@smthrs/engine",
+    sourceRelativePath: "src/effect/compute-task-bridge.js",
+    patchable: SMITHERS_ENGINE_EFFECT_COMPUTE_ABORT_SOURCE,
+    patched: SMITHERS_ENGINE_EFFECT_COMPUTE_ABORT_PATCH,
+    upstreamAbsent: ["ultrafuzzAbortSignal"]
   },
   {
     id: "engine_json_correction_usage_invocation",
@@ -6661,6 +6688,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
   const enginePackageJson = path.join(engineRoot, "package.json");
   const schedulerSource = path.join(schedulerRoot, "src", "makeWorkflowSession.js");
   const engineSource = path.join(engineRoot, "src", "engine.js");
+  const engineComputeSource = path.join(engineRoot, "src", "effect", "compute-task-bridge.js");
   const engineWorkflowHashSource = path.join(engineRoot, "src", "workflow-hash.js");
   for (const [label, dependencyPackageJson, dependencySource] of [
     ["scheduler", schedulerPackageJson, schedulerSource],
@@ -6677,6 +6705,16 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
     }
   }
   assertRegularFileInside(nodeModules, engineWorkflowHashSource, "installed Smithers workflow hash implementation");
+  assertRegularFileInside(nodeModules, engineComputeSource, "installed Smithers compute task implementation");
+  writeFileDurable(
+    engineComputeSource,
+    applyRequiredSmithersPatch(
+      fs.readFileSync(engineComputeSource, "utf8"),
+      SMITHERS_ENGINE_EFFECT_COMPUTE_ABORT_SOURCE,
+      SMITHERS_ENGINE_EFFECT_COMPUTE_ABORT_PATCH,
+      "compute task cancellation handoff"
+    )
+  );
 
   let schedulerContents = fs.readFileSync(schedulerSource, "utf8");
   for (const [source, patched, label] of [
@@ -6776,6 +6814,7 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "main agent usage invocation",
       [SMITHERS_ENGINE_MAIN_USAGE_INVOCATION_PREDECESSOR_PATCH]
     ],
+    [SMITHERS_ENGINE_COMPUTE_ABORT_SOURCE, SMITHERS_ENGINE_COMPUTE_ABORT_PATCH, "legacy compute cancellation handoff"],
     [
       SMITHERS_ENGINE_JSON_CORRECTION_USAGE_INVOCATION_SOURCE,
       SMITHERS_ENGINE_JSON_CORRECTION_USAGE_INVOCATION_PATCH,

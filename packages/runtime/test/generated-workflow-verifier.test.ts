@@ -203,7 +203,7 @@ type TaskLocalAuthority = "dependency-admission" | "report-run-metadata" | "repo
 function loadArtifactAwareAgent(
   options: {
     onCheck?: (authority: TaskLocalAuthority) => void;
-    onReset?: () => void;
+    onReset?: (signal: AbortSignal | undefined) => void;
     onSourceVerify?: () => void;
   } = {}
 ): (
@@ -241,7 +241,7 @@ function loadArtifactAwareAgent(
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onSourceVerify?.(),
-    () => options.onReset?.(),
+    (_task: unknown, _runtime: unknown, signal: AbortSignal | undefined) => options.onReset?.(signal),
     () => undefined,
     () => undefined,
     (_task: unknown, args: unknown) => args,
@@ -437,10 +437,12 @@ function loadJsonValidatorPreflight(
     stdout?: string;
     parse?: typeof parseJsonValidatorPreflightSuccessEnvelope;
     bundle?: ReturnType<typeof installedBundle>;
+    run?: (signal: AbortSignal) => Promise<{ stdout: string; stderr: string }>;
   } = {}
 ): {
-  preflight(): void;
+  preflight(signal?: AbortSignal): Promise<void>;
   observedTimeoutMs(): number | undefined;
+  observedLauncher(): string | undefined;
   spawnCount(): number;
   budgetMs: number;
 } {
@@ -452,12 +454,14 @@ function loadJsonValidatorPreflight(
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   let observedTimeout: number | undefined;
+  let observedLauncher: string | undefined;
   let spawns = 0;
   const loaded = new Function(
     "ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256",
     "artifactValidatorSmokeFixturePath",
-    "execFileSync",
+    "runProcessGroup",
     "parseJsonValidatorPreflightSuccessEnvelope",
+    "nonRetryableFailure",
     "path",
     `${helper}; return {
       preflight: preflightJsonValidator,
@@ -466,18 +470,36 @@ function loadJsonValidatorPreflight(
   )(
     ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
-    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
+    async (file: string, _args: readonly string[], spawnOptions: { timeoutMs?: number; signal: AbortSignal }) => {
       spawns += 1;
-      observedTimeout = spawnOptions.timeout;
+      observedTimeout = spawnOptions.timeoutMs;
+      observedLauncher = file;
+      if (options.run !== undefined) return options.run(spawnOptions.signal);
       if (options.failure !== undefined) throw options.failure;
-      return options.stdout ?? "{}";
+      return { stdout: options.stdout ?? "{}", stderr: "" };
     },
     options.parse ?? (() => undefined),
+    (error: Error) => Object.assign(error, { details: { failureRetryable: false } }),
     path
-  ) as { preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): void; budgetMs: number };
+  ) as {
+    preflight(
+      schemaDirectory: string,
+      bundle: ReturnType<typeof installedBundle>,
+      runRoot: string,
+      signal: AbortSignal
+    ): Promise<void>;
+    budgetMs: number;
+  };
   return {
-    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas"), options.bundle ?? installedBundle()),
+    preflight: (signal = new AbortController().signal) =>
+      loaded.preflight(
+        path.join(path.sep, "fixture", "schemas"),
+        options.bundle ?? installedBundle(),
+        path.join(path.sep, "fixture", "run"),
+        signal
+      ),
     observedTimeoutMs: () => observedTimeout,
+    observedLauncher: () => observedLauncher,
     spawnCount: () => spawns,
     budgetMs: loaded.budgetMs
   };
@@ -747,7 +769,7 @@ function loadTaskPromptPathForArtifactReset(): (
 ) => string | undefined {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function taskPromptPathForArtifactReset");
-  const helperEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", helperStart);
+  const helperEnd = source.indexOf("\n\nasync function resetTaskArtifactsForRetry", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
@@ -777,7 +799,7 @@ function loadCanonicalTaskArtifactRetryReset(): (
 ) => void {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const selectorStart = source.indexOf("function taskPromptPathForArtifactReset");
-  const selectorEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", selectorStart);
+  const selectorEnd = source.indexOf("\n\nasync function resetTaskArtifactsForRetry", selectorStart);
   const resetStart = source.indexOf("function resetTaskArtifactContents");
   const resetEnd = source.indexOf("\n\nfunction isMissingPathError", resetStart);
   const resolverStart = source.indexOf("function resolveRegularArtifactFile");
@@ -5811,7 +5833,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
   assert.match(
     source,
-    /preflightJsonValidator\(schemaDirectory, schemaBundle\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
+    /"assert-task-inputs", \(\) =>\s*assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
   );
   assert.match(
     source,
@@ -6124,9 +6146,9 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
           _chainIndex: number,
           _prompt: string,
           _metadataAgent: unknown,
-          admittedAgent: () => { preflight?: (args: unknown) => Promise<unknown> }
+          admittedAgent: () => Promise<{ preflight?: (args: unknown) => Promise<unknown> }>
         ) => ({
-          preflight: async (args: unknown) => admittedAgent().preflight?.(args),
+          preflight: async (args: unknown) => (await admittedAgent()).preflight?.(args),
           generate: async () => ({ summary: "ok" })
         }),
         // An enabled friction log's entry directory reaches every agent instance, after its other roots.
@@ -6619,7 +6641,7 @@ test("the generated goal-search census counts a lane's findings validated agains
   );
 });
 
-test("generated validator preflight expects the run's planned schema identity, not this build's", () => {
+test("generated validator preflight expects the run's planned schema identity, not this build's", async () => {
   const installed = installedBundle();
   const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
   assert.ok(findings);
@@ -6647,9 +6669,9 @@ test("generated validator preflight expects the run's planned schema identity, n
   const launchValidator = envelope({ sha256: sealedFindings.sha256, bundle_sha256: sealed.sha256 });
   const preflight = (stdout: string) =>
     loadJsonValidatorPreflight({ stdout, bundle: sealed, parse: parseJsonValidatorPreflightSuccessEnvelope });
-  assert.doesNotThrow(() => preflight(launchValidator).preflight());
+  await assert.doesNotReject(() => preflight(launchValidator).preflight());
   // A validator reporting this build's bundle does not validate with the schemas the host checks.
-  assert.throws(
+  await assert.rejects(
     () => preflight(envelope({ sha256: findings.sha256, bundle_sha256: installed.sha256 })).preflight(),
     (error: unknown) =>
       error instanceof Error &&
@@ -6658,8 +6680,8 @@ test("generated validator preflight expects the run's planned schema identity, n
   );
 });
 
-test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
-  const timedOut = Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" });
+test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", async () => {
+  const timedOut = Object.assign(new Error("process exceeded its execution budget"), { code: "PROCESS_TIMEOUT" });
   const harness = loadJsonValidatorPreflight({ failure: timedOut });
 
   // #1026: `"ultrafuzz"` is the trusted launcher, whose own cold start measured 33.8-35.6 s at the
@@ -6669,17 +6691,18 @@ test("generated validator preflight budgets a contended CLI start and reports th
   assert.ok(harness.budgetMs >= 120_000, String(harness.budgetMs));
   assert.ok(harness.budgetMs <= 600_000, String(harness.budgetMs));
 
-  assert.throws(
+  await assert.rejects(
     () => harness.preflight(),
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.equal(harness.observedTimeoutMs(), harness.budgetMs);
       assert.equal(error.cause, timedOut);
+      assert.equal((error as Error & { code?: string }).code, "PROCESS_TIMEOUT");
       // `ETIMEDOUT` alone proves only that the budget was passed, never by how much. The elapsed
       // reading has to survive the ledger's 1000-byte cap to be readable in the published row.
       assert.match(error.message, /^artifact-contract failure: JSON validator preflight failed after \d+ms /u);
       assert.match(error.message, new RegExp(`against a ${harness.budgetMs}ms budget`, "u"));
-      assert.ok(error.message.endsWith(": spawnSync ultrafuzz ETIMEDOUT"), error.message);
+      assert.ok(error.message.endsWith(": process exceeded its execution budget"), error.message);
       const reported = `prepare:audit-final-report failed at step preflight-json-validator: ${error.message}`;
       assert.equal(normalizeNodeAttemptFailureMessage(reported), reported);
       return true;
@@ -6687,21 +6710,145 @@ test("generated validator preflight budgets a contended CLI start and reports th
   );
 });
 
-test("generated validator preflight spawns the CLI once per engine process and never remembers a failure", () => {
+test("generated validator preflight shares concurrent launches and never remembers a failure", async () => {
   // One engine process runs every prepare and agent-attempt reset. The CLI answer does not depend on
   // the task, so only the first success spawns it.
   const harness = loadJsonValidatorPreflight();
-  harness.preflight();
-  harness.preflight();
-  harness.preflight();
+  await Promise.all([harness.preflight(), harness.preflight(), harness.preflight()]);
+  await harness.preflight();
   assert.equal(harness.spawnCount(), 1);
 
   const failing = loadJsonValidatorPreflight({
-    failure: Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" })
+    failure: Object.assign(new Error("process exceeded its execution budget"), { code: "PROCESS_TIMEOUT" })
   });
-  assert.throws(() => failing.preflight(), /JSON validator preflight failed/u);
-  assert.throws(() => failing.preflight(), /JSON validator preflight failed/u);
+  await assert.rejects(() => failing.preflight(), /JSON validator preflight failed/u);
+  await assert.rejects(() => failing.preflight(), /JSON validator preflight failed/u);
   assert.equal(failing.spawnCount(), 2, "a failed preflight must be retried by the next caller");
+});
+
+test("generated validator preflight cancels a task wait without canceling another active owner", async () => {
+  let complete = (): void => {};
+  let sharedSignal: AbortSignal | undefined;
+  const harness = loadJsonValidatorPreflight({
+    run: (signal) => {
+      sharedSignal = signal;
+      return new Promise((resolve) => {
+        complete = () => resolve({ stdout: "{}", stderr: "" });
+      });
+    }
+  });
+  const first = new AbortController();
+  const second = new AbortController();
+  const canceled = assert.rejects(harness.preflight(first.signal), { code: "TASK_ABORTED" });
+  const remaining = harness.preflight(second.signal);
+  first.abort();
+  await canceled;
+  assert.equal(sharedSignal?.aborted, false, "the remaining owner still needs the probe");
+  complete();
+  await remaining;
+  second.abort();
+  assert.equal(sharedSignal?.aborted, false, "a completed wait must remove its abort listener");
+  await harness.preflight();
+  assert.equal(harness.spawnCount(), 1, "the remaining owner can cache the successful probe");
+});
+
+test("generated validator preflight waits for last-owner cleanup and does not cache a canceled probe", async () => {
+  let cleanup = (): void => {};
+  let sharedSignal: AbortSignal | undefined;
+  const harness = loadJsonValidatorPreflight({
+    run: (signal) => {
+      sharedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        cleanup = () => reject(Object.assign(new Error("process execution canceled"), { code: "TASK_ABORTED" }));
+      });
+    }
+  });
+  const controller = new AbortController();
+  let settled = false;
+  const probe = harness.preflight(controller.signal);
+  const rejected = assert.rejects(probe, { code: "TASK_ABORTED" }).then(() => {
+    settled = true;
+  });
+  controller.abort();
+  assert.equal(sharedSignal?.aborted, true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "the canceled caller still owns bounded cleanup");
+
+  // A new caller may start while the canceled launch is draining. Failure of
+  // that old launch must not evict the new shared probe from the cache.
+  const finishOldCleanup = cleanup;
+  const nextController = new AbortController();
+  const next = assert.rejects(harness.preflight(nextController.signal), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 2);
+  finishOldCleanup();
+  await rejected;
+  const concurrent = assert.rejects(harness.preflight(nextController.signal), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 2);
+  nextController.abort();
+  assert.equal(sharedSignal?.aborted, true);
+  cleanup();
+  await Promise.all([next, concurrent]);
+});
+
+test("generated validator preflight refuses already canceled callers before launch or cached success", async () => {
+  const harness = loadJsonValidatorPreflight();
+  await assert.rejects(harness.preflight(AbortSignal.abort()), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 0);
+  await harness.preflight();
+  await assert.rejects(harness.preflight(AbortSignal.abort()), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 1);
+});
+
+test("generated validator preflight does not describe launch or exit failures as deadline failures", async () => {
+  for (const code of ["ENOENT", "EACCES", "ENOTDIR", "PROCESS_EXIT", "TASK_ABORTED"]) {
+    const failure = Object.assign(new Error(`command failed: ${code}`), { code });
+    const harness = loadJsonValidatorPreflight({ failure });
+    await assert.rejects(harness.preflight(), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.cause, failure);
+      assert.doesNotMatch(error.message, /timeout|budget|launcher is signalled/u);
+      assert.notEqual((error as Error & { code?: string }).code, "PROCESS_TIMEOUT");
+      if (["ENOENT", "EACCES", "ENOTDIR"].includes(code)) {
+        assert.equal((error as Error & { code?: string }).code, "TOOL_UNAVAILABLE");
+        assert.deepEqual((error as Error & { details?: unknown }).details, { failureRetryable: false });
+        assert.match(error.message, /restore the run-owned trusted CLI before retrying/u);
+      } else if (code === "TASK_ABORTED") {
+        assert.equal((error as Error & { code?: string }).code, "TASK_ABORTED");
+      }
+      return true;
+    });
+    assert.equal(
+      harness.observedLauncher(),
+      path.join(path.sep, "fixture", "run", "trusted-bin", process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz")
+    );
+    assert.equal(harness.spawnCount(), 1, "a failed trusted launch must not fall back to PATH");
+  }
+});
+
+test("generated preparation retains preflight timeout, cancellation and tool availability codes", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function preparationStep");
+  const helperEnd = source.indexOf("\n\nfunction prepareArtifactMirror", helperStart);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const step = new Function("isNonRetryableFailure", "nonRetryableFailure", `${helper}; return preparationStep;`)(
+    (error: { details?: { failureRetryable?: boolean } }) => error.details?.failureRetryable === false,
+    (error: Error) => Object.assign(error, { details: { failureRetryable: false } })
+  ) as (attemptId: string, step: string, run: () => never) => never;
+  for (const code of ["PROCESS_TIMEOUT", "TASK_ABORTED", "TOOL_UNAVAILABLE"]) {
+    const failure = Object.assign(new Error("preflight failure"), {
+      code,
+      ...(code === "TOOL_UNAVAILABLE" ? { details: { failureRetryable: false } } : {})
+    });
+    assert.throws(
+      () =>
+        step("fixture", "preflight-json-validator", () => {
+          throw failure;
+        }),
+      { code, cause: failure, ...(code === "TOOL_UNAVAILABLE" ? { details: { failureRetryable: false } } : {}) }
+    );
+  }
 });
 
 test("generated agent prompt inserts literal braces from task and operator prompts verbatim", () => {
@@ -8371,12 +8518,16 @@ test("agent failure normalization preserves only validated Smithers recovery con
   for (const [code, details] of [
     ["AGENT_SESSION_LOST", { failureRetryable: true, discardResumeSession: true }],
     ["AGENT_CHECKPOINT_INVALID", { failureRetryable: true, discardAgentCheckpoint: true }],
-    ["AGENT_CONFIG_INVALID", { failureRetryable: false }]
+    ["AGENT_CONFIG_INVALID", { failureRetryable: false }],
+    ["TOOL_UNAVAILABLE", { failureRetryable: false }]
   ] as const) {
     const failure = Object.assign(new Error("controlled failure"), { code, details });
     const normalized = await captureAgentFailure(failure);
     assert.equal(normalized.code, code);
     assert.deepEqual(normalized.details, details);
+    const preflight = await captureAgentFailure(failure, { agentChain: [{}] }, true);
+    assert.equal(preflight.code, code);
+    assert.deepEqual(preflight.details, details);
   }
   // Agent CLI deadlines keep their code: run synchronization labels timeouts by code alone (#1144).
   for (const code of ["PROCESS_TIMEOUT", "PROCESS_IDLE_TIMEOUT"]) {
@@ -8580,6 +8731,33 @@ test("agent preflight and generation share one lazily admitted agent instance", 
   assert.equal(admittedGenerations, 1);
 });
 
+test("agent generation forwards its engine signal to reset before any adapter call", async () => {
+  const controller = new AbortController();
+  let resets = 0;
+  let generations = 0;
+  const wrapped = loadArtifactAwareAgent({
+    onReset: (signal) => {
+      resets += 1;
+      assert.equal(signal, controller.signal);
+      throw Object.assign(new Error("validator preflight canceled"), { code: "TASK_ABORTED" });
+    }
+  })({ agentChain: [{}] }, 0, "prompt", {
+    preflight: async () => undefined,
+    generate: async () => {
+      generations += 1;
+      return {};
+    }
+  });
+  assert.ok(wrapped.preflight);
+  await wrapped.preflight({});
+  assert.equal(resets, 0, "Smithers 0.35 agent preflight has no cancellation signal");
+  await assert.rejects(wrapped.generate({ abortSignal: controller.signal, taskContext: { attempt: 1 } }), {
+    code: "TASK_ABORTED"
+  });
+  assert.equal(resets, 1);
+  assert.equal(generations, 0);
+});
+
 test("agent failure normalization never stringifies arbitrary thrown objects", async () => {
   const normalized = await captureAgentFailure({
     toString(): never {
@@ -8604,7 +8782,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(
     agentSource,
-    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\)\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\), args\?\.abortSignal\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
   );
   const coverageSource = workflowSource.slice(
     workflowSource.indexOf("function authoritativeFinalReportCoverage"),
@@ -10284,7 +10462,6 @@ test("generated Smithers preparation names its failing step and carries a retry 
     "hydrate-pinned-submodules",
     "preserve-pinned-source-proof",
     "materialize-prompt-schemas",
-    "preflight-json-validator",
     "assert-task-inputs",
     "materialize-workspace-patch-dependencies",
     "require-invariant-suite-snapshot",
@@ -10301,6 +10478,8 @@ test("generated Smithers preparation names its failing step and carries a retry 
   for (const step of steps) {
     assert.match(preparation, new RegExp(`preparationStep\\(task\\.attemptId, "${step}", \\(\\) =>`, "u"), step);
   }
+  assert.match(preparation, /await preflightJsonValidator\(/u);
+  assert.match(preparation, /preparationStep\(task\.attemptId, "preflight-json-validator", \(\) =>/u);
 
   // #949: retry-failed reopens a producer onto its durable worktree, which can still contain that
   // producer's earlier source output. Restore the runtime-owned pre-agent tree before replaying the

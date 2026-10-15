@@ -88,7 +88,7 @@ type WorkflowHelpers = {
     publications: Map<string, Buffer>,
     artifactRoots: readonly string[]
   ) => void;
-  resetTaskArtifactsForRetry?: (task: TaskSpecLike) => void;
+  resetTaskArtifactsForRetry?: (task: TaskSpecLike, runtime?: unknown, signal?: AbortSignal) => Promise<void>;
   changedTestTreePaths?: (workspaceRoot: string, baselinePath?: string, protectedBaselinePath?: string) => string[];
   changedInvariantSourcePaths?: (workspaceRoot: string) => string[];
   listInvariantSuiteSources?: (suiteRoot: string, relative?: string, budget?: SuiteBudget) => string[];
@@ -115,9 +115,9 @@ type WorkflowHelpers = {
 /** The running file/byte allowance `listInvariantSuiteSources` spends while it walks. */
 type SuiteBudget = { files: number; totalBytes: number };
 
-/** Slice a top-level `function name(...)` declaration out of the template. */
+/** Slice a top-level sync or async function declaration out of the template. */
 function sliceTopLevelFunction(source: string, name: string): string {
-  const start = source.indexOf(`\nfunction ${name}(`);
+  const start = source.search(new RegExp(`\\n(?:async )?function ${name}\\(`, "u"));
   if (start < 0) return "";
   const end = source.indexOf("\n}\n", start);
   assert.ok(end > start, `unterminated helper ${name}`);
@@ -386,7 +386,9 @@ function loadWorkflowHelpers(
     resetTaskArtifactContents: () => undefined,
     restoreInvariantSuiteWorkspaceSnapshot: () => undefined,
     restoreWorkspacePatchPreparation: () => undefined,
-    prepareArtifactMirror: () => undefined,
+    prepareArtifactMirrorForAgent: async (_task: unknown, _options: unknown, signal: AbortSignal) => {
+      assert.ok(signal instanceof AbortSignal, "retry preparation must retain its engine cancellation signal");
+    },
     materializePromptArtifactAuthority: () => undefined,
     materializeFinalReportRunMetadataAuthority: () => undefined,
     INVARIANT_TEST_ROOT_NAMES: ["test", "tests"] as const,
@@ -1433,7 +1435,7 @@ test("post-agent baseline verification requires both exact strict-JSON copies wi
   }
 });
 
-test("#217 a retry drops the previous attempt's tombstones so a restored source is not suppressed", () => {
+test("#217 a retry drops the previous attempt's tombstones so a restored source is not suppressed", async () => {
   const { runRoot, handlers, state } = createInvariantChain();
   try {
     const workspaceRoot = fs.realpathSync(handlers.workspacePath);
@@ -1441,7 +1443,7 @@ test("#217 a retry drops the previous attempt's tombstones so a restored source 
 
     const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state);
     assert.ok(helpers.resetTaskArtifactsForRetry);
-    helpers.resetTaskArtifactsForRetry(handlers);
+    await helpers.resetTaskArtifactsForRetry(handlers, undefined, new AbortController().signal);
 
     assert.equal(
       state.tombstones.get(workspaceRoot),
@@ -2144,7 +2146,7 @@ test("#215 a changed src/ helper reaches the manifest and survives one hop downs
   }
 });
 
-test("#212 retry cleanup resets generated tests under the repository's plural tests/ root", () => {
+test("#212 retry cleanup resets generated tests under the repository's plural tests/ root", async () => {
   // Aave v4 at the benchmark commit has no test/ at all: `git ls-files test`
   // is empty and the Foundry root is tests/. A retry that resets test/foundry/
   // leaves the previous attempt's generated sources in place under tests/, and
@@ -2167,7 +2169,7 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
       }
     });
     assert.ok(helpers.resetTaskArtifactsForRetry);
-    helpers.resetTaskArtifactsForRetry(handlers);
+    await helpers.resetTaskArtifactsForRetry(handlers, undefined, new AbortController().signal);
 
     // Both directories the companion lookup accepts -- the logical node id the
     // prompt mandates and the concrete id -- have to be cleared, or the previous
@@ -2190,7 +2192,7 @@ test("#212 retry cleanup resets generated tests under the repository's plural te
   }
 });
 
-test("retry cleanup clears every task-owned root before it re-prepares the attempt and its authorities", () => {
+test("retry cleanup clears every task-owned root before it re-prepares the attempt and its authorities", async () => {
   const { runRoot, handlers, state } = createInvariantChain();
   try {
     const canonicalRunRoot = fs.realpathSync(runRoot);
@@ -2199,6 +2201,7 @@ test("retry cleanup clears every task-owned root before it re-prepares the attem
     fs.mkdirSync(path.join(handlers.workspacePath, "tests", "recon"), { recursive: true });
     handlers.outputs = [{ path: "generated-tests/CryticTester.sol", contract: "ultrafuzz/generated-tests@3" }];
     const calls: string[] = [];
+    const controller = new AbortController();
     const helpers = loadWorkflowHelpers([...RETRY_HELPERS], state, {
       resetTaskArtifactContents: (rootPath: string, _attemptId: string, label: string) =>
         calls.push(
@@ -2206,17 +2209,22 @@ test("retry cleanup clears every task-owned root before it re-prepares the attem
         ),
       restoreInvariantSuiteWorkspaceSnapshot: () => calls.push("restore invariant suite"),
       restoreWorkspacePatchPreparation: () => calls.push("restore workspace patch preparation"),
-      prepareArtifactMirror: (_task: unknown, options: unknown) => calls.push(`prepare ${JSON.stringify(options)}`),
+      prepareArtifactMirrorForAgent: async (_task: unknown, options: unknown, signal: AbortSignal) => {
+        assert.equal(signal, controller.signal);
+        calls.push(`prepare ${JSON.stringify(options)}`);
+        await Promise.resolve();
+        calls.push("prepared");
+      },
       materializePromptArtifactAuthority: () => calls.push("materialize prompt authority"),
       materializeFinalReportRunMetadataAuthority: () => calls.push("materialize report run metadata")
     });
     assert.ok(helpers.resetTaskArtifactsForRetry);
-    helpers.resetTaskArtifactsForRetry(handlers);
+    const reset = helpers.resetTaskArtifactsForRetry(handlers, undefined, controller.signal);
 
     // A previous attempt's outputs must not survive into the canonical root, the workspace
     // mirror or either generated-test directory, and the authorities the model reads are
     // derived again only after the attempt's inputs are prepared.
-    assert.deepEqual(calls, [
+    const beforePrepared = [
       "reset canonical artifacts/handlers",
       "restore invariant suite",
       "reset mirror workspaces/handlers/artifacts/handlers",
@@ -2225,7 +2233,13 @@ test("retry cleanup clears every task-owned root before it re-prepares the attem
       "reset generated-test workspaces/handlers/tests/foundry/stateful-invariant-handlers",
       "reset generated-test workspaces/handlers/tests/foundry/handlers",
       "restore workspace patch preparation",
-      'prepare {"replayWorkspacePatches":false,"evidenceMode":"require"}',
+      'prepare {"replayWorkspacePatches":false,"evidenceMode":"require"}'
+    ];
+    assert.deepEqual(calls, beforePrepared, "authority publication must wait for asynchronous preparation");
+    await reset;
+    assert.deepEqual(calls, [
+      ...beforePrepared,
+      "prepared",
       "materialize prompt authority",
       "materialize report run metadata"
     ]);

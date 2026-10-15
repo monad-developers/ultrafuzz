@@ -26130,8 +26130,11 @@ test("resume refuses a run whose resolved config cannot be read instead of conti
 });
 
 testWhen(runningUnderBun)(
-  "engine-owned task runtime crosses sealed issuer aliases under production Bun symlink flags",
-  () => {
+  "engine-owned task runtime and compute cancellation cross sealed issuer aliases under production Bun symlink flags",
+  async () => {
+    const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+    const computePatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_compute_abort");
+    assert.ok(computePatch);
     const root = tempProject();
     const controls = path.join(root, "controls");
     const driverRoot = path.join(root, "dependencies", "packages", "driver");
@@ -26181,6 +26184,14 @@ export const execute = (agent) => {
     taskContext: { runId: runtime.runId, nodeId: runtime.stepId, attempt: 1, iteration: 0 }
   }));
 };
+export const executeCompute = (computeFn) => {
+  const taskSignal = AbortSignal.abort();
+  const taskRuntime = { signal: taskSignal };
+  const computeToolContext = {};
+  const runWithToolContext = (_context, run) => run();
+  const desc = { computeFn };
+  ${computePatch.patched}
+};
 `,
       "utf8"
     );
@@ -26196,7 +26207,7 @@ export const execute = (agent) => {
     const workflowPath = path.join(root, "workflow.mjs");
     fs.writeFileSync(
       workflowPath,
-      `import { execute } from "@smthrs/engine";
+      `import { execute, executeCompute } from "@smthrs/engine";
 import { getTaskRuntime } from "@smthrs/driver/task-runtime";
 const observed = await execute({
   generate(args) {
@@ -26213,7 +26224,11 @@ const observed = await execute({
     };
   }
 });
-process.stdout.write(JSON.stringify(observed));
+const compute = executeCompute((context) => ({
+  ambientVisible: getTaskRuntime() !== undefined,
+  explicitSignalAborted: context.ultrafuzzAbortSignal.aborted
+}));
+process.stdout.write(JSON.stringify({ ...observed, compute }));
 `,
       "utf8"
     );
@@ -26237,7 +26252,8 @@ process.stdout.write(JSON.stringify(observed));
       ambientVisible: false,
       explicitMarker: "engine-owned",
       contextMatches: true,
-      forwardedRuntime: false
+      forwardedRuntime: false,
+      compute: { ambientVisible: false, explicitSignalAborted: true }
     });
   }
 );
@@ -26510,7 +26526,10 @@ function runWithInstalledArtifacts(script: string, input: unknown, artifactsModu
   return JSON.parse(stdout) as unknown;
 }
 
-type ResumedWorkflowTask = { id: string; children: (deps?: { agent?: unknown }) => unknown };
+type ResumedWorkflowTask = {
+  id: string;
+  children: (deps?: { agent?: unknown; ultrafuzzAbortSignal?: AbortSignal }) => unknown;
+};
 
 /**
  * A launched run's project workflow rendered in this process the way a native `resume` runs it: that
@@ -26597,7 +26616,7 @@ ${nodes}  - id: __finish__
 async function withResumedWorkflowTasks(
   run: { project: string; runRoot: string },
   artifactsModule: string,
-  body: (task: (id: string) => ResumedWorkflowTask) => void
+  body: (task: (id: string) => ResumedWorkflowTask) => void | Promise<void>
 ): Promise<void> {
   const previousCwd = process.cwd();
   const previousPath = process.env.PATH;
@@ -26605,7 +26624,7 @@ async function withResumedWorkflowTasks(
   try {
     const tasks = await resumedWorkflowTasks(run.project, run.runRoot, artifactsModule);
     process.chdir(run.project);
-    body((id) => {
+    await body((id) => {
       const found = tasks.get(id);
       assert.ok(found, `${id} is not among ${[...tasks.keys()].join(", ")}`);
       return found;
@@ -26672,18 +26691,19 @@ test("a run resumed after an upgrade changed its schemas finishes its tasks agai
   const upgraded = (await import(artifactsModule)) as { artifactSchemaBundleDigest(): string };
   assert.notEqual(upgraded.artifactSchemaBundleDigest(), artifactSchemaBundleDigest());
 
-  await withResumedWorkflowTasks(run, artifactsModule, (task) => {
+  await withResumedWorkflowTasks(run, artifactsModule, async (task) => {
+    const context = { ultrafuzzAbortSignal: new AbortController().signal };
     // #921: the upgrade changed the installed schema bundle, not the run's plan. The validator preflight
     // used to expect this build's bundle, which the run's own validator does not report, and schema
     // materialization refused the launch copy in a prepared worktree, on every attempt.
-    assert.deepEqual(task("prepare:summarize").children(), { prepared: true });
+    assert.deepEqual(await task("prepare:summarize").children(context), { prepared: true });
     fs.writeFileSync(path.join(mirror("summarize"), "summary.txt"), "Summary.\n", "utf8");
     assert.equal(
       (task("verify:summarize").children({ agent: { completed: true } }) as { primary_artifact: string })
         .primary_artifact,
       "summary.txt"
     );
-    assert.deepEqual(task("prepare:project-discovery").children(), { prepared: true });
+    assert.deepEqual(await task("prepare:project-discovery").children(context), { prepared: true });
     for (const attemptId of ["summarize", "project-discovery"]) {
       for (const file of ["report.schema.json", "findings.schema.json"]) {
         assert.deepEqual(
@@ -26729,7 +26749,7 @@ test("a run resumed after an upgrade changed its schemas finishes its tasks agai
     );
 
     // A dependent task's admission revalidates the verified findings against the planned schema too.
-    assert.deepEqual(task("prepare:review").children(), { prepared: true });
+    assert.deepEqual(await task("prepare:review").children(context), { prepared: true });
   });
 });
 
@@ -26750,10 +26770,12 @@ test("a run whose plan has no schema-backed output still prepares its tasks afte
   const artifactsModule = upgradedArtifactsModule((schemas) =>
     editSchemaFile(schemas, "report.schema.json", (schema) => void (schema.$comment = "an upgrade after launch"))
   );
-  await withResumedWorkflowTasks(run, artifactsModule, (task) => {
+  await withResumedWorkflowTasks(run, artifactsModule, async (task) => {
     // Such a plan names no schema bundle, so its tasks do not run the agent-facing validator preflight,
     // which expected this build's bundle while the run's own validator reports the launch one.
-    assert.deepEqual(task("prepare:summarize").children(), { prepared: true });
+    assert.deepEqual(await task("prepare:summarize").children({ ultrafuzzAbortSignal: new AbortController().signal }), {
+      prepared: true
+    });
   });
 });
 
