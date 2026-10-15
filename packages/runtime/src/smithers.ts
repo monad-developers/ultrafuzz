@@ -2527,6 +2527,7 @@ const SMITHERS_OPENCODE_USAGE_EXIT_PATCH = `            answer: isSuccess ? full
           },`;
 
 export type SmithersCompatibilityPatchId =
+  | "reset_plan_child_discovery"
   | "reset_plan_helpers"
   | "reset_plan_selection"
   | "reset_plan_children"

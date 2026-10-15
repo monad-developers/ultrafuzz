@@ -250,6 +250,124 @@ test("native targeted resume returns the reset plan and clears its receipt after
   assert.fail("continued workflow did not finish");
 });
 
+function childRunScript(workflow: string): string {
+  return `import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { Database } from "bun:sqlite";
+const require = createRequire(${JSON.stringify(runner)});
+const { SmithersDb } = await import(require.resolve("@smthrs/db/adapter"));
+const { ultrafuzzPreviewReset, ultrafuzzResolveResetPlan, timeTravel } = await import(${JSON.stringify(timeTravelModule)});
+const workflow = (await import(${JSON.stringify(workflow)})).default;
+const adapter = new SmithersDb(workflow.db);
+const db = new Database("smithers.db");
+const opts = { runId: ${JSON.stringify(rootRunId)}, nodeId: "node:seed", restoreVcs: false, force: true };
+const parent = db.query("SELECT * FROM _smithers_runs WHERE run_id = ?").get(opts.runId);
+const node = db.query("SELECT * FROM _smithers_nodes WHERE run_id = ? AND node_id = ?").get(opts.runId, opts.nodeId);
+const attempt = db.query("SELECT * FROM _smithers_attempts WHERE run_id = ? AND node_id = ?").get(opts.runId, opts.nodeId);
+const insert = (table, row) => {
+  const keys = Object.keys(row);
+  db.query("INSERT INTO " + table + " (" + keys.join(",") + ") VALUES (" + keys.map(() => "?").join(",") + ")")
+    .run(...Object.values(row));
+};
+const child = (runId, parentId = opts.runId, config = { subflowWorkspaceParentRunId: parentId }, branch) => {
+  insert("_smithers_runs", { ...parent, run_id: runId, parent_run_id: parentId, config_json: JSON.stringify(config), status: "finished" });
+  insert("_smithers_nodes", { ...node, run_id: runId });
+  insert("_smithers_attempts", { ...attempt, run_id: runId });
+  if (branch !== undefined) insert("_smithers_branches", {
+    run_id: runId, parent_run_id: parentId, parent_frame_no: 0, branch_label: branch, created_at_ms: 1
+  });
+};
+`;
+}
+
+test("ordinary targeted resume resets every owned child beyond the native descendant listing limit", async () => {
+  const fixture = campaign();
+  const script = `${childRunScript(fixture.workflow)}
+db.exec("BEGIN IMMEDIATE");
+for (let index = 0; index < 1001; index += 1) child("explicit-subflow-" + String(index).padStart(4, "0"));
+db.exec("COMMIT");
+assert.equal((await adapter.listRunDescendants(opts.runId)).length, 1000, "fixture exceeds the native listing default");
+const preview = await ultrafuzzPreviewReset("smithers.db", opts);
+const native = (await ultrafuzzResolveResetPlan(adapter, opts)).plan;
+assert.equal(preview.node_count, 1006, "all 1001 children and five parent nodes are included");
+assert.deepEqual(native, preview);
+assert.deepEqual(await ultrafuzzPreviewReset("smithers.db", opts), preview);
+console.log(JSON.stringify(preview));
+process.exit(0);`;
+  const output = execFileSync("bun", ["-e", script], { cwd: fixture.root, encoding: "utf8", timeout: 60_000 });
+  const plan = parseResetPlan(JSON.parse(output), rootRunId, "node:seed");
+  const before = snapshotTree(fixture.root);
+  assert.deepEqual(
+    await previewSmithersReset({ projectRoot: fixture.root, smithersRunId: rootRunId, nodeId: "node:seed" }),
+    plan
+  );
+  assert.deepEqual(snapshotTree(fixture.root), before);
+  // No explicit generation: ordinary targeted resume previews and executes its own token.
+  const result = await runSmithersLifecycleCommand({
+    action: "resume",
+    projectRoot: fixture.root,
+    smithersRunId: rootRunId,
+    workflowPath: fixture.workflow,
+    resetNode: "node:seed",
+    controllerLeaseSeconds: 30,
+    relaunchPaths: { runRoot: fixture.runRoot, logsDir: path.join(fixture.runRoot, "smithers", "logs") }
+  });
+  assert.deepEqual(result.resetPlan, plan);
+  assert.equal(result.resetAlreadyApplied, false);
+  assert.equal(fs.existsSync(path.join(fixture.runRoot, "smithers", "reset-node-applied.json")), false);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const inspected = JSON.parse(fixture.run(["inspect", rootRunId])) as { data: { run: { status: string } } };
+    assert.notEqual(inspected.data.run.status, "failed");
+    if (inspected.data.run.status === "finished") break;
+    assert.notEqual(attempt, 99, "continued workflow did not finish");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  execFileSync(
+    "bun",
+    [
+      "-e",
+      `import assert from "node:assert/strict";
+import { Database } from "bun:sqlite";
+const db = new Database("smithers.db", { readonly: true });
+for (const [table, state] of [["_smithers_nodes", "pending"], ["_smithers_attempts", "cancelled"]]) {
+  const rows = db.query("SELECT state FROM " + table + " WHERE run_id LIKE 'explicit-subflow-%'").all();
+  assert.equal(rows.length, 1001);
+  assert.ok(rows.every((row) => row.state === state), "every child is reset, including those beyond row 1000");
+}
+db.close();`
+    ],
+    { cwd: fixture.root, encoding: "utf8", timeout: 30_000 }
+  );
+});
+
+test("preview and native reset share fork exclusions and continuation-successor discovery", () => {
+  const fixture = campaign();
+  const script = `${childRunScript(fixture.workflow)}
+child("explicit-child");
+child("forked-child", opts.runId, { subflowWorkspaceParentRunId: opts.runId }, "fork");
+child("unlabelled-fork", opts.runId, { subflowWorkspaceParentRunId: opts.runId }, null);
+child("continued-child", "explicit-child", { continuation: { parentRunId: "explicit-child" } }, "continue-as-new");
+child("newer-fork", "explicit-child", { continuation: { parentRunId: "explicit-child" } }, "fork");
+db.query("UPDATE _smithers_runs SET created_at_ms = created_at_ms + 1 WHERE run_id = 'newer-fork'").run();
+const preview = await ultrafuzzPreviewReset("smithers.db", opts);
+assert.deepEqual((await ultrafuzzResolveResetPlan(adapter, opts)).plan, preview);
+assert.equal(preview.node_count, 7);
+assert.deepEqual(preview.nodes.filter((node) => node.workflow_run_id !== opts.runId).map((node) => node.workflow_run_id),
+  ["continued-child", "explicit-child"]);
+const result = await timeTravel(adapter, { ...opts, expectedGeneration: preview.generation });
+assert.equal(result.success, true);
+assert.deepEqual(result.resetPlan, preview);
+for (const id of ["explicit-child", "continued-child"]) {
+  assert.equal((await adapter.getNode(id, opts.nodeId, 0)).state, "pending");
+}
+for (const id of ["forked-child", "unlabelled-fork", "newer-fork"]) {
+  assert.equal((await adapter.getNode(id, opts.nodeId, 0)).state, "finished");
+}
+process.exit(0);`;
+  const result = spawnSync("bun", ["-e", script], { cwd: fixture.root, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
 test("a generation race refuses a stale plan before resetting a node", async () => {
   const fixture = campaign();
   const plan = await previewSmithersReset({ projectRoot: fixture.root, smithersRunId: rootRunId, nodeId: "node:seed" });

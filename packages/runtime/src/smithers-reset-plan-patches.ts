@@ -118,15 +118,10 @@ export async function ultrafuzzPreviewReset(databasePath, opts) {
 }
 
 async function ultrafuzzReadPreviewSnapshot(db, opts) {
-  const rows = (sql, args) => db.query(sql).all(...args).map((row) => Object.fromEntries(
-    Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]),
-  ));
-  const adapter = {
-    getRun: async (id) => rows("SELECT * FROM _smithers_runs WHERE run_id = ?", [id])[0],
-    listNodes: async (id) => rows("SELECT * FROM _smithers_nodes WHERE run_id = ? ORDER BY rowid ASC", [id]),
-    listAttemptsForRun: async (id) => rows("SELECT * FROM _smithers_attempts WHERE run_id = ? ORDER BY started_at_ms ASC, node_id ASC, iteration ASC, attempt ASC", [id]),
-    listRuns: async (_limit, _status, _workflow, options) => rows("SELECT * FROM _smithers_runs WHERE parent_run_id = ?", [options.parentRunId]),
-  };
+  // Use the execution adapter's descendant, fork and continuation semantics.
+  // Constructing it does not migrate tables or load a target workflow.
+  const { SmithersDb } = await import("@smthrs/db/adapter");
+  const adapter = new SmithersDb(db);
   // One SQLite snapshot for every read, including dynamically added nodes and child runs.
   db.exec("BEGIN");
   let iteration = opts.iteration;
@@ -146,6 +141,18 @@ async function ultrafuzzAssertResetGeneration(adapter, opts, generation) {
   }
 }
 `;
+
+const originalChildDiscovery = `  const candidates = [];
+  if (typeof adapter.listRunDescendants === "function" && typeof adapter.getRun === "function") {
+    const descendants = await adapter.listRunDescendants(runId);
+    for (const descendant of descendants) {
+      if (descendant.runId === runId || (descendant.depth !== 1 && descendant.parentRunId !== runId)) continue;
+      const child = await adapter.getRun(descendant.runId);
+      if (child?.parentRunId === runId) candidates.push(child);
+    }
+  } else if (typeof adapter.listRuns === "function") {
+    candidates.push(...(await adapter.listRuns(1_000, undefined, undefined, { parentRunId: runId })));
+  }`;
 
 const originalSelection = `  const attempts = await adapter.listAttempts(runId, nodeId, iteration);
   const targetAttempt = selectAttempt(attempts, opts.attempt);
@@ -180,6 +187,18 @@ const originalSelection = `  const attempts = await adapter.listAttempts(runId, 
   });`;
 
 export const SMITHERS_RESET_PLAN_PATCHES: readonly SmithersCompatibilityPatch[] = [
+  {
+    id: "reset_plan_child_discovery",
+    packageName: "@smthrs/time-travel",
+    sourceRelativePath: "src/timetravel.js",
+    patchable: originalChildDiscovery,
+    // This is reset closure discovery, not a paginated UI listing. Both native
+    // execution and the snapshot adapter must see every eligible descendant.
+    patched: originalChildDiscovery
+      .replace("listRunDescendants(runId)", "listRunDescendants(runId, Number.MAX_SAFE_INTEGER)")
+      .replace("listRuns(1_000,", "listRuns(Number.MAX_SAFE_INTEGER,"),
+    upstreamAbsent: ["listRunDescendants(runId, Number.MAX_SAFE_INTEGER)"]
+  },
   {
     id: "reset_plan_helpers",
     packageName: "@smthrs/time-travel",

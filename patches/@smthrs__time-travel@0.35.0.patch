@@ -1,8 +1,25 @@
 diff --git a/src/timetravel.js b/src/timetravel.js
-index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d2344943b2a8e8d 100644
+index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..f170e2cf66957e399745364d91123db0ac6c957d 100644
 --- a/src/timetravel.js
 +++ b/src/timetravel.js
-@@ -235,6 +235,150 @@ async function resolveExistingChildResetPlans(adapter, childRun, seen, resetWhol
+@@ -142,14 +142,14 @@ function parseRunConfig(run) {
+ async function listOwnedChildRuns(adapter, runId) {
+   const candidates = [];
+   if (typeof adapter.listRunDescendants === "function" && typeof adapter.getRun === "function") {
+-    const descendants = await adapter.listRunDescendants(runId);
++    const descendants = await adapter.listRunDescendants(runId, Number.MAX_SAFE_INTEGER);
+     for (const descendant of descendants) {
+       if (descendant.runId === runId || (descendant.depth !== 1 && descendant.parentRunId !== runId)) continue;
+       const child = await adapter.getRun(descendant.runId);
+       if (child?.parentRunId === runId) candidates.push(child);
+     }
+   } else if (typeof adapter.listRuns === "function") {
+-    candidates.push(...(await adapter.listRuns(1_000, undefined, undefined, { parentRunId: runId })));
++    candidates.push(...(await adapter.listRuns(Number.MAX_SAFE_INTEGER, undefined, undefined, { parentRunId: runId })));
+   }
+   return candidates.filter((child) => {
+     const config = parseRunConfig(child);
+@@ -235,6 +235,145 @@ async function resolveExistingChildResetPlans(adapter, childRun, seen, resetWhol
   * @param {TimeTravelOptions} opts
   * @returns {Promise<TimeTravelResult>}
   */
@@ -122,15 +139,10 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d234494
 +}
 +
 +async function ultrafuzzReadPreviewSnapshot(db, opts) {
-+  const rows = (sql, args) => db.query(sql).all(...args).map((row) => Object.fromEntries(
-+    Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]),
-+  ));
-+  const adapter = {
-+    getRun: async (id) => rows("SELECT * FROM _smithers_runs WHERE run_id = ?", [id])[0],
-+    listNodes: async (id) => rows("SELECT * FROM _smithers_nodes WHERE run_id = ? ORDER BY rowid ASC", [id]),
-+    listAttemptsForRun: async (id) => rows("SELECT * FROM _smithers_attempts WHERE run_id = ? ORDER BY started_at_ms ASC, node_id ASC, iteration ASC, attempt ASC", [id]),
-+    listRuns: async (_limit, _status, _workflow, options) => rows("SELECT * FROM _smithers_runs WHERE parent_run_id = ?", [options.parentRunId]),
-+  };
++  // Use the execution adapter's descendant, fork and continuation semantics.
++  // Constructing it does not migrate tables or load a target workflow.
++  const { SmithersDb } = await import("@smthrs/db/adapter");
++  const adapter = new SmithersDb(db);
 +  // One SQLite snapshot for every read, including dynamically added nodes and child runs.
 +  db.exec("BEGIN");
 +  let iteration = opts.iteration;
@@ -153,7 +165,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d234494
  export async function timeTravel(adapter, opts) {
    const cleanReport = { blocking: [], revertible: [], warnings: [] };
    const runId = opts.runId;
-@@ -242,37 +386,11 @@ export async function timeTravel(adapter, opts) {
+@@ -242,37 +381,11 @@ export async function timeTravel(adapter, opts) {
    const iteration = opts.iteration ?? 0;
    const resetDependents = opts.resetDependents ?? true;
    const restoreVcs = opts.restoreVcs ?? true;
@@ -194,7 +206,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d234494
    const startedAtMs = nowMs();
    const lock = await acquireRewindLock(adapter, runId);
    if (!lock) {
-@@ -372,7 +490,7 @@ export async function timeTravel(adapter, opts) {
+@@ -372,7 +485,7 @@ export async function timeTravel(adapter, opts) {
          ),
        );
      }
@@ -203,7 +215,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d234494
      for (const plan of childResetPlans) {
        plan.attemptsByNode = new Map();
        for (const childNode of plan.nodes) {
-@@ -425,6 +543,8 @@ export async function timeTravel(adapter, opts) {
+@@ -425,6 +538,8 @@ export async function timeTravel(adapter, opts) {
            if (!stillHeld) {
              throw new Error(`Time-travel lease ownership was lost for ${runId} during database mutation.`);
            }
@@ -212,7 +224,7 @@ index cbb034cf4c54033ccc67ca5e337e58b8bcef926b..a89be7980ebeb1b5e6e1b3291d234494
            const frames = yield* adapter.listFrames(runId, 1_000_000);
            const cutoff = targetAttempt.startedAtMs;
            let lastValidFrameNo = -1;
-@@ -579,6 +699,7 @@ export async function timeTravel(adapter, opts) {
+@@ -579,6 +694,7 @@ export async function timeTravel(adapter, opts) {
        jjPointer,
        vcsRestored,
        resetNodes: resetNodeIds,
