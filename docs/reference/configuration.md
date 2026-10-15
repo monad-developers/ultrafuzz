@@ -361,15 +361,38 @@ start with `~` and suffix variants such as `:free` are valid. OpenRouter IDs
 must be non-empty, no longer than 256 characters, and contain no whitespace or
 control characters. Subscription auth is rejected.
 
-An OpenRouter HTTP 429 is recovered for up to two minutes with exponential
-backoff, a 30-second base-delay cap, and up to 25% jitter, while the caller's
-total timeout continues to bound the whole operation. Before substantive
+An OpenRouter HTTP 429 is recovered within a two-minute window with exponential
+backoff, a 30-second base-delay cap, and up to 25% jitter. Cumulative backoff
+across the entire invocation is also capped at two minutes; productive activity
+may refresh the recovery window but does not replenish this wait budget. The
+caller’s total timeout continues to bound the whole operation. A wait is refused
+if it would reach the node’s finalization reserve (one sixth of the timeout,
+rounded to whole seconds, at least one second and capped at five minutes).
+The reserve is taken from the configured timeout, not added to it. Subsecond
+standalone adapter timeouts reserve their entire allowance. Before substantive
 activity, the adapter can retry fresh. After Codex emits a substantive model,
 tool, command, or file event, it continues only through the exact Codex thread
 with `codex exec resume`; the original prompt is never replayed. Recovery fails
 closed if no stable thread ID is available or a resumed process reports a
 different ID. No new request starts at the recovery deadline; the last observed
 provider rate-limit error is returned instead.
+
+Retry notices and terminal diagnostics expose `providerRecovery`: the configured
+timeout and absolute deadline, elapsed time, `productiveRuntimeMs`, cumulative
+`backoffMs`, `backoffBudgetMs`, retry and rate-limit counts, remaining time,
+finalization reserve, and the latest observed session checkpoint. Productive
+runtime means elapsed time excluding adapter-managed backoff; provider-internal
+waits are not observable. Budget exhaustion reports `finalization-reserved` or
+`backoff-budget-exhausted` with these diagnostics instead of waiting for
+`PROCESS_TIMEOUT`. The same diagnostics are attached to adapter results/errors.
+Provider quota classification and reset information are preserved when recovery
+stops, so the scheduler can retain its existing quota-wait behavior.
+
+The checkpoint identifies the last substantive progress observed in a validated
+Codex session. In-attempt recovery reuses that exact session and workspace;
+replayed actions do not refresh its timestamp. This is not canonical artifact
+authority or a portable checkpoint across controller restarts. Existing portable
+checkpoint handling and stale-session safeguards still apply when a task resumes.
 
 ## Retry Policy
 
