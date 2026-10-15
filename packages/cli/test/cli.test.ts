@@ -1550,10 +1550,14 @@ async function assertStatusRenderingAndWatch(
   const statusText = await cli(project, ["status", runData.run_id, "--window", "5"], env);
   assert.equal(statusText.code, 0, statusText.stderr);
   assert.doesNotMatch(statusText.stdout, /smithers/iu);
-  assert.match(statusText.stdout, /^Status: running-healthy \(running\)$/mu);
+  assert.match(statusText.stdout, /^Status: running$/mu);
+  assert.match(statusText.stdout, /^Workflow: running-healthy \(running\)$/mu);
   assert.match(statusText.stdout, /^Run ended: no$/mu);
   assert.match(statusText.stdout, /^Report: pending$/mu);
-  assert.match(statusText.stdout, /^Progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu);
+  assert.match(
+    statusText.stdout,
+    /^Workflow progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu
+  );
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
   assert.match(statusText.stdout, /^Time on current step: \d+ minutes on project-discovery$/mu);
 
@@ -1955,7 +1959,8 @@ test("status observes an incomplete launch with a successful CLI envelope and un
   assert.match(data.reason, /Launcher liveness is unknown/u);
   const text = await cli(project, ["status", runId], env);
   assert.equal(text.code, 0, text.stderr);
-  assert.match(text.stdout, /Status: launch-incomplete \(pending\)/u);
+  assert.match(text.stdout, /^Status: pending$/mu);
+  assert.match(text.stdout, /^Workflow: launch-incomplete \(unsubmitted\)$/mu);
   assert.match(text.stdout, /progress and ETA are unavailable/u);
   assert.doesNotMatch(text.stdout, /Progress: 0%|ETA: 0|running-healthy/u);
 });
@@ -2074,8 +2079,9 @@ test("status surfaces quota parking with preserved attempts and the resume remed
   );
   const parked = await cli(project, ["status", runId], env);
   assert.equal(parked.code, 0, `${parked.stderr}\n${parked.stdout}`);
-  assert.match(parked.stdout, /^Status: waiting-quota \(running\)$/mu);
-  assert.match(parked.stdout, /^Reason: 2 task\(s\) quota-parked$/mu);
+  assert.match(parked.stdout, /^Status: running$/mu);
+  assert.match(parked.stdout, /^Workflow: waiting-quota \(running\)$/mu);
+  assert.match(parked.stdout, /^Workflow reason: 2 task\(s\) quota-parked$/mu);
   assert.match(
     parked.stdout,
     /^Quota: 4 node\(s\) parked \(attempts preserved\) — node:erc20-invariants, node:vault-invariants, node:oracle-invariants, \+1 more; no provider reset time — provider credit exhausted; restore credit, then run `ultrafuzz resume status-quota-parked`$/mu

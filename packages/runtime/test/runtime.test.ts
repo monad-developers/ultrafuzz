@@ -12957,6 +12957,57 @@ test("repeated observations leave an unchanged finished or orphaned run byte-ide
   }
 });
 
+test("getRunHealth retains product failure diagnostics after the workflow reports every task finished", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "finished-workflow-failed-product";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const status = currentStatusEnvelope(workflowRunId);
+  const data = status.data as Record<string, unknown>;
+  Object.assign(data, {
+    status: "finished",
+    verdict: "done",
+    reason: "run finished",
+    liveness: { state: "succeeded" },
+    finishedAtMs: 2_000
+  });
+  Object.assign(data.counts as Record<string, unknown>, {
+    finished: 3,
+    inProgress: 0,
+    pending: 0,
+    failed: 0,
+    total: 3
+  });
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ]),
+    status
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  // The runner finished, but its producer has no verified artifact publication.
+  // A subsequent poll must still explain that durable product failure.
+  for (let poll = 0; poll < 2; poll += 1) {
+    const health = await getRunHealth({ projectRoot: project, runId, env });
+    assert.equal(health.value?.status, "failed", JSON.stringify(health.diagnostics));
+    assert.equal(health.value?.verdict, "done");
+    assert.equal(health.value?.progress.percent, 100);
+    assert.notEqual(health.value?.report.verification, "verified");
+    const diagnostic = health.diagnostics.find((entry) => entry.code === "RUN_WORKFLOW_COMPLETION_DIVERGED");
+    assert.ok(diagnostic, JSON.stringify(health.diagnostics));
+    assert.match(diagnostic.message, /project-discovery \(failed\)/u);
+  }
+});
+
 test("an explicit synchronization keeps renewing a live run's controller lease", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

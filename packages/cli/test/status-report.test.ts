@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderReportStatusLines, shouldRefreshStatus } from "../src/status-report.js";
+import { renderExecutionStatusLines, renderReportStatusLines, shouldRefreshStatus } from "../src/status-report.js";
+
+test("a done workflow never replaces the product's failed status", () => {
+  assert.deepEqual(renderExecutionStatusLines({ status: "failed", verdict: "done", workflow_status: "finished" }), [
+    "Status: failed",
+    "Workflow: done (finished)"
+  ]);
+});
 
 test("watch stops at ended runs with unavailable reports and distinguishes attention stops", () => {
   assert.equal(shouldRefreshStatus({ ended: true, status: "failed", verdict: "failed" }), false);
