@@ -11535,6 +11535,10 @@ nodes:
   );
   assert.match(workflowSource, /const fullTaskPrompt = renderAgentPrompt/u);
   assert.match(workflowSource, /runtimeContext: task\.runtimeContext/u);
+  assert.match(workflowSource, /runtimeContext: task\.runtimeContext \+ "\\n\\n" \+ backendConcurrencyContext/u);
+  assert.ok(
+    workflowSource.includes(`renderBackendConcurrencyContext(${plan.value!.resolved_config.run.maxParallelAgents})`)
+  );
   assert.match(workflowSource, /operatorPrompt,/u);
 });
 
@@ -27000,6 +27004,61 @@ test("native continuation hands generated agents the run's TOML config, so Codex
     if (previous.key === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previous.key;
   }
+});
+
+test("backend concurrency follows run, resume, reset, refresh, and fork overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "backend-concurrency";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  // An inherited value must never override the operator-selected scheduler ceiling.
+  env.ULTRAFUZZ_MAX_CONCURRENCY = "32";
+  const concurrencyLog = path.join(project, "backend-concurrency.log");
+  logFakeRunnerUpVariable(env, "ULTRAFUZZ_MAX_CONCURRENCY", concurrencyLog);
+  const run = await startRun({ projectRoot: project, runId, maxConcurrency: 16, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  for (const options of [{}, { maxConcurrency: 8, resetNode: "node:project-discovery" }, { refreshController: true }]) {
+    const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.equal(resumed.value?.submitted, true);
+  }
+  env.SMITHERS_FAKE_FORKED_RUN_ID = "ultrafuzz-backend-concurrency-forked";
+  const forked = await forkRun({ projectRoot: project, runId, forkFrame: 44, maxConcurrency: 6, env });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.submitted, true);
+  env.SMITHERS_FAKE_FORKED_RUN_ID = "ultrafuzz-backend-concurrency-forked-again";
+  const inheritedFork = await forkRun({ projectRoot: project, runId, forkFrame: 44, env });
+  assert.equal(inheritedFork.ok, true, JSON.stringify(inheritedFork.diagnostics));
+  assert.equal(inheritedFork.value?.submitted, true);
+
+  assert.deepEqual(fs.readFileSync(concurrencyLog, "utf8").trim().split("\n"), ["16", "16", "8", "8", "6", "6"]);
+  // Fork's --input contains real newlines, so a command spans several log lines.
+  const schedulerLimits = [...fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").matchAll(/--max-concurrency (\d+)/gu)];
+  assert.deepEqual(
+    schedulerLimits.map((match) => match[1]),
+    ["16", "16", "8", "8", "6", "6"]
+  );
+  const state = readRunState(layoutForRunRoot(run.value!.run_root, runId));
+  assert.equal(state.concurrency.requested_concurrency, 6);
+});
+
+test("backend concurrency uses configured max_parallel_agents when no run flag is supplied", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = controllerRefreshTerminalEnv(project, "backend-concurrency-config");
+  const concurrencyLog = path.join(project, "backend-concurrency.log");
+  logFakeRunnerUpVariable(env, "ULTRAFUZZ_MAX_CONCURRENCY", concurrencyLog);
+  const run = await startRun({
+    projectRoot: project,
+    runId: "backend-concurrency-config",
+    runtimeOverrides: { maxParallelAgents: 3 },
+    env
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(concurrencyLog, "utf8"), "3\n");
 });
 
 test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs", async () => {

@@ -99,12 +99,17 @@ Use this configured invariant testing fuzzer timeout:
      require their CLIs.
 
 2. Resolve CPU allocation and the supervised timing budgets.
-   - Resolve available host parallelism exactly once with
-     `availableParallelism()` or the runtime's equivalent and reuse that value.
-   - Compute `workers = max(1, available_vcpus)`; the single final backend uses
-     the whole host instead of splitting it between competing backends.
-   - Record the deterministic cases in the plan: 1 vCPU means 1 worker; higher
-     counts use `available_vcpus` workers on the one backend.
+   - Read `available_vcpus`, `configured_concurrency_limit`, and the backend
+     worker limit from the appended Backend Concurrency context. The runtime
+     resolves available host parallelism once on the executing controller.
+   - Use `workers = max(1, min(available_vcpus, configured_concurrency_limit))`.
+     The operator's configured limit takes precedence over whole-host profile
+     defaults. A 32-vCPU host capped at 16 uses 16 workers; 8 available vCPUs
+     with the same cap use 8; 1 vCPU uses 1. Never raise the limit by probing
+     the host CPU count again.
+   - Record `available_vcpus` and the capped `workers` in the plan. Also record
+     `configured_concurrency_limit` when the pinned plan schema declares it
+     (historical pinned schemas may omit this field).
    - After validation and the Recon smoke, reserve the complete
      `{{invariant_testing_fuzzer_timeout}}` seconds for the supervised Recon
      process. Do not subtract setup, parsing, shutdown, reproducer, or artifact

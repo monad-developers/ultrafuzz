@@ -4359,8 +4359,7 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
   } = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
-    env: input.env,
-    environmentVariableNames: input.environmentVariableNames
+    ...smithersConcurrencyEnvironment(input)
   });
   writeRuntimeDocument(
     path.join(path.dirname(input.compiled.inputPath), "submission.json"),
@@ -4380,6 +4379,21 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     command: displayCommand,
     stdout,
     stderr
+  };
+}
+
+/** The backend prompt and the detached scheduler must receive the same operator-selected ceiling. */
+function smithersConcurrencyEnvironment(input: {
+  maxConcurrency?: number;
+  env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
+}) {
+  if (input.maxConcurrency === undefined) {
+    return { env: input.env, environmentVariableNames: input.environmentVariableNames };
+  }
+  return {
+    env: { ...input.env, ULTRAFUZZ_MAX_CONCURRENCY: String(input.maxConcurrency) },
+    environmentVariableNames: [...(input.environmentVariableNames ?? []), "ULTRAFUZZ_MAX_CONCURRENCY"]
   };
 }
 
@@ -5114,8 +5128,7 @@ export async function runSmithersLifecycleCommand(input: {
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ],
         projectRoot: input.projectRoot,
-        env: input.env,
-        environmentVariableNames: input.environmentVariableNames
+        ...smithersConcurrencyEnvironment(input)
       });
     } catch (error) {
       if (error instanceof Error && resetMarkerPath !== undefined) {
@@ -5188,8 +5201,7 @@ export async function runSmithersLifecycleCommand(input: {
     const resumeResult = await execSmithersCli({
       args: resumeCommand,
       projectRoot: input.projectRoot,
-      env: input.env,
-      environmentVariableNames: input.environmentVariableNames
+      ...smithersConcurrencyEnvironment(input)
     });
     return {
       stdout: resumeResult.stdout,
@@ -5232,8 +5244,7 @@ export async function runSmithersLifecycleCommand(input: {
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
-    env: input.env,
-    environmentVariableNames: input.environmentVariableNames
+    ...smithersConcurrencyEnvironment(input)
   });
   return {
     ...result,
@@ -7994,6 +8005,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
     __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
+    __ULTRAFUZZ_MAX_PARALLEL_AGENTS__: JSON.stringify(config.run.maxParallelAgents),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
   });

@@ -106,6 +106,7 @@ const {
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
   readWorkspacePreparationAuthority,
+  renderBackendConcurrencyContext,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
   runSummaryUsage,
@@ -350,6 +351,9 @@ function plannedOutputSchema(output: (typeof taskSpecs)[number]["outputs"][numbe
 }
 
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
+// The launcher supplies the current run/resume/fork ceiling. Resolve CPUs here, once,
+// so static and dynamically materialized tasks share the executing host's allocation.
+const backendConcurrencyContext = renderBackendConcurrencyContext(__ULTRAFUZZ_MAX_PARALLEL_AGENTS__);
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
 const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
@@ -9239,7 +9243,7 @@ export default smithers((ctx) => {
           ]);
           const inputTask = inputTasks.get(task.id);
           const fullTaskPrompt = renderAgentPrompt({
-            runtimeContext: task.runtimeContext,
+            runtimeContext: task.runtimeContext + "\n\n" + backendConcurrencyContext,
             operatorPrompt,
             taskPrompt: promptForTask(task, inputTask),
             frictionLog: frictionLogPaths(task)
