@@ -201,6 +201,7 @@
     "failure_category": {
       "enum": [
         "executor-error",
+        "tool-unavailable",
         "timeout",
         "canceled",
         "dependency",
@@ -324,6 +325,7 @@
           "failure_category": {
             "enum": [
               "executor-error",
+              "tool-unavailable",
               "timeout",
               "canceled",
               "dependency",

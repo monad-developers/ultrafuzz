@@ -611,7 +611,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
             launcherKept
               ? `resume could not re-verify the run's trusted Ultrafuzz CLI (tasks still call ${launcher}, and their preflight-json-validator step fails while that launcher cannot verify itself)`
-              : `resume could not re-verify the run's trusted Ultrafuzz CLI (${launcher} does not exist, so tasks call whatever \`ultrafuzz\` is on PATH)`,
+              : `resume could not re-verify the run's trusted Ultrafuzz CLI (${launcher} does not exist; refreshed task preflights require this launcher and fail with TOOL_UNAVAILABLE)`,
             error
           )
         );

@@ -24141,6 +24141,97 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   );
 });
 
+for (const phase of ["preparation", "agent", "verifier"] as const) {
+  test(`syncRun preserves typed TOOL_UNAVAILABLE ${phase} failures in durable provenance`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `sync-tool-unavailable-${phase}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const failedTask = `${phase === "preparation" ? "prepare" : phase === "verifier" ? "verify" : "node"}:project-discovery`;
+    const message =
+      "tool_unavailable: JSON validator preflight could not launch ultrafuzz at its trusted path (ENOENT)";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        steps: [
+          ...(phase === "agent"
+            ? []
+            : [
+                {
+                  id: "node:project-discovery",
+                  state: phase === "preparation" ? ("skipped" as const) : ("finished" as const),
+                  attempt: 1
+                }
+              ]),
+          { id: failedTask, state: "failed", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        ...(phase === "verifier"
+          ? [
+              { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+              { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+            ]
+          : []),
+        { type: "NodeStarted", nodeId: failedTask, attempt: 1 },
+        {
+          type: "NodeFailed",
+          nodeId: failedTask,
+          attempt: 1,
+          error: {
+            code: "TOOL_UNAVAILABLE",
+            message,
+            details: { failureRetryable: false }
+          }
+        }
+      ]),
+      ...(phase === "preparation"
+        ? {}
+        : {
+            attemptSelections: {
+              "node:project-discovery": { 1: { chainIndex: 0, profileId: "default", model: "gpt-5.5" } }
+            }
+          })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const sync = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(sync.value?.status, "failed");
+    const state = readRunState(path.join(run.value.run_root, "state.json"));
+    const node = state.nodes["project-discovery"];
+    assert.ok(node);
+    assert.equal(node.status, "failed");
+    assert.equal(node.timed_out, false);
+    assert.equal(node.last_error, message);
+    assert.ok(node.provenance && "failure" in node.provenance);
+    assert.deepEqual(node.provenance.failure, {
+      category: "tool-unavailable",
+      causal_task_id: failedTask,
+      causal_failure_category: "tool-unavailable",
+      dependent_task_ids: []
+    });
+    if (phase !== "agent") assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "TOOL_UNAVAILABLE"));
+    const ledger = fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8").trim();
+    const entries =
+      ledger === ""
+        ? []
+        : ledger.split("\n").map((line) => JSON.parse(line) as { outcome: string; failure_category: string });
+    assert.deepEqual(
+      entries.map((entry) => [entry.outcome, entry.failure_category]),
+      phase === "preparation" ? [] : [["failed", "tool-unavailable"]]
+    );
+    // A second synchronization re-reads the new category through the durable state/ledger schemas.
+    const repeated = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+    assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8").trim(), ledger);
+  });
+}
+
 test("syncRun excludes a pre-agent terminal failure from the model-attempt ledger", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

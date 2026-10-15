@@ -3269,6 +3269,7 @@ test("node attempt ledger shape stays structural while byte and ordering rules r
     failure_message: "artifact contract rejected findings.json"
   };
   assert.equal(validateNodeAttemptLedgerEntry(entry).ok, true);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_category: "tool-unavailable" }).ok, true);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, node_id: "node:strategy-1" }).ok, false);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "" }).ok, false);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, failure_message: "🙂".repeat(251) }).ok, true);
