@@ -108,6 +108,7 @@ const {
   readWorkspacePreparationAuthority,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
+  runProcessGroup,
   runSummaryUsage,
   smithersTaskAgentId,
   topologyRuntimeBudgetForTimeout,
@@ -2443,13 +2444,13 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
     if (candidate === undefined) return [];
     const agents = Array.isArray(candidate) ? candidate : [candidate];
     return agents.map((agent, agentIndex) =>
-      artifactAwareAgent(task, chainIndex, originalPrompt, agent, () => {
+      artifactAwareAgent(task, chainIndex, originalPrompt, agent, async () => {
         // Smithers can persist prepare:* and then construct this agent from a
         // fresh controller process. Rebuild authority only when this process
         // has no admission; stable task identities preserve the exact original
         // snapshot epoch across ordinary rerenders and chain candidates.
         if (!dependencyArtifactAdmissionsByTask.has(task.attemptId)) {
-          prepareArtifactMirror(task);
+          await prepareArtifactMirrorForAgent(task);
         }
         assertDependencyArtifactAdmissionCurrent(task);
         const admitted = baseAgentForProfile(task, profile, admittedDependencyArtifactDirs(task));
@@ -2477,7 +2478,7 @@ function artifactAwareAgent(
   chainIndex: number,
   originalPrompt: string,
   agent: AgentLike,
-  admittedAgent: () => AgentLike = () => agent
+  admittedAgent: () => AgentLike | Promise<AgentLike> = () => agent
 ): AgentLike {
   const attemptedGenerations = new Set<number>();
   let executionAgent: AgentLike | undefined;
@@ -2600,7 +2601,7 @@ function artifactAwareAgent(
       : {
           preflight: async (args) => {
             try {
-              executionAgent ??= admittedAgent();
+              executionAgent ??= await admittedAgent();
               assertDependencyArtifactAdmissionCurrent(task);
               if (executionAgent.preflight === undefined) {
                 throw new Error("agent factory changed its preflight capability");
@@ -2691,7 +2692,7 @@ function artifactAwareAgent(
         ? authoritativeFinalReportPromptAuthorityArgs(task, authoritativeFinalReportRunMetadataArgs(task, retryArgs))
         : retryArgs;
       try {
-        executionAgent ??= admittedAgent();
+        executionAgent ??= await admittedAgent();
         assertDependencyArtifactAdmissionCurrent(task);
         assertFinalReportPromptAuthorityUnchanged(task);
         // Smithers requires a durable object output for every task, but an
@@ -2743,7 +2744,10 @@ function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string 
   return path.dirname(candidate) === path.resolve(artifactDir) ? candidate : undefined;
 }
 
-function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number], runtime?: FinalReportTaskRuntime): Promise<void> {
+async function resetTaskArtifactsForRetry(
+  task: (typeof taskSpecs)[number],
+  runtime?: FinalReportTaskRuntime
+): Promise<void> {
   // The task's prompt is the `prompt.rendered.md` directly in its artifact root.
   // The next attempt and every later engine read that file, so retry cleanup
   // must preserve it, edits included. A prompt path anywhere else is not a
@@ -2797,7 +2801,7 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number], runtime?: 
     }
   }
   restoreWorkspacePatchPreparation(task, workspaceRoot);
-  prepareArtifactMirror(task, { replayWorkspacePatches: false, evidenceMode: "require" });
+  await prepareArtifactMirrorForAgent(task, { replayWorkspacePatches: false, evidenceMode: "require" });
   materializePromptArtifactAuthority(task);
   return materializeFinalReportRunMetadataAuthority(task, runtime);
 }
@@ -3115,6 +3119,9 @@ function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
       `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
+    if (error instanceof Error && "code" in error && error.code === "PROCESS_TIMEOUT") {
+      Object.assign(wrapped, { code: error.code });
+    }
     throw isNonRetryableFailure(error) ? nonRetryableFailure(wrapped) : wrapped;
   }
 }
@@ -3180,20 +3187,10 @@ function prepareArtifactMirror(
   }
   preparationStep(task.attemptId, "preserve-pinned-source-proof", () => preservePinnedSourceProof(task));
   const schemaDirectory = path.join(workspaceRoot, ".ultrafuzz", "schemas");
-  const schemaBundle = preparationStep(task.attemptId, "materialize-prompt-schemas", () => {
+  preparationStep(task.attemptId, "materialize-prompt-schemas", () => {
     const bundle = plannedSchemaBundle();
     materializePromptSchemas(schemaDirectory, bundle);
-    return bundle;
   });
-  // Only a task with a schema-backed output runs the agent-facing validator; a run whose plan has none
-  // has no planned bundle for that validator to report. `pinnedSubmodules: "verify"` is the post-agent
-  // verify pass. It checks outputs in-process and never runs the agent-facing CLI, so a CLI cold start
-  // there could only fail its zero-retry task.
-  if (options.pinnedSubmodules !== "verify" && task.outputs.some((output) => isSchemaBackedOutput(output))) {
-    preparationStep(task.attemptId, "preflight-json-validator", () =>
-      preflightJsonValidator(schemaDirectory, schemaBundle)
-    );
-  }
   preparationStep(task.attemptId, "assert-task-inputs", () =>
     assertTaskInputs(task, workspaceRoot, options.pinnedSubmodules !== "verify")
   );
@@ -3260,6 +3257,27 @@ function prepareArtifactMirror(
   return { prepared: true };
 }
 
+async function prepareArtifactMirrorForAgent(
+  task: (typeof taskSpecs)[number],
+  options: Parameters<typeof prepareArtifactMirror>[1] = {}
+): Promise<z.infer<typeof preparationOutput>> {
+  const result = prepareArtifactMirror(task, options);
+  // The post-agent verifier stays synchronous and only validates artifacts in-process.
+  if (task.outputs.some((output) => isSchemaBackedOutput(output))) {
+    try {
+      await preflightJsonValidator(
+        path.join(realpathSync(task.workspacePath), ".ultrafuzz", "schemas"),
+        plannedSchemaBundle()
+      );
+    } catch (error) {
+      preparationStep(task.attemptId, "preflight-json-validator", () => {
+        throw error;
+      });
+    }
+  }
+  return result;
+}
+
 /**
  * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
@@ -3276,16 +3294,24 @@ const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
 // with the run's planned schema bundle, neither of which varies by task: `materializePromptSchemas`
 // has already digest-checked each workspace's schema copy. One success per engine process is enough.
 // Re-spawning it in every prepare and attempt reset only added CLI cold starts that could fail an attempt.
-let jsonValidatorPreflightPassed = false;
+let jsonValidatorPreflight: Promise<void> | undefined;
 
-function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaBundle): void {
-  if (jsonValidatorPreflightPassed) return;
+function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaBundle): Promise<void> {
+  // Share an in-flight launch now that preparation yields to the engine. Failed
+  // probes remain retryable by a later caller; only a validated success is cached.
+  return (jsonValidatorPreflight ??= runJsonValidatorPreflight(schemaDirectory, bundle).catch((error: unknown) => {
+    jsonValidatorPreflight = undefined;
+    throw error;
+  }));
+}
+
+async function runJsonValidatorPreflight(schemaDirectory: string, bundle: ArtifactSchemaBundle): Promise<void> {
   const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
   if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
   let stdout: string;
   const startedAt = Date.now();
   try {
-    stdout = execFileSync(
+    ({ stdout } = await runProcessGroup(
       "ultrafuzz",
       [
         "json",
@@ -3296,13 +3322,17 @@ function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaB
         artifactValidatorSmokeFixturePath(),
         "--json"
       ],
-      { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS, windowsHide: true }
-    );
+      { maxBuffer: 1024 * 1024, timeoutMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS }
+    ));
   } catch (error) {
-    throw new Error(
-      `artifact-contract failure: JSON validator preflight failed after ${Date.now() - startedAt}ms against a ${JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS}ms budget (only the launcher is signalled on timeout, and its grandchild CLI holds the inherited pipes open, so elapsed can overrun the budget): ${error instanceof Error ? error.message : String(error)}`,
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    const deadline = code === "PROCESS_TIMEOUT" ? ` against a ${JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS}ms budget` : "";
+    const wrapped = new Error(
+      `artifact-contract failure: JSON validator preflight failed after ${Date.now() - startedAt}ms${deadline}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
+    if (code === "PROCESS_TIMEOUT") Object.assign(wrapped, { code });
+    throw wrapped;
   }
   try {
     // The run's own validator must report the schema the host checks this run's artifacts against,
@@ -3318,7 +3348,6 @@ function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaB
       cause: error
     });
   }
-  jsonValidatorPreflightPassed = true;
 }
 
 function taskPublishesWorkspacePatch(task: (typeof taskSpecs)[number]): boolean {
@@ -9269,7 +9298,7 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => prepareArtifactMirror(task)}
+                {() => prepareArtifactMirrorForAgent(task)}
               </Task>
               <Task
                 id={task.id}

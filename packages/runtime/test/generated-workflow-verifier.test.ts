@@ -439,7 +439,7 @@ function loadJsonValidatorPreflight(
     bundle?: ReturnType<typeof installedBundle>;
   } = {}
 ): {
-  preflight(): void;
+  preflight(): Promise<void>;
   observedTimeoutMs(): number | undefined;
   spawnCount(): number;
   budgetMs: number;
@@ -456,7 +456,7 @@ function loadJsonValidatorPreflight(
   const loaded = new Function(
     "ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256",
     "artifactValidatorSmokeFixturePath",
-    "execFileSync",
+    "runProcessGroup",
     "parseJsonValidatorPreflightSuccessEnvelope",
     "path",
     `${helper}; return {
@@ -466,15 +466,18 @@ function loadJsonValidatorPreflight(
   )(
     ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
-    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
+    async (_file: string, _args: readonly string[], spawnOptions: { timeoutMs?: number }) => {
       spawns += 1;
-      observedTimeout = spawnOptions.timeout;
+      observedTimeout = spawnOptions.timeoutMs;
       if (options.failure !== undefined) throw options.failure;
-      return options.stdout ?? "{}";
+      return { stdout: options.stdout ?? "{}", stderr: "" };
     },
     options.parse ?? (() => undefined),
     path
-  ) as { preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): void; budgetMs: number };
+  ) as {
+    preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): Promise<void>;
+    budgetMs: number;
+  };
   return {
     preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas"), options.bundle ?? installedBundle()),
     observedTimeoutMs: () => observedTimeout,
@@ -747,7 +750,7 @@ function loadTaskPromptPathForArtifactReset(): (
 ) => string | undefined {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function taskPromptPathForArtifactReset");
-  const helperEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", helperStart);
+  const helperEnd = source.indexOf("\n\nasync function resetTaskArtifactsForRetry", helperStart);
   assert.ok(helperStart >= 0, source);
   assert.ok(helperEnd > helperStart, source);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
@@ -777,7 +780,7 @@ function loadCanonicalTaskArtifactRetryReset(): (
 ) => void {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const selectorStart = source.indexOf("function taskPromptPathForArtifactReset");
-  const selectorEnd = source.indexOf("\n\nfunction resetTaskArtifactsForRetry", selectorStart);
+  const selectorEnd = source.indexOf("\n\nasync function resetTaskArtifactsForRetry", selectorStart);
   const resetStart = source.indexOf("function resetTaskArtifactContents");
   const resetEnd = source.indexOf("\n\nfunction isMissingPathError", resetStart);
   const resolverStart = source.indexOf("function resolveRegularArtifactFile");
@@ -5811,7 +5814,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
   assert.match(
     source,
-    /preflightJsonValidator\(schemaDirectory, schemaBundle\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
+    /"assert-task-inputs", \(\) =>\s*assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
   );
   assert.match(
     source,
@@ -5981,7 +5984,7 @@ test("rerenders retain one dependency admission epoch and fresh modules reauthen
     `${source.slice(reconciliationStart, reconciliationEnd)}
 ${source.slice(admissionStart, admissionEnd)}
 ${source.slice(agentStart, agentEnd)}
-function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
+function prepareArtifactMirrorForAgent(task: (typeof taskSpecs)[number]): void {
   counters.preparations += 1;
   assertTaskInputs(task, task.workspacePath);
 }`,
@@ -6049,7 +6052,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
         "frictionLogAddDir",
         `${emitted}; return {
           prepare(task) {
-            prepareArtifactMirror(task);
+            prepareArtifactMirrorForAgent(task);
           },
           agent(task) {
             return agentForTask(task, "prompt");
@@ -6124,9 +6127,9 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
           _chainIndex: number,
           _prompt: string,
           _metadataAgent: unknown,
-          admittedAgent: () => { preflight?: (args: unknown) => Promise<unknown> }
+          admittedAgent: () => Promise<{ preflight?: (args: unknown) => Promise<unknown> }>
         ) => ({
-          preflight: async (args: unknown) => admittedAgent().preflight?.(args),
+          preflight: async (args: unknown) => (await admittedAgent()).preflight?.(args),
           generate: async () => ({ summary: "ok" })
         }),
         // An enabled friction log's entry directory reaches every agent instance, after its other roots.
@@ -6619,7 +6622,7 @@ test("the generated goal-search census counts a lane's findings validated agains
   );
 });
 
-test("generated validator preflight expects the run's planned schema identity, not this build's", () => {
+test("generated validator preflight expects the run's planned schema identity, not this build's", async () => {
   const installed = installedBundle();
   const findings = installed.registry.find((entry) => entry.filename === "findings.schema.json");
   assert.ok(findings);
@@ -6647,9 +6650,9 @@ test("generated validator preflight expects the run's planned schema identity, n
   const launchValidator = envelope({ sha256: sealedFindings.sha256, bundle_sha256: sealed.sha256 });
   const preflight = (stdout: string) =>
     loadJsonValidatorPreflight({ stdout, bundle: sealed, parse: parseJsonValidatorPreflightSuccessEnvelope });
-  assert.doesNotThrow(() => preflight(launchValidator).preflight());
+  await assert.doesNotReject(() => preflight(launchValidator).preflight());
   // A validator reporting this build's bundle does not validate with the schemas the host checks.
-  assert.throws(
+  await assert.rejects(
     () => preflight(envelope({ sha256: findings.sha256, bundle_sha256: installed.sha256 })).preflight(),
     (error: unknown) =>
       error instanceof Error &&
@@ -6658,8 +6661,8 @@ test("generated validator preflight expects the run's planned schema identity, n
   );
 });
 
-test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {
-  const timedOut = Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" });
+test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", async () => {
+  const timedOut = Object.assign(new Error("process exceeded its execution budget"), { code: "PROCESS_TIMEOUT" });
   const harness = loadJsonValidatorPreflight({ failure: timedOut });
 
   // #1026: `"ultrafuzz"` is the trusted launcher, whose own cold start measured 33.8-35.6 s at the
@@ -6669,17 +6672,18 @@ test("generated validator preflight budgets a contended CLI start and reports th
   assert.ok(harness.budgetMs >= 120_000, String(harness.budgetMs));
   assert.ok(harness.budgetMs <= 600_000, String(harness.budgetMs));
 
-  assert.throws(
+  await assert.rejects(
     () => harness.preflight(),
     (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.equal(harness.observedTimeoutMs(), harness.budgetMs);
       assert.equal(error.cause, timedOut);
+      assert.equal((error as Error & { code?: string }).code, "PROCESS_TIMEOUT");
       // `ETIMEDOUT` alone proves only that the budget was passed, never by how much. The elapsed
       // reading has to survive the ledger's 1000-byte cap to be readable in the published row.
       assert.match(error.message, /^artifact-contract failure: JSON validator preflight failed after \d+ms /u);
       assert.match(error.message, new RegExp(`against a ${harness.budgetMs}ms budget`, "u"));
-      assert.ok(error.message.endsWith(": spawnSync ultrafuzz ETIMEDOUT"), error.message);
+      assert.ok(error.message.endsWith(": process exceeded its execution budget"), error.message);
       const reported = `prepare:audit-final-report failed at step preflight-json-validator: ${error.message}`;
       assert.equal(normalizeNodeAttemptFailureMessage(reported), reported);
       return true;
@@ -6687,21 +6691,56 @@ test("generated validator preflight budgets a contended CLI start and reports th
   );
 });
 
-test("generated validator preflight spawns the CLI once per engine process and never remembers a failure", () => {
+test("generated validator preflight shares concurrent launches and never remembers a failure", async () => {
   // One engine process runs every prepare and agent-attempt reset. The CLI answer does not depend on
   // the task, so only the first success spawns it.
   const harness = loadJsonValidatorPreflight();
-  harness.preflight();
-  harness.preflight();
-  harness.preflight();
+  await Promise.all([harness.preflight(), harness.preflight(), harness.preflight()]);
+  await harness.preflight();
   assert.equal(harness.spawnCount(), 1);
 
   const failing = loadJsonValidatorPreflight({
-    failure: Object.assign(new Error("spawnSync ultrafuzz ETIMEDOUT"), { code: "ETIMEDOUT" })
+    failure: Object.assign(new Error("process exceeded its execution budget"), { code: "PROCESS_TIMEOUT" })
   });
-  assert.throws(() => failing.preflight(), /JSON validator preflight failed/u);
-  assert.throws(() => failing.preflight(), /JSON validator preflight failed/u);
+  await assert.rejects(() => failing.preflight(), /JSON validator preflight failed/u);
+  await assert.rejects(() => failing.preflight(), /JSON validator preflight failed/u);
   assert.equal(failing.spawnCount(), 2, "a failed preflight must be retried by the next caller");
+});
+
+test("generated validator preflight does not describe launch or exit failures as deadline failures", async () => {
+  for (const code of ["ENOENT", "EACCES", "PROCESS_EXIT"]) {
+    const failure = Object.assign(new Error(`command failed: ${code}`), { code });
+    const harness = loadJsonValidatorPreflight({ failure });
+    await assert.rejects(harness.preflight(), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.cause, failure);
+      assert.doesNotMatch(error.message, /timeout|budget|launcher is signalled/u);
+      assert.notEqual((error as Error & { code?: string }).code, "PROCESS_TIMEOUT");
+      return true;
+    });
+  }
+});
+
+test("generated preparation retains a real preflight deadline code through its step wrapper", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function preparationStep");
+  const helperEnd = source.indexOf("\n\nfunction prepareArtifactMirror", helperStart);
+  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const step = new Function("isNonRetryableFailure", `${helper}; return preparationStep;`)(() => false) as (
+    attemptId: string,
+    step: string,
+    run: () => never
+  ) => never;
+  const deadline = Object.assign(new Error("preflight deadline"), { code: "PROCESS_TIMEOUT" });
+  assert.throws(
+    () =>
+      step("fixture", "preflight-json-validator", () => {
+        throw deadline;
+      }),
+    { code: "PROCESS_TIMEOUT", cause: deadline }
+  );
 });
 
 test("generated agent prompt inserts literal braces from task and operator prompts verbatim", () => {
@@ -10284,7 +10323,6 @@ test("generated Smithers preparation names its failing step and carries a retry 
     "hydrate-pinned-submodules",
     "preserve-pinned-source-proof",
     "materialize-prompt-schemas",
-    "preflight-json-validator",
     "assert-task-inputs",
     "materialize-workspace-patch-dependencies",
     "require-invariant-suite-snapshot",
@@ -10301,6 +10339,8 @@ test("generated Smithers preparation names its failing step and carries a retry 
   for (const step of steps) {
     assert.match(preparation, new RegExp(`preparationStep\\(task\\.attemptId, "${step}", \\(\\) =>`, "u"), step);
   }
+  assert.match(preparation, /await preflightJsonValidator\(/u);
+  assert.match(preparation, /preparationStep\(task\.attemptId, "preflight-json-validator", \(\) =>/u);
 
   // #949: retry-failed reopens a producer onto its durable worktree, which can still contain that
   // producer's earlier source output. Restore the runtime-owned pre-agent tree before replaying the
