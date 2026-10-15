@@ -224,7 +224,7 @@ export function checkpointJson(directory: string, name: string, value: unknown):
   }
 }
 
-export interface EvidenceEntry {
+interface EvidenceEntry {
   path: string;
   sha256: string | null;
   size: number;
