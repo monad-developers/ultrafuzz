@@ -44,3 +44,10 @@ export function renderReportStatusLines(value: Pick<RunHealthValue, "ended" | "r
     ...(report.json_path === null ? [] : [`Report JSON: ${report.json_path}`])
   ];
 }
+
+/** Product lifecycle, workflow execution, and verified report completion are separate observations. */
+export function renderExecutionStatusLines(
+  value: Pick<RunHealthValue, "status" | "verdict" | "workflow_status">
+): string[] {
+  return [`Status: ${value.status}`, `Workflow: ${value.verdict} (${value.workflow_status})`];
+}

@@ -495,18 +495,28 @@ hash when auditing a continuation.
 
 ```text
 Run: <run-id>
-Status: running-healthy (running)
+Status: running
+Workflow: running-healthy (running)
 Run ended: no
 Report: pending
 Report reason: The run has not ended.
 Report completion: UNKNOWN
 Report verification: unknown
-Reason: 1 running, 2 finished in last 10m
-Progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
+Workflow reason: 1 running, 2 finished in last 10m
+Workflow progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
 ETA: 20 minutes
 Time on current step: 10 minutes on stateful-invariant-campaign
 Pace: 4 finished in the last 10m
 ```
+
+`Status` is the recorded Ultrafuzz lifecycle state. `Workflow` and `Workflow progress`
+describe runner execution, including preparation and verifier tasks. A finished workflow
+or 100% workflow progress does not establish a complete verified report; read `Report
+completion` and `Report verification` separately. If a finished runner reports no failed
+tasks while Ultrafuzz has not succeeded and retains unsuccessful product nodes, status emits
+`RUN_WORKFLOW_COMPLETION_DIVERGED` with a bounded list of their recorded failure reasons.
+These records can be stale when synchronization is unavailable; inspect the product
+state before selecting a retry or reset.
 
 A poll that succeeds with diagnostics, such as a `WORKFLOW_DEADLINE_CANCEL_FAILED`
 or `WORKFLOW_STATE_SYNC_SKIPPED` warning, prints each one on stdout after these
