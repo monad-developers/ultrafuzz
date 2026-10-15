@@ -643,13 +643,28 @@ test("doctor reports install posture in human and JSON output", async (t) => {
   assert.match(human.stdout + human.stderr, /^Workflow engine:$/mu);
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
   assert.match(human.stdout + human.stderr, /- latest published stable: /u);
-  assert.match(human.stdout + human.stderr, /- compatibility patches: local delegation .*detached snapshot transfer /u);
-  // Every tracked workaround has to reach the operator, not just the first one.
-  // The two resume-durability patches are the ones whose absence silently costs
-  // durable resume progress, so assert them by name.
-  assert.match(human.stdout + human.stderr, /- compatibility patches: .*supervisor descriptor /u);
-  assert.match(human.stdout + human.stderr, /- compatibility patches: .*terminal state restore /u);
-  assert.match(human.stdout + human.stderr, /- compatibility patches: .*resume hydration /u);
+  const compatibilityPatches = /^- compatibility patches: (.+)$/mu.exec(human.stdout + human.stderr)?.[1]?.split(", ");
+  assert.ok(compatibilityPatches, "doctor must list the installed compatibility patches");
+  // Every tracked workaround has to reach the operator regardless of list order.
+  // Keep the delegation and resume-durability checks alongside the reset-plan patches.
+  for (const patch of [
+    "reset plan child discovery",
+    "reset plan helpers",
+    "reset plan selection",
+    "reset plan children",
+    "reset plan guard",
+    "reset plan result",
+    "reset plan cli options",
+    "reset plan cli preview",
+    "reset plan cli generation",
+    "local delegation",
+    "detached snapshot transfer",
+    "supervisor descriptor",
+    "terminal state restore",
+    "resume hydration"
+  ]) {
+    assert.ok(compatibilityPatches.includes(`${patch} applied`), `doctor must report ${patch} as applied`);
+  }
   assert.match(human.stdout + human.stderr, /^- recon: missing from execution environment$/mu);
   // The scaffold's opt-in Kimi profile is configured but not selected by the topology.
   assert.match(human.stdout + human.stderr, /^- kimi: missing from execution environment \(not required\)$/mu);
