@@ -513,7 +513,7 @@ Pace: 4 finished in the last 10m
 describe runner execution, including preparation and verifier tasks. A finished workflow
 or 100% workflow progress does not establish a complete verified report; read `Report
 completion` and `Report verification` separately. If a finished runner reports no failed
-tasks while Ultrafuzz retains unsuccessful product nodes, status emits
+tasks while Ultrafuzz has not succeeded and retains unsuccessful product nodes, status emits
 `RUN_WORKFLOW_COMPLETION_DIVERGED` with a bounded list of their recorded failure reasons.
 These records can be stale when synchronization is unavailable; inspect the product
 state before selecting a retry or reset.
