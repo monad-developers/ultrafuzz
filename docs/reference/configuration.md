@@ -168,15 +168,28 @@ parent workflow's limits remain authoritative. Set the value to zero to retain
 the original single-deadline behavior; historical sealed configs without this
 field also keep that behavior.
 
-The wrapper saves bounded raw logs (16 MiB per stream), backend evidence (up to
-512 MiB and 10,000 entries per artifact root), the preliminary campaign plan,
+The runtime supervisor saves bounded raw logs (16 MiB per stream), backend evidence (up to
+512 MiB and 10,000 entries in the complete checkpoint), the preliminary campaign plan,
 and a validated workspace patch under the run's `backend-checkpoints` directory
 before returning. Reuse is bound to the task, source revision, prompt and
 authenticated dependency markers, so changed inputs require fresh execution.
+Only an actual runtime-owned backend launch and successful exit admits grace;
+task-writable policy or receipt files cannot declare completion. The wrapper is
+an IPC client: its exit, disconnect, or SIGKILL cancels the runtime-owned process
+group, as do the original execution deadline and operator cancellation.
+Receipts are authenticated with a process-private key and bind the complete
+checkpoint inventory and SHA-256 contents, including logs and workspace patches.
+Missing, changed, extra, symlinked or hard-linked evidence fails closed before
+retry restoration. Writes use descriptor-anchored traversal and atomic staging,
+without following destination links; this feature requires Linux `/proc/self/fd`
+support. Set grace to zero on other hosts to keep single-deadline execution.
 These are unverified inputs, not findings or successful producer outputs.
-If finalization times out, an unchanged task retry restores that evidence and
+If finalization times out, an unchanged task retry in the same runtime process restores that evidence and
 gets only the configured finalization window, without rerunning fuzzing. Normal
-artifact validation still has to succeed. `ultrafuzz node` reports the phase,
+artifact validation still has to succeed. After a full runtime-process restart,
+the receipt key is intentionally unavailable: automatic reuse fails closed with
+an authentication diagnostic, preserving raw evidence for diagnosis instead of
+trusting writable disk state. `ultrafuzz node` reports the phase,
 both deadlines, checkpoint availability, and last observed agent activity;
 timeout errors include those fields and elapsed time.
 

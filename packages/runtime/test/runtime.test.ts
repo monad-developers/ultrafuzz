@@ -12133,7 +12133,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{skipAgent \? undefined : agentForTask\(task, fullTaskPrompt\)\}/);
-  assert.match(workflowSource, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\b/u);
+  assert.match(workflowSource, /addDir:\s*\[\s*task\.artifactDir,\s*\.\.\.dependencyArtifactDirs\b/u);
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
@@ -12151,7 +12151,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await executionAgent\.generate\(unstructuredArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?_output: \{ completed: true \}/u
+    /const result =\s*task\.finalizationGraceMs > 0\s*\? await withBackendFinalization\([\s\S]*?: await executionAgent\.generate\(unstructuredArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.doesNotMatch(
     workflowSource,
