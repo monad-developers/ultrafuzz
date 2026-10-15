@@ -793,7 +793,10 @@ export async function synchronizeLinkedWorkflowRun(
   const evidenceComplete = syncResult.syncedNodes >= loaded.tasks.length;
   const nonBlockingNodeIds = requiresCompleteRun(evidence)
     ? new Set<string>()
-    : new Set([...nonBlockingRuntimeNodeIds(loaded.graph), ...withheldReportNodeIds(readRunState(layout).nodes)]);
+    : new Set([
+        ...nonBlockingRuntimeNodeIds(loaded.graph),
+        ...withheldReportStateIds(loaded.graph, loaded.tasks, readRunState(layout).nodes)
+      ]);
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
       code: "WORKFLOW_TASK_EVIDENCE_MISSING",
@@ -4945,8 +4948,8 @@ function producesFinalReport(node: PlannedGraphNode): boolean {
 }
 
 /**
- * Report tasks whose output the secret gate rejected. The run withholds that
- * report instead of failing; `resume --retry-failed` generates it again (#1217).
+ * Report tasks whose output the secret gate rejected. Their reports remain
+ * unavailable; `resume --retry-failed` generates them again (#1217).
  */
 function withheldReportNodeIds(nodes: Readonly<Record<string, NodeState>>): ReadonlySet<string> {
   return new Set(
@@ -4958,6 +4961,45 @@ function withheldReportNodeIds(nodes: Readonly<Record<string, NodeState>>): Read
       )
       .map(([nodeId]) => nodeId)
   );
+}
+
+/** Keep report failures visible while exempting aggregates explained entirely by withheld reports. */
+function withheldReportStateIds(
+  graph: PlannedGraph,
+  tasks: readonly StoredWorkflowTask[],
+  nodes: Readonly<Record<string, NodeState>>
+): ReadonlySet<string> {
+  const ids = new Set(withheldReportNodeIds(nodes));
+  const rollUp = (stateId: string, children: readonly string[]): void => {
+    if (nodes[stateId]?.status !== "failed") return;
+    const unsuccessful = children.filter((id) => {
+      const status = nodes[id]?.status;
+      return status !== "succeeded" && status !== "reused-from-prior-run";
+    });
+    if (unsuccessful.length > 0 && unsuccessful.every((id) => ids.has(id))) ids.add(stateId);
+  };
+  const tasksByConcreteNode = new Map<string, StoredWorkflowTask[]>();
+  for (const task of tasks) {
+    const siblings = tasksByConcreteNode.get(task.concreteNodeId) ?? [];
+    siblings.push(task);
+    tasksByConcreteNode.set(task.concreteNodeId, siblings);
+  }
+  const statesByConcreteNode = new Map<string, string[]>();
+  for (const [concreteNodeId, siblings] of tasksByConcreteNode) {
+    const attemptIds = siblings.map((task) => task.attemptId);
+    const aggregateId = siblings[0]?.metadata.node.storageId ?? concreteNodeId;
+    rollUp(aggregateId, attemptIds);
+    statesByConcreteNode.set(concreteNodeId, nodes[aggregateId] === undefined ? attemptIds : [aggregateId]);
+  }
+  for (const node of graph.nodes) {
+    if (node.dynamic?.status !== "expanded") continue;
+    const generatedIds = node.dynamic.generated_node_ids ?? [];
+    // Stale state cannot stand in for a generated task missing from the current manifest.
+    if (generatedIds.some((id) => !statesByConcreteNode.has(id))) continue;
+    const children = generatedIds.flatMap((id) => statesByConcreteNode.get(id) ?? []);
+    rollUp(node.id, children);
+  }
+  return ids;
 }
 
 function nonBlockingRuntimeNodeIds(graph: PlannedGraph): ReadonlySet<string> {
