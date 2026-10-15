@@ -52,6 +52,7 @@ const RUN_KEYS = [
   "friction_log_enabled",
   "workspace_mode",
   "default_timeout_seconds",
+  "finalization_grace_ms",
   "workflow_deadline_seconds",
   "controller_lease_seconds",
   "refresh_prompts_on_resume"
@@ -254,6 +255,13 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "integer",
         assign: (value) => {
           runConfig.defaultTimeoutSeconds = value;
+        }
+      },
+      {
+        key: "finalization_grace_ms",
+        type: "integer",
+        assign: (value) => {
+          runConfig.finalizationGraceMs = value;
         }
       },
       {

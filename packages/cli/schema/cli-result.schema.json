@@ -1157,7 +1157,29 @@
             }
           }
         },
-        "tool_details_included": { "type": "boolean" }
+        "tool_details_included": { "type": "boolean" },
+        "backend_finalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "phase",
+            "started_at_ms",
+            "execution_deadline_ms",
+            "finalization_deadline_ms",
+            "finalization_grace_ms",
+            "last_activity_at_ms",
+            "checkpoint_available"
+          ],
+          "properties": {
+            "phase": { "enum": ["execution", "finalization", "completed", "timed-out", "aborted", "failed"] },
+            "started_at_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "execution_deadline_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "finalization_deadline_ms": { "type": ["integer", "null"], "minimum": 0 },
+            "finalization_grace_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "last_activity_at_ms": { "$ref": "#/$defs/nonNegativeInteger" },
+            "checkpoint_available": { "type": "boolean" }
+          }
+        }
       }
     },
     "snapshotsData": {

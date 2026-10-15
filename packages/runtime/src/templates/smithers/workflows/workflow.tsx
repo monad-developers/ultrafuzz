@@ -89,6 +89,8 @@ const {
 } = await import(artifactsModule);
 const {
   applyWorkspacePatch,
+  backendCheckpointDirectory,
+  withBackendFinalization,
   canonicalPropertiesMarkdownParityIssues,
   captureWorkspacePatch,
   captureWorkspaceTree,
@@ -490,6 +492,11 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       ...compiledTaskSourceIdentity(task),
       branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
+      finalizationGraceMs: task.metadata.artifacts.outputs.some(
+        (output) => output.contract === "ultrafuzz/invariant-campaign-plan@2"
+      )
+        ? __ULTRAFUZZ_FINALIZATION_GRACE_MS__
+        : 0,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
@@ -2426,7 +2433,12 @@ function baseAgentForProfile(
     // their verifier markers. The metadata-only instance created while the
     // workflow is rendered receives no dependency access. The run friction log,
     // when enabled, is the only run-level root and holds no task inputs.
-    addDir: [task.artifactDir, ...dependencyArtifactDirs, ...frictionLogAddDir(task)]
+    addDir: [
+      task.artifactDir,
+      ...dependencyArtifactDirs,
+      ...frictionLogAddDir(task),
+      ...(task.finalizationGraceMs > 0 ? [backendCheckpointDirectory(task.runRoot, task.id)] : [])
+    ]
   });
   if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
     throw new Error(`agent factory returned no agents: ${profile.agentRef}`);
@@ -2614,6 +2626,7 @@ function artifactAwareAgent(
           }
         }),
     generate: async (args) => {
+      const generationStartedAt = Date.now();
       const smithersAttempt = args?.taskContext?.attempt ?? 1;
       const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
       attemptedGenerations.add(smithersAttempt);
@@ -2703,7 +2716,29 @@ function artifactAwareAgent(
         // This is a privileged engine-to-wrapper capability. It must never
         // cross into an adapter, model process, callback, or serialized event.
         Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
-        const result = await executionAgent.generate(unstructuredArgs);
+        const generationAgent = executionAgent;
+        const result =
+          task.finalizationGraceMs > 0
+            ? await withBackendFinalization({
+                directory: backendCheckpointDirectory(task.runRoot, task.id),
+                artifactDirectory: task.artifactDir,
+                mirrorArtifactDirectory: path.join(task.workspacePath, "artifacts", task.attemptId),
+                workspace: { root: task.workspacePath, productionSourceRoots: task.productionSourceRoots },
+                binding: JSON.stringify([
+                  task.id,
+                  task.sourceRevision,
+                  originalPrompt,
+                  [...assertDependencyArtifactAdmissionCurrent(task).snapshotsByProducerAttempt]
+                    .map(([id, snapshot]) => [id, createHash("sha256").update(snapshot.marker.bytes).digest("hex")])
+                    .sort(([left], [right]) => left.localeCompare(right))
+                ]),
+                startedAt: generationStartedAt,
+                timeoutMs: task.timeoutMs,
+                graceMs: task.finalizationGraceMs,
+                args: unstructuredArgs,
+                generate: (backendArgs) => generationAgent.generate(backendArgs)
+              })
+            : await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
@@ -9278,7 +9313,7 @@ export default smithers((ctx) => {
                 dependsOn={[task.preparationId]}
                 skipIf={skipAgent}
                 continueOnFail={task.continueOnFail}
-                timeoutMs={task.timeoutMs}
+                timeoutMs={task.timeoutMs + task.finalizationGraceMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={task.retries}
                 // The planned chain is the whole retry budget. Smithers'

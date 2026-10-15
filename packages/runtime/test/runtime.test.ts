@@ -11810,6 +11810,9 @@ test("invariant campaign budget admits the shipped 7200-second node timeout", as
   });
   assert.equal(compiled.tasks[0]?.timeoutMs, 7_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.match(workflowSource, /"finalizationGraceMs": 300000/u);
+  assert.match(workflowSource, /timeoutMs=\{task\.timeoutMs \+ task\.finalizationGraceMs\}/u);
+  assert.match(workflowSource, /await withBackendFinalization\(/u);
   assert.match(
     workflowSource,
     /"campaignTimeoutExpectations": \{\s*"configuredFuzzerTimeoutSeconds": 3600,\s*"plannedTimeoutSeconds": 7200,\s*"finalizationReserveSeconds": 300\s*\}/u

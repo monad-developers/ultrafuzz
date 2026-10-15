@@ -135,6 +135,7 @@ export default tseslint.config(
           "COMPILED_TASKS",
           "DYNAMIC_GROUPS",
           "FRICTION_LOG",
+          "FINALIZATION_GRACE_MS",
           "MAX_DYNAMIC_NODES",
           "RUN_ID_LITERAL",
           "RUN_ROOT_RELATIVE",

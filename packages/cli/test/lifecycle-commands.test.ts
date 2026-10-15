@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { backendCheckpointDirectory } from "@ultrafuzz/runtime";
 
 import { runCli } from "../src/index.js";
 import { privateHomeEnv, temporaryRoot } from "./temporary-root.js";
@@ -519,7 +520,7 @@ test("events --watch streams one line per event and terminates", async (t) => {
 });
 
 test("node reports focused status and only expands tool payloads with --tools", async (t) => {
-  const { project, env } = await launchedProject(t);
+  const { project, env, runRoot } = await launchedProject(t);
 
   const human = await cli(project, ["node", RUN_ID, "node:project-discovery"], env);
   assert.equal(human.code, 0, human.stderr);
@@ -530,19 +531,36 @@ test("node reports focused status and only expands tool payloads with --tools", 
   assert.match(human.stdout, /^Output: not recorded$/mu);
   assert.doesNotMatch(human.stdout, /forge build/u);
 
+  const checkpoint = backendCheckpointDirectory(runRoot, "node:project-discovery");
+  fs.mkdirSync(checkpoint, { recursive: true });
+  const backendFinalization = {
+    phase: "finalization",
+    started_at_ms: 1_000,
+    execution_deadline_ms: 2_000,
+    finalization_deadline_ms: 2_500,
+    finalization_grace_ms: 500,
+    last_activity_at_ms: 1_900,
+    checkpoint_available: true
+  };
+  fs.writeFileSync(path.join(checkpoint, "status.json"), JSON.stringify(backendFinalization));
+
   const attempts = await cli(project, ["node", RUN_ID, "node:project-discovery", "--attempts"], env);
   assert.equal(attempts.code, 0, attempts.stderr);
   assert.match(attempts.stdout, /- attempt 1: in-progress/u);
   assert.match(attempts.stdout, /tool 1 shell: ok/u);
   assert.doesNotMatch(attempts.stdout, /forge build/u);
+  assert.match(attempts.stdout, /Backend phase: finalization; checkpoint: available/u);
+  assert.match(attempts.stdout, /Execution deadline: .*; finalization deadline:/u);
 
   const tools = await cli(project, ["node", RUN_ID, "node:project-discovery", "--tools", "--json"], env);
   assert.equal(tools.code, 0, tools.stderr);
   const data = parseJson(tools).data as {
+    backend_finalization: unknown;
     tool_details_included: boolean;
     attempts: Array<{ tool_calls: Array<{ input?: unknown }> }>;
   };
   assert.equal(data.tool_details_included, true);
+  assert.deepEqual(data.backend_finalization, backendFinalization);
   assert.deepEqual(data.attempts[0]?.tool_calls[0]?.input, { command: "forge build" });
 });
 

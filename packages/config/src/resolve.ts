@@ -145,6 +145,7 @@ export function serializeResolvedConfigToml(
     friction_log_enabled: clone.run.frictionLogEnabled,
     workspace_mode: clone.run.workspaceMode,
     default_timeout_seconds: omitProfileSettings ? undefined : clone.run.defaultTimeoutSeconds,
+    finalization_grace_ms: clone.run.finalizationGraceMs,
     workflow_deadline_seconds: omitProfileSettings ? undefined : clone.run.workflowDeadlineSeconds,
     controller_lease_seconds: clone.run.controllerLeaseSeconds
   });
@@ -860,6 +861,8 @@ function configPathSegment(segment: string): string {
       return "friction_log_enabled";
     case "defaultTimeoutSeconds":
       return "default_timeout_seconds";
+    case "finalizationGraceMs":
+      return "finalization_grace_ms";
     case "workflowDeadlineSeconds":
       return "workflow_deadline_seconds";
     case "controllerLeaseSeconds":

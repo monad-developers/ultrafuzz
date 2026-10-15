@@ -1,4 +1,9 @@
 import path from "node:path";
+import {
+  backendCheckpointDirectory,
+  readBackendFinalizationStatus,
+  type BackendFinalizationStatus
+} from "./backend-finalization.js";
 
 import {
   SMITHERS_NODE_STATES,
@@ -604,12 +609,19 @@ export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
     return runtimeFailure<WorkflowNodeValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_NODE_FAILED")]);
   }
   let detail: CurrentNodeDetail;
+  let backendFinalization: BackendFinalizationStatus | undefined;
   try {
     detail = parseCurrentNodeEnvelope(snapshot, input, evidence.smithersRunId);
+    backendFinalization = readBackendFinalizationStatus(
+      backendCheckpointDirectory(evidence.layout.root, detail.node.nodeId)
+    );
   } catch (error) {
     return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID", error)]);
   }
-  return runtimeResult<WorkflowNodeValue>(true, adaptNodeDetail(input, evidence.smithersRunId, detail));
+  return runtimeResult<WorkflowNodeValue>(
+    true,
+    adaptNodeDetail(input, evidence.smithersRunId, detail, backendFinalization)
+  );
 }
 
 export async function watchWorkflowNode(
@@ -639,7 +651,12 @@ export async function watchWorkflowNode(
           input,
           evidence.smithersRunId
         );
-        const value = adaptNodeDetail(input, evidence.smithersRunId, detail);
+        const value = adaptNodeDetail(
+          input,
+          evidence.smithersRunId,
+          detail,
+          readBackendFinalizationStatus(backendCheckpointDirectory(evidence.layout.root, detail.node.nodeId))
+        );
         last = value;
         input.onSnapshot(value);
       }
@@ -1798,10 +1815,12 @@ function eventDetail(payload: Record<string, unknown>): string | null {
 function adaptNodeDetail(
   input: WorkflowNodeQueryInput,
   smithersRunId: string,
-  detail: CurrentNodeDetail
+  detail: CurrentNodeDetail,
+  backendFinalization?: BackendFinalizationStatus
 ): WorkflowNodeValue {
   const attempts = detail.attempts.map((attempt) => adaptNodeAttempt(attempt, input.tools === true));
   return {
+    ...(backendFinalization === undefined ? {} : { backend_finalization: backendFinalization }),
     run_id: input.runId,
     workflow_run_id: smithersRunId,
     node_id: detail.node.nodeId,

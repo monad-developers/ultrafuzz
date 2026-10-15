@@ -30,6 +30,7 @@ forge_rayon_threads = 1
 friction_log_enabled = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
+finalization_grace_ms = 300000
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 refresh_prompts_on_resume = true
@@ -113,21 +114,22 @@ empty path components, and dot components fail validation.
 
 ## Run
 
-| Key                         | Type    | Meaning                                                                     |
-| --------------------------- | ------- | --------------------------------------------------------------------------- |
-| `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.          |
-| `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
-| `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.        |
-| `keep_workspaces`           | boolean | Keep every task worktree instead of deleting the disposable ones.           |
-| `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
-| `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
-| `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
-| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local friction log.           |
-| `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
-| `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
-| `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).    |
-| `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
-| `refresh_prompts_on_resume` | boolean | Re-render unfinished tasks' prompts on `resume`. Defaults to `true`.        |
+| Key                         | Type    | Meaning                                                                                                                                      |
+| --------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.                                                                           |
+| `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                                                                                            |
+| `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.                                                                         |
+| `keep_workspaces`           | boolean | Keep every task worktree instead of deleting the disposable ones.                                                                            |
+| `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.                                                                          |
+| `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                                                                                     |
+| `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.                                                                   |
+| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local friction log.                                                                            |
+| `workspace_mode`            | string  | Must be `git-worktree`.                                                                                                                      |
+| `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour).                                                                  |
+| `finalization_grace_ms`     | integer | Additional bounded finalization time after a checkpointed invariant backend succeeds (default 300,000 ms; 0 disables; maximum 3,600,000 ms). |
+| `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).                                                                     |
+| `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor.                                                                  |
+| `refresh_prompts_on_resume` | boolean | Re-render unfinished tasks' prompts on `resume`. Defaults to `true`.                                                                         |
 
 Other workspace modes are outside the product contract.
 
@@ -155,6 +157,28 @@ resume.
 `workflow_deadline_seconds` accepts up to 604,800 (seven days).
 `default_timeout_seconds` and `controller_lease_seconds` accept up to 86,400
 (one day).
+
+`finalization_grace_ms` applies to invariant campaign tasks that use the
+runtime-supplied `ultrafuzz backend run` wrapper. The original execution deadline
+still stops unfinished or failed backends. An exit code of zero admits a fixed
+finalization deadline: the later of the original deadline and backend completion
+plus the configured grace, never later than execution deadline plus grace.
+Heartbeats and provider retries do not extend it. Operator cancellation and the
+parent workflow's limits remain authoritative. Set the value to zero to retain
+the original single-deadline behavior; historical sealed configs without this
+field also keep that behavior.
+
+The wrapper saves bounded raw logs (16 MiB per stream), backend evidence (up to
+512 MiB and 10,000 entries per artifact root), the preliminary campaign plan,
+and a validated workspace patch under the run's `backend-checkpoints` directory
+before returning. Reuse is bound to the task, source revision, prompt and
+authenticated dependency markers, so changed inputs require fresh execution.
+These are unverified inputs, not findings or successful producer outputs.
+If finalization times out, an unchanged task retry restores that evidence and
+gets only the configured finalization window, without rerunning fuzzing. Normal
+artifact validation still has to succeed. `ultrafuzz node` reports the phase,
+both deadlines, checkpoint availability, and last observed agent activity;
+timeout errors include those fields and elapsed time.
 
 `workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
 records `workflow_deadline_at` in run state when the run is created, and again

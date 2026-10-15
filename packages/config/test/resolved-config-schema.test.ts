@@ -23,10 +23,28 @@ import {
   validateResolvedConfigJson
 } from "../src/index.js";
 
-const EXPECTED_SCHEMA_SHA256 = "f0c2aee9c6b2dbd91f4f5d8ca8aa5542a7c6273163d88488ad7c195b55345d36";
-const EXPECTED_BUNDLE_SHA256 = "2db0236348118abdf034a459a8d8aa69c7ea157d31405a31be59407f625b8e42";
+const EXPECTED_SCHEMA_SHA256 = "797caed6ee797f1875116ac4a9fd29a0a39851b9c167698df4ace4c10856c388";
+const EXPECTED_BUNDLE_SHA256 = "025684d7272d9993ef8fe81188a965b64ce67923fa5aaabd6ed2e5f7899d6ddd";
 
 describe("resolved config JSON contract", () => {
+  it("bounds finalization grace, preserves project override and accepts historical absence", () => {
+    for (const grace of [0, 90_000, 3_600_000]) {
+      const project = parseProjectConfigToml(`[run]\nfinalization_grace_ms = ${String(grace)}\n`);
+      expect(project.ok).toBe(true);
+      if (!project.ok) continue;
+      const result = resolveConfig({ env: {}, projectConfig: project.value });
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(parseResolvedConfigJsonBytes(serializeResolvedConfigJsonBytes(result.value)).run.finalizationGraceMs).toBe(
+        grace
+      );
+      delete result.value.run.finalizationGraceMs;
+      expect(resolvedConfigZodSchema.safeParse(result.value).success).toBe(true);
+    }
+    for (const grace of [-1, 1.5, 3_600_001]) {
+      expect(resolveConfig({ env: {}, projectConfig: { run: { finalizationGraceMs: grace } } }).ok).toBe(false);
+    }
+  });
   it("registers the exact checked-in Draft 2020-12 schema and stable digests", () => {
     const schemaPath = path.join(configSchemaDirectory(), RESOLVED_CONFIG_SCHEMA_FILENAME);
     const schemaBytes = fs.readFileSync(schemaPath);

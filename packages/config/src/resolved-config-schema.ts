@@ -302,6 +302,7 @@ export const resolvedConfigZodSchema: z.ZodType<ResolvedConfig> = z
         frictionLogEnabled: z.boolean().optional(),
         workspaceMode: z.literal("git-worktree"),
         defaultTimeoutSeconds: timeoutSecondsSchema,
+        finalizationGraceMs: z.number().int().min(0).max(3_600_000).optional(),
         workflowDeadlineSeconds: workflowDeadlineSecondsSchema,
         controllerLeaseSeconds: timeoutSecondsSchema
       })

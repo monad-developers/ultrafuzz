@@ -92,6 +92,14 @@ function renderNode(value: WorkflowNodeValue): string {
     `Output: ${value.output.present ? `recorded (${value.output.source ?? "unknown source"})` : "not recorded"}`,
     `Updated: ${value.updated_at ?? "unknown"}`
   ];
+  const phase = value.backend_finalization;
+  if (phase !== undefined) {
+    lines.push(
+      `Backend phase: ${phase.phase}; checkpoint: ${phase.checkpoint_available ? "available" : "not available"}`,
+      `Execution deadline: ${new Date(phase.execution_deadline_ms).toISOString()}; finalization deadline: ${phase.finalization_deadline_ms === null ? "not entered" : new Date(phase.finalization_deadline_ms).toISOString()}`,
+      `Finalization grace: ${String(phase.finalization_grace_ms)}ms; last activity: ${new Date(phase.last_activity_at_ms).toISOString()}`
+    );
+  }
   for (const attempt of value.attempts) {
     lines.push(
       `- attempt ${attempt.attempt ?? "?"}: ${attempt.state ?? "unknown"}${attempt.cached ? " (cached)" : ""}${

@@ -7937,6 +7937,11 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       sourceRef: task.sourceRef ?? null,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
+      finalizationGraceMs: task.metadata.artifacts.outputs.some(
+        (output) => output.contract === "ultrafuzz/invariant-campaign-plan@2"
+      )
+        ? (config.run.finalizationGraceMs ?? 0)
+        : 0,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
       campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
         INVARIANT_CAMPAIGN_ROLE_CONTRACTS.has(output.contract)
@@ -7984,6 +7989,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     ),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
+    __ULTRAFUZZ_FINALIZATION_GRACE_MS__: JSON.stringify(config.run.finalizationGraceMs ?? 0),
     __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),
     __ULTRAFUZZ_RUN_ROOT_RELATIVE__: JSON.stringify(
       relativeProjectPath(compiled.projectRoot, compiled.runRoot, "run root")

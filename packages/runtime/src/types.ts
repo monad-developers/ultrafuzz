@@ -20,6 +20,7 @@ import type {
 import type { PromptArtifactReference } from "@ultrafuzz/prompts";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
+import type { BackendFinalizationStatus } from "./backend-finalization.js";
 
 export const RUNTIME_SCHEMA_VERSION = "ultrafuzz.runtime.v1" as const;
 
@@ -701,6 +702,7 @@ export interface WorkflowNodeAttempt {
 }
 
 export interface WorkflowNodeValue {
+  backend_finalization?: BackendFinalizationStatus;
   run_id: string;
   workflow_run_id: string;
   node_id: string;
