@@ -27285,7 +27285,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --no-vcs --force --format json/
+    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --iteration 0 --attempt 1 --expected-generation sha256:a{64} --no-vcs --force --format json --full-output/u
   );
   assert.match(
     commands,
@@ -28265,7 +28265,7 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   assert.equal(resetByNode.ok, true, JSON.stringify(resetByNode.diagnostics));
   assert.match(
     fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
-    /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --force --format json/u
+    /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --attempt 1 --expected-generation sha256:a{64} --no-vcs --force --format json --full-output/u
   );
 });
 
