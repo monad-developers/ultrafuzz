@@ -15,13 +15,15 @@ import {
 } from "./backend-checkpoint-state.js";
 import { requestBackendLaunch, startBackendSupervisor } from "./backend-supervisor.js";
 
-const timestamp = z.number().int().nonnegative();
+const nonnegativeInteger = z.number().int().nonnegative();
+// JavaScript Date cannot represent every safe-integer millisecond timestamp.
+const timestamp = nonnegativeInteger.max(8_640_000_000_000_000);
 const statusSchema = z.strictObject({
   phase: z.enum(["execution", "finalization", "completed", "timed-out", "aborted", "failed"]),
   started_at_ms: timestamp,
   execution_deadline_ms: timestamp,
   finalization_deadline_ms: timestamp.nullable(),
-  finalization_grace_ms: timestamp,
+  finalization_grace_ms: nonnegativeInteger,
   last_activity_at_ms: timestamp,
   checkpoint_available: z.boolean()
 });

@@ -589,7 +589,16 @@ test("node and node --watch keep tool evidence and warn when optional backend st
   const baselineData = parseJson(baseline).data;
   const checkpoint = backendCheckpointDirectory(runRoot, "node:project-discovery");
   fs.mkdirSync(checkpoint, { recursive: true });
-  for (const contents of ["{", "{}"]) {
+  const outOfDateRange = JSON.stringify({
+    phase: "finalization",
+    started_at_ms: 1_000,
+    execution_deadline_ms: 9_000_000_000_000_000,
+    finalization_deadline_ms: null,
+    finalization_grace_ms: 500,
+    last_activity_at_ms: 1_900,
+    checkpoint_available: true
+  });
+  for (const contents of ["{", "{}", outOfDateRange]) {
     fs.writeFileSync(path.join(checkpoint, "status.json"), contents);
     for (const watch of [[], ["--watch"]]) {
       const json = await cli(project, [...args, ...watch, "--json"], env);

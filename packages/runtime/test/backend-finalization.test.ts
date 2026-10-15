@@ -29,6 +29,34 @@ function fixture() {
   };
 }
 
+test("backend status timestamps must be representable as JavaScript dates", () => {
+  const directory = temporaryRoot("backend-status-date-range-");
+  const statusPath = path.join(directory, "status.json");
+  const status = {
+    phase: "finalization",
+    started_at_ms: 1_000,
+    execution_deadline_ms: 2_000,
+    finalization_deadline_ms: 2_500,
+    finalization_grace_ms: 500,
+    last_activity_at_ms: 1_900,
+    checkpoint_available: true
+  };
+  for (const field of ["started_at_ms", "execution_deadline_ms", "finalization_deadline_ms", "last_activity_at_ms"]) {
+    for (const value of [0, 8_640_000_000_000_000]) {
+      const boundary = { ...status, [field]: value };
+      fs.writeFileSync(statusPath, JSON.stringify(boundary));
+      assert.deepEqual(readBackendFinalizationStatus(directory), boundary);
+      assert.doesNotThrow(() => new Date(value).toISOString());
+    }
+    for (const value of [8_640_000_000_000_001, 9_000_000_000_000_000, Number.MAX_SAFE_INTEGER]) {
+      fs.writeFileSync(statusPath, JSON.stringify({ ...status, [field]: value }));
+      assert.throws(() => readBackendFinalizationStatus(directory), { name: "ZodError" }, `${field}=${String(value)}`);
+    }
+  }
+  fs.writeFileSync(statusPath, JSON.stringify({ ...status, finalization_deadline_ms: null }));
+  assert.equal(readBackendFinalizationStatus(directory)?.finalization_deadline_ms, null);
+});
+
 function assertPhaseTimeout(error: unknown, phase: string): boolean {
   assert.ok(error instanceof Error);
   assert.equal("code" in error ? error.code : undefined, "PROCESS_TIMEOUT");
