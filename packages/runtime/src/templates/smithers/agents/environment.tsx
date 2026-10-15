@@ -9,6 +9,7 @@ export const PROVIDER_SCOPED_SENSITIVE_ENVIRONMENT_CAPABILITY =
 // imports, rather than from copies kept in step with them.
 const {
   BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES,
+  configureCommandInvocationGuard,
   isCredentialLikeEnvironmentVariableName,
   routeOwnsCredentialLikeEnvironmentVariable
 } = (await import(
@@ -16,9 +17,19 @@ const {
     new URL("../../modules/@ultrafuzz/runtime/dist/index.js", import.meta.url).href
 )) as {
   BUILT_IN_PROVIDER_CREDENTIAL_ENVIRONMENT_VARIABLES: readonly string[];
+  configureCommandInvocationGuard: <
+    T extends { command: string; args: string[]; env?: Record<string, string> }
+  >(input: {
+    engine: string;
+    command: T;
+    cwd: string;
+    taskContext?: { runId?: string; nodeId?: string; iteration?: number; attempt?: number };
+  }) => T;
   isCredentialLikeEnvironmentVariableName: (name: string) => boolean;
   routeOwnsCredentialLikeEnvironmentVariable: (agent: string, name: string) => boolean;
 };
+
+export { configureCommandInvocationGuard };
 
 const CONTROLLER_ONLY_ENVIRONMENT_VARIABLES = [
   "SMITHERS_BIN",

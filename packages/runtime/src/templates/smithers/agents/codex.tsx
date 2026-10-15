@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CodexAgent as SmithersCodexAgent } from "smthrs";
-import { workflowControlChildEnvironment, workflowControlCredentialValue } from "./environment";
+import {
+  configureCommandInvocationGuard,
+  workflowControlChildEnvironment,
+  workflowControlCredentialValue
+} from "./environment";
 import { resolveProviderHome } from "./provider-home";
 import { readRootStringTable, readStringTable, stringField } from "./toml";
 
@@ -39,12 +43,17 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
       await command.cleanup?.();
       throw error;
     }
-    const sanitizedCommand = { ...command, env };
+    const sanitizedCommand = configureCommandInvocationGuard({
+      engine: "codex",
+      command: { ...command, env },
+      cwd: params.cwd,
+      taskContext: params.options?.taskContext
+    });
     const directories = this.opts.addDir ?? [];
     if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
       return sanitizedCommand;
     }
-    const addDirIndex = command.args.indexOf("--add-dir");
+    const addDirIndex = sanitizedCommand.args.indexOf("--add-dir");
     if (addDirIndex < 0) {
       return sanitizedCommand;
     }
@@ -52,9 +61,9 @@ export class CompatibleCodexAgent extends SmithersCodexAgent {
     return {
       ...sanitizedCommand,
       args: [
-        ...command.args.slice(0, addDirIndex),
+        ...sanitizedCommand.args.slice(0, addDirIndex),
         ...replacement,
-        ...command.args.slice(addDirIndex + 1 + directories.length)
+        ...sanitizedCommand.args.slice(addDirIndex + 1 + directories.length)
       ]
     };
   }

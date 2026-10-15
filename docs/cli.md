@@ -1,6 +1,6 @@
 # Ultrafuzz CLI
 
-Every command accepts `--project <path>`. Commands that support automation
+Public commands accept `--project <path>`. Commands that support automation
 accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 
 | Command                   | Purpose                                                                                                                   |
@@ -43,6 +43,10 @@ accept `--json` and emit the `ultrafuzz.cli.result.v2` envelope.
 
 The dashboard/API is a local operator surface over product state, not a
 workflow-engine API.
+
+The hidden `command-hook` integration consumes provider hook JSON, not the
+public CLI envelope. Its `--status HANDLE` mode inspects an invocation within a
+guarded node attempt; see the [internal command hook reference](reference/cli.md#internal-command-hook).
 
 `init` may create implementation plumbing for the workflow adapter. That
 plumbing is not an end-user API. User-owned configuration, prompts, topology,
