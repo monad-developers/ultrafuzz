@@ -200,6 +200,28 @@ The value is fixed at launch, so changing it, or `ULTRAFUZZ_KEEP_WORKSPACES`,
 for a `resume` has no effect. A deletion that fails is reported as a
 `TASK_WORKTREE_REMOVAL_FAILED` warning, and the next command retries it.
 
+Workspace patches hand off authored changes, not raw build and coverage output.
+In addition to the existing generated roots, capture excludes untracked compiler
+JSON in `out/<source>.sol/<type>.json` with ABI, bytecode, and Solidity compiler
+metadata whose compilation target matches that source and type (including test,
+script, and multiple-type source files), and
+hash-named JSON directly in `build-info/` or `build-snapshot/` inside compiler,
+corpus, or recognized scratch directories; `solidity-files-cache.json`;
+`lcov.info`, `*.lcov`, and `covered.<number>.html`/`.txt`; and JSON, binary, or
+text corpus files under
+`recon-corpus/` and `echidna/`. In `.cov-work/` and `.recon/`, `build.json`,
+`build-info.json`, `compilation.json`, `compiler-input.json`, `compiler-output.json`,
+`standard-input.json`, `standard-output.json`, `recon-coverage.json`, and `corpus/`
+output are also excluded. Authored test sources and ordinary configuration beside
+those files remain eligible, including JSON config directly in nested `out/`
+directories and test vectors under source-named fixture directories. These rules
+do not omit tracked edits/deletions or paths already authenticated by retained
+handoffs and preparation trees. Compiler inspection is bounded to 16 MiB per
+file; oversized, malformed, and otherwise unknown files retain the existing measured
+diff-overflow handling. Raw evidence needed downstream belongs
+in declared artifacts, which still undergo the publication secret gate; excluding
+scratch from a workspace patch never exempts a declared artifact from scanning.
+
 The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
 resolves the real executable before launch, writes an executable wrapper under
 the run directory, and places that wrapper ahead of Foundry on worker `PATH`.
