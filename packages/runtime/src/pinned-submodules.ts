@@ -11,6 +11,7 @@ import {
   parseStrictJsonBytes,
   readRunState,
   safeResolveInside,
+  withJournalLock,
   writeFileDurable
 } from "@ultrafuzz/artifacts";
 
@@ -1516,8 +1517,7 @@ function changedDependencyPaths(workspaceRoot: string, snapshot: PinnedSubmodule
     snapshot.entries.flatMap((entry) => (entry.type === "file" ? [[entry.path, entry] as const] : []))
   );
   const observed = new Map<string, string>();
-  const walk = (relative: string): void => {
-    const absolute = trackedPath(workspaceRoot, relative, "task dependency entry");
+  const walk = (absolute: string, relative: string): void => {
     const stat = fs.lstatSync(absolute, { throwIfNoEntry: false });
     if (stat === undefined) return;
     if (stat.isSymbolicLink()) {
@@ -1527,7 +1527,10 @@ function changedDependencyPaths(workspaceRoot: string, snapshot: PinnedSubmodule
       for (const name of fs.readdirSync(absolute)) {
         // A clone or `git init` inside a dependency is one change; its objects are not walked.
         if (name === ".git") observed.set(path.posix.join(relative, name), "git-metadata");
-        else walk(path.posix.join(relative, name));
+        // Names discovered inside a physical directory need not satisfy the
+        // stricter rules for authenticated source paths. In particular, an
+        // agent may create control characters, backslashes, or deeper trees.
+        else walk(path.join(absolute, name), path.posix.join(relative, name));
       }
     } else if (stat.isFile()) {
       const mode = (stat.mode & 0o111) === 0 ? 0o644 : 0o755;
@@ -1540,7 +1543,9 @@ function changedDependencyPaths(workspaceRoot: string, snapshot: PinnedSubmodule
       observed.set(relative, "unsupported");
     }
   };
-  for (const root of snapshot.top_level_roots) walk(root);
+  for (const root of snapshot.top_level_roots) {
+    walk(trackedPath(workspaceRoot, root, "task dependency root"), root);
+  }
 
   const expected = new Map(
     snapshot.entries.map((entry): [string, string] => [
@@ -1825,8 +1830,8 @@ function loadsCleanly(root: string, expectation: PinnedSubmoduleExpectation): bo
 
 /**
  * Stage a complete cache entry, check it against the manifest, make its files
- * read-only, and publish it with one rename. Concurrent fills race safely: a
- * valid entry published first wins and the staging copy is discarded.
+ * read-only, and publish it with one rename. Serialize the final check and
+ * replacement so a concurrent repair cannot delete an entry already in use.
  */
 function publishDependencyCache(
   root: string,
@@ -1840,17 +1845,16 @@ function publishDependencyCache(
     populate(staging);
     loadSealedSnapshot(staging, expectation);
     makeFilesReadOnly(staging);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
+    return withJournalLock(
+      root,
+      () => {
+        if (loadsCleanly(root, expectation)) return root;
+        fs.rmSync(root, { recursive: true, force: true });
         fs.renameSync(staging, root);
         return root;
-      } catch (error) {
-        if (loadsCleanly(root, expectation)) return root;
-        if (attempt === 1) throw error;
-        fs.rmSync(root, { recursive: true, force: true });
-      }
-    }
-    return root;
+      },
+      { trustedRoot: parent }
+    );
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
   }

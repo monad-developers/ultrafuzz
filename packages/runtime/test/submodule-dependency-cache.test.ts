@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout } from "node:timers/promises";
 
 import { checkoutSubmoduleExpectationForProject } from "../src/checkout-submodules.js";
 import {
@@ -32,6 +35,69 @@ function checkoutTask(name: string) {
   return { fixture, expectation, task, cacheRoot, input };
 }
 
+function cachePublisher(
+  role: string,
+  coordination: string,
+  cacheRoot: string,
+  input: ReturnType<typeof checkoutTask>["input"]
+) {
+  const moduleUrl = new URL("../src/pinned-submodules.js", import.meta.url).href;
+  const script = `
+    import assert from "node:assert/strict";
+    import fs from "node:fs";
+    import path from "node:path";
+    import { hydrateTaskSubmodules, PINNED_SUBMODULE_EXECUTION_ROOT } from ${JSON.stringify(moduleUrl)};
+    const { role, coordination, cacheRoot, input } = ${JSON.stringify({ role, coordination, cacheRoot, input })};
+    const mark = (name) => fs.writeFileSync(path.join(coordination, name), "");
+    const originalOpen = fs.openSync;
+    fs.openSync = (...args) => {
+      try { return originalOpen(...args); }
+      catch (error) {
+        if (String(args[0]) === cacheRoot + ".lock" && error.code === "EEXIST") mark(role + "-lock-contended");
+        throw error;
+      }
+    };
+    const originalRemove = fs.rmSync;
+    fs.rmSync = (...args) => {
+      if (String(args[0]) === cacheRoot && role === "first") {
+        mark("first-before-remove");
+        const deadline = performance.now() + 20_000;
+        const sleeper = new Int32Array(new SharedArrayBuffer(4));
+        while (!fs.existsSync(path.join(coordination, "release-first"))) {
+          if (performance.now() > deadline) throw new Error("publisher was never released");
+          Atomics.wait(sleeper, 0, 0, 10);
+        }
+        const cachedFile = path.join(cacheRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "tree/vendor/dependency/dependency.txt");
+        if (fs.existsSync(cachedFile) && fs.readFileSync(cachedFile, "utf8") === "dependency\\n") mark("removed-valid-cache");
+      }
+      return originalRemove(...args);
+    };
+    assert.equal(hydrateTaskSubmodules(input), undefined);
+    mark(role + "-finished");
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.on("error", (error) => {
+    stderr += error.message;
+  });
+  const completion = new Promise<{ code: number | null; stderr: string }>((resolve) => {
+    child.once("close", (code) => resolve({ code, stderr }));
+  });
+  return { child, completion };
+}
+
+async function waitForPublisherSignal(coordination: string, names: string[]): Promise<void> {
+  const deadline = performance.now() + 20_000;
+  while (!names.some((name) => fs.existsSync(path.join(coordination, name)))) {
+    assert.ok(performance.now() < deadline, `timed out waiting for ${names.join(" or ")}`);
+    await setTimeout(10);
+  }
+}
+
 test("the dependency cache sits in the Git directory, outside the worktree and its status", (context) => {
   const { fixture, task, cacheRoot } = checkoutTask("cache-location");
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
@@ -57,6 +123,56 @@ test("a missing or damaged cache entry is rebuilt from the source repository's G
   assert.equal(hydrateTaskSubmodules(input), undefined);
   assert.equal(fs.readFileSync(cachedFile, "utf8"), "dependency\n");
   assert.equal(fs.readFileSync(path.join(task, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
+});
+
+test("concurrent cache repairs do not remove another publisher's valid replacement", async (context) => {
+  const { fixture, task, cacheRoot, input } = checkoutTask("cache-concurrent-refill");
+  const publishers: ReturnType<typeof cachePublisher>[] = [];
+  context.after(async () => {
+    for (const publisher of publishers) publisher.child.kill();
+    await Promise.all(publishers.map((publisher) => publisher.completion));
+    fs.rmSync(fixture.root, { recursive: true, force: true });
+  });
+  const secondTask = path.join(fixture.root, "cache-concurrent-refill-second");
+  git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/cache-concurrent-refill-second", secondTask, "main"]);
+  const coordination = path.join(fixture.root, "publisher-signals");
+  fs.mkdirSync(coordination);
+  const cachedFile = path.join(cacheRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "tree/vendor/dependency/dependency.txt");
+  fs.chmodSync(cachedFile, 0o644);
+  fs.writeFileSync(cachedFile, "damaged\n");
+
+  publishers.push(cachePublisher("first", coordination, cacheRoot, input));
+  await waitForPublisherSignal(coordination, ["first-before-remove"]);
+  publishers.push(cachePublisher("second", coordination, cacheRoot, { ...input, workspaceRoot: secondTask }));
+  // An unprotected publisher finishes while the first is paused before deletion. A protected
+  // publisher instead contends on the lock. Release only once one of these schedules is certain.
+  await waitForPublisherSignal(coordination, ["second-finished", "second-lock-contended"]);
+  fs.writeFileSync(path.join(coordination, "release-first"), "");
+  for (const publisher of publishers) {
+    const result = await publisher.completion;
+    assert.equal(result.code, 0, result.stderr);
+  }
+  assert.equal(fs.existsSync(path.join(coordination, "removed-valid-cache")), false);
+  assert.equal(fs.readFileSync(cachedFile, "utf8"), "dependency\n");
+  for (const workspace of [task, secondTask]) {
+    assert.equal(fs.readFileSync(path.join(workspace, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
+  }
+});
+
+test("cache repair recovers a publication lock left by an exited process", (context) => {
+  const { fixture, cacheRoot, input } = checkoutTask("cache-dead-publisher");
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const cachedFile = path.join(cacheRoot, PINNED_SUBMODULE_EXECUTION_ROOT, "tree/vendor/dependency/dependency.txt");
+  fs.chmodSync(cachedFile, 0o644);
+  fs.writeFileSync(cachedFile, "damaged\n");
+  const exited = spawnSync(process.execPath, ["-e", ""], { stdio: "ignore" });
+  assert.equal(exited.status, 0);
+  const lock = `${cacheRoot}.lock`;
+  fs.writeFileSync(lock, JSON.stringify({ host: os.hostname(), pid: exited.pid }));
+
+  assert.equal(hydrateTaskSubmodules(input), undefined);
+  assert.equal(fs.readFileSync(cachedFile, "utf8"), "dependency\n");
+  assert.equal(fs.existsSync(lock), false);
 });
 
 test("an ordinary task runs without hydration when no source remains, and a pinned one fails", (context) => {

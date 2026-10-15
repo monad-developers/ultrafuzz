@@ -280,6 +280,38 @@ test("after the agent, an ordinary checkout records dependency edits and restore
   assert.equal(fs.readFileSync(path.join(replaced, "vendor/dependency/dependency.txt"), "utf8"), "dependency\n");
 });
 
+test("ordinary dependency restoration accepts filesystem names and depth beyond source path rules", (context) => {
+  const fixture = nestedSubmoduleFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  git(fixture.source, ["branch", "-M", "main"]);
+  const { expectation } = checkoutSubmoduleExpectationForProject(fixture.source);
+  assert.ok(expectation !== undefined);
+  enablePinnedSubmoduleWorktreeConfig(fixture.source, expectation, "checkout");
+  const workspaceRoot = path.join(fixture.root, "unusual-names");
+  git(fixture.source, ["worktree", "add", "-B", "ultrafuzz/test/unusual-names", workspaceRoot, "main"]);
+  const input = { sourceRoot: fixture.source, workspaceRoot, expectation };
+  hydratePinnedSubmodules({ ...input, sourcePolicy: "checkout" });
+
+  const dependency = path.join(workspaceRoot, "vendor/dependency");
+  const unusualNames = ["a\\generated.txt", "b\ngenerated.txt"];
+  for (const name of unusualNames) fs.writeFileSync(path.join(dependency, name), "generated\n");
+  const deep = path.join(dependency, ...Array<string>(129).fill("d"));
+  fs.mkdirSync(deep, { recursive: true });
+  fs.writeFileSync(path.join(deep, "generated.txt"), "generated\n");
+  const recorded: unknown[] = [];
+  const changes = restoreCheckoutSubmodulesAfterAgent({ ...input, onChanges: (value) => recorded.push(value) });
+
+  assert.equal(changes?.changed_path_count, 132);
+  assert.equal(changes.changed_paths.length, 50);
+  assert.deepEqual(
+    changes.changed_paths.slice(0, 2),
+    unusualNames.map((name) => `vendor/dependency/${name}`)
+  );
+  assert.deepEqual(recorded, [changes]);
+  for (const name of [...unusualNames, "d"]) assert.equal(fs.existsSync(path.join(dependency, name)), false);
+  verifyPinnedSubmodules({ ...input, sourcePolicy: "checkout" });
+});
+
 test("dependency filenames are sanitized before recording and stay omitted after credential rotation", (context) => {
   const credential = 'dependency-review-"secret"-value';
   const rawCredential = "dependency-review-raw-secret-value";
