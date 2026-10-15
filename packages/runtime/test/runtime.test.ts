@@ -11536,8 +11536,9 @@ nodes:
   assert.match(workflowSource, /const fullTaskPrompt = renderAgentPrompt/u);
   assert.match(workflowSource, /runtimeContext: task\.runtimeContext/u);
   assert.match(workflowSource, /runtimeContext: task\.runtimeContext \+ "\\n\\n" \+ backendConcurrencyContext/u);
+  assert.ok(plan.value);
   assert.ok(
-    workflowSource.includes(`renderBackendConcurrencyContext(${plan.value!.resolved_config.run.maxParallelAgents})`)
+    workflowSource.includes(`renderBackendConcurrencyContext(${plan.value.resolved_config.run.maxParallelAgents})`)
   );
   assert.match(workflowSource, /operatorPrompt,/u);
 });
@@ -27018,6 +27019,7 @@ test("backend concurrency follows run, resume, reset, refresh, and fork override
   logFakeRunnerUpVariable(env, "ULTRAFUZZ_MAX_CONCURRENCY", concurrencyLog);
   const run = await startRun({ projectRoot: project, runId, maxConcurrency: 16, env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
 
   for (const options of [{}, { maxConcurrency: 8, resetNode: "node:project-discovery" }, { refreshController: true }]) {
     const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
@@ -27035,12 +27037,13 @@ test("backend concurrency follows run, resume, reset, refresh, and fork override
 
   assert.deepEqual(fs.readFileSync(concurrencyLog, "utf8").trim().split("\n"), ["16", "16", "8", "8", "6", "6"]);
   // Fork's --input contains real newlines, so a command spans several log lines.
-  const schedulerLimits = [...fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").matchAll(/--max-concurrency (\d+)/gu)];
+  assert.ok(env.SMITHERS_FAKE_LOG);
+  const schedulerLimits = [...fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8").matchAll(/--max-concurrency (\d+)/gu)];
   assert.deepEqual(
     schedulerLimits.map((match) => match[1]),
     ["16", "16", "8", "8", "6", "6"]
   );
-  const state = readRunState(layoutForRunRoot(run.value!.run_root, runId));
+  const state = readRunState(layoutForRunRoot(run.value.run_root, runId));
   assert.equal(state.concurrency.requested_concurrency, 6);
 });
 

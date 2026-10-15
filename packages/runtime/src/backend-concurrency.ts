@@ -14,10 +14,10 @@ export function renderBackendConcurrencyContext(
   return [
     "## Backend Concurrency",
     "",
-    `- Configured concurrency limit: ${limit}.`,
-    `- Available vCPUs: ${availableVcpus}.`,
-    `- Backend worker limit: ${workers} = max(1, min(available_vcpus, configured_concurrency_limit)).`,
-    `- Use at most ${workers} concurrent workers in total across this task's nested backend processes, including setup, smoke, replay, and final fuzzing.`,
+    `- Configured concurrency limit: ${String(limit)}.`,
+    `- Available vCPUs: ${String(availableVcpus)}.`,
+    `- Backend worker limit: ${String(workers)} = max(1, min(available_vcpus, configured_concurrency_limit)).`,
+    `- Use at most ${String(workers)} concurrent workers in total across this task's nested backend processes, including setup, smoke, replay, and final fuzzing.`,
     "- This limit takes precedence over profile or task defaults requesting the whole host."
   ].join("\n");
 }
