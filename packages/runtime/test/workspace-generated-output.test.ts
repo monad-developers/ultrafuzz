@@ -12,6 +12,7 @@ import {
   captureWorkspaceTree,
   validateWorkspacePatchCapture
 } from "../src/workspace-handoff.js";
+import { captureLegacyWorkspacePatch } from "./fixtures/legacy-workspace-patch.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 function git(root: string, args: string[]): string {
@@ -54,9 +55,9 @@ test("classifies nested build, coverage and corpus output without dropping neigh
     "test/recon/coverage.lcov": "SF:src/Fixture.sol\nDA:1,1\nend_of_record\n",
     "test/recon/recon-corpus/seed.bin": "corpus",
     "test/recon/echidna/coverage/seed.txt": "corpus",
-    "custom-output/build-info/build.json": "{}",
-    "custom-output/build-snapshot/snapshot.json": "{}",
-    "custom-output/Fixture.sol/Fixture.json": "{}",
+    "custom-output/out/build-info/0123456789abcdef.json": "{}",
+    ".recon/build-snapshot/0123456789abcdef.json": "{}",
+    "custom-output/out/Fixture.sol/Fixture.json": "{}",
     ".cov-work/cache/solidity-files-cache.json": "{}"
   };
   const authored: Record<string, string> = {
@@ -68,7 +69,16 @@ test("classifies nested build, coverage and corpus output without dropping neigh
     ".recon/settings.json": compilerDump,
     "echidna-config/config.json": '{"testMode":"assertion"}\n',
     "test/fixtures/compiler-output.json": compilerDump,
-    "test/recon/notes.txt": "authored notes\n"
+    "test/recon/notes.txt": "authored notes\n",
+    "test/recon/out/config.json": '{"workers":1}\n',
+    "test/recon/out/Harness.t.sol": "contract Harness {}\n",
+    "test/fixtures/Fixture.sol/cases.json": '{"cases":[1,2,3]}\n',
+    "test/fixtures/Fixture.sol/README.txt": "authored fixture description\n",
+    "test/fixtures/build-info/cases.json": '{"cases":[1,2,3]}\n',
+    "test/fixtures/build-snapshot/config.json": '{"workers":1}\n',
+    "test/fixtures/build-info/0123456789abcdef.json": '{"cases":[1,2,3]}\n',
+    "test/fixtures/out/Fixture.sol/cases.json": '{"cases":[1,2,3]}\n',
+    "custom-output/Fixture.sol/Fixture.json": compilerDump
   };
   for (const [filename, contents] of Object.entries({ ...generated, ...authored })) write(root, filename, contents);
 
@@ -127,18 +137,18 @@ test("keeps a below-limit generated compiler dump out of the fail-closed artifac
 test("preserves tracked edits and deletions even when their paths look generated", () => {
   const root = fixture();
   write(root, "lcov.info", "original\n");
-  write(root, ".recon/build-info/old.json", "{}\n");
+  write(root, ".recon/build-info/0123456789abcdef.json", "{}\n");
   git(root, ["add", "-A"]);
   git(root, ["commit", "--quiet", "-m", "tracked fixture data"]);
   const baseline = captureWorkspaceTree(root);
   const originalIndex = git(root, ["write-tree"]);
   write(root, "lcov.info", "edited\n");
-  fs.unlinkSync(path.join(root, ".recon/build-info/old.json"));
-  write(root, ".recon/build-info/new.json", "{}\n");
+  fs.unlinkSync(path.join(root, ".recon/build-info/0123456789abcdef.json"));
+  write(root, ".recon/build-info/fedcba9876543210.json", "{}\n");
 
   const captured = captureWorkspacePatch(root, baseline);
   assert.deepEqual(captured.manifest.files.map((entry) => entry.path).sort(), [
-    ".recon/build-info/old.json",
+    ".recon/build-info/0123456789abcdef.json",
     "lcov.info"
   ]);
   assert.match(captured.patch, /deleted file mode/u);
@@ -163,13 +173,67 @@ test("replays authored scratch JSON across generations even when it acquires com
   assert.equal(fs.readFileSync(path.join(downstream, ".recon/config.json"), "utf8"), compilerDump);
 });
 
+test("replays retained v1 generated entries and preserves their authority across updates and deletions", () => {
+  const root = fixture();
+  const downstream = path.join(temporaryRoot("ultrafuzz-legacy-downstream-"), "workspace");
+  const baseline = captureWorkspaceTree(root);
+  git(root, ["worktree", "add", "--quiet", "--detach", downstream, "HEAD"]);
+  write(root, ".recon/build.json", "{}\n");
+  write(root, "lcov.info", "legacy coverage\n");
+  write(root, "test/Harness.t.sol", "contract Harness {}\n");
+  const first = captureLegacyWorkspacePatch(root, baseline);
+  validateWorkspacePatchCapture(downstream, first, ["src", "contracts"]);
+  applyWorkspacePatch(downstream, first, ["src", "contracts"]);
+  assert.equal(captureWorkspaceTree(downstream, { trees: [first.manifest.result_tree] }), first.manifest.result_tree);
+  applyWorkspacePatch(downstream, first, ["src", "contracts"]);
+
+  // New scratch is not grandfathered merely because a retained handoff exists.
+  write(downstream, ".cov-work/compiler-output.json", "new scratch\n");
+  assert.equal(captureWorkspaceTree(downstream, { trees: [first.manifest.result_tree] }), first.manifest.result_tree);
+  write(downstream, ".recon/build.json", "modified legacy data\n");
+  assert.throws(() => applyWorkspacePatch(downstream, first, ["src", "contracts"]), /base tree mismatch/u);
+  write(downstream, ".recon/build.json", "{}\n");
+
+  // This new-runtime patch inherits the legacy generated entries through its
+  // base tree, without naming them in its own changed-file manifest.
+  write(root, "test/Harness.t.sol", "contract Harness { uint256 x; }\n");
+  const second = captureWorkspacePatch(root, first.manifest.result_tree);
+  assert.deepEqual(second.manifest.files, [{ path: "test/Harness.t.sol" }]);
+  applyWorkspacePatch(downstream, second, ["src", "contracts"]);
+  assert.equal(captureWorkspaceTree(downstream, { trees: [second.manifest.result_tree] }), second.manifest.result_tree);
+  const configuredSecret = "fixture-configured-credential-value";
+  write(root, ".recon/build.json", JSON.stringify({ credential: configuredSecret }));
+  const contaminated = captureWorkspacePatch(root, second.manifest.result_tree);
+  assert.deepEqual(contaminated.manifest.files, [{ path: ".recon/build.json" }]);
+  assert.throws(
+    () =>
+      assertArtifactPublicationsContainNoSecrets(new Map([["workspace.patch", Buffer.from(contaminated.patch)]]), [
+        configuredSecret
+      ]),
+    /artifact publication contains sensitive data/u
+  );
+  fs.unlinkSync(path.join(root, ".recon/build.json"));
+  const third = captureWorkspacePatch(root, second.manifest.result_tree);
+  assert.deepEqual(third.manifest.files, [{ path: ".recon/build.json" }]);
+  applyWorkspacePatch(downstream, third, ["src", "contracts"]);
+  assert.equal(captureWorkspaceTree(downstream, { trees: [third.manifest.result_tree] }), third.manifest.result_tree);
+  assert.equal(fs.existsSync(path.join(downstream, ".recon/build.json")), false);
+  assert.equal(fs.readFileSync(path.join(downstream, "lcov.info"), "utf8"), "legacy coverage\n");
+});
+
 test("still rejects configured and credential-shaped secrets in included authored files", () => {
   const values = [
     "fixture-configured-credential-value",
     "ghp_AbCdEf1234567890AbCdEf1234567890AbCd" // gitleaks:allow -- fixed synthetic scanner fixture
   ];
   for (const secret of values) {
-    for (const filename of [".cov-work/Harness.t.sol", ".recon/config.json", "test/Replay.t.sol"]) {
+    for (const filename of [
+      ".cov-work/Harness.t.sol",
+      ".recon/config.json",
+      "test/Replay.t.sol",
+      "test/recon/out/config.json",
+      "test/fixtures/Fixture.sol/cases.json"
+    ]) {
       const root = fixture();
       const baseline = captureWorkspaceTree(root);
       write(root, filename, JSON.stringify({ fixture: secret }));

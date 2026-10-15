@@ -2,7 +2,6 @@ import { lstatSync } from "node:fs";
 import path from "node:path";
 
 const SCRATCH_DIRECTORIES = new Set([".cov-work", ".recon"]);
-const BUILD_DIRECTORIES = new Set(["out", "build-info", "build-snapshot"]);
 const CORPUS_DIRECTORIES = new Set(["recon-corpus", "echidna"]);
 const SCRATCH_BUILD_FILES = new Set([
   "build.json",
@@ -30,10 +29,18 @@ export function isGeneratedWorkspaceOutput(workspaceRoot: string, relativePath: 
   const segments = relativePath.split("/");
   const filename = segments.pop() ?? "";
   const scratch = segments.some((segment) => SCRATCH_DIRECTORIES.has(segment));
+  const parent = segments.at(-1) ?? "";
+  // A broad ancestor such as out/ or Fixture.sol/ also holds authored config
+  // and test vectors. Require matching source/artifact names in a compiler layout
+  // or a hash-named build snapshot, not merely a familiar directory name.
+  const contractArtifact =
+    segments.at(-2) === "out" && parent.endsWith(".sol") && filename === `${parent.slice(0, -4)}.json`;
+  const buildSnapshot =
+    (parent === "build-info" || parent === "build-snapshot") &&
+    /^[0-9a-f]{8,64}\.json$/u.test(filename) &&
+    (scratch || segments.slice(0, -1).some((segment) => segment === "out" || CORPUS_DIRECTORIES.has(segment)));
   const buildJson =
-    filename.endsWith(".json") &&
-    (segments.some((segment) => BUILD_DIRECTORIES.has(segment) || segment.endsWith(".sol")) ||
-      (scratch && SCRATCH_BUILD_FILES.has(filename)));
+    filename.endsWith(".json") && (contractArtifact || buildSnapshot || (scratch && SCRATCH_BUILD_FILES.has(filename)));
   const coverage =
     filename === "lcov.info" ||
     filename.endsWith(".lcov") ||
