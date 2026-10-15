@@ -4,13 +4,21 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 
 import { temporaryRoot } from "./temporary-root.js";
 
 interface ControllerRun {
   status: string;
   eventTypes: Record<string, number>;
-  attempts: Array<{ state: string; started_at_ms: number; heartbeat_at_ms: number | null }>;
+  attempts: Array<{
+    state: string;
+    started_at_ms: number;
+    heartbeat_at_ms: number | null;
+    error_json: string | null;
+    meta_json: string | null;
+  }>;
 }
 
 // Runs a workflow on the engine Ultrafuzz ships: the repository install, which
@@ -39,7 +47,7 @@ const db = new Database("smithers.db", { readonly: true });
 const eventTypes = Object.fromEntries(
   db.query("SELECT type, count(*) AS n FROM _smithers_events GROUP BY type").all().map((row) => [row.type, row.n])
 );
-const attempts = db.query("SELECT state, started_at_ms, heartbeat_at_ms FROM _smithers_attempts").all();
+const attempts = db.query("SELECT state, started_at_ms, heartbeat_at_ms, error_json, meta_json FROM _smithers_attempts").all();
 fs.writeFileSync("result.json", JSON.stringify({ status: run.status, eventTypes, attempts }));
 process.exit(0);
 `
@@ -59,6 +67,63 @@ process.exit(0);
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
+
+test("controller persists a missing generated validator as TOOL_UNAVAILABLE without retrying preparation", () => {
+  const root = temporaryRoot("ufz-controller-missing-validator-");
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../../src/templates/smithers/workflows/workflow.tsx", import.meta.url)),
+    "utf8"
+  );
+  const helpers = (
+    [
+      ["const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS", "\n\nfunction taskPublishesWorkspacePatch"],
+      ["function preparationStep", "\n\nfunction prepareArtifactMirror"],
+      ["function nonRetryableFailure", "\n\nfunction assertVerifiedDependency"]
+    ] as const
+  )
+    .map(([startMarker, endMarker]) => {
+      const start = source.indexOf(startMarker);
+      const end = source.indexOf(endMarker, start);
+      assert.ok(start >= 0 && end > start, startMarker);
+      return source.slice(start, end);
+    })
+    .join("\n");
+  const compiled = ts.transpileModule(helpers, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText;
+  const run = runOnControllerEngine(
+    root,
+    `
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+const artifactValidatorSmokeFixturePath = () => "synthetic-fixture.json";
+${compiled}
+const workflow = smithers(() => h(Workflow, { name: "missing-validator" },
+  h(Task, { id: "prepare:synthetic", output: outputs.result, retries: 3,
+    retryPolicy: { backoff: "fixed", initialDelayMs: 1 } }, () => {
+    preparationStep("synthetic", "preflight-json-validator", () => preflightJsonValidator(
+      process.cwd(), { registry: [{ filename: "findings.schema.json" }] }, process.cwd()));
+    return { value: "unreachable" };
+  })));
+`
+  );
+  assert.equal(run.status, "failed");
+  assert.equal(run.attempts.length, 1, JSON.stringify(run));
+  assert.equal(run.eventTypes.NodeFailed, 1);
+  assert.equal(run.eventTypes.NodeRetrying ?? 0, 0);
+  const attempt = run.attempts[0];
+  assert.ok(attempt?.error_json && attempt.meta_json);
+  const failure = JSON.parse(attempt.error_json) as {
+    code?: string;
+    message: string;
+    details?: { failureRetryable?: boolean };
+  };
+  assert.equal(failure.code, "TOOL_UNAVAILABLE");
+  assert.equal(failure.details?.failureRetryable, false);
+  assert.match(failure.message, /prepare:synthetic failed at step preflight-json-validator: tool_unavailable/u);
+  assert.doesNotMatch(failure.message, /timeout|budget|180000/u);
+  assert.equal((JSON.parse(attempt.meta_json) as { failureRetryable?: boolean }).failureRetryable, false);
+});
 
 // #1147: each successful attempt-row heartbeat write also appended a TaskHeartbeat
 // event row and stream.ndjson line. This agent is quiet, so only the throttled

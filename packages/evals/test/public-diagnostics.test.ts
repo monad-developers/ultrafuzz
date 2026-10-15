@@ -155,6 +155,23 @@ describe("public eval diagnostics summary", () => {
     expect(() => parsePublicEvalDiagnostics(impossibleDate)).toThrow(/actual canonical UTC calendar instant/u);
   });
 
+  it.each([
+    "agent-failure",
+    "artifact-contract",
+    "dependency-cascade",
+    "provider-interruption",
+    "tool-unavailable"
+  ] as const)("retains %s through canonical and Zod diagnostic parsing", (category) => {
+    const document = diagnosticsDocument([
+      {
+        ...scoreableRow("target-alpha"),
+        failed_nodes: [{ node_id: "failed-node", status: "failed", timed_out: false, failure_category: category }]
+      }
+    ]);
+    expectStructuralParity(document, true);
+    expect(parsePublicEvalDiagnostics(document).rows[0]?.failed_nodes[0]?.failure_category).toBe(category);
+  });
+
   it("accepts a bounded failed-node message and rejects an oversized one", () => {
     const row = {
       ...scoreableRow("target-alpha"),

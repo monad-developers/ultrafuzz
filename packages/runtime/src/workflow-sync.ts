@@ -3484,18 +3484,21 @@ async function finalizeTerminalTask(input: {
   verifiedAfterAdmission: (attemptId: string) => boolean;
 }): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
-    // Preparation and verification wrappers both enforce the artifact contract
-    // around the agent task, so a wrapper failure is reported as one.
+    // Preparation and verification wrappers enforce artifact contracts around the agent task.
+    // A typed launch failure keeps its operational category instead of implying invalid artifacts.
     const wrapperSource = input.evidenceSource === "verifier" || input.evidenceSource === "preparation";
+    const toolUnavailable = input.evidence.status === "failed" && input.evidence.errorCode === "TOOL_UNAVAILABLE";
     const category =
       input.evidence.status === "skipped"
         ? "dependency-cascade"
-        : wrapperSource
-          ? "artifact-contract"
-          : input.evidence.status === "timed-out"
-            ? "provider-interruption"
-            : "agent-failure";
-    const wrapperFailure = wrapperSource && category === "artifact-contract";
+        : toolUnavailable
+          ? "tool-unavailable"
+          : wrapperSource
+            ? "artifact-contract"
+            : input.evidence.status === "timed-out"
+              ? "provider-interruption"
+              : "agent-failure";
+    const wrapperFailure = wrapperSource && category !== "dependency-cascade";
     const preparationFailure = wrapperFailure && input.evidenceSource === "preparation";
     const wrapperTaskId = preparationFailure ? input.task.preparationSmithersNodeId : input.task.verifierSmithersNodeId;
     const wrapperLabel = preparationFailure ? "artifact preparation" : "artifact verifier";
@@ -3509,6 +3512,7 @@ async function finalizeTerminalTask(input: {
     if (
       wrapperFailure &&
       !preparationFailure &&
+      !toolUnavailable &&
       input.evidence.status === "failed" &&
       input.evidence.timedOut !== true &&
       (input.task.optionalDependencyArtifactDirs?.length ?? 0) === 0
@@ -3531,7 +3535,11 @@ async function finalizeTerminalTask(input: {
     const diagnostics: RuntimeDiagnostic[] = wrapperFailure
       ? [
           {
-            code: preparationFailure ? "ARTIFACT_PREPARATION_FAILED" : "ARTIFACT_VERIFIER_FAILED",
+            code: toolUnavailable
+              ? "TOOL_UNAVAILABLE"
+              : preparationFailure
+                ? "ARTIFACT_PREPARATION_FAILED"
+                : "ARTIFACT_VERIFIER_FAILED",
             message: `${wrapperLabel} did not complete successfully for ${input.task.attemptId}`,
             severity: "error",
             source: "artifact-contracts",
@@ -4550,7 +4558,14 @@ function terminalOutcomeForEvent(event: WorkflowEvent): TerminalAttemptOutcome |
       const failureMessage = errorText(event.payload.error);
       return workflowErrorIsTimeout(event.payload.error)
         ? { outcome: "timed-out", failureCategory: "timeout", ...(failureMessage ? { failureMessage } : {}) }
-        : { outcome: "failed", failureCategory: "executor-error", ...(failureMessage ? { failureMessage } : {}) };
+        : {
+            outcome: "failed",
+            failureCategory:
+              isRecord(event.payload.error) && event.payload.error.code === "TOOL_UNAVAILABLE"
+                ? "tool-unavailable"
+                : "executor-error",
+            ...(failureMessage ? { failureMessage } : {})
+          };
     }
     case "NodeCancelled": {
       // Smithers names the cancellation: run-cancelled, unmounted or aborted.
@@ -4587,6 +4602,7 @@ function finalizationFailureCategory(
   if (outcome !== "failed") {
     return undefined;
   }
+  if (finalization.provenance.failure?.category === "tool-unavailable") return "tool-unavailable";
   // Only a finished executor occurrence reaches this overlay, so its node
   // failed after the executor finished: a verifier or artifact-gate rejection,
   // or a cancellation while the verifier ran.

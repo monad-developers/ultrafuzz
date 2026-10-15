@@ -502,7 +502,13 @@
                 "maximum": 9007199254740991
               },
               "failure_category": {
-                "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+                "enum": [
+                  "dependency-cascade",
+                  "artifact-contract",
+                  "tool-unavailable",
+                  "provider-interruption",
+                  "agent-failure"
+                ]
               }
             }
           }
@@ -946,14 +952,26 @@
       "additionalProperties": false,
       "properties": {
         "category": {
-          "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+          "enum": [
+            "dependency-cascade",
+            "artifact-contract",
+            "tool-unavailable",
+            "provider-interruption",
+            "agent-failure"
+          ]
         },
         "causal_task_id": {
           "type": "string",
           "minLength": 1
         },
         "causal_failure_category": {
-          "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+          "enum": [
+            "dependency-cascade",
+            "artifact-contract",
+            "tool-unavailable",
+            "provider-interruption",
+            "agent-failure"
+          ]
         },
         "dependent_task_ids": {
           "type": "array",

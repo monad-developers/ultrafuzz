@@ -201,6 +201,15 @@ test("stats derives closed per-node timing, usage, cost, and status totals", () 
   assert.deepEqual(derived.diagnostics, []);
 });
 
+test("stats serializes tool-unavailable beside existing attempt failure categories", () => {
+  for (const category of ["tool-unavailable", "executor-error"] as const) {
+    const failed = { ...attempt("node", "node", 1, { outcome: "failed" }), failure_category: category };
+    const { value } = deriveRunStatistics(evidence({ attempts: [failed], usage: [] }), Date.parse(FINISHED_AT));
+    assert.deepEqual(value.nodes[0]?.failure_categories, [category]);
+    assert.doesNotThrow(() => envelope("stats", buildStatisticsCommandResult(value, [])));
+  }
+});
+
 test("stats counts a failed node whose task Smithers cancelled as canceled", () => {
   type WorkflowState = "cancelled" | "failed";
   const failed = (nodeId: string, logicalNodeId: string, workflow: NodeWorkflowProvenance): NodeState => ({

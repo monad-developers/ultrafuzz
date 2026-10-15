@@ -76,7 +76,13 @@
         "status": { "enum": ["failed", "timed-out"] },
         "timed_out": { "type": "boolean" },
         "failure_category": {
-          "enum": ["agent-failure", "artifact-contract", "dependency-cascade", "provider-interruption"]
+          "enum": [
+            "agent-failure",
+            "artifact-contract",
+            "dependency-cascade",
+            "provider-interruption",
+            "tool-unavailable"
+          ]
         },
         "failure_code": { "const": "task-output-validation-failure" },
         "failure_message": { "type": "string", "minLength": 1, "maxLength": 1000 }

@@ -33,6 +33,7 @@ export type NodeAttemptOutcome = (typeof NODE_ATTEMPT_OUTCOMES)[number];
 
 export const NODE_ATTEMPT_FAILURE_CATEGORIES = [
   "executor-error",
+  "tool-unavailable",
   "timeout",
   "canceled",
   "dependency",

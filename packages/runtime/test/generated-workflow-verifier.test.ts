@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { temporaryRoot } from "./temporary-root.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -437,10 +437,15 @@ function loadJsonValidatorPreflight(
     stdout?: string;
     parse?: typeof parseJsonValidatorPreflightSuccessEnvelope;
     bundle?: ReturnType<typeof installedBundle>;
+    runRoot?: string;
+    platform?: NodeJS.Platform;
+    execute?: (file: string, args: readonly string[], options: ExecFileSyncOptionsWithStringEncoding) => string;
   } = {}
 ): {
   preflight(): void;
+  preparation(): void;
   observedTimeoutMs(): number | undefined;
+  observedExecutable(): string | undefined;
   spawnCount(): number;
   budgetMs: number;
 } {
@@ -448,10 +453,22 @@ function loadJsonValidatorPreflight(
   const helperStart = source.indexOf("const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS");
   const helperEnd = source.indexOf("\n\nfunction taskPublishesWorkspacePatch", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
+  const preparationStart = source.indexOf("function preparationStep");
+  const preparationEnd = source.indexOf("function prepareArtifactMirror", preparationStart);
+  const retryStart = source.indexOf("function nonRetryableFailure");
+  const retryEnd = source.indexOf("function assertVerifiedDependency", retryStart);
+  assert.ok(preparationStart >= 0 && preparationEnd > preparationStart);
+  assert.ok(retryStart >= 0 && retryEnd > retryStart);
+  const helper = ts.transpileModule(
+    source.slice(helperStart, helperEnd) +
+      source.slice(preparationStart, preparationEnd) +
+      source.slice(retryStart, retryEnd),
+    {
+      compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
+    }
+  ).outputText;
   let observedTimeout: number | undefined;
+  let observedFile: string | undefined;
   let spawns = 0;
   const loaded = new Function(
     "ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256",
@@ -459,25 +476,41 @@ function loadJsonValidatorPreflight(
     "execFileSync",
     "parseJsonValidatorPreflightSuccessEnvelope",
     "path",
+    "process",
     `${helper}; return {
       preflight: preflightJsonValidator,
+      preparation: (...args) => preparationStep("fixture", "preflight-json-validator", () => preflightJsonValidator(...args)),
       budgetMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS
     };`
   )(
     ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
-    (_file: string, _args: readonly string[], spawnOptions: { timeout?: number }) => {
+    (file: string, args: readonly string[], spawnOptions: ExecFileSyncOptionsWithStringEncoding) => {
       spawns += 1;
       observedTimeout = spawnOptions.timeout;
+      observedFile = file;
       if (options.failure !== undefined) throw options.failure;
+      if (options.execute !== undefined) return options.execute(file, args, spawnOptions);
       return options.stdout ?? "{}";
     },
     options.parse ?? (() => undefined),
-    path
-  ) as { preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): void; budgetMs: number };
+    path,
+    { platform: options.platform ?? process.platform }
+  ) as {
+    preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>, runRoot: string): void;
+    preparation(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>, runRoot: string): void;
+    budgetMs: number;
+  };
+  const args = [
+    path.join(path.sep, "fixture", "schemas"),
+    options.bundle ?? installedBundle(),
+    options.runRoot ?? path.join(path.sep, "fixture", "run")
+  ] as const;
   return {
-    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas"), options.bundle ?? installedBundle()),
+    preflight: () => loaded.preflight(...args),
+    preparation: () => loaded.preparation(...args),
     observedTimeoutMs: () => observedTimeout,
+    observedExecutable: () => observedFile,
     spawnCount: () => spawns,
     budgetMs: loaded.budgetMs
   };
@@ -5811,7 +5844,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
   assert.match(optional, /dependencyArtifactAdmissionsByTask\.get\(task\.attemptId\)/u);
   assert.match(
     source,
-    /preflightJsonValidator\(schemaDirectory, schemaBundle\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
+    /preflightJsonValidator\(schemaDirectory, schemaBundle, task\.runRoot\)[\s\S]{0,120}?assertTaskInputs\(task, workspaceRoot, options\.pinnedSubmodules !== "verify"\)/u
   );
   assert.match(
     source,
@@ -6656,6 +6689,147 @@ test("generated validator preflight expects the run's planned schema identity, n
       /invalid success envelope/u.test(error.message) &&
       /mismatched identity/u.test(String((error.cause as Error | undefined)?.message))
   );
+});
+
+test(
+  "generated validator preflight executes its run-owned launcher with an empty or shadowed PATH",
+  {
+    skip: process.platform === "win32"
+  },
+  () => {
+    const root = temporaryRoot("ufz-validator-executable-");
+    const runRoot = path.join(root, "run with spaces");
+    const trustedBin = path.join(runRoot, "trusted-bin");
+    const hostileBin = path.join(root, "hostile-bin");
+    fs.mkdirSync(trustedBin, { recursive: true });
+    fs.mkdirSync(hostileBin);
+    const launcher = path.join(trustedBin, "ultrafuzz");
+    const bundle = installedBundle();
+    const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
+    assert.ok(findings);
+    const envelope = JSON.stringify({
+      schema_version: "ultrafuzz.cli.result.v2",
+      command: "json validate",
+      ok: true,
+      diagnostics: [],
+      data: {
+        status: "valid",
+        diagnostics: [],
+        schema: {
+          id: findings.id,
+          sha256: findings.sha256,
+          bundle_sha256: bundle.sha256,
+          validator_build: "ultrafuzz-json-validator.v1:synthetic",
+          registered: true
+        },
+        artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+        truncated: false
+      }
+    });
+    fs.writeFileSync(launcher, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(envelope)});\n`, {
+      mode: 0o700
+    });
+    const hostileMarker = path.join(root, "hostile-called");
+    fs.writeFileSync(
+      path.join(hostileBin, "ultrafuzz"),
+      `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(hostileMarker)}, "called");\n`,
+      { mode: 0o700 }
+    );
+    for (const searchPath of ["", hostileBin]) {
+      const harness = loadJsonValidatorPreflight({
+        runRoot,
+        parse: parseJsonValidatorPreflightSuccessEnvelope,
+        execute: (file, args, options) =>
+          execFileSync(file, args, {
+            ...options,
+            env: { PATH: searchPath, ULTRAFUZZ_TRUSTED_BIN: hostileBin }
+          })
+      });
+      harness.preparation();
+      assert.equal(harness.observedExecutable(), launcher);
+    }
+    assert.equal(fs.existsSync(hostileMarker), false);
+
+    // A missing trusted launcher must not fall back to a different CLI on PATH.
+    fs.unlinkSync(launcher);
+    const missing = loadJsonValidatorPreflight({
+      runRoot,
+      execute: (file, args, options) => execFileSync(file, args, { ...options, env: { PATH: hostileBin } })
+    });
+    assert.throws(
+      () => missing.preparation(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal((error as { code?: string }).code, "TOOL_UNAVAILABLE");
+        assert.match(error.message, /prepare:fixture failed at step preflight-json-validator: tool_unavailable/u);
+        assert.ok(error.message.includes(launcher));
+        assert.doesNotMatch(error.message, /timeout|budget|180000/u);
+        return true;
+      }
+    );
+    assert.equal(fs.existsSync(hostileMarker), false);
+  }
+);
+
+test("generated validator preflight selects the platform's run-owned launcher", () => {
+  for (const platform of ["linux", "win32"] as const) {
+    const harness = loadJsonValidatorPreflight({ platform });
+    harness.preflight();
+    assert.equal(
+      harness.observedExecutable(),
+      path.join(path.sep, "fixture", "run", "trusted-bin", platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz")
+    );
+  }
+});
+
+test("generated validator launch failures keep their typed, non-retryable classification through preparation", async () => {
+  for (const code of ["ENOENT", "EACCES", "ENOTDIR"]) {
+    const launchFailure = Object.assign(new Error(`spawnSync ultrafuzz ${code}`), { code });
+    const harness = loadJsonValidatorPreflight({ failure: launchFailure });
+    assert.throws(
+      () => harness.preparation(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        const failure = error as NormalizedAgentFailure;
+        assert.equal(failure.code, "TOOL_UNAVAILABLE");
+        assert.deepEqual(failure.details, { failureRetryable: false });
+        assert.equal((failure.cause as Error).cause, launchFailure);
+        assert.match(failure.message, /tool_unavailable.*ultrafuzz/u);
+        assert.doesNotMatch(failure.message, /timeout|budget|180000/u);
+        return true;
+      }
+    );
+  }
+  const normalized = await captureAgentFailure(
+    Object.assign(new Error("tool_unavailable: ultrafuzz"), {
+      code: "TOOL_UNAVAILABLE",
+      details: { failureRetryable: false }
+    }),
+    { agentChain: [{}] },
+    true
+  );
+  assert.equal(normalized.code, "TOOL_UNAVAILABLE");
+  assert.deepEqual(normalized.details, { failureRetryable: false });
+});
+
+test("generated validator preflight only adds deadline diagnostics to a typed timeout", () => {
+  for (const failure of [
+    new Error("validator exited with status 1"),
+    Object.assign(new Error("capture failed"), { code: "ENOBUFS" })
+  ]) {
+    const harness = loadJsonValidatorPreflight({ failure });
+    assert.throws(
+      () => harness.preflight(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.cause, failure);
+        assert.match(error.message, /JSON validator preflight failed after \d+ms:/u);
+        assert.doesNotMatch(error.message, /timeout|budget|180000/u);
+        assert.equal((error as { code?: string }).code, undefined);
+        return true;
+      }
+    );
+  }
 });
 
 test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", () => {

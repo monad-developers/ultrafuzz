@@ -16,7 +16,8 @@ export const PUBLIC_EVAL_FAILURE_CATEGORIES = [
   "agent-failure",
   "artifact-contract",
   "dependency-cascade",
-  "provider-interruption"
+  "provider-interruption",
+  "tool-unavailable"
 ] as const;
 export const PUBLIC_EVAL_FAILURE_CODES = ["task-output-validation-failure"] as const;
 export const PUBLIC_EVAL_DIAGNOSTICS_TIMESTAMP_PATTERN_SOURCE =

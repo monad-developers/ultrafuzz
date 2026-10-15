@@ -136,6 +136,7 @@ export const SMITHERS_NODE_STATES = [
 export const NODE_PROVENANCE_FAILURE_CATEGORIES = [
   "dependency-cascade",
   "artifact-contract",
+  "tool-unavailable",
   "provider-interruption",
   "agent-failure"
 ] as const;

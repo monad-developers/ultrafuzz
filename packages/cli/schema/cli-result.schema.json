@@ -1588,6 +1588,7 @@
               "items": {
                 "enum": [
                   "executor-error",
+                  "tool-unavailable",
                   "timeout",
                   "canceled",
                   "dependency",

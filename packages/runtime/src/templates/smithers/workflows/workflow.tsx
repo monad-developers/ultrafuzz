@@ -2493,6 +2493,7 @@ function artifactAwareAgent(
       "AGENT_SESSION_LOST",
       "AGENT_CHECKPOINT_INVALID",
       "TASK_ABORTED",
+      "TOOL_UNAVAILABLE",
       // Agent CLI deadlines. Run synchronization labels timeouts by code only.
       "PROCESS_TIMEOUT",
       "PROCESS_IDLE_TIMEOUT"
@@ -3115,6 +3116,9 @@ function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
       `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
+    if (error instanceof Error && "code" in error && error.code === "TOOL_UNAVAILABLE") {
+      Object.assign(wrapped, { code: "TOOL_UNAVAILABLE" });
+    }
     throw isNonRetryableFailure(error) ? nonRetryableFailure(wrapped) : wrapped;
   }
 }
@@ -3191,7 +3195,7 @@ function prepareArtifactMirror(
   // there could only fail its zero-retry task.
   if (options.pinnedSubmodules !== "verify" && task.outputs.some((output) => isSchemaBackedOutput(output))) {
     preparationStep(task.attemptId, "preflight-json-validator", () =>
-      preflightJsonValidator(schemaDirectory, schemaBundle)
+      preflightJsonValidator(schemaDirectory, schemaBundle, task.runRoot)
     );
   }
   preparationStep(task.attemptId, "assert-task-inputs", () =>
@@ -3263,8 +3267,7 @@ function prepareArtifactMirror(
 /**
  * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
- * `"ultrafuzz"` resolves to the run-owned trusted launcher, which `composeSmithersCommandPath` puts
- * first on PATH, so the preflight pays the CLI's own cold start: ~2.5 s on an idle box,
+ * The run-owned trusted launcher pays the CLI's own cold start: ~2.5 s on an idle box,
  * ~35 s once a dozen agents are building against the same cores. Below that the step reports a bare
  * `spawnSync ultrafuzz ETIMEDOUT`, which names neither the contention nor a schema, and which cost
  * the smoke lane two of its three targets in #1026. Roughly five times that measured worst case,
@@ -3278,15 +3281,18 @@ const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
 // Re-spawning it in every prepare and attempt reset only added CLI cold starts that could fail an attempt.
 let jsonValidatorPreflightPassed = false;
 
-function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaBundle): void {
+function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaBundle, runRoot: string): void {
   if (jsonValidatorPreflightPassed) return;
   const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
   if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
+  // Detached workers may drop PATH and the trusted-bin environment variable. The task's sealed run
+  // location is authoritative, and the launcher verifies its package closure on every invocation.
+  const launcherPath = path.join(runRoot, "trusted-bin", process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz");
   let stdout: string;
   const startedAt = Date.now();
   try {
     stdout = execFileSync(
-      "ultrafuzz",
+      launcherPath,
       [
         "json",
         "validate",
@@ -3299,8 +3305,24 @@ function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaB
       { encoding: "utf8", maxBuffer: 1024 * 1024, timeout: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS, windowsHide: true }
     );
   } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code === "ENOENT" || code === "EACCES" || code === "ENOTDIR") {
+      throw Object.assign(
+        nonRetryableFailure(
+          new Error(
+            `tool_unavailable: JSON validator preflight could not launch ultrafuzz at ${JSON.stringify(launcherPath)} (${code}); restore the run-owned trusted CLI before retrying`,
+            { cause: error }
+          )
+        ),
+        { code: "TOOL_UNAVAILABLE" }
+      );
+    }
+    const deadline =
+      code === "ETIMEDOUT"
+        ? ` against a ${JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS}ms budget (only the launcher is signalled on timeout, and its grandchild CLI holds the inherited pipes open, so elapsed can overrun the budget)`
+        : "";
     throw new Error(
-      `artifact-contract failure: JSON validator preflight failed after ${Date.now() - startedAt}ms against a ${JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS}ms budget (only the launcher is signalled on timeout, and its grandchild CLI holds the inherited pipes open, so elapsed can overrun the budget): ${error instanceof Error ? error.message : String(error)}`,
+      `artifact-contract failure: JSON validator preflight failed after ${Date.now() - startedAt}ms${deadline}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
   }

@@ -274,6 +274,25 @@ test("failure identity mismatches and missing sealed task state fail closed with
   assert.throws(() => deriveTerminalReportCompletion(snapshot(fixture)), /missing sealed task state/u);
 });
 
+test("tool-unavailable failures cannot become a publishable partial task result", () => {
+  for (const taskPrefix of ["prepare", "node", "verify"]) {
+    const fixture = makeFixture(["failed"]);
+    setOutcome(fixture, "failed", "failed");
+    const taskId = `${taskPrefix}:failed`;
+    workflow(fixture, "failed").task_id = taskId;
+    provenance(fixture, "failed").failure = {
+      category: "tool-unavailable",
+      causal_task_id: taskId,
+      causal_failure_category: "tool-unavailable",
+      dependent_task_ids: []
+    };
+    assert.throws(
+      () => deriveTerminalReportCompletion(snapshot(fixture)),
+      /cannot downgrade controller task|cannot classify task outcome/u
+    );
+  }
+});
+
 function makeFixture(ids: string[]): Fixture {
   const graph: PlannedGraphDocument = {
     schema_version: PLANNED_GRAPH_SCHEMA_VERSION,
