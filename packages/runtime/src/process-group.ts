@@ -108,6 +108,7 @@ function observeProcessGroup(child: ChildProcessWithoutNullStreams, options: Pro
       clearTimeout(killTimer);
       clearTimeout(drainTimer);
       options.signal?.removeEventListener("abort", cancel);
+      process.removeListener("exit", shutdown);
       signal("SIGKILL");
       child.stdout.destroy();
       child.stderr.destroy();
@@ -134,7 +135,14 @@ function observeProcessGroup(child: ChildProcessWithoutNullStreams, options: Pro
       }, TERMINATION_GRACE_MS);
     }
     function cancel(): void {
-      if (!exited) stop(processFailure("TASK_ABORTED", "process execution canceled"));
+      if (exited || settled) return;
+      stop(processFailure("TASK_ABORTED", "process execution canceled"));
+      // The engine can settle its cancellation race and exit before a grace
+      // timer runs. Deliver the terminal signal within the abort notification.
+      signal("SIGKILL");
+    }
+    function shutdown(): void {
+      signal("SIGKILL");
     }
     function overflow(): void {
       stop(processFailure("PROCESS_OUTPUT_LIMIT", `process output exceeded ${String(options.maxBuffer)} bytes`));
@@ -161,6 +169,7 @@ function observeProcessGroup(child: ChildProcessWithoutNullStreams, options: Pro
     });
     child.once("close", finish);
     options.signal?.addEventListener("abort", cancel, { once: true });
+    process.once("exit", shutdown);
     if (options.signal?.aborted === true) cancel();
   });
 }

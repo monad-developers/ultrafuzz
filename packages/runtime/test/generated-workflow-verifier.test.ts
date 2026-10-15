@@ -203,7 +203,7 @@ type TaskLocalAuthority = "dependency-admission" | "report-run-metadata" | "repo
 function loadArtifactAwareAgent(
   options: {
     onCheck?: (authority: TaskLocalAuthority) => void;
-    onReset?: () => void;
+    onReset?: (signal: AbortSignal | undefined) => void;
     onSourceVerify?: () => void;
   } = {}
 ): (
@@ -241,7 +241,7 @@ function loadArtifactAwareAgent(
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onSourceVerify?.(),
-    () => options.onReset?.(),
+    (_task: unknown, _runtime: unknown, signal: AbortSignal | undefined) => options.onReset?.(signal),
     () => undefined,
     () => undefined,
     (_task: unknown, args: unknown) => args,
@@ -437,10 +437,12 @@ function loadJsonValidatorPreflight(
     stdout?: string;
     parse?: typeof parseJsonValidatorPreflightSuccessEnvelope;
     bundle?: ReturnType<typeof installedBundle>;
+    run?: (signal: AbortSignal) => Promise<{ stdout: string; stderr: string }>;
   } = {}
 ): {
-  preflight(): Promise<void>;
+  preflight(signal?: AbortSignal): Promise<void>;
   observedTimeoutMs(): number | undefined;
+  observedLauncher(): string | undefined;
   spawnCount(): number;
   budgetMs: number;
 } {
@@ -452,12 +454,14 @@ function loadJsonValidatorPreflight(
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   let observedTimeout: number | undefined;
+  let observedLauncher: string | undefined;
   let spawns = 0;
   const loaded = new Function(
     "ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256",
     "artifactValidatorSmokeFixturePath",
     "runProcessGroup",
     "parseJsonValidatorPreflightSuccessEnvelope",
+    "nonRetryableFailure",
     "path",
     `${helper}; return {
       preflight: preflightJsonValidator,
@@ -466,21 +470,36 @@ function loadJsonValidatorPreflight(
   )(
     ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
-    async (_file: string, _args: readonly string[], spawnOptions: { timeoutMs?: number }) => {
+    async (file: string, _args: readonly string[], spawnOptions: { timeoutMs?: number; signal: AbortSignal }) => {
       spawns += 1;
       observedTimeout = spawnOptions.timeoutMs;
+      observedLauncher = file;
+      if (options.run !== undefined) return options.run(spawnOptions.signal);
       if (options.failure !== undefined) throw options.failure;
       return { stdout: options.stdout ?? "{}", stderr: "" };
     },
     options.parse ?? (() => undefined),
+    (error: Error) => Object.assign(error, { details: { failureRetryable: false } }),
     path
   ) as {
-    preflight(schemaDirectory: string, bundle: ReturnType<typeof installedBundle>): Promise<void>;
+    preflight(
+      schemaDirectory: string,
+      bundle: ReturnType<typeof installedBundle>,
+      runRoot: string,
+      signal: AbortSignal
+    ): Promise<void>;
     budgetMs: number;
   };
   return {
-    preflight: () => loaded.preflight(path.join(path.sep, "fixture", "schemas"), options.bundle ?? installedBundle()),
+    preflight: (signal = new AbortController().signal) =>
+      loaded.preflight(
+        path.join(path.sep, "fixture", "schemas"),
+        options.bundle ?? installedBundle(),
+        path.join(path.sep, "fixture", "run"),
+        signal
+      ),
     observedTimeoutMs: () => observedTimeout,
+    observedLauncher: () => observedLauncher,
     spawnCount: () => spawns,
     budgetMs: loaded.budgetMs
   };
@@ -5984,7 +6003,7 @@ test("rerenders retain one dependency admission epoch and fresh modules reauthen
     `${source.slice(reconciliationStart, reconciliationEnd)}
 ${source.slice(admissionStart, admissionEnd)}
 ${source.slice(agentStart, agentEnd)}
-function prepareArtifactMirrorForAgent(task: (typeof taskSpecs)[number]): void {
+function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
   counters.preparations += 1;
   assertTaskInputs(task, task.workspacePath);
 }`,
@@ -6052,7 +6071,7 @@ function prepareArtifactMirrorForAgent(task: (typeof taskSpecs)[number]): void {
         "frictionLogAddDir",
         `${emitted}; return {
           prepare(task) {
-            prepareArtifactMirrorForAgent(task);
+            prepareArtifactMirror(task);
           },
           agent(task) {
             return agentForTask(task, "prompt");
@@ -6707,8 +6726,81 @@ test("generated validator preflight shares concurrent launches and never remembe
   assert.equal(failing.spawnCount(), 2, "a failed preflight must be retried by the next caller");
 });
 
+test("generated validator preflight cancels a task wait without canceling another active owner", async () => {
+  let complete = (): void => {};
+  let sharedSignal: AbortSignal | undefined;
+  const harness = loadJsonValidatorPreflight({
+    run: (signal) => {
+      sharedSignal = signal;
+      return new Promise((resolve) => {
+        complete = () => resolve({ stdout: "{}", stderr: "" });
+      });
+    }
+  });
+  const first = new AbortController();
+  const second = new AbortController();
+  const canceled = assert.rejects(harness.preflight(first.signal), { code: "TASK_ABORTED" });
+  const remaining = harness.preflight(second.signal);
+  first.abort();
+  await canceled;
+  assert.equal(sharedSignal?.aborted, false, "the remaining owner still needs the probe");
+  complete();
+  await remaining;
+  second.abort();
+  assert.equal(sharedSignal?.aborted, false, "a completed wait must remove its abort listener");
+  await harness.preflight();
+  assert.equal(harness.spawnCount(), 1, "the remaining owner can cache the successful probe");
+});
+
+test("generated validator preflight waits for last-owner cleanup and does not cache a canceled probe", async () => {
+  let cleanup = (): void => {};
+  let sharedSignal: AbortSignal | undefined;
+  const harness = loadJsonValidatorPreflight({
+    run: (signal) => {
+      sharedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        cleanup = () => reject(Object.assign(new Error("process execution canceled"), { code: "TASK_ABORTED" }));
+      });
+    }
+  });
+  const controller = new AbortController();
+  let settled = false;
+  const probe = harness.preflight(controller.signal);
+  const rejected = assert.rejects(probe, { code: "TASK_ABORTED" }).then(() => {
+    settled = true;
+  });
+  controller.abort();
+  assert.equal(sharedSignal?.aborted, true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "the canceled caller still owns bounded cleanup");
+
+  // A new caller may start while the canceled launch is draining. Failure of
+  // that old launch must not evict the new shared probe from the cache.
+  const finishOldCleanup = cleanup;
+  const nextController = new AbortController();
+  const next = assert.rejects(harness.preflight(nextController.signal), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 2);
+  finishOldCleanup();
+  await rejected;
+  const concurrent = assert.rejects(harness.preflight(nextController.signal), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 2);
+  nextController.abort();
+  assert.equal(sharedSignal?.aborted, true);
+  cleanup();
+  await Promise.all([next, concurrent]);
+});
+
+test("generated validator preflight refuses already canceled callers before launch or cached success", async () => {
+  const harness = loadJsonValidatorPreflight();
+  await assert.rejects(harness.preflight(AbortSignal.abort()), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 0);
+  await harness.preflight();
+  await assert.rejects(harness.preflight(AbortSignal.abort()), { code: "TASK_ABORTED" });
+  assert.equal(harness.spawnCount(), 1);
+});
+
 test("generated validator preflight does not describe launch or exit failures as deadline failures", async () => {
-  for (const code of ["ENOENT", "EACCES", "PROCESS_EXIT"]) {
+  for (const code of ["ENOENT", "EACCES", "ENOTDIR", "PROCESS_EXIT", "TASK_ABORTED"]) {
     const failure = Object.assign(new Error(`command failed: ${code}`), { code });
     const harness = loadJsonValidatorPreflight({ failure });
     await assert.rejects(harness.preflight(), (error: unknown) => {
@@ -6716,31 +6808,47 @@ test("generated validator preflight does not describe launch or exit failures as
       assert.equal(error.cause, failure);
       assert.doesNotMatch(error.message, /timeout|budget|launcher is signalled/u);
       assert.notEqual((error as Error & { code?: string }).code, "PROCESS_TIMEOUT");
+      if (["ENOENT", "EACCES", "ENOTDIR"].includes(code)) {
+        assert.equal((error as Error & { code?: string }).code, "TOOL_UNAVAILABLE");
+        assert.deepEqual((error as Error & { details?: unknown }).details, { failureRetryable: false });
+        assert.match(error.message, /restore the run-owned trusted CLI before retrying/u);
+      } else if (code === "TASK_ABORTED") {
+        assert.equal((error as Error & { code?: string }).code, "TASK_ABORTED");
+      }
       return true;
     });
+    assert.equal(
+      harness.observedLauncher(),
+      path.join(path.sep, "fixture", "run", "trusted-bin", process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz")
+    );
+    assert.equal(harness.spawnCount(), 1, "a failed trusted launch must not fall back to PATH");
   }
 });
 
-test("generated preparation retains a real preflight deadline code through its step wrapper", () => {
+test("generated preparation retains preflight timeout, cancellation and tool availability codes", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function preparationStep");
   const helperEnd = source.indexOf("\n\nfunction prepareArtifactMirror", helperStart);
   const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
   }).outputText;
-  const step = new Function("isNonRetryableFailure", `${helper}; return preparationStep;`)(() => false) as (
-    attemptId: string,
-    step: string,
-    run: () => never
-  ) => never;
-  const deadline = Object.assign(new Error("preflight deadline"), { code: "PROCESS_TIMEOUT" });
-  assert.throws(
-    () =>
-      step("fixture", "preflight-json-validator", () => {
-        throw deadline;
-      }),
-    { code: "PROCESS_TIMEOUT", cause: deadline }
-  );
+  const step = new Function("isNonRetryableFailure", "nonRetryableFailure", `${helper}; return preparationStep;`)(
+    (error: { details?: { failureRetryable?: boolean } }) => error.details?.failureRetryable === false,
+    (error: Error) => Object.assign(error, { details: { failureRetryable: false } })
+  ) as (attemptId: string, step: string, run: () => never) => never;
+  for (const code of ["PROCESS_TIMEOUT", "TASK_ABORTED", "TOOL_UNAVAILABLE"]) {
+    const failure = Object.assign(new Error("preflight failure"), {
+      code,
+      ...(code === "TOOL_UNAVAILABLE" ? { details: { failureRetryable: false } } : {})
+    });
+    assert.throws(
+      () =>
+        step("fixture", "preflight-json-validator", () => {
+          throw failure;
+        }),
+      { code, cause: failure, ...(code === "TOOL_UNAVAILABLE" ? { details: { failureRetryable: false } } : {}) }
+    );
+  }
 });
 
 test("generated agent prompt inserts literal braces from task and operator prompts verbatim", () => {
@@ -8410,12 +8518,16 @@ test("agent failure normalization preserves only validated Smithers recovery con
   for (const [code, details] of [
     ["AGENT_SESSION_LOST", { failureRetryable: true, discardResumeSession: true }],
     ["AGENT_CHECKPOINT_INVALID", { failureRetryable: true, discardAgentCheckpoint: true }],
-    ["AGENT_CONFIG_INVALID", { failureRetryable: false }]
+    ["AGENT_CONFIG_INVALID", { failureRetryable: false }],
+    ["TOOL_UNAVAILABLE", { failureRetryable: false }]
   ] as const) {
     const failure = Object.assign(new Error("controlled failure"), { code, details });
     const normalized = await captureAgentFailure(failure);
     assert.equal(normalized.code, code);
     assert.deepEqual(normalized.details, details);
+    const preflight = await captureAgentFailure(failure, { agentChain: [{}] }, true);
+    assert.equal(preflight.code, code);
+    assert.deepEqual(preflight.details, details);
   }
   // Agent CLI deadlines keep their code: run synchronization labels timeouts by code alone (#1144).
   for (const code of ["PROCESS_TIMEOUT", "PROCESS_IDLE_TIMEOUT"]) {
@@ -8619,6 +8731,33 @@ test("agent preflight and generation share one lazily admitted agent instance", 
   assert.equal(admittedGenerations, 1);
 });
 
+test("agent generation forwards its engine signal to reset before any adapter call", async () => {
+  const controller = new AbortController();
+  let resets = 0;
+  let generations = 0;
+  const wrapped = loadArtifactAwareAgent({
+    onReset: (signal) => {
+      resets += 1;
+      assert.equal(signal, controller.signal);
+      throw Object.assign(new Error("validator preflight canceled"), { code: "TASK_ABORTED" });
+    }
+  })({ agentChain: [{}] }, 0, "prompt", {
+    preflight: async () => undefined,
+    generate: async () => {
+      generations += 1;
+      return {};
+    }
+  });
+  assert.ok(wrapped.preflight);
+  await wrapped.preflight({});
+  assert.equal(resets, 0, "Smithers 0.35 agent preflight has no cancellation signal");
+  await assert.rejects(wrapped.generate({ abortSignal: controller.signal, taskContext: { attempt: 1 } }), {
+    code: "TASK_ABORTED"
+  });
+  assert.equal(resets, 1);
+  assert.equal(generations, 0);
+});
+
 test("agent failure normalization never stringifies arbitrary thrown objects", async () => {
   const normalized = await captureAgentFailure({
     toString(): never {
@@ -8643,7 +8782,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(
     agentSource,
-    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\)\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\), args\?\.abortSignal\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
   );
   const coverageSource = workflowSource.slice(
     workflowSource.indexOf("function authoritativeFinalReportCoverage"),

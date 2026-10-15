@@ -2450,7 +2450,10 @@ function agentForTask(task: (typeof taskSpecs)[number], originalPrompt: string):
         // has no admission; stable task identities preserve the exact original
         // snapshot epoch across ordinary rerenders and chain candidates.
         if (!dependencyArtifactAdmissionsByTask.has(task.attemptId)) {
-          await prepareArtifactMirrorForAgent(task);
+          // Smithers 0.35 does not give agent.preflight an AbortSignal. Rebuild
+          // dependency admission here; generation's reset owns the cancelable
+          // validator probe before the adapter can generate anything.
+          prepareArtifactMirror(task);
         }
         assertDependencyArtifactAdmissionCurrent(task);
         const admitted = baseAgentForProfile(task, profile, admittedDependencyArtifactDirs(task));
@@ -2494,6 +2497,7 @@ function artifactAwareAgent(
       "AGENT_SESSION_LOST",
       "AGENT_CHECKPOINT_INVALID",
       "TASK_ABORTED",
+      "TOOL_UNAVAILABLE",
       // Agent CLI deadlines. Run synchronization labels timeouts by code only.
       "PROCESS_TIMEOUT",
       "PROCESS_IDLE_TIMEOUT"
@@ -2623,7 +2627,7 @@ function artifactAwareAgent(
       // preflight side effects and prior outputs cannot cross producer bounds.
       if (firstGenerationForAttempt) {
         assertWorkspaceSourceRevision(task);
-        await resetTaskArtifactsForRetry(task, finalReportTaskRuntimeFromAgentArgs(task, args));
+        await resetTaskArtifactsForRetry(task, finalReportTaskRuntimeFromAgentArgs(task, args), args?.abortSignal);
       } else {
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
@@ -2746,7 +2750,8 @@ function taskPromptPathForArtifactReset(artifactDir: string, promptPath: string 
 
 async function resetTaskArtifactsForRetry(
   task: (typeof taskSpecs)[number],
-  runtime?: FinalReportTaskRuntime
+  runtime?: FinalReportTaskRuntime,
+  signal?: AbortSignal
 ): Promise<void> {
   // The task's prompt is the `prompt.rendered.md` directly in its artifact root.
   // The next attempt and every later engine read that file, so retry cleanup
@@ -2801,7 +2806,7 @@ async function resetTaskArtifactsForRetry(
     }
   }
   restoreWorkspacePatchPreparation(task, workspaceRoot);
-  await prepareArtifactMirrorForAgent(task, { replayWorkspacePatches: false, evidenceMode: "require" });
+  await prepareArtifactMirrorForAgent(task, { replayWorkspacePatches: false, evidenceMode: "require" }, signal);
   materializePromptArtifactAuthority(task);
   return materializeFinalReportRunMetadataAuthority(task, runtime);
 }
@@ -3119,7 +3124,11 @@ function preparationStep<T>(attemptId: string, step: string, run: () => T): T {
       `prepare:${attemptId} failed at step ${step}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
-    if (error instanceof Error && "code" in error && error.code === "PROCESS_TIMEOUT") {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      ["PROCESS_TIMEOUT", "TASK_ABORTED", "TOOL_UNAVAILABLE"].includes(String(error.code))
+    ) {
       Object.assign(wrapped, { code: error.code });
     }
     throw isNonRetryableFailure(error) ? nonRetryableFailure(wrapped) : wrapped;
@@ -3259,15 +3268,19 @@ function prepareArtifactMirror(
 
 async function prepareArtifactMirrorForAgent(
   task: (typeof taskSpecs)[number],
-  options: Parameters<typeof prepareArtifactMirror>[1] = {}
+  options: Parameters<typeof prepareArtifactMirror>[1] = {},
+  signal?: AbortSignal
 ): Promise<z.infer<typeof preparationOutput>> {
   const result = prepareArtifactMirror(task, options);
   // The post-agent verifier stays synchronous and only validates artifacts in-process.
   if (task.outputs.some((output) => isSchemaBackedOutput(output))) {
     try {
+      if (signal === undefined) throw new Error("validator preflight requires the engine task cancellation signal");
       await preflightJsonValidator(
         path.join(realpathSync(task.workspacePath), ".ultrafuzz", "schemas"),
-        plannedSchemaBundle()
+        plannedSchemaBundle(),
+        task.runRoot,
+        signal
       );
     } catch (error) {
       preparationStep(task.attemptId, "preflight-json-validator", () => {
@@ -3281,8 +3294,7 @@ async function prepareArtifactMirrorForAgent(
 /**
  * How long the validator preflight may spend inside the Ultrafuzz CLI.
  *
- * `"ultrafuzz"` resolves to the run-owned trusted launcher, which `composeSmithersCommandPath` puts
- * first on PATH, so the preflight pays the CLI's own cold start: ~2.5 s on an idle box,
+ * The run-owned trusted launcher pays the CLI's own cold start: ~2.5 s on an idle box,
  * ~35 s once a dozen agents are building against the same cores. Below that the step reports a bare
  * `spawnSync ultrafuzz ETIMEDOUT`, which names neither the contention nor a schema, and which cost
  * the smoke lane two of its three targets in #1026. Roughly five times that measured worst case,
@@ -3294,25 +3306,87 @@ const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS = 180_000;
 // with the run's planned schema bundle, neither of which varies by task: `materializePromptSchemas`
 // has already digest-checked each workspace's schema copy. One success per engine process is enough.
 // Re-spawning it in every prepare and attempt reset only added CLI cold starts that could fail an attempt.
-let jsonValidatorPreflight: Promise<void> | undefined;
+type JsonValidatorPreflight = {
+  controller: AbortController;
+  owners: Set<symbol>;
+  result: Promise<void>;
+  settled: boolean;
+};
+let jsonValidatorPreflight: JsonValidatorPreflight | undefined;
 
-function preflightJsonValidator(schemaDirectory: string, bundle: ArtifactSchemaBundle): Promise<void> {
-  // Share an in-flight launch now that preparation yields to the engine. Failed
-  // probes remain retryable by a later caller; only a validated success is cached.
-  return (jsonValidatorPreflight ??= runJsonValidatorPreflight(schemaDirectory, bundle).catch((error: unknown) => {
-    jsonValidatorPreflight = undefined;
-    throw error;
-  }));
+function canceledValidatorPreflight(): Error {
+  return Object.assign(new Error("JSON validator preflight canceled"), { code: "TASK_ABORTED" });
 }
 
-async function runJsonValidatorPreflight(schemaDirectory: string, bundle: ArtifactSchemaBundle): Promise<void> {
+function preflightJsonValidator(
+  schemaDirectory: string,
+  bundle: ArtifactSchemaBundle,
+  runRoot: string,
+  signal: AbortSignal
+): Promise<void> {
+  if (signal.aborted) return Promise.reject(canceledValidatorPreflight());
+  // A task only owns its own wait. The final departing owner cancels the shared
+  // launch; a canceled task must neither abandon it nor cancel another task's probe.
+  if (jsonValidatorPreflight === undefined || jsonValidatorPreflight.controller.signal.aborted) {
+    const shared: JsonValidatorPreflight = {
+      controller: new AbortController(),
+      owners: new Set(),
+      result: Promise.resolve(),
+      settled: false
+    };
+    shared.result = runJsonValidatorPreflight(schemaDirectory, bundle, runRoot, shared.controller.signal)
+      .catch((error: unknown) => {
+        if (jsonValidatorPreflight === shared) jsonValidatorPreflight = undefined;
+        throw error;
+      })
+      .finally(() => {
+        shared.settled = true;
+      });
+    jsonValidatorPreflight = shared;
+  }
+  return awaitValidatorPreflight(jsonValidatorPreflight, signal);
+}
+
+async function awaitValidatorPreflight(shared: JsonValidatorPreflight, signal: AbortSignal): Promise<void> {
+  const owner = Symbol();
+  shared.owners.add(owner);
+  let cancel = (): void => {};
+  const canceled = new Promise<never>((_resolve, reject) => {
+    cancel = () => {
+      shared.owners.delete(owner);
+      if (shared.owners.size === 0 && !shared.settled) shared.controller.abort();
+      reject(canceledValidatorPreflight());
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+  });
+  try {
+    await Promise.race([shared.result, canceled]);
+    if (signal.aborted) throw canceledValidatorPreflight();
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    shared.owners.delete(owner);
+    // The last cancellation waits for bounded supervisor cleanup. Smithers may
+    // win its own cancellation race first, so the supervisor also kills the
+    // session synchronously on abort and on normal process shutdown.
+    if (shared.controller.signal.aborted) await shared.result.catch(() => undefined);
+  }
+}
+
+async function runJsonValidatorPreflight(
+  schemaDirectory: string,
+  bundle: ArtifactSchemaBundle,
+  runRoot: string,
+  signal: AbortSignal
+): Promise<void> {
   const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
   if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
+  const launcherPath = path.join(runRoot, "trusted-bin", process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz");
   let stdout: string;
   const startedAt = Date.now();
   try {
     ({ stdout } = await runProcessGroup(
-      "ultrafuzz",
+      launcherPath,
       [
         "json",
         "validate",
@@ -3322,16 +3396,27 @@ async function runJsonValidatorPreflight(schemaDirectory: string, bundle: Artifa
         artifactValidatorSmokeFixturePath(),
         "--json"
       ],
-      { maxBuffer: 1024 * 1024, timeoutMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS }
+      { maxBuffer: 1024 * 1024, timeoutMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS, signal }
     ));
   } catch (error) {
     const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code === "ENOENT" || code === "EACCES" || code === "ENOTDIR") {
+      throw Object.assign(
+        nonRetryableFailure(
+          new Error(
+            `tool_unavailable: JSON validator preflight could not launch ultrafuzz at ${JSON.stringify(launcherPath)} (${code}); restore the run-owned trusted CLI before retrying`,
+            { cause: error }
+          )
+        ),
+        { code: "TOOL_UNAVAILABLE" }
+      );
+    }
     const deadline = code === "PROCESS_TIMEOUT" ? ` against a ${JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS}ms budget` : "";
     const wrapped = new Error(
       `artifact-contract failure: JSON validator preflight failed after ${Date.now() - startedAt}ms${deadline}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
-    if (code === "PROCESS_TIMEOUT") Object.assign(wrapped, { code });
+    if (code === "PROCESS_TIMEOUT" || code === "TASK_ABORTED") Object.assign(wrapped, { code });
     throw wrapped;
   }
   try {
@@ -9298,7 +9383,9 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => prepareArtifactMirrorForAgent(task)}
+                {(context?: { ultrafuzzAbortSignal?: AbortSignal }) =>
+                  prepareArtifactMirrorForAgent(task, {}, context?.ultrafuzzAbortSignal)
+                }
               </Task>
               <Task
                 id={task.id}

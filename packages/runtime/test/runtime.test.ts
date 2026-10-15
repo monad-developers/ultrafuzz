@@ -26130,8 +26130,11 @@ test("resume refuses a run whose resolved config cannot be read instead of conti
 });
 
 testWhen(runningUnderBun)(
-  "engine-owned task runtime crosses sealed issuer aliases under production Bun symlink flags",
-  () => {
+  "engine-owned task runtime and compute cancellation cross sealed issuer aliases under production Bun symlink flags",
+  async () => {
+    const { SMITHERS_COMPATIBILITY_PATCHES } = await import("../src/smithers.js");
+    const computePatch = SMITHERS_COMPATIBILITY_PATCHES.find((patch) => patch.id === "engine_compute_abort");
+    assert.ok(computePatch);
     const root = tempProject();
     const controls = path.join(root, "controls");
     const driverRoot = path.join(root, "dependencies", "packages", "driver");
@@ -26181,6 +26184,14 @@ export const execute = (agent) => {
     taskContext: { runId: runtime.runId, nodeId: runtime.stepId, attempt: 1, iteration: 0 }
   }));
 };
+export const executeCompute = (computeFn) => {
+  const taskSignal = AbortSignal.abort();
+  const taskRuntime = { signal: taskSignal };
+  const computeToolContext = {};
+  const runWithToolContext = (_context, run) => run();
+  const desc = { computeFn };
+  ${computePatch.patched}
+};
 `,
       "utf8"
     );
@@ -26196,7 +26207,7 @@ export const execute = (agent) => {
     const workflowPath = path.join(root, "workflow.mjs");
     fs.writeFileSync(
       workflowPath,
-      `import { execute } from "@smthrs/engine";
+      `import { execute, executeCompute } from "@smthrs/engine";
 import { getTaskRuntime } from "@smthrs/driver/task-runtime";
 const observed = await execute({
   generate(args) {
@@ -26213,7 +26224,11 @@ const observed = await execute({
     };
   }
 });
-process.stdout.write(JSON.stringify(observed));
+const compute = executeCompute((context) => ({
+  ambientVisible: getTaskRuntime() !== undefined,
+  explicitSignalAborted: context.ultrafuzzAbortSignal.aborted
+}));
+process.stdout.write(JSON.stringify({ ...observed, compute }));
 `,
       "utf8"
     );
@@ -26237,7 +26252,8 @@ process.stdout.write(JSON.stringify(observed));
       ambientVisible: false,
       explicitMarker: "engine-owned",
       contextMatches: true,
-      forwardedRuntime: false
+      forwardedRuntime: false,
+      compute: { ambientVisible: false, explicitSignalAborted: true }
     });
   }
 );
