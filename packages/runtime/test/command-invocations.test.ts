@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import fs from "node:fs";
 import { createServer } from "node:http";
@@ -177,6 +178,91 @@ test("racing independent prelaunch hooks admit exactly one invocation", { timeou
   assert.equal(new Set(results.map(handle)).size, 1);
 });
 
+test("rewritten terminal hooks durably find their original reservation and preserve replay protection", () => {
+  const f = fixture();
+  const original = commandInvocationHook(f.event("original"), f.env);
+  const otherCommand = "verification --other";
+  const other = commandInvocationHook(f.event("other", otherCommand), f.env);
+  const terminal = {
+    ...f.event("original", otherCommand),
+    cwd: path.join(f.root, "rewritten-cwd"),
+    hook_event_name: "PostToolUse"
+  };
+  // No in-memory state from admission is available in this independent hook process.
+  const post = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+    import { commandInvocationHook } from ${JSON.stringify(moduleUrl)};
+    console.log(JSON.stringify(commandInvocationHook(${JSON.stringify(terminal)})));
+  `
+    ],
+    { env: f.env, encoding: "utf8" }
+  );
+  assert.equal(post.status, 0, post.stderr);
+  assert.equal(handle(JSON.parse(post.stdout)), handle(original));
+  assert.equal(commandInvocationStatus(f.registry, handle(original)).status, "completed");
+  assert.equal(commandInvocationStatus(f.registry, handle(other)).status, "completion_unknown");
+  const later = commandInvocationHook(f.event("later"), f.env);
+  assert.equal(denied(later), false);
+  assert.notEqual(handle(later), handle(original));
+  const replay = commandInvocationHook(f.event("original"), f.env);
+  assert.equal(denied(replay), true);
+  assert.equal(handle(replay), handle(original));
+  commandInvocationHook(terminal, f.env);
+  assert.equal(commandInvocationStatus(f.registry, handle(later)).status, "completion_unknown");
+  assert.equal(denied(commandInvocationHook(f.event("duplicate"), f.env)), true);
+});
+
+test("completion correlation is session-scoped and ambiguous native identities cannot release reservations", () => {
+  const f = fixture();
+  const first = commandInvocationHook(f.event("same-call"), f.env);
+  const otherEvent = { ...f.event("same-call", "other-command"), session_id: "session-2" };
+  const other = commandInvocationHook(otherEvent, f.env);
+  commandInvocationHook({ ...otherEvent, session_id: "unknown-session", hook_event_name: "PostToolUse" }, f.env);
+  assert.equal(commandInvocationStatus(f.registry, handle(first)).status, "completion_unknown");
+  assert.equal(commandInvocationStatus(f.registry, handle(other)).status, "completion_unknown");
+  commandInvocationHook({ ...f.event("same-call", "rewritten-command"), hook_event_name: "PostToolUse" }, f.env);
+  assert.equal(commandInvocationStatus(f.registry, handle(first)).status, "completed");
+  assert.equal(commandInvocationStatus(f.registry, handle(other)).status, "completion_unknown");
+  // Reusing a native identity for a different command is ambiguous, not
+  // permission to use an old completion to release the newer reservation.
+  const conflicting = commandInvocationHook(f.event("same-call", "conflicting-command"), f.env);
+  assert.throws(
+    () => commandInvocationHook({ ...f.event("same-call"), hook_event_name: "PostToolUse" }, f.env),
+    /ambiguous/u
+  );
+  assert.equal(commandInvocationStatus(f.registry, handle(conflicting)).status, "completion_unknown");
+  assert.equal(denied(commandInvocationHook(f.event("duplicate-conflict", "conflicting-command"), f.env)), true);
+});
+
+test("completion lookup ignores torn, corrupt, symlinked and mismatched reservations", () => {
+  const f = fixture();
+  const original = commandInvocationHook(f.event("original"), f.env);
+  const originalHandle = handle(original);
+  const originalRecord = JSON.parse(fs.readFileSync(path.join(f.registry, `${originalHandle}.json`), "utf8"));
+  for (const [index, contents] of [
+    "",
+    "{",
+    JSON.stringify({ ...originalRecord, invocation_id: "wrong-handle" })
+  ].entries()) {
+    fs.writeFileSync(path.join(f.registry, `${String(index).repeat(64)}-0.json`), contents);
+  }
+  fs.symlinkSync(path.join(f.registry, `${originalHandle}.json`), path.join(f.registry, `${"f".repeat(64)}-0.json`));
+  // A matching command with the wrong native identity must not mark it done.
+  commandInvocationHook({ ...f.event("never-admitted"), hook_event_name: "PostToolUse" }, f.env);
+  assert.equal(commandInvocationStatus(f.registry, originalHandle).status, "completion_unknown");
+  commandInvocationHook({ ...f.event("original", "rewritten-command"), hook_event_name: "PostToolUse" }, f.env);
+  assert.equal(commandInvocationStatus(f.registry, originalHandle).status, "completed");
+  for (const prefix of ["0", "1", "2", "f"]) {
+    const id = `${prefix.repeat(64)}-0`;
+    assert.equal(commandInvocationStatus(f.registry, id).status, "completion_unknown");
+    assert.equal(fs.existsSync(path.join(f.registry, `${id}.completed.json`)), false);
+  }
+});
+
 test("distinct keys, directories and attempts remain concurrent; shell text is not normalized", () => {
   const f = fixture();
   const first = commandInvocationHook(f.event("first"), f.env);
@@ -217,6 +303,8 @@ test("old, torn, orphaned or PID-reused reservations cannot expire into duplicat
   assert.equal(denied(commandInvocationHook(f.event("later"), f.env)), true);
   fs.writeFileSync(file, "");
   assert.equal(denied(commandInvocationHook(f.event("torn"), f.env)), true);
+  commandInvocationHook({ ...f.event("first", "rewritten-command"), hook_event_name: "PostToolUse" }, f.env);
+  assert.equal(fs.existsSync(path.join(f.registry, `${id}.completed.json`)), false);
   assert.equal(commandInvocationStatus(f.registry, id).status, "completion_unknown");
   assert.equal(
     denied(commandInvocationHook(f.event("explicit", "# ultrafuzz-command-key: restart\nverification --all"), f.env)),
@@ -420,9 +508,45 @@ function commandHookFixtureCli(root: string): string {
   return bin;
 }
 
+function fixtureCodexHookSettings(root: string, codexHome: string, marker: string, rewrite: boolean): void {
+  const groups: unknown[] = [{ matcher: "Bash", hooks: [{ type: "command", command: `touch ${marker}` }] }];
+  if (rewrite) {
+    const script = path.join(root, "rewrite.mjs");
+    fs.writeFileSync(
+      script,
+      `
+      let text = ''; for await (const chunk of process.stdin) text += chunk;
+      const input = JSON.parse(text);
+      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { command: input.tool_input.command + ' # rewritten-by-trusted-hook' } } }));
+    `
+    );
+    // Canonically ordered hash input for Codex 0.146.0's exact hook trust contract.
+    const hooks = [
+      {
+        async: false,
+        command: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`,
+        timeout: 10,
+        type: "command"
+      }
+    ];
+    const matcher = "^Bash$";
+    const trustedHash = `sha256:${createHash("sha256")
+      .update(JSON.stringify({ event_name: "pre_tool_use", hooks, matcher }))
+      .digest("hex")}`;
+    groups.push({ matcher, hooks });
+    const key = `${path.join(codexHome, "hooks.json")}:pre_tool_use:1:0`;
+    fs.writeFileSync(
+      path.join(codexHome, "config.toml"),
+      `[hooks.state.${JSON.stringify(key)}]\ntrusted_hash=${JSON.stringify(trustedHash)}\n`
+    );
+  }
+  fs.writeFileSync(path.join(codexHome, "hooks.json"), JSON.stringify({ hooks: { PreToolUse: groups } }));
+}
+
 function scriptedResponsesServer(verification: string) {
   const state = {
     results: [] as string[],
+    outputs: new Map<string, string>(),
     requestCount: 0,
     generation: 0,
     nativeSession: undefined as number | undefined,
@@ -442,6 +566,7 @@ function scriptedResponsesServer(verification: string) {
         if (item.type === "function_call_output") {
           const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output);
           state.results.push(output);
+          if (item.call_id !== undefined) state.outputs.set(item.call_id, output);
           if (item.call_id === `g${state.generation}-original`)
             state.nativeSession = Number(/session ID (\d+)/u.exec(output)?.[1]);
         }
@@ -465,6 +590,14 @@ function scriptedResponsesServer(verification: string) {
           call_id: `g${generation}-poll`,
           name: "write_stdin",
           arguments: JSON.stringify({ session_id: nativeSession, chars: "", yield_time_ms: 10000 })
+        };
+      } else if (requestCount === 4) {
+        item = {
+          type: "function_call",
+          id: `g${generation}-fc-replay`,
+          call_id: `g${generation}-original`,
+          name: "exec_command",
+          arguments: JSON.stringify({ cmd: verification, yield_time_ms: 250, login: false })
         };
       } else {
         item = {
@@ -503,129 +636,137 @@ function scriptedResponsesServer(verification: string) {
   return { state, server };
 }
 
-test(
-  "qualified real Codex CLI denies relaunch while a unified-exec session is live",
-  {
-    timeout: 45_000,
-    skip: !process.env.ULTRAFUZZ_TEST_CODEX
-  },
-  async () => {
-    const root = temporaryRoot("ufz-real-command-hooks-");
-    const bin = commandHookFixtureCli(root);
-    const counter = path.join(root, "work-count");
-    const marker = path.join(root, "untrusted-hook-ran");
-    const codexHome = path.join(root, "codex-home");
-    fs.mkdirSync(codexHome);
-    fs.writeFileSync(
-      path.join(codexHome, "hooks.json"),
-      JSON.stringify({
-        hooks: {
-          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: `touch ${marker}` }] }]
-        }
-      })
-    );
-    const verification = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require('node:fs').appendFileSync(${JSON.stringify(counter)}, 'work\\n'); setTimeout(() => console.log('verification-complete'), 6000);`)}`;
-    const { server, state } = scriptedResponsesServer(verification);
-    const { results } = state;
-    server.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    const address = server.address();
-    assert.ok(address !== null && typeof address === "object");
-    const savedBin = process.env.ULTRAFUZZ_TRUSTED_BIN;
-    process.env.ULTRAFUZZ_TRUSTED_BIN = bin;
-    const diagnostics: string[] = [];
-    try {
-      const command = configureCommandInvocationGuard({
-        engine: "codex",
-        cwd: root,
-        command: {
-          command: defined(process.env.ULTRAFUZZ_TEST_CODEX),
-          args: [
-            "exec",
-            "--skip-git-repo-check",
-            "--json",
-            "--enable",
-            "unified_exec",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-c",
-            'model="gpt-5.5"',
-            "-c",
-            'model_provider="fixture"',
-            "-c",
-            `model_providers.fixture={name="fixture",base_url="http://127.0.0.1:${address.port}/v1",env_key="ULTRAFUZZ_FIXTURE_API_KEY",wire_api="responses"}`,
-            "run verification"
-          ],
-          env: {
-            CODEX_HOME: codexHome,
-            ULTRAFUZZ_FIXTURE_API_KEY: "fixture-only",
-            OPENAI_API_KEY: "",
-            CODEX_API_KEY: ""
-          }
-        },
-        taskContext: { runId: "run", nodeId: "node", attempt: 1, iteration: 0 },
-        diagnostic: (message) => diagnostics.push(message)
-      });
-      assert.match(diagnostics.join("\n"), /enabled/u);
-      assert.equal(command.args.includes("--dangerously-bypass-hook-trust"), false);
-      let providerSession: string | undefined;
-      for (let generation = 0; generation < 2; generation += 1) {
-        Object.assign(state, { generation, requestCount: 0, nativeSession: undefined });
-        results.length = 0;
-        const args =
-          generation === 0
-            ? command.args
-            : ["exec", "resume", ...command.args.slice(1, -1), defined(providerSession), "run verification"];
-        const child = spawn(command.command, args, {
+for (const rewrite of [false, true])
+  test(
+    `qualified real Codex CLI coalesces live and completed replays${rewrite ? " with a trusted rewriting hook" : ""}`,
+    {
+      timeout: 45_000,
+      skip: !process.env.ULTRAFUZZ_TEST_CODEX
+    },
+    async () => {
+      const root = temporaryRoot("ufz-real-command-hooks-");
+      const bin = commandHookFixtureCli(root);
+      const counter = path.join(root, "work-count");
+      const marker = path.join(root, "untrusted-hook-ran");
+      const codexHome = path.join(root, "codex-home");
+      fs.mkdirSync(codexHome);
+      fixtureCodexHookSettings(root, codexHome, marker, rewrite);
+      const verification = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require('node:fs').appendFileSync(${JSON.stringify(counter)}, 'work\\n'); setTimeout(() => console.log('verification-complete'), 6000);`)}`;
+      const { server, state } = scriptedResponsesServer(verification);
+      const { results } = state;
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      const address = server.address();
+      assert.ok(address !== null && typeof address === "object");
+      const savedBin = process.env.ULTRAFUZZ_TRUSTED_BIN;
+      process.env.ULTRAFUZZ_TRUSTED_BIN = bin;
+      const diagnostics: string[] = [];
+      try {
+        const command = configureCommandInvocationGuard({
+          engine: "codex",
           cwd: root,
-          env: { ...process.env, ...command.env },
-          stdio: ["ignore", "pipe", "pipe"],
-          detached: true
+          command: {
+            command: defined(process.env.ULTRAFUZZ_TEST_CODEX),
+            args: [
+              "exec",
+              "--skip-git-repo-check",
+              "--json",
+              "--enable",
+              "unified_exec",
+              "--dangerously-bypass-approvals-and-sandbox",
+              "-c",
+              'model="gpt-5.5"',
+              "-c",
+              'model_provider="fixture"',
+              "-c",
+              `model_providers.fixture={name="fixture",base_url="http://127.0.0.1:${address.port}/v1",env_key="ULTRAFUZZ_FIXTURE_API_KEY",wire_api="responses"}`,
+              "run verification"
+            ],
+            env: {
+              CODEX_HOME: codexHome,
+              ULTRAFUZZ_FIXTURE_API_KEY: "fixture-only",
+              OPENAI_API_KEY: "",
+              CODEX_API_KEY: ""
+            }
+          },
+          taskContext: { runId: "run", nodeId: "node", attempt: 1, iteration: 0 },
+          diagnostic: (message) => diagnostics.push(message)
         });
-        let stdout = "";
-        let stderr = "";
-        child.stdout.on("data", (chunk) => {
-          stdout += String(chunk);
-        });
-        child.stderr.on("data", (chunk) => {
-          stderr += String(chunk);
-        });
-        const stop = () => {
+        assert.match(diagnostics.join("\n"), /enabled/u);
+        assert.equal(command.args.includes("--dangerously-bypass-hook-trust"), false);
+        let providerSession: string | undefined;
+        for (let generation = 0; generation < 2; generation += 1) {
+          Object.assign(state, { generation, requestCount: 0, nativeSession: undefined });
+          results.length = 0;
+          state.outputs.clear();
+          const args =
+            generation === 0
+              ? command.args
+              : ["exec", "resume", ...command.args.slice(1, -1), defined(providerSession), "run verification"];
+          const child = spawn(command.command, args, {
+            cwd: root,
+            env: { ...process.env, ...command.env },
+            stdio: ["ignore", "pipe", "pipe"],
+            detached: true
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => {
+            stdout += String(chunk);
+          });
+          child.stderr.on("data", (chunk) => {
+            stderr += String(chunk);
+          });
+          const stop = () => {
+            try {
+              if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+            } catch {
+              /* Already exited. */
+            }
+          };
+          const timer = setTimeout(stop, 35_000);
           try {
-            if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-          } catch {
-            /* Already exited. */
+            const [code] = await once(child, "exit");
+            assert.equal(state.error, undefined);
+            assert.equal(code, 0, `${stderr}\n${stdout}\n${JSON.stringify(results)}`);
+            providerSession = /"thread_id":"([^"]+)"/u.exec(stdout)?.[1];
+            assert.ok(providerSession);
+            assert.match(
+              results.join("\n"),
+              /coalesced/u,
+              `${stderr}\n${stdout}\nhook-inputs: ${fs.existsSync(path.join(root, "hook-inputs")) ? fs.readFileSync(path.join(root, "hook-inputs"), "utf8") : "missing"}`
+            );
+            assert.match(results.join("\n"), /verification-complete/u);
+            assert.match(defined(state.outputs.get(`g${generation}-original`)), /coalesced.*completed/u);
+            assert.equal(fs.readFileSync(counter, "utf8"), "work\n".repeat(generation + 1));
+            assert.equal(fs.existsSync(marker), false, "trusting the guard must not enable other untrusted hooks");
+            const registryRoot = registry(command);
+            const handles = fs.readdirSync(registryRoot).filter((file) => /^[a-f0-9]{64}-\d+\.json$/u.test(file));
+            assert.equal(handles.length, generation + 1);
+            for (const file of handles)
+              assert.equal(commandInvocationStatus(registryRoot, file.slice(0, -5)).status, "completed");
+            if (rewrite) {
+              const inputs = fs
+                .readFileSync(path.join(root, "hook-inputs"), "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line) as { hook_event_name: string; tool_input: { command: string } });
+              const postInputs = inputs.filter((input) => input.hook_event_name === "PostToolUse");
+              assert.equal(postInputs.length, generation + 1);
+              assert.ok(
+                postInputs.every((input) => input.tool_input.command === `${verification} # rewritten-by-trusted-hook`)
+              );
+            }
+          } finally {
+            clearTimeout(timer);
+            stop();
           }
-        };
-        const timer = setTimeout(stop, 35_000);
-        try {
-          const [code] = await once(child, "exit");
-          assert.equal(state.error, undefined);
-          assert.equal(code, 0, `${stderr}\n${stdout}\n${JSON.stringify(results)}`);
-          providerSession = /"thread_id":"([^"]+)"/u.exec(stdout)?.[1];
-          assert.ok(providerSession);
-          assert.match(
-            results.join("\n"),
-            /coalesced/u,
-            `${stderr}\n${stdout}\nhook-inputs: ${fs.existsSync(path.join(root, "hook-inputs")) ? fs.readFileSync(path.join(root, "hook-inputs"), "utf8") : "missing"}`
-          );
-          assert.match(results.join("\n"), /verification-complete/u);
-          assert.equal(fs.readFileSync(counter, "utf8"), "work\n".repeat(generation + 1));
-          assert.equal(fs.existsSync(marker), false, "trusting the guard must not enable other untrusted hooks");
-          const registryRoot = registry(command);
-          const handles = fs.readdirSync(registryRoot).filter((file) => /^[a-f0-9]{64}-\d+\.json$/u.test(file));
-          assert.equal(handles.length, generation + 1);
-          for (const file of handles)
-            assert.equal(commandInvocationStatus(registryRoot, file.slice(0, -5)).status, "completed");
-        } finally {
-          clearTimeout(timer);
-          stop();
         }
+      } finally {
+        if (savedBin === undefined) delete process.env.ULTRAFUZZ_TRUSTED_BIN;
+        else process.env.ULTRAFUZZ_TRUSTED_BIN = savedBin;
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
       }
-    } finally {
-      if (savedBin === undefined) delete process.env.ULTRAFUZZ_TRUSTED_BIN;
-      else process.env.ULTRAFUZZ_TRUSTED_BIN = savedBin;
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  }
-);
+  );

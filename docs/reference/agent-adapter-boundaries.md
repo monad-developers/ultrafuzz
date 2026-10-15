@@ -36,6 +36,9 @@ permits a subsequent execution. Stream hook messages identify reservations,
 coalescing and completion without copying shell commands or output into the
 registry. Replaying the same completed provider tool-call identity remains
 coalesced; a subsequent execution must have a new native call identity.
+Completion finds the original durable reservation by its session/tool-call
+identity, not by post-hook command text: existing trusted hooks may rewrite
+that text. Ambiguous native identities do not release any reservation.
 
 For intentional concurrent executions, add a unique first-line comment such
 as `# ultrafuzz-command-key: second-check`. Different commands and attempts
@@ -70,7 +73,9 @@ poll/relaunch, distinct keys, completion replay, orphan/PID-reuse and torn-recor
 handling. Set `ULTRAFUZZ_TEST_CODEX` to the pinned binary to run the deterministic
 local Responses-server qualification after building the CLI. It exercises the
 real hook CLI through fresh and resumed Codex sessions and verifies that an
-unrelated untrusted hook remains disabled. No paid provider request is made.
+unrelated untrusted hook remains disabled. A trusted rewriting hook also proves
+that terminal completion permits a later distinct call while completed-call
+replays stay coalesced. No paid provider request is made.
 
 | Adapter          | Classification                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Existing option or missing surface                                                                                                                                                                       | Upstream dependency                                                                                                                                                                                                                     |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

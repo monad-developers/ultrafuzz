@@ -186,6 +186,30 @@ function complete(root: string, entry: Invocation): void {
   });
 }
 
+function invocationForToolCall(root: string, sessionId: string, toolUseId: string): Invocation | undefined {
+  // The fsynced reservation is also the durable reverse mapping. A separate
+  // index would introduce a crash window between admission and correlation.
+  // Do not use post-hook command text: another trusted pre-hook can rewrite it.
+  const directory = fs.opendirSync(root);
+  let match: Invocation | undefined;
+  try {
+    for (let file = directory.readSync(); file !== null; file = directory.readSync()) {
+      if (!file.isFile() || !file.name.endsWith(".json")) continue;
+      const handle = file.name.slice(0, -5);
+      if (!HANDLE_PATTERN.test(handle)) continue;
+      const entry = invocation(root, handle);
+      if (entry?.session_id !== sessionId || entry.tool_use_id !== toolUseId) continue;
+      // Never guess when replay/corruption reused one native identity for two
+      // reservations, including an old completed call and a live successor.
+      if (match !== undefined) throw new Error("ambiguous command invocation tool-call identity");
+      match = entry;
+    }
+    return match;
+  } finally {
+    directory.closeSync();
+  }
+}
+
 function parseHookInput(input: unknown) {
   const event = record(input);
   const command = record(event?.tool_input)?.command;
@@ -227,51 +251,50 @@ export function commandInvocationHook(input: unknown, env: NodeJS.ProcessEnv = p
   if (event.eventName !== "PreToolUse" && event.eventName !== "PostToolUse") return {};
   safeDirectory(root);
   const { sessionId, toolUseId } = event;
+  if (event.eventName === "PostToolUse") {
+    const entry = invocationForToolCall(root, sessionId, toolUseId);
+    if (entry === undefined) return {};
+    // Qualified Codex emits this only for terminal execution, including a
+    // later write_stdin poll, with the original (session-scoped) tool-call id.
+    complete(root, entry);
+    const message = diagnostic(commandInvocationStatus(root, entry.invocation_id), "observed");
+    return { systemMessage: message, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: message } };
+  }
   // Codex exposes command text and the session cwd, not shell/workdir/env
   // overrides. Do not pretend to normalize shell syntax or infer those fields.
   const identity = digest(JSON.stringify([event.cwd, event.command]));
   for (let generation = 0; generation < MAX_GENERATIONS; generation += 1) {
     const handle = `${identity}-${String(generation)}`;
     const file = path.join(root, `${handle}.json`);
-    if (event.eventName === "PreToolUse") {
-      const entry: Invocation = {
-        schema_version: 1,
-        invocation_id: handle,
-        session_id: sessionId,
-        tool_use_id: toolUseId,
-        owner,
-        started_at: new Date().toISOString()
-      };
-      if (createRecord(file, entry)) {
-        const message = diagnostic(commandInvocationStatus(root, handle), "reserved");
-        return {
-          systemMessage: message,
-          hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: message }
-        };
-      }
-      const status = commandInvocationStatus(root, handle);
-      // A provider retry/replay of an already completed call is idempotent,
-      // while a new tool-call identity may intentionally run the command again.
-      if (status.status === "completed" && (status.session_id !== sessionId || status.tool_use_id !== toolUseId))
-        continue;
-      const message = diagnostic(status, "coalesced");
+    const entry: Invocation = {
+      schema_version: 1,
+      invocation_id: handle,
+      session_id: sessionId,
+      tool_use_id: toolUseId,
+      owner,
+      started_at: new Date().toISOString()
+    };
+    if (createRecord(file, entry)) {
+      const message = diagnostic(commandInvocationStatus(root, handle), "reserved");
       return {
         systemMessage: message,
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: message
-        }
+        hookSpecificOutput: { hookEventName: "PreToolUse", additionalContext: message }
       };
     }
-    const entry = invocation(root, handle);
-    if (entry === undefined) return {};
-    if (entry.session_id !== sessionId || entry.tool_use_id !== toolUseId) continue;
-    // Qualified Codex emits this only for terminal execution, including a
-    // later write_stdin poll, with the original (session-scoped) tool-call id.
-    complete(root, entry);
-    const message = diagnostic(commandInvocationStatus(root, handle), "observed");
-    return { systemMessage: message, hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: message } };
+    const status = commandInvocationStatus(root, handle);
+    // A provider retry/replay of an already completed call is idempotent,
+    // while a new tool-call identity may intentionally run the command again.
+    if (status.status === "completed" && (status.session_id !== sessionId || status.tool_use_id !== toolUseId))
+      continue;
+    const message = diagnostic(status, "coalesced");
+    return {
+      systemMessage: message,
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: message
+      }
+    };
   }
   throw new Error("command invocation generation limit reached");
 }
