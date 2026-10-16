@@ -49,6 +49,9 @@ import {
   createInitialRunState,
   createRunLayout,
   installedArtifactSchemaBundle,
+  artifactSchemaFieldSummaries,
+  artifactSchemaFieldSummary,
+  SCHEMA_FIELD_SUMMARY_INDEX_FILE,
   plannedArtifactSchemaBundle,
   readRunState,
   validateArtifactContractBytes,
@@ -139,6 +142,43 @@ test("planned outputs, manifests, markers, and campaign documents share one arti
   assert.ok(schemaPatterns(propertyCampaignJsonSchema).has(CANONICAL_ARTIFACT_RELATIVE_PATH_PATTERN));
 });
 
+test("every bundled schema ships a current derived field summary", () => {
+  const bundleDirectory = path.join(packageRoot, "schema");
+  const summaries = artifactSchemaFieldSummaries(bundleDirectory);
+  const schemaFiles = readdirSync(bundleDirectory)
+    .filter((file) => file.endsWith(".schema.json"))
+    .sort();
+  assert.deepEqual([...summaries.keys()].sort(), schemaFiles);
+
+  const index = JSON.parse(fs.readFileSync(path.join(bundleDirectory, SCHEMA_FIELD_SUMMARY_INDEX_FILE), "utf8")) as {
+    single_read_byte_limit: number;
+  };
+  for (const [schemaFilename, summary] of summaries) {
+    const summaryPath = path.join(bundleDirectory, summary.summaryFilename);
+    const schemaBytes = fs.statSync(path.join(bundleDirectory, schemaFilename)).size;
+    assert.equal(statSync(summaryPath).isFile(), true, `${schemaFilename} summary is missing`);
+    assert.equal(fs.statSync(summaryPath).size, summary.summaryBytes, `${schemaFilename} summary size is stale`);
+    assert.equal(summary.schemaBytes, schemaBytes, `${schemaFilename} schema size is stale`);
+    assert.equal(summary.exceedsSingleRead, schemaBytes >= index.single_read_byte_limit);
+    // A summary is the way around an unreadable schema, so it must stay far smaller than one.
+    assert.ok(summary.summaryBytes < index.single_read_byte_limit, `${schemaFilename} summary is oversized`);
+  }
+});
+
+test("field summaries carry the shape of a schema reached through a cross-document reference", () => {
+  const bundleDirectory = path.join(packageRoot, "schema");
+  const summary = artifactSchemaFieldSummary("findings.schema.json", bundleDirectory);
+  assert.notEqual(summary, undefined);
+  const text = fs.readFileSync(path.join(bundleDirectory, summary!.summaryFilename), "utf8");
+  // findings.schema.json is a 264-byte array of urn:...:finding:2. Stopping at that boundary would
+  // send the agent to the 80 KB document this summary exists to keep out of a single read (#1298).
+  assert.match(text, /^\*id: string$/mu);
+  assert.match(text, /^\*status: enum\(candidate\|/mu);
+  assert.match(text, / -> finding\.schema\.json\$\/\$defs\/findingReportBoundText\/allOf$/mu);
+  assert.ok(!artifactSchemaFieldSummary("findings.schema.json", bundleDirectory)!.exceedsSingleRead);
+  assert.ok(artifactSchemaFieldSummary("finding.schema.json", bundleDirectory)!.exceedsSingleRead);
+});
+
 test("materializes the checked-in JSON schema bundle into a task-local directory", () => {
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-bundle-"));
   try {
@@ -149,7 +189,14 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     assert.ok(copied.some((file) => file.endsWith("reference-expectations.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("invariant-evidence-ledger.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("invariant-source-proof.schema.json")));
-    assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
+    // Derived field summaries travel with the bundle so the rendered output contract can name them (#1298).
+    assert.ok(copied.some((file) => file.endsWith("findings.summary.txt")));
+    assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json") || file.endsWith(".summary.txt")));
+    assert.deepEqual(
+      fs.readFileSync(path.join(destination, "findings.summary.txt")),
+      fs.readFileSync(path.join(packageRoot, "schema", "findings.summary.txt"))
+    );
+    assert.equal(statSync(path.join(destination, "findings.summary.txt")).mode & 0o777, 0o400);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "reference-expectations.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
