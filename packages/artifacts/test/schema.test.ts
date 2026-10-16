@@ -168,15 +168,17 @@ test("every bundled schema ships a current derived field summary", () => {
 test("field summaries carry the shape of a schema reached through a cross-document reference", () => {
   const bundleDirectory = path.join(packageRoot, "schema");
   const summary = artifactSchemaFieldSummary("findings.schema.json", bundleDirectory);
-  assert.notEqual(summary, undefined);
-  const text = fs.readFileSync(path.join(bundleDirectory, summary!.summaryFilename), "utf8");
+  assert.ok(summary !== undefined);
+  const text = fs.readFileSync(path.join(bundleDirectory, summary.summaryFilename), "utf8");
   // findings.schema.json is a 264-byte array of urn:...:finding:2. Stopping at that boundary would
   // send the agent to the 80 KB document this summary exists to keep out of a single read (#1298).
   assert.match(text, /^\*id: string$/mu);
   assert.match(text, /^\*status: enum\(candidate\|/mu);
   assert.match(text, / -> finding\.schema\.json\$\/\$defs\/findingReportBoundText\/allOf$/mu);
-  assert.ok(!artifactSchemaFieldSummary("findings.schema.json", bundleDirectory)!.exceedsSingleRead);
-  assert.ok(artifactSchemaFieldSummary("finding.schema.json", bundleDirectory)!.exceedsSingleRead);
+  const referenced = artifactSchemaFieldSummary("finding.schema.json", bundleDirectory);
+  assert.ok(referenced !== undefined);
+  assert.ok(!summary.exceedsSingleRead);
+  assert.ok(referenced.exceedsSingleRead);
 });
 
 test("materializes the checked-in JSON schema bundle into a task-local directory", () => {

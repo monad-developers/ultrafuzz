@@ -569,7 +569,7 @@ function schemaSizeAnnotation(schemaFile: string): string {
 }
 
 function byteSizeText(bytes: number): string {
-  return bytes < 1024 ? `${bytes} bytes` : `${Math.round(bytes / 1024)} KB`;
+  return bytes < 1024 ? `${String(bytes)} bytes` : `${String(Math.round(bytes / 1024))} KB`;
 }
 
 function validationCommand(schemaPath: string, artifactPath: string): string {

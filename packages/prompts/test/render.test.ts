@@ -226,8 +226,9 @@ describe("prompt rendering", () => {
     const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    const current = input.graph.logicalNodes.find((node) => node.id === input.node.logicalId)!;
-    current.outputs!.push({
+    const current = input.graph.logicalNodes.find((node) => node.id === input.node.logicalId);
+    if (current?.outputs === undefined) throw new Error("the base render input declares no outputs to extend");
+    current.outputs.push({
       path: "triaged-findings.json",
       contract: "ultrafuzz/triaged-findings@1",
       primary: false,
