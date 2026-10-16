@@ -1,0 +1,160 @@
+# threat-model.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 24706 bytes, sha256 cbef8933e1a3edf0
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.threat-model.v1)
+*title: string
+*scope: object
+   summary: string
+  *repository_evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+  *exclusions: array<string>
+*protocol: object
+   summary: string
+  *archetypes: array<string>
+*capabilities: array<object>
+  *id: string
+  *status: enum(present|absent|unknown)
+   rationale: string
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*assets: array<object>
+  *id: string
+  *name: string
+   description: string
+   value_at_risk: string
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*actors: array<object>
+  *id: string
+  *name: string
+  *role: string
+  *trust: enum(untrusted|partially-trusted|trusted|privileged)
+  *privileges: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*trust_boundaries: array<object>
+  *id: string
+  *name: string
+   description: string
+  *actor_ids: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*attack_surfaces: array<object>
+  *id: string
+  *name: string
+   description: string
+  *entry_points: array<string>
+  *asset_ids: array<string>
+  *actor_ids: array<string>
+  *capability_ids: array<string>
+  *trust_boundary_ids: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*value_flows: array<object>
+  *id: string
+  *name: string
+   description: string
+  *steps: array<string>
+  *asset_ids: array<string>
+  *actor_ids: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*lifecycle_transitions: array<object>
+  *id: string
+  *name: string
+  *from: string
+  *to: string
+  *trigger: string
+  *guards: array<string>
+  *effects: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*invariants: array<object>
+  *id: string
+  *name: string
+  *kind: enum(economic|accounting|state|authorization|integration)
+  *statement: string
+  *asset_ids: array<string>
+  *capability_ids: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*threats: array<object>
+  *id: string
+  *title: string
+   description: string
+  *preconditions: array<string>
+  *impact: string
+  *asset_ids: array<string>
+  *actor_ids: array<string>
+  *attack_surface_ids: array<string>
+  *capability_ids: array<string>
+  *trust_boundary_ids: array<string>
+  *invariant_ids: array<string>
+  *assumption_ids: array<string>
+  *unknown_ids: array<string>
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*assumptions: array<object>
+  *id: string
+  *name: string
+  *statement: string
+  *evidence: array<object>
+    *path: string
+     line: integer
+     end_line: integer
+     symbol: string
+     note: string
+*unknowns: array<object>
+  *id: string
+  *name: string
+   description: string
+   security_impact: string
+  *evidence_needed: string
+*coverage_gaps: array<object>
+  *id: string
+  *name: string
+   description: string
+  *reason: string

@@ -1,0 +1,30 @@
+# event-query-facade.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 3223 bytes, sha256 e34716dbe9857cc1
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.event-query-facade.v1)
+*run_id: string
+*append_log: const(events.jsonl)
+*index_root: const(events.index)
+*indexes: tuple[const(run), const(node), const(type), const(status), const(timestamp)]
+*filters: object
+  *run_id: const(events.index/run/<run-id>.jsonl)
+  *node_id: const(events.index/node/<node-id>.jsonl)
+  *event_type: const(events.index/type/<event-type>.jsonl)
+  *status: const(events.index/status/<status>.jsonl)
+  *timestamp: const(events.index/timestamp/<yyyy-mm-dd>.jsonl)
+*long_filters: object
+  *run_id: const(events.index/run/sha256/<sha256-hex(run-id)>.jsonl)
+  *node_id: const(events.index/node/sha256/<sha256-hex(node-id)>.jsonl)
+  *event_type: const(events.index/type/sha256/<sha256-hex(event-type)>.jsonl)
+  *status: const(events.index/status/sha256/<sha256-hex(status)>.jsonl)
+*index_key_encoding: object
+  *version: const(ultrafuzz.event-index-key.v1)
+  *direct_max_id_length: const(122)
+  *direct_id_path: const(<dimension>/<id>.jsonl)
+  *long_id_path: const(<dimension>/sha256/<sha256-hex(id)>.jsonl)
+  *digest: const(sha256)
+  *hash_input_encoding: const(utf8)
+  *digest_encoding: const(hex)

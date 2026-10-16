@@ -1,0 +1,39 @@
+# admin-config-boundary-matrix.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 6275 bytes, sha256 e2f2abb432453183
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.admin-config-boundary-matrix.v1)
+*surfaces: array<object>
+  *surface_id: string
+  *module_family: string
+  *contract_or_interface: string
+  *documented_name: string
+  *implementation_name: string
+  *selector: string|null
+  *authorization_model: string
+  *getter_or_reflection_path: string|null
+  *source_evidence: array<string>
+  *selected_test_cases: array<string>
+  *classification: enum(production-bug|implementation-drift|incomplete-spec|harness-defect|inconclusive)
+*selector_mismatches: array<object>
+  *surface_id: string
+  *documented_name: string
+  *implementation_name: string
+  *documented_selector: string|null
+  *implementation_selector: string|null
+  *evidence_paths: array<string>
+  *classification: enum(implementation-drift|incomplete-spec)
+  *reason: string
+*ambiguous_or_incomplete_specs: array<object>
+  *surface_id: string
+  *classification: enum(implementation-drift|incomplete-spec)
+  *reason: string
+  *evidence_paths: array<string>
+*generated_tests: array<object>
+  *path: string
+  *checks: array<string>
+ coverage_notes: array<object>
+  *surface_id: string
+  *reason: string

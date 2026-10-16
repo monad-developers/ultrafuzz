@@ -1,0 +1,32 @@
+# dynamic-strategy-provenance.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 3891 bytes, sha256 2f2c0d4dc5a3731f
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.dynamic-strategy-provenance.v1)
+*current_run_artifacts: array<string>
+*agents: array<object>
+  *agent_id: string
+  *label: string
+  *role: string
+*models: array<object>
+  *agent_id: string
+  *model: string
+  *backend: string
+*commands: array<string>
+*generated_files: array<object>
+  *strategy_id: string
+  *source_path: string
+  *destination_intent: string
+*validation: array<object>
+  *subject: string
+  *command: string
+  *status: enum(passed|failed|blocked|not-run)
+  *summary: string
+*excluded_context: object
+  *sibling_runs: const(excluded)
+  *previous_reports: const(excluded)
+  *host_global_paths: const(excluded)
+  *network_resources: const(excluded)
+  *extra_target_context: const(excluded)

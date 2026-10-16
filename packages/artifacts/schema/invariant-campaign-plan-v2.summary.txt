@@ -1,0 +1,36 @@
+# invariant-campaign-plan-v2.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 6063 bytes, sha256 a72ece887ff35083
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.invariant-campaign-plan.v2)
+*available_vcpus: integer
+*workers: integer
+*configured_budget_seconds: integer
+*deadline: string
+*finalization_reserve_seconds: integer
+*configured_fuzzer_timeout_seconds: integer
+*recon_internal_timeout_seconds: integer
+*recon_test_limit: string
+*recon_sequence_length: integer
+*host_soft_timeout_seconds: integer
+*host_force_kill_grace_seconds: integer
+*artifact_finalization_reserve_seconds: integer
+*backend_started_at: string
+*fuzzing_deadline_utc: string
+*force_kill_deadline_utc: string
+*final_artifact_deadline_utc: string
+*backend: object
+  *name: const(recon)
+  *version: string|null
+  *exact_shell_escaped_command: string
+*command_plan: array<object>
+  *phase: enum(validation|smoke|campaign|finalization)
+  *command: string
+*paths: object
+  *corpus: string
+  *cache: string
+  *log: string
+  *raw_results: string
+  *reproducers: string

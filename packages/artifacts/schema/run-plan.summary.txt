@@ -1,0 +1,70 @@
+# run-plan.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 12539 bytes, sha256 da11ec5333f32ce6
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.run-plan.v4)
+*run_id: string
+*mode: enum(run|resume|replay|fork)
+ source_run_id: string
+ source_revision: string
+ source_ref: string
+*graph_fingerprint: string
+*config_fingerprint: string
+*redacted_config_fingerprint: string
+*controller_source_digest: string
+*execution: object
+   (rules): 1 cross-member rule  -> $/$defs/execution/allOf
+  *mode: enum(local|cloud)
+   provider: const(modal)
+  *retentionDays: integer
+  *resources: object
+    *cpu: number
+    *memoryMiB: integer
+    *timeoutSeconds: integer
+  *nodes: object<object>  -> $/$defs/execution/properties/nodes/additionalProperties
+  *providers: object
+     modal: object
+      *app: string
+      *image: string
+       region: string
+      *credentialEnv: array<string>
+*topology: object
+  *path: string
+  *logical_nodes: integer
+  *expanded_nodes: integer
+  *required_commands: array<string>
+   origin: enum(project-default|audit-profile|project-config|runtime-override)
+   digest: string
+*rendered_prompts: array<object>
+  *node_id: string
+  *logical_node_id: string
+  *attempt_id: string
+  *prompt_id: string
+  *prompt_path: string
+  *rendered_prompt_path: string
+  *rendered_prompt_digest: string
+  *rendered_prompt_snapshot_path: string
+  *variables_used: array<string>
+  *artifact_references: array<oneOf[4]>  -> $/$defs/artifactReference/oneOf
+*policy_posture: object
+  *config: enum(pass|warn|fail)
+  *topology: enum(pass|warn|fail)
+  *prompts: enum(pass|warn|fail)
+  *paths: enum(pass|warn|fail)
+  *agents: enum(pass|warn|fail)
+  *trust: enum(pass|warn|fail)
+*prompt_digest: string
+*audit_profile: object
+  *id: string
+  *catalog_digest: string
+  *effective_topology_path: string
+  *topology_path_origin: string
+  *topology_digest: string
+  *prompt_digest: string
+  *expanded_graph_fingerprint: string
+  *effective_settings: object
+  *setting_origins: object<string>
+  *overridden_settings: array<string>
+  *topology_overridden: boolean

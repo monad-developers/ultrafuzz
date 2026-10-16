@@ -1,0 +1,92 @@
+# run-state.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 32815 bytes, sha256 1d183fff48dcb701
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.run-state.v5)
+*run_id: string
+*status: enum(pending|running|paused|succeeded|failed|timed-out|canceled)
+*graph_fingerprint: string
+*config_fingerprint: string
+*created_at: string
+ source_run_id: string
+ started_at: string
+ finished_at: string
+ workflow_deadline_at: string
+*last_transition_at: string
+*controller_lease: object
+  *status: enum(active|expired|recovering)
+  *duration_ms: integer
+  *renewed_at: string
+  *expires_at: string
+  *recovery_attempts: integer
+*concurrency: object
+  *requested_concurrency: integer
+  *effective_concurrency: integer
+  *ready_queue_depth: integer
+  *active_work: integer
+  *queued_duration_ms: integer
+  *active_duration_ms: integer
+  *idle_duration_ms: integer
+  *observed_at: string
+ provenance: object
+  *workflow: object
+    *inspection: object
+      *runId: string
+    *runId: string
+    *compiledRunId: string
+    *name: string
+    *controlGeneration: string
+     controllerGeneration: string
+     controllerGenerationJournal: const(smithers/controller-generation-journal.json)
+    *linkId: string
+    *executionSnapshot: string
+     controllerExecutionSnapshot: string
+   recovery: object
+     (rules): 3 cross-member rules  -> $/$defs/runRecoveryProvenance/allOf
+    *recovery_id: string
+    *submission_status: enum(prepared|submitted)
+    *recovered: boolean
+     recovered_at: string
+    *prior_status: const(failed)
+    *failed_nodes: array<object>
+      *node_id: string
+      *workflow_task_id: string
+      *failed_attempt: integer
+      *failure_category: enum(dependency-cascade|artifact-contract|provider-interruption|agent-failure)
+    *source_workflow_run_id: string
+    *source_workflow_link_id: string
+     workflow_run_id: string
+     workflow_link_id: string
+    *control_generation: string
+    *controller_invocation_id: string
+    *controller_invoked_at: string
+     lifecycle_result_event_id: string
+     lifecycle_result_at: string
+     lifecycle_submission_event_id: string
+     lifecycle_submitted_at: string
+   recovery_history: array<object>
+     (rules): 3 cross-member rules  -> $/$defs/runRecoveryProvenance/allOf
+    *recovery_id: string
+    *submission_status: enum(prepared|submitted)
+    *recovered: boolean
+     recovered_at: string
+    *prior_status: const(failed)
+    *failed_nodes: array<object>
+      *node_id: string
+      *workflow_task_id: string
+      *failed_attempt: integer
+      *failure_category: enum(dependency-cascade|artifact-contract|provider-interruption|agent-failure)
+    *source_workflow_run_id: string
+    *source_workflow_link_id: string
+     workflow_run_id: string
+     workflow_link_id: string
+    *control_generation: string
+    *controller_invocation_id: string
+    *controller_invoked_at: string
+     lifecycle_result_event_id: string
+     lifecycle_result_at: string
+     lifecycle_submission_event_id: string
+     lifecycle_submitted_at: string
+*nodes: object<object>  -> $/properties/nodes/additionalProperties/allOf

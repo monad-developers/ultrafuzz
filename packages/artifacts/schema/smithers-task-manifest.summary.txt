@@ -1,0 +1,226 @@
+# smithers-task-manifest.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 45547 bytes, sha256 815ec880bb714341
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.smithers.workflow.v4)
+*run_id: string
+*smithers_run_id: string
+*workflow_name: string
+ source_revision: string
+ source_ref: string
+*pinned_submodules: anyOf[2]  -> $/properties/pinned_submodules/anyOf
+ dynamic_groups: array<object>
+  *groupNodeId: string
+  *logicalNodeId: string
+  *source: object
+    *concreteNodeId: string
+    *attemptId: string
+     verifierSmithersNodeId: string
+    *artifactPath: string
+  *sourcePath: string
+  *keyPath: string
+  *nodeIdTemplate: string
+  *templatePath: string
+  *templateDigest: string
+  *templateFingerprint: string
+  *continueOnFail: boolean
+  *maxDynamicNodes: integer
+  *reservedNodeIds: array<string>
+  *taskTemplates: array<object>
+    *attemptId: string
+    *concreteNodeId: string
+    *logicalNodeId: string
+    *preparationSmithersNodeId: string
+    *smithersNodeId: string
+    *verifierSmithersNodeId: string
+    *agentRef: string
+    *agentChain: array<object>
+      *profileId: string
+      *agentRef: string
+       modelName: string
+       reasoningEffort: string
+      *role: enum(primary|fallback)
+     modelName: string
+     reasoningEffort: string
+     sourceRevision: string
+     sourceRef: string
+    *dependencies: array<string>
+    *dependencySmithersNodeIds: array<string>
+    *timeoutMs: integer
+    *heartbeatTimeoutMs: integer
+    *retries: integer
+    *retryPolicy: object
+      *backoff: const(exponential)
+      *initialDelayMs: integer
+    *workspacePath: string
+    *artifactDir: string
+    *dependencyArtifactDirs: array<string>
+     referenceArtifactDirs: array<string>
+     vulnerabilityDatabaseCatalog: object
+      *path: string
+      *sha256: string
+     referenceArtifactManifestAuthorities: array<object>
+      *attemptId: string
+      *artifactDir: string
+      *sizeBytes: integer
+      *sha256: string
+     optionalDependencyArtifactDirs: array<string>
+     renderedPromptPath: string
+     promptTemplatePath: string
+     dynamicDependencies: array<string>
+     deferredPromptGroups: array<string>
+     dynamicVariables: object<string|number|boolean>
+    *execution: object
+       (rules): 1 cross-member rule  -> $/properties/tasks/items/properties/execution/allOf
+      *mode: enum(local|cloud)
+       provider: const(modal)
+      *resources: object  -> $/properties/tasks/items/properties/execution/properties/resources
+       modal: object  -> $/properties/tasks/items/properties/execution/properties/modal
+      *agentCredentialEnv: array<string>
+    *metadata: object
+      *schemaVersion: const(ultrafuzz.smithers.task.v3)
+      *run: object  -> $/properties/tasks/items/properties/metadata/properties/run
+      *node: object  -> $/properties/tasks/items/properties/metadata/properties/node
+      *dependencies: object  -> $/properties/tasks/items/properties/metadata/properties/dependencies
+      *loop: object  -> $/properties/tasks/items/properties/metadata/properties/loop
+      *model: object  -> $/properties/tasks/items/properties/metadata/properties/model
+      *workspace: object  -> $/properties/tasks/items/properties/metadata/properties/workspace
+      *artifacts: object  -> $/properties/tasks/items/properties/metadata/properties/artifacts
+      *retryPolicy: object  -> $/properties/tasks/items/properties/metadata/properties/retryPolicy
+      *timeout: object  -> $/properties/tasks/items/properties/metadata/properties/timeout
+      *execution: object  -> $/properties/tasks/items/properties/metadata/properties/execution/allOf
+  *promptContext: object
+    *projectRoot: string
+    *repoPath: string
+    *artifactsDir: string
+    *runMetadataPath: string
+    *resolvedConfig: object
+       (rules): 2 cross-member rules  -> $/properties/dynamic_groups/items/properties/promptContext/properties/resolvedConfig/dependentRequired
+      *triage: object  -> $/properties/dynamic_groups/items/properties/promptContext/properties/resolvedConfig/properties/triage
+      *dynamicStrategiesEnumerator: anyOf[2]  -> $/properties/dynamic_groups/items/properties/promptContext/properties/resolvedConfig/properties/dynamicStrategiesEnumerator/anyOf
+      *invariantPropertyPriorityThreshold: string
+      *invariantPropertyPriorityFilter: string
+      *invariantPropertyPriorities: array<string>
+      *invariantTestingFuzzerTimeout: integer
+       vulnerabilityDatabaseRelativePath: string
+       vulnerabilityDatabaseSha256: string
+       invariantReferenceExpectationSelection: enum(priority|mandatory)
+*tasks: array<object>
+  *attemptId: string
+  *concreteNodeId: string
+  *logicalNodeId: string
+  *preparationSmithersNodeId: string
+  *smithersNodeId: string
+  *verifierSmithersNodeId: string
+  *agentRef: string
+  *agentChain: array<object>
+    *profileId: string
+    *agentRef: string
+     modelName: string
+     reasoningEffort: string
+    *role: enum(primary|fallback)
+   modelName: string
+   reasoningEffort: string
+   sourceRevision: string
+   sourceRef: string
+  *dependencies: array<string>
+  *dependencySmithersNodeIds: array<string>
+  *timeoutMs: integer
+  *heartbeatTimeoutMs: integer
+  *retries: integer
+  *retryPolicy: object
+    *backoff: const(exponential)
+    *initialDelayMs: integer
+  *workspacePath: string
+  *artifactDir: string
+  *dependencyArtifactDirs: array<string>
+   referenceArtifactDirs: array<string>
+   vulnerabilityDatabaseCatalog: object
+    *path: string
+    *sha256: string
+   referenceArtifactManifestAuthorities: array<object>
+    *attemptId: string
+    *artifactDir: string
+    *sizeBytes: integer
+    *sha256: string
+   optionalDependencyArtifactDirs: array<string>
+   renderedPromptPath: string
+   promptTemplatePath: string
+   dynamicDependencies: array<string>
+   deferredPromptGroups: array<string>
+   dynamicVariables: object<string|number|boolean>
+  *execution: object
+     (rules): 1 cross-member rule  -> $/properties/tasks/items/properties/execution/allOf
+    *mode: enum(local|cloud)
+     provider: const(modal)
+    *resources: object
+      *cpu: number
+      *memoryMiB: integer
+      *timeoutSeconds: integer
+     modal: object
+      *app: string
+      *image: string
+       region: string
+      *credentialEnv: array<string>
+    *agentCredentialEnv: array<string>
+  *metadata: object
+    *schemaVersion: const(ultrafuzz.smithers.task.v3)
+    *run: object
+      *ultrafuzzRunId: string
+      *smithersWorkflowName: string
+      *graphVersion: const(4)
+      *topologyVersion: const(2)
+    *node: object
+      *concreteNodeId: string
+      *logicalNodeId: string
+      *attemptId: string
+      *label: string
+      *kind: const(agentic)
+       promptPath: string
+       group: string
+       producerNodeId: string
+       storageId: string
+       dynamic: object  -> $/properties/tasks/items/properties/metadata/properties/node/properties/dynamic
+    *dependencies: object
+      *concreteNodeIds: array<string>
+      *attemptIds: array<string>
+      *smithersNodeIds: array<string>
+    *loop: object
+      *index: integer
+      *count: integer
+      *mode: enum(parallel|series)
+      *attemptIndex: integer
+    *model: object
+      *profileId: string
+      *agentRef: string
+       modelName: string
+       reasoningEffort: string
+      *modelIndex: integer
+      *attemptIndex: integer
+      *agentChain: array<object>  -> $/properties/tasks/items/properties/metadata/properties/model/properties/agentChain/items
+    *workspace: object
+      *primitive: const(worktree)
+      *path: string
+      *repoPath: string
+      *trustModel: const(skip-permissions)
+       sourceRevision: string
+       sourceRef: string
+    *artifacts: object
+      *dir: string
+      *outputs: array<object>  -> $/properties/tasks/items/properties/metadata/properties/artifacts/properties/outputs/items/allOf
+      *manifestPath: string
+    *retryPolicy: object
+      *maxAttempts: integer
+      *sameAgentAttempts: integer
+      *smithersRetries: integer
+    *timeout: object
+      *milliseconds: integer
+      *seconds: integer
+      *heartbeatTimeoutMs: integer
+    *execution: object
+       (rules): 1 cross-member rule  -> $/properties/tasks/items/properties/metadata/properties/execution/allOf
+      *mode: enum(local|cloud)
+       provider: const(modal)
+      *resources: object  -> $/properties/tasks/items/properties/metadata/properties/execution/properties/resources

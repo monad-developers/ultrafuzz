@@ -1,0 +1,65 @@
+# generated-tests.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 4428 bytes, sha256 4203d399290f2240
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 1 cross-member rule  -> $/allOf
+*schema_version: const(ultrafuzz.generated-tests.v3)
+*run_id: string
+*node_id: string
+*framework: string
+*generated_tests: array<object>
+  *path: string
+  *size_bytes: integer
+  *sha256: string
+   provenance: object
+     producer_node_id: string
+     run_id: string
+     logical_node_id: string
+     attempt_index: integer
+     loop_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     agent_ref: string
+     workflow_run_id: string
+     workflow_task_id: string
+     source_run_id: string
+     origin: string
+   language: string
+   description: string
+*support_files: array<object>
+  *path: string
+  *size_bytes: integer
+  *sha256: string
+   provenance: object
+     producer_node_id: string
+     run_id: string
+     logical_node_id: string
+     attempt_index: integer
+     loop_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     agent_ref: string
+     workflow_run_id: string
+     workflow_task_id: string
+     source_run_id: string
+     origin: string
+   language: string
+   description: string
+ provenance: object
+   producer_node_id: string
+   run_id: string
+   logical_node_id: string
+   attempt_index: integer
+   loop_index: integer
+   model_id: string
+   model: string
+   model_index: integer
+   agent_ref: string
+   workflow_run_id: string
+   workflow_task_id: string
+   source_run_id: string
+   origin: string

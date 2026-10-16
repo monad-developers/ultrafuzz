@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  artifactSchemaFieldSummary,
   findingNoteKeyPromptVocabulary,
   findingReachabilityPromptVocabulary,
   isArtifactContractId
@@ -489,7 +490,7 @@ function appendOutputContract(
     .map((guidance) => guidance.trimEnd())
     .join("\n\n");
   const schemaGuidance = outputs.some((output) => output.schemaFile !== undefined)
-    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. Read it before authoring the artifact. It is the sole authority on JSON versions, field names, types, enums, required or optional members, and empty forms. Prompt prose may add semantic or run-context requirements that JSON Schema cannot express, but it does not redefine the JSON shape.\n\n`
+    ? `Where an entry above names a schema to validate against, that file is an orchestrator-supplied JSON Schema under ${markdownCodeSpan(schemaDirectory)}. It is the sole authority on JSON versions, field names, types, enums, required or optional members, and empty forms. Where an output also names a \`Field summary\`, start there: the summary lists every member with its type and enums, and names the JSON Pointer to read in the schema wherever it omits detail. An output with no summary line, or a summary file the workspace does not hold, means reading the schema itself. Read the schema at those pointers, at any member the summary marks \`pattern-guarded\`, and for the empty form; several schemas are larger than one read, so query them at a pointer rather than reading them whole. A summary is never a validation input. Prompt prose may add semantic or run-context requirements that JSON Schema cannot express, but it does not redefine the JSON shape.\n\n`
     : "";
   const contract = renderOutputContractTemplate("output-contract.mdx", {
     schema_guidance: schemaGuidance,
@@ -511,7 +512,8 @@ function appendOutputContract(
           ...(output.schemaFile === undefined
             ? []
             : [
-                `  Validate against: ${markdownCodeSpan(path.join(schemaDirectory, output.schemaFile))}`,
+                ...fieldSummaryLines(schemaDirectory, output.schemaFile),
+                `  Validate against: ${markdownCodeSpan(path.join(schemaDirectory, output.schemaFile))}${schemaSizeAnnotation(output.schemaFile)}`,
                 `  Validation command: ${validationCommand(
                   path.join(schemaDirectory, output.schemaFile),
                   path.join(input.node.artifactDir, output.path)
@@ -541,6 +543,33 @@ function appendOutputContract(
     renderedMarkdown: `${rendered.trimEnd()}\n\n${specializedGuidance === "" ? "" : `${specializedGuidance}\n\n`}${outputContractMarkdown}`,
     outputContractMarkdown
   };
+}
+
+/**
+ * The derived shape index an agent should read before the schema itself (#1298). A bundle that
+ * ships no summary for a schema renders no line, so an older sealed bundle still renders.
+ */
+function fieldSummaryLines(schemaDirectory: string, schemaFile: string): string[] {
+  const summary = artifactSchemaFieldSummary(schemaFile);
+  if (summary === undefined) return [];
+  return [
+    `  Field summary: ${markdownCodeSpan(path.join(schemaDirectory, summary.summaryFilename))} (${byteSizeText(
+      summary.summaryBytes
+    )}; derived shape index, not a validation input)`
+  ];
+}
+
+/** Name the schema's measured size, and say when it is too large to read in one call. */
+function schemaSizeAnnotation(schemaFile: string): string {
+  const summary = artifactSchemaFieldSummary(schemaFile);
+  if (summary === undefined) return "";
+  return summary.exceedsSingleRead
+    ? ` (${byteSizeText(summary.schemaBytes)}; larger than one read - query it at the pointer a summary line names)`
+    : ` (${byteSizeText(summary.schemaBytes)})`;
+}
+
+function byteSizeText(bytes: number): string {
+  return bytes < 1024 ? `${String(bytes)} bytes` : `${String(Math.round(bytes / 1024))} KB`;
 }
 
 function validationCommand(schemaPath: string, artifactPath: string): string {

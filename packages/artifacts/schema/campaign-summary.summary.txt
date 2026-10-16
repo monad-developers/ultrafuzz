@@ -1,0 +1,24 @@
+# campaign-summary.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 3183 bytes, sha256 df399e3a0ac49827
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.campaign-summary.v2)
+*outcome: enum(complete|partial|blocked)
+*sequence_length: integer
+ reason: string
+*implemented_property_suite_refs: array<string>
+*campaign_plan_ref: string
+*backend_results: array<object>
+  *fuzzer_backend: string
+  *status: enum(complete|partial|blocked|failed|timed-out|unavailable)
+  *result_ref: string
+*finding_refs: array<string>
+*reproducer_refs: array<object>
+  *finding_id: string
+  *path: string|null
+  *blocker: string|null
+*failure_counts: object
+  *pre_deduplication: integer
+  *post_deduplication: integer

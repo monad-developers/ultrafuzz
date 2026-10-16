@@ -1,0 +1,44 @@
+# audited-differential-lanes.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 6956 bytes, sha256 d1fde912c71faee8
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.audited-differential-lanes.v1)
+*auditor_attempt_index: integer
+*source_plan_artifacts: array<string>
+*source_harness_artifacts: array<string>
+*surface_audits: array<object>
+  *surface_id: string
+  *status: enum(conformant|reference_gap|ambiguous_spec|out_of_scope|ready)
+  *public_evidence_paths: array<string>
+  *audit_notes: array<string>
+  *required_narrowing: array<string>
+*ready_lanes: array<object>
+  *lane_id: string
+  *attempt_index: integer
+  *auditor_attempt_index: integer
+  *planner_attempt_index: integer
+  *harness_author_attempt_index: integer
+  *source_plan_artifact: string
+  *source_harness_artifact: string
+  *surface_id: string
+  *intended_t_sol_path: string
+  *focused_command: string
+  *public_evidence_paths: array<string>
+  *exact_observable_equality_assertions: array<string>
+  *oracle_type: enum(independent_reference|metamorphic|self_consistency|sanity_probe)
+  *calibration_bucket: enum(red_seeking_adversarial|green_safe_sanity)
+  *red_seeking_priority: enum(high|medium|low)
+*rejected_or_narrowed_lanes: array<object>
+  *lane_id: string
+  *disposition: enum(rejected|narrowed)
+  *reason: string
+*reference_gap_work_orders: array<object>
+  *surface_id: string
+  *summary: string
+  *evidence_paths: array<string>
+*ambiguous_spec_work_orders: array<object>
+  *surface_id: string
+  *summary: string
+  *evidence_paths: array<string>

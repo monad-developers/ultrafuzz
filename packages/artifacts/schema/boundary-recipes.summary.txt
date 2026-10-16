@@ -1,0 +1,30 @@
+# boundary-recipes.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 4210 bytes, sha256 ae83045900a4f4e3
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.boundary-recipes.v1)
+*recipes: array<object>
+  *id: string
+  *title: string
+  *path: string
+  *workflow: string
+  *public_support: array<string>
+  *setup: array<string>
+  *action_sequence: array<string>
+  *oracle: string
+  *boundary_values: array<string>
+  *expected_classification_if_red: enum(production-bug|implementation-drift|incomplete-spec|harness-defect|inconclusive)
+  *preferred_downstream_lane: string
+   finding_ids: array<string>
+   property_ids: array<string>
+   summary: string
+*deferred_or_spec_gated: array<object>
+  *id: string
+  *reason: string
+  *evidence_paths: array<string>
+*coverage_priorities: array<object>
+  *workflow: string
+  *priority: enum(high|medium|low)
+   rationale: string

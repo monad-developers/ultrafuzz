@@ -1,0 +1,329 @@
+# report.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 160987 bytes, sha256 26a1bb8a57a4d71b
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 2 cross-member rules  -> $/allOf
+*schema_version: const(ultrafuzz.report.v3)
+*run_metadata: object
+  *run_id: string
+  *source_run_id: string
+  *repository: string
+  *target_commit: anyOf[2]  -> $/properties/run_metadata/properties/target_commit/anyOf
+  *elapsed_time: string
+  *models_used: array<string>
+  *tokens_used: string
+  *estimated_spend: string
+  *partial_pricing: boolean
+   attempts_without_usage: integer
+   unpriced_attempts: integer
+  *strategy_loops: anyOf[2]  -> $/properties/run_metadata/properties/strategy_loops/anyOf
+  *audit_profile: string
+  *audit_profile_catalog_digest: anyOf[2]  -> $/properties/run_metadata/properties/audit_profile_catalog_digest/anyOf
+  *topology_digest: anyOf[2]  -> $/properties/run_metadata/properties/topology_digest/anyOf
+  *prompt_digest: anyOf[2]  -> $/properties/run_metadata/properties/prompt_digest/anyOf
+  *expanded_graph_fingerprint: string
+   agent_execution: object
+    *planned_chain: array<object>
+      *attempt: integer
+      *profile_id: string
+      *agent_ref: string
+       model_name: string
+       reasoning_effort: string
+      *role: enum(primary|fallback)
+    *failed_attempts: array<object>
+      *attempt: integer
+      *profile_id: string
+      *agent_ref: string
+       model_name: string
+       reasoning_effort: string
+      *role: enum(primary|fallback)
+    *producer: object
+      *attempt: integer
+      *profile_id: string
+      *agent_ref: string
+       model_name: string
+       reasoning_effort: string
+      *role: enum(primary|fallback)
+   artifact_validation_warnings: array<object>
+    *code: string
+    *artifact_path: string
+    *field_path: string
+    *message: string
+    *gate: string
+     source_path: string
+   source_run_ids: array<string>
+   dependency_changes: array<object>
+    *attempt_id: string
+    *changed_path_count: integer
+    *changed_paths: array<string>
+ completion: object
+   (rules): 2 cross-member rules  -> $/properties/completion/allOf
+  *schema_version: const(ultrafuzz.report-completion.v1)
+  *run_id: string
+  *outcome: enum(complete|partial)
+  *counts: object
+    *planned: integer
+    *succeeded: integer
+    *failed: integer
+    *timed_out: integer
+    *skipped: integer
+    *cancelled: integer
+    *unverified: integer
+  *incomplete_nodes: array<oneOf[5]>  -> $/properties/completion/properties/incomplete_nodes/items/oneOf
+  *incomplete_nodes_omitted: integer
+ verification: object
+  *status: const(not-checked)
+  *reason_codes: array<enum(verification-unavailable|record-missing|record-invalid|result-unreadable|results-truncated)>
+ observed_completion: object
+  *outcome: const(partial)
+  *counts: object
+    *planned: integer|null
+    *succeeded: integer|null
+    *failed: integer|null
+    *timed_out: integer|null
+    *skipped: integer|null
+    *cancelled: integer|null
+    *unverified: integer|null
+   incomplete_nodes: array<object>
+    *node_id: string
+    *outcome: enum(failed|timed_out|skipped|cancelled|unverified)
+   incomplete_nodes_omitted: integer|null
+ campaign_outcome: object
+  *outcome: enum(complete|partial|blocked)
+   reason: string
+*issues: array<object>
+  *schema_version: const(ultrafuzz.finding.v2)
+  *id: string
+  *title: string
+  *status: enum(candidate|needs-review|duplicate|false-positive|confirmed|fixed|wont-fix)
+   severity_guess: enum(High|Medium|Low)
+   confidence: enum(high|medium|low)
+  *summary: string
+   triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+   producer_node_id: string
+   producer_attempt_id: string
+   source_node_id: string
+   source_nodes: array<string>
+   strategy: string
+   dynamic_strategy_id: string
+   enumerator_id: string
+   attempt_index: integer
+   model_id: string
+   model: string
+   model_index: integer
+   loop_index: integer
+   affected_files: array<string>
+   affected_functions: array<string>
+   patch_refs: array<string>
+   property_ids: array<string>
+   fuzzer_backend: string
+   fuzzer_backends: array<string>
+   contributing_backend_failures: array<object>
+    *fuzzer_backend: string
+    *failure_id: string
+    *raw_result_ref: string
+   deduplication: object
+    *pre_dedup_count: integer
+     basis: string
+   dedupe_key: string
+   family_id: string
+   family_variants: array<object>
+    *id: string
+    *title: string
+    *summary: string
+    *dedupe_key: string
+     strategy: string
+     attempt_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     loop_index: integer
+     affected_files: array<string>
+     affected_functions: array<string>
+     evidence: array<anyOf[4]>  -> $/properties/issues/items/properties/family_variants/items/properties/evidence/items/anyOf
+   related_findings: array<object>
+    *id: string
+    *title: string
+    *relationship: string
+    *summary: string
+     dedupe_key: string
+   notes: array<string (pattern-guarded)>  -> $/$defs/findingReportBoundText/allOf
+   evidence: array<anyOf[4]>  -> $/properties/issues/items/properties/evidence/items/anyOf
+  *severity: enum(High|Medium|Low)
+  *impact: enum(High|Medium|Low)
+  *likelihood: enum(High|Medium|Low)
+  *impact_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+  *likelihood_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+  *severity_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+  *description: string
+  *proof_of_concept: object
+    *scenario: array<string>
+    *language: string
+    *code: string
+   recommendation: string
+   recommended_next_action: string
+   strategy_provenance: object
+    *detection_rates: array<object>
+      *strategy: string
+      *detections: integer
+      *configured_loops: integer
+     attempts: array<object>
+      *strategy: string
+       attempt_index: integer
+       model_id: string
+       model: string
+       model_index: integer
+       loop_index: integer
+  *lifecycle: object
+    *dedupe_key: string
+    *source_artifacts: array<object>
+      *path: string
+      *node_id: string
+      *finding_id: string
+      *title: string
+      *relationship: enum(primary|duplicate|family-variant)
+    *strategy_hits: array<object>
+      *strategy: string
+       attempt_index: integer
+       model_id: string
+       model: string
+       model_index: integer
+       loop_index: integer
+     duplicate_finding_ids: array<string>
+     family_variant_keys: array<string>
+     triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+     triage_reason: string
+     demotion_reason: string
+     canonical_severity: enum(High|Medium|Low)
+     final_disposition: enum(promoted|non-production|dropped)
+     comparison_disposition: enum(promoted-again|rediscovered-but-demoted|not-reproduced|not-searched)
+     stages: array<object>
+      *stage: enum(raw|deduped|triaged|severity-classified)
+      *artifact_path: string
+       finding_id: string
+*non_production_outcomes: array<object>
+  *schema_version: const(ultrafuzz.finding.v2)
+  *id: string
+  *title: string
+  *status: enum(candidate|needs-review|duplicate|false-positive|confirmed|fixed|wont-fix)
+   severity_guess: enum(High|Medium|Low)
+   confidence: enum(high|medium|low)
+  *summary: string
+  *triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+   producer_node_id: string
+   producer_attempt_id: string
+   source_node_id: string
+   source_nodes: array<string>
+   strategy: string
+   dynamic_strategy_id: string
+   enumerator_id: string
+   attempt_index: integer
+   model_id: string
+   model: string
+   model_index: integer
+   loop_index: integer
+   affected_files: array<string>
+   affected_functions: array<string>
+   patch_refs: array<string>
+   property_ids: array<string>
+   fuzzer_backend: string
+   fuzzer_backends: array<string>
+   contributing_backend_failures: array<object>
+    *fuzzer_backend: string
+    *failure_id: string
+    *raw_result_ref: string
+   deduplication: object
+    *pre_dedup_count: integer
+     basis: string
+   dedupe_key: string
+   family_id: string
+   family_variants: array<object>
+    *id: string
+    *title: string
+    *summary: string
+    *dedupe_key: string
+     strategy: string
+     attempt_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     loop_index: integer
+     affected_files: array<string>
+     affected_functions: array<string>
+     evidence: array<anyOf[4]>  -> $/properties/non_production_outcomes/items/properties/family_variants/items/properties/evidence/items/anyOf
+   related_findings: array<object>
+    *id: string
+    *title: string
+    *relationship: string
+    *summary: string
+     dedupe_key: string
+   notes: array<string (pattern-guarded)>  -> $/$defs/findingReportBoundText/allOf
+   evidence: array<anyOf[4]>  -> $/properties/non_production_outcomes/items/properties/evidence/items/anyOf
+   severity: enum(High|Medium|Low)
+   impact: enum(High|Medium|Low)
+   likelihood: enum(High|Medium|Low)
+   impact_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+   likelihood_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+   severity_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+   description: string
+   proof_of_concept: object
+    *scenario: array<string>
+    *language: string
+    *code: string
+   recommendation: string
+  *recommended_next_action: string
+   strategy_provenance: object
+    *detection_rates: array<object>
+      *strategy: string
+      *detections: integer
+      *configured_loops: integer
+     attempts: array<object>
+      *strategy: string
+       attempt_index: integer
+       model_id: string
+       model: string
+       model_index: integer
+       loop_index: integer
+  *lifecycle: object
+    *dedupe_key: string
+    *source_artifacts: array<object>
+      *path: string
+      *node_id: string
+      *finding_id: string
+      *title: string
+      *relationship: enum(primary|duplicate|family-variant)
+    *strategy_hits: array<object>
+      *strategy: string
+       attempt_index: integer
+       model_id: string
+       model: string
+       model_index: integer
+       loop_index: integer
+     duplicate_finding_ids: array<string>
+     family_variant_keys: array<string>
+     triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+     triage_reason: string
+     demotion_reason: string
+     canonical_severity: enum(High|Medium|Low)
+     final_disposition: enum(promoted|non-production|dropped)
+     comparison_disposition: enum(promoted-again|rediscovered-but-demoted|not-reproduced|not-searched)
+     stages: array<object>
+      *stage: enum(raw|deduped|triaged|severity-classified)
+      *artifact_path: string
+       finding_id: string
+ coverage_evidence: oneOf[2]  -> $/properties/coverage_evidence/oneOf
+*property_provenance: array<object>
+  *finding_id: string
+   source_finding_id: string
+  *title: string
+  *property_ids: array<string>
+  *sources: array<object>
+    *source_node_id: string
+    *source_property_id: string
+  *implementation_paths: array<string>
+  *test_paths: array<string>
+   fuzzer_backend: string
+   fuzzer_backends: array<string>
+*property_implementation_coverage: anyOf[3]  -> $/properties/property_implementation_coverage/anyOf

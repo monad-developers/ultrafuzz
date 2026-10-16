@@ -1,0 +1,13 @@
+# analysis-bundle-attempt-history.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 1598 bytes, sha256 19ec5920de192878
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.analysis-bundle.v1)
+*attempts: array<object>
+  *ordinal: integer
+  *launcher_status: enum(launched|failed)
+  *workflow_status: enum(pending|running|paused|succeeded|failed|timed-out|canceled|unknown)
+   started_at: string
+   finished_at: string

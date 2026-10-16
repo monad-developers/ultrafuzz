@@ -1,0 +1,116 @@
+# aggregation-manifest.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 11831 bytes, sha256 35f3de746cd1294f
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.aggregation-manifest.v1)
+*source_generated_tests: integer
+*copied_generated_tests: integer
+*source_support_files: integer
+*copied_support_files: integer
+*source_bundles: array<object>
+   (rules): 1 cross-member rule  -> $/$defs/aggregationSourceBundle/allOf
+  *strategy: string
+  *node_id: string
+  *source_attempt_id: string
+  *attempt_index: integer
+  *source_manifest_path: string
+  *source_manifest_relative_path: string
+  *source_manifest_sha256: string
+  *source_run_id: string
+  *framework: string
+  *generated_test_count: integer
+  *support_file_count: integer
+  *disposition: enum(empty|copied|skipped)
+   reason: string
+*files: array<object>
+  *strategy: string
+  *node_id: string
+  *source_attempt_id: string
+  *attempt_index: integer
+  *source_manifest_path: string
+  *source_manifest_relative_path: string
+  *source_manifest_sha256: string
+  *source_artifact_path: string
+  *source_relative_path: string
+  *destination_path: string
+  *destination_relative_path: string
+  *size_bytes: integer
+  *sha256: string
+   language: string
+   description: string
+   provenance: object
+     producer_node_id: string
+     run_id: string
+     logical_node_id: string
+     attempt_index: integer
+     loop_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     agent_ref: string
+     workflow_run_id: string
+     workflow_task_id: string
+     source_run_id: string
+     origin: string
+*support_files: array<object>
+  *strategy: string
+  *node_id: string
+  *source_attempt_id: string
+  *attempt_index: integer
+  *source_manifest_path: string
+  *source_manifest_relative_path: string
+  *source_manifest_sha256: string
+  *source_artifact_path: string
+  *source_relative_path: string
+  *destination_path: string
+  *destination_relative_path: string
+  *size_bytes: integer
+  *sha256: string
+   language: string
+   description: string
+   provenance: object
+     producer_node_id: string
+     run_id: string
+     logical_node_id: string
+     attempt_index: integer
+     loop_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     agent_ref: string
+     workflow_run_id: string
+     workflow_task_id: string
+     source_run_id: string
+     origin: string
+*skipped_files: array<object>
+  *kind: enum(generated-test|support-file)
+  *strategy: string
+  *node_id: string
+  *source_attempt_id: string
+  *attempt_index: integer
+  *source_manifest_path: string
+  *source_manifest_relative_path: string
+  *source_manifest_sha256: string
+  *source_artifact_path: string
+  *source_relative_path: string
+  *size_bytes: integer
+  *sha256: string
+   language: string
+   description: string
+   provenance: object
+     producer_node_id: string
+     run_id: string
+     logical_node_id: string
+     attempt_index: integer
+     loop_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     agent_ref: string
+     workflow_run_id: string
+     workflow_task_id: string
+     source_run_id: string
+     origin: string
+  *reason: string

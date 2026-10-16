@@ -1,0 +1,23 @@
+# reference-harness.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 3475 bytes, sha256 0f2d2e1e1fb6da52
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.reference-harness.v1)
+*harness_author_attempt_index: integer
+*source_plan_artifacts: array<string>
+*authored_paths: array<string>
+*reference_models: array<object>
+  *model_id: string
+  *covered_surfaces: array<string>
+  *public_evidence_paths: array<string>
+  *implementation_rules_applied: array<string>
+  *known_gaps: array<string>
+  *deployment_helpers: array<string>
+*validation: object
+  *commands: array<string>
+  *passed: boolean
+  *compiler_errors: array<string>
+  *notes: array<string>
+*lane_readiness_notes: array<string>
