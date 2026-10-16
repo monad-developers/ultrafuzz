@@ -91,7 +91,10 @@ Each bundled schema also ships a derived field summary beside it,
 required marker, follows a cross-document `$ref` so a thin wrapper such as
 `findings.schema.json` carries the shape it points at, and names the JSON
 Pointer to read in the schema wherever it omits detail, including members
-guarded by large expanded patterns. Task preparation copies the summaries next
+guarded by large expanded patterns. An open map carries its value shape, since
+it declares no members of its own, and a `(rules)` line counts the constraints
+that bind several members at once - a conjunction, a conditional, a dependency -
+which member-by-member expansion never shows. Task preparation copies the summaries next
 to the bundle, and a rendered output contract names each one on a `Field
 summary` line together with its schema's measured size, because four of these
 schemas are larger than an agent can read in one call. A summary is a reading

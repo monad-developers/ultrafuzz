@@ -3,6 +3,8 @@
 # schema: 160987 bytes, sha256 26a1bb8a57a4d71b
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 2 cross-member rules  -> $/allOf
 *schema_version: const(ultrafuzz.report.v3)
 *run_metadata: object
   *run_id: string
@@ -57,6 +59,7 @@
     *changed_path_count: integer
     *changed_paths: array<string>
  completion: object
+   (rules): 2 cross-member rules  -> $/properties/completion/allOf
   *schema_version: const(ultrafuzz.report-completion.v1)
   *run_id: string
   *outcome: enum(complete|partial)
@@ -76,17 +79,17 @@
  observed_completion: object
   *outcome: const(partial)
   *counts: object
-    *planned: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/planned/anyOf
-    *succeeded: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/succeeded/anyOf
-    *failed: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/failed/anyOf
-    *timed_out: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/timed_out/anyOf
-    *skipped: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/skipped/anyOf
-    *cancelled: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/cancelled/anyOf
-    *unverified: anyOf[2]  -> $/properties/observed_completion/properties/counts/properties/unverified/anyOf
+    *planned: integer|null
+    *succeeded: integer|null
+    *failed: integer|null
+    *timed_out: integer|null
+    *skipped: integer|null
+    *cancelled: integer|null
+    *unverified: integer|null
    incomplete_nodes: array<object>
     *node_id: string
     *outcome: enum(failed|timed_out|skipped|cancelled|unverified)
-   incomplete_nodes_omitted: anyOf[2]  -> $/properties/observed_completion/properties/incomplete_nodes_omitted/anyOf
+   incomplete_nodes_omitted: integer|null
  campaign_outcome: object
   *outcome: enum(complete|partial|blocked)
    reason: string

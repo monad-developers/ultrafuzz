@@ -3,6 +3,7 @@
 # schema: 5867 bytes, sha256 14ffcc38b7fbd666
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
 *schema_version: const(ultrafuzz.dependency-scope-matrix.v1)
 *dependencies: array<object>
   *dependency_id: string
@@ -12,7 +13,7 @@
   *classification: enum(protocol-owned/in-scope|explicitly-trusted/assumed-correct|documented-out-of-scope-or-known-risk|unknown/ambiguous)
   *source_evidence: array<string>
   *source_backed_scope_claim: string
-   in_scope_rationale: anyOf[2]  -> $/properties/dependencies/items/properties/in_scope_rationale/anyOf
+   in_scope_rationale: string|null
   *selected_test_cases: array<string>
   *expected_classification_if_red: anyOf[2]  -> $/properties/dependencies/items/properties/expected_classification_if_red/anyOf
    scope_notes: array<string>

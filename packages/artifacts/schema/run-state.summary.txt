@@ -3,6 +3,7 @@
 # schema: 32815 bytes, sha256 1d183fff48dcb701
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
 *schema_version: const(ultrafuzz.run-state.v5)
 *run_id: string
 *status: enum(pending|running|paused|succeeded|failed|timed-out|canceled)
@@ -43,6 +44,7 @@
     *executionSnapshot: string
      controllerExecutionSnapshot: string
    recovery: object
+     (rules): 3 cross-member rules  -> $/$defs/runRecoveryProvenance/allOf
     *recovery_id: string
     *submission_status: enum(prepared|submitted)
     *recovered: boolean
@@ -65,6 +67,7 @@
      lifecycle_submission_event_id: string
      lifecycle_submitted_at: string
    recovery_history: array<object>
+     (rules): 3 cross-member rules  -> $/$defs/runRecoveryProvenance/allOf
     *recovery_id: string
     *submission_status: enum(prepared|submitted)
     *recovered: boolean
@@ -86,4 +89,4 @@
      lifecycle_result_at: string
      lifecycle_submission_event_id: string
      lifecycle_submitted_at: string
-*nodes: object
+*nodes: object<object>  -> $/properties/nodes/additionalProperties/allOf

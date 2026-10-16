@@ -3,6 +3,8 @@
 # schema: 4428 bytes, sha256 4203d399290f2240
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 1 cross-member rule  -> $/allOf
 *schema_version: const(ultrafuzz.generated-tests.v3)
 *run_id: string
 *node_id: string

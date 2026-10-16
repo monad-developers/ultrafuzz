@@ -147,7 +147,8 @@ function renderSummary(filename, schema, bytes) {
     "# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.",
     `# schema: ${bytes.byteLength} bytes, sha256 ${digest.slice(0, 16)}`,
     '# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,',
-    "# prefixed with a schema filename when the detail lives in another document of the same bundle."
+    "# prefixed with a schema filename when the detail lives in another document of the same bundle.",
+    '# "(rules)" counts constraints that bind several members at once and are not shown member by member.'
   ];
   return `${[...header, ...lines].join("\n")}\n`;
 }
@@ -166,7 +167,11 @@ function renderDocument(schema, filename) {
     renderMembers(root, 0, lines);
   } else if (root.schema.items !== undefined) {
     const items = resolveRef(root.schema.items, childRef(root, "/items"));
-    lines.push(memberLine(0, " ", "(root)", describe(root.schema, root), items === undefined ? undefined : items));
+    // The entry shape is expanded below, so a pointer here would name the whole referenced
+    // document - for the findings wrapper, the 80 KB file this summary stands in for. The member
+    // lines carry that filename wherever they do omit something.
+    const expanded = items !== undefined && isRecord(items.schema.properties);
+    lines.push(memberLine(0, " ", "(root)", describe(root.schema, root), expanded ? undefined : items));
     if (items !== undefined) renderMembers(items, 0, lines);
   } else if (branches !== undefined) {
     // A root union, such as event-record's 27 variants, is the whole document: a line naming the
@@ -175,10 +180,17 @@ function renderDocument(schema, filename) {
     renderBranches(root, branches, lines);
   } else if (Array.isArray(root.schema.allOf)) {
     // Every branch of a root conjunction holds, so its members read as one object.
+    let unexpanded = 0;
     for (const [index, branch] of root.schema.allOf.entries()) {
       const ref = resolveRef(branch, childRef(root, `/allOf/${index}`));
-      if (ref !== undefined) renderMembers(ref, 0, lines);
+      if (ref === undefined) continue;
+      if (isRecord(ref.schema.properties)) renderMembers(ref, 0, lines);
+      else unexpanded += 1;
     }
+    if (unexpanded > 0 && lines.length > 0) {
+      lines.unshift(rulesLine(0, { count: unexpanded, pointer: childRef(root, "/allOf") }));
+    }
+
     if (lines.length === 0) {
       lines.push(memberLine(0, " ", "(root)", describe(root.schema, root), childRef(root, "/allOf")));
     }
@@ -272,6 +284,7 @@ function branchLabel(ref, discriminator) {
 function renderMembers(ref, depth, lines) {
   const properties = isRecord(ref.schema.properties) ? ref.schema.properties : undefined;
   if (properties === undefined) return;
+  for (const rules of crossMemberRules(ref)) lines.push(rulesLine(depth, rules));
   const required = new Set(
     Array.isArray(ref.schema.required) ? ref.schema.required.filter((name) => typeof name === "string") : []
   );
@@ -311,31 +324,51 @@ function nestedObject(ref) {
 function describe(schema, ref) {
   if (!isRecord(schema)) return "?";
   if (schema.const !== undefined) return `const(${String(schema.const)})`;
-  if (Array.isArray(schema.enum)) {
-    const inline = schema.enum.map((value) => String(value)).join("|");
-    return inline.length <= MAX_INLINE_ENUM_CHARS ? `enum(${inline})` : `enum[${schema.enum.length} values]`;
-  }
+  if (Array.isArray(schema.enum)) return describeEnum(schema);
+  // A union of plain scalars is shorter written out than behind a branch count and a pointer.
+  const scalars = scalarUnion(schema, ref);
+  if (scalars !== undefined) return scalars;
   for (const branch of ["anyOf", "oneOf"]) {
     if (Array.isArray(schema[branch])) return `${branch}[${schema[branch].length}]`;
   }
-  if (schema.type === "array" || schema.items !== undefined || Array.isArray(schema.prefixItems)) {
-    // `items: false` admits nothing, so the member is an array that must stay empty.
-    if (schema.items === false) return "array (must be empty)";
-    // A tuple's positions are its shape, so they belong inline rather than behind a pointer.
-    if (Array.isArray(schema.prefixItems)) {
-      return `tuple[${schema.prefixItems
-        .map((item, index) => describe(item, childRef(ref, `/prefixItems/${index}`)))
-        .join(", ")}]`;
-    }
-    const items = schema.items === undefined ? undefined : resolveRef(schema.items, childRef(ref, "/items"));
-    return `array<${items === undefined ? "?" : describe(items.schema, items)}>`;
-  }
+  if (isArrayLike(schema)) return describeArray(schema, ref);
   const guard = patternCharacters(schema) > GUARD_PATTERN_CHARS ? " (pattern-guarded)" : "";
-  if (schema.type === "object" || isRecord(schema.properties)) return "object";
+  if (schema.type === "object" || isRecord(schema.properties)) return describeObject(schema, ref, guard);
   if (typeof schema.type === "string") return `${schema.type}${guard}`;
   if (Array.isArray(schema.type)) return `${schema.type.join("|")}${guard}`;
   if (Array.isArray(schema.allOf)) return `allOf[${schema.allOf.length}]${guard}`;
   return `?${guard}`;
+}
+
+function describeEnum(schema) {
+  const inline = schema.enum.map((value) => String(value)).join("|");
+  return inline.length <= MAX_INLINE_ENUM_CHARS ? `enum(${inline})` : `enum[${schema.enum.length} values]`;
+}
+
+function describeArray(schema, ref) {
+  // `items: false` admits nothing, so the member is an array that must stay empty.
+  if (schema.items === false) return "array (must be empty)";
+  // A tuple's positions are its shape, so they belong inline rather than behind a pointer.
+  if (Array.isArray(schema.prefixItems)) {
+    return `tuple[${schema.prefixItems
+      .map((item, index) => describe(item, childRef(ref, `/prefixItems/${index}`)))
+      .join(", ")}]`;
+  }
+  const items = schema.items === undefined ? undefined : resolveRef(schema.items, childRef(ref, "/items"));
+  return `array<${items === undefined ? "?" : describe(items.schema, items)}>`;
+}
+
+function describeObject(schema, ref, guard) {
+  // An open map declares no members, so its value shape is the only shape it has: goal-plan's
+  // `replacements` reads as `object` without it, hiding that a value must be a scalar.
+  const values = mapValues(schema, ref);
+  if (values !== undefined) return `object<${describe(values.schema, values)}>${guard}`;
+  if (!isRecord(schema.properties) && schema.additionalProperties === false) return "object (must be empty)";
+  return "object";
+}
+
+function isArrayLike(schema) {
+  return schema.type === "array" || schema.items !== undefined || Array.isArray(schema.prefixItems);
 }
 
 /** The reference to read when a member's description omits something an author would need. */
@@ -345,18 +378,101 @@ function detailPointer(ref) {
     const inline = schema.enum.map((value) => String(value)).join("|");
     return inline.length <= MAX_INLINE_ENUM_CHARS ? undefined : childRef(ref, "/enum");
   }
-  for (const branch of ["anyOf", "oneOf", "allOf"]) {
-    if (Array.isArray(schema[branch])) return childRef(ref, `/${branch}`);
+  if (scalarUnion(schema, ref) !== undefined) return undefined;
+  const combinator = ["anyOf", "oneOf", "allOf"].find((key) => Array.isArray(schema[key]));
+  const values = mapValues(schema, ref);
+  if (combinator !== undefined) {
+    // A member can hide a rule set and the shape of its entries at once. Naming the combinator
+    // alone sent a reader of analysis-bundle's `files` to count rules and away from the six item
+    // shapes the same line advertises, so name the member and let one read cover both.
+    return isArrayLike(schema) || values !== undefined ? ref : childRef(ref, `/${combinator}`);
   }
-  if (schema.type === "array" || schema.items !== undefined || Array.isArray(schema.prefixItems)) {
-    if (Array.isArray(schema.prefixItems)) return undefined;
-    if (schema.items === undefined || schema.items === false) return undefined;
-    const items = resolveRef(schema.items, childRef(ref, "/items"));
-    if (items === undefined) return undefined;
-    return detailPointer(items) ?? (isRecord(items.schema.properties) ? items : undefined);
-  }
+  if (isArrayLike(schema)) return itemsDetailPointer(ref);
+  if (values !== undefined) return nestedDetailPointer(values);
   if (patternCharacters(schema) > GUARD_PATTERN_CHARS) return ref;
   if (isRecord(schema.properties)) return ref;
+  return undefined;
+}
+
+function itemsDetailPointer(ref) {
+  const { schema } = ref;
+  if (Array.isArray(schema.prefixItems)) return undefined;
+  if (schema.items === undefined || schema.items === false) return undefined;
+  const items = resolveRef(schema.items, childRef(ref, "/items"));
+  return items === undefined ? undefined : nestedDetailPointer(items);
+}
+
+/** What to read for a shape reached through array items or an open map's values. */
+function nestedDetailPointer(ref) {
+  return detailPointer(ref) ?? (isRecord(ref.schema.properties) ? ref : undefined);
+}
+
+/**
+ * Constraints that bind several members at once - a conjunction, a conditional, a dependency -
+ * which member expansion never shows. generated-tests requires a nonempty `generated_tests`
+ * whenever `support_files` is nonempty, and a reader told to query named pointers has no other
+ * way to reach that rule.
+ */
+function crossMemberRules(ref) {
+  const { schema } = ref;
+  const found = [];
+  for (const key of ["allOf", "oneOf", "anyOf"]) {
+    if (Array.isArray(schema[key]) && schema[key].length > 0) found.push({ key, count: schema[key].length });
+  }
+  for (const key of ["dependentRequired", "dependentSchemas"]) {
+    if (isRecord(schema[key])) found.push({ key, count: Object.keys(schema[key]).length });
+  }
+  if (isRecord(schema.if)) found.push({ key: "if", count: 1 });
+  // One line per keyword, each naming its own pointer: a single line covering two keywords could
+  // only point at the member itself, which for a document root is the whole file this summary
+  // exists to keep out of a read.
+  return found.map((entry) => ({ count: entry.count, pointer: childRef(ref, `/${entry.key}`) }));
+}
+
+function rulesLine(depth, rules) {
+  const text = `${rules.count} cross-member ${rules.count === 1 ? "rule" : "rules"}`;
+  return memberLine(depth, " ", "(rules)", text, rules.pointer);
+}
+
+/**
+ * The value shape of an open map: an object that declares no members of its own but constrains
+ * whatever members appear. Without it such a member summarizes to a bare `object`.
+ */
+function mapValues(schema, ref) {
+  if (!isRecord(schema) || isRecord(schema.properties)) return undefined;
+  if (isRecord(schema.additionalProperties)) {
+    return resolveRef(schema.additionalProperties, childRef(ref, "/additionalProperties"));
+  }
+  if (isRecord(schema.patternProperties)) {
+    const patterns = Object.keys(schema.patternProperties);
+    if (patterns.length === 1 && isRecord(schema.patternProperties[patterns[0]])) {
+      return resolveRef(
+        schema.patternProperties[patterns[0]],
+        childRef(ref, `/patternProperties/${escapePointer(patterns[0])}`)
+      );
+    }
+  }
+  return undefined;
+}
+
+/** A union of nothing but plain scalars, written out, or undefined when a branch holds structure. */
+function scalarUnion(schema, ref) {
+  for (const key of ["anyOf", "oneOf"]) {
+    const branches = schema[key];
+    if (!Array.isArray(branches) || branches.length === 0) continue;
+    const types = [];
+    for (const [index, branch] of branches.entries()) {
+      const resolved = resolveRef(branch, childRef(ref, `/${key}/${index}`));
+      if (resolved === undefined) return undefined;
+      const inner = resolved.schema;
+      if (!isRecord(inner) || typeof inner.type !== "string") return undefined;
+      if (!["string", "number", "integer", "boolean", "null"].includes(inner.type)) return undefined;
+      if (inner.enum !== undefined || inner.const !== undefined) return undefined;
+      if (patternCharacters(inner) > 0) return undefined;
+      if (!types.includes(inner.type)) types.push(inner.type);
+    }
+    return types.join("|");
+  }
   return undefined;
 }
 

@@ -3,6 +3,7 @@
 # schema: 6779 bytes, sha256 5f70b7a686419196
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
 *schema_version: const(ultrafuzz.externalized-state-accounting.v1)
 *state_components: array<object>
   *component_id: string
@@ -22,13 +23,13 @@
   *actions: array<string>
   *state_component_ids: array<string>
   *expected_outcome: string
-  *test_path: anyOf[2]  -> $/properties/scenarios/items/properties/test_path/anyOf
+  *test_path: string|null
 *accounting_oracles: array<object>
   *oracle_id: string
   *state_component_ids: array<string>
   *assertion: string
   *public_basis: array<string>
-  *rounding_rule: anyOf[2]  -> $/properties/accounting_oracles/items/properties/rounding_rule/anyOf
+  *rounding_rule: string|null
 *generated_tests: array<object>
   *path: string
   *scenario_ids: array<string>

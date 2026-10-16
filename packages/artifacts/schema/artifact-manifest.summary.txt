@@ -3,6 +3,7 @@
 # schema: 12073 bytes, sha256 47ab29caff652cac
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
 *schema_version: const(ultrafuzz.artifact-manifest.v3)
 *run_id: string
 *node_id: string
@@ -29,6 +30,7 @@
      origin: string
      metadata: oneOf[2]  -> $/$defs/provenanceMetadata/oneOf
 *output_contracts: array<object>
+   (rules): 1 cross-member rule  -> $/properties/output_contracts/items/allOf
   *path: string
   *contract: enum[44 values]  -> $/properties/output_contracts/items/properties/contract/enum
   *contract_digest: string

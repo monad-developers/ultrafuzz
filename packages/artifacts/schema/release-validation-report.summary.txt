@@ -3,6 +3,7 @@
 # schema: 3064 bytes, sha256 5686ea79936712c4
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
 *schema_version: const(ultrafuzz.release-validation.report.v2)
 *package_id: const(ultrafuzz)
 *generated_at: string
@@ -10,6 +11,7 @@
 *report_path: string
 *overall_status: enum(pass|fail)
 *commands: array<object>
+   (rules): 1 cross-member rule  -> $/properties/commands/items/allOf
   *id: string
   *title: string
   *command: string

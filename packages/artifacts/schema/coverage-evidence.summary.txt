@@ -3,6 +3,7 @@
 # schema: 8345 bytes, sha256 b762c855d02f2c8c
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
  (root): oneOf[2]  -> $/oneOf
    [0] status=measured: object
     *schema_version: const(ultrafuzz.coverage-evidence.v1)
@@ -18,6 +19,7 @@
       *covered_ranges: integer
       *total_ranges: integer
     *files: array<object>
+       (rules): 1 cross-member rule  -> $/oneOf/0/properties/files/items/allOf
       *path: string
       *kind: enum(production|test|harness|dependency)
       *included: boolean

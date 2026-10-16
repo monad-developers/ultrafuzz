@@ -181,6 +181,31 @@ test("field summaries carry the shape of a schema reached through a cross-docume
   assert.ok(referenced.exceedsSingleRead);
 });
 
+test("field summaries keep an open map's value shape and every cross-member rule reachable", () => {
+  const bundleDirectory = path.join(packageRoot, "schema");
+  const read = (schemaFilename: string): string => {
+    const summary = artifactSchemaFieldSummary(schemaFilename, bundleDirectory);
+    assert.ok(summary !== undefined, `${schemaFilename} ships no field summary`);
+    return fs.readFileSync(path.join(bundleDirectory, summary.summaryFilename), "utf8");
+  };
+
+  // An open map declares no members, so the value shape is the only shape it has to report.
+  assert.match(read("goal-plan.schema.json"), /^ {2}\*replacements: object<string\|number\|boolean>$/mu);
+  // A conditional that binds two members is invisible to member-by-member expansion.
+  assert.match(read("generated-tests.schema.json"), /^ \(rules\): 1 cross-member rule {2}-> \$\/allOf$/mu);
+  // A member can hide both a rule set and the shape of its entries; one pointer must cover both.
+  assert.match(read("analysis-bundle.schema.json"), /^\*files: array<oneOf\[6\]> {2}-> \$\/properties\/files$/mu);
+
+  // A pointer that names a document and no path inside it sends the reader to the whole file a
+  // summary exists to keep out of one read.
+  for (const schemaFilename of artifactSchemaFieldSummaries(bundleDirectory).keys()) {
+    for (const line of read(schemaFilename).split("\n")) {
+      if (line.startsWith("#") || !line.includes(" -> ")) continue;
+      assert.match(line, / -> [\w.-]*\$\/\S+$/u, `${schemaFilename}: ${line}`);
+    }
+  }
+});
+
 test("materializes the checked-in JSON schema bundle into a task-local directory", () => {
   const root = mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-schema-bundle-"));
   try {

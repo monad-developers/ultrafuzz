@@ -3,6 +3,7 @@
 # schema: 4210 bytes, sha256 ae83045900a4f4e3
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
 *schema_version: const(ultrafuzz.boundary-recipes.v1)
 *recipes: array<object>
   *id: string
