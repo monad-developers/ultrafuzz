@@ -1545,4 +1545,17 @@ describe("prompt rendering", () => {
     input.variables = { coverage_evidence_markdown_projection: "replacement" };
     expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
   });
+
+  it("renders the shared log command inside the run, and never takes an override for it", () => {
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Post with {{shared_log_command}} post";
+
+    expect(renderPrompt(input).renderedMarkdown).toContain(
+      `Post with ${path.join(tmp, "runs", "run-1", "shared-log-bin", "ultrafuzz-shared-log")} post`
+    );
+    input.variables = { shared_log_command: "/tmp/elsewhere" };
+    expect(() => renderPrompt(input)).toThrow(/authoritative and cannot be overridden/u);
+  });
 });
