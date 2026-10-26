@@ -24,8 +24,27 @@ import { afterEach, beforeEach, type TestContext } from "node:test";
  */
 const registered = new Set<string>();
 const testRoots = new AsyncLocalStorage<string[]>();
-const directTestRoots: string[][] = [];
+type DirectTestScope = { roots: string[]; pending: boolean };
+const directTestScopes: DirectTestScope[] = [];
+const directTestContextScopes = new WeakMap<object, DirectTestScope>();
 let exitHookInstalled = false;
+
+function drainPendingDirectTestScopes(): void {
+  while (directTestScopes.at(-1)?.pending) {
+    const scope = directTestScopes.pop();
+    if (scope !== undefined) removeRoots(scope.roots);
+  }
+}
+
+function currentDirectTestRoots(): string[] | undefined {
+  // A child with a failed teardown remains pending while its parent body may
+  // resume. New parent fixtures belong to the nearest still-active ancestor.
+  for (let index = directTestScopes.length - 1; index >= 0; index -= 1) {
+    const scope = directTestScopes[index];
+    if (scope !== undefined && !scope.pending) return scope.roots;
+  }
+  return directTestScopes.at(-1)?.roots;
+}
 
 // Supporting files run under Node's test runner, which isolates each file.
 // Bun caches this helper across files, so hooks registered by one import would
@@ -33,20 +52,30 @@ let exitHookInstalled = false;
 // wrapper below instead. Node's beforeEach async context does not reach the
 // test body, so track serial direct tests until their after hooks finish.
 if (process.versions.bun === undefined) {
-  beforeEach(() => {
-    directTestRoots.push([]);
+  beforeEach((context) => {
+    // An earlier teardown hook can throw before our late context.after runs.
+    drainPendingDirectTestScopes();
+    const scope = { roots: [], pending: false };
+    directTestContextScopes.set(context, scope);
+    directTestScopes.push(scope);
   });
 
   afterEach((context) => {
-    const roots = directTestRoots.at(-1);
-    if (roots === undefined) return;
+    // A nested child can leave its pending scope above the active parent.
+    drainPendingDirectTestScopes();
+    const scope = directTestContextScopes.get(context);
+    if (scope === undefined) return;
+    if (directTestScopes.at(-1) !== scope) {
+      throw new Error("Runtime test scratch scopes overlap; run these tests without test concurrency");
+    }
     if (!("after" in context)) throw new Error("Runtime test scratch cleanup requires a test context");
+    scope.pending = true;
     context.after(() => {
-      if (directTestRoots.at(-1) !== roots) {
+      if (directTestScopes.at(-1) !== scope) {
         throw new Error("Runtime test scratch scopes overlap; run these tests without test concurrency");
       }
-      directTestRoots.pop();
-      removeRoots(roots);
+      directTestScopes.pop();
+      removeRoots(scope.roots);
     });
   });
 }
@@ -105,7 +134,7 @@ export function privateHomeEnv(): { HOME: string } {
  */
 export function registerTemporaryPath(directory: string, lifetime: "test" | "process" = "test"): string {
   registered.add(directory);
-  if (lifetime === "test") (testRoots.getStore() ?? directTestRoots.at(-1))?.push(directory);
+  if (lifetime === "test") (testRoots.getStore() ?? currentDirectTestRoots())?.push(directory);
   installExitHook();
   return directory;
 }
