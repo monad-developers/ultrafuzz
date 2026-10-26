@@ -4648,6 +4648,53 @@ bunAdapterTest(
 );
 
 bunAdapterTest(
+  "generated OpenRouter recovery records progress after a false provisional 429 boundary",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    const result = await agent.withOpenRouterRecovery({ timeout: 6_000 }, async (options) => {
+      invocation += 1;
+      if (invocation === 2) {
+        assert.equal(options.resumeSession, "budget-session");
+        return { text: "OK" };
+      }
+      const onEvent = options.onEvent as (event: Record<string, unknown>) => void;
+      const onStderr = options.onStderr as (text: string) => void;
+      onEvent({ type: "started", resume: "budget-session" });
+      onStderr("HTTP 429");
+      clock.nowMs = 100;
+      onEvent({
+        type: "action",
+        phase: "completed",
+        action: { id: "work-complete", kind: "note", title: "assistant" },
+        message: "work-complete"
+      });
+      onStderr("suffix\n");
+      await Promise.resolve();
+      clock.nowMs = 300;
+      onStderr("HTTP 429 Too Many Requests\n");
+      throw new Error("HTTP 429 after completed work");
+    });
+    assert.equal(result.text, "OK");
+    assert.equal(invocation, 2);
+    const diagnostics = openRouterBudgetDiagnostics(result);
+    assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+    assert.ok(diagnostics.deadlineAt);
+    assert.ok(diagnostics.lastCheckpoint);
+    assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 5_900);
+  }
+);
+
+bunAdapterTest(
   "generated OpenRouter provider stub cannot replenish cumulative backoff by making new progress",
   { timeout: 10_000 },
   async () => {

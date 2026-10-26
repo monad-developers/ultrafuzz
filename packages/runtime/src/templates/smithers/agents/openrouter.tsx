@@ -1115,6 +1115,7 @@ class BufferedAttemptRelay {
   #lastNewSubstantiveEventWasAssistantMessage = false;
   #reportedUsage: unknown;
   #checkpoint: { sessionId: string; observedAt: number } | undefined;
+  #provisionalCheckpoint: { sessionId: string; observedAt: number } | undefined;
   sawSubstantiveEvent = false;
   resumeSession: string | undefined;
 
@@ -1302,6 +1303,7 @@ class BufferedAttemptRelay {
     this.#provisionalReleaseScheduled = false;
     this.#provisionalCallbacks = [];
     this.#provisionalCallbackBytes = 0;
+    this.#provisionalCheckpoint = undefined;
     this.#terminalRateLimitStderr = undefined;
     this.#terminalRateLimitDiagnostic = undefined;
     this.#terminalRateLimitEvent = undefined;
@@ -1345,11 +1347,13 @@ class BufferedAttemptRelay {
   }
 
   #recordCheckpoint(): void {
-    if (this.#sawTerminalRateLimit || this.#isProvisionalStaging() || this.#isQuarantined()) return;
+    if (this.#sawTerminalRateLimit || this.#isQuarantined()) return;
     const now = performance.now();
     if (this.#totalDeadlineMs !== undefined && now >= this.#totalDeadlineMs) return;
     const sessionId = this.resumeSession ?? this.#expectedResumeSession;
-    if (sessionId !== undefined) this.#checkpoint = { sessionId, observedAt: now };
+    if (sessionId === undefined) return;
+    if (this.#isProvisionalStaging()) this.#provisionalCheckpoint = { sessionId, observedAt: now };
+    else this.#checkpoint = { sessionId, observedAt: now };
   }
 
   attemptSignal(): AbortSignal {
@@ -1568,6 +1572,16 @@ class BufferedAttemptRelay {
   #drainProvisionalCallbacks(force: boolean): void {
     this.#provisionalReleaseScheduled = false;
     if (!force && (this.#provisionalRateLimit || this.#sawTerminalRateLimit)) return;
+    const provisionalCheckpoint = this.#provisionalCheckpoint;
+    this.#provisionalCheckpoint = undefined;
+    if (
+      provisionalCheckpoint !== undefined &&
+      !this.#sawTerminalRateLimit &&
+      !this.#isQuarantined() &&
+      (this.#checkpoint?.observedAt ?? -Infinity) < provisionalCheckpoint.observedAt
+    ) {
+      this.#checkpoint = provisionalCheckpoint;
+    }
     const callbacks = this.#provisionalCallbacks;
     this.#provisionalCallbacks = [];
     this.#provisionalCallbackBytes = 0;
@@ -1581,6 +1595,7 @@ class BufferedAttemptRelay {
     this.#sawTerminalRateLimit = true;
     this.#provisionalRateLimit = false;
     this.#provisionalReleaseScheduled = false;
+    this.#provisionalCheckpoint = undefined;
     if (diagnostic !== undefined) {
       this.#terminalRateLimitDiagnostic = boundedRateLimitDiagnostic(String(diagnostic));
     }
