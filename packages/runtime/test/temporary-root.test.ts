@@ -184,6 +184,7 @@ directNodeTest("a failed direct teardown releases scratch before the next case",
 directNodeTest("a failed nested teardown releases only the child scope before parent teardown", () => {
   const fixture = temporaryRoot("ufz-failed-nested-teardown-");
   const childMarker = path.join(fixture, "child-root.txt");
+  const childAfterMarker = path.join(fixture, "child-after-root.txt");
   const parentMarker = path.join(fixture, "parent-root.txt");
   const resumedMarker = path.join(fixture, "resumed-parent-root.txt");
   const parentAfter = path.join(fixture, "parent-after.txt");
@@ -202,12 +203,17 @@ directNodeTest("a failed nested teardown releases only the child scope before pa
       "  context.after(() => {",
       "    assert.equal(fs.existsSync(parent), true);",
       `    assert.equal(fs.existsSync(fs.readFileSync(${JSON.stringify(childMarker)}, "utf8")), false);`,
+      `    assert.equal(fs.existsSync(fs.readFileSync(${JSON.stringify(childAfterMarker)}, "utf8")), false);`,
       `    assert.equal(fs.existsSync(fs.readFileSync(${JSON.stringify(resumedMarker)}, "utf8")), true);`,
       `    fs.writeFileSync(${JSON.stringify(parentAfter)}, "yes");`,
       "  });",
       '  await context.test("child", (childContext) => {',
       `    fs.writeFileSync(${JSON.stringify(childMarker)}, temporaryRoot("ufz-child-teardown-"));`,
-      '    childContext.after(() => { throw new Error("nested teardown sentinel"); });',
+      "    childContext.after(async () => {",
+      "      await Promise.resolve();",
+      `      fs.writeFileSync(${JSON.stringify(childAfterMarker)}, temporaryRoot("ufz-child-after-"));`,
+      '      throw new Error("nested teardown sentinel");',
+      "    });",
       "  });",
       `  fs.writeFileSync(${JSON.stringify(resumedMarker)}, temporaryRoot("ufz-resumed-parent-"));`,
       "});",

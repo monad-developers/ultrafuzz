@@ -145,7 +145,7 @@ export default smithers(() => (
 // detached engine's PATH makes any bare `smithers` call fail this test, even
 // though `pnpm test` puts node_modules/.bin on PATH and a host may have its own
 // `smithers`.
-const poisonBin = temporaryRoot("ultrafuzz-poison-smithers-");
+const poisonBin = temporaryRoot("ultrafuzz-poison-smithers-", "process");
 const poisonSmithers = "#!/bin/sh\necho 'bare smithers resolved from PATH' >&2\nexit 97\n";
 fs.writeFileSync(path.join(poisonBin, "smithers"), poisonSmithers, { mode: 0o755 });
 const productionPath = `${poisonBin}${path.delimiter}${process.env.PATH ?? ""}`;

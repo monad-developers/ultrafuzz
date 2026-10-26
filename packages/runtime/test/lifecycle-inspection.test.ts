@@ -57,8 +57,8 @@ const startRun = (input: Parameters<typeof runtimeStartRun>[0]): ReturnType<type
     }
   });
 
-function tempProject(): string {
-  return temporaryRoot("ufz-inspect-");
+function tempProject(lifetime: "test" | "process" = "test"): string {
+  return temporaryRoot("ufz-inspect-", lifetime);
 }
 
 function shellQuote(value: string): string {
@@ -267,10 +267,10 @@ function writeInspectionFixtures(project: string, fixtures: FakeInspectionFixtur
  * from the files `writeInspectionFixtures` sets, so the runner a run was
  * launched with never has to change.
  */
-function fakeInspectionEnv(project: string): Record<string, string | undefined> {
+function fakeInspectionEnv(project: string, lifetime: "test" | "process" = "test"): Record<string, string | undefined> {
   const binDir = path.join(path.dirname(project), `${path.basename(project)}-fake-bin`);
   fs.mkdirSync(binDir, { recursive: true });
-  registerTemporaryPath(binDir);
+  registerTemporaryPath(binDir, lifetime);
   const files = fakeInspectionFiles(project);
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -332,18 +332,22 @@ function fakeInspectionEnv(project: string): Record<string, string | undefined> 
 }
 
 /** A project with the fake runner installed and no run; `diagnoseProject` never reads one. */
-function projectWithFakeRunner(): { project: string; env: Record<string, string | undefined> } {
-  const project = tempProject();
+function projectWithFakeRunner(lifetime: "test" | "process" = "test"): {
+  project: string;
+  env: Record<string, string | undefined>;
+} {
+  const project = tempProject(lifetime);
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  return { project, env: fakeInspectionEnv(project) };
+  return { project, env: fakeInspectionEnv(project, lifetime) };
 }
 
 async function launchedProject(
   fixtures: FakeInspectionFixtures,
-  runId = "inspect-run"
+  runId = "inspect-run",
+  lifetime: "test" | "process" = "test"
 ): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
-  const { project, env } = projectWithFakeRunner();
+  const { project, env } = projectWithFakeRunner(lifetime);
   writeInspectionFixtures(project, fixtures);
   const run = await startRun({
     projectRoot: project,
@@ -386,7 +390,7 @@ let sharedInspectedRun:
 async function inspectedRun(fixtures: FakeInspectionFixtures): ReturnType<typeof launchedProject> {
   // A failed launch stays cached, so every later caller reports it as the shared launch failing, not
   // as its own regression.
-  sharedInspectedRun ??= launchedProject({}).then(
+  sharedInspectedRun ??= launchedProject({}, "inspect-run", "process").then(
     (launched) => ({ ...launched, launchedDocuments: readRunDocuments(launched.runRoot) }),
     (error: unknown) => {
       throw new Error("the shared inspection run failed to launch, so this test did not run", { cause: error });
@@ -401,6 +405,18 @@ async function inspectedRun(fixtures: FakeInspectionFixtures): ReturnType<typeof
   writeInspectionFixtures(launched.project, fixtures);
   return launched;
 }
+
+test("a shared inspection project is available in its creating case", async () => {
+  const { project } = await inspectedRun({});
+  assert.equal(fs.existsSync(project), true);
+});
+
+test("a shared inspection project remains available in the next case", async () => {
+  const { project, env } = await inspectedRun({});
+  assert.equal(fs.existsSync(project), true);
+  assert.ok(env.SMITHERS_BIN);
+  assert.equal(fs.existsSync(env.SMITHERS_BIN), true);
+});
 
 function smithersLog(project: string): string {
   return fs.readFileSync(fakeInspectionFiles(project).commandLog, "utf8");

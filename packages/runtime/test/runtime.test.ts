@@ -176,7 +176,7 @@ const SMITHERS_TEST_ENVIRONMENT_ALLOWLIST = [
   "SMITHERS_FAKE_SNAPSHOT_BYTES_LOG"
 ] as const;
 const OPENROUTER_TEST_STDERR_PENDING_LIMIT = 64 * 1024;
-process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = temporaryRoot("ufz-provider-homes-");
+process.env.ULTRAFUZZ_PROVIDER_HOME_ROOT = temporaryRoot("ufz-provider-homes-", "process");
 
 function tempProject(): string {
   return temporaryRoot("ufz-runtime-");

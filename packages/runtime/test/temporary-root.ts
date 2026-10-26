@@ -46,6 +46,20 @@ function currentDirectTestRoots(): string[] | undefined {
   return directTestScopes.at(-1)?.roots;
 }
 
+function scopeDirectAfterHooks(context: TestContext, scope: DirectTestScope): void {
+  const registerAfter = context.after.bind(context);
+  context.after = (callback, options) => {
+    if (callback === undefined) return registerAfter(undefined, options);
+    if (callback.length >= 2) {
+      return registerAfter(
+        (hookContext, done) => testRoots.run(scope.roots, () => callback(hookContext, done)),
+        options
+      );
+    }
+    return registerAfter((hookContext) => testRoots.run(scope.roots, () => callback(hookContext, () => {})), options);
+  };
+}
+
 // Supporting files run under Node's test runner, which isolates each file.
 // Bun caches this helper across files, so hooks registered by one import would
 // not cover direct tests in later files. Bun's runtime lane uses the scoped
@@ -56,6 +70,7 @@ if (process.versions.bun === undefined) {
     // An earlier teardown hook can throw before our late context.after runs.
     drainPendingDirectTestScopes();
     const scope = { roots: [], pending: false };
+    scopeDirectAfterHooks(context as TestContext, scope);
     directTestContextScopes.set(context, scope);
     directTestScopes.push(scope);
   });
