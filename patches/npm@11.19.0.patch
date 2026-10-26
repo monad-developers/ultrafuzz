@@ -1840,11 +1840,126 @@ index 9d082e4404947775276e0d6278516aadaab8bcbe..f19ece377d9da9d10a0b694ac6772a88
    "repository": {
      "type": "git",
      "url": "https://github.com/isaacs/node-tar.git"
+diff --git a/node_modules/undici/docs/docs/api/Client.md b/node_modules/undici/docs/docs/api/Client.md
+index e0d41b47805ec238306e8df8779363e724fb3bf5..ca6e336f226e44065bf7f3659a6ea2c29c9a6d44 100644
+--- a/node_modules/undici/docs/docs/api/Client.md
++++ b/node_modules/undici/docs/docs/api/Client.md
+@@ -29,6 +29,8 @@ Returns: `Client`
+ * **webSocket** `WebSocketOptions` (optional) - WebSocket-specific configuration options.
+   * **maxFragments** `number` (optional) - Default: `131072` - Maximum number of fragments in a message. Set to 0 to disable the limit.
+   * **maxPayloadSize** `number` (optional) - Default: `134217728` (128 MB) - Maximum allowed payload size in bytes for WebSocket messages. Applied to uncompressed messages, compressed frame payloads, and decompressed (permessage-deflate) messages. Set to 0 to disable the limit.
++* **eventSource** `EventSourceOptions` (optional) - EventSource-specific configuration options.
++  * **maxEventSize** `number` (optional) - The maximum total bytes of data and metadata field values retained for a pending EventSource event. Each unfinished line is separately limited to this value plus seven syntax bytes. The number of `data:` lines per event and input chunks buffered for an unfinished line are each limited to `min(131072, max(1024, floor(maxEventSize / 128)))` to bound object overhead. Set to `0` to disable these limits. Default: `buffer.kStringMaxLength`.
+ * **pipelining** `number | null` (optional) - Default: `1` - The amount of concurrent requests to be sent over the single TCP/TLS connection according to [RFC7230](https://tools.ietf.org/html/rfc7230#section-6.3.2). Carefully consider your workload and environment before enabling concurrent requests as pipelining may reduce performance if used incorrectly. Pipelining is sensitive to network stack settings as well as head of line blocking caused by e.g. long running requests. Set to `0` to disable keep-alive connections.
+ * **connect** `ConnectOptions | Function | null` (optional) - Default: `null`.
+ * **strictContentLength** `Boolean` (optional) - Default: `true` - Whether to treat request content length mismatches as errors. If true, an error is thrown when the request content-length header doesn't match the length of the request body.
+diff --git a/node_modules/undici/docs/docs/api/DiagnosticsChannel.md b/node_modules/undici/docs/docs/api/DiagnosticsChannel.md
+index 099c072f6c6ca7d833cb238920551be105ed85fc..aefb1009c63a4612c91ee28eaaae209b80c048fd 100644
+--- a/node_modules/undici/docs/docs/api/DiagnosticsChannel.md
++++ b/node_modules/undici/docs/docs/api/DiagnosticsChannel.md
+@@ -40,7 +40,8 @@ diagnosticsChannel.channel('undici:request:bodySent').subscribe(({ request }) =>
+ 
+ ## `undici:request:headers`
+ 
+-This message is published after the response headers have been received, i.e. the response has been completed.
++This message is published after the response headers have been received. This includes a successful CONNECT or
++protocol upgrade response.
+ 
+ ```js
+ import diagnosticsChannel from 'diagnostics_channel'
+@@ -57,6 +58,7 @@ diagnosticsChannel.channel('undici:request:headers').subscribe(({ request, respo
+ ## `undici:request:trailers`
+ 
+ This message is published after the response body and trailers have been received, i.e. the response has been completed.
++After an upgraded socket is passed to the request handler, this message is published with an empty `trailers` array.
+ 
+ ```js
+ import diagnosticsChannel from 'diagnostics_channel'
 diff --git a/node_modules/undici/lib/core/request.js b/node_modules/undici/lib/core/request.js
-index 4da60667ec2902642c9e7a1bf529245765b79afb..8e7ecc73084b8b9f0fbb9c8365f3284a9d260aae 100644
+index 4da60667ec2902642c9e7a1bf529245765b79afb..0b2b1a8d9d7b63e659013409624a86265d8ae391 100644
 --- a/node_modules/undici/lib/core/request.js
 +++ b/node_modules/undici/lib/core/request.js
-@@ -350,7 +350,13 @@ function processHeader (request, key, val) {
+@@ -263,11 +263,77 @@ class Request {
+     }
+   }
+ 
+-  onUpgrade (statusCode, headers, socket) {
++  /**
++   * @param {number|null} statusCode
++   * @param {Buffer[]|null} headers
++   * @param {import('node:stream').Duplex} socket
++   * @param {string} [statusText]
++   */
++  onUpgrade (statusCode, headers, socket, statusText = '') {
++    this.onFinally()
++
+     assert(!this.aborted)
+     assert(!this.completed)
+ 
+-    return this[kHandler].onUpgrade(statusCode, headers, socket)
++    if (statusCode !== null) {
++      this.#publishUpgradeHeaders(statusCode, headers, statusText)
++    }
++
++    const result = this[kHandler].onUpgrade(statusCode, headers, socket)
++
++    if (!this.aborted) {
++      this.completed = true
++      if (statusCode !== null) {
++        this.#publishUpgradeTrailers()
++      }
++    }
++
++    return result
++  }
++
++  /**
++   * @param {number} statusCode
++   * @param {import('node:http2').IncomingHttpHeaders} headers
++   * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
++   * @param {string} [statusText]
++   */
++  onUpgradeResponse (statusCode, headers, parseHeaders, statusText = '') {
++    assert(!this.aborted)
++    assert(this.completed)
++
++    if (channels.headers.hasSubscribers) {
++      this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText)
++    }
++    this.#publishUpgradeTrailers()
++  }
++
++  /**
++   * @param {Error} error
++   */
++  onUpgradeError (error) {
++    assert(!this.aborted)
++    assert(this.completed)
++
++    if (channels.error.hasSubscribers) {
++      channels.error.publish({ request: this, error })
++    }
++  }
++
++  /**
++   * @param {number} statusCode
++   * @param {Buffer[]} headers
++   * @param {string} statusText
++   */
++  #publishUpgradeHeaders (statusCode, headers, statusText) {
++    if (channels.headers.hasSubscribers) {
++      channels.headers.publish({ request: this, response: { statusCode, headers, statusText } })
++    }
++  }
++
++  #publishUpgradeTrailers () {
++    if (channels.trailers.hasSubscribers) {
++      channels.trailers.publish({ request: this, trailers: [] })
++    }
+   }
+ 
+   onComplete (trailers) {
+@@ -350,7 +416,13 @@ function processHeader (request, key, val) {
        } else if (typeof val[i] === 'object') {
          throw new InvalidArgumentError(`invalid ${key} header`)
        } else {
@@ -1859,7 +1974,7 @@ index 4da60667ec2902642c9e7a1bf529245765b79afb..8e7ecc73084b8b9f0fbb9c8365f3284a
        }
      }
      val = arr
-@@ -361,7 +367,12 @@ function processHeader (request, key, val) {
+@@ -361,7 +433,12 @@ function processHeader (request, key, val) {
    } else if (val === null) {
      val = ''
    } else {
@@ -1870,10 +1985,40 @@ index 4da60667ec2902642c9e7a1bf529245765b79afb..8e7ecc73084b8b9f0fbb9c8365f3284a
 +      throw new InvalidArgumentError(`invalid ${key} header`)
 +    }
    }
-
+ 
    if (headerName === 'host') {
+diff --git a/node_modules/undici/lib/dispatcher/agent.js b/node_modules/undici/lib/dispatcher/agent.js
+index 90b46fe3aeb4b4bbb8af48d18a74dc73c9aaa1f8..416ab3edda301f7e5888cb7a1de28689bc18ce2d 100644
+--- a/node_modules/undici/lib/dispatcher/agent.js
++++ b/node_modules/undici/lib/dispatcher/agent.js
+@@ -23,7 +23,7 @@ function defaultFactory (origin, opts) {
+ }
+ 
+ class Agent extends DispatcherBase {
+-  constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
++  constructor ({ factory = defaultFactory, maxRedirections = 0, connect, tls, ...options } = {}) {
+     if (typeof factory !== 'function') {
+       throw new InvalidArgumentError('factory must be a function.')
+     }
+@@ -42,11 +42,15 @@ class Agent extends DispatcherBase {
+       connect = { ...connect }
+     }
+ 
++    if (tls && typeof tls !== 'function') {
++      tls = { ...tls }
++    }
++
+     this[kInterceptors] = options.interceptors?.Agent && Array.isArray(options.interceptors.Agent)
+       ? options.interceptors.Agent
+       : [createRedirectInterceptor({ maxRedirections })]
+ 
+-    this[kOptions] = { ...util.deepClone(options), connect }
++    this[kOptions] = { ...util.deepClone(options), connect, tls }
+     this[kOptions].interceptors = options.interceptors
+       ? { ...options.interceptors }
+       : undefined
 diff --git a/node_modules/undici/lib/dispatcher/client-h1.js b/node_modules/undici/lib/dispatcher/client-h1.js
-index 9455517a19b15f78de88b3cd355cd47af69b87ae..6b28f60c06df563f9baee7580731da149c10cd34 100644
+index 9455517a19b15f78de88b3cd355cd47af69b87ae..7d1fdbdf6e7b811f3e399b6fbe46b94d57bb5d56 100644
 --- a/node_modules/undici/lib/dispatcher/client-h1.js
 +++ b/node_modules/undici/lib/dispatcher/client-h1.js
 @@ -10,6 +10,7 @@ const {
@@ -1884,17 +2029,49 @@ index 9455517a19b15f78de88b3cd355cd47af69b87ae..6b28f60c06df563f9baee7580731da14
    HeadersTimeoutError,
    HeadersOverflowError,
    SocketError,
-@@ -875,7 +876,7 @@ async function connectH1 (client, socket) {
-
+@@ -431,7 +432,7 @@ class Parser {
+   }
+ 
+   onUpgrade (head) {
+-    const { upgrade, client, socket, headers, statusCode } = this
++    const { upgrade, client, socket, headers, statusCode, statusText } = this
+ 
+     assert(upgrade)
+     assert(client[kSocket] === socket)
+@@ -466,9 +467,10 @@ class Parser {
+     client.emit('disconnect', client[kUrl], [client], new InformationalError('upgrade'))
+ 
+     try {
+-      request.onUpgrade(statusCode, headers, socket)
+-    } catch (err) {
+-      util.destroy(socket, err)
++      request.onUpgrade(statusCode, headers, socket, statusText)
++    } catch (error) {
++      util.errorRequest(client, request, error)
++      util.destroy(socket, error)
+     }
+ 
+     client[kResume]()
+@@ -725,8 +727,6 @@ async function connectH1 (client, socket) {
+   socket[kParser] = new Parser(client, socket, llhttpInstance)
+ 
+   addListener(socket, 'error', function (err) {
+-    assert(err.code !== 'ERR_TLS_CERT_ALTNAME_INVALID')
+-
+     const parser = this[kParser]
+ 
+     // On Mac OS, we get an ECONNRESET even if there is a full body to be forwarded
+@@ -875,7 +875,7 @@ async function connectH1 (client, socket) {
+ 
  function clearIdleSocketValidation (socket) {
    if (socket[kIdleSocketValidationTimeout]) {
 -    clearTimeout(socket[kIdleSocketValidationTimeout])
 +    clearImmediate(socket[kIdleSocketValidationTimeout])
      socket[kIdleSocketValidationTimeout] = null
    }
-
-@@ -884,15 +885,23 @@ function clearIdleSocketValidation (socket) {
-
+ 
+@@ -884,15 +884,23 @@ function clearIdleSocketValidation (socket) {
+ 
  function scheduleIdleSocketValidation (client, socket) {
    socket[kIdleSocketValidation] = 1
 -  socket[kIdleSocketValidationTimeout] = setTimeout(() => {
@@ -1910,7 +2087,7 @@ index 9455517a19b15f78de88b3cd355cd47af69b87ae..6b28f60c06df563f9baee7580731da14
 +  socket[kIdleSocketValidationTimeout] = setImmediate(() => {
      socket[kIdleSocketValidationTimeout] = null
      socket[kIdleSocketValidation] = 2
-
+ 
      if (client[kSocket] === socket && !socket.destroyed) {
        client[kResume]()
      }
@@ -1918,9 +2095,9 @@ index 9455517a19b15f78de88b3cd355cd47af69b87ae..6b28f60c06df563f9baee7580731da14
 -  socket[kIdleSocketValidationTimeout].unref?.()
 +  })
  }
-
+ 
  /**
-@@ -993,8 +1002,16 @@ function writeH1 (client, request) {
+@@ -993,8 +1001,16 @@ function writeH1 (client, request) {
      }
      body = bodyStream.stream
      contentLength = bodyStream.length
@@ -1937,16 +2114,254 @@ index 9455517a19b15f78de88b3cd355cd47af69b87ae..6b28f60c06df563f9baee7580731da14
 +      headers.push('content-type', contentTypeValue)
 +    }
    }
-
+ 
    if (body && typeof body.read === 'function') {
+@@ -1033,12 +1049,22 @@ function writeH1 (client, request) {
+   const socket = client[kSocket]
+   clearIdleSocketValidation(socket)
+ 
+-  const abort = (err) => {
+-    if (request.aborted || request.completed) {
++  /**
++   * @param {Error} [error]
++   */
++  const abort = (error) => {
++    if (request.aborted) {
++      return
++    }
++
++    if (request.completed) {
++      if (request.upgrade || request.method === 'CONNECT') {
++        util.destroy(socket, new InformationalError('aborted'))
++      }
+       return
+     }
+ 
+-    util.errorRequest(client, request, err || new RequestAbortedError())
++    util.errorRequest(client, request, error || new RequestAbortedError())
+ 
+     util.destroy(body)
+     util.destroy(socket, new InformationalError('aborted'))
+diff --git a/node_modules/undici/lib/dispatcher/client-h2.js b/node_modules/undici/lib/dispatcher/client-h2.js
+index 4a52effb1f3b14bacc122764a7e0a36a17ed93cc..f417aa3d1867ff21055ebb908da1915970613cf9 100644
+--- a/node_modules/undici/lib/dispatcher/client-h2.js
++++ b/node_modules/undici/lib/dispatcher/client-h2.js
+@@ -1,6 +1,7 @@
+ 'use strict'
+ 
+ const assert = require('node:assert')
++const { errorMonitor } = require('node:events')
+ const { pipeline } = require('node:stream')
+ const util = require('../core/util.js')
+ const {
+@@ -77,6 +78,15 @@ function parseH2Headers (headers) {
+   return result
+ }
+ 
++/**
++ * @param {import('node:http2').IncomingHttpHeaders} headers
++ * @returns {Buffer[]}
++ */
++function parseH2ResponseHeaders (headers) {
++  const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers
++  return parseH2Headers(realHeaders)
++}
++
+ async function connectH2 (client, socket) {
+   client[kSocket] = socket
+ 
+@@ -126,8 +136,6 @@ async function connectH2 (client, socket) {
+   socket[kHTTP2Session] = session
+ 
+   util.addListener(socket, 'error', function (err) {
+-    assert(err.code !== 'ERR_TLS_CERT_ALTNAME_INVALID')
+-
+     this[kError] = err
+ 
+     this[kClient][kOnError](err)
+@@ -201,8 +209,6 @@ function resumeH2 (client) {
+ }
+ 
+ function onHttp2SessionError (err) {
+-  assert(err.code !== 'ERR_TLS_CERT_ALTNAME_INVALID')
+-
+   this[kSocket][kError] = err
+   this[kClient][kOnError](err)
+ }
+@@ -297,22 +303,32 @@ function writeH2 (client, request) {
+   headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ''}`
+   headers[HTTP2_HEADER_METHOD] = method
+ 
+-  const abort = (err) => {
+-    if (request.aborted || request.completed) {
++  /**
++   * @param {Error} [error]
++   */
++  const abort = (error) => {
++    if (request.aborted) {
+       return
+     }
+ 
+-    err = err || new RequestAbortedError()
++    if (request.completed) {
++      if (method === 'CONNECT' && stream != null) {
++        util.destroy(stream, error || new RequestAbortedError())
++      }
++      return
++    }
+ 
+-    util.errorRequest(client, request, err)
++    error = error || new RequestAbortedError()
++
++    util.errorRequest(client, request, error)
+ 
+     if (stream != null) {
+-      util.destroy(stream, err)
++      util.destroy(stream, error)
+     }
+ 
+     // We do not destroy the socket as we can continue using the session
+     // the stream get's destroyed and the session remains to create new streams
+-    util.destroy(body, err)
++    util.destroy(body, error)
+     client[kQueue][client[kRunningIdx]++] = null
+     client[kResume]()
+   }
+@@ -331,25 +347,57 @@ function writeH2 (client, request) {
+ 
+   if (method === 'CONNECT') {
+     session.ref()
+-    // We are already connected, streams are pending, first request
+-    // will create a new stream. We trigger a request to create the stream and wait until
+-    // `ready` event is triggered
+     // We disabled endStream to allow the user to write to the stream
+     stream = session.request(headers, { endStream: false, signal })
++    let upgradeResponseFinished = false
++
++    /**
++     * @param {import('node:http2').IncomingHttpHeaders} headers
++     */
++    const onResponse = (headers) => {
++      upgradeResponseFinished = true
++      stream.off(errorMonitor, onUpgradeError)
++      request.onUpgradeResponse(Number(headers[HTTP2_HEADER_STATUS]), headers, parseH2ResponseHeaders)
++    }
+ 
+-    if (stream.id && !stream.pending) {
+-      request.onUpgrade(null, null, stream)
+-      ++session[kOpenStreams]
+-      client[kQueue][client[kRunningIdx]++] = null
+-    } else {
+-      stream.once('ready', () => {
++    /**
++     * @param {Error} error
++     */
++    const onUpgradeError = (error) => {
++      upgradeResponseFinished = true
++      stream.off('response', onResponse)
++      request.onUpgradeError(error)
++    }
++
++    const onReady = () => {
++      try {
+         request.onUpgrade(null, null, stream)
+-        ++session[kOpenStreams]
+-        client[kQueue][client[kRunningIdx]++] = null
+-      })
++      } catch (error) {
++        stream.off('response', onResponse)
++        abort(error)
++        return
++      }
++
++      if (request.aborted) {
++        return
++      }
++
++      stream.off('error', abort)
++      stream.once(errorMonitor, onUpgradeError)
++      client[kQueue][client[kRunningIdx]++] = null
+     }
+ 
++    stream.once('response', onResponse)
++    stream.once('error', abort)
++    ++session[kOpenStreams]
++    onReady()
++
+     stream.once('close', () => {
++      if (!upgradeResponseFinished && request.completed) {
++        stream.off('response', onResponse)
++        stream.off(errorMonitor, onUpgradeError)
++        request.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream.rstCode}`))
++      }
+       session[kOpenStreams] -= 1
+       if (session[kOpenStreams] === 0) session.unref()
+     })
+diff --git a/node_modules/undici/lib/dispatcher/client.js b/node_modules/undici/lib/dispatcher/client.js
+index 18472fffd773fc168da898b142b41ea4417b77c3..9efe80e3002bcc170834e3121a22feb824ecc082 100644
+--- a/node_modules/undici/lib/dispatcher/client.js
++++ b/node_modules/undici/lib/dispatcher/client.js
+@@ -107,9 +107,10 @@ class Client extends DispatcherBase {
+     // h2
+     maxConcurrentStreams,
+     allowH2,
+-    webSocket
++    webSocket,
++    eventSource
+   } = {}) {
+-    super({ webSocket })
++    super({ webSocket, eventSource })
+ 
+     if (keepAlive !== undefined) {
+       throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
+diff --git a/node_modules/undici/lib/dispatcher/dispatcher-base.js b/node_modules/undici/lib/dispatcher/dispatcher-base.js
+index 371a3ea1f6f1e013a3058953fa08206e1746b3a6..e90e4b379ef96dd541e57f9bc878f11c995cef55 100644
+--- a/node_modules/undici/lib/dispatcher/dispatcher-base.js
++++ b/node_modules/undici/lib/dispatcher/dispatcher-base.js
+@@ -1,5 +1,6 @@
+ 'use strict'
+ 
++const buffer = require('node:buffer')
+ const Dispatcher = require('./dispatcher')
+ const {
+   ClientDestroyedError,
+@@ -12,6 +13,7 @@ const kOnDestroyed = Symbol('onDestroyed')
+ const kOnClosed = Symbol('onClosed')
+ const kInterceptedDispatch = Symbol('Intercepted Dispatch')
+ const kWebSocketOptions = Symbol('webSocketOptions')
++const kEventSourceOptions = Symbol('eventSourceOptions')
+ 
+ class DispatcherBase extends Dispatcher {
+   constructor (opts) {
+@@ -22,6 +24,7 @@ class DispatcherBase extends Dispatcher {
+     this[kClosed] = false
+     this[kOnClosed] = []
+     this[kWebSocketOptions] = opts?.webSocket ?? {}
++    this[kEventSourceOptions] = opts?.eventSource ?? {}
+   }
+ 
+   get webSocketOptions () {
+@@ -31,6 +34,12 @@ class DispatcherBase extends Dispatcher {
+     }
+   }
+ 
++  get eventSourceOptions () {
++    return {
++      maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer.kStringMaxLength
++    }
++  }
++
+   get destroyed () {
+     return this[kDestroyed]
+   }
 diff --git a/node_modules/undici/lib/handler/retry-handler.js b/node_modules/undici/lib/handler/retry-handler.js
-index 5d1ccf00538766402b02fc2919c806e9541ee969..2e36ab31daf1192739dfd37f64b28da83e894019 100644
+index 5d1ccf00538766402b02fc2919c806e9541ee969..7084c2b5652066fe51b9d3651e7ded356da5bb65 100644
 --- a/node_modules/undici/lib/handler/retry-handler.js
 +++ b/node_modules/undici/lib/handler/retry-handler.js
 @@ -15,6 +15,28 @@ function calculateRetryAfterHeader (retryAfter) {
    return new Date(retryAfter).getTime() - current
  }
-
+ 
 +function validatePartialResponseContentLength (headers, range, statusCode, retryCount) {
 +  const contentLength = headers['content-length']
 +  if (contentLength == null) {
@@ -1977,13 +2392,13 @@ index 5d1ccf00538766402b02fc2919c806e9541ee969..2e36ab31daf1192739dfd37f64b28da8
      this.etag = null
      this.resume = null
 +    this.headersSent = false
-
+ 
      // Handle possible onConnect duplication
      this.handler.onConnect(reason => {
 @@ -80,6 +103,20 @@ class RetryHandler {
      })
    }
-
+ 
 +  checkpointResponseEnd (headers, resume) {
 +    if (this.end == null && this.opts.method !== 'HEAD') {
 +      const contentLength = headers['content-length']
@@ -2001,19 +2416,24 @@ index 5d1ccf00538766402b02fc2919c806e9541ee969..2e36ab31daf1192739dfd37f64b28da8
    onRequestSent () {
      if (this.handler.onRequestSent) {
        this.handler.onRequestSent()
-@@ -169,6 +206,8 @@ class RetryHandler {
-
+@@ -168,7 +205,12 @@ class RetryHandler {
+     this.retryCount += 1
+ 
      if (statusCode >= 300) {
-       if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+-      if (this.retryOpts.statusCodes.includes(statusCode) === false) {
++      // Only expose a response if no earlier attempt has reached the caller.
++      // Otherwise abort this attempt so the error settles the existing body
++      // instead of replacing it with a new response.
++      if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
 +        this.headersSent = true
 +        this.checkpointResponseEnd(headers, resume)
          return this.handler.onHeaders(
            statusCode,
            rawHeaders,
-@@ -229,10 +268,23 @@ class RetryHandler {
+@@ -229,10 +271,23 @@ class RetryHandler {
          return false
        }
-
+ 
 +      const contentLengthError = validatePartialResponseContentLength(headers, contentRange, statusCode, this.retryCount)
 +      if (contentLengthError != null) {
 +        this.abort(contentLengthError)
@@ -2021,7 +2441,7 @@ index 5d1ccf00538766402b02fc2919c806e9541ee969..2e36ab31daf1192739dfd37f64b28da8
 +      }
 +
        const { start, size, end = size - 1 } = contentRange
-
+ 
 -      assert(this.start === start, 'content-range mismatch')
 -      assert(this.end == null || this.end === end, 'content-range mismatch')
 +      if (this.start !== start || (this.end != null && this.end !== end)) {
@@ -2033,21 +2453,21 @@ index 5d1ccf00538766402b02fc2919c806e9541ee969..2e36ab31daf1192739dfd37f64b28da8
 +        )
 +        return false
 +      }
-
+ 
        this.resume = resume
        return true
-@@ -244,6 +296,7 @@ class RetryHandler {
+@@ -244,6 +299,7 @@ class RetryHandler {
          const range = parseRangeHeader(headers['content-range'])
-
+ 
          if (range == null) {
 +          this.headersSent = true
            return this.handler.onHeaders(
              statusCode,
              rawHeaders,
-@@ -252,6 +305,12 @@ class RetryHandler {
+@@ -252,6 +308,12 @@ class RetryHandler {
            )
          }
-
+ 
 +        const contentLengthError = validatePartialResponseContentLength(headers, range, statusCode, this.retryCount)
 +        if (contentLengthError != null) {
 +          this.abort(contentLengthError)
@@ -2057,29 +2477,29 @@ index 5d1ccf00538766402b02fc2919c806e9541ee969..2e36ab31daf1192739dfd37f64b28da8
          const { start, size, end = size - 1 } = range
          assert(
            start != null && Number.isFinite(start),
-@@ -276,6 +335,7 @@ class RetryHandler {
+@@ -276,6 +338,7 @@ class RetryHandler {
        )
-
+ 
        this.resume = resume
 +      this.headersSent = true
        this.etag = headers.etag != null ? headers.etag : null
-
+ 
        // Weak etags are not useful for comparison nor cache
-@@ -315,7 +375,7 @@ class RetryHandler {
+@@ -315,7 +378,7 @@ class RetryHandler {
    }
-
+ 
    onError (err) {
 -    if (this.aborted || isDisturbed(this.opts.body)) {
 +    if (this.aborted || isDisturbed(this.opts.body) || (this.headersSent && this.resume == null)) {
        return this.handler.onError(err)
      }
-
+ 
 diff --git a/node_modules/undici/lib/web/cookies/util.js b/node_modules/undici/lib/web/cookies/util.js
 index 254f5419e905bbdbb8e1706bf87860d8157717d1..ca408e153abb2f4a1aa8d927bacc44dbd1d9958b 100644
 --- a/node_modules/undici/lib/web/cookies/util.js
 +++ b/node_modules/undici/lib/web/cookies/util.js
 @@ -105,7 +105,7 @@ function validateCookiePath (path) {
-
+ 
      if (
        code < 0x20 || // exclude CTLs (0-31)
 -      code === 0x7F || // DEL
@@ -2089,7 +2509,7 @@ index 254f5419e905bbdbb8e1706bf87860d8157717d1..ca408e153abb2f4a1aa8d927bacc44db
        throw new Error('Invalid cookie path')
 @@ -114,16 +114,80 @@ function validateCookiePath (path) {
  }
-
+ 
  /**
 - * I have no idea why these values aren't allowed to be honest,
 - * but Deno tests these. - Khafra
@@ -2176,9 +2596,9 @@ index 254f5419e905bbdbb8e1706bf87860d8157717d1..ca408e153abb2f4a1aa8d927bacc44db
    }
  }
 @@ -266,7 +330,13 @@ function stringify (cookie) {
-
+ 
      const [key, ...value] = part.split('=')
-
+ 
 -    out.push(`${key.trim()}=${value.join('=')}`)
 +    const trimmedKey = key.trim()
 +    const joinedValue = value.join('=')
@@ -2188,20 +2608,34 @@ index 254f5419e905bbdbb8e1706bf87860d8157717d1..ca408e153abb2f4a1aa8d927bacc44db
 +
 +    out.push(`${trimmedKey}=${joinedValue}`)
    }
-
+ 
    return out.join('; ')
 diff --git a/node_modules/undici/lib/web/eventsource/eventsource-stream.js b/node_modules/undici/lib/web/eventsource/eventsource-stream.js
-index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c739a9e6bc 100644
+index 754934568d05626224eb1fce3e015f65a9b1e831..9172602ad0564d92e44448146af21f4ea05df3c5 100644
 --- a/node_modules/undici/lib/web/eventsource/eventsource-stream.js
 +++ b/node_modules/undici/lib/web/eventsource/eventsource-stream.js
-@@ -23,6 +23,49 @@ const COLON = 0x3A
+@@ -1,4 +1,5 @@
+ 'use strict'
++const buffer = require('node:buffer')
+ const { Transform } = require('node:stream')
+ const { isASCIINumber, isValidLastEventId } = require('./util')
+ 
+@@ -23,6 +24,63 @@ const COLON = 0x3A
   */
  const SPACE = 0x20
-
+ 
++const defaultMaxEventSize = buffer.kStringMaxLength
++
 +const DATA = Buffer.from('data')
 +const EVENT = Buffer.from('event')
 +const ID = Buffer.from('id')
 +const RETRY = Buffer.from('retry')
++
++// Each data field creates a string node, and each unconsumed input chunk keeps
++// a Buffer wrapper. The absolute ceiling protects the large default byte limit.
++const minParserItems = 1024
++const maxParserItems = 131072
++const bytesPerParserItem = 128
 +
 +function isASCIINumberBytes (buffer, start) {
 +  if (start >= buffer.length) {
@@ -2241,30 +2675,64 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +  return true
 +}
 +
++function createMaxEventSizeExceededError () {
++  const error = new Error('EventSource message size exceeded')
++  error.aborted = false
++  return error
++}
++
  /**
   * @typedef {object} EventSourceStreamEvent
   * @type {object}
-@@ -63,11 +106,14 @@ class EventSourceStream extends Transform {
+@@ -63,11 +121,21 @@ class EventSourceStream extends Transform {
    eventEndCheck = false
-
+ 
    /**
 -   * @type {Buffer}
 +   * @type {Buffer[]}
     */
 -  buffer = null
 +  chunks = []
-
+ 
 +  chunkIndex = 0
    pos = 0
 +  lineChunkIndex = 0
 +  linePos = 0
-
++  lineLength = 0
++  eventSize = 0
++  eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 }
++  dataLineCount = 0
++  maxEventSize
++  maxDataLines
++  maxBufferedChunks
+ 
    event = {
      data: undefined,
-@@ -106,92 +152,20 @@ class EventSourceStream extends Transform {
+@@ -78,6 +146,7 @@ class EventSourceStream extends Transform {
+ 
+   /**
+    * @param {object} options
++   * @param {number} [options.maxEventSize]
+    * @param {eventSourceSettings} options.eventSourceSettings
+    * @param {Function} [options.push]
+    */
+@@ -89,6 +158,12 @@ class EventSourceStream extends Transform {
+     super(options)
+ 
+     this.state = options.eventSourceSettings || {}
++    this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize
++    const parserItemLimit = this.maxEventSize > 0
++      ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem)))
++      : 0
++    this.maxDataLines = parserItemLimit
++    this.maxBufferedChunks = parserItemLimit
+     if (options.push) {
+       this.push = options.push
+     }
+@@ -106,92 +181,28 @@ class EventSourceStream extends Transform {
        return
      }
-
+ 
 -    // Cache the chunk in the buffer, as the data might not be complete while
 -    // processing it
 -    // TODO: Investigate if there is a more performant way to handle
@@ -2274,9 +2742,16 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 -      this.buffer = Buffer.concat([this.buffer, chunk])
 -    } else {
 -      this.buffer = chunk
--    }
++    // A leading line ending can immediately release the currently buffered
++    // line, even when it uses the final allowed chunk slot.
++    if (this.maxEventSize > 0 &&
++        this.chunks.length >= this.maxBufferedChunks &&
++        chunk[0] !== LF && chunk[0] !== CR) {
++      callback(createMaxEventSizeExceededError())
++      return
+     }
 +    this.chunks.push(chunk)
-
+ 
      // Strip leading byte-order-mark if we opened the stream and started
      // the processing of the incoming data
      if (this.checkBOM) {
@@ -2353,7 +2828,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +        return
        }
      }
-
+ 
 -    while (this.pos < this.buffer.length) {
 +    while (this.hasCurrentByte()) {
 +      const byte = this.currentByte()
@@ -2361,7 +2836,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
        // If the previous line ended with an end-of-line, we need to check
        // if the next character is also an end-of-line.
        if (this.eventEndCheck) {
-@@ -204,10 +178,9 @@ class EventSourceStream extends Transform {
+@@ -204,10 +215,9 @@ class EventSourceStream extends Transform {
          if (this.crlfCheck) {
            // If the current character is a line feed, we can remove it
            // from the buffer and reset the crlfCheck flag
@@ -2371,13 +2846,13 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +          if (byte === LF) {
              this.crlfCheck = false
 +            this.consumeCurrentByte()
-
+ 
              // It is possible that the line feed is not the end of the
              // event. We need to check if the next character is an
-@@ -223,19 +196,17 @@ class EventSourceStream extends Transform {
+@@ -223,19 +233,17 @@ class EventSourceStream extends Transform {
            this.crlfCheck = false
          }
-
+ 
 -        if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
 +        if (byte === LF || byte === CR) {
            // If the current character is a carriage return, we need to
@@ -2388,7 +2863,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +          if (byte === CR) {
              this.crlfCheck = true
            }
-
+ 
 -          this.buffer = this.buffer.subarray(this.pos + 1)
 -          this.pos = 0
 -          if (
@@ -2398,8 +2873,8 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
              this.processEvent(this.event)
            }
            this.clearEvent()
-@@ -249,22 +220,18 @@ class EventSourceStream extends Transform {
-
+@@ -249,22 +257,23 @@ class EventSourceStream extends Transform {
+ 
        // If the current character is an end-of-line, we can process the
        // line
 -      if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
@@ -2411,7 +2886,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +        if (byte === CR) {
            this.crlfCheck = true
          }
-
+ 
          // In any case, we can process the line as we reached an
          // end-of-line character
 -        this.parseLine(this.buffer.subarray(0, this.pos), this.event)
@@ -2420,29 +2895,56 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 -        this.buffer = this.buffer.subarray(this.pos + 1)
 -        // Reset the position as we removed the processed line from the buffer
 -        this.pos = 0
-+        this.parseLine(this.readLine(), this.event)
++        try {
++          this.parseLine(this.readLine(), this.event)
++        } catch (error) {
++          callback(error)
++          return
++        }
 +        this.consumeCurrentByte()
          // A line was processed and this could be the end of the event. We need
          // to check if the next line is empty to determine if the event is
          // finished.
-@@ -272,7 +239,7 @@ class EventSourceStream extends Transform {
+@@ -272,15 +281,28 @@ class EventSourceStream extends Transform {
          continue
        }
-
+ 
 -      this.pos++
++      // readLine() is only called after CR or LF. Reject an unfinished line
++      // before it can retain an unbounded number of decoded chunks. The seven
++      // extra bytes allow the longest field prefix ("event: " or "retry: ").
++      if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
++        callback(createMaxEventSizeExceededError())
++        return
++      }
 +      this.advanceCursor()
      }
-
+ 
      callback()
-@@ -297,64 +264,53 @@ class EventSourceStream extends Transform {
+   }
+ 
++  _destroy (error, callback) {
++    this.chunks.length = 0
++    this.clearEvent()
++    super._destroy(error, callback)
++  }
++
+   /**
+    * @param {Buffer} line
+-   * @param {EventStreamEvent} event
++   * @param {EventSourceStreamEvent} event
+    */
+   parseLine (line, event) {
+     // If the line is empty (a blank line)
+@@ -297,67 +319,74 @@ class EventSourceStream extends Transform {
        return
      }
-
+ 
 -    let field = ''
 -    let value = ''
 +    let fieldLength = line.length
 +    let valueStart = line.length
-
+ 
      // If the line contains a U+003A COLON character (:)
      if (colonPosition !== -1) {
 -      // Collect the characters on the line before the first U+003A COLON
@@ -2452,7 +2954,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 -      // see: https://github.com/nodejs/undici/issues/2630
 -      field = line.subarray(0, colonPosition).toString('utf8')
 +      fieldLength = colonPosition
-
+ 
        // Collect the characters on the line after the first U+003A COLON
        // character (:), and let value be that string.
        // If value starts with a U+0020 SPACE character, remove it from value.
@@ -2474,7 +2976,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 -      field = line.toString('utf8')
 -      value = ''
      }
-
+ 
 -    // Modify the event with the field name and value. The value is also
 -    // decoded as UTF-8
 -    switch (field) {
@@ -2501,6 +3003,13 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 -        }
 -        break
 +    if (isFieldName(line, fieldLength, DATA)) {
++      if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
++        throw createMaxEventSizeExceededError()
++      }
++      const valueBytes = line.length - valueStart
++      const dataSize = this.eventFieldSizes.data + (event.data === undefined ? 0 : 1) + valueBytes
++      this.setEventFieldSize('data', dataSize)
++
 +      const value = line.toString('utf8', valueStart)
 +
 +      if (event.data === undefined) {
@@ -2508,11 +3017,13 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +      } else {
 +        event.data += `\n${value}`
 +      }
++      this.dataLineCount++
 +      return
 +    }
 +
 +    if (isFieldName(line, fieldLength, RETRY)) {
 +      if (isASCIINumberBytes(line, valueStart)) {
++        this.setEventFieldSize('retry', line.length - valueStart)
 +        event.retry = line.toString('utf8', valueStart)
 +      }
 +      return
@@ -2520,23 +3031,35 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +
 +    if (isFieldName(line, fieldLength, ID)) {
 +      if (isValidLastEventIdBytes(line, valueStart)) {
++        this.setEventFieldSize('id', line.length - valueStart)
 +        event.id = line.toString('utf8', valueStart)
 +      }
 +      return
 +    }
 +
 +    if (isFieldName(line, fieldLength, EVENT)) {
-+      const value = line.toString('utf8', valueStart)
-+
-+      if (value.length > 0) {
-+        event.event = value
++      if (valueStart < line.length) {
++        this.setEventFieldSize('event', line.length - valueStart)
++        event.event = line.toString('utf8', valueStart)
 +      }
      }
    }
-
-@@ -384,12 +340,151 @@ class EventSourceStream extends Transform {
+ 
++  setEventFieldSize (field, size) {
++    const eventSize = this.eventSize - this.eventFieldSizes[field] + size
++    if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
++      throw createMaxEventSizeExceededError()
++    }
++    this.eventSize = eventSize
++    this.eventFieldSizes[field] = size
++  }
++
+   /**
+    * @param {EventSourceStreamEvent} event
+    */
+@@ -384,13 +413,160 @@ class EventSourceStream extends Transform {
    }
-
+ 
    clearEvent () {
 -    this.event = {
 -      data: undefined,
@@ -2547,6 +3070,12 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +    this.event.event = undefined
 +    this.event.id = undefined
 +    this.event.retry = undefined
++    this.eventSize = 0
++    this.dataLineCount = 0
++    this.eventFieldSizes.data = 0
++    this.eventFieldSizes.event = 0
++    this.eventFieldSizes.id = 0
++    this.eventFieldSizes.retry = 0
 +  }
 +
 +  hasPendingEvent () {
@@ -2582,14 +3111,16 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +  syncLineStartToCursor () {
 +    this.lineChunkIndex = this.chunkIndex
 +    this.linePos = this.pos
++    this.lineLength = 0
 +    this.dropConsumedChunks()
 +  }
 +
 +  dropConsumedChunks () {
-+    while (this.lineChunkIndex > 0) {
-+      this.chunks.shift()
-+      this.lineChunkIndex--
-+      this.chunkIndex--
++    if (this.lineChunkIndex > 0) {
++      const consumed = this.lineChunkIndex
++      this.chunks.splice(0, consumed)
++      this.lineChunkIndex = 0
++      this.chunkIndex -= consumed
 +    }
 +
 +    if (this.chunkIndex === this.chunks.length) {
@@ -2598,8 +3129,8 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +      this.pos = 0
 +      this.lineChunkIndex = 0
 +      this.linePos = 0
-+    }
-+  }
+     }
+   }
 +
 +  readLine () {
 +    if (this.lineChunkIndex === this.chunkIndex) {
@@ -2680,7 +3211,7 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +
 +      this.checkBOM = false
 +      return false
-     }
++    }
 +
 +    if (first === BOM[0] && second === BOM[1] && third === BOM[2]) {
 +      this.discardLeadingBytes(3)
@@ -2688,9 +3219,95 @@ index 754934568d05626224eb1fce3e015f65a9b1e831..af04e16322cc6af0bbb1eb92876235c7
 +
 +    this.checkBOM = false
 +    return !this.hasCurrentByte()
-   }
++  }
  }
-
+ 
+ module.exports = {
+diff --git a/node_modules/undici/lib/web/eventsource/eventsource.js b/node_modules/undici/lib/web/eventsource/eventsource.js
+index 5a488ffce276a0a5feb44ae8f29c38dbf5e3b235..6092645bf2c761b04b20c944b070a72f10ee8f5b 100644
+--- a/node_modules/undici/lib/web/eventsource/eventsource.js
++++ b/node_modules/undici/lib/web/eventsource/eventsource.js
+@@ -11,6 +11,7 @@ const { isNetworkError } = require('../fetch/response')
+ const { delay } = require('./util')
+ const { kEnumerableProperty } = require('../../core/util')
+ const { environmentSettingsObject } = require('../fetch/util')
++const { getGlobalDispatcher } = require('../../global')
+ 
+ let experimentalWarned = false
+ 
+@@ -292,6 +293,7 @@ class EventSource extends EventTarget {
+ 
+       const eventSourceStream = new EventSourceStream({
+         eventSourceSettings: this.#state,
++        maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
+         push: (event) => {
+           this.dispatchEvent(createFastMessageEvent(
+             event.type,
+@@ -470,7 +472,8 @@ webidl.converters.EventSourceInitDict = webidl.dictionaryConverter([
+   },
+   {
+     key: 'dispatcher', // undici only
+-    converter: webidl.converters.any
++    converter: webidl.converters.any,
++    defaultValue: () => getGlobalDispatcher()
+   }
+ ])
+ 
+diff --git a/node_modules/undici/lib/web/fetch/index.js b/node_modules/undici/lib/web/fetch/index.js
+index 9a685d680a1c36ff67041d4d200eb28493f866f5..b3b21873dcd58a19ca354f2649b166143917200b 100644
+--- a/node_modules/undici/lib/web/fetch/index.js
++++ b/node_modules/undici/lib/web/fetch/index.js
+@@ -1950,8 +1950,10 @@ async function httpNetworkFetch (
+   // 19. Run these steps in parallel:
+ 
+   //    1. Run these steps, but abort when fetchParams is canceled:
+-  fetchParams.controller.onAborted = onAborted
+-  fetchParams.controller.on('terminated', onAborted)
++  if (!fetchParams.controller.resume) {
++    fetchParams.controller.on('terminated', onAborted)
++  }
++
+   fetchParams.controller.resume = async () => {
+     // 1. While true
+     while (true) {
+@@ -2120,8 +2122,6 @@ async function httpNetworkFetch (
+           }
+           location = headersList.get('location', true)
+ 
+-          this.body = new Readable({ read: resume })
+-
+           const decoders = []
+ 
+           const willFollow = location && request.redirect === 'follow' &&
+@@ -2139,7 +2139,7 @@ async function httpNetworkFetch (
+             // CVE fix similar to urllib3 (GHSA-gm62-xv2j-4w53) and curl (CVE-2022-32206).
+             const maxContentEncodings = 5
+             if (codings.length > maxContentEncodings) {
+-              reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`))
++              this.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`))
+               return true
+             }
+ 
+@@ -2172,6 +2172,8 @@ async function httpNetworkFetch (
+             }
+           }
+ 
++          this.body = new Readable({ read: resume })
++
+           const onError = this.onError.bind(this)
+ 
+           resolve({
+@@ -2218,10 +2220,6 @@ async function httpNetworkFetch (
+             fetchParams.controller.off('terminated', this.abort)
+           }
+ 
+-          if (fetchParams.controller.onAborted) {
+-            fetchParams.controller.off('terminated', fetchParams.controller.onAborted)
+-          }
+-
+           fetchParams.controller.ended = true
+ 
+           this.body.push(null)
 diff --git a/node_modules/undici/lib/web/websocket/connection.js b/node_modules/undici/lib/web/websocket/connection.js
 index bb87d361e4b743150506f312dd13c39beac3fa21..1197b9b650c273a62e84aa8d9db987ef2f6485b7 100644
 --- a/node_modules/undici/lib/web/websocket/connection.js
@@ -2709,7 +3326,7 @@ index 6a6e43899c5a959908f11f6388850fc54f8ef2b6..0b3d493db8204efe9c2fc75b371240b0
 --- a/node_modules/undici/lib/web/websocket/permessage-deflate.js
 +++ b/node_modules/undici/lib/web/websocket/permessage-deflate.js
 @@ -63,7 +63,12 @@ class PerMessageDeflate {
-
+ 
          if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
            callback(new MessageSizeExceededError())
 +          // The inflater may still hold buffered input that can emit a late
@@ -2721,15 +3338,40 @@ index 6a6e43899c5a959908f11f6388850fc54f8ef2b6..0b3d493db8204efe9c2fc75b371240b0
            this.#inflate = null
            return
          }
+diff --git a/node_modules/undici/lib/web/websocket/receiver.js b/node_modules/undici/lib/web/websocket/receiver.js
+index a7dea7fae1c1fcd60906d3cc464bfcb3c87fadf0..b36ef9f93781ec2e97b81d8b5f76c97fd4270b70 100644
+--- a/node_modules/undici/lib/web/websocket/receiver.js
++++ b/node_modules/undici/lib/web/websocket/receiver.js
+@@ -249,6 +249,20 @@ class ByteParser extends Writable {
+         if (isControlFrame(this.#info.opcode)) {
+           this.#loop = this.parseControlFrame(body)
+           this.#state = parserStates.INFO
++
++          // If the automatic PONG/CLOSE reply filled the socket's write buffer,
++          // stop parsing and resume on drain so a PING flood cannot grow the
++          // outbound queue without bound.
++          const socket = this.ws[kResponse].socket
++          if (this.#loop && socket.writableNeedDrain) {
++            this.#loop = false
++            socket.once('drain', () => {
++              if (this.destroyed) return
++              this.#loop = true
++              this.run(callback)
++            })
++            return
++          }
+         } else {
+           if (!this.#info.compressed) {
+             if (!this.writeFragments(body)) {
 diff --git a/node_modules/undici/package.json b/node_modules/undici/package.json
-index 3c2001f391e3f82925f23342075e215b4d603aa0..ce7be625a4de34c13e5a1df3d0d92db4a415083a 100644
+index 3c2001f391e3f82925f23342075e215b4d603aa0..4bccc5455b894670b56604e99e45d29ded0dc3fe 100644
 --- a/node_modules/undici/package.json
 +++ b/node_modules/undici/package.json
 @@ -1,6 +1,6 @@
  {
    "name": "undici",
 -  "version": "6.27.0",
-+  "version": "6.28.1",
++  "version": "6.29.1",
    "description": "An HTTP/1.1 client, written from scratch for Node.js",
    "homepage": "https://undici.nodejs.org",
    "bugs": {

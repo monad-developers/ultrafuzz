@@ -10,8 +10,8 @@ import { bundledOperatorNpmClosureForValidation, resolveOperatorNpmAuthority } f
 
 test("the release-pinned operator npm closure is complete and reproducible", () => {
   assert.deepEqual(bundledOperatorNpmClosureForValidation(), {
-    bytes: 12_230_966,
-    digest: "4852a49e930ed235c056f19f9cfa6214f5d84dd4a0942f9403714e4603ef13e6",
+    bytes: 12_239_079,
+    digest: "59715f52d005bdb07d45b5e52544af33ac198c0293e9bd9af837d75109b1fa1a",
     directories: 460,
     files: 1_943
   });
@@ -31,7 +31,7 @@ test("the operator npm backports retain their security behavior", () => {
       "brace-expansion": "5.0.12",
       "ip-address": "10.5.0",
       tar: "7.5.22",
-      undici: "6.28.1"
+      undici: "6.29.1"
     }
   );
   const braceExpansion = require(path.join(npmRoot, "node_modules", "brace-expansion")) as {

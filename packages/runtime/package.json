@@ -39,7 +39,7 @@
     "proper-lockfile": "4.1.2",
     "smthrs": "0.35.0",
     "typescript": "6.0.3",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
