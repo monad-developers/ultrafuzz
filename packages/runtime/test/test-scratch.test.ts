@@ -60,16 +60,22 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
   fs.writeFileSync(path.join(reusedPid, ".test-child-pgid"), `${deadChildPid}\n`);
   const claimedOriginal = fs.mkdtempSync(path.join(parent, `run-${deadLauncherPid}-`));
   fs.writeFileSync(path.join(claimedOriginal, ".test-child-pgid"), `${deadChildPid}\n`);
-  for (const directory of [missing, torn, confirmedDead, reusedPid, claimedOriginal]) {
+  const claimedByLiveOriginal = fs.mkdtempSync(path.join(parent, `run-${deadLauncherPid}-`));
+  fs.writeFileSync(path.join(claimedByLiveOriginal, ".test-child-pgid"), `${deadChildPid}\n`);
+  let ownStart: bigint | undefined;
+  if (process.platform === "linux") {
+    const stat = fs.readFileSync("/proc/self/stat", "utf8");
+    const start = stat
+      .slice(stat.lastIndexOf(") ") + 2)
+      .trim()
+      .split(/\s+/u)[19];
+    if (start === undefined) throw new Error("test process start time is unavailable");
+    ownStart = BigInt(start);
+  }
+  for (const directory of [missing, torn, confirmedDead, reusedPid, claimedOriginal, claimedByLiveOriginal]) {
     fs.writeFileSync(path.join(directory, ".test-scratch-origin"), `${directory}\n`);
-    if (process.platform === "linux") {
-      const stat = fs.readFileSync("/proc/self/stat", "utf8");
-      const start = stat
-        .slice(stat.lastIndexOf(") ") + 2)
-        .trim()
-        .split(/\s+/u)[19];
-      if (start === undefined) throw new Error("test process start time is unavailable");
-      const marker = directory === reusedPid ? BigInt(start) - 1n : BigInt(start);
+    if (ownStart !== undefined) {
+      const marker = directory === reusedPid || directory === claimedByLiveOriginal ? ownStart - 1n : ownStart;
       fs.writeFileSync(path.join(directory, ".test-launcher-start"), `${marker}\n`);
     }
   }
@@ -82,6 +88,7 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
 
   const children = [liveChildIn(missing), liveChildIn(torn), liveChildIn(claimedOriginal)];
   const claimed = path.join(parent, `reap-${deadLauncherPid}-testclaim`);
+  const claimedByLive = path.join(parent, `reap-${process.pid}-${ownStart ?? "unknown"}x${"a".repeat(32)}`);
   context.after(async () => {
     await Promise.all(
       children.map(async (child) => {
@@ -90,7 +97,17 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
         await once(child, "exit");
       })
     );
-    for (const directory of [missing, torn, confirmedDead, reusedPid, claimedOriginal, claimed, outside]) {
+    for (const directory of [
+      missing,
+      torn,
+      confirmedDead,
+      reusedPid,
+      claimedOriginal,
+      claimed,
+      claimedByLiveOriginal,
+      claimedByLive,
+      outside
+    ]) {
       if (fs.existsSync(directory)) fs.chmodSync(directory, 0o700);
       fs.rmSync(directory, { recursive: true, force: true });
     }
@@ -102,6 +119,7 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
     })
   );
   fs.renameSync(claimedOriginal, claimed);
+  fs.renameSync(claimedByLiveOriginal, claimedByLive);
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const probe = runScratchProbe();
@@ -109,6 +127,7 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
     assert.equal(fs.existsSync(path.join(missing, "alive")), true);
     assert.equal(fs.existsSync(path.join(torn, "alive")), true);
     assert.equal(fs.existsSync(path.join(claimed, "alive")), true);
+    assert.equal(fs.existsSync(claimedByLive), true, "reaper claimed scratch owned by a live reaper");
     if (process.platform !== "linux" || (!fs.existsSync(confirmedDead) && !fs.existsSync(reusedPid))) break;
     await delay(50);
   }

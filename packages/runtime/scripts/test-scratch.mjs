@@ -171,8 +171,9 @@ function uncertainProcessIsGoneOrOlder(name, firstInfo, launcherStart) {
   const currentInfo = processInfo(name);
   if (currentInfo?.state === "Z" || currentInfo?.state === "X") return true;
   if (currentInfo === undefined && !pidIsAlive(Number(name))) return true;
-  // Older processes could receive the path later, so readable cwd/fds were
-  // checked first. Age only excuses unavailable /proc reads.
+  // The harness passes private scratch paths only to processes it launches.
+  // Check readable older env/cwd/fds first; age excuses only unreadable /proc
+  // evidence from preexisting host daemons, never newer test descendants.
   return firstInfo?.start < launcherStart && currentInfo?.start < launcherStart;
 }
 
@@ -236,19 +237,30 @@ function recordedOriginalScratch(root, parent) {
   return original;
 }
 
+function scratchOwnerIsActive(kind, pid, suffix, launcherStart) {
+  const claimMatch = /^([0-9]+)x[0-9a-f]{32}$/u.exec(suffix);
+  const ownerStart = kind === "run" ? launcherStart : claimMatch === null ? undefined : BigInt(claimMatch[1]);
+  const currentStart = processStartTicks(pid);
+  if (ownerStart !== undefined && currentStart === ownerStart) return true;
+  // Legacy claims have no recorded start tick. Retain while their owner PID
+  // exists, even if it has been reused; new claims include the identity.
+  return (currentStart === undefined || ownerStart === undefined) && pidIsAlive(Number(pid));
+}
+
 function reapStaleScratch(parent, entry) {
   if (!entry.isDirectory() || process.platform !== "linux") return;
-  const match = /^(?:run|reap)-([1-9][0-9]*)-[A-Za-z0-9]+$/u.exec(entry.name);
+  const match = /^(run|reap)-([1-9][0-9]*)-([A-Za-z0-9]+)$/u.exec(entry.name);
   if (match === null) return;
   const stale = path.join(parent, entry.name);
   const launcherStart = recordedLauncherStart(stale);
   if (launcherStart === undefined) return;
-  const currentStart = processStartTicks(match[1]);
-  if (currentStart === launcherStart || (currentStart === undefined && pidIsAlive(Number(match[1])))) return;
+  if (scratchOwnerIsActive(match[1], match[2], match[3], launcherStart)) return;
   const original = recordedOriginalScratch(stale, parent);
   if (original === undefined || !recordedTestGroupIsDead(stale) || scratchUseStatus(stale, original) !== "clear")
     return;
-  const claimed = path.join(parent, `reap-${process.pid}-${randomUUID().replaceAll("-", "")}`);
+  const claimStart = processStartTicks("self");
+  if (claimStart === undefined) return;
+  const claimed = path.join(parent, `reap-${process.pid}-${claimStart}x${randomUUID().replaceAll("-", "")}`);
   try {
     fs.renameSync(stale, claimed);
   } catch (error) {
