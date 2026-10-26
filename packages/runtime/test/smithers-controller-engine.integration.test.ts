@@ -94,15 +94,22 @@ test("controller persists a missing generated validator as TOOL_UNAVAILABLE with
   const run = runOnControllerEngine(
     root,
     `
-import { execFileSync } from "node:child_process";
+import { runProcessGroup } from ${JSON.stringify(new URL("../src/process-group.js", import.meta.url).href)};
 import path from "node:path";
 const artifactValidatorSmokeFixturePath = () => "synthetic-fixture.json";
 ${compiled}
 const workflow = smithers(() => h(Workflow, { name: "missing-validator" },
   h(Task, { id: "prepare:synthetic", output: outputs.result, retries: 3,
-    retryPolicy: { backoff: "fixed", initialDelayMs: 1 } }, () => {
-    preparationStep("synthetic", "preflight-json-validator", () => preflightJsonValidator(
-      process.cwd(), { registry: [{ filename: "findings.schema.json" }] }, process.cwd()));
+    retryPolicy: { backoff: "fixed", initialDelayMs: 1 } }, async () => {
+    try {
+      await preflightJsonValidator(
+        process.cwd(), { registry: [{ filename: "findings.schema.json" }] }, process.cwd(),
+        new AbortController().signal);
+    } catch (error) {
+      // The generated workflow awaits this probe before wrapping its failure
+      // as a named, nonretryable preparation step.
+      preparationStep("synthetic", "preflight-json-validator", () => { throw error; });
+    }
     return { value: "unreachable" };
   })));
 `
