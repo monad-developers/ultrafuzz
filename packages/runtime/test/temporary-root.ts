@@ -27,25 +27,29 @@ const testRoots = new AsyncLocalStorage<string[]>();
 const directTestRoots: string[][] = [];
 let exitHookInstalled = false;
 
-// Supporting files call node:test directly. Its beforeEach async context does not
-// reach the test body in Node, so track these serial tests until their after hooks
-// finish. Register cleanup from afterEach so a test's own t.after hooks run first.
-beforeEach(() => {
-  directTestRoots.push([]);
-});
-
-afterEach((context) => {
-  const roots = directTestRoots.at(-1);
-  if (roots === undefined) return;
-  if (!("after" in context)) throw new Error("Runtime test scratch cleanup requires a test context");
-  context.after(() => {
-    if (directTestRoots.at(-1) !== roots) {
-      throw new Error("Runtime test scratch scopes overlap; run these tests without test concurrency");
-    }
-    directTestRoots.pop();
-    removeRoots(roots);
+// Supporting files run under Node's test runner, which isolates each file.
+// Bun caches this helper across files, so hooks registered by one import would
+// not cover direct tests in later files. Bun's runtime lane uses the scoped
+// wrapper below instead. Node's beforeEach async context does not reach the
+// test body, so track serial direct tests until their after hooks finish.
+if (process.versions.bun === undefined) {
+  beforeEach(() => {
+    directTestRoots.push([]);
   });
-});
+
+  afterEach((context) => {
+    const roots = directTestRoots.at(-1);
+    if (roots === undefined) return;
+    if (!("after" in context)) throw new Error("Runtime test scratch cleanup requires a test context");
+    context.after(() => {
+      if (directTestRoots.at(-1) !== roots) {
+        throw new Error("Runtime test scratch scopes overlap; run these tests without test concurrency");
+      }
+      directTestRoots.pop();
+      removeRoots(roots);
+    });
+  });
+}
 
 /** Attach roots created by a test body to its after hook, including on assertion failure. */
 export function withTemporaryRootScope(context: TestContext, body: () => void | Promise<void>): void | Promise<void> {

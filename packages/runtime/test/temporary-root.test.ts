@@ -7,6 +7,8 @@ import nodeTest from "node:test";
 import { test } from "./runtime-test-shard.js";
 import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 
+const directNodeTest = process.versions.bun === undefined ? nodeTest : nodeTest.skip;
+
 let sealedRoot: string;
 let adjacentRoot: string;
 let sharedRoot: string;
@@ -53,28 +55,35 @@ test("scratch is reclaimed after the test's own after hook", () => {
   assert.equal(fs.existsSync(teardownRoot), false);
 });
 
-nodeTest("direct node:test fixtures remain available to their teardown hooks", (context) => {
+directNodeTest("direct node:test fixtures remain available to their teardown hooks", (context) => {
   directRoot = temporaryRoot("ufz-direct-cleanup-");
   fs.chmodSync(directRoot, 0o500);
   context.after(() => assert.equal(fs.existsSync(directRoot), true));
 });
 
-nodeTest("direct node:test fixtures are reclaimed before the next case", () => {
+directNodeTest("direct node:test fixtures are reclaimed before the next case", () => {
   assert.equal(fs.existsSync(directRoot), false);
 });
 
-nodeTest("nested tests reclaim only their own scratch", async (context) => {
+directNodeTest("nested tests reclaim only their own scratch", async (context) => {
   parentRoot = temporaryRoot("ufz-parent-cleanup-");
-  let childRoot: string;
-  await context.test("nested child", () => {
-    childRoot = temporaryRoot("ufz-child-cleanup-");
+  let childRoot: string | undefined;
+  context.after(() => assert.equal(fs.existsSync(parentRoot), true));
+  await context.test("nested child", (childContext) => {
+    const root = temporaryRoot("ufz-child-cleanup-");
+    childRoot = root;
     assert.equal(fs.existsSync(parentRoot), true);
+    childContext.after(() => {
+      assert.equal(fs.existsSync(root), true);
+      assert.equal(fs.existsSync(parentRoot), true);
+    });
   });
-  assert.equal(fs.existsSync(childRoot!), false);
+  assert.ok(childRoot);
+  assert.equal(fs.existsSync(childRoot), false);
   assert.equal(fs.existsSync(parentRoot), true);
 });
 
-nodeTest("the parent fixture is reclaimed after its nested tests", () => {
+directNodeTest("the parent fixture is reclaimed after its nested tests", () => {
   assert.equal(fs.existsSync(parentRoot), false);
 });
 
@@ -109,7 +118,7 @@ test("scratch is reclaimed after a failed test body", () => {
   assert.equal(fs.existsSync(fs.readFileSync(marker, "utf8")), false);
 });
 
-nodeTest("a failed direct node:test case releases scratch before the next case", () => {
+directNodeTest("a failed direct node:test case releases scratch before the next case", () => {
   const fixture = temporaryRoot("ufz-failed-direct-");
   const marker = path.join(fixture, "created-root.txt");
   const verified = path.join(fixture, "verified.txt");
@@ -131,7 +140,7 @@ nodeTest("a failed direct node:test case releases scratch before the next case",
       "});"
     ].join("\n")
   );
-  const child = spawnSync(process.execPath, process.versions.bun === undefined ? [childTest] : ["test", childTest], {
+  const child = spawnSync(process.execPath, [childTest], {
     encoding: "utf8"
   });
   assert.equal(child.status, 1, `${child.stdout}${child.stderr}`);
