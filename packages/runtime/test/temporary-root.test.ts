@@ -9,6 +9,8 @@ import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
 let sealedRoot: string;
 let adjacentRoot: string;
 let sharedRoot: string;
+let outsideHardlink: string;
+let teardownRoot: string;
 
 test("test-scoped scratch includes sealed snapshots and registered adjacent paths", () => {
   sealedRoot = temporaryRoot("ufz-test-cleanup-");
@@ -16,6 +18,11 @@ test("test-scoped scratch includes sealed snapshots and registered adjacent path
   fs.mkdirSync(snapshot);
   fs.writeFileSync(path.join(snapshot, "module.js"), "export {};\n");
   fs.chmodSync(path.join(snapshot, "module.js"), 0o400);
+  const outside = temporaryRoot("ufz-hardlink-outside-", "process");
+  outsideHardlink = path.join(outside, "shared.js");
+  fs.writeFileSync(outsideHardlink, "export {};\n");
+  fs.chmodSync(outsideHardlink, 0o400);
+  fs.linkSync(outsideHardlink, path.join(snapshot, "shared.js"));
   fs.chmodSync(snapshot, 0o500);
 
   adjacentRoot = registerTemporaryPath(fs.mkdtempSync(path.join(path.dirname(sealedRoot), "ufz-test-adjacent-")));
@@ -30,6 +37,17 @@ test("scratch is reclaimed between test cases while a shared fixture remains", (
   assert.equal(fs.existsSync(sealedRoot), false);
   assert.equal(fs.existsSync(adjacentRoot), false);
   assert.equal(fs.existsSync(sharedRoot), true);
+  assert.equal(fs.statSync(outsideHardlink).mode & 0o777, 0o400);
+});
+
+test("scratch remains available to a test's own after hook", (context) => {
+  teardownRoot = temporaryRoot("ufz-teardown-cleanup-");
+  fs.writeFileSync(path.join(teardownRoot, "data"), "fixture");
+  context.after(() => assert.equal(fs.readFileSync(path.join(teardownRoot, "data"), "utf8"), "fixture"));
+});
+
+test("scratch is reclaimed after the test's own after hook", () => {
+  assert.equal(fs.existsSync(teardownRoot), false);
 });
 
 test("scratch is reclaimed after a failed test body", () => {

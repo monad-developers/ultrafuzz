@@ -19,8 +19,8 @@ import type { TestContext } from "node:test";
  * The root is removable. Sealed execution snapshots are left `dr-x------`, and
  * unlinking an entry needs the write bit on its parent rather than on the entry
  * itself, so `rmSync` cannot remove a tree that contains one. Owner write
- * permission is restored on files and directories on the way down, which is the same
- * treatment `restoreRemovableDirectoryPermissions` applies in `clean.ts`.
+ * permission is restored on directories on the way down. File modes do not
+ * affect unlinking, and a fixture file may be hard-linked outside scratch.
  */
 const registered = new Set<string>();
 const testRoots = new AsyncLocalStorage<string[]>();
@@ -29,8 +29,14 @@ let exitHookInstalled = false;
 /** Attach roots created by a test body to its after hook, including on assertion failure. */
 export function withTemporaryRootScope(context: TestContext, body: () => void | Promise<void>): void | Promise<void> {
   const roots: string[] = [];
-  context.after(() => removeRoots(roots));
-  return testRoots.run(roots, body);
+  return testRoots.run(roots, async () => {
+    try {
+      await body();
+    } finally {
+      // Register after the body so its own after hooks can still use the fixture.
+      context.after(() => removeRoots(roots));
+    }
+  });
 }
 
 export function temporaryRoot(prefix: string, lifetime: "test" | "process" = "test"): string {
@@ -38,10 +44,12 @@ export function temporaryRoot(prefix: string, lifetime: "test" | "process" = "te
   try {
     root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), prefix));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOSPC") {
-      throw new Error(`Runtime test scratch space is full (ENOSPC) while creating ${prefix} in ${os.tmpdir()}`, {
-        cause: error
-      });
+    const failure = error as NodeJS.ErrnoException;
+    if (failure.code === "ENOSPC" || failure.code === "EDQUOT" || failure.errno === -122) {
+      throw new Error(
+        `Runtime test scratch space or quota is exhausted (ENOSPC/EDQUOT) while creating ${prefix} in ${os.tmpdir()}`,
+        { cause: error }
+      );
     }
     throw error;
   }
@@ -115,12 +123,10 @@ function restoreRemovablePermissions(root: string): void {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  if (stat.isSymbolicLink()) return;
-  if (!stat.isDirectory() && !stat.isFile()) return;
-  fs.chmodSync(root, stat.mode | (stat.isDirectory() ? 0o700 : 0o600));
   if (!stat.isDirectory()) return;
+  fs.chmodSync(root, stat.mode | 0o700);
   const entries = fs.readdirSync(root, { withFileTypes: true });
   for (const entry of entries) {
-    if (entry.isDirectory() || entry.isFile()) restoreRemovablePermissions(path.join(root, entry.name));
+    if (entry.isDirectory()) restoreRemovablePermissions(path.join(root, entry.name));
   }
 }
