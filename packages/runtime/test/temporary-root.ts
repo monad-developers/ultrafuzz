@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { TestContext } from "node:test";
+import { afterEach, beforeEach, type TestContext } from "node:test";
 
 /**
  * Create a temporary directory for a test and remove it after that test.
@@ -24,7 +24,28 @@ import type { TestContext } from "node:test";
  */
 const registered = new Set<string>();
 const testRoots = new AsyncLocalStorage<string[]>();
+const directTestRoots: string[][] = [];
 let exitHookInstalled = false;
+
+// Supporting files call node:test directly. Its beforeEach async context does not
+// reach the test body in Node, so track these serial tests until their after hooks
+// finish. Register cleanup from afterEach so a test's own t.after hooks run first.
+beforeEach(() => {
+  directTestRoots.push([]);
+});
+
+afterEach((context) => {
+  const roots = directTestRoots.at(-1);
+  if (roots === undefined) return;
+  if (!("after" in context)) throw new Error("Runtime test scratch cleanup requires a test context");
+  context.after(() => {
+    if (directTestRoots.at(-1) !== roots) {
+      throw new Error("Runtime test scratch scopes overlap; run these tests without test concurrency");
+    }
+    directTestRoots.pop();
+    removeRoots(roots);
+  });
+});
 
 /** Attach roots created by a test body to its after hook, including on assertion failure. */
 export function withTemporaryRootScope(context: TestContext, body: () => void | Promise<void>): void | Promise<void> {
@@ -80,7 +101,7 @@ export function privateHomeEnv(): { HOME: string } {
  */
 export function registerTemporaryPath(directory: string, lifetime: "test" | "process" = "test"): string {
   registered.add(directory);
-  if (lifetime === "test") testRoots.getStore()?.push(directory);
+  if (lifetime === "test") (testRoots.getStore() ?? directTestRoots.at(-1))?.push(directory);
   installExitHook();
   return directory;
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import nodeTest from "node:test";
 
 import { test } from "./runtime-test-shard.js";
 import { registerTemporaryPath, temporaryRoot } from "./temporary-root.js";
@@ -11,6 +12,8 @@ let adjacentRoot: string;
 let sharedRoot: string;
 let outsideHardlink: string;
 let teardownRoot: string;
+let directRoot: string;
+let parentRoot: string;
 
 test("test-scoped scratch includes sealed snapshots and registered adjacent paths", () => {
   sealedRoot = temporaryRoot("ufz-test-cleanup-");
@@ -50,6 +53,31 @@ test("scratch is reclaimed after the test's own after hook", () => {
   assert.equal(fs.existsSync(teardownRoot), false);
 });
 
+nodeTest("direct node:test fixtures remain available to their teardown hooks", (context) => {
+  directRoot = temporaryRoot("ufz-direct-cleanup-");
+  fs.chmodSync(directRoot, 0o500);
+  context.after(() => assert.equal(fs.existsSync(directRoot), true));
+});
+
+nodeTest("direct node:test fixtures are reclaimed before the next case", () => {
+  assert.equal(fs.existsSync(directRoot), false);
+});
+
+nodeTest("nested tests reclaim only their own scratch", async (context) => {
+  parentRoot = temporaryRoot("ufz-parent-cleanup-");
+  let childRoot: string;
+  await context.test("nested child", () => {
+    childRoot = temporaryRoot("ufz-child-cleanup-");
+    assert.equal(fs.existsSync(parentRoot), true);
+  });
+  assert.equal(fs.existsSync(childRoot!), false);
+  assert.equal(fs.existsSync(parentRoot), true);
+});
+
+nodeTest("the parent fixture is reclaimed after its nested tests", () => {
+  assert.equal(fs.existsSync(parentRoot), false);
+});
+
 test("scratch is reclaimed after a failed test body", () => {
   const fixture = temporaryRoot("ufz-failed-test-");
   const marker = path.join(fixture, "created-root.txt");
@@ -79,4 +107,34 @@ test("scratch is reclaimed after a failed test body", () => {
   assert.match(`${child.stdout}${child.stderr}`, /deliberate failure sentinel/u);
   assert.equal(fs.readFileSync(verified, "utf8"), "yes", `${child.stdout}${child.stderr}`);
   assert.equal(fs.existsSync(fs.readFileSync(marker, "utf8")), false);
+});
+
+nodeTest("a failed direct node:test case releases scratch before the next case", () => {
+  const fixture = temporaryRoot("ufz-failed-direct-");
+  const marker = path.join(fixture, "created-root.txt");
+  const verified = path.join(fixture, "verified.txt");
+  const childTest = path.join(fixture, "failure.test.mjs");
+  fs.writeFileSync(
+    childTest,
+    [
+      'import assert from "node:assert/strict";',
+      'import fs from "node:fs";',
+      'import test from "node:test";',
+      `import { temporaryRoot } from ${JSON.stringify(new URL("./temporary-root.js", import.meta.url).href)};`,
+      'test("deliberate direct failure", () => {',
+      `  fs.writeFileSync(${JSON.stringify(marker)}, temporaryRoot("ufz-failing-direct-body-"));`,
+      '  throw new Error("deliberate direct failure sentinel");',
+      "});",
+      'test("cleanup follows failure", () => {',
+      `  assert.equal(fs.existsSync(fs.readFileSync(${JSON.stringify(marker)}, "utf8")), false);`,
+      `  fs.writeFileSync(${JSON.stringify(verified)}, "yes");`,
+      "});"
+    ].join("\n")
+  );
+  const child = spawnSync(process.execPath, process.versions.bun === undefined ? [childTest] : ["test", childTest], {
+    encoding: "utf8"
+  });
+  assert.equal(child.status, 1, `${child.stdout}${child.stderr}`);
+  assert.match(`${child.stdout}${child.stderr}`, /deliberate direct failure sentinel/u);
+  assert.equal(fs.readFileSync(verified, "utf8"), "yes", `${child.stdout}${child.stderr}`);
 });
