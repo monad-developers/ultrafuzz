@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
 import nodeTest from "node:test";
+import type { TestContext } from "node:test";
+
+import { withTemporaryRootScope } from "./temporary-root.js";
 
 const RUNTIME_TEST_SHARD_ENV = "ULTRAFUZZ_RUNTIME_TEST_SHARD";
 const MAX_RUNTIME_TEST_SHARDS = 32;
@@ -39,7 +42,13 @@ const selectedShard = parseRuntimeTestShard(process.env[RUNTIME_TEST_SHARD_ENV])
  */
 export const test = ((name: string, ...args: unknown[]) => {
   if (selectedShard === undefined || runtimeTestShardForName(name, selectedShard.total) === selectedShard.index) {
-    return Reflect.apply(nodeTest, undefined, [name, ...args]);
+    const bodyIndex = typeof args[0] === "function" ? 0 : 1;
+    const body = args[bodyIndex] as (context: TestContext) => void | Promise<void>;
+    return Reflect.apply(nodeTest, undefined, [
+      name,
+      ...args.slice(0, bodyIndex),
+      (context: TestContext) => withTemporaryRootScope(context, () => body(context))
+    ]);
   }
 
   const reason = `assigned to runtime test shard ${runtimeTestShardForName(name, selectedShard.total)}/${selectedShard.total}`;

@@ -698,7 +698,8 @@ function loadOpenRouterPatchedSmithersUrl(): Promise<string> {
     const patch = SMITHERS_COMPATIBILITY_PATCHES.find((candidate) => candidate.id === "agents_ordered_stdout");
     assert.ok(patch);
     const pinnedRoot = path.dirname(pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent"));
-    const isolatedRoot = path.join(tempProject(), "agents");
+    // This imported module is cached and reused by later test cases.
+    const isolatedRoot = path.join(temporaryRoot("ufz-runtime-", "process"), "agents");
     fs.cpSync(pinnedRoot, isolatedRoot, { recursive: true });
     fs.rmSync(path.join(isolatedRoot, "node_modules"), { recursive: true, force: true });
     fs.symlinkSync(path.dirname(path.dirname(pinnedRoot)), path.join(isolatedRoot, "node_modules"), "dir");

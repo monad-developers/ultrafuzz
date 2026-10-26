@@ -1,6 +1,7 @@
 import { readdirSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import path from "node:path";
+
+import { runTests } from "./test-scratch.mjs";
 
 const selectors = process.argv.slice(2).filter((argument) => !argument.startsWith("-"));
 const passThrough = process.argv.slice(2).filter((argument) => argument.startsWith("-"));
@@ -23,8 +24,4 @@ const testFiles =
         .map((entry) => path.join("dist-test/test", entry))
     : selectors.flatMap((selector) => selectorFiles.get(selector) ?? [`dist-test/test/${selector}.test.js`]);
 
-const result = spawnSync("node", ["--test", ...testFiles, ...passThrough], {
-  stdio: "inherit"
-});
-
-process.exit(result.status ?? 1);
+process.exitCode = await runTests(["--test", ...passThrough, ...testFiles]);
