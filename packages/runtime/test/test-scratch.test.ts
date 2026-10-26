@@ -56,9 +56,11 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
   fs.writeFileSync(path.join(torn, ".test-child-pgid"), "not-a-pid\n");
   const confirmedDead = fs.mkdtempSync(path.join(parent, `run-${deadLauncherPid}-`));
   fs.writeFileSync(path.join(confirmedDead, ".test-child-pgid"), `${deadChildPid}\n`);
+  const reusedPid = fs.mkdtempSync(path.join(parent, `run-${process.pid}-`));
+  fs.writeFileSync(path.join(reusedPid, ".test-child-pgid"), `${deadChildPid}\n`);
   const claimedOriginal = fs.mkdtempSync(path.join(parent, `run-${deadLauncherPid}-`));
   fs.writeFileSync(path.join(claimedOriginal, ".test-child-pgid"), `${deadChildPid}\n`);
-  for (const directory of [missing, torn, confirmedDead, claimedOriginal]) {
+  for (const directory of [missing, torn, confirmedDead, reusedPid, claimedOriginal]) {
     fs.writeFileSync(path.join(directory, ".test-scratch-origin"), `${directory}\n`);
     if (process.platform === "linux") {
       const stat = fs.readFileSync("/proc/self/stat", "utf8");
@@ -66,7 +68,9 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
         .slice(stat.lastIndexOf(") ") + 2)
         .trim()
         .split(/\s+/u)[19];
-      fs.writeFileSync(path.join(directory, ".test-launcher-start"), `${start}\n`);
+      if (start === undefined) throw new Error("test process start time is unavailable");
+      const marker = directory === reusedPid ? BigInt(start) - 1n : BigInt(start);
+      fs.writeFileSync(path.join(directory, ".test-launcher-start"), `${marker}\n`);
     }
   }
   const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "ufz-scratch-hardlink-"));
@@ -86,20 +90,32 @@ nodeTest("stale scratch is reclaimed only after a complete child marker confirms
         await once(child, "exit");
       })
     );
-    for (const directory of [missing, torn, confirmedDead, claimedOriginal, claimed, outside]) {
+    for (const directory of [missing, torn, confirmedDead, reusedPid, claimedOriginal, claimed, outside]) {
       if (fs.existsSync(directory)) fs.chmodSync(directory, 0o700);
       fs.rmSync(directory, { recursive: true, force: true });
     }
   });
-  await Promise.all(children.map(async (child) => once(child.stdout!, "data")));
+  await Promise.all(
+    children.map(async (child) => {
+      assert.ok(child.stdout);
+      return once(child.stdout, "data");
+    })
+  );
   fs.renameSync(claimedOriginal, claimed);
 
-  const probe = runScratchProbe();
-  assert.equal(probe.status, 0, `${probe.stdout}${probe.stderr}`);
-  assert.equal(fs.existsSync(path.join(missing, "alive")), true);
-  assert.equal(fs.existsSync(path.join(torn, "alive")), true);
-  assert.equal(fs.existsSync(path.join(claimed, "alive")), true);
-  if (process.platform === "linux") assert.equal(fs.existsSync(confirmedDead), false);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const probe = runScratchProbe();
+    if (probe.status !== 0) assert.match(String(probe.stderr), /scratch retained for a possibly active test process/u);
+    assert.equal(fs.existsSync(path.join(missing, "alive")), true);
+    assert.equal(fs.existsSync(path.join(torn, "alive")), true);
+    assert.equal(fs.existsSync(path.join(claimed, "alive")), true);
+    if (process.platform !== "linux" || (!fs.existsSync(confirmedDead) && !fs.existsSync(reusedPid))) break;
+    await delay(50);
+  }
+  if (process.platform === "linux") {
+    assert.equal(fs.existsSync(confirmedDead), false);
+    assert.equal(fs.existsSync(reusedPid), false, "reaper treated a reused PID as the original launcher");
+  }
   assert.equal(fs.statSync(outsideFile).mode & 0o777, 0o400);
   assert.equal(
     children.every((child) => child.exitCode === null && child.signalCode === null),
@@ -144,8 +160,10 @@ linuxNodeTest("a surviving test worker keeps scratch after its launcher and runn
     stdio: ["ignore", "pipe", "pipe"]
   });
   let launcherOutput = "";
-  launcher.stdout!.on("data", (chunk: Buffer) => (launcherOutput += String(chunk)));
-  launcher.stderr!.on("data", (chunk: Buffer) => (launcherOutput += String(chunk)));
+  assert.ok(launcher.stdout);
+  assert.ok(launcher.stderr);
+  launcher.stdout.on("data", (chunk: Buffer) => (launcherOutput += String(chunk)));
+  launcher.stderr.on("data", (chunk: Buffer) => (launcherOutput += String(chunk)));
   const live: { runnerPgid?: number; workerPid?: number; scratch?: string } = {};
   context.after(async () => {
     if (launcher.exitCode === null && launcher.signalCode === null) {
@@ -178,6 +196,7 @@ linuxNodeTest("a surviving test worker keeps scratch after its launcher and runn
   }
   assert.equal(fs.existsSync(ready), true, "test worker never reported its scratch directory");
   const readyState = JSON.parse(fs.readFileSync(ready, "utf8")) as { pid: number; scratch: string };
+  const workerPid = readyState.pid;
   live.workerPid = readyState.pid;
   live.scratch = readyState.scratch;
   live.runnerPgid = Number(fs.readFileSync(path.join(live.scratch, ".test-child-pgid"), "utf8").trim());
@@ -187,10 +206,10 @@ linuxNodeTest("a surviving test worker keeps scratch after its launcher and runn
   await once(launcher, "exit");
   process.kill(live.runnerPgid, "SIGKILL");
   await delay(25);
-  assert.equal(linuxProcessIsActive(live.workerPid!), true, "test worker stopped before stale reaping began");
+  assert.equal(linuxProcessIsActive(workerPid), true, "test worker stopped before stale reaping began");
   const probe = runScratchProbe();
   assert.equal(probe.status, 0, `${probe.stdout}${probe.stderr}`);
-  assert.equal(linuxProcessIsActive(live.workerPid!), true, "test worker stopped during stale reaping");
+  assert.equal(linuxProcessIsActive(workerPid), true, "test worker stopped during stale reaping");
   assert.equal(fs.existsSync(live.scratch), true, "reaper deleted scratch still owned by a live worker");
 });
 
@@ -262,4 +281,59 @@ nodeTest("scratch runner identifies quota exhaustion reported by Node or the fil
     assert.equal(probe.status, 1, `${probe.stdout}${probe.stderr}`);
     assert.match(`${probe.stdout}${probe.stderr}`, /exhausted scratch space or quota \(ENOSPC\/EDQUOT\)/u);
   }
+});
+
+nodeTest("a failed scratch marker write removes the new markerless directory", () => {
+  const runner = new URL("../../scripts/test-scratch.mjs", import.meta.url).href;
+  const markers =
+    process.platform === "linux" ? [".test-scratch-origin", ".test-launcher-start"] : [".test-scratch-origin"];
+  for (const marker of markers) {
+    const script = `
+      import fs from "node:fs";
+      import os from "node:os";
+      import path from "node:path";
+      import { runTests } from ${JSON.stringify(runner)};
+      const originalWrite = fs.writeFileSync;
+      fs.writeFileSync = (target, ...args) => {
+        if (String(target).endsWith(${JSON.stringify(marker)})) {
+          throw Object.assign(new Error("quota exceeded"), { code: "EDQUOT", errno: -122 });
+        }
+        return originalWrite(target, ...args);
+      };
+      const status = await runTests(["--eval", ""]);
+      const parent = path.join(fs.realpathSync(os.tmpdir()), "ultrafuzz-runtime-tests-" + (process.getuid?.() ?? "user"));
+      const leaked = fs.readdirSync(parent).some((name) => name.startsWith("run-" + process.pid + "-"));
+      if (leaked) process.stderr.write("markerless scratch leaked\\n");
+      process.exitCode = leaked ? 2 : status;
+    `;
+    const probe = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { encoding: "utf8" });
+    assert.equal(probe.status, 1, `${marker}: ${probe.stdout}${probe.stderr}`);
+    assert.match(probe.stderr, /disk full or quota exceeded, ENOSPC\/EDQUOT/u);
+  }
+});
+
+linuxNodeTest("an uncertain proc scan retains scratch without failing a passing run", (context) => {
+  const runner = new URL("../../scripts/test-scratch.mjs", import.meta.url).href;
+  const script = `
+    import fs from "node:fs";
+    import { runTests } from ${JSON.stringify(runner)};
+    const originalRead = fs.readFileSync;
+    fs.readFileSync = (target, ...args) => {
+      if (String(target) === "/proc/" + process.pid + "/environ") {
+        throw Object.assign(new Error("proc read denied"), { code: "EACCES" });
+      }
+      return originalRead(target, ...args);
+    };
+    process.exitCode = await runTests(["--eval", ""]);
+  `;
+  const probe = spawnSync(process.execPath, ["--input-type=module", "--eval", script], { encoding: "utf8" });
+  const retained = /scratch retained for a possibly active test process \(group dead, scratch uncertain\): (.+)/u.exec(
+    String(probe.stderr)
+  );
+  assert.equal(probe.status, 0, `${probe.stdout}${probe.stderr}`);
+  assert.ok(retained, "the uncertain scan did not retain scratch");
+  const scratch = retained[1];
+  assert.ok(scratch);
+  context.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  assert.equal(fs.existsSync(scratch), true);
 });

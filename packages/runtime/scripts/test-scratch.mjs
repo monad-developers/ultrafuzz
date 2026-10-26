@@ -32,7 +32,23 @@ function pidIsAlive(pid) {
 function processGroupIsAlive(pgid) {
   // A Node --test runner can exit while its per-file workers keep running.
   // On Windows a group probe is unavailable, so stale scratch is retained.
-  return process.platform === "win32" || pidIsAlive(-pgid);
+  if (process.platform === "win32") return true;
+  if (!pidIsAlive(-pgid)) return false;
+  if (process.platform !== "linux") return true;
+  let processes;
+  try {
+    processes = fs.readdirSync("/proc", { withFileTypes: true });
+  } catch {
+    return true;
+  }
+  let uncertain = false;
+  for (const entry of processes) {
+    if (!/^[0-9]+$/u.test(entry.name)) continue;
+    const info = processInfo(entry.name);
+    if (info?.group === pgid && info.state !== "Z" && info.state !== "X") return true;
+    if (info === undefined && pidIsAlive(Number(entry.name))) uncertain = true;
+  }
+  return uncertain;
 }
 
 function recordedTestGroupIsDead(root) {
@@ -58,20 +74,28 @@ function pathIsWithin(candidate, root) {
   return candidate === root || candidate.startsWith(`${root}${path.sep}`);
 }
 
-function processStartTicks(pid) {
+function processInfo(pid) {
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
     const commandEnd = stat.lastIndexOf(") ");
     if (commandEnd === -1) return undefined;
     // Field 22 is starttime; the text after the command starts at field 3.
-    const value = stat
+    const fields = stat
       .slice(commandEnd + 2)
       .trim()
-      .split(/\s+/u)[19];
-    return /^[0-9]+$/u.test(value ?? "") ? BigInt(value) : undefined;
+      .split(/\s+/u);
+    const value = fields[19];
+    const group = Number(fields[2]); // Field 5 is the process group ID.
+    return /^[0-9]+$/u.test(value ?? "") && Number.isSafeInteger(group)
+      ? { start: BigInt(value), state: fields[0], group }
+      : undefined;
   } catch {
     return undefined;
   }
+}
+
+function processStartTicks(pid) {
+  return processInfo(pid)?.start;
 }
 
 function recordedLauncherStart(root) {
@@ -84,11 +108,94 @@ function recordedLauncherStart(root) {
   return /^[0-9]+\n$/u.test(marker) ? BigInt(marker.trim()) : undefined;
 }
 
+function sameUidStatus(processRoot) {
+  try {
+    // Non-dumpable processes can have root-owned /proc directories.
+    const status = fs.readFileSync(path.join(processRoot, "status"), "utf8");
+    const match = /^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)/mu.exec(status);
+    if (match === null) return "uncertain";
+    return match.slice(1).some((uid) => Number(uid) === process.getuid()) ? "same" : "other";
+  } catch {
+    return "uncertain";
+  }
+}
+
+function environmentUseStatus(processRoot, paths) {
+  try {
+    const environment = fs.readFileSync(path.join(processRoot, "environ"), "utf8");
+    const usesScratch = environment
+      .split("\0")
+      .some((field) =>
+        paths.some(
+          (directory) =>
+            field === `TMPDIR=${directory}` || field === `TMP=${directory}` || field === `TEMP=${directory}`
+        )
+      );
+    return usesScratch ? "active" : "clear";
+  } catch {
+    return "uncertain";
+  }
+}
+
+function cwdUseStatus(processRoot, paths) {
+  try {
+    const cwd = fs.readlinkSync(path.join(processRoot, "cwd"));
+    return paths.some((directory) => pathIsWithin(cwd, directory)) ? "active" : "clear";
+  } catch {
+    return "uncertain";
+  }
+}
+
+function fdUseStatus(processRoot, paths) {
+  let descriptors;
+  try {
+    descriptors = fs.readdirSync(path.join(processRoot, "fd"));
+  } catch {
+    return "uncertain";
+  }
+  let uncertain = false;
+  for (const descriptor of descriptors) {
+    let target;
+    try {
+      target = fs.readlinkSync(path.join(processRoot, "fd", descriptor));
+    } catch (error) {
+      if (error.code !== "ENOENT") uncertain = true;
+      continue; // A descriptor may close during the scan.
+    }
+    if (paths.some((directory) => pathIsWithin(target, directory))) return "active";
+  }
+  return uncertain ? "uncertain" : "clear";
+}
+
+function uncertainProcessIsGoneOrOlder(name, firstInfo, launcherStart) {
+  const currentInfo = processInfo(name);
+  if (currentInfo?.state === "Z" || currentInfo?.state === "X") return true;
+  if (currentInfo === undefined && !pidIsAlive(Number(name))) return true;
+  // Older processes could receive the path later, so readable cwd/fds were
+  // checked first. Age only excuses unavailable /proc reads.
+  return firstInfo?.start < launcherStart && currentInfo?.start < launcherStart;
+}
+
+function processScratchUseStatus(name, paths, launcherStart) {
+  const processRoot = path.join("/proc", name);
+  const firstInfo = processInfo(name);
+  if (firstInfo?.state === "Z" || firstInfo?.state === "X") return "clear";
+  const ownership = sameUidStatus(processRoot);
+  if (ownership === "other") return "clear";
+  const environment = environmentUseStatus(processRoot, paths);
+  if (environment === "active") return "active";
+  const cwd = cwdUseStatus(processRoot, paths);
+  if (cwd === "active") return "active";
+  const fds = fdUseStatus(processRoot, paths);
+  if (fds === "active") return "active";
+  if (ownership === "same" && environment === "clear" && cwd === "clear" && fds === "clear") return "clear";
+  return uncertainProcessIsGoneOrOlder(name, firstInfo, launcherStart) ? "clear" : "uncertain";
+}
+
 function scratchUseStatus(scratch, original = scratch) {
   if (process.platform !== "linux" || process.getuid === undefined) return "uncertain";
   const launcherStart = recordedLauncherStart(scratch);
   if (launcherStart === undefined) return "uncertain";
-  const paths = [original, scratch];
   let processes;
   try {
     processes = fs.readdirSync("/proc", { withFileTypes: true });
@@ -98,67 +205,9 @@ function scratchUseStatus(scratch, original = scratch) {
   let uncertain = false;
   for (const entry of processes) {
     if (!/^[0-9]+$/u.test(entry.name)) continue;
-    const pid = Number(entry.name);
-    const processRoot = path.join("/proc", entry.name);
-    const started = processStartTicks(entry.name);
-    // A process that started before this launcher predates its scratch.
-    // Readable cwd/fds may still show later use; age excuses only read errors.
-    const olderProcess = started !== undefined && started < launcherStart;
-    let readUncertain = false;
-    try {
-      // Non-dumpable processes can have root-owned /proc directories even
-      // while their real/effective UIDs still match this test launcher.
-      const status = fs.readFileSync(path.join(processRoot, "status"), "utf8");
-      const match = /^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)/mu.exec(status);
-      if (match === null) readUncertain = true;
-      else if (!match.slice(1).some((uid) => Number(uid) === process.getuid())) continue;
-    } catch (error) {
-      if ((error.code === "ENOENT" || error.code === "ESRCH") && !pidIsAlive(pid)) continue;
-      readUncertain = true;
-    }
-    let environment;
-    try {
-      environment = fs.readFileSync(path.join(processRoot, "environ"), "utf8");
-    } catch (error) {
-      if ((error.code === "ENOENT" || error.code === "ESRCH") && !pidIsAlive(pid)) continue;
-      readUncertain = true;
-    }
-    if (
-      environment
-        ?.split("\0")
-        .some((field) =>
-          paths.some(
-            (directory) =>
-              field === `TMPDIR=${directory}` || field === `TMP=${directory}` || field === `TEMP=${directory}`
-          )
-        )
-    ) {
-      return "active";
-    }
-    try {
-      const cwd = fs.readlinkSync(path.join(processRoot, "cwd"));
-      if (paths.some((directory) => pathIsWithin(cwd, directory))) return "active";
-      for (const descriptor of fs.readdirSync(path.join(processRoot, "fd"))) {
-        let target;
-        try {
-          target = fs.readlinkSync(path.join(processRoot, "fd", descriptor));
-        } catch (error) {
-          if (error.code === "ENOENT" && !pidIsAlive(pid)) break;
-          if (error.code === "ENOENT") continue; // A descriptor closed during the scan.
-          throw error;
-        }
-        if (paths.some((directory) => pathIsWithin(target, directory))) return "active";
-      }
-    } catch (error) {
-      if ((error.code === "ENOENT" || error.code === "ESRCH") && !pidIsAlive(pid)) continue;
-      readUncertain = true;
-    }
-    if (readUncertain) {
-      if (!pidIsAlive(pid)) continue;
-      const currentStart = processStartTicks(entry.name);
-      const stillOlder = currentStart !== undefined && currentStart < launcherStart;
-      if (!olderProcess || !stillOlder) uncertain = true;
-    }
+    const use = processScratchUseStatus(entry.name, [original, scratch], launcherStart);
+    if (use === "active") return "active";
+    if (use === "uncertain") uncertain = true;
   }
   return uncertain ? "uncertain" : "clear";
 }
@@ -187,6 +236,49 @@ function recordedOriginalScratch(root, parent) {
   return original;
 }
 
+function reapStaleScratch(parent, entry) {
+  if (!entry.isDirectory() || process.platform !== "linux") return;
+  const match = /^(?:run|reap)-([1-9][0-9]*)-[A-Za-z0-9]+$/u.exec(entry.name);
+  if (match === null) return;
+  const stale = path.join(parent, entry.name);
+  const launcherStart = recordedLauncherStart(stale);
+  if (launcherStart === undefined) return;
+  const currentStart = processStartTicks(match[1]);
+  if (currentStart === launcherStart || (currentStart === undefined && pidIsAlive(Number(match[1])))) return;
+  const original = recordedOriginalScratch(stale, parent);
+  if (original === undefined || !recordedTestGroupIsDead(stale) || scratchUseStatus(stale, original) !== "clear")
+    return;
+  const claimed = path.join(parent, `reap-${process.pid}-${randomUUID().replaceAll("-", "")}`);
+  try {
+    fs.renameSync(stale, claimed);
+  } catch (error) {
+    if (error.code === "ENOENT") return; // Another test launcher claimed it first.
+    throw error;
+  }
+  // An escaped child still has the original run path after the rename.
+  if (recordedTestGroupIsDead(claimed) && scratchUseStatus(claimed, original) === "clear") removeScratch(claimed);
+}
+
+function createScratch(parent) {
+  const scratch = fs.mkdtempSync(path.join(parent, `run-${process.pid}-`));
+  try {
+    fs.writeFileSync(path.join(scratch, ".test-scratch-origin"), `${scratch}\n`, { mode: 0o600, flag: "wx" });
+    if (process.platform === "linux") {
+      const start = processStartTicks("self");
+      if (start === undefined) throw new Error("Runtime test launcher start time is unavailable from /proc/self/stat");
+      fs.writeFileSync(path.join(scratch, ".test-launcher-start"), `${start}\n`, { mode: 0o600, flag: "wx" });
+    }
+  } catch (error) {
+    try {
+      removeScratch(scratch);
+    } catch (cleanupError) {
+      process.stderr.write(`Runtime test scratch setup cleanup failed for ${scratch}: ${String(cleanupError)}\n`);
+    }
+    throw error;
+  }
+  return scratch;
+}
+
 function ownedScratchDirectory() {
   const parent = path.join(fs.realpathSync(os.tmpdir()), `ultrafuzz-runtime-tests-${process.getuid?.() ?? "user"}`);
   fs.mkdirSync(parent, { mode: 0o700, recursive: true });
@@ -198,32 +290,133 @@ function ownedScratchDirectory() {
   ) {
     throw new Error(`Runtime test scratch parent is not owned by this process: ${parent}`);
   }
-  for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
-    const match = /^(?:run|reap)-([1-9][0-9]*)-[A-Za-z0-9]+$/u.exec(entry.name);
-    if (!match || !entry.isDirectory() || pidIsAlive(Number(match[1]))) continue;
-    const stale = path.join(parent, entry.name);
-    const original = recordedOriginalScratch(stale, parent);
-    if (original === undefined || !recordedTestGroupIsDead(stale) || scratchUseStatus(stale, original) !== "clear")
-      continue;
-    const claimed = path.join(parent, `reap-${process.pid}-${randomUUID().replaceAll("-", "")}`);
-    try {
-      fs.renameSync(stale, claimed);
-    } catch (error) {
-      if (error.code === "ENOENT") continue; // Another test launcher claimed it first.
-      throw error;
+  for (const entry of fs.readdirSync(parent, { withFileTypes: true })) reapStaleScratch(parent, entry);
+  return createScratch(parent);
+}
+
+function forwardTestSignals(groupId) {
+  if (process.platform === "win32" || groupId === undefined) return () => {};
+  const handlers = ["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => {
+    const handler = () => signalTestGroup(groupId, signal);
+    process.on(signal, handler);
+    return [signal, handler];
+  });
+  return () => {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  };
+}
+
+function recordTestGroup(scratch, child) {
+  if (child.pid === undefined) return undefined;
+  try {
+    const pendingMarker = path.join(scratch, ".test-child-pgid.pending");
+    fs.writeFileSync(pendingMarker, `${child.pid}\n`, { mode: 0o600, flag: "wx" });
+    fs.renameSync(pendingMarker, path.join(scratch, ".test-child-pgid"));
+    return undefined;
+  } catch (error) {
+    if (process.platform === "win32") child.kill("SIGKILL");
+    else signalTestGroup(child.pid, "SIGKILL");
+    return error;
+  }
+}
+
+function observeTestOutput(child, observation) {
+  for (const [stream, output] of [
+    [child.stdout, process.stdout],
+    [child.stderr, process.stderr]
+  ]) {
+    let tail = "";
+    stream.on("data", (chunk) => {
+      const value = tail + String(chunk);
+      if (scratchExhaustionOutput.test(value)) observation.diskFull = true;
+      tail = value.slice(-40);
+    });
+    stream.pipe(output, { end: false });
+  }
+}
+
+function waitForTestChild(child, observation) {
+  return new Promise((resolve) => {
+    child.once("error", (error) => {
+      if (scratchExhaustionError(error)) observation.diskFull = true;
+      process.stderr.write(`Runtime test process could not start: ${String(error)}\n`);
+      resolve({ status: 1, closed: false, exitCode: undefined });
+    });
+    child.once("close", (code) => resolve({ status: code ?? 1, closed: true, exitCode: code }));
+  });
+}
+
+async function runTestChild(args, extraEnv, scratch) {
+  let child;
+  let stopForwarding = () => {};
+  const observation = { diskFull: false };
+  try {
+    child = spawn(process.execPath, args, {
+      env: { ...process.env, ...extraEnv, TMPDIR: scratch, TMP: scratch, TEMP: scratch },
+      stdio: ["inherit", "pipe", "pipe"],
+      detached: process.platform !== "win32"
+    });
+    stopForwarding = forwardTestSignals(child.pid);
+    const markerError = recordTestGroup(scratch, child);
+    observeTestOutput(child, observation);
+    const result = await waitForTestChild(child, observation);
+    let status = result.status;
+    if (markerError !== undefined) {
+      process.stderr.write(`Runtime test scratch owner could not be recorded: ${String(markerError)}\n`);
+      status = 1;
     }
-    // A process can start while we claim the directory, and an escaped child
-    // still has the original run path in its environment after the rename.
-    if (recordedTestGroupIsDead(claimed) && scratchUseStatus(claimed, original) === "clear") removeScratch(claimed);
+    if (observation.diskFull) {
+      process.stderr.write(`Runtime tests exhausted scratch space or quota (ENOSPC/EDQUOT) under ${scratch}.\n`);
+      status = 1;
+    }
+    return { ...result, status, groupId: child.pid };
+  } catch (error) {
+    process.stderr.write(`Runtime test process failed: ${String(error)}\n`);
+    return { status: 1, closed: false, exitCode: undefined, groupId: child?.pid };
+  } finally {
+    stopForwarding();
   }
-  const scratch = fs.mkdtempSync(path.join(parent, `run-${process.pid}-`));
-  fs.writeFileSync(path.join(scratch, ".test-scratch-origin"), `${scratch}\n`, { mode: 0o600, flag: "wx" });
-  if (process.platform === "linux") {
-    const start = processStartTicks("self");
-    if (start === undefined) throw new Error("Runtime test launcher start time is unavailable from /proc/self/stat");
-    fs.writeFileSync(path.join(scratch, ".test-launcher-start"), `${start}\n`, { mode: 0o600, flag: "wx" });
+}
+
+function currentTestGroupIsActive(groupId) {
+  return process.platform !== "win32" && groupId !== undefined && processGroupIsAlive(groupId);
+}
+
+async function cleanupCurrentScratch(scratch, result) {
+  let groupActive = currentTestGroupIsActive(result.groupId);
+  let scratchUse = scratchUseStatus(scratch);
+  // A worker or unrelated process can exit during /proc enumeration.
+  for (
+    let attempt = 0;
+    attempt < 5 && (groupActive || (process.platform === "linux" && scratchUse === "uncertain"));
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    groupActive = currentTestGroupIsActive(result.groupId);
+    scratchUse = scratchUseStatus(scratch);
   }
-  return scratch;
+  // Non-Linux platforms have no proc scan. A closed POSIX runner with a dead
+  // group can release scratch; Windows requires a normal successful exit.
+  const completedOutsideLinux =
+    process.platform !== "linux" &&
+    result.closed &&
+    Number.isInteger(result.exitCode) &&
+    !groupActive &&
+    (process.platform !== "win32" || result.exitCode === 0);
+  if (groupActive || (scratchUse !== "clear" && !completedOutsideLinux)) {
+    process.stderr.write(
+      `Runtime test scratch retained for a possibly active test process (group ${groupActive ? "active" : "dead"}, scratch ${scratchUse}): ${scratch}\n`
+    );
+    // Unrelated processes can make /proc uncertain; preserve test status.
+    return groupActive || scratchUse === "active" ? 1 : result.status;
+  }
+  try {
+    removeScratch(scratch);
+  } catch (error) {
+    process.stderr.write(`Runtime test scratch cleanup failed for ${scratch}: ${String(error)}\n`);
+    return 1;
+  }
+  return result.status;
 }
 
 export async function runTests(args, extraEnv = {}) {
@@ -236,107 +429,6 @@ export async function runTests(args, extraEnv = {}) {
     );
     return 1;
   }
-
-  let status;
-  let diskFull = false;
-  let childGroupId;
-  let childClosed = false;
-  let childExitCode;
-  const signalHandlers = [];
-  try {
-    const child = spawn(process.execPath, args, {
-      env: { ...process.env, ...extraEnv, TMPDIR: scratch, TMP: scratch, TEMP: scratch },
-      stdio: ["inherit", "pipe", "pipe"],
-      detached: process.platform !== "win32"
-    });
-    childGroupId = child.pid;
-    if (process.platform !== "win32" && childGroupId !== undefined) {
-      for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-        const handler = () => signalTestGroup(childGroupId, signal);
-        process.on(signal, handler);
-        signalHandlers.push([signal, handler]);
-      }
-    }
-    let markerError;
-    if (child.pid !== undefined) {
-      try {
-        const pendingMarker = path.join(scratch, ".test-child-pgid.pending");
-        fs.writeFileSync(pendingMarker, `${child.pid}\n`, { mode: 0o600, flag: "wx" });
-        fs.renameSync(pendingMarker, path.join(scratch, ".test-child-pgid"));
-      } catch (error) {
-        markerError = error;
-        if (process.platform === "win32") child.kill("SIGKILL");
-        else signalTestGroup(child.pid, "SIGKILL");
-      }
-    }
-    for (const [stream, output] of [
-      [child.stdout, process.stdout],
-      [child.stderr, process.stderr]
-    ]) {
-      let tail = "";
-      stream.on("data", (chunk) => {
-        const text = tail + String(chunk);
-        if (scratchExhaustionOutput.test(text)) diskFull = true;
-        tail = text.slice(-40);
-      });
-      stream.pipe(output, { end: false });
-    }
-    status = await new Promise((resolve) => {
-      child.once("error", (error) => {
-        if (scratchExhaustionError(error)) diskFull = true;
-        process.stderr.write(`Runtime test process could not start: ${String(error)}\n`);
-        resolve(1);
-      });
-      child.once("close", (code) => {
-        childClosed = true;
-        childExitCode = code;
-        resolve(code ?? 1);
-      });
-    });
-    if (markerError !== undefined) {
-      process.stderr.write(`Runtime test scratch owner could not be recorded: ${String(markerError)}\n`);
-      status = 1;
-    }
-    if (diskFull) {
-      process.stderr.write(`Runtime tests exhausted scratch space or quota (ENOSPC/EDQUOT) under ${scratch}.\n`);
-      status = 1;
-    }
-  } finally {
-    for (const [signal, handler] of signalHandlers) process.off(signal, handler);
-    let groupActive = process.platform !== "win32" && childGroupId !== undefined && processGroupIsAlive(childGroupId);
-    let scratchUse = scratchUseStatus(scratch);
-    // A worker or unrelated process can exit during /proc enumeration.
-    // Retry brief ambiguity before retaining an otherwise completed run.
-    for (
-      let attempt = 0;
-      attempt < 5 && (groupActive || (process.platform === "linux" && scratchUse === "uncertain"));
-      attempt += 1
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      groupActive = process.platform !== "win32" && childGroupId !== undefined && processGroupIsAlive(childGroupId);
-      scratchUse = scratchUseStatus(scratch);
-    }
-    // Non-Linux platforms have no proc scan. A closed POSIX runner with a dead
-    // group can release its scratch; Windows requires a normal successful exit.
-    const completedOutsideLinux =
-      process.platform !== "linux" &&
-      childClosed &&
-      Number.isInteger(childExitCode) &&
-      !groupActive &&
-      (process.platform !== "win32" || childExitCode === 0);
-    if (groupActive || (scratchUse !== "clear" && !completedOutsideLinux)) {
-      process.stderr.write(
-        `Runtime test scratch retained for a possibly active test process (group ${groupActive ? "active" : "dead"}, scratch ${scratchUse}): ${scratch}\n`
-      );
-      status = 1;
-    } else {
-      try {
-        removeScratch(scratch);
-      } catch (error) {
-        process.stderr.write(`Runtime test scratch cleanup failed for ${scratch}: ${String(error)}\n`);
-        status = 1;
-      }
-    }
-  }
-  return status;
+  const result = await runTestChild(args, extraEnv, scratch);
+  return cleanupCurrentScratch(scratch, result);
 }
