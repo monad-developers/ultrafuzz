@@ -1808,7 +1808,7 @@ function writeFakeInstalledSmithersDependencies(project: string): void {
     ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
     ["@smthrs/tool-context", SMITHERS_VERSION],
     ["react", "19.2.4"],
-    ["zod", "4.4.3"]
+    ["zod", "4.6.6"]
   ] as const;
   for (const [name, version] of dependencies) {
     writeFakeInstalledSmithersDependency(project, name, version);
@@ -3638,10 +3638,7 @@ test("non-force init migrates a superseded generated manifest so the project kee
   const project = tempProject();
   assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
   const manifestPath = path.join(project, ".smithers", "package.json");
-  const current = JSON.parse(renderSmithersPackageJson()) as {
-    dependencies: Record<string, string>;
-  };
-  const superseded = { ...current, dependencies: { ...current.dependencies, smthrs: "0.34.0" } };
+  const superseded = legacySmithersPackageManifest("0.34.0");
   fs.writeFileSync(manifestPath, `${JSON.stringify(superseded, null, 2)}\n`, "utf8");
 
   // Without `--force`, so the run directory, the Ultrafuzz run ID and the
@@ -3652,6 +3649,32 @@ test("non-force init migrates a superseded generated manifest so the project kee
   assert.equal(fs.readFileSync(manifestPath, "utf8"), renderSmithersPackageJson());
   assert.doesNotThrow(() => assertSmithersPackageManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8"))));
 });
+
+test("non-force init upgrades the prior 0.35 manifest's dependency pins", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  const manifestPath = path.join(project, ".smithers", "package.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(legacySmithersPackageManifest(SMITHERS_VERSION), null, 2)}\n`);
+
+  const upgraded = initProject({ projectRoot: project });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), renderSmithersPackageJson());
+});
+
+function legacySmithersPackageManifest(smithersVersion: string): Record<string, unknown> {
+  const current = JSON.parse(renderSmithersPackageJson()) as {
+    dependencies: Record<string, string>;
+    overrides: Record<string, string>;
+  };
+  return {
+    ...current,
+    dependencies: { ...current.dependencies, smthrs: smithersVersion, zod: "4.4.3" },
+    overrides: Object.fromEntries(
+      Object.entries(current.overrides).filter(([name]) => name === "effect" || name.startsWith("@effect/"))
+    )
+  };
+}
 
 test("non-force init preserves a manifest that is not one Ultrafuzz generated", () => {
   const project = tempProject();
@@ -18710,7 +18733,9 @@ test("every runner compatibility patch still anchors in the pinned Smithers rele
   );
   // Every override must land on one Effect version, or the pinned set is not
   // internally consistent and npm reintroduces a second copy.
-  for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES)) {
+  for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES).filter(
+    ([name]) => name === "effect" || name.startsWith("@effect/")
+  )) {
     assert.equal(version, SMITHERS_EFFECT_VERSION, `override ${name} must track Effect ${SMITHERS_EFFECT_VERSION}`);
   }
 });
@@ -28250,12 +28275,7 @@ test("resume continues under a superseded generated manifest without changing ei
 
   // Roll the project back to what a pre-bump `init` wrote.
   const manifestPath = path.join(project, ".smithers", "package.json");
-  const current = JSON.parse(renderSmithersPackageJson()) as { dependencies: Record<string, string> };
-  const superseded = `${JSON.stringify(
-    { ...current, dependencies: { ...current.dependencies, smthrs: "0.34.0" } },
-    null,
-    2
-  )}\n`;
+  const superseded = `${JSON.stringify(legacySmithersPackageManifest("0.34.0"), null, 2)}\n`;
   fs.writeFileSync(manifestPath, superseded, "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 

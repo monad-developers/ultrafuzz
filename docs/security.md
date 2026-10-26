@@ -187,6 +187,11 @@ that no such shim directory is copied. Socket's duplicate obfuscated-code
 warnings refer to npm's official bundled/minified distribution; no warning is
 suppressed, and registry integrity plus the closure digest cover those bytes.
 
+The controller's generated `.smithers/package.json` is installed separately by
+npm, so it also pins the fixed MCP SDK, body-parser, DOMPurify, and Zod versions.
+Its fixed resolution cutoff follows those releases. Non-force init upgrades the
+exact prior generated manifest to the new pins while preserving project runs.
+
 ## Agent process environment
 
 The workflow controller receives only the active agents' configured API-key

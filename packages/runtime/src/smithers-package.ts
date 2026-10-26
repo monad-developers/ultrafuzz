@@ -19,14 +19,11 @@ export const KIMI_CODE_VERSION = "0.29.1";
 // manifest does not preserve the Ultrafuzz run ID or the Smithers run ID the
 // durable run is keyed on.
 //
-// A listed version only migrates when the rest of the manifest still matches the
-// current generated document exactly (see `migrateGeneratedSmithersManifest`),
-// so the list is fail-safe under drift: if a future bump also moves Kimi, Zod,
-// TypeScript or the Effect override family, manifests from that release stop
-// matching and are rejected rather than silently rewritten to a shape they were
-// never installed against. That makes a stale entry inert, not dangerous --
-// but it also means an entry is only useful while its release differed from the
-// current one in `smthrs` alone, which is true of 0.34.0 -> 0.35.0.
+// A listed version only migrates when the rest of the manifest still matches
+// the recorded generated document exactly (see
+// `migrateGeneratedSmithersManifest`), so the list is fail-safe under drift.
+// The 0.34.0 and pre-security 0.35.0 documents shared the old Zod and Effect
+// pins; both are recognized explicitly and migrate to today's security pins.
 //
 // Only versions this repository actually pinned belong here. `0.34.0` is the
 // sole `smthrs` pin ever committed (the release before it pinned
@@ -53,12 +50,15 @@ const SMITHERS_EFFECT_PACKAGE_NAMES = [
   "@effect/sql-sqlite-bun"
 ] as const;
 
-export const REQUIRED_SMITHERS_OVERRIDES: Readonly<Record<string, string>> = {
+const LEGACY_SMITHERS_OVERRIDES = {
   effect: SMITHERS_EFFECT_VERSION,
   ...Object.fromEntries(SMITHERS_EFFECT_PACKAGE_NAMES.map((name) => [name, SMITHERS_EFFECT_VERSION]))
 };
 
-const REQUIRED_SMITHERS_DEPENDENCIES = {
+// These were the exact generated pins before the October dependency fixes. A
+// project can carry this manifest across upgrades, so keep its shape available
+// solely for authenticated migration to the current document.
+const LEGACY_GENERATED_SMITHERS_DEPENDENCIES = {
   dependencies: {
     "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
     smthrs: SMITHERS_VERSION,
@@ -66,6 +66,23 @@ const REQUIRED_SMITHERS_DEPENDENCIES = {
   },
   devDependencies: {
     typescript: "6.0.3"
+  },
+  overrides: LEGACY_SMITHERS_OVERRIDES
+} as const;
+
+export const REQUIRED_SMITHERS_OVERRIDES: Readonly<Record<string, string>> = {
+  ...LEGACY_SMITHERS_OVERRIDES,
+  "@modelcontextprotocol/sdk": "1.32.0",
+  "body-parser": "2.4.0",
+  dompurify: "3.4.17",
+  zod: "4.6.6"
+};
+
+const REQUIRED_SMITHERS_DEPENDENCIES = {
+  ...LEGACY_GENERATED_SMITHERS_DEPENDENCIES,
+  dependencies: {
+    ...LEGACY_GENERATED_SMITHERS_DEPENDENCIES.dependencies,
+    zod: "4.6.6"
   },
   overrides: REQUIRED_SMITHERS_OVERRIDES
 } as const;
@@ -95,11 +112,14 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
   "@effect/platform-bun@4.0.0-beta.105": "2026-08-07T01:13:10.227Z",
   "@effect/platform-node-shared@4.0.0-beta.105": "2026-08-07T01:16:00.798Z",
   "@effect/sql-sqlite-bun@4.0.0-beta.105": "2026-08-07T01:13:00.629Z",
+  "@modelcontextprotocol/sdk@1.32.0": "2026-10-02T17:32:51.427Z",
   "@moonshot-ai/kimi-code@0.29.1": "2026-07-24T05:27:08.545Z",
+  "body-parser@2.4.0": "2026-10-22T11:39:38.614Z",
+  "dompurify@3.4.17": "2026-10-12T12:41:28.880Z",
   "effect@4.0.0-beta.105": "2026-08-07T01:37:58.225Z",
   "smthrs@0.35.0": "2026-08-17T20:35:37.787Z",
   "typescript@6.0.3": "2026-04-16T23:38:27.905Z",
-  "zod@4.4.3": "2026-05-04T07:06:40.819Z"
+  "zod@4.6.6": "2026-10-11T16:18:23.878Z"
 };
 
 // The pin list above closes the hazard one package at a time, and only for
@@ -126,11 +146,9 @@ const SMITHERS_PIN_PUBLISH_TIMES: Readonly<Record<string, string>> = {
 // runs -- npm does not freeze a future `--before` view. The cutoff also decides
 // which transitive releases launch installs, so it is also what moves a security
 // fix in an open range into the launched engine; `pnpm-lock.yaml` does not reach
-// this install. This instant is about ten hours after `source-map-js@1.2.2`
-// (2026-09-30T14:08:09Z), the newest of the releases that fix the October 2026
-// advisories in `proxy-addr`, `@vue/server-renderer`, `source-map-js` and
-// `prosemirror-view`, and well after every pin.
-export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-10-01T00:00:00Z";
+// this install. The current instant is more than two days after the newest
+// pinned security release, body-parser 2.4.0, reached the registry.
+export const SMITHERS_DEPENDENCY_RESOLUTION_CUTOFF = "2026-10-25T00:00:00Z";
 
 /**
  * Fails when a pinned version has no recorded publish instant, or when the
@@ -223,17 +241,16 @@ export function renderSmithersPackageJson(): string {
  * replacement text, or `undefined` when the manifest is not one this runtime is
  * willing to rewrite on the project's behalf.
  *
- * Two shapes migrate, and nothing else does.
+ * Three shapes migrate, and nothing else does.
  *
  * 1. The frozen 0.32 shape (`smithers-orchestrator@0.32.0` plus the
  *    `4.0.0-beta.102` override family). Extra packages in the three dependency
  *    extension maps are preserved and only the generated pins are rewritten.
- * 2. A manifest identical to `renderSmithersPackageJson()` apart from
- *    `dependencies.smthrs`, which must name a version in
- *    `MIGRATABLE_PRIOR_SMITHERS_VERSIONS`. This one is strict on purpose: it
- *    rewrites nothing it did not itself generate, so a hand-edited or corrupted
- *    manifest is still rejected and surfaces as a launch failure the operator
- *    resolves deliberately, rather than being quietly overwritten.
+ * 2. The exact previously generated `smthrs@0.35.0` manifest, before the
+ *    security pins and cutoff moved forward.
+ * 3. That same generated shape with `dependencies.smthrs` at a version in
+ *    `MIGRATABLE_PRIOR_SMITHERS_VERSIONS`. Both are strict on purpose: hand
+ *    edits or corruption are rejected instead of silently overwritten.
  *
  * The name is historical -- it predates case 2 -- and is kept so the three call
  * sites and the durable behaviour they encode stay put across the pin bump.
@@ -243,11 +260,11 @@ export function migrateStockSmithers032PackageManifest(value: unknown): string |
 }
 
 /**
- * Case 2 above. Accepts only the exact generated document for a superseded pin:
+ * Cases 2 and 3 above. Accepts only the exact old generated document:
  * the same six top-level keys, the same `name`/`private`/`type`, and dependency
- * sections whose key sets and values match the current ones entry for entry,
- * with `smthrs` at the prior version. Any extra dependency, any missing one, any
- * other version drift and any override outside `REQUIRED_SMITHERS_OVERRIDES`
+ * sections whose key sets and values match the recorded legacy ones entry for entry,
+ * with `smthrs` at the current or recorded prior version. Any extra dependency,
+ * any missing one, any other version drift and any override outside the legacy set
  * rejects. The replacement is the canonical current document, so a manifest that
  * only reordered keys is normalised rather than refused.
  */
@@ -256,7 +273,10 @@ function migrateGeneratedSmithersManifest(value: unknown): string | undefined {
   const dependencies = value.dependencies;
   if (!isRecord(dependencies)) return undefined;
   const pinned = dependencies[SMITHERS_PACKAGE_NAME];
-  if (typeof pinned !== "string" || !MIGRATABLE_PRIOR_SMITHERS_VERSIONS.some((prior) => prior === pinned)) {
+  if (
+    typeof pinned !== "string" ||
+    (pinned !== SMITHERS_VERSION && !MIGRATABLE_PRIOR_SMITHERS_VERSIONS.some((prior) => prior === pinned))
+  ) {
     return undefined;
   }
   return matchesGeneratedSmithersManifest(value, pinned) ? renderSmithersPackageJson() : undefined;
@@ -265,9 +285,9 @@ function migrateGeneratedSmithersManifest(value: unknown): string | undefined {
 function matchesGeneratedSmithersManifest(value: Record<string, unknown>, priorSmithersVersion: string): boolean {
   const expected: Record<string, unknown> = {
     ...GENERATED_SMITHERS_MANIFEST_IDENTITY,
-    ...REQUIRED_SMITHERS_DEPENDENCIES,
+    ...LEGACY_GENERATED_SMITHERS_DEPENDENCIES,
     dependencies: {
-      ...REQUIRED_SMITHERS_DEPENDENCIES.dependencies,
+      ...LEGACY_GENERATED_SMITHERS_DEPENDENCIES.dependencies,
       [SMITHERS_PACKAGE_NAME]: priorSmithersVersion
     }
   };
@@ -311,6 +331,7 @@ function migrateStock032SmithersManifest(value: unknown): string | undefined {
   }
   delete dependencies["smithers-orchestrator"];
   dependencies[SMITHERS_PACKAGE_NAME] = SMITHERS_VERSION;
+  dependencies.zod = REQUIRED_SMITHERS_DEPENDENCIES.dependencies.zod;
   const overrides = migratedSections.overrides!;
   for (const [name, version] of Object.entries(REQUIRED_SMITHERS_OVERRIDES)) overrides[name] = version;
   return `${JSON.stringify(

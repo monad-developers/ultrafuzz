@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   MIGRATABLE_PRIOR_SMITHERS_VERSIONS,
+  REQUIRED_SMITHERS_OVERRIDES,
   SMITHERS_VERSION,
   assertSmithersPackageManifest,
   migrateStockSmithers032PackageManifest,
@@ -13,18 +14,35 @@ function currentManifest(): Record<string, unknown> {
   return JSON.parse(renderSmithersPackageJson()) as Record<string, unknown>;
 }
 
-/** The document `renderSmithersPackageJson` produced under a superseded pin. */
+/** The exact generated document before the October dependency security pins. */
 function priorPinManifest(priorSmithersVersion: string): Record<string, unknown> {
   const manifest = currentManifest();
   manifest.dependencies = {
     ...(manifest.dependencies as Record<string, unknown>),
-    smthrs: priorSmithersVersion
+    smthrs: priorSmithersVersion,
+    zod: "4.4.3"
   };
+  manifest.overrides = Object.fromEntries(
+    Object.entries(manifest.overrides as Record<string, unknown>).filter(
+      ([name]) => name === "effect" || name.startsWith("@effect/")
+    )
+  );
   return manifest;
 }
 
 test("the generated Smithers package manifest is the one accepted current document", () => {
-  assert.doesNotThrow(() => assertSmithersPackageManifest(currentManifest()));
+  const manifest = currentManifest();
+  assert.doesNotThrow(() => assertSmithersPackageManifest(manifest));
+  assert.equal((manifest.dependencies as Record<string, string>).zod, "4.6.6");
+  assert.deepEqual(manifest.overrides, REQUIRED_SMITHERS_OVERRIDES);
+  for (const [name, version] of Object.entries({
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "body-parser": "2.4.0",
+    dompurify: "3.4.17",
+    zod: "4.6.6"
+  })) {
+    assert.equal((manifest.overrides as Record<string, string>)[name], version);
+  }
 });
 
 test("non-stock historical Smithers dependency manifests fail instead of being migrated", () => {
@@ -69,17 +87,13 @@ test("the exact 0.32 generated manifest migrates once and preserves package exte
   // this path into a wholesale regeneration.
   assert.deepEqual(migrated.dependencies, {
     "@moonshot-ai/kimi-code": "0.29.1",
-    zod: "4.4.3",
+    zod: "4.6.6",
     "custom-agent-package": "1.2.3",
     smthrs: SMITHERS_VERSION
   });
   assert.deepEqual(migrated.devDependencies, { typescript: "6.0.3" });
   assert.deepEqual(migrated.overrides, {
-    effect: "4.0.0-beta.105",
-    "@effect/opentelemetry": "4.0.0-beta.105",
-    "@effect/platform-bun": "4.0.0-beta.105",
-    "@effect/platform-node-shared": "4.0.0-beta.105",
-    "@effect/sql-sqlite-bun": "4.0.0-beta.105",
+    ...REQUIRED_SMITHERS_OVERRIDES,
     "custom-transitive-package": "3.4.5"
   });
 
@@ -105,6 +119,15 @@ test("a superseded generated manifest migrates forward in place so a durable run
     assert.equal(migratedText, renderSmithersPackageJson(), `${prior} must migrate to the current document`);
     assert.doesNotThrow(() => assertSmithersPackageManifest(JSON.parse(migratedText as string)));
   }
+});
+
+test("the prior 0.35.0 manifest migrates its vulnerable pins without changing the runner", () => {
+  const old = priorPinManifest(SMITHERS_VERSION);
+  assert.throws(() => assertSmithersPackageManifest(old), /must retain Ultrafuzz's exact runner versions/u);
+  const migratedText = migrateStockSmithers032PackageManifest(old);
+  assert.equal(migratedText, renderSmithersPackageJson());
+  assert.doesNotThrow(() => assertSmithersPackageManifest(JSON.parse(migratedText as string)));
+  assert.equal(migrateStockSmithers032PackageManifest(currentManifest()), undefined);
 });
 
 test("the current generated manifest is left alone rather than rewritten", () => {

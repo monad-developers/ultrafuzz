@@ -33,7 +33,7 @@ export function writeFakeNpmInstaller(
     ["@smthrs/tool-context", SMITHERS_VERSION],
     ["react", "19.2.4"],
     ["smthrs", SMITHERS_VERSION],
-    ["zod", "4.4.3"]
+    ["zod", "4.6.6"]
   ];
   fs.writeFileSync(
     npm,
