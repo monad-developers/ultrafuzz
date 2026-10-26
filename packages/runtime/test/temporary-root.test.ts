@@ -35,16 +35,22 @@ test("scratch is reclaimed between test cases while a shared fixture remains", (
 test("scratch is reclaimed after a failed test body", () => {
   const fixture = temporaryRoot("ufz-failed-test-");
   const marker = path.join(fixture, "created-root.txt");
+  const verified = path.join(fixture, "verified.txt");
   const childTest = path.join(fixture, "failure.test.mjs");
   fs.writeFileSync(
     childTest,
     [
+      'import assert from "node:assert/strict";',
       `import { test } from ${JSON.stringify(new URL("./runtime-test-shard.js", import.meta.url).href)};`,
       `import { temporaryRoot } from ${JSON.stringify(new URL("./temporary-root.js", import.meta.url).href)};`,
       'import fs from "node:fs";',
       'test("deliberate failure", () => {',
       `  fs.writeFileSync(${JSON.stringify(marker)}, temporaryRoot("ufz-failing-body-"));`,
       '  throw new Error("deliberate failure sentinel");',
+      "});",
+      'test("cleanup follows failed test", () => {',
+      `  assert.equal(fs.existsSync(fs.readFileSync(${JSON.stringify(marker)}, "utf8")), false);`,
+      `  fs.writeFileSync(${JSON.stringify(verified)}, "yes");`,
       "});"
     ].join("\n")
   );
@@ -53,5 +59,6 @@ test("scratch is reclaimed after a failed test body", () => {
   });
   assert.equal(child.status, 1, `${child.stdout}${child.stderr}`);
   assert.match(`${child.stdout}${child.stderr}`, /deliberate failure sentinel/u);
+  assert.equal(fs.readFileSync(verified, "utf8"), "yes", `${child.stdout}${child.stderr}`);
   assert.equal(fs.existsSync(fs.readFileSync(marker, "utf8")), false);
 });
