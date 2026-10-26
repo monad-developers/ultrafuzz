@@ -28,7 +28,7 @@
     },
     "analysis-bundle-attempt-history.schema.json": {
       "summary_filename": "analysis-bundle-attempt-history.summary.txt",
-      "schema_bytes": 1598,
+      "schema_bytes": 1593,
       "summary_bytes": 793,
       "exceeds_single_read": false
     },
@@ -52,7 +52,7 @@
     },
     "analysis-bundle-terminal-status.schema.json": {
       "summary_filename": "analysis-bundle-terminal-status.summary.txt",
-      "schema_bytes": 2090,
+      "schema_bytes": 2085,
       "summary_bytes": 922,
       "exceeds_single_read": false
     },
@@ -178,7 +178,7 @@
     },
     "event-record.schema.json": {
       "summary_filename": "event-record.summary.txt",
-      "schema_bytes": 48141,
+      "schema_bytes": 48264,
       "summary_bytes": 14009,
       "exceeds_single_read": false
     },
@@ -232,8 +232,8 @@
     },
     "invariant-campaign-plan-v2.schema.json": {
       "summary_filename": "invariant-campaign-plan-v2.summary.txt",
-      "schema_bytes": 6063,
-      "summary_bytes": 1419,
+      "schema_bytes": 6171,
+      "summary_bytes": 1458,
       "exceeds_single_read": false
     },
     "invariant-evidence-ledger.schema.json": {
@@ -262,8 +262,8 @@
     },
     "node-attempt-ledger.schema.json": {
       "summary_filename": "node-attempt-ledger.summary.txt",
-      "schema_bytes": 9679,
-      "summary_bytes": 1665,
+      "schema_bytes": 9731,
+      "summary_bytes": 1682,
       "exceeds_single_read": false
     },
     "planned-graph.schema.json": {
@@ -280,7 +280,7 @@
     },
     "property-campaign.schema.json": {
       "summary_filename": "property-campaign.summary.txt",
-      "schema_bytes": 23822,
+      "schema_bytes": 23797,
       "summary_bytes": 2954,
       "exceeds_single_read": false
     },
@@ -304,7 +304,7 @@
     },
     "reference-manifest.schema.json": {
       "summary_filename": "reference-manifest.summary.txt",
-      "schema_bytes": 2422,
+      "schema_bytes": 2417,
       "summary_bytes": 867,
       "exceeds_single_read": false
     },
@@ -334,8 +334,8 @@
     },
     "run-state.schema.json": {
       "summary_filename": "run-state.summary.txt",
-      "schema_bytes": 32815,
-      "summary_bytes": 3457,
+      "schema_bytes": 33072,
+      "summary_bytes": 3491,
       "exceeds_single_read": false
     },
     "selected-strategies.schema.json": {

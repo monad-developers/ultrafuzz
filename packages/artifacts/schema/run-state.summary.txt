@@ -1,6 +1,6 @@
 # run-state.schema.json - derived field summary
 # Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
-# schema: 32815 bytes, sha256 1d183fff48dcb701
+# schema: 33072 bytes, sha256 065fc226c1332441
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
 # "(rules)" counts constraints that bind several members at once and are not shown member by member.
@@ -54,7 +54,7 @@
       *node_id: string
       *workflow_task_id: string
       *failed_attempt: integer
-      *failure_category: enum(dependency-cascade|artifact-contract|provider-interruption|agent-failure)
+      *failure_category: enum(dependency-cascade|artifact-contract|tool-unavailable|provider-interruption|agent-failure)
     *source_workflow_run_id: string
     *source_workflow_link_id: string
      workflow_run_id: string
@@ -77,7 +77,7 @@
       *node_id: string
       *workflow_task_id: string
       *failed_attempt: integer
-      *failure_category: enum(dependency-cascade|artifact-contract|provider-interruption|agent-failure)
+      *failure_category: enum(dependency-cascade|artifact-contract|tool-unavailable|provider-interruption|agent-failure)
     *source_workflow_run_id: string
     *source_workflow_link_id: string
      workflow_run_id: string

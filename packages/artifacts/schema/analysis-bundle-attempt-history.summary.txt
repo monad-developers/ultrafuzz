@@ -1,6 +1,6 @@
 # analysis-bundle-attempt-history.schema.json - derived field summary
 # Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
-# schema: 1598 bytes, sha256 19ec5920de192878
+# schema: 1593 bytes, sha256 6397eb82c0be0180
 # "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
 # prefixed with a schema filename when the detail lives in another document of the same bundle.
 # "(rules)" counts constraints that bind several members at once and are not shown member by member.
