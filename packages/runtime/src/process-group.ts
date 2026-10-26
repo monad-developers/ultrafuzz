@@ -16,20 +16,28 @@ function processFailure(code: string, message: string): Error {
 }
 
 function sessionProcessGroups(sessionId: number): Set<number> {
-  const groups = new Set([sessionId]);
+  const groups = new Set<number>();
   if (process.platform !== "linux") return groups;
   // `detached` creates a new session as well as a process group. timeout(1)
   // creates another group inside it; killing only -child.pid would miss that
   // entire subtree, including after the original launcher has exited.
-  for (const entry of readdirSync("/proc")) {
+  let entries: string[];
+  try {
+    entries = readdirSync("/proc");
+  } catch {
+    // The launcher's own group is known without /proc. Discovery of nested
+    // groups is best effort when procfs is temporarily unavailable.
+    return groups;
+  }
+  for (const entry of entries) {
     if (!/^\d+$/u.test(entry)) continue;
     let stat: string;
     try {
       stat = readFileSync(`/proc/${entry}/stat`, "utf8");
-    } catch (error) {
-      if (error instanceof Error && "code" in error && ["ENOENT", "ESRCH", "EACCES"].includes(String(error.code)))
-        continue;
-      throw error;
+    } catch {
+      // A process can exit or become unreadable while scanning. Other procfs
+      // read errors must not interrupt cleanup of the known process group.
+      continue;
     }
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
     const groupId = Number(fields[2]);
@@ -40,12 +48,18 @@ function sessionProcessGroups(sessionId: number): Set<number> {
 
 function signalProcessGroup(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
   if (child.pid === undefined) return;
-  for (const groupId of sessionProcessGroups(child.pid)) {
+  const signalGroup = (groupId: number): void => {
     try {
       process.kill(-groupId, signal);
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
     }
+  };
+  // Signal the group created by detached spawn before relying on procfs to
+  // discover any nested groups in its session.
+  signalGroup(child.pid);
+  for (const groupId of sessionProcessGroups(child.pid)) {
+    if (groupId !== child.pid) signalGroup(groupId);
   }
 }
 

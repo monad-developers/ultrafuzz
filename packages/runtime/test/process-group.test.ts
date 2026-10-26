@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { runProcessGroup } from "../src/process-group.js";
 import { temporaryRoot } from "./temporary-root.js";
@@ -184,6 +185,46 @@ test("process group cancellation escalates against a resistant leader and descen
     await rejected;
   }
 });
+
+for (const operation of ["readdirSync", "readFileSync"] as const) {
+  test(
+    `process group cancellation kills the launcher when /proc ${operation} fails`,
+    { ...posix, skip: process.platform !== "linux" },
+    async () => {
+      const backend = fixture();
+      const controller = new AbortController();
+      const result = runProcessGroup(process.execPath, [backend.script, "tree", backend.pidsPath], {
+        ...options,
+        signal: controller.signal
+      });
+      const rejected = assert.rejects(result, { code: "TASK_ABORTED" });
+      let failedReads = 0;
+      try {
+        await waitFor(() => backend.pids().length === 3);
+        const procFailure = mock.method(fs, operation, (target: fs.PathLike) => {
+          if (operation === "readdirSync") assert.equal(target, "/proc");
+          else assert.match(String(target), /^\/proc\/\d+\/stat$/u);
+          failedReads += 1;
+          throw Object.assign(new Error("procfs unavailable"), { code: "EIO" });
+        });
+        syncBuiltinESMExports();
+        try {
+          controller.abort();
+        } finally {
+          procFailure.mock.restore();
+          syncBuiltinESMExports();
+        }
+        assert.ok(failedReads > 0, `the ${operation} failure must be exercised`);
+        await rejected;
+        await waitFor(() => backend.pids().every((pid) => !running(pid)));
+      } finally {
+        controller.abort();
+        cleanup(backend.pids());
+        await rejected;
+      }
+    }
+  );
+}
 
 test("process group never launches with an already canceled signal", posix, async () => {
   const backend = fixture();
