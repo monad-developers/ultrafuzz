@@ -338,7 +338,7 @@ function codexHookArguments(hookCommand: string): string[] {
 
 function suppliesHookConfiguration(args: string[]): boolean {
   return (
-    args.some((argument) => /^(?:--config=|-c)?\s*(?:hooks(?:[.=]|\s*=)|features\.hooks\s*=)/u.test(argument)) ||
+    args.some((argument) => /^(?:--config=|-c=?)?\s*(?:hooks(?:[.=]|\s*=)|features\.hooks\s*=)/u.test(argument)) ||
     args.some(
       (argument, index) => argument === "--disable=hooks" || (argument === "--disable" && args[index + 1] === "hooks")
     )

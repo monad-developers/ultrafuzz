@@ -477,9 +477,14 @@ test("configuration qualifies the provider, preserves flags and isolates attempt
     "hooks={}",
     "--config=hooks.state={}",
     "features.hooks=false",
+    "-c=features.hooks=false",
+    "-c=hooks.PostToolUse=[]",
+    "-cfeatures.hooks=false",
+    "-chooks.PostToolUse=[]",
+    "-chooks={}",
     "--disable=hooks"
   ]) {
-    const custom = { ...command, args: ["exec", "-c", flag, "-"] };
+    const custom = { ...command, args: ["exec", ...(flag.startsWith("-") ? [flag] : ["-c", flag]), "-"] };
     assert.equal(configure({ command: custom }), custom);
     assert.match(defined(messages.at(-1)), /caller already supplies.*inactive/u);
   }
@@ -543,7 +548,7 @@ function fixtureCodexHookSettings(root: string, codexHome: string, marker: strin
   fs.writeFileSync(path.join(codexHome, "hooks.json"), JSON.stringify({ hooks: { PreToolUse: groups } }));
 }
 
-function scriptedResponsesServer(verification: string) {
+function scriptedResponsesServer(verification: string, mode: "replay" | "failed" | "stopped" = "replay") {
   const state = {
     results: [] as string[],
     outputs: new Map<string, string>(),
@@ -580,7 +585,12 @@ function scriptedResponsesServer(verification: string) {
           id: `g${generation}-fc-${requestCount}`,
           call_id: `g${generation}-${requestCount === 1 ? "original" : "duplicate"}`,
           name: "exec_command",
-          arguments: JSON.stringify({ cmd: verification, yield_time_ms: 250, login: false })
+          arguments: JSON.stringify({
+            cmd: verification,
+            yield_time_ms: 250,
+            login: false,
+            ...(mode === "stopped" ? { tty: true } : {})
+          })
         };
       } else if (requestCount === 3) {
         assert.ok(Number.isSafeInteger(nativeSession), JSON.stringify(results));
@@ -589,15 +599,24 @@ function scriptedResponsesServer(verification: string) {
           id: `g${generation}-fc-poll`,
           call_id: `g${generation}-poll`,
           name: "write_stdin",
-          arguments: JSON.stringify({ session_id: nativeSession, chars: "", yield_time_ms: 10000 })
+          arguments: JSON.stringify({
+            session_id: nativeSession,
+            chars: mode === "stopped" ? "\u0003" : "",
+            yield_time_ms: 10000
+          })
         };
       } else if (requestCount === 4) {
         item = {
           type: "function_call",
           id: `g${generation}-fc-replay`,
-          call_id: `g${generation}-original`,
+          call_id: `g${generation}-${mode === "replay" ? "original" : "next"}`,
           name: "exec_command",
-          arguments: JSON.stringify({ cmd: verification, yield_time_ms: 250, login: false })
+          arguments: JSON.stringify({
+            cmd: verification,
+            yield_time_ms: 250,
+            login: false,
+            ...(mode === "stopped" ? { tty: true } : {})
+          })
         };
       } else {
         item = {
@@ -761,6 +780,128 @@ for (const rewrite of [false, true])
             clearTimeout(timer);
             stop();
           }
+        }
+      } finally {
+        if (savedBin === undefined) delete process.env.ULTRAFUZZ_TRUSTED_BIN;
+        else process.env.ULTRAFUZZ_TRUSTED_BIN = savedBin;
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  );
+
+for (const mode of ["failed", "stopped"] as const)
+  test(
+    `qualified real Codex CLI writes a completion receipt after a ${mode} command`,
+    { timeout: 45_000, skip: !process.env.ULTRAFUZZ_TEST_CODEX },
+    async () => {
+      const root = temporaryRoot("ufz-real-command-terminal-");
+      const bin = commandHookFixtureCli(root);
+      const counter = path.join(root, "work-count");
+      const marker = path.join(root, "untrusted-hook-ran");
+      const codexHome = path.join(root, "codex-home");
+      fs.mkdirSync(codexHome);
+      fixtureCodexHookSettings(root, codexHome, marker, false);
+      const worker = `
+        const fs = require('node:fs');
+        const first = !fs.existsSync(${JSON.stringify(counter)});
+        fs.appendFileSync(${JSON.stringify(counter)}, 'work\\n');
+        if (first) {
+          ${mode === "failed" ? "setTimeout(() => process.exit(7), 6000);" : "setInterval(() => {}, 1000); setTimeout(() => process.exit(124), 30000);"}
+        } else {
+          console.log('next-completed');
+        }
+      `;
+      const verification = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(worker.replace(/\s+/gu, " ").trim())}`;
+      const { server, state } = scriptedResponsesServer(verification, mode);
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      const address = server.address();
+      assert.ok(address !== null && typeof address === "object");
+      const savedBin = process.env.ULTRAFUZZ_TRUSTED_BIN;
+      process.env.ULTRAFUZZ_TRUSTED_BIN = bin;
+      try {
+        const command = configureCommandInvocationGuard({
+          engine: "codex",
+          cwd: root,
+          command: {
+            command: defined(process.env.ULTRAFUZZ_TEST_CODEX),
+            args: [
+              "exec",
+              "--skip-git-repo-check",
+              "--json",
+              "--enable",
+              "unified_exec",
+              "--dangerously-bypass-approvals-and-sandbox",
+              "-c",
+              'model="gpt-5.5"',
+              "-c",
+              'model_provider="fixture"',
+              "-c",
+              `model_providers.fixture={name="fixture",base_url="http://127.0.0.1:${address.port}/v1",env_key="ULTRAFUZZ_FIXTURE_API_KEY",wire_api="responses"}`,
+              "run verification"
+            ],
+            env: {
+              CODEX_HOME: codexHome,
+              ULTRAFUZZ_FIXTURE_API_KEY: "fixture-only",
+              OPENAI_API_KEY: "",
+              CODEX_API_KEY: ""
+            }
+          },
+          taskContext: { runId: "run", nodeId: "node", attempt: 1, iteration: 0 },
+          diagnostic: (message) => assert.match(message, /enabled/u)
+        });
+        const startedAt = Date.now();
+        const child = spawn(command.command, command.args, {
+          cwd: root,
+          env: { ...process.env, ...command.env },
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: true
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => {
+          stdout += String(chunk);
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += String(chunk);
+        });
+        const stop = () => {
+          try {
+            if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+          } catch {
+            /* Already exited. */
+          }
+        };
+        const timer = setTimeout(stop, 35_000);
+        try {
+          const [code] = await once(child, "exit");
+          assert.equal(state.error, undefined);
+          assert.equal(code, 0, `${stderr}\n${stdout}\n${JSON.stringify(state.results)}`);
+          assert.match(state.results.join("\n"), /coalesced/u);
+          const terminal = defined(state.outputs.get("g0-poll"));
+          if (mode === "failed") assert.match(terminal, /Process exited with code 7/u);
+          else {
+            assert.match(terminal, /Process exited with code/u);
+            assert.ok(Date.now() - startedAt < 20_000, "native session stop must finish before the worker fallback");
+          }
+          assert.match(defined(state.outputs.get("g0-next")), /next-completed/u);
+          assert.equal(fs.readFileSync(counter, "utf8"), "work\nwork\n");
+          assert.equal(fs.existsSync(marker), false);
+          const registryRoot = registry(command);
+          const handles = fs.readdirSync(registryRoot).filter((file) => /^[a-f0-9]{64}-\d+\.json$/u.test(file));
+          assert.equal(handles.length, 2);
+          for (const file of handles)
+            assert.equal(commandInvocationStatus(registryRoot, file.slice(0, -5)).status, "completed");
+          const hookInputs = fs
+            .readFileSync(path.join(root, "hook-inputs"), "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { hook_event_name: string });
+          assert.equal(hookInputs.filter((input) => input.hook_event_name === "PostToolUse").length, 2);
+        } finally {
+          clearTimeout(timer);
+          stop();
         }
       } finally {
         if (savedBin === undefined) delete process.env.ULTRAFUZZ_TRUSTED_BIN;
