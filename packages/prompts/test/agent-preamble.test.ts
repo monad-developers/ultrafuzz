@@ -18,7 +18,7 @@ describe("agent preamble MDX", () => {
     });
     expect(sha256(authorization)).toBe("708458aee8dcfc26a35ca5778274b8f81146332ebc3227302aff8a98e60f2535");
     expect(sha256(boundary)).toBe("f25d5978ba27833deb062ebae4f7a21e9c3e7cc7ea48a0a49d49aceb3f9214a1");
-    expect(sha256(runtime)).toBe("05b91daad522fea769116af2bbeb0aa1224129f8192b235ef2d7f8e4973ccfd2");
+    expect(sha256(runtime)).toBe("8af49367b6aef2ec8544ba1499e2f5ed6e1f9733c031ceaa54e8cff566c15603");
 
     const taskPrompt = "# Node-specific prompt\n\nDo the assigned work.";
     const withoutOperator = renderAgentPreambleTemplate("agent-prompt", {
@@ -30,8 +30,8 @@ describe("agent preamble MDX", () => {
     });
     const mandatoryPrefix = `${authorization}\n\n${boundary}\n\n${runtime}\n\n`;
     expect(withoutOperator).toBe(`${mandatoryPrefix}${taskPrompt}`);
-    expect(Buffer.byteLength(mandatoryPrefix, "utf8")).toBe(1_478);
-    expect(sha256(mandatoryPrefix)).toBe("8b796bcd9dd9b811a0a655c928ad58badf1a037e79d9cc9097917a846804bb5f");
+    expect(Buffer.byteLength(mandatoryPrefix, "utf8")).toBe(1_874);
+    expect(sha256(mandatoryPrefix)).toBe("cfd9f1ddf6a692c918ef179db0b4934cb9431f90cd822d26440754a711d87179");
 
     const operatorPrompt = "Focus on authorization boundaries.";
     expect(

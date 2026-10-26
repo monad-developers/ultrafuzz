@@ -89,6 +89,8 @@ const {
 } = await import(artifactsModule);
 const {
   applyWorkspacePatch,
+  backendCheckpointDirectory,
+  withBackendFinalization,
   canonicalPropertiesMarkdownParityIssues,
   captureWorkspacePatch,
   captureWorkspaceTree,
@@ -106,6 +108,7 @@ const {
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   projectCanonicalFinalReport,
   readWorkspacePreparationAuthority,
+  renderBackendConcurrencyContext,
   replaceWorkspacePreparationEvidence,
   restoreWorkspaceTreeWithIndexLockRecovery,
   runProcessGroup,
@@ -351,6 +354,9 @@ function plannedOutputSchema(output: (typeof taskSpecs)[number]["outputs"][numbe
 }
 
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
+// The launcher supplies the current run/resume/fork ceiling. Resolve CPUs here, once,
+// so static and dynamically materialized tasks share the executing host's allocation.
+const backendConcurrencyContext = renderBackendConcurrencyContext(__ULTRAFUZZ_MAX_PARALLEL_AGENTS__);
 const loadedWorkflowPath = fileURLToPath(import.meta.url);
 const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH;
 const admittedWorkflowControls = admitWorkflowControls(loadedWorkflowPath, persistedWorkflowPath);
@@ -491,6 +497,11 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       ...compiledTaskSourceIdentity(task),
       branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
+      finalizationGraceMs: task.metadata.artifacts.outputs.some(
+        (output) => output.contract === "ultrafuzz/invariant-campaign-plan@2"
+      )
+        ? __ULTRAFUZZ_FINALIZATION_GRACE_MS__
+        : 0,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
@@ -2427,7 +2438,12 @@ function baseAgentForProfile(
     // their verifier markers. The metadata-only instance created while the
     // workflow is rendered receives no dependency access. The run friction log,
     // when enabled, is the only run-level root and holds no task inputs.
-    addDir: [task.artifactDir, ...dependencyArtifactDirs, ...frictionLogAddDir(task)]
+    addDir: [
+      task.artifactDir,
+      ...dependencyArtifactDirs,
+      ...frictionLogAddDir(task),
+      ...(task.finalizationGraceMs > 0 ? [backendCheckpointDirectory(task.runRoot, task.id)] : [])
+    ]
   });
   if (selected === null || selected === undefined || (Array.isArray(selected) && selected.length === 0)) {
     throw new Error(`agent factory returned no agents: ${profile.agentRef}`);
@@ -2619,6 +2635,7 @@ function artifactAwareAgent(
           }
         }),
     generate: async (args) => {
+      const generationStartedAt = Date.now();
       const smithersAttempt = args?.taskContext?.attempt ?? 1;
       const firstGenerationForAttempt = !attemptedGenerations.has(smithersAttempt);
       attemptedGenerations.add(smithersAttempt);
@@ -2705,10 +2722,37 @@ function artifactAwareAgent(
         // arbitrary or absent terminal text cannot become a second contract.
         const unstructuredArgs = { ...attemptArgs };
         Reflect.deleteProperty(unstructuredArgs, "outputSchema");
+        if (continuationAgent.cliEngine !== "codex" && continuationAgent.cliEngine !== "claude-code") {
+          process.stderr.write(
+            "ultrafuzz.command_invocation unavailable: provider has no qualified prelaunch hook; command guard inactive\n"
+          );
+        }
         // This is a privileged engine-to-wrapper capability. It must never
         // cross into an adapter, model process, callback, or serialized event.
         Reflect.deleteProperty(unstructuredArgs, "ultrafuzzTaskRuntime");
-        const result = await executionAgent.generate(unstructuredArgs);
+        const generationAgent = executionAgent;
+        const result =
+          task.finalizationGraceMs > 0
+            ? await withBackendFinalization({
+                directory: backendCheckpointDirectory(task.runRoot, task.id),
+                artifactDirectory: task.artifactDir,
+                mirrorArtifactDirectory: path.join(task.workspacePath, "artifacts", task.attemptId),
+                workspace: { root: task.workspacePath, productionSourceRoots: task.productionSourceRoots },
+                binding: JSON.stringify([
+                  task.id,
+                  task.sourceRevision,
+                  originalPrompt,
+                  [...assertDependencyArtifactAdmissionCurrent(task).snapshotsByProducerAttempt]
+                    .map(([id, snapshot]) => [id, createHash("sha256").update(snapshot.marker.bytes).digest("hex")])
+                    .sort(([left], [right]) => left.localeCompare(right))
+                ]),
+                startedAt: generationStartedAt,
+                timeoutMs: task.timeoutMs,
+                graceMs: task.finalizationGraceMs,
+                args: unstructuredArgs,
+                generate: (backendArgs) => generationAgent.generate(backendArgs)
+              })
+            : await executionAgent.generate(unstructuredArgs);
         assertDependencyArtifactAdmissionCurrent(task);
         assertFinalReportRunMetadataAuthorityUnchanged(task);
         assertFinalReportPromptAuthorityUnchanged(task);
@@ -3381,6 +3425,7 @@ async function runJsonValidatorPreflight(
 ): Promise<void> {
   const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
   if (findings === undefined) throw new Error("artifact-contract failure: validator preflight schema is unavailable");
+  // Detached workers may drop PATH. Resolve the sealed run's launcher directly.
   const launcherPath = path.join(runRoot, "trusted-bin", process.platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz");
   let stdout: string;
   const startedAt = Date.now();
@@ -3546,6 +3591,16 @@ function materializeWorkspacePatchDependencies(
     throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
   }
   const captures = authenticatedWorkspacePatchCaptures(task, workspaceRoot);
+  // A retained v1 dependency can contain a path a newer runtime excludes from
+  // new captures. Preserve authenticated membership through every tree check,
+  // including resumed-prefix selection and the next producer's baseline.
+  const treeAuthority = {
+    trees: [
+      ...captures.map((capture) => capture.manifest.base_tree),
+      ...(persistedPreparation === undefined ? [] : [persistedPreparation])
+    ],
+    files: captures.flatMap((capture) => capture.manifest.files)
+  };
   // On a RESUME the worktree lives on a durable volume and still holds the previous attempt's state, so it
   // can already sit at -- or past -- some of these dependencies' outputs. Skip the prefix the worktree
   // already holds (issue #312). On a fresh run at the pinned baseline nothing normally matches, though a
@@ -3554,7 +3609,7 @@ function materializeWorkspacePatchDependencies(
   const replayFrom =
     replayWorkspacePatches && captures.length > 0
       ? firstDependencyRequiringReplay(
-          captureWorkspaceTree(workspaceRoot),
+          captureWorkspaceTree(workspaceRoot, treeAuthority),
           captures.map((entry) => entry.manifest)
         )
       : 0;
@@ -3564,7 +3619,7 @@ function materializeWorkspacePatchDependencies(
       // exact dependency result tree is absent and the clean base tree is
       // still present; otherwise the dependency patch is already represented
       // by the dirty workspace and must not be applied over agent changes.
-      const currentTree = captureWorkspaceTree(workspaceRoot);
+      const currentTree = captureWorkspaceTree(workspaceRoot, treeAuthority);
       if (currentTree !== capture.manifest.base_tree) continue;
     }
     applyWorkspacePatch(workspaceRoot, capture, task.productionSourceRoots);
@@ -3573,7 +3628,7 @@ function materializeWorkspacePatchDependencies(
     writeWorkspacePreparationAuthority(
       task.runRoot,
       task.attemptId,
-      captureWorkspaceTree(workspaceRoot),
+      captureWorkspaceTree(workspaceRoot, treeAuthority),
       admittedWorkspacePreparationDependencyDigest(task)
     );
   }
@@ -3581,7 +3636,7 @@ function materializeWorkspacePatchDependencies(
     if (persistedPreparation === undefined && evidenceMode === "require") {
       throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
     }
-    const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot);
+    const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot, treeAuthority);
     workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
     if (persistedPreparation === undefined && evidenceMode === "create") {
       writeWorkspacePatchPreparation(task, preparationTree);
@@ -3599,7 +3654,7 @@ function materializeWorkspacePatchDependencies(
     if (persistedBaseline === undefined && evidenceMode === "require") {
       throw new Error(`artifact-contract failure: workspace patch baseline is unavailable ${task.attemptId}`);
     }
-    const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot);
+    const baselineTree = persistedBaseline ?? captureWorkspaceTree(workspaceRoot, treeAuthority);
     workspacePatchBaselineTrees.set(task.attemptId, baselineTree);
     if (persistedBaseline === undefined && evidenceMode === "create") {
       writeWorkspacePatchBaseline(task, baselineTree);
@@ -4058,7 +4113,7 @@ function replaceSupersededWorkspacePreparation(
       restoreWorkspaceTreeWithIndexLockRecovery(workspaceRoot, base);
       removeStaleWorkspaceFiles(workspaceRoot, base);
       for (const capture of captures) applyWorkspacePatch(workspaceRoot, capture, task.productionSourceRoots);
-      if (captureWorkspaceTree(workspaceRoot) !== replacementTree) {
+      if (captureWorkspaceTree(workspaceRoot, { trees: [replacementTree] }) !== replacementTree) {
         throw new Error(
           `artifact-contract failure: replacement workspace preparation result changed ${task.attemptId}`
         );
@@ -9357,7 +9412,7 @@ export default smithers((ctx) => {
           ]);
           const inputTask = inputTasks.get(task.id);
           const fullTaskPrompt = renderAgentPrompt({
-            runtimeContext: task.runtimeContext,
+            runtimeContext: task.runtimeContext + "\n\n" + backendConcurrencyContext,
             operatorPrompt,
             taskPrompt: promptForTask(task, inputTask),
             frictionLog: frictionLogPaths(task)
@@ -9394,7 +9449,7 @@ export default smithers((ctx) => {
                 dependsOn={[task.preparationId]}
                 skipIf={skipAgent}
                 continueOnFail={task.continueOnFail}
-                timeoutMs={task.timeoutMs}
+                timeoutMs={task.timeoutMs + task.finalizationGraceMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={task.retries}
                 // The planned chain is the whole retry budget. Smithers'

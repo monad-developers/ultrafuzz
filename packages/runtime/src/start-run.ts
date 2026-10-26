@@ -54,6 +54,7 @@ import {
 import { planRun } from "./plan-run.js";
 import { agentAuthenticationEnvironmentVariableNames } from "./provider-credential-environment.js";
 import { refreshRunPrompts } from "./prompt-refresh.js";
+import { previewResumeReset } from "./reset-preview.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import {
@@ -467,6 +468,19 @@ function openRouterCredentialPreflightDiagnostics(
 }
 
 export async function resumeRun(input: WorkflowLifecycleInput): Promise<RuntimeResult<WorkflowLifecycleValue>> {
+  if (
+    (input.dryRun === true || input.resetGeneration !== undefined) &&
+    (input.resetNode === undefined || input.retryFailed === true)
+  ) {
+    return runtimeFailure<WorkflowLifecycleValue>([
+      {
+        code: "WORKFLOW_RESET_PREVIEW_OPTIONS",
+        message: "--dry-run and --reset-generation require --reset-node and cannot be combined with --retry-failed",
+        severity: "error",
+        source: "runtime"
+      }
+    ]);
+  }
   return submitSmithersContinuation(input);
 }
 
@@ -485,7 +499,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       ? recordedLaunchFailure(layout)
       : undefined;
     if (launchFailure !== undefined) return runtimeFailure<WorkflowLifecycleValue>([launchFailure]);
-    releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
+    // Preview must not create the lifecycle lock or prepare controller/prompt files.
+    if (input.dryRun !== true) releaseLifecycleLock = await acquireWorkflowLifecycleLock(layout);
 
     assertRegularFileInside(layout.root, layout.runMetadataPath, "run metadata");
     const metadata = objectRecord(
@@ -504,6 +519,8 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         : (historicalWorkflowIds.at(-1) ?? `ultrafuzz-${runId}`),
       "Smithers run ID"
     );
+    const preview = await previewResumeReset(input, layout.root, smithersRunId);
+    if (preview !== undefined) return runtimeResult(true, preview, []);
     let workflowPath: string;
     // Refresh proves ownership before rendering; the resume below reuses that
     // evidence rather than inspecting the same run a second time (#968).
@@ -535,6 +552,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
     // Modal sandboxes would run its remaining attempts on this host instead. The mode comes from
     // the config, not the optional task manifest, and a run whose config cannot be read is refused.
     const config = readContinuationResolvedConfig(layout.root, configPath, runId);
+    const requestedConcurrency = continuationConcurrency(layout, config, input.maxConcurrency);
     if (config.execution.mode === "cloud") return cloudExecutionRemovedFailure(runId);
     if (input.refreshController !== true && workflowPredatesPlannedSchemaBundles(workflowPath)) {
       return controllerRefreshRequiredFailure(runId);
@@ -611,7 +629,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
             "WORKFLOW_TRUSTED_CLI_UNVERIFIED",
             launcherKept
               ? `resume could not re-verify the run's trusted Ultrafuzz CLI (tasks still call ${launcher}, and their preflight-json-validator step fails while that launcher cannot verify itself)`
-              : `resume could not re-verify the run's trusted Ultrafuzz CLI (${launcher} does not exist, so tasks call whatever \`ultrafuzz\` is on PATH)`,
+              : `resume could not re-verify the run's trusted Ultrafuzz CLI (${launcher} does not exist; refreshed task preflights require this launcher and fail with TOOL_UNAVAILABLE)`,
             error
           )
         );
@@ -643,8 +661,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       smithersRunId,
       workflowPath,
       projectRoot,
-      maxConcurrency: input.maxConcurrency ?? config.run.maxParallelAgents,
+      maxConcurrency: requestedConcurrency,
       resetNode: input.resetNode,
+      resetGeneration: input.resetGeneration,
       force: input.force,
       retryFailed: input.retryFailed,
       tasks,
@@ -693,7 +712,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       recordNativeContinuationState({
         layout,
         config,
-        requestedConcurrency: input.maxConcurrency,
+        requestedConcurrency,
         forgeGuardActive: forgeGuard.active
       });
     }
@@ -703,7 +722,9 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
         run_id: runId,
         workflow_run_id: smithersRunId,
         action: "resume" as const,
-        submitted: !result.alreadyRunning
+        submitted: !result.alreadyRunning,
+        ...(result.resetPlan === undefined ? {} : { reset_plan: result.resetPlan }),
+        ...(result.resetAlreadyApplied === undefined ? {} : { reset_already_applied: result.resetAlreadyApplied })
       },
       diagnostics
     );
@@ -839,6 +860,17 @@ function readContinuationExpandedGraph(layout: RunLayout): unknown {
   // Graph provenance only restores failure-policy rendering when available.
   // Its absence must not become refresh authorization.
   return undefined;
+}
+
+/** Keep a previous one-run override when a continuation does not provide a new one. */
+function continuationConcurrency(layout: RunLayout, config: ResolvedConfig, override?: number): number {
+  if (override !== undefined) return override;
+  try {
+    return readRunState(layout).concurrency.requested_concurrency;
+  } catch {
+    // Legacy/malformed projections must not prevent native continuation.
+    return config.run.maxParallelAgents;
+  }
 }
 
 function recordNativeContinuationState(input: {
@@ -1051,7 +1083,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: "rep
     if (hasRuntimeErrors(preflightDiagnostics)) {
       return runtimeFailure<WorkflowLifecycleValue>(preflightDiagnostics);
     }
-    const requestedConcurrency = input.maxConcurrency ?? sealedConfig.run.maxParallelAgents;
+    const requestedConcurrency = continuationConcurrency(evidence.layout, sealedConfig, input.maxConcurrency);
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       projectRoot: path.resolve(input.projectRoot),

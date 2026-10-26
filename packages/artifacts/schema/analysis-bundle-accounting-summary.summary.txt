@@ -1,0 +1,22 @@
+# analysis-bundle-accounting-summary.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 1860 bytes, sha256 cb0e6041abf79451
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.analysis-bundle.v1)
+*run_count: integer
+*accounted_run_count: integer
+*runtime_observed_run_count: integer
+*runtime_seconds: number|null
+*input_tokens: integer
+*output_tokens: integer
+*cache_read_tokens: integer
+*cache_write_tokens: integer
+*reasoning_tokens: integer
+*total_tokens: integer
+*estimated_spend_usd: number|null
+*partial_pricing: boolean
+*event_count: integer
+*priced_event_count: integer
+*unpriced_event_count: integer

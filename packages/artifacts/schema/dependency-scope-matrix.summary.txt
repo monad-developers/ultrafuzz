@@ -1,0 +1,36 @@
+# dependency-scope-matrix.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 5867 bytes, sha256 14ffcc38b7fbd666
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.dependency-scope-matrix.v1)
+*dependencies: array<object>
+  *dependency_id: string
+  *contract_or_interface: string
+  *dependency_type: string
+  *touched_functions: array<string>
+  *classification: enum(protocol-owned/in-scope|explicitly-trusted/assumed-correct|documented-out-of-scope-or-known-risk|unknown/ambiguous)
+  *source_evidence: array<string>
+  *source_backed_scope_claim: string
+   in_scope_rationale: string|null
+  *selected_test_cases: array<string>
+  *expected_classification_if_red: anyOf[2]  -> $/properties/dependencies/items/properties/expected_classification_if_red/anyOf
+   scope_notes: array<string>
+   harness_notes: array<string>
+*in_scope_test_targets: array<object>
+  *dependency_id: string
+  *rationale: string
+*non_finding_rows: array<object>
+  *dependency_id: string
+  *reason: string
+*generated_tests: array<object>
+  *path: string
+  *checks: array<string>
+*source_backed_in_scope_rationales: array<object>
+  *finding_candidate_id: string
+  *dependency_id: string
+  *evidence_paths: array<string>
+ coverage_notes: array<object>
+  *dependency_id: string
+  *reason: string

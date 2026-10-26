@@ -1,0 +1,85 @@
+# goal-plan.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 14533 bytes, sha256 a524ac1a2dfbd161
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.goal-plan.v1)
+*policy: const(additive-v1)
+*threat_model_sha256: string
+*vulnerability_database: object
+  *planner_catalog_schema_version: const(ultrafuzz.vulnerability-db.planner-catalog.v1)
+  *snapshot_manifest_schema_version: const(ultrafuzz.vulnerability-db.snapshot.v1)
+  *database_schema_version: integer
+  *aggregate_sha256: string
+  *catalog_sha256: string
+*catalog_class_ids: array<string>
+*modeled_threat_ids: array<string>
+*threat_goals: array<object>
+  *kind: const(threat)
+  *id: string
+  *node_id: string
+  *threat_ids: array<string>
+  *class_ids: array<string>
+  *attack_surface_ids: array<string>
+  *title: string
+  *goal_prompt: string
+  *replacements: object<string|number|boolean>
+  *selection_rationale: string
+*class_goals: array<object>
+  *kind: const(class)
+  *id: string
+  *node_id: string
+  *class_id: string
+  *class_replacement_key: string
+  *threat_ids: array<string>
+  *threat_replacement_keys: array<string>
+  *attack_surface_ids: array<string>
+  *coverage_gap: boolean
+  *selected_record: object
+    *id: string
+    *path: string
+    *sha256: string
+    *size_bytes: integer
+  *title: string
+  *goal_prompt: string
+  *replacements: object<string|number|boolean>
+  *selection_rationale: string
+*applicability_decisions: array<object>
+  *class_id: string
+  *decision: enum(applicable|inapplicable)
+  *checks: array<object>
+    *capability_id: string
+    *requirement: enum(required|optional|incompatible)
+    *observed_status: enum(present|absent|unknown)
+    *evidence: array<object>
+      *path: string
+       line: integer
+       end_line: integer
+       symbol: string
+       note: string
+    *rationale: string
+  *rationale: string
+*selected_class_records: array<object>
+  *id: string
+  *path: string
+  *sha256: string
+  *size_bytes: integer
+*roaming_goal: object
+  *node_id: const(goal-roaming)
+  *prompt_path: const(strategies/roaming-goal.md)
+  *purpose: string
+*counts: object
+  *threats: integer
+  *applicable_classes: integer
+  *inapplicable_classes: integer
+  *dynamic_goals: integer
+  *total_goals: integer
+ expected_child_count: integer
+ threat_count: integer
+ applicable_class_count: integer
+ max_dynamic_nodes: integer
+ goal_lanes: array<object>
+  *lane_id: anyOf[2]  -> $/properties/goal_lanes/items/properties/lane_id/anyOf
+  *kind: enum(threat|class|roaming)
+  *node_ids: array<string>

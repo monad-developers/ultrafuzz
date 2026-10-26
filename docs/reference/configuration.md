@@ -30,6 +30,7 @@ forge_rayon_threads = 1
 friction_log_enabled = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
+finalization_grace_ms = 300000
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 refresh_prompts_on_resume = true
@@ -113,21 +114,22 @@ empty path components, and dot components fail validation.
 
 ## Run
 
-| Key                         | Type    | Meaning                                                                     |
-| --------------------------- | ------- | --------------------------------------------------------------------------- |
-| `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.          |
-| `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
-| `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.        |
-| `keep_workspaces`           | boolean | Keep every task worktree instead of deleting the disposable ones.           |
-| `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
-| `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
-| `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
-| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local friction log.           |
-| `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
-| `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour). |
-| `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).    |
-| `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
-| `refresh_prompts_on_resume` | boolean | Re-render unfinished tasks' prompts on `resume`. Defaults to `true`.        |
+| Key                         | Type    | Meaning                                                                                                                                      |
+| --------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.                                                                           |
+| `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                                                                                            |
+| `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.                                                                         |
+| `keep_workspaces`           | boolean | Keep every task worktree instead of deleting the disposable ones.                                                                            |
+| `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.                                                                          |
+| `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                                                                                     |
+| `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.                                                                   |
+| `friction_log_enabled`      | boolean | Let agents record tooling roadblocks in a run-local friction log.                                                                            |
+| `workspace_mode`            | string  | Must be `git-worktree`.                                                                                                                      |
+| `default_timeout_seconds`   | integer | Default node timeout in seconds. The generated default is 3,600 (one hour).                                                                  |
+| `finalization_grace_ms`     | integer | Additional bounded finalization time after a checkpointed invariant backend succeeds (default 300,000 ms; 0 disables; maximum 3,600,000 ms). |
+| `workflow_deadline_seconds` | integer | Workflow wall-time limit, checked only when a command syncs (see below).                                                                     |
+| `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor.                                                                  |
+| `refresh_prompts_on_resume` | boolean | Re-render unfinished tasks' prompts on `resume`. Defaults to `true`.                                                                         |
 
 Other workspace modes are outside the product contract.
 
@@ -155,6 +157,48 @@ resume.
 `workflow_deadline_seconds` accepts up to 604,800 (seven days).
 `default_timeout_seconds` and `controller_lease_seconds` accept up to 86,400
 (one day).
+
+`finalization_grace_ms` applies to invariant campaign tasks that use the
+runtime-supplied `ultrafuzz backend run` wrapper. The original execution deadline
+still stops unfinished or failed backends. An exit code of zero admits a fixed
+finalization deadline: the later of the original deadline and backend completion
+plus the configured grace, never later than execution deadline plus grace.
+Heartbeats and provider retries do not extend it. Operator cancellation and the
+parent workflow's limits remain authoritative. Set the value to zero to retain
+the original single-deadline behavior; historical sealed configs without this
+field also keep that behavior.
+
+Completion is timestamped when the backend leader exits, not when inherited
+stdout/stderr pipes close. The supervisor kills remaining process-group members
+and drains logs for at most 250 ms; grace may begin during that drain, but a
+checkpoint is reusable only after its logs and evidence are sealed.
+
+The runtime supervisor saves bounded raw logs (16 MiB per stream), backend evidence (up to
+512 MiB and 10,000 entries in the complete checkpoint), the preliminary campaign plan,
+and a validated workspace patch under the run's `backend-checkpoints` directory
+before returning. Reuse is bound to the task, source revision, prompt and
+authenticated dependency markers, so changed inputs require fresh execution.
+Only an actual runtime-owned backend launch and successful exit admits grace;
+task-writable policy or receipt files cannot declare completion. The wrapper is
+an IPC client: its exit, disconnect, or SIGKILL cancels the runtime-owned process
+group, as do the original execution deadline and operator cancellation.
+Receipts are authenticated with a process-private key and bind the complete
+checkpoint inventory and SHA-256 contents, including logs and workspace patches.
+Missing, changed, extra, symlinked or hard-linked evidence fails closed before
+retry restoration. Writes use descriptor-anchored traversal and atomic staging,
+without following destination links; this feature requires Linux `/proc/self/fd`
+support. Set grace to zero on other hosts to keep single-deadline execution.
+These are unverified inputs, not findings or successful producer outputs.
+If finalization times out, an unchanged task retry in the same runtime process restores that evidence and
+gets only the configured finalization window, without rerunning fuzzing. Normal
+artifact validation still has to succeed. After a full runtime-process restart,
+the receipt key is intentionally unavailable: automatic reuse fails closed with
+an authentication diagnostic, preserving raw evidence for diagnosis instead of
+trusting writable disk state. `ultrafuzz node` reports the phase,
+both deadlines, checkpoint availability, and last observed agent activity;
+timeout errors include those fields and elapsed time. If that optional status
+file is unreadable or invalid, `node` and `node --watch` warn while still showing
+the independently validated node, attempt, and tool evidence.
 
 `workflow_deadline_seconds` is not a guaranteed wall-clock limit. Ultrafuzz
 records `workflow_deadline_at` in run state when the run is created, and again
@@ -199,6 +243,28 @@ replace its earlier output. With `keep_workspaces = true` nothing is deleted.
 The value is fixed at launch, so changing it, or `ULTRAFUZZ_KEEP_WORKSPACES`,
 for a `resume` has no effect. A deletion that fails is reported as a
 `TASK_WORKTREE_REMOVAL_FAILED` warning, and the next command retries it.
+
+Workspace patches hand off authored changes, not raw build and coverage output.
+In addition to the existing generated roots, capture excludes untracked compiler
+JSON in `out/<source>.sol/<type>.json` with ABI, bytecode, and Solidity compiler
+metadata whose compilation target matches that source and type (including test,
+script, and multiple-type source files), and
+hash-named JSON directly in `build-info/` or `build-snapshot/` inside compiler,
+corpus, or recognized scratch directories; `solidity-files-cache.json`;
+`lcov.info`, `*.lcov`, and `covered.<number>.html`/`.txt`; and JSON, binary, or
+text corpus files under
+`recon-corpus/` and `echidna/`. In `.cov-work/` and `.recon/`, `build.json`,
+`build-info.json`, `compilation.json`, `compiler-input.json`, `compiler-output.json`,
+`standard-input.json`, `standard-output.json`, `recon-coverage.json`, and `corpus/`
+output are also excluded. Authored test sources and ordinary configuration beside
+those files remain eligible, including JSON config directly in nested `out/`
+directories and test vectors under source-named fixture directories. These rules
+do not omit tracked edits/deletions or paths already authenticated by retained
+handoffs and preparation trees. Compiler inspection is bounded to 16 MiB per
+file; oversized, malformed, and otherwise unknown files retain the existing measured
+diff-overflow handling. Raw evidence needed downstream belongs
+in declared artifacts, which still undergo the publication secret gate; excluding
+scratch from a workspace patch never exempts a declared artifact from scanning.
 
 The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
 resolves the real executable before launch, writes an executable wrapper under
@@ -361,15 +427,38 @@ start with `~` and suffix variants such as `:free` are valid. OpenRouter IDs
 must be non-empty, no longer than 256 characters, and contain no whitespace or
 control characters. Subscription auth is rejected.
 
-An OpenRouter HTTP 429 is recovered for up to two minutes with exponential
-backoff, a 30-second base-delay cap, and up to 25% jitter, while the caller's
-total timeout continues to bound the whole operation. Before substantive
+An OpenRouter HTTP 429 is recovered within a two-minute window with exponential
+backoff, a 30-second base-delay cap, and up to 25% jitter. Cumulative backoff
+across the entire invocation is also capped at two minutes; productive activity
+may refresh the recovery window but does not replenish this wait budget. The
+caller’s total timeout continues to bound the whole operation. A wait is refused
+if it would reach the node’s finalization reserve (one sixth of the timeout,
+rounded to whole seconds, at least one second and capped at five minutes).
+The reserve is taken from the configured timeout, not added to it. Subsecond
+standalone adapter timeouts reserve their entire allowance. Before substantive
 activity, the adapter can retry fresh. After Codex emits a substantive model,
 tool, command, or file event, it continues only through the exact Codex thread
 with `codex exec resume`; the original prompt is never replayed. Recovery fails
 closed if no stable thread ID is available or a resumed process reports a
 different ID. No new request starts at the recovery deadline; the last observed
 provider rate-limit error is returned instead.
+
+Retry notices and terminal diagnostics expose `providerRecovery`: the configured
+timeout and absolute deadline, elapsed time, `productiveRuntimeMs`, cumulative
+`backoffMs`, `backoffBudgetMs`, retry and rate-limit counts, remaining time,
+finalization reserve, and the latest observed session checkpoint. Productive
+runtime means elapsed time excluding adapter-managed backoff; provider-internal
+waits are not observable. Budget exhaustion reports `finalization-reserved` or
+`backoff-budget-exhausted` with these diagnostics instead of waiting for
+`PROCESS_TIMEOUT`. The same diagnostics are attached to adapter results/errors.
+Provider quota classification and reset information are preserved when recovery
+stops, so the scheduler can retain its existing quota-wait behavior.
+
+The checkpoint identifies the last substantive progress observed in a validated
+Codex session. In-attempt recovery reuses that exact session and workspace;
+replayed actions do not refresh its timestamp. This is not canonical artifact
+authority or a portable checkpoint across controller restarts. Existing portable
+checkpoint handling and stale-session safeguards still apply when a task resumes.
 
 ## Retry Policy
 

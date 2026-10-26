@@ -143,6 +143,7 @@
         "workspaceMode": {
           "const": "git-worktree"
         },
+        "finalizationGraceMs": { "type": "integer", "minimum": 0, "maximum": 3600000 },
         "defaultTimeoutSeconds": {
           "$ref": "#/$defs/timeoutSeconds"
         },

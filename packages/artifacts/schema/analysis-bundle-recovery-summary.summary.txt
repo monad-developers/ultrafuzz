@@ -1,0 +1,49 @@
+# analysis-bundle-recovery-summary.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 4871 bytes, sha256 2a77bcff37ed034a
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.analysis-bundle.v1)
+*total_generations: integer
+*terminal_generations: integer
+*active_generations: integer
+*progress_generations: integer
+*no_progress_generations: integer
+*unknown_progress_generations: integer
+*model_work_generations: integer
+*no_model_work_generations: integer
+*unknown_model_work_generations: integer
+*genuine_failures: integer
+*rotations: integer
+*resumptions: integer
+*start_reasons: object
+  *initial: integer
+  *pre-model-retry: integer
+  *post-model-resume: integer
+  *image-rollout: integer
+  *stale-probe-rotation: integer
+  *operator-restart: integer
+  *unknown: integer
+*terminal_reasons: object
+  *active: integer
+  *succeeded: integer
+  *genuine-worker-failure: integer
+  *operational-failure: integer
+  *image-rollout: integer
+  *stale-probe-rotation: integer
+  *operator-request: integer
+  *timeout: integer
+  *resource-termination: integer
+  *recovery-budget-exhausted: integer
+  *unknown: integer
+*terminal_classes: object
+  *active: integer
+  *succeeded: integer
+  *genuine-worker-failure: integer
+  *operational-failure: integer
+  *controller-rotation: integer
+  *timeout: integer
+  *resource-termination: integer
+  *recovery-budget-exhausted: integer
+  *unknown: integer

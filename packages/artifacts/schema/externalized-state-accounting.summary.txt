@@ -1,0 +1,40 @@
+# externalized-state-accounting.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 6779 bytes, sha256 5f70b7a686419196
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.externalized-state-accounting.v1)
+*state_components: array<object>
+  *component_id: string
+  *name: string
+  *category: string
+  *economic_relevance: string
+  *public_evidence: array<string>
+  *actors: array<string>
+  *mutation_paths: array<string>
+  *settlement_or_claim_paths: array<string>
+  *value_reads: array<string>
+*scenarios: array<object>
+  *scenario_id: string
+  *title: string
+  *actors: array<string>
+  *preconditions: array<string>
+  *actions: array<string>
+  *state_component_ids: array<string>
+  *expected_outcome: string
+  *test_path: string|null
+*accounting_oracles: array<object>
+  *oracle_id: string
+  *state_component_ids: array<string>
+  *assertion: string
+  *public_basis: array<string>
+  *rounding_rule: string|null
+*generated_tests: array<object>
+  *path: string
+  *scenario_ids: array<string>
+*incomplete_specs: array<object>
+  *subject: string
+  *reason: string
+  *evidence_paths: array<string>
+ coverage_notes: array<string>

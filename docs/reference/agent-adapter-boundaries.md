@@ -16,6 +16,67 @@ and the gate requires an explicit policy for every adapter actually registered
 in `agentFactories`, including a factory imported under an alias or registered
 without a matching re-export.
 
+## Command invocation admission
+
+The shared runtime command registry addresses the Codex/OpenRouter incident
+path in [#1317](https://github.com/monad-developers/ultrafuzz/issues/1317).
+`CompatibleCodexAgent` maps task context onto `PreToolUse` and `PostToolUse`
+configuration. The provider owns shell execution; Smithers' output callbacks
+observe a command after launch and cannot safely enforce admission themselves.
+
+On Linux, the qualified `@openai/codex@0.146.0` path reserves an invocation
+before a Bash or unified-exec command starts. A reservation is scoped to the
+run, node, iteration and attempt, plus exact command text and the hook's session
+working directory. Exclusive file creation admits only one concurrent caller.
+A duplicate receives the existing invocation, provider session and tool-call
+identities, a coalescing diagnostic, and `ultrafuzz command-hook --status HANDLE`.
+Use the original `write_stdin` handle to retrieve command output. A matching
+terminal `PostToolUse`, including completion delivered through `write_stdin`,
+permits a subsequent execution. Stream hook messages identify reservations,
+coalescing and completion without copying shell commands or output into the
+registry. Replaying the same completed provider tool-call identity remains
+coalesced; a subsequent execution must have a new native call identity.
+Completion finds the original durable reservation by its session/tool-call
+identity, not by post-hook command text: existing trusted hooks may rewrite
+that text. Ambiguous native identities do not release any reservation.
+
+For intentional concurrent executions, add a unique first-line comment such
+as `# ultrafuzz-command-key: second-check`. Different commands and attempts
+are independent. The hook does not expose all execution options (notably a
+unified-exec workdir override), so the same command text with different hidden
+options also needs an explicit key. Shell syntax is not normalized.
+
+Reservations and completion receipts live in the task workspace's
+`.ultrafuzz/command-invocations` directory. They survive provider/controller
+restarts on that workspace. No elapsed-time lease releases a reservation:
+records with a dead controller, corrupt or incomplete records report `completion_unknown` and remain
+coalesced, because a child may have outlived its provider. Poll the original
+session or confirm that work stopped before deliberately choosing a new key.
+`active` means the reserving controller is alive, not independently verified
+shell liveness; a missing completion receipt never grants a relaunch.
+This is an accidental-duplication guard, not a boundary against an agent that
+changes commands or edits its own workspace.
+
+The guard trusts only its exact session-configured Codex hook identities; it
+does not use the global hook-trust bypass or change provider-home settings.
+Existing user/project hook sources retain their own trust state. Versions not
+explicitly qualified, missing task/trusted-CLI context, unsupported platforms,
+and operational hook failures report `command guard inactive` and fail open.
+Claude/DeepSeek background-completion and settings-composition contracts remain
+unqualified, as do direct Kimi/Pi/OpenCode command paths. Their diagnostics make
+this limitation explicit. Complete provider-independent enforcement still
+requires a managed command runner or equivalent upstream admission surface;
+this change does not close #1317.
+
+`command-invocations.test.ts` covers independent-process admission races,
+poll/relaunch, distinct keys, completion replay, orphan/PID-reuse and torn-record
+handling. Set `ULTRAFUZZ_TEST_CODEX` to the pinned binary to run the deterministic
+local Responses-server qualification after building the CLI. It exercises the
+real hook CLI through fresh and resumed Codex sessions and verifies that an
+unrelated untrusted hook remains disabled. A trusted rewriting hook also proves
+that terminal completion permits a later distinct call while completed-call
+replays stay coalesced. No paid provider request is made.
+
 | Adapter          | Classification                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Existing option or missing surface                                                                                                                                                                       | Upstream dependency                                                                                                                                                                                                                     |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude.tsx`     | Thin mapping plus one stated-failure hook in `StatedFailureClaudeCodeAgent`, which `deepseek.tsx` shares. Smithers reports a failed result without an `error` field as `Claude run failed` and drops Claude Code's `result` text, so the `createOutputInterpreter` override keeps that text and the `generate` override, which forgets it when each generation starts, attaches it to that generation's thrown error as `details.agentStatedFailure`. The thrown message is unchanged, because Smithers classifies it. | Uses `model`, `extraArgs`, `addDir`, `permissionMode`, `settingSources`, `apiKey`, `configDir`, and `env`.                                                                                               | [#1084](https://github.com/monad-developers/ultrafuzz/issues/1084): `@smthrs/agents` `src/ClaudeCodeAgent.js` builds a failed result's error as `limitBannerText \|\| resultError \|\| "Claude run failed"` and drops `payload.result`. |

@@ -7,6 +7,10 @@ import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { SMITHERS_RESET_PLAN_PATCHES } from "./smithers-reset-plan-patches.js";
+import { parseResetPlan } from "./reset-plan.js";
+import type { ResetPlan } from "./types.js";
+
 import {
   assertValidSmithersTaskManifest,
   assertNoSymlinkComponents,
@@ -2532,6 +2536,15 @@ const SMITHERS_OPENCODE_USAGE_EXIT_PATCH = `            answer: isSuccess ? full
           },`;
 
 export type SmithersCompatibilityPatchId =
+  | "reset_plan_child_discovery"
+  | "reset_plan_helpers"
+  | "reset_plan_selection"
+  | "reset_plan_children"
+  | "reset_plan_guard"
+  | "reset_plan_result"
+  | "reset_plan_cli_options"
+  | "reset_plan_cli_preview"
+  | "reset_plan_cli_generation"
   | "local_delegation"
   | "detached_snapshot_transfer"
   | "supervisor_descriptor"
@@ -2634,6 +2647,7 @@ export interface SmithersCompatibilityPatch {
 // must re-verify each anchor against the newly pinned release instead of assuming
 // the workaround still lands.
 export const SMITHERS_COMPATIBILITY_PATCHES: readonly SmithersCompatibilityPatch[] = [
+  ...SMITHERS_RESET_PLAN_PATCHES,
   {
     id: "local_delegation",
     packageName: "smthrs",
@@ -4386,8 +4400,7 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
   } = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
-    env: input.env,
-    environmentVariableNames: input.environmentVariableNames
+    ...smithersConcurrencyEnvironment(input)
   });
   writeRuntimeDocument(
     path.join(path.dirname(input.compiled.inputPath), "submission.json"),
@@ -4407,6 +4420,21 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     command: displayCommand,
     stdout,
     stderr
+  };
+}
+
+/** The backend prompt and the detached scheduler must receive the same operator-selected ceiling. */
+function smithersConcurrencyEnvironment(input: {
+  maxConcurrency?: number;
+  env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
+}) {
+  if (input.maxConcurrency === undefined) {
+    return { env: input.env, environmentVariableNames: input.environmentVariableNames };
+  }
+  return {
+    env: { ...input.env, ULTRAFUZZ_MAX_CONCURRENCY: String(input.maxConcurrency) },
+    environmentVariableNames: [...(input.environmentVariableNames ?? []), "ULTRAFUZZ_MAX_CONCURRENCY"]
   };
 }
 
@@ -4854,6 +4882,7 @@ export async function runSmithersLifecycleCommand(input: {
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;
+  resetGeneration?: string;
   force?: boolean;
   retryFailed?: boolean;
   /** The run's tasks, so `retryFailed` can leave a producer that started consumers already omitted. */
@@ -4881,6 +4910,8 @@ export async function runSmithersLifecycleCommand(input: {
   alreadyRunning?: boolean;
   /** Each failed producer `retryFailed` left failed, with the started consumers that omitted it. */
   retainedFailures?: ReadonlyMap<string, readonly string[]>;
+  resetPlan?: ResetPlan;
+  resetAlreadyApplied?: boolean;
 }> {
   // Every `up` invocation has to name the run-scoped log directory. Without `--log-dir` the
   // orchestrator falls back to `<projectRoot>/.smithers/executions/<runId>/logs`, so a relaunched
@@ -5079,7 +5110,9 @@ export async function runSmithersLifecycleCommand(input: {
         ? undefined
         : path.join(input.relaunchPaths.runRoot, "smithers", "reset-node-applied.json");
     let resetStderr = "";
-    if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
+    const appliedReset = readSmithersResetMarker(resetMarkerPath, input.smithersRunId, input.resetNode);
+    let resetPlan = appliedReset?.plan;
+    if (appliedReset === undefined) {
       // A failure can be durable in the canonical node snapshot even when the
       // runner cannot resolve its implicit "latest attempt" lookup. Pinning the
       // iteration from that snapshot keeps --reset-node recoverable by node ID.
@@ -5087,6 +5120,16 @@ export async function runSmithersLifecycleCommand(input: {
         currentInspection === undefined
           ? undefined
           : smithersFailedTasks(currentInspection).find((task) => task.nodeId === input.resetNode)?.iteration;
+      resetPlan = await previewSmithersReset({
+        projectRoot: input.projectRoot,
+        smithersRunId: input.smithersRunId,
+        nodeId: input.resetNode,
+        iteration: resetIteration,
+        env: input.env
+      });
+      if (input.resetGeneration !== undefined && input.resetGeneration !== resetPlan.generation) {
+        throw new Error("Reset plan generation changed; preview the reset again before resuming");
+      }
       const resetResult = await execSmithersCli({
         args: [
           "timetravel",
@@ -5095,11 +5138,17 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--node-id",
           input.resetNode,
-          ...(resetIteration === undefined ? [] : ["--iteration", String(resetIteration)]),
+          "--iteration",
+          String(resetPlan.iteration),
+          "--attempt",
+          String(resetPlan.attempt),
+          "--expected-generation",
+          resetPlan.generation,
           "--no-vcs",
           "--force",
           "--format",
-          "json"
+          "json",
+          "--full-output"
         ],
         projectRoot: input.projectRoot,
         env: input.env,
@@ -5115,10 +5164,16 @@ export async function runSmithersLifecycleCommand(input: {
             schema_version: SMITHERS_RESET_NODE_SCHEMA_VERSION,
             smithers_run_id: input.smithersRunId,
             node_id: input.resetNode,
-            applied_at: appliedAt
+            applied_at: appliedAt,
+            reset_plan: resetPlan
           },
           "Smithers reset-node marker"
         );
+      }
+      const resetPayload = commandPayload(jsonField(resetResult.stdout).json);
+      const executedPlan = parseResetPlan(resetPayload?.resetPlan, input.smithersRunId, input.resetNode);
+      if (JSON.stringify(executedPlan) !== JSON.stringify(resetPlan)) {
+        throw new Error("workflow reset result differs from its resolved reset plan; reset receipt was retained");
       }
     }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
@@ -5141,8 +5196,7 @@ export async function runSmithersLifecycleCommand(input: {
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ],
         projectRoot: input.projectRoot,
-        env: input.env,
-        environmentVariableNames: input.environmentVariableNames
+        ...smithersConcurrencyEnvironment(input)
       });
     } catch (error) {
       if (error instanceof Error && resetMarkerPath !== undefined) {
@@ -5161,7 +5215,9 @@ export async function runSmithersLifecycleCommand(input: {
     return {
       ...resumeResult,
       stderr: [resetStderr, resumeResult.stderr].filter((value) => value.length > 0).join("\n"),
-      ...(retainedFailures.size === 0 ? {} : { retainedFailures })
+      ...(retainedFailures.size === 0 ? {} : { retainedFailures }),
+      ...(resetPlan === undefined ? {} : { resetPlan }),
+      resetAlreadyApplied: appliedReset !== undefined
     };
   }
 
@@ -5215,8 +5271,7 @@ export async function runSmithersLifecycleCommand(input: {
     const resumeResult = await execSmithersCli({
       args: resumeCommand,
       projectRoot: input.projectRoot,
-      env: input.env,
-      environmentVariableNames: input.environmentVariableNames
+      ...smithersConcurrencyEnvironment(input)
     });
     return {
       stdout: resumeResult.stdout,
@@ -5259,8 +5314,7 @@ export async function runSmithersLifecycleCommand(input: {
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
-    env: input.env,
-    environmentVariableNames: input.environmentVariableNames
+    ...smithersConcurrencyEnvironment(input)
   });
   return {
     ...result,
@@ -5904,22 +5958,33 @@ function isCompatibleSmithersRunId(value: string): boolean {
   return /^[a-z0-9_-]{1,64}$/u.test(value);
 }
 
-function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
-  if (markerPath === undefined) return false;
+export function readSmithersResetMarker(
+  markerPath: string | undefined,
+  smithersRunId: string,
+  nodeId: string
+): { plan?: ResetPlan } | undefined {
+  if (markerPath === undefined) return undefined;
   try {
     fs.lstatSync(markerPath);
   } catch (error) {
-    if (isCausalEnoent(error)) return false;
+    if (isCausalEnoent(error)) return undefined;
     throw error;
   }
+  assertRegularFileInside(path.dirname(path.dirname(markerPath)), markerPath, "Smithers reset marker");
   const parsed = parseRuntimeDocumentBytes(
     SMITHERS_RESET_NODE_JSON_SCHEMA_ID,
-    readRegularFileSnapshot(markerPath, 64 * 1024),
+    readRegularFileSnapshot(markerPath, 16 * 1024 * 1024),
     "persisted Smithers reset marker"
   );
   if (
     !isObjectRecord(parsed) ||
-    !hasExactObjectKeys(parsed, ["schema_version", "smithers_run_id", "node_id", "applied_at"]) ||
+    !hasExactObjectKeys(parsed, [
+      "schema_version",
+      "smithers_run_id",
+      "node_id",
+      "applied_at",
+      ...(parsed.reset_plan === undefined ? [] : ["reset_plan"])
+    ]) ||
     parsed.schema_version !== SMITHERS_RESET_NODE_SCHEMA_VERSION ||
     typeof parsed.smithers_run_id !== "string" ||
     parsed.smithers_run_id.length === 0 ||
@@ -5930,7 +5995,37 @@ function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: s
   ) {
     throw new Error("persisted Smithers reset marker does not match the current strict contract");
   }
-  return parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
+  if (parsed.smithers_run_id !== smithersRunId || parsed.node_id !== nodeId) return undefined;
+  return parsed.reset_plan === undefined ? {} : { plan: parseResetPlan(parsed.reset_plan, smithersRunId, nodeId) };
+}
+
+/** Reads the runner's persisted state without loading a workflow or opening a writable store. */
+export async function previewSmithersReset(input: {
+  projectRoot: string;
+  smithersRunId: string;
+  nodeId: string;
+  iteration?: number;
+  env?: Record<string, string | undefined>;
+}): Promise<ResetPlan> {
+  const result = await runSmithersInspectionCommand({
+    args: [
+      "timetravel",
+      "reset-preview",
+      "--run-id",
+      input.smithersRunId,
+      "--node-id",
+      input.nodeId,
+      ...(input.iteration === undefined ? [] : ["--iteration", String(input.iteration)]),
+      "--dry-run",
+      "--format",
+      "json",
+      "--full-output"
+    ],
+    projectRoot: input.projectRoot,
+    env: input.env
+  });
+  if (!result.ok) throw new Error("workflow reset preview failed: " + (result.error ?? "runner query failed"));
+  return parseResetPlan(commandPayload(result.json)?.resetPlan, input.smithersRunId, input.nodeId);
 }
 
 function isCausalEnoent(error: unknown): boolean {
@@ -6881,6 +6976,17 @@ export function applySmithersCompatibilityPatches(projectRoot: string): void {
       "owned cumulative agent usage"
     )
   );
+  for (const patch of SMITHERS_RESET_PLAN_PATCHES) {
+    const roots = smithersDependencyRootCandidates(nodeModules, patch.packageName);
+    const root = roots.length === 1 ? roots[0] : undefined;
+    if (root === undefined) throw new Error("pinned workflow runner resolved an incomplete reset planner");
+    const sourcePath = path.join(root, ...patch.sourceRelativePath.split("/"));
+    assertRegularFileInside(nodeModules, sourcePath, "installed Smithers reset planner");
+    writeFileDurable(
+      sourcePath,
+      applyRequiredSmithersPatch(fs.readFileSync(sourcePath, "utf8"), patch.patchable, patch.patched, patch.id)
+    );
+  }
 }
 
 function applyRequiredSmithersPatch(
@@ -7976,6 +8082,11 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
       sourceRef: task.sourceRef ?? null,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
+      finalizationGraceMs: task.metadata.artifacts.outputs.some(
+        (output) => output.contract === "ultrafuzz/invariant-campaign-plan@2"
+      )
+        ? (config.run.finalizationGraceMs ?? 0)
+        : 0,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
       campaignTimeoutExpectations: task.metadata.artifacts.outputs.some((output) =>
         INVARIANT_CAMPAIGN_ROLE_CONTRACTS.has(output.contract)
@@ -8023,6 +8134,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     ),
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
+    __ULTRAFUZZ_FINALIZATION_GRACE_MS__: JSON.stringify(config.run.finalizationGraceMs ?? 0),
     __ULTRAFUZZ_SOURCE_PROJECT_ROOT__: JSON.stringify(compiled.projectRoot),
     __ULTRAFUZZ_RUN_ROOT_RELATIVE__: JSON.stringify(
       relativeProjectPath(compiled.projectRoot, compiled.runRoot, "run root")
@@ -8033,6 +8145,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow, config: Resolv
     __ULTRAFUZZ_COMPILED_TASKS__: compiledTasks,
     __ULTRAFUZZ_DYNAMIC_GROUPS__: dynamicGroups,
     __ULTRAFUZZ_MAX_DYNAMIC_NODES__: JSON.stringify(compiled.maxDynamicNodes),
+    __ULTRAFUZZ_MAX_PARALLEL_AGENTS__: JSON.stringify(config.run.maxParallelAgents),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
   });

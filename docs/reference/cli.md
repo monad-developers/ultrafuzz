@@ -227,7 +227,14 @@ not infer, repair, normalize, or convert its domain shape. Model-only overrides
 keep the configured agent and reasoning. When `--agent` selects another agent,
 backend-specific reasoning is cleared, including when `--model` also pins a
 replacement model.
-`--max-concurrency` caps workflow task submission concurrency.
+`--max-concurrency` caps workflow task submission concurrency and the total
+backend workers requested by each task. Backend prompts receive the smaller
+of this ceiling and the executing host's available CPUs; the invariant campaign
+records that worker count in its plan and passes it to Recon. For example,
+`--max-concurrency 16` requests at most 16 backend workers on a 32-vCPU host.
+Without a flag, a new run uses `run.max_parallel_agents`. Resume and fork retain
+the previous run ceiling unless a new flag overrides it. This is a worker-count
+policy per task, not a kernel-enforced CPU quota across concurrent tasks.
 `--audit-profile` selects a profile for one command, while `--topology-path`
 atomically replaces the project or profile topology for that command.
 
@@ -353,7 +360,8 @@ ultrafuzz node <run-id> <node-id> \
   [--project <path>] \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
-  [--reset-node <workflow-node-id>] [--retry-failed] [--refresh-controller] [--json]
+  [--reset-node <workflow-node-id>] [--dry-run] [--reset-generation <generation>] \
+  [--retry-failed] [--refresh-controller] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -495,18 +503,28 @@ hash when auditing a continuation.
 
 ```text
 Run: <run-id>
-Status: running-healthy (running)
+Status: running
+Workflow: running-healthy (running)
 Run ended: no
 Report: pending
 Report reason: The run has not ended.
 Report completion: UNKNOWN
 Report verification: unknown
-Reason: 1 running, 2 finished in last 10m
-Progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
+Workflow reason: 1 running, 2 finished in last 10m
+Workflow progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
 ETA: 20 minutes
 Time on current step: 10 minutes on stateful-invariant-campaign
 Pace: 4 finished in the last 10m
 ```
+
+`Status` is the recorded Ultrafuzz lifecycle state. `Workflow` and `Workflow progress`
+describe runner execution, including preparation and verifier tasks. A finished workflow
+or 100% workflow progress does not establish a complete verified report; read `Report
+completion` and `Report verification` separately. If a finished runner reports no failed
+tasks while Ultrafuzz has not succeeded and retains unsuccessful product nodes, status emits
+`RUN_WORKFLOW_COMPLETION_DIVERGED` with a bounded list of their recorded failure reasons.
+These records can be stale when synchronization is unavailable; inspect the product
+state before selecting a retry or reset.
 
 A poll that succeeds with diagnostics, such as a `WORKFLOW_DEADLINE_CANCEL_FAILED`
 or `WORKFLOW_STATE_SYNC_SKIPPED` warning, prints each one on stdout after these
@@ -642,6 +660,28 @@ workflow node and its dependents in the same linked run; the applied reset is
 recorded so retrying the command after a failed continuation resumes the
 already-reset run instead of repeating the reset. `fork` may start from a
 checkpoint frame and may reset one workflow node before starting the fork.
+
+Use `resume <run-id> --reset-node <node-id> --dry-run` to see the exact reset
+closure and its generation before changing the run. Preview reads one persisted
+database snapshot, including dynamically expanded nodes, without loading the
+workflow, refreshing prompts, acquiring a lifecycle lock, archiving evidence,
+or starting a controller. It also works with `--refresh-controller`; that flag
+does not render a controller during preview. JSON includes a versioned
+`reset_plan` containing only node identities, iteration/attempt numbers, the
+closure size, and an opaque generation hash.
+
+The pinned runner's reset policy includes nodes attempted at or after the
+selected attempt, and later iterations. This can include independent work;
+preview lists the actual reset set, not only dependencies in the topology.
+Normal execution recomputes and reports its plan. To require the previewed
+generation, pass `--reset-generation <generation>` when executing the same
+reset. The runner checks it again inside the reset transaction and refuses a
+changed generation. `--dry-run` and `--reset-generation` require `--reset-node`
+and cannot be combined with `--retry-failed`.
+
+If launching the controller fails after a reset, the saved receipt retains the
+plan. Retrying the same reset reports `reset_already_applied: true` and that
+original plan; preview also reports the receipt without repeating the reset.
 
 Every command in this section takes an Ultrafuzz run ID and resolves the linked
 workflow run from existing product evidence; none of them require the
@@ -1033,3 +1073,14 @@ performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](evals.md) for configuration and architecture details.
+
+## Internal command hook
+
+`ultrafuzz command-hook` consumes the provider's hook JSON on stdin. It is an
+internal integration command and emits the provider hook protocol rather than
+the public CLI result envelope. Within a guarded node attempt,
+`ultrafuzz command-hook --status HANDLE` polls the durable invocation identity
+reported by a coalesced command. It returns status and native session/tool-call
+identities, without executing or cancelling the command. Use the native session
+handle to retrieve output. See [command invocation admission](agent-adapter-boundaries.md#command-invocation-admission)
+for qualified providers, explicit concurrent invocations and recovery limits.

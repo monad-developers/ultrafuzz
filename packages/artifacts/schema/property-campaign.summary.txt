@@ -1,0 +1,72 @@
+# property-campaign.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 23822 bytes, sha256 74c32d751446034c
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.property-campaign.v3)
+*campaign_plan_ref: string
+*implemented_properties_ref: string
+*findings_ref: string
+*campaign_summary_ref: string
+*fuzzer_backend: string
+*backend_version: string|null
+ configured_timeout_seconds: integer
+ sequence_length: integer
+ exact_command: string
+ start_timestamp: string
+ end_timestamp: string
+ termination_reason: enum(configured-timeout|test-limit|process-exit|launch-error|host-force-kill)
+ campaign_outcome: enum(complete|partial|blocked)
+ usable_results: boolean
+*execution: object
+   (rules): 6 cross-member rules  -> $/properties/execution/allOf
+  *status: enum(complete|partial|blocked|failed|timed-out|unavailable)
+  *usable_results: boolean
+  *command: string
+  *config_path: anyOf[2]  -> $/properties/execution/properties/config_path/anyOf
+  *workers: integer
+  *started_at: anyOf[2]  -> $/properties/execution/properties/started_at/anyOf
+  *finished_at: string
+  *deadline: string
+  *exit_code: integer|null
+  *failure: anyOf[2]  -> $/properties/execution/properties/failure/anyOf
+*paths: object
+  *corpus: string
+  *cache: string
+  *log: string
+  *raw_results: string
+  *reproducers: string
+*evidence_files: array<object>
+  *path: string
+  *size_bytes: integer
+  *sha256: string
+*coverage: object
+   (rules): 2 cross-member rules  -> $/properties/coverage/allOf
+  *status: enum(reported|unavailable)
+  *metrics: array<object>
+     (rules): 3 cross-member rules  -> $/properties/coverage/properties/metrics/items/allOf
+    *name: string
+    *value: number
+    *unit: enum(count|ratio|percent|seconds|bytes|executions-per-second)
+    *source_ref: string
+  *unavailable_reason: string|null
+*property_results: array<object>
+   (rules): 3 cross-member rules  -> $/properties/property_results/items/allOf
+  *property_id: string
+  *status: enum(passed|failed|inconclusive|not-executed)
+  *failure_ids: array<string>
+  *coverage_metric_names: array<string>
+  *evidence_refs: array<string>
+  *reason: string|null
+*failures: array<object>
+   (rules): 2 cross-member rules  -> $/properties/failures/items/allOf
+  *id: string
+  *status: enum(reproduced|blocked-unreproduced)
+  *property_ids: array<string>
+  *entrypoint: string|null
+  *sequence: array<string>
+  *precondition_evidence: array<string>
+  *raw_reproducer_ref: string
+  *deterministic_reproducer_ref: anyOf[2]  -> $/properties/failures/items/properties/deterministic_reproducer_ref/anyOf
+  *reproduction_blocker: string|null

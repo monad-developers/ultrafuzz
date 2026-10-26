@@ -129,7 +129,11 @@ fan-out belong in `.ultrafuzz/topology.yml`.
 
 Normal `ultrafuzz run` campaigns execute on the local machine. The scaffolded
 local default is `max_parallel_agents = 4`, and the `--max-concurrency` flag
-caps local workflow task submission concurrency for that run.
+caps local workflow task submission concurrency and the backend workers each
+task requests. Backend workers are also bounded by available CPUs. To allocate
+at most half of a 32-vCPU host to one final fuzzing backend, use
+`--max-concurrency 16`. Concurrent tasks can each use that many workers; this
+setting does not impose an aggregate CPU quota on the process tree.
 
 Choose local concurrency from the host's available CPU, memory, and target test
 cost. Modal benchmark resource numbers, including the 16-agent and 32-node

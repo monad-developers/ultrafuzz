@@ -222,6 +222,34 @@ describe("prompt rendering", () => {
     expect(rendered).toContain("Lifecycle stage path: review/custom-findings.json");
   });
 
+  it("sends agents to a derived field summary and says which schemas exceed one read", () => {
+    const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    const current = input.graph.logicalNodes.find((node) => node.id === input.node.logicalId);
+    if (current?.outputs === undefined) throw new Error("the base render input declares no outputs to extend");
+    current.outputs.push({
+      path: "triaged-findings.json",
+      contract: "ultrafuzz/triaged-findings@1",
+      primary: false,
+      description: "A triaged findings array.",
+      schemaFile: "triaged-findings.schema.json"
+    });
+    const schemaDirectory = path.join(input.node.workspacePath, ".ultrafuzz", "schemas");
+
+    const rendered = renderPrompt(input).renderedMarkdown;
+    expect(rendered).toContain(`Field summary: \`${path.join(schemaDirectory, "findings.summary.txt")}\` (`);
+    expect(rendered).toContain("derived shape index, not a validation input");
+    // triaged-findings.schema.json is 80 KB+, so its line has to say so; findings.schema.json is 264 bytes.
+    expect(rendered).toContain(
+      `Validate against: \`${path.join(schemaDirectory, "triaged-findings.schema.json")}\` (81 KB; larger than one read`
+    );
+    expect(rendered).toContain(
+      `Validate against: \`${path.join(schemaDirectory, "findings.schema.json")}\` (264 bytes)`
+    );
+    expect(rendered).toContain("Where an output also names a `Field summary`, start there");
+  });
+
   it("renders the standard findings output from its exact typed declaration", () => {
     const tmp = mkdtempSync(path.join(realpathSync(os.tmpdir()), "ufz-render-"));
     tmpDirs.push(tmp);

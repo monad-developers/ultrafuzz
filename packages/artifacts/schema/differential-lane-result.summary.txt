@@ -1,0 +1,43 @@
+# differential-lane-result.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 14822 bytes, sha256 8bbc2b720962b494
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 5 cross-member rules  -> $/allOf
+*schema_version: const(ultrafuzz.differential-lane-result.v1)
+*lane_id: string|null
+*attempt_index: integer
+*auditor_attempt_index: integer
+*source_auditor_artifact: string
+*source_plan_artifact: string|null
+*source_harness_artifact: string|null
+*assigned_lane_payload: anyOf[2]  -> $/properties/assigned_lane_payload/anyOf
+*authored_paths: array<string>
+*focused_command: string|null
+*focused_command_ran: boolean
+*matched_test_count: integer
+*status: enum(green|semantic_red_frozen|compile_or_harness_defect|no_assigned_lane)
+*red_preservation_audit: object
+  *result: enum(no_semantic_red_observed|semantic_red_frozen|not_applicable)
+  *pre_repair_file_hash: anyOf[2]  -> $/properties/red_preservation_audit/properties/pre_repair_file_hash/anyOf
+  *assertion_predicate: string|null
+*red_candidates: array<object>
+  *stable_failure_hash: string
+  *red_candidate_id: string
+  *test_path: string
+  *failing_test_name: string
+  *focused_command: string
+  *failure_signature: string
+  *assertion: string
+  *observed: string
+  *expected: string
+  *public_oracle_basis: array<string>
+  *classification: const(untriaged)
+*compile_or_harness_defects: array<object>
+  *stable_failure_hash: string
+  *category: enum(compile|harness)
+  *summary: string
+  *evidence_paths: array<string>
+*public_evidence_paths: array<string>
+*notes: array<string>

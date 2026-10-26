@@ -1,0 +1,39 @@
+# node-attempt-ledger.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 9679 bytes, sha256 c876e9ee56d9472b
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 3 cross-member rules  -> $/allOf
+ (rules): 2 cross-member rules  -> $/dependentRequired
+ (rules): 1 cross-member rule  -> $/dependentSchemas
+*schema_version: const(ultrafuzz.node-attempt-ledger.v1)
+*run_id: string
+*workflow_run_id: string
+*control_generation: string
+*node_id: string
+*strategy_attempt_id: string
+*iteration: integer
+*attempt: integer
+*started_event_sequence: integer
+*source_event_sequence: integer
+*lifecycle: object
+  *started_at: string
+  *finished_at: string
+*outcome: enum(succeeded|failed|timed-out|canceled|reused)
+*reuse: oneOf[2]  -> $/properties/reuse/oneOf
+*manifests: object
+  *input_sha256: string
+  *output_sha256: anyOf[2]  -> $/properties/manifests/properties/output_sha256/anyOf
+ agent: object
+  *chain_index: integer
+  *profile_id: string
+  *agent_ref: string
+   model_name: string
+   reasoning_effort: string
+  *role: enum(primary|fallback)
+  *selection: enum(observed|projected)
+ failure_category: enum(executor-error|timeout|canceled|dependency|invalid-output|artifact-validation|unknown)
+ failure_message: string
+ failure_message_redaction_span_code_points: array<integer>
+ failure_message_truncated: const(true)

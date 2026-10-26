@@ -1,0 +1,14 @@
+# invariant-suite-manifest.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 3195 bytes, sha256 734330bebf80039c
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.invariant-suite-manifest.v2)
+*producer_node_id: string
+*producer_attempt_id: string
+*files: array<object>
+  *path: string  -> $/properties/files/items/properties/path/allOf
+  *size_bytes: integer
+  *sha256: string
+*tombstones: array<string>  -> $/properties/tombstones/items/allOf

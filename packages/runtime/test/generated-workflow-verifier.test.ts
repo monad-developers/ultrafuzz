@@ -58,6 +58,7 @@ import {
 } from "../src/canonical-properties-markdown.js";
 import { projectCanonicalFinalReport } from "../src/final-report-markdown.js";
 import { runSummaryUsage } from "../src/terminal-report-projection.js";
+import { runProcessGroup } from "../src/process-group.js";
 import { runMetadataWithAccounting } from "./run-metadata-fixtures.js";
 import {
   assertValidPromptArtifactAuthority,
@@ -70,6 +71,11 @@ import {
   declaredAncestorOutputsByContract,
   declaredSiblingOutputsByContract
 } from "../src/semantic-artifact-context.js";
+import {
+  backendCheckpointDirectory,
+  runCheckpointedBackend,
+  withBackendFinalization
+} from "../src/backend-finalization.js";
 
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
@@ -238,6 +244,10 @@ function loadArtifactAwareAgent(
     "assertFinalReportRunMetadataAuthorityUnchanged",
     "assertFinalReportPromptAuthorityUnchanged",
     "finalReportTaskRuntimeFromAgentArgs",
+    "backendCheckpointDirectory",
+    "withBackendFinalization",
+    "path",
+    "createHash",
     `${helper}; return artifactAwareAgent;`
   )(
     () => options.onSourceVerify?.(),
@@ -252,10 +262,17 @@ function loadArtifactAwareAgent(
     () => "ultrafuzz-agent:test",
     normalizeNodeAttemptFailureMessage,
     publicationForbiddenSecretValues,
-    () => options.onCheck?.("dependency-admission"),
+    () => {
+      options.onCheck?.("dependency-admission");
+      return { snapshotsByProducerAttempt: new Map() };
+    },
     () => options.onCheck?.("report-run-metadata"),
     () => options.onCheck?.("report-prompt"),
-    () => undefined
+    () => undefined,
+    backendCheckpointDirectory,
+    withBackendFinalization,
+    path,
+    createHash
   ) as ReturnType<typeof loadArtifactAwareAgent>;
 }
 
@@ -335,6 +352,56 @@ test("artifact-aware agents own process completion without constraining terminal
       assert.equal(result.text, (terminalResult as Record<string, unknown>).text);
     }
   }
+});
+
+test("the generated campaign wrapper enters checkpoint finalization without leaking privileged engine args", async () => {
+  const root = temporaryRoot("workflow-backend-");
+  const workspacePath = path.join(root, "workspace");
+  const artifactDir = path.join(root, "artifacts", "campaign");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.mkdirSync(path.join(workspacePath, "artifacts", "campaign"), { recursive: true });
+  const git = (args: string[]): void => {
+    execFileSync("git", args, { cwd: workspacePath, stdio: "pipe" });
+  };
+  git(["init", "--quiet"]);
+  git(["config", "user.name", "Test"]);
+  git(["config", "user.email", "test@example.invalid"]);
+  git(["commit", "--quiet", "--allow-empty", "-m", "fixture"]);
+  const task = {
+    id: "node:campaign",
+    attemptId: "campaign",
+    runRoot: root,
+    workspacePath,
+    artifactDir,
+    agentChain: [{}],
+    finalizationGraceMs: 800,
+    timeoutMs: 3_000,
+    productionSourceRoots: ["src", "contracts"]
+  };
+  const wrapped = loadArtifactAwareAgent()(task, 0, "sealed prompt", {
+    generate: async (value) => {
+      assert.ok(value !== null && typeof value === "object");
+      assert.equal(Reflect.has(value, "ultrafuzzTaskRuntime"), false);
+      assert.equal(Reflect.has(value, "outputSchema"), false);
+      assert.match(String(Reflect.get(value, "prompt")), /Checkpointed backend finalization/u);
+      assert.equal(
+        await runCheckpointedBackend(backendCheckpointDirectory(root, task.id), [
+          process.execPath,
+          "-e",
+          "process.exit(0)"
+        ]),
+        0
+      );
+      return { text: "finalized" };
+    }
+  });
+  const result = await wrapped.generate({
+    prompt: "campaign",
+    taskContext: { attempt: 1 },
+    outputSchema: {},
+    ultrafuzzTaskRuntime: { privileged: true }
+  });
+  assert.deepEqual(result, { text: "finalized", _output: { completed: true } });
 });
 
 test("artifact-aware agents recheck every task-local authority after the model returns, succeeding or failing", async () => {
@@ -437,10 +504,17 @@ function loadJsonValidatorPreflight(
     stdout?: string;
     parse?: typeof parseJsonValidatorPreflightSuccessEnvelope;
     bundle?: ReturnType<typeof installedBundle>;
-    run?: (signal: AbortSignal) => Promise<{ stdout: string; stderr: string }>;
+    runRoot?: string;
+    platform?: NodeJS.Platform;
+    run?: (
+      file: string,
+      args: readonly string[],
+      options: { timeoutMs: number; maxBuffer: number; signal: AbortSignal }
+    ) => Promise<{ stdout: string; stderr: string }>;
   } = {}
 ): {
   preflight(signal?: AbortSignal): Promise<void>;
+  preparation(signal?: AbortSignal): Promise<void>;
   observedTimeoutMs(): number | undefined;
   observedLauncher(): string | undefined;
   spawnCount(): number;
@@ -450,9 +524,18 @@ function loadJsonValidatorPreflight(
   const helperStart = source.indexOf("const JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS");
   const helperEnd = source.indexOf("\n\nfunction taskPublishesWorkspacePatch", helperStart);
   assert.ok(helperStart >= 0 && helperEnd > helperStart, source);
-  const helper = ts.transpileModule(source.slice(helperStart, helperEnd), {
-    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 }
-  }).outputText;
+  const preparationStart = source.indexOf("function preparationStep");
+  const preparationEnd = source.indexOf("function prepareArtifactMirror", preparationStart);
+  const retryStart = source.indexOf("function nonRetryableFailure");
+  const retryEnd = source.indexOf("function assertVerifiedDependency", retryStart);
+  assert.ok(preparationStart >= 0 && preparationEnd > preparationStart);
+  assert.ok(retryStart >= 0 && retryEnd > retryStart);
+  const helper = ts.transpileModule(
+    source.slice(helperStart, helperEnd) +
+      source.slice(preparationStart, preparationEnd) +
+      source.slice(retryStart, retryEnd),
+    { compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 } }
+  ).outputText;
   let observedTimeout: number | undefined;
   let observedLauncher: string | undefined;
   let spawns = 0;
@@ -463,24 +546,34 @@ function loadJsonValidatorPreflight(
     "parseJsonValidatorPreflightSuccessEnvelope",
     "nonRetryableFailure",
     "path",
+    "process",
     `${helper}; return {
       preflight: preflightJsonValidator,
+      preparation: async (...args) => {
+        try { await preflightJsonValidator(...args); }
+        catch (error) { preparationStep("fixture", "preflight-json-validator", () => { throw error; }); }
+      },
       budgetMs: JSON_VALIDATOR_PREFLIGHT_TIMEOUT_MS
     };`
   )(
     ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
     () => path.join(path.sep, "fixture", "findings.json"),
-    async (file: string, _args: readonly string[], spawnOptions: { timeoutMs?: number; signal: AbortSignal }) => {
+    async (
+      file: string,
+      args: readonly string[],
+      spawnOptions: { timeoutMs: number; maxBuffer: number; signal: AbortSignal }
+    ) => {
       spawns += 1;
       observedTimeout = spawnOptions.timeoutMs;
       observedLauncher = file;
-      if (options.run !== undefined) return options.run(spawnOptions.signal);
+      if (options.run !== undefined) return options.run(file, args, spawnOptions);
       if (options.failure !== undefined) throw options.failure;
       return { stdout: options.stdout ?? "{}", stderr: "" };
     },
     options.parse ?? (() => undefined),
     (error: Error) => Object.assign(error, { details: { failureRetryable: false } }),
-    path
+    path,
+    { platform: options.platform ?? process.platform }
   ) as {
     preflight(
       schemaDirectory: string,
@@ -488,16 +581,22 @@ function loadJsonValidatorPreflight(
       runRoot: string,
       signal: AbortSignal
     ): Promise<void>;
+    preparation(
+      schemaDirectory: string,
+      bundle: ReturnType<typeof installedBundle>,
+      runRoot: string,
+      signal: AbortSignal
+    ): Promise<void>;
     budgetMs: number;
   };
+  const args = [
+    path.join(path.sep, "fixture", "schemas"),
+    options.bundle ?? installedBundle(),
+    options.runRoot ?? path.join(path.sep, "fixture", "run")
+  ] as const;
   return {
-    preflight: (signal = new AbortController().signal) =>
-      loaded.preflight(
-        path.join(path.sep, "fixture", "schemas"),
-        options.bundle ?? installedBundle(),
-        path.join(path.sep, "fixture", "run"),
-        signal
-      ),
+    preflight: (signal = new AbortController().signal) => loaded.preflight(...args, signal),
+    preparation: (signal = new AbortController().signal) => loaded.preparation(...args, signal),
     observedTimeoutMs: () => observedTimeout,
     observedLauncher: () => observedLauncher,
     spawnCount: () => spawns,
@@ -2868,6 +2967,33 @@ test("generated Smithers verifies a v3 property campaign against authenticated s
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("checkpoint-wrapped campaigns retain backend exit evidence during later artifact finalization", () => {
+  const root = temporaryRoot("checkpoint-campaign-gates-");
+  const fixture = generatedCampaignVerificationFixture(root);
+  const plan = generatedCampaignPlanFixture();
+  const result = generatedPropertyCampaignFixture();
+  const command = `ultrafuzz backend run '/run/backend-checkpoints/task' -- ${GENERATED_CAMPAIGN_COMMAND}`;
+  (plan.backend as Record<string, unknown>).exact_shell_escaped_command = command;
+  plan.command_plan = [{ phase: "campaign", command }];
+  result.exact_command = command;
+  (result.execution as Record<string, unknown>).command = command;
+  // The fixture's backend finished in its execution window. Validation happens
+  // much later; finalization must preserve its original exit/deadline facts.
+  for (const [name, document] of [
+    ["campaign-plan.json", plan],
+    ["campaign.json", result]
+  ] as const) {
+    fs.writeFileSync(path.join(fixture.task.artifactDir, name), JSON.stringify(document));
+  }
+  const harness = loadVerifyArtifactsHarness({
+    taskSpecs: [fixture.implementationProducer, fixture.task],
+    authenticatedDependencyDirs: [fixture.implementationArtifactDir]
+  });
+  const verified = harness.verifyArtifacts(fixture.task, harness.captureTaskOutputs(fixture.task));
+  assert.equal(verified.primary_artifact, "campaign.json");
+  assert.equal(harness.markerWrites.length, 1);
 });
 
 test("generated Smithers requires exactly one declaration for every current campaign tuple member", () => {
@@ -5851,7 +5977,7 @@ test("generated Smithers workflow quarantines optional tasks and reads only veri
     taskProjection,
     /optionalDependencyArtifactDirs: task\.optionalDependencyArtifactDirs\.map\(\(directory\) =>\s*path\.resolve\(process\.cwd\(\), directory\)/u
   );
-  assert.match(baseAgent, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\b/u);
+  assert.match(baseAgent, /addDir:\s*\[\s*task\.artifactDir,\s*\.\.\.dependencyArtifactDirs\b/u);
   // The friction log paths come from the task's own run root, never from inherited
   // environment that a continuation can blank.
   assert.doesNotMatch(source, /process\.env\.ULTRAFUZZ_FRICTION/u);
@@ -6680,6 +6806,147 @@ test("generated validator preflight expects the run's planned schema identity, n
   );
 });
 
+test(
+  "generated validator preflight executes its run-owned launcher with an empty or shadowed PATH",
+  {
+    skip: process.platform === "win32"
+  },
+  async () => {
+    const root = temporaryRoot("ufz-validator-executable-");
+    const runRoot = path.join(root, "run with spaces");
+    const trustedBin = path.join(runRoot, "trusted-bin");
+    const hostileBin = path.join(root, "hostile-bin");
+    fs.mkdirSync(trustedBin, { recursive: true });
+    fs.mkdirSync(hostileBin);
+    const launcher = path.join(trustedBin, "ultrafuzz");
+    const bundle = installedBundle();
+    const findings = bundle.registry.find((entry) => entry.filename === "findings.schema.json");
+    assert.ok(findings);
+    const envelope = JSON.stringify({
+      schema_version: "ultrafuzz.cli.result.v2",
+      command: "json validate",
+      ok: true,
+      diagnostics: [],
+      data: {
+        status: "valid",
+        diagnostics: [],
+        schema: {
+          id: findings.id,
+          sha256: findings.sha256,
+          bundle_sha256: bundle.sha256,
+          validator_build: "ultrafuzz-json-validator.v1:synthetic",
+          registered: true
+        },
+        artifact_sha256: ARTIFACT_VALIDATOR_SMOKE_FIXTURE_SHA256,
+        truncated: false
+      }
+    });
+    fs.writeFileSync(launcher, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(envelope)});\n`, {
+      mode: 0o700
+    });
+    const hostileMarker = path.join(root, "hostile-called");
+    fs.writeFileSync(
+      path.join(hostileBin, "ultrafuzz"),
+      `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(hostileMarker)}, "called");\n`,
+      { mode: 0o700 }
+    );
+    for (const searchPath of ["", hostileBin]) {
+      const harness = loadJsonValidatorPreflight({
+        runRoot,
+        parse: parseJsonValidatorPreflightSuccessEnvelope,
+        run: (file, args, options) =>
+          runProcessGroup(file, args, {
+            ...options,
+            env: { PATH: searchPath, ULTRAFUZZ_TRUSTED_BIN: hostileBin }
+          })
+      });
+      await harness.preparation();
+      assert.equal(harness.observedLauncher(), launcher);
+    }
+    assert.equal(fs.existsSync(hostileMarker), false);
+
+    // A missing trusted launcher must not fall back to a different CLI on PATH.
+    fs.unlinkSync(launcher);
+    const missing = loadJsonValidatorPreflight({
+      runRoot,
+      run: (file, args, options) => runProcessGroup(file, args, { ...options, env: { PATH: hostileBin } })
+    });
+    await assert.rejects(
+      () => missing.preparation(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal((error as { code?: string }).code, "TOOL_UNAVAILABLE");
+        assert.match(error.message, /prepare:fixture failed at step preflight-json-validator: tool_unavailable/u);
+        assert.ok(error.message.includes(launcher));
+        assert.doesNotMatch(error.message, /timeout|budget|180000/u);
+        return true;
+      }
+    );
+    assert.equal(fs.existsSync(hostileMarker), false);
+  }
+);
+
+test("generated validator preflight selects the platform's run-owned launcher", async () => {
+  for (const platform of ["linux", "win32"] as const) {
+    const harness = loadJsonValidatorPreflight({ platform });
+    await harness.preflight();
+    assert.equal(
+      harness.observedLauncher(),
+      path.join(path.sep, "fixture", "run", "trusted-bin", platform === "win32" ? "ultrafuzz.cmd" : "ultrafuzz")
+    );
+  }
+});
+
+test("generated validator launch failures keep their typed, non-retryable classification through preparation", async () => {
+  for (const code of ["ENOENT", "EACCES", "ENOTDIR"]) {
+    const launchFailure = Object.assign(new Error(`spawnSync ultrafuzz ${code}`), { code });
+    const harness = loadJsonValidatorPreflight({ failure: launchFailure });
+    await assert.rejects(
+      () => harness.preparation(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        const failure = error as NormalizedAgentFailure;
+        assert.equal(failure.code, "TOOL_UNAVAILABLE");
+        assert.deepEqual(failure.details, { failureRetryable: false });
+        assert.equal((failure.cause as Error).cause, launchFailure);
+        assert.match(failure.message, /tool_unavailable.*ultrafuzz/u);
+        assert.doesNotMatch(failure.message, /timeout|budget|180000/u);
+        return true;
+      }
+    );
+  }
+  const normalized = await captureAgentFailure(
+    Object.assign(new Error("tool_unavailable: ultrafuzz"), {
+      code: "TOOL_UNAVAILABLE",
+      details: { failureRetryable: false }
+    }),
+    { agentChain: [{}] },
+    true
+  );
+  assert.equal(normalized.code, "TOOL_UNAVAILABLE");
+  assert.deepEqual(normalized.details, { failureRetryable: false });
+});
+
+test("generated validator preflight only adds deadline diagnostics to a typed timeout", async () => {
+  for (const failure of [
+    new Error("validator exited with status 1"),
+    Object.assign(new Error("capture failed"), { code: "ENOBUFS" })
+  ]) {
+    const harness = loadJsonValidatorPreflight({ failure });
+    await assert.rejects(
+      () => harness.preflight(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.equal(error.cause, failure);
+        assert.match(error.message, /JSON validator preflight failed after \d+ms:/u);
+        assert.doesNotMatch(error.message, /timeout|budget|180000/u);
+        assert.equal((error as { code?: string }).code, undefined);
+        return true;
+      }
+    );
+  }
+});
+
 test("generated validator preflight budgets a contended CLI start and reports the wall time it spent", async () => {
   const timedOut = Object.assign(new Error("process exceeded its execution budget"), { code: "PROCESS_TIMEOUT" });
   const harness = loadJsonValidatorPreflight({ failure: timedOut });
@@ -6730,8 +6997,8 @@ test("generated validator preflight cancels a task wait without canceling anothe
   let complete = (): void => {};
   let sharedSignal: AbortSignal | undefined;
   const harness = loadJsonValidatorPreflight({
-    run: (signal) => {
-      sharedSignal = signal;
+    run: (_file, _args, options) => {
+      sharedSignal = options.signal;
       return new Promise((resolve) => {
         complete = () => resolve({ stdout: "{}", stderr: "" });
       });
@@ -6756,8 +7023,8 @@ test("generated validator preflight waits for last-owner cleanup and does not ca
   let cleanup = (): void => {};
   let sharedSignal: AbortSignal | undefined;
   const harness = loadJsonValidatorPreflight({
-    run: (signal) => {
-      sharedSignal = signal;
+    run: (_file, _args, options) => {
+      sharedSignal = options.signal;
       return new Promise((_resolve, reject) => {
         cleanup = () => reject(Object.assign(new Error("process execution canceled"), { code: "TASK_ABORTED" }));
       });
@@ -8782,7 +9049,7 @@ test("final-report prompt authority is bounded, tamper-evident, and constant-siz
   );
   assert.match(
     agentSource,
-    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\), args\?\.abortSignal\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);\s*const result = await executionAgent\.generate\(unstructuredArgs\)/u
+    /if \(firstGenerationForAttempt\)[\s\S]*?resetTaskArtifactsForRetry\(task, finalReportTaskRuntimeFromAgentArgs\(task, args\), args\?\.abortSignal\)[\s\S]*?materializeFinalReportPromptAuthority\(task, authoritativeFinalReportCoverage\(task\), execution\)[\s\S]*?authoritativeFinalReportPromptAuthorityArgs\([\s\S]*?assertFinalReportPromptAuthorityUnchanged\(task\);[\s\S]*?Reflect\.deleteProperty\(unstructuredArgs, "ultrafuzzTaskRuntime"\);[\s\S]*?args: unstructuredArgs[\s\S]*?: await executionAgent\.generate\(unstructuredArgs\)/u
   );
   const coverageSource = workflowSource.slice(
     workflowSource.indexOf("function authoritativeFinalReportCoverage"),
@@ -10413,7 +10680,15 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   // R49) died at `prepare:stateful-invariant-implement-properties` without this.
   assert.match(source, /function firstDependencyRequiringReplay\(/u);
   assert.match(helper, /replayWorkspacePatches && captures\.length > 0/u);
-  assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot\),/u);
+  assert.match(helper, /firstDependencyRequiringReplay\(\s*captureWorkspaceTree\(workspaceRoot, treeAuthority\),/u);
+  // #1308: every tree reconstruction retains authenticated legacy membership,
+  // including preparation state, without admitting unrelated new scratch paths.
+  assert.match(helper, /const captures = authenticatedWorkspacePatchCaptures\(task, workspaceRoot\);/u);
+  assert.match(helper, /const treeAuthority = \{\s*trees: \[/u);
+  assert.match(helper, /\.\.\.captures\.map\(\(capture\) => capture\.manifest\.base_tree\)/u);
+  assert.match(helper, /\.\.\.\(persistedPreparation === undefined \? \[\] : \[persistedPreparation\]\)/u);
+  assert.match(helper, /files: captures\.flatMap\(\(capture\) => capture\.manifest\.files\)/u);
+  assert.doesNotMatch(helper, /captureWorkspaceTree\(workspaceRoot\)/u);
   assert.match(helper, /captures\.map\(\(entry\) => entry\.manifest\)/u);
   // Every capture is validated even when replay skips it: the manifest schema, object ids, digest and
   // sensitive-path checks all live inside `applyWorkspacePatch`, so a skipped patch would otherwise go

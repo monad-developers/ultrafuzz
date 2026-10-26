@@ -1,4 +1,9 @@
 import path from "node:path";
+import {
+  backendCheckpointDirectory,
+  readBackendFinalizationStatus,
+  type BackendFinalizationStatus
+} from "./backend-finalization.js";
 
 import {
   SMITHERS_NODE_STATES,
@@ -609,11 +614,19 @@ export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
   } catch (error) {
     return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID", error)]);
   }
-  return runtimeResult<WorkflowNodeValue>(true, adaptNodeDetail(input, evidence.smithersRunId, detail));
+  const backend = optionalBackendFinalizationStatus(evidence.layout.root, detail.node.nodeId);
+  return runtimeResult<WorkflowNodeValue>(
+    true,
+    adaptNodeDetail(input, evidence.smithersRunId, detail, backend.status),
+    backend.diagnostics
+  );
 }
 
 export async function watchWorkflowNode(
-  input: WorkflowNodeQueryInput & { intervalSeconds?: number; onSnapshot: (value: WorkflowNodeValue) => void }
+  input: WorkflowNodeQueryInput & {
+    intervalSeconds?: number;
+    onSnapshot: (value: WorkflowNodeValue, diagnostics: RuntimeDiagnostic[]) => void;
+  }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
@@ -621,6 +634,7 @@ export async function watchWorkflowNode(
     return runtimeFailure<WorkflowNodeValue>(evidence.diagnostics);
   }
   let last: WorkflowNodeValue | undefined;
+  let diagnostics: RuntimeDiagnostic[] = [];
   let stream: SmithersStreamResult;
   try {
     stream = await streamSmithersCommand({
@@ -639,9 +653,11 @@ export async function watchWorkflowNode(
           input,
           evidence.smithersRunId
         );
-        const value = adaptNodeDetail(input, evidence.smithersRunId, detail);
+        const backend = optionalBackendFinalizationStatus(evidence.layout.root, detail.node.nodeId);
+        const value = adaptNodeDetail(input, evidence.smithersRunId, detail, backend.status);
         last = value;
-        input.onSnapshot(value);
+        diagnostics = backend.diagnostics;
+        input.onSnapshot(value, diagnostics);
       }
     });
   } catch (error) {
@@ -657,7 +673,32 @@ export async function watchWorkflowNode(
   if (last === undefined) {
     return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
   }
-  return runtimeResult<WorkflowNodeValue>(true, last);
+  return runtimeResult<WorkflowNodeValue>(true, last, diagnostics);
+}
+
+function optionalBackendFinalizationStatus(
+  runRoot: string,
+  nodeId: string
+): { status: BackendFinalizationStatus | undefined; diagnostics: RuntimeDiagnostic[] } {
+  const directory = backendCheckpointDirectory(runRoot, nodeId);
+  try {
+    return { status: readBackendFinalizationStatus(directory), diagnostics: [] };
+  } catch {
+    // Optional diagnostics must never mask the authoritative node/attempt data.
+    // Keep the warning bounded and do not echo untrusted checkpoint contents.
+    return {
+      status: undefined,
+      diagnostics: [
+        {
+          code: "BACKEND_FINALIZATION_STATUS_UNAVAILABLE",
+          message: "Backend finalization status is unavailable; workflow node evidence remains available.",
+          severity: "warning",
+          source: "runtime",
+          path: path.join(directory, "status.json")
+        }
+      ]
+    };
+  }
 }
 
 /**
@@ -1798,10 +1839,12 @@ function eventDetail(payload: Record<string, unknown>): string | null {
 function adaptNodeDetail(
   input: WorkflowNodeQueryInput,
   smithersRunId: string,
-  detail: CurrentNodeDetail
+  detail: CurrentNodeDetail,
+  backendFinalization?: BackendFinalizationStatus
 ): WorkflowNodeValue {
   const attempts = detail.attempts.map((attempt) => adaptNodeAttempt(attempt, input.tools === true));
   return {
+    ...(backendFinalization === undefined ? {} : { backend_finalization: backendFinalization }),
     run_id: input.runId,
     workflow_run_id: smithersRunId,
     node_id: detail.node.nodeId,

@@ -1,0 +1,17 @@
+# harness-repairs.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 2328 bytes, sha256 d25adaf91b63b4c0
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (root): array<object>
+ (rules): 1 cross-member rule  -> $/items/allOf
+*failure_id: string
+*classification: const(harness-defect)
+*failure_summary: string
+*reproducer_path: string|null
+ reproducer_unavailable_reason: string
+*repair_summary: string
+*files_changed_or_proposed: array<string>
+*commands: array<string>
+*notes: array<string>

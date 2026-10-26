@@ -1,0 +1,78 @@
+# planned-graph.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 17453 bytes, sha256 b1c0e66aca89630f
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.planned-graph.v4)
+*graph_version: const(4)
+*topology_version: const(2)
+*groups: object<object>  -> $/$defs/topologyGroup
+*nodes: array<object>
+   (rules): 1 cross-member rule  -> $/properties/nodes/items/allOf
+  *id: string
+  *logical_id: string
+  *display_name: string
+  *kind: enum(agentic|reference)
+   group: string
+  *depends_on: array<string>
+  *artifact_dir: string
+   timeout_seconds: integer
+  *outputs: array<object>
+     (rules): 1 cross-member rule  -> $/properties/nodes/items/properties/outputs/items/allOf
+    *path: string
+    *contract: enum[44 values]  -> $/properties/nodes/items/properties/outputs/items/properties/contract/enum
+    *contract_digest: string
+     schema_file: string
+     schema_id: string
+     schema_sha256: string
+     schema_bundle_sha256: string
+     validator_build: string
+    *primary: boolean
+  *prompt_id: string
+  *prompt_path: string
+   reference: string
+   reference_revision: object
+     kind: enum(document|vulnerability-database)
+    *provider: const(github)
+    *repo: string
+    *commit: string
+    *paths: array<string>
+   artifact_dirs: array<string>
+   dynamic: object
+    *from: object
+      *node: string
+      *path: string
+    *key: string
+    *node_id: string
+     template_digest: string
+     status: enum(pending|expanded)
+     generated_node_ids: array<string>
+   dynamic_dependencies: array<string>
+   declared_depends_on: array<string>
+   dynamic_generated: object
+    *group_node_id: string
+    *source_node_id: string
+    *source_attempt_id: string
+    *expansion_key: string
+    *item_sha256: string
+    *storage_id: string
+    *manifest_path: string
+  *loop: object
+    *index: integer
+    *count: integer
+    *mode: enum(parallel|series)
+    *attempt_index: integer
+  *model_fanout: array<object>
+     attempt_id: string
+    *model_profile_id: string
+    *agent_ref: string
+     model_name: string
+     reasoning_effort: string
+     timeout_seconds: integer
+    *model_index: integer
+    *loop_index: integer
+    *attempt_index: integer
+   workflow: object
+    *node_id: string
+    *task_node_ids: array<string>

@@ -1154,7 +1154,13 @@
                 "$ref": "#/$defs/nonNegativeSafeInteger"
               },
               "failure_category": {
-                "enum": ["dependency-cascade", "artifact-contract", "provider-interruption", "agent-failure"]
+                "enum": [
+                  "dependency-cascade",
+                  "artifact-contract",
+                  "tool-unavailable",
+                  "provider-interruption",
+                  "agent-failure"
+                ]
               }
             }
           }

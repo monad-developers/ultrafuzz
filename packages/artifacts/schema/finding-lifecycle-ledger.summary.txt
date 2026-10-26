@@ -1,0 +1,34 @@
+# finding-lifecycle-ledger.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 5626 bytes, sha256 449d1fbd77124329
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.finding-lifecycle-ledger.v1)
+*records: array<object>
+  *dedupe_key: string
+  *source_artifacts: array<object>
+    *path: string
+    *node_id: string
+    *finding_id: string
+    *title: string
+    *relationship: enum(primary|duplicate|family-variant)
+  *strategy_hits: array<object>
+    *strategy: string
+     attempt_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     loop_index: integer
+   duplicate_finding_ids: array<string>
+   family_variant_keys: array<string>
+   triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+   triage_reason: string
+   demotion_reason: string
+   canonical_severity: enum(High|Medium|Low)
+   final_disposition: enum(promoted|non-production|dropped)
+   comparison_disposition: enum(promoted-again|rediscovered-but-demoted|not-reproduced|not-searched)
+  *stages: array<object>
+    *stage: enum(raw|deduped|triaged|severity-classified)
+    *artifact_path: string
+     finding_id: string

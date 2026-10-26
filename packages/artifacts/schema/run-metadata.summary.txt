@@ -1,0 +1,90 @@
+# run-metadata.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 21397 bytes, sha256 af4ecd34431b876b
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (rules): 1 cross-member rule  -> $/allOf
+ (rules): 1 cross-member rule  -> $/dependentRequired
+*schema_version: const(ultrafuzz.run-metadata.v2)
+*run_id: string
+*created_at: string
+ source_run_id: string
+ source_revision: string
+ source_ref: string
+*mode: enum(run|resume|replay|fork)
+*workflow_ids: array<string>
+*redacted_config_fingerprint: string
+*forge_guard: object
+  *enabled: boolean
+  *active: boolean
+  *virtual_memory_limit_kb: integer
+  *rayon_threads: integer
+ workflow: object
+  *run_id: string
+  *compiled_run_id: string
+  *name: string
+  *path: string
+  *evidence_path: string
+  *expanded_graph_path: string
+  *config_path: string
+  *input_path: string
+  *tasks_path: string
+  *control_integrity_path: string
+  *control_generation: string
+   controller_generation: string
+   controller_generation_journal_path: string
+  *workflow_link_id: string
+  *execution_snapshot_path: string
+   controller_execution_snapshot_path: string
+  *task_node_ids: array<string>
+ accounting: object
+  *schema_version: const(ultrafuzz.accounting.v4)
+  *source: const(usage-ledger)
+  *workflow_run_id: string
+  *current: object  -> $/$defs/accountingSegment/allOf
+  *segments: array<object>  -> $/$defs/accountingSegment/allOf
+  *cumulative: object  -> $/$defs/cumulativeAccounting/allOf
+  *checkpoint: object
+    *schema_version: const(ultrafuzz.accounting-checkpoint.v1)
+    *ledger_event_count: integer
+    *last_source_event_sequence: integer
+    *control_generation: string
+    *workflow_run_id: string
+  *pricing_catalog: object
+    *source: enum(models.dev|configured-catalog|disabled)
+    *status: enum(available|disabled|unavailable)
+     fetched_at: string
+    *resolved_models: array<string>
+    *unresolved_models: array<string>
+    *model_prices: object<object>  -> $/$defs/modelPricing
+     fallback: object
+      *table: string
+      *models: array<string>
+  *updated_at: string
+ attempts_without_usage: object
+  *attempts: array<object>
+    *workflow_run_id: string
+    *source_event_sequence: integer
+    *node_id: string
+    *iteration: integer
+    *attempt: integer
+     model_name: string
+  *cumulative_count: integer
+ prompt_digest: string
+ audit_profile: object
+  *requested: string
+  *effective: string
+  *catalog_schema_version: integer
+  *settings: object
+   declared_topology_path: string
+  *catalog_digest: string
+  *effective_topology_path: string
+  *topology_path_origin: string
+  *topology_digest: string
+  *prompt_digest: string
+  *expanded_graph_fingerprint: string
+  *effective_settings: object
+  *setting_origins: object<string>
+  *overridden_settings: array<string>
+  *topology_overridden: boolean

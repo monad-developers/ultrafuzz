@@ -1,0 +1,117 @@
+# triaged-findings.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 82760 bytes, sha256 e18c8ce277f0c51c
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+ (root): array<object>
+ (rules): 2 cross-member rules  -> $/items/allOf
+*schema_version: const(ultrafuzz.finding.v2)
+*id: string
+*title: string
+*status: enum(candidate|needs-review|duplicate|false-positive|confirmed|fixed|wont-fix)
+ severity_guess: enum(High|Medium|Low)
+ confidence: enum(high|medium|low)
+*summary: string
+*triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+ producer_node_id: string
+ producer_attempt_id: string
+ source_node_id: string
+ source_nodes: array<string>
+ strategy: string
+ dynamic_strategy_id: string
+ enumerator_id: string
+ attempt_index: integer
+ model_id: string
+ model: string
+ model_index: integer
+ loop_index: integer
+ affected_files: array<string>
+ affected_functions: array<string>
+ patch_refs: array<string>
+ property_ids: array<string>
+ fuzzer_backend: string
+ fuzzer_backends: array<string>
+ contributing_backend_failures: array<object>
+  *fuzzer_backend: string
+  *failure_id: string
+  *raw_result_ref: string
+ deduplication: object
+  *pre_dedup_count: integer
+   basis: string
+ dedupe_key: string
+ family_id: string
+ family_variants: array<object>
+  *id: string
+  *title: string
+  *summary: string
+  *dedupe_key: string
+   strategy: string
+   attempt_index: integer
+   model_id: string
+   model: string
+   model_index: integer
+   loop_index: integer
+   affected_files: array<string>
+   affected_functions: array<string>
+   evidence: array<anyOf[4]>  -> $/items/properties/family_variants/items/properties/evidence/items/anyOf
+ related_findings: array<object>
+  *id: string
+  *title: string
+  *relationship: string
+  *summary: string
+   dedupe_key: string
+*notes: array<string (pattern-guarded)>  -> $/$defs/findingReportBoundText/allOf
+ evidence: array<anyOf[4]>  -> $/items/properties/evidence/items/anyOf
+ severity: enum(High|Medium|Low)
+ impact: enum(High|Medium|Low)
+ likelihood: enum(High|Medium|Low)
+ impact_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+ likelihood_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+ severity_rationale: string (pattern-guarded)  -> $/$defs/findingReportBoundText/allOf
+ description: string
+ proof_of_concept: object
+  *scenario: array<string>
+  *language: string
+  *code: string
+ recommendation: string
+ recommended_next_action: string
+ strategy_provenance: object
+  *detection_rates: array<object>
+    *strategy: string
+    *detections: integer
+    *configured_loops: integer
+   attempts: array<object>
+    *strategy: string
+     attempt_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     loop_index: integer
+ lifecycle: object
+  *dedupe_key: string
+  *source_artifacts: array<object>
+    *path: string
+    *node_id: string
+    *finding_id: string
+    *title: string
+    *relationship: enum(primary|duplicate|family-variant)
+  *strategy_hits: array<object>
+    *strategy: string
+     attempt_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     loop_index: integer
+   duplicate_finding_ids: array<string>
+   family_variant_keys: array<string>
+   triage_classification: enum(true-positive|false-positive|undetermined|incomplete-spec|harness-defect|repair-candidate|spec-gated|defensive-hardening)
+   triage_reason: string
+   demotion_reason: string
+   canonical_severity: enum(High|Medium|Low)
+   final_disposition: enum(promoted|non-production|dropped)
+   comparison_disposition: enum(promoted-again|rediscovered-but-demoted|not-reproduced|not-searched)
+   stages: array<object>
+    *stage: enum(raw|deduped|triaged|severity-classified)
+    *artifact_path: string
+     finding_id: string

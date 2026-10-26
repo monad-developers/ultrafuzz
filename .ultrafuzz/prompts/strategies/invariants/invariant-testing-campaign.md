@@ -99,12 +99,17 @@ Use this configured invariant testing fuzzer timeout:
      require their CLIs.
 
 2. Resolve CPU allocation and the supervised timing budgets.
-   - Resolve available host parallelism exactly once with
-     `availableParallelism()` or the runtime's equivalent and reuse that value.
-   - Compute `workers = max(1, available_vcpus)`; the single final backend uses
-     the whole host instead of splitting it between competing backends.
-   - Record the deterministic cases in the plan: 1 vCPU means 1 worker; higher
-     counts use `available_vcpus` workers on the one backend.
+   - Read `available_vcpus`, `configured_concurrency_limit`, and the backend
+     worker limit from the appended Backend Concurrency context. The runtime
+     resolves available host parallelism once on the executing controller.
+   - Use `workers = max(1, min(available_vcpus, configured_concurrency_limit))`.
+     The operator's configured limit takes precedence over whole-host profile
+     defaults. A 32-vCPU host capped at 16 uses 16 workers; 8 available vCPUs
+     with the same cap use 8; 1 vCPU uses 1. Never raise the limit by probing
+     the host CPU count again.
+   - Record `available_vcpus` and the capped `workers` in the plan. Also record
+     `configured_concurrency_limit` when the pinned plan schema declares it
+     (historical pinned schemas may omit this field).
    - After validation and the Recon smoke, reserve the complete
      `{{invariant_testing_fuzzer_timeout}}` seconds for the supervised Recon
      process. Do not subtract setup, parsing, shutdown, reproducer, or artifact
@@ -143,6 +148,15 @@ Use this configured invariant testing fuzzer timeout:
      relationships are contextual requirements beyond JSON Schema.
 
 3. Run the backend without path collisions.
+   - When the runtime supplies a **Checkpointed backend finalization** context,
+     wrap the complete supervised command below in its `ultrafuzz backend run`
+     command. That runner durably saves raw backend evidence on successful exit
+     and admits a bounded artifact-finalization grace window. Do not wrap the
+     preliminary smoke or claim completion from heartbeat/log activity. If that
+     context reports an existing completed checkpoint, reuse its restored raw
+     evidence and finalize artifacts without rerunning the expensive campaign.
+     Copy the runner's captured stdout/stderr into the declared log/evidence
+     paths; do not mistake an empty redirected wrapper stdout for backend logs.
    - Start the long campaign from this template, substituting the resolved
      worker count and the repository's own contract, config, and corpus
      conventions:
@@ -196,8 +210,12 @@ Use this configured invariant testing fuzzer timeout:
    - Choose the schema-defined execution variant that exactly matches whether
      the backend started, how it terminated, and whether its results are
      consumable. Record actual lifecycle timestamps, exit evidence, and failure
-     evidence; the finish time is the record finalization time even when the
-     backend never started.
+     evidence. For a backend that started, `execution.finished_at` and
+     `end_timestamp` are its actual exit time, not the later artifact-writing
+     time. Preserve that recorded exit time when resuming finalization from a
+     checkpoint; do not change the backend deadlines or invent a later backend
+     run. When the backend never started, use the time its unavailable/blocked
+     outcome was established.
    - Copy every plan-owned backend identity, version, execution worker/deadline
      setting, campaign command, and operational path exactly from
      `campaign-plan.json`. Bind the executed campaign command to the plan's

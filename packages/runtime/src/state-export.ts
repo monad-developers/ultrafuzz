@@ -59,6 +59,7 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { readPendingRunHealth } from "./pending-run-health.js";
 import { observedRunEnded, readReportPublicationStatus } from "./report-publication-status.js";
+import { workflowCompletionDivergenceDiagnostic } from "./run-completion-diagnostics.js";
 
 const LIVE_WORKFLOW_RUN_STATUSES: ReadonlySet<string> = new Set([
   "running",
@@ -331,7 +332,12 @@ export async function getRunHealth(input: {
     health.workflow_status,
     evidence.layout.statePath
   );
-  const diagnostics = [...syncDiagnostics, ...(lifecycleDivergence === undefined ? [] : [lifecycleDivergence])];
+  const completionDivergence = workflowCompletionDivergenceDiagnostic(state, health);
+  const diagnostics = [
+    ...syncDiagnostics,
+    ...(lifecycleDivergence === undefined ? [] : [lifecycleDivergence]),
+    ...(completionDivergence === undefined ? [] : [completionDivergence])
+  ];
   const ended = observedRunEnded(state.status, health.workflow_status, health.verdict);
   return runtimeResult<RunHealthValue>(
     !diagnostics.some((diagnostic) => diagnostic.severity === "error"),

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { artifactSchemaFieldSummaries } from "./field-summaries.js";
 import { layoutForRunRoot } from "./run-layout.js";
 import { safeResolveInside, sha256Bytes, writeFileDurable } from "./safe-paths.js";
 import {
@@ -117,9 +118,48 @@ export function materializePromptSchemas(destination: string, bundle: ArtifactSc
     copied.push(targetPath);
   }
   if (copied.length === 0) throw new Error(`prompt schema source is empty: ${source}`);
+  copied.push(...materializeFieldSummaries(source, target, bundle));
   // Keep the schema files read-only while allowing the owning task/worktree
   // cleanup to unlink and recreate the directory.
   fs.chmodSync(target, 0o700);
+  return copied;
+}
+
+/**
+ * Copy the bundle's derived field summaries beside its schemas, for the summary paths the rendered
+ * output contract names (#1298). A summary is the agent's view of a schema's shape and never a
+ * validation input, so it carries no pinned digest; a bundle sealed before summaries existed
+ * simply has none to copy and the prompt's summary line is omitted for the same reason.
+ */
+function materializeFieldSummaries(source: string, target: string, bundle: ArtifactSchemaBundle): string[] {
+  const summaries = artifactSchemaFieldSummaries(source);
+  if (summaries.size === 0) return [];
+  const registered = new Set(bundle.registry.map((entry) => entry.filename));
+  const copied: string[] = [];
+  for (const [schemaFilename, summary] of summaries) {
+    if (!registered.has(schemaFilename)) continue;
+    const sourcePath = safeResolveInside(source, summary.summaryFilename, "prompt schema field summary");
+    if (!fs.existsSync(sourcePath)) continue;
+    const sourceEntry = fs.lstatSync(sourcePath);
+    if (!sourceEntry.isFile() || sourceEntry.isSymbolicLink() || sourceEntry.nlink !== 1) {
+      throw new Error(`prompt schema field summary source entry is unsafe: ${sourcePath}`);
+    }
+    const sourceBytes = readRegularFileSnapshot(sourcePath, MAX_SCHEMA_FILE_BYTES);
+    const targetPath = safeResolveInside(target, summary.summaryFilename, "prompt schema field summary destination");
+    if (fs.existsSync(targetPath)) {
+      const targetEntry = fs.lstatSync(targetPath);
+      if (!targetEntry.isFile() || targetEntry.isSymbolicLink() || targetEntry.nlink !== 1) {
+        throw new Error(`prompt schema field summary destination entry is unsafe: ${targetPath}`);
+      }
+      if (!readRegularFileSnapshot(targetPath, MAX_SCHEMA_FILE_BYTES).equals(sourceBytes)) {
+        writeFileDurable(targetPath, sourceBytes, { mode: 0o400 });
+      }
+    } else {
+      fs.copyFileSync(sourcePath, targetPath);
+    }
+    fs.chmodSync(targetPath, 0o400);
+    copied.push(targetPath);
+  }
   return copied;
 }
 

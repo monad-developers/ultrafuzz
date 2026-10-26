@@ -1,0 +1,39 @@
+# differential-plan.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 6261 bytes, sha256 d06742317a4121b3
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.differential-plan.v1)
+*planner_attempt_index: integer
+*candidate_surfaces: array<object>
+  *surface_id: string
+  *public_entrypoints: array<string>
+  *public_evidence_paths: array<string>
+  *oracle_basis: array<string>
+  *in_scope_behavior: array<string>
+  *out_of_scope_behavior: array<string>
+  *ambiguities: array<string>
+  *priority: enum(high|medium|low)
+*reference_model_rules: object
+  *allowed_structures: array<string>
+  *forbidden_sources: array<string>
+*deployment_assumptions: array<string>
+*phase_priorities: array<string>
+*assigned_differential_lanes: array<object>
+  *lane_id: string
+  *planner_attempt_index: integer
+  *surface_id: string
+  *intended_t_sol_path: string
+  *focused_command: string
+  *public_evidence_paths: array<string>
+  *observable_equality_assertions: array<string>
+  *oracle_type: enum(independent_reference|metamorphic|self_consistency|sanity_probe)
+  *calibration_bucket: enum(red_seeking_adversarial|green_safe_sanity)
+  *red_seeking_priority: enum(high|medium|low)
+*deferred_lane_candidates: array<object>
+  *lane_id: string
+  *reason: string
+*out_of_scope_surfaces: array<object>
+  *surface_id: string
+  *reason: string

@@ -15,6 +15,7 @@ import {
   type WorkspacePatchOverflowAttribution,
   type WorkspacePatchOverflowContributor
 } from "./git-capture-diagnostics.js";
+import { isGeneratedWorkspaceOutput } from "./workspace-generated-output.js";
 
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
@@ -88,9 +89,10 @@ const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "art
  * index would simply keep the baseline blob and an authored edit would vanish from the patch with no
  * error and a manifest that still validates.
  *
- * The pathspecs are root-anchored, matching where `recon fuzz .` writes. Agent-chosen variants are not
- * guessed here. `captureWorkspacePatch` handles those only after a real diff crosses the patch ceiling,
- * then excludes measured untracked contributors at exact-file granularity (issue #368).
+ * The pathspecs are root-anchored, matching where `recon fuzz .` writes. Per-file classification below
+ * also excludes recognizable nested build/coverage/corpus output before it can poison a baseline or
+ * fail the secret gate below the patch ceiling (#1308). Unknown output retains measured overflow
+ * recovery at exact-file granularity (issue #368).
  */
 const WORKSPACE_GENERATED_ROOTS = ["recon-corpus", "echidna", "magic", "out"] as const;
 
@@ -156,11 +158,30 @@ export interface WorkspacePatchGitFacts {
   patchSha256: string;
 }
 
-/** Return the tracked tree represented by the complete current worktree. */
-export function captureWorkspaceTree(workspaceRoot: string): string {
+interface WorkspaceTreeCaptureAuthority {
+  /** Trees authenticated by preparation or dependency handoff authority. */
+  trees?: readonly string[];
+  /** Changed paths authenticated by a dependency handoff, including deletions. */
+  files?: readonly WorkspacePatchFile[];
+}
+
+/**
+ * Return the current worktree tree. Paths already authenticated by a handoff
+ * remain eligible even if a newer runtime now classifies their layout as scratch.
+ * Without authority this captures only candidates for a new handoff; replay and
+ * preparation must supply their authenticated baseline/path membership.
+ */
+export function captureWorkspaceTree(workspaceRoot: string, authority: WorkspaceTreeCaptureAuthority = {}): string {
+  const preservedPaths = new Set((authority.files ?? []).map((entry) => workspacePathKey(Buffer.from(entry.path))));
+  for (const tree of new Set(authority.trees ?? [])) {
+    assertObjectId(tree, "workspace tree capture authority");
+    for (const entry of splitNulBuffer(runGitBuffer(workspaceRoot, ["ls-tree", "-r", "--name-only", "-z", tree]))) {
+      preservedPaths.add(workspacePathKey(entry));
+    }
+  }
   return withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", "HEAD"], index);
-    stageWorkspaceTree(workspaceRoot, index);
+    stageWorkspaceTree(workspaceRoot, index, preservedPaths);
     return runGit(workspaceRoot, ["write-tree"], index).trim();
   });
 }
@@ -430,7 +451,8 @@ export function applyWorkspacePatch(
   expectedProductionSourceRoots: readonly string[]
 ): void {
   validateWorkspacePatchCapture(workspaceRoot, capture, expectedProductionSourceRoots);
-  const currentTree = captureWorkspaceTree(workspaceRoot);
+  const authority = { trees: [capture.manifest.base_tree], files: capture.manifest.files };
+  const currentTree = captureWorkspaceTree(workspaceRoot, authority);
   if (currentTree === capture.manifest.result_tree) return;
   if (currentTree !== capture.manifest.base_tree) {
     throw new Error(`workspace patch base tree mismatch: expected ${capture.manifest.base_tree}, got ${currentTree}`);
@@ -444,7 +466,7 @@ export function applyWorkspacePatch(
   }
   runGit(workspaceRoot, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], undefined, capture.patch);
   runGit(workspaceRoot, ["apply", "--binary", "--whitespace=nowarn", "-"], undefined, capture.patch);
-  const appliedTree = captureWorkspaceTree(workspaceRoot);
+  const appliedTree = captureWorkspaceTree(workspaceRoot, authority);
   if (appliedTree !== capture.manifest.result_tree) {
     throw new Error(
       `workspace patch result tree mismatch: expected ${capture.manifest.result_tree}, got ${appliedTree}`
@@ -498,13 +520,17 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
  * in the index and nothing here ever names a root path, so their entries are `treeish` by
  * construction.
  */
-function stageWorkspaceTree(workspaceRoot: string, index: string): { untrackedPaths: ReadonlyMap<string, Buffer> } {
+function stageWorkspaceTree(
+  workspaceRoot: string,
+  index: string,
+  preservedPaths: ReadonlySet<string> = new Set()
+): { untrackedPaths: ReadonlyMap<string, Buffer> } {
   // A listed path can vanish before it is staged — agent subprocesses are still running during
   // capture — and `git add --pathspec-from-file` fails the whole invocation when a name matches
   // nothing (`--ignore-errors` does not suppress it). Re-list and retry rather than aborting the
   // run, which is the failure this whole function exists to avoid.
   for (let attempt = 0; ; attempt += 1) {
-    const stageable = stageableWorkspacePaths(workspaceRoot, index);
+    const stageable = stageableWorkspacePaths(workspaceRoot, index, preservedPaths);
     if (stageable.pathspecs.length === 0) return { untrackedPaths: stageable.untrackedPaths };
     try {
       runGit(
@@ -528,7 +554,8 @@ const MAX_MEASURED_EXCLUSION_CANDIDATES = 4096;
 /** Every path git would stage, minus the runtime roots and any directory entry. */
 function stageableWorkspacePaths(
   workspaceRoot: string,
-  index: string
+  index: string,
+  preservedPaths: ReadonlySet<string>
 ): { pathspecs: Buffer[]; untrackedPaths: ReadonlyMap<string, Buffer> } {
   // Two listings rather than one, so the generated-root exclusions apply to UNTRACKED paths only.
   // Excluding a tracked path here would be silent data loss: staging runs after `read-tree <baseline>`,
@@ -555,7 +582,8 @@ function stageableWorkspacePaths(
       ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`),
       // The prompt-owned destinations remain exact. Prefix matching was added as an incident stopgap,
       // but silently dropped authored paths such as `echidna-config/NewAuthored.sol`. Unknown, nested,
-      // case-variant and slash-less generated paths are handled by measured overflow recovery instead.
+      // case-variant and slash-less paths remain eligible unless classified as generated output below
+      // or excluded by measured overflow recovery.
       ...WORKSPACE_GENERATED_ROOTS.map((root) => `:(exclude)${root}/**`),
       ...WORKSPACE_DEPENDENCY_ROOTS.map((root) => `:(exclude)${root}/**`)
     ],
@@ -584,6 +612,21 @@ function stageableWorkspacePaths(
     const top = (separator < 0 ? entry : entry.subarray(0, separator)).toString("utf8");
     if (top === ".git" || runtimeRoots.has(top)) return;
     const key = workspacePathKey(entry);
+    if (isUntracked) {
+      const relativePath = entry.toString("utf8");
+      // Never classify a lossy decoded path or bypass a sensitive/path-safety failure.
+      if (Buffer.from(relativePath).equals(entry)) {
+        try {
+          normalizeWorkspacePatchPath(relativePath);
+          rejectSensitivePath(relativePath);
+        } catch {
+          pathspecs.push(entry);
+          untrackedPaths.set(key, entry);
+          return;
+        }
+        if (!preservedPaths.has(key) && isGeneratedWorkspaceOutput(workspaceRoot, relativePath)) return;
+      }
+    }
     pathspecs.push(entry);
     if (isUntracked) untrackedPaths.set(key, entry);
   };

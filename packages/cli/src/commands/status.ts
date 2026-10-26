@@ -13,7 +13,7 @@ import {
   type CommandResult
 } from "../command-shared.js";
 import { formatStatusDuration } from "../status-rendering.js";
-import { renderReportStatusLines, shouldRefreshStatus } from "../status-report.js";
+import { renderExecutionStatusLines, renderReportStatusLines, shouldRefreshStatus } from "../status-report.js";
 import { setTimeout as wait } from "node:timers/promises";
 
 const DEFAULT_WATCH_INTERVAL_SECONDS = 30;
@@ -86,17 +86,17 @@ function emitStatusResult(command: Command, result: CommandResult, watch: boolea
 
 function renderHealth(value: RunHealthValue): string {
   if (value.verdict === "launch-incomplete") {
-    return `Run: ${value.run_id}\nStatus: launch-incomplete (pending)\n${renderReportStatusLines(value).join("\n")}\nReason: ${value.reason}\nWorkflow progress and ETA are unavailable until launch preparation completes.\n`;
+    return `Run: ${value.run_id}\n${renderExecutionStatusLines(value).join("\n")}\n${renderReportStatusLines(value).join("\n")}\nWorkflow reason: ${value.reason}\nWorkflow progress and ETA are unavailable until launch preparation completes.\n`;
   }
   const progress = value.progress;
   const lines = [
     `Run: ${value.run_id}`,
     ...(typeof value.audit_profile?.effective === "string" ? [`Audit profile: ${value.audit_profile.effective}`] : []),
-    `Status: ${value.verdict} (${value.status})`,
+    ...renderExecutionStatusLines(value),
     ...renderReportStatusLines(value),
     ...lifecycleDivergenceLines(value),
-    `Reason: ${value.reason}`,
-    `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,
+    `Workflow reason: ${value.reason}`,
+    `Workflow progress: ${String(progress.percent)}% (${String(progress.finished)} finished / ${String(progress.in_progress)} running / ${String(progress.pending)} pending / ${String(progress.failed)} failed${extraBuckets(value)} / ${String(progress.total)} total)`,
     `ETA: ${renderEta(value.eta)}`,
     `Time on current step: ${renderCurrentStep(value.current_step)}`,
     `Pace: ${value.throughput.recent_finished} finished in the last ${Math.max(1, Math.round(value.throughput.window_ms / 60_000))}m`

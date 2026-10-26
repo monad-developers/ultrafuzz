@@ -749,13 +749,16 @@ async function loadGeneratedOpenRouterAgent(
     provisionalCallbackLimit?: number;
     actionSnapshotLimit?: number;
     actionSnapshotBytes?: number;
+    backoffBudgetMs?: number;
   },
   testInstrumentation?: {
     acknowledgeProvisionalRateLimit?: boolean;
     acknowledgeTerminalRateLimit?: boolean;
     expireRetryDeadlineBeforeReplacementBuild?: number;
+    manualClock?: boolean;
   }
 ): Promise<{
+  openRouterTestClock?: { nowMs: number; waits: number[]; onWait?: () => void };
   OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
     generate(options?: Record<string, unknown>): Promise<{ text: string }>;
     withOpenRouterRecovery<T>(
@@ -773,11 +776,14 @@ async function loadGeneratedOpenRouterAgent(
     nowMs: number;
     retryDeadlineMs: number;
     totalDeadlineMs?: number;
+    finalizationReserveMs?: number;
+    backoffRemainingMs?: number;
     random: number;
   }):
     | { kind: "rate-limit-exhausted" }
     | { kind: "total-timeout" }
-    | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
+    | { kind: "backoff-budget-exhausted" | "finalization-reserved" }
+    | { kind: "backoff"; delayMs: number; afterDelay: "retry" };
   createOpenRouterAgent(options?: Record<string, unknown>): {
     opts: Record<string, unknown> & { env?: Record<string, string> };
     generate(options?: {
@@ -888,13 +894,32 @@ async function loadGeneratedOpenRouterAgent(
     }
     for (const [from, value] of [
       ["const OPENROUTER_ACTION_SNAPSHOT_LIMIT = 256;", retryPolicy.actionSnapshotLimit],
-      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes]
+      ["const OPENROUTER_ACTION_SNAPSHOT_BYTES = 256 * 1024;", retryPolicy.actionSnapshotBytes],
+      ["const OPENROUTER_429_BACKOFF_BUDGET_MS = 120_000;", retryPolicy.backoffBudgetMs]
     ] as const) {
       if (value === undefined) continue;
       const replaced = openRouterSource.replace(from, from.replace(/= .*;/u, `= ${value};`));
       assert.notEqual(replaced, openRouterSource, `missing generated OpenRouter source: ${from}`);
       openRouterSource = replaced;
     }
+  }
+  if (testInstrumentation?.manualClock === true) {
+    openRouterSource = openRouterSource.replaceAll("performance.now()", "openRouterTestClock.nowMs");
+    const waitStart = openRouterSource.indexOf("function waitForRetry(");
+    const waitEnd = openRouterSource.indexOf("function abortReason(", waitStart);
+    assert.ok(waitStart > 0 && waitEnd > waitStart, "missing generated OpenRouter retry wait source");
+    openRouterSource =
+      openRouterSource.slice(0, waitStart) +
+      `function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted === true) return Promise.reject(abortReason(signal));
+  openRouterTestClock.waits.push(delayMs);
+  openRouterTestClock.nowMs += delayMs;
+  openRouterTestClock.onWait?.();
+  return signal?.aborted === true ? Promise.reject(abortReason(signal)) : Promise.resolve();
+}
+export const openRouterTestClock = { nowMs: 0, waits: [] as number[], onWait: undefined as (() => void) | undefined };
+` +
+      openRouterSource.slice(waitEnd);
   }
   if (testInstrumentation?.acknowledgeProvisionalRateLimit === true) {
     const from = 'this.#provisionalRateLimit = matchState === "provisional";';
@@ -979,6 +1004,7 @@ ${deadlineFrom}`
   );
   fs.copyFileSync(path.join(fixture, "strict-json.mjs"), path.join(fixture, "strict-json"));
   return (await import(pathToFileURL(path.join(fixture, "openrouter.mjs")).href)) as {
+    openRouterTestClock?: { nowMs: number; waits: number[]; onWait?: () => void };
     OpenRouterCodexAgent: new (options?: Record<string, unknown>) => {
       generate(options?: Record<string, unknown>): Promise<{ text: string }>;
       withOpenRouterRecovery<T>(
@@ -996,11 +1022,14 @@ ${deadlineFrom}`
       nowMs: number;
       retryDeadlineMs: number;
       totalDeadlineMs?: number;
+      finalizationReserveMs?: number;
+      backoffRemainingMs?: number;
       random: number;
     }):
       | { kind: "rate-limit-exhausted" }
       | { kind: "total-timeout" }
-      | { kind: "backoff"; delayMs: number; afterDelay: "retry" | "total-timeout" };
+      | { kind: "backoff-budget-exhausted" | "finalization-reserved" }
+      | { kind: "backoff"; delayMs: number; afterDelay: "retry" };
     createOpenRouterAgent(options?: Record<string, unknown>): {
       opts: Record<string, unknown> & { env?: Record<string, string> };
       generate(options?: {
@@ -1916,6 +1945,11 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       '  command -v forge > "$SMITHERS_FAKE_FORGE_GUARD_LOG"',
       "fi",
       'case "$1" in',
+      "  timetravel)",
+      `    ${shellQuote(process.execPath)} -e ${shellQuote(
+        'const args = process.argv.slice(1); const option = (key) => args[args.indexOf(key) + 1]; const runId = option("--run-id"); const nodeId = option("--node-id"); const iteration = args.includes("--iteration") ? Number(option("--iteration")) : 0; const resetPlan = { schema_version: "ultrafuzz.reset-plan.v1", workflow_run_id: runId, generation: "sha256:" + "a".repeat(64), requested_node_id: nodeId, iteration, attempt: 1, reset_dependents: true, policy: "attempt-order", node_count: 1, nodes: [{ workflow_run_id: runId, node_id: nodeId, iteration }] }; console.log(JSON.stringify({ ok: true, data: { success: true, resetPlan }, meta: { command: "timetravel", duration: "1ms" } }));'
+      )} "$@"`,
+      "    ;;",
       "  fork)",
       '    printf \'%s\\n\' \'{"ok":true,"data":{"forkedRunId":"ultrafuzz-lifecycle-run-forked"}}\'',
       "    ;;",
@@ -2251,6 +2285,11 @@ function fakeLifecycleSmithersEnv(
       "#!/bin/sh",
       `printf '%s\\n' "$*" >> ${shellQuote(commandLog)}`,
       'case "$1" in',
+      "  timetravel)",
+      `    ${shellQuote(process.execPath)} -e ${shellQuote(
+        'const args = process.argv.slice(1); const option = (key) => args[args.indexOf(key) + 1]; const runId = option("--run-id"); const nodeId = option("--node-id"); const iteration = args.includes("--iteration") ? Number(option("--iteration")) : 0; const resetPlan = { schema_version: "ultrafuzz.reset-plan.v1", workflow_run_id: runId, generation: "sha256:" + "a".repeat(64), requested_node_id: nodeId, iteration, attempt: 1, reset_dependents: true, policy: "attempt-order", node_count: 1, nodes: [{ workflow_run_id: runId, node_id: nodeId, iteration }] }; console.log(JSON.stringify({ ok: true, data: { success: true, resetPlan }, meta: { command: "timetravel", duration: "1ms" } }));'
+      )} "$@"`,
+      "    ;;",
       "  inspect)",
       `    inspect_count=$(cat ${shellQuote(inspectCountPath)})`,
       "    inspect_count=$((inspect_count + 1))",
@@ -3803,6 +3842,53 @@ bunAdapterTest(
   }
 );
 
+bunAdapterTest(
+  "generated Codex adapter carries the same guarded attempt through fresh and resumed commands",
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project }).ok, true);
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+    const bin = path.join(project, "fake-guard-bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "codex"), "#!/bin/sh\nprintf 'codex-cli 0.146.0\\n'\n", { mode: 0o700 });
+    const names = ["PATH", "ULTRAFUZZ_TRUSTED_BIN"] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    process.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+    process.env.ULTRAFUZZ_TRUSTED_BIN = bin;
+    try {
+      const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
+      const taskContext = { runId: "run", nodeId: "node", iteration: 0, attempt: 1 };
+      const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: { taskContext } });
+      const resumed = await agent.buildCommand({
+        prompt: "test",
+        cwd: project,
+        options: { taskContext, resumeSession: "session-123" }
+      });
+      try {
+        assert.match(fresh.args.join(" "), /hooks\.PreToolUse/u);
+        assert.match(resumed.args.join(" "), /hooks\.PreToolUse/u);
+        assert.deepEqual(fresh.args.slice(0, 2), ["exec", "-c"]);
+        assert.deepEqual(resumed.args.slice(0, 3), ["exec", "resume", "-c"]);
+        assert.equal(fresh.args.filter((arg) => arg === "--add-dir").length, 2);
+        assert.equal(resumed.args.includes("--add-dir"), false);
+        assert.ok(fresh.env?.ULTRAFUZZ_COMMAND_INVOCATIONS);
+        assert.equal(resumed.env?.ULTRAFUZZ_COMMAND_INVOCATIONS, fresh.env.ULTRAFUZZ_COMMAND_INVOCATIONS);
+        assert.equal(fresh.env.ULTRAFUZZ_COMMAND_INVOCATION_ENGINE, "codex");
+        assert.equal(fresh.env.ULTRAFUZZ_TRUSTED_BIN, "");
+      } finally {
+        await fresh.cleanup?.();
+        await resumed.cleanup?.();
+      }
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
+    }
+  }
+);
+
 test("linked workflow classifies sensitive allowlist values from the ambient environment", () => {
   const names = ["ULTRAFUZZ_AGENT_ENV_ALLOWLIST", "AMBIENT_RPC_URL"] as const;
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -4405,7 +4491,7 @@ bunAdapterTest(
         totalDeadlineMs: 500,
         random: 0
       }),
-      { kind: "backoff", delayMs: 500, afterDelay: "total-timeout" }
+      { kind: "finalization-reserved" }
     );
     assert.deepEqual(
       decideOpenRouter429Recovery({
@@ -4428,6 +4514,482 @@ bunAdapterTest(
     );
   }
 );
+
+bunAdapterTest(
+  "generated OpenRouter provider stub recovers near the deadline using one checkpoint and fixed headroom",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    const timeouts: number[] = [];
+    const resumed: unknown[] = [];
+    const notices: string[] = [];
+    let expensiveWork = 0;
+    let invocation = 0;
+    const result = await agent.withOpenRouterRecovery(
+      { prompt: "Run the expensive work once", timeout: 6_000, onStderr: (text: string) => notices.push(text) },
+      async (options) => {
+        invocation += 1;
+        timeouts.push(options.timeout as number);
+        resumed.push(options.resumeSession);
+        if (invocation === 1) {
+          expensiveWork += 1;
+          clock.nowMs = 3_800;
+          emitOpenRouterCheckpoint(options, "work-complete");
+          throw new Error("HTTP 429 after expensive work");
+        }
+        assert.equal(options.resumeSession, "budget-session");
+        assert.match(String(options.prompt), /Do not repeat completed work/u);
+        if (invocation === 2) {
+          clock.nowMs += 100;
+          throw new Error("HTTP 429 still recovering");
+        }
+        clock.nowMs += 400;
+        emitOpenRouterCheckpoint(options, "final-answer");
+        return { text: "OK" };
+      }
+    );
+    assert.equal(result.text, "OK");
+    assert.equal(expensiveWork, 1);
+    assert.deepEqual(resumed, [undefined, "budget-session", "budget-session"]);
+    assert.deepEqual(timeouts, [6_000, 1_700, 1_100]);
+    assert.deepEqual(clock.waits, [500, 500]);
+    const diagnostics = openRouterBudgetDiagnostics(result);
+    assert.equal(diagnostics.elapsedMs, 5_300);
+    assert.equal(diagnostics.productiveRuntimeMs, 4_300);
+    assert.equal(diagnostics.backoffMs, 1_000);
+    assert.equal(diagnostics.retryCount, 2);
+    assert.equal(diagnostics.rateLimitCount, 2);
+    assert.equal(diagnostics.finalizationReserveMs, 1_000);
+    assert.equal(diagnostics.remainingMs, 700);
+    assert.equal(diagnostics.configuredTimeoutMs, 6_000);
+    assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+    assert.ok(diagnostics.deadlineAt);
+    assert.ok(diagnostics.lastCheckpoint);
+    assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 700);
+    assert.match(notices.at(-1) ?? "", /providerRecovery=.*"backoffMs":1000.*"retryCount":2/u);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub stops sustained late 429s before consuming its reserve",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    const providerFailure = new Error("HTTP 429 sustained near deadline");
+    await assert.rejects(
+      agent.withOpenRouterRecovery({ timeout: { totalMs: 6_000, idleMs: 500 } }, async (options) => {
+        invocation += 1;
+        if (invocation === 1) clock.nowMs = 3_800;
+        else assert.equal(options.resumeSession, "budget-session");
+        assert.equal((options.timeout as { idleMs: number }).idleMs, 500);
+        // Provider replay is not new work and cannot refresh this checkpoint.
+        emitOpenRouterCheckpoint(options, "work-complete");
+        throw providerFailure;
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "AGENT_CLI_ERROR");
+        assert.match(String(error), /finalization-reserved.*"backoffMs":1000/u);
+        assert.equal((error as Error).cause, providerFailure);
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.remainingMs, 1_200);
+        assert.equal(diagnostics.productiveRuntimeMs, 3_800);
+        assert.equal(diagnostics.retryCount, 2);
+        assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+        assert.ok(diagnostics.deadlineAt);
+        assert.ok(diagnostics.lastCheckpoint);
+        assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 2_200);
+        return true;
+      }
+    );
+    assert.equal(invocation, 3);
+    assert.deepEqual(clock.waits, [500, 500]);
+    assert.equal(clock.nowMs, 4_800);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub cannot replenish cumulative backoff by making new progress",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 1_000, maxDelayMs: 1_000, jitterFraction: 0, backoffBudgetMs: 2_500 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    await assert.rejects(
+      agent.withOpenRouterRecovery({ timeout: 0 }, async (options) => {
+        invocation += 1;
+        clock.nowMs += 100;
+        emitOpenRouterCheckpoint(options, `new-progress-${invocation}`);
+        throw new Error("HTTP 429 after new progress");
+      }),
+      (error: unknown) => {
+        assert.match(String(error), /backoff-budget-exhausted/u);
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.configuredTimeoutMs, null);
+        assert.equal(diagnostics.deadlineAt, null);
+        assert.equal(diagnostics.backoffBudgetMs, 2_500);
+        assert.equal(diagnostics.backoffMs, 2_000);
+        assert.equal(diagnostics.productiveRuntimeMs, 300);
+        assert.equal(diagnostics.retryCount, 2);
+        assert.equal(diagnostics.rateLimitCount, 3);
+        assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+        return true;
+      }
+    );
+    assert.equal(invocation, 3);
+    assert.deepEqual(clock.waits, [1_000, 1_000]);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub rechecks headroom after callbacks and retains the original hard deadline",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const agent = new OpenRouterCodexAgent();
+    let invocation = 0;
+    await assert.rejects(
+      agent.withOpenRouterRecovery(
+        {
+          timeout: 6_000,
+          onStderr: (text: string) => {
+            if (text.includes("returned HTTP 429")) clock.nowMs = 5_100;
+          }
+        },
+        async (options) => {
+          invocation += 1;
+          clock.nowMs = 3_800;
+          emitOpenRouterCheckpoint(options, "work-complete");
+          throw new Error("HTTP 429 before a slow status callback");
+        }
+      ),
+      /finalization-reserved/u
+    );
+    assert.equal(invocation, 1);
+    assert.deepEqual(clock.waits, []);
+
+    clock.nowMs = 0;
+    invocation = 0;
+    await assert.rejects(
+      agent.withOpenRouterRecovery({ timeout: 6_000 }, async (options) => {
+        invocation += 1;
+        clock.nowMs = invocation === 1 ? 1_000 : 6_000;
+        emitOpenRouterCheckpoint(options, `progress-${invocation}`);
+        if (invocation === 1) throw new Error("HTTP 429 before a long resumed operation");
+        return { text: "Too late" };
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "PROCESS_TIMEOUT");
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.elapsedMs, 6_000);
+        assert.equal(diagnostics.backoffMs, 500);
+        assert.equal(diagnostics.productiveRuntimeMs, 5_500);
+        assert.equal(diagnostics.remainingMs, 0);
+        assert.ok(diagnostics.deadlineAt);
+        assert.ok(diagnostics.lastCheckpoint);
+        assert.equal(Date.parse(diagnostics.deadlineAt) - Date.parse(diagnostics.lastCheckpoint.observedAt), 5_000);
+        return true;
+      }
+    );
+    assert.equal(invocation, 2);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub accounts actual aborted backoff without launching a retry",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const controller = new AbortController();
+    clock.onWait = () => {
+      clock.nowMs = 1_200;
+      controller.abort(new Error("cancelled 200ms into the wait"));
+    };
+    let invocation = 0;
+    await assert.rejects(
+      new OpenRouterCodexAgent().withOpenRouterRecovery(
+        { timeout: 6_000, abortSignal: controller.signal },
+        async (options) => {
+          invocation += 1;
+          clock.nowMs = 1_000;
+          emitOpenRouterCheckpoint(options, "work-complete");
+          throw new Error("HTTP 429 before cancellation");
+        }
+      ),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "PROCESS_ABORTED");
+        const diagnostics = openRouterBudgetDiagnostics(error);
+        assert.equal(diagnostics.elapsedMs, 1_200);
+        assert.equal(diagnostics.backoffMs, 200);
+        assert.equal(diagnostics.productiveRuntimeMs, 1_000);
+        assert.equal(diagnostics.retryCount, 0);
+        assert.equal(diagnostics.lastCheckpoint?.sessionId, "budget-session");
+        return true;
+      }
+    );
+    assert.equal(invocation, 1);
+    assert.deepEqual(clock.waits, [500]);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves quota controls when headroom prevents recovery",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 5_000, initialDelayMs: 500, maxDelayMs: 500, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const details = { failureQuota: true, failureRetryable: true, quotaResetAtMs: 1_800_000_000_000 };
+    const providerFailure = Object.assign(new Error("HTTP 429 provider quota"), {
+      code: "AGENT_QUOTA_EXCEEDED",
+      details
+    });
+    await assert.rejects(
+      new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 6_000 }, async () => {
+        clock.nowMs = 4_900;
+        throw providerFailure;
+      }),
+      (error: unknown) => {
+        assert.equal((error as { code: string }).code, "AGENT_QUOTA_EXCEEDED");
+        assert.deepEqual((error as { details: unknown }).details, details);
+        assert.equal((error as Error).cause, providerFailure);
+        assert.match(String(error), /finalization-reserved/u);
+        assert.equal(openRouterBudgetDiagnostics(error).backoffMs, 0);
+        return true;
+      }
+    );
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves real Smithers quota controls through terminal diagnostics",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const classifierPath = path.join(
+      pinnedRunnerSourceDir("@smthrs/agents", "BaseCliAgent/BaseCliAgent"),
+      "BaseCliAgent",
+      "BaseCliAgent.js"
+    );
+    const { classifyQuotaError } = (await import(pathToFileURL(classifierPath).href)) as {
+      classifyQuotaError(
+        message: string,
+        command: string,
+        context: { nowMs: () => number }
+      ): (Error & { code: string; details: Record<string, unknown> }) | null;
+    };
+    const providerText =
+      "provider diagnostic prefix ".repeat(20) + "HTTP 429 Too Many Requests; retry after 360 seconds";
+    const quota = classifyQuotaError(providerText, "codex", { nowMs: () => 1_800_000_000_000 });
+    assert.ok(quota);
+    assert.equal(quota.code, "AGENT_QUOTA_EXCEEDED");
+    assert.equal(quota.details.quotaResetAtMs, 1_800_000_360_000);
+    assert.doesNotMatch(quota.message, /HTTP 429|429 Too Many Requests/u);
+    for (const channel of ["stderr", "event"]) {
+      clock.nowMs = 0;
+      await assert.rejects(
+        new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 12_000 }, async (options) => {
+          clock.nowMs = 9_500;
+          if (channel === "stderr") {
+            (options.onStderr as (text: string) => void)(`${providerText}\n`);
+          } else {
+            (options.onEvent as (event: Record<string, unknown>) => void)({
+              type: "completed",
+              ok: false,
+              error: providerText
+            });
+          }
+          throw quota;
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, "AGENT_QUOTA_EXCEEDED");
+          assert.deepEqual((error as { details: unknown }).details, quota.details);
+          assert.equal(((error as Error).cause as Error).cause, quota);
+          assert.match(String(error), /finalization-reserved/u);
+          return true;
+        }
+      );
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub preserves direct scheduler controls without promoting arbitrary causes",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const staleQuota = Object.assign(new Error("earlier provider quota"), { code: "AGENT_QUOTA_EXCEEDED" });
+    const details = { failureRetryable: false, discardResumeSession: true, discardAgentCheckpoint: true };
+    for (const code of ["AGENT_CONFIG_INVALID", "AGENT_CHECKPOINT_INVALID", "UNKNOWN_PROVIDER_CODE"]) {
+      clock.nowMs = 0;
+      const providerFailure = Object.assign(new Error("HTTP 429 route rejected", { cause: staleQuota }), {
+        code,
+        details
+      });
+      await assert.rejects(
+        new OpenRouterCodexAgent().withOpenRouterRecovery({ timeout: 12_000 }, async () => {
+          clock.nowMs = 9_500;
+          throw providerFailure;
+        }),
+        (error: unknown) => {
+          assert.equal((error as { code: string }).code, code === "UNKNOWN_PROVIDER_CODE" ? "AGENT_CLI_ERROR" : code);
+          assert.deepEqual((error as { details: unknown }).details, details);
+          assert.equal((error as Error).cause, providerFailure);
+          return true;
+        }
+      );
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+bunAdapterTest(
+  "generated OpenRouter provider stub rechecks terminal callback errors cancellation and deadlines at budget stops",
+  { timeout: 10_000 },
+  async () => {
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { OpenRouterCodexAgent, openRouterTestClock: clock } = await loadGeneratedOpenRouterAgent(
+      project,
+      { retryWindowMs: 120_000, initialDelayMs: 1_000, maxDelayMs: 30_000, jitterFraction: 0 },
+      { manualClock: true }
+    );
+    assert.ok(clock);
+    const providerText = "HTTP 429 terminal provider output\n";
+    for (const stop of ["initial-decision", "headroom-recheck"]) {
+      for (const outcome of ["abort", "deadline", "callback-error"]) {
+        clock.nowMs = 0;
+        const controller = new AbortController();
+        const cancelled = new Error("caller cancelled during terminal release");
+        const callbackFailure = new Error("terminal callback failed");
+        let invocations = 0;
+        let terminalCallbacks = 0;
+        await assert.rejects(
+          new OpenRouterCodexAgent().withOpenRouterRecovery(
+            {
+              timeout: 12_000,
+              abortSignal: controller.signal,
+              onStderr: (text: string) => {
+                if (stop === "headroom-recheck" && text.includes("returned HTTP 429")) clock.nowMs = 9_500;
+                if (text !== providerText) return;
+                terminalCallbacks += 1;
+                if (outcome !== "deadline") controller.abort(cancelled);
+                if (outcome !== "abort") clock.nowMs = 12_000;
+                if (outcome === "callback-error") throw callbackFailure;
+              }
+            },
+            async (options) => {
+              invocations += 1;
+              clock.nowMs = stop === "initial-decision" ? 9_500 : 5_000;
+              (options.onStderr as (text: string) => void)(providerText);
+              throw Object.assign(new Error("HTTP 429 quota"), { code: "AGENT_QUOTA_EXCEEDED" });
+            }
+          ),
+          (error: unknown) => {
+            if (outcome === "callback-error") assert.equal(error, callbackFailure);
+            else {
+              assert.equal(
+                (error as { code: string }).code,
+                outcome === "abort" ? "PROCESS_ABORTED" : "PROCESS_TIMEOUT"
+              );
+              if (outcome === "abort") assert.equal((error as Error).cause, cancelled);
+              else assert.equal(openRouterBudgetDiagnostics(error).remainingMs, 0);
+            }
+            return true;
+          }
+        );
+        assert.equal(invocations, 1);
+        assert.equal(terminalCallbacks, 1);
+      }
+    }
+    assert.deepEqual(clock.waits, []);
+  }
+);
+
+function emitOpenRouterCheckpoint(options: Record<string, unknown>, id: string): void {
+  const onEvent = options.onEvent as (event: Record<string, unknown>) => void;
+  onEvent({ type: "started", resume: "budget-session" });
+  onEvent({
+    type: "action",
+    phase: "completed",
+    action: { id, kind: "note", title: "assistant" },
+    message: id
+  });
+}
+
+function openRouterBudgetDiagnostics(outcome: unknown): {
+  configuredTimeoutMs: number | null;
+  deadlineAt: string | null;
+  elapsedMs: number;
+  productiveRuntimeMs: number;
+  backoffMs: number;
+  backoffBudgetMs: number;
+  retryCount: number;
+  rateLimitCount: number;
+  finalizationReserveMs: number;
+  remainingMs: number | null;
+  lastCheckpoint: { sessionId: string; observedAt: string } | null;
+} {
+  return (outcome as { providerRecovery: ReturnType<typeof openRouterBudgetDiagnostics> }).providerRecovery;
+}
 
 bunAdapterTest(
   "generated OpenRouter recovery telemetry cannot replace the original provider failure",
@@ -11529,6 +12091,8 @@ nodes:
     "- Working budget before finalization: 1000 seconds.",
     "- Clock: `date -u +%s` once at start = START; working deadline START+1000, hard deadline START+1200.",
     "- Re-run `date -u +%s` before each expensive step; compare, never estimate.",
+    "- Keep the session handle returned by a long-running command and poll that handle until completion. Do not relaunch the command to check progress.",
+    "- When a command is coalesced, poll its original native session or the reported `ultrafuzz command-hook --status HANDLE`. Use a unique first-line `# ultrafuzz-command-key: NAME` comment only when you deliberately need another concurrent invocation.",
     "- Stop starting new delegated or tool work when the finalization reserve begins.",
     "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs.",
     "- Crossing the hard deadline kills this node with no output at all."
@@ -11540,6 +12104,11 @@ nodes:
   );
   assert.match(workflowSource, /const fullTaskPrompt = renderAgentPrompt/u);
   assert.match(workflowSource, /runtimeContext: task\.runtimeContext/u);
+  assert.match(workflowSource, /runtimeContext: task\.runtimeContext \+ "\\n\\n" \+ backendConcurrencyContext/u);
+  assert.ok(plan.value);
+  assert.ok(
+    workflowSource.includes(`renderBackendConcurrencyContext(${plan.value.resolved_config.run.maxParallelAgents})`)
+  );
   assert.match(workflowSource, /operatorPrompt,/u);
 });
 
@@ -11810,6 +12379,9 @@ test("invariant campaign budget admits the shipped 7200-second node timeout", as
   });
   assert.equal(compiled.tasks[0]?.timeoutMs, 7_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.match(workflowSource, /"finalizationGraceMs": 300000/u);
+  assert.match(workflowSource, /timeoutMs=\{task\.timeoutMs \+ task\.finalizationGraceMs\}/u);
+  assert.match(workflowSource, /await withBackendFinalization\(/u);
   assert.match(
     workflowSource,
     /"campaignTimeoutExpectations": \{\s*"configuredFuzzerTimeoutSeconds": 3600,\s*"plannedTimeoutSeconds": 7200,\s*"finalizationReserveSeconds": 300\s*\}/u
@@ -12130,7 +12702,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \{ agentFactories as projectAgentFactories \} from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{skipAgent \? undefined : agentForTask\(task, fullTaskPrompt\)\}/);
-  assert.match(workflowSource, /addDir: \[task\.artifactDir, \.\.\.dependencyArtifactDirs\b/u);
+  assert.match(workflowSource, /addDir:\s*\[\s*task\.artifactDir,\s*\.\.\.dependencyArtifactDirs\b/u);
   assert.match(workflowSource, /baseAgentForProfile\(task, profile, admittedDependencyArtifactDirs\(task\)\)/u);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/u);
   assert.match(workflowSource, /const schemaDirectory = path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)/u);
@@ -12148,7 +12720,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(
     workflowSource,
-    /const result = await executionAgent\.generate\(unstructuredArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?_output: \{ completed: true \}/u
+    /const result =\s*task\.finalizationGraceMs > 0\s*\? await withBackendFinalization\([\s\S]*?: await executionAgent\.generate\(unstructuredArgs\);[\s\S]*?assertDependencyArtifactAdmissionCurrent\(task\);[\s\S]*?_output: \{ completed: true \}/u
   );
   assert.doesNotMatch(
     workflowSource,
@@ -12959,6 +13531,57 @@ test("repeated observations leave an unchanged finished or orphaned run byte-ide
       assert.equal(explicit.ok, true, JSON.stringify(explicit.diagnostics));
       assert.deepEqual(runStateDocumentBytes(runRoot), before, "an explicit sync renewed a finished run's lease");
     }
+  }
+});
+
+test("getRunHealth retains product failure diagnostics after the workflow reports every task finished", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project, GENERIC_RUNTIME_MARKDOWN_PATH);
+  const runId = "finished-workflow-failed-product";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const status = currentStatusEnvelope(workflowRunId);
+  const data = status.data as Record<string, unknown>;
+  Object.assign(data, {
+    status: "finished",
+    verdict: "done",
+    reason: "run finished",
+    liveness: { state: "succeeded" },
+    finishedAtMs: 2_000
+  });
+  Object.assign(data.counts as Record<string, unknown>, {
+    finished: 3,
+    inProgress: 0,
+    pending: 0,
+    failed: 0,
+    total: 3
+  });
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ]),
+    status
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+  // The runner finished, but its producer has no verified artifact publication.
+  // A subsequent poll must still explain that durable product failure.
+  for (let poll = 0; poll < 2; poll += 1) {
+    const health = await getRunHealth({ projectRoot: project, runId, env });
+    assert.equal(health.value?.status, "failed", JSON.stringify(health.diagnostics));
+    assert.equal(health.value?.verdict, "done");
+    assert.equal(health.value?.progress.percent, 100);
+    assert.notEqual(health.value?.report.verification, "verified");
+    const diagnostic = health.diagnostics.find((entry) => entry.code === "RUN_WORKFLOW_COMPLETION_DIVERGED");
+    assert.ok(diagnostic, JSON.stringify(health.diagnostics));
+    assert.match(diagnostic.message, /project-discovery \(failed\)/u);
   }
 });
 
@@ -24141,6 +24764,97 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   );
 });
 
+for (const phase of ["preparation", "agent", "verifier"] as const) {
+  test(`syncRun preserves typed TOOL_UNAVAILABLE ${phase} failures in durable provenance`, async () => {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `sync-tool-unavailable-${phase}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const failedTask = `${phase === "preparation" ? "prepare" : phase === "verifier" ? "verify" : "node"}:project-discovery`;
+    const message =
+      "tool_unavailable: JSON validator preflight could not launch ultrafuzz at its trusted path (ENOENT)";
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        steps: [
+          ...(phase === "agent"
+            ? []
+            : [
+                {
+                  id: "node:project-discovery",
+                  state: phase === "preparation" ? ("skipped" as const) : ("finished" as const),
+                  attempt: 1
+                }
+              ]),
+          { id: failedTask, state: "failed", attempt: 1 }
+        ]
+      }),
+      events: workflowEvents(workflowRunId, [
+        ...(phase === "verifier"
+          ? [
+              { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+              { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+            ]
+          : []),
+        { type: "NodeStarted", nodeId: failedTask, attempt: 1 },
+        {
+          type: "NodeFailed",
+          nodeId: failedTask,
+          attempt: 1,
+          error: {
+            code: "TOOL_UNAVAILABLE",
+            message,
+            details: { failureRetryable: false }
+          }
+        }
+      ]),
+      ...(phase === "preparation"
+        ? {}
+        : {
+            attemptSelections: {
+              "node:project-discovery": { 1: { chainIndex: 0, profileId: "default", model: "gpt-5.5" } }
+            }
+          })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.ok(run.value);
+    const sync = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    assert.equal(sync.value?.status, "failed");
+    const state = readRunState(path.join(run.value.run_root, "state.json"));
+    const node = state.nodes["project-discovery"];
+    assert.ok(node);
+    assert.equal(node.status, "failed");
+    assert.equal(node.timed_out, false);
+    assert.equal(node.last_error, message);
+    assert.ok(node.provenance && "failure" in node.provenance);
+    assert.deepEqual(node.provenance.failure, {
+      category: "tool-unavailable",
+      causal_task_id: failedTask,
+      causal_failure_category: "tool-unavailable",
+      dependent_task_ids: []
+    });
+    if (phase !== "agent") assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "TOOL_UNAVAILABLE"));
+    const ledger = fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8").trim();
+    const entries =
+      ledger === ""
+        ? []
+        : ledger.split("\n").map((line) => JSON.parse(line) as { outcome: string; failure_category: string });
+    assert.deepEqual(
+      entries.map((entry) => [entry.outcome, entry.failure_category]),
+      phase === "preparation" ? [] : [["failed", "tool-unavailable"]]
+    );
+    // A second synchronization re-reads the new category through the durable state/ledger schemas.
+    const repeated = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+    assert.equal(fs.readFileSync(path.join(run.value.run_root, "attempts.jsonl"), "utf8").trim(), ledger);
+  });
+}
+
 test("syncRun excludes a pre-agent terminal failure from the model-attempt ledger", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -27108,6 +27822,63 @@ test("native continuation hands generated agents the run's TOML config, so Codex
   }
 });
 
+test("backend concurrency follows run, resume, reset, refresh, and fork overrides", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "backend-concurrency";
+  const env = controllerRefreshTerminalEnv(project, runId);
+  // An inherited value must never override the operator-selected scheduler ceiling.
+  env.ULTRAFUZZ_MAX_CONCURRENCY = "32";
+  const concurrencyLog = path.join(project, "backend-concurrency.log");
+  logFakeRunnerUpVariable(env, "ULTRAFUZZ_MAX_CONCURRENCY", concurrencyLog);
+  const run = await startRun({ projectRoot: project, runId, maxConcurrency: 16, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.ok(run.value);
+
+  for (const options of [{}, { maxConcurrency: 8, resetNode: "node:project-discovery" }, { refreshController: true }]) {
+    const resumed = await resumeRun({ projectRoot: project, runId, env, ...options });
+    assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+    assert.equal(resumed.value?.submitted, true);
+  }
+  env.SMITHERS_FAKE_FORKED_RUN_ID = "ultrafuzz-backend-concurrency-forked";
+  const forked = await forkRun({ projectRoot: project, runId, forkFrame: 44, maxConcurrency: 6, env });
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.submitted, true);
+  env.SMITHERS_FAKE_FORKED_RUN_ID = "ultrafuzz-backend-concurrency-forked-again";
+  const inheritedFork = await forkRun({ projectRoot: project, runId, forkFrame: 44, env });
+  assert.equal(inheritedFork.ok, true, JSON.stringify(inheritedFork.diagnostics));
+  assert.equal(inheritedFork.value?.submitted, true);
+
+  assert.deepEqual(fs.readFileSync(concurrencyLog, "utf8").trim().split("\n"), ["16", "16", "8", "8", "6", "6"]);
+  // Fork's --input contains real newlines, so a command spans several log lines.
+  assert.ok(env.SMITHERS_FAKE_LOG);
+  const schedulerLimits = [...fs.readFileSync(env.SMITHERS_FAKE_LOG, "utf8").matchAll(/--max-concurrency (\d+)/gu)];
+  assert.deepEqual(
+    schedulerLimits.map((match) => match[1]),
+    ["16", "16", "8", "8", "6", "6"]
+  );
+  const state = readRunState(layoutForRunRoot(run.value.run_root, runId));
+  assert.equal(state.concurrency.requested_concurrency, 6);
+});
+
+test("backend concurrency uses configured max_parallel_agents when no run flag is supplied", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = controllerRefreshTerminalEnv(project, "backend-concurrency-config");
+  const concurrencyLog = path.join(project, "backend-concurrency.log");
+  logFakeRunnerUpVariable(env, "ULTRAFUZZ_MAX_CONCURRENCY", concurrencyLog);
+  const run = await startRun({
+    projectRoot: project,
+    runId: "backend-concurrency-config",
+    runtimeOverrides: { maxParallelAgents: 3 },
+    env
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(concurrencyLog, "utf8"), "3\n");
+});
+
 test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -27297,7 +28068,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --no-vcs --force --format json/
+    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --iteration 0 --attempt 1 --expected-generation sha256:a{64} --no-vcs --force --format json --full-output/u
   );
   assert.match(
     commands,
@@ -28277,7 +29048,7 @@ test("resume derives reset identities from the canonical nodes of a failed workf
   assert.equal(resetByNode.ok, true, JSON.stringify(resetByNode.diagnostics));
   assert.match(
     fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
-    /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --force --format json/u
+    /timetravel .* --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --attempt 1 --expected-generation sha256:a{64} --no-vcs --force --format json --full-output/u
   );
 });
 
@@ -28579,7 +29350,7 @@ test("resume --retry-failed --reset-node does not report the reset task as skipp
   const resets = fs
     .readFileSync(commandLog, "utf8")
     .split("\n")
-    .filter((line) => /^timetravel .* --node-id node:lens /u.test(line));
+    .filter((line) => /^timetravel .* --node-id node:lens /u.test(line) && !line.includes("--dry-run"));
   assert.equal(resets.length, 1, resets.join("\n"));
   assert.equal(
     resumed.diagnostics.find((diagnostic) => diagnostic.code === "WORKFLOW_RETRY_SKIPPED"),
@@ -28691,6 +29462,22 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   );
   const failedCommands = fs.readFileSync(commandLog, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
+  const resetPreview = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:actors-flows",
+    dryRun: true,
+    refreshController: true,
+    env
+  });
+  assert.equal(resetPreview.ok, true, JSON.stringify(resetPreview.diagnostics));
+  assert.equal(resetPreview.value?.reset_already_applied, true);
+  assert.equal(resetPreview.value?.submitted, false);
+  assert.deepEqual(
+    resetPreview.value?.reset_plan?.nodes.map((node) => node.node_id),
+    ["node:actors-flows"]
+  );
+  assert.equal(fs.readFileSync(commandLog, "utf8"), failedCommands, "receipt preview must not invoke the runner");
   // A launch copy is the only source of a deleted static prompt, and it is restored as it is: a run's
   // prompt files may be edited, so no digest recorded at launch can refuse it.
   fs.rmSync(plannedPrompt.rendered_prompt_path);
@@ -28708,6 +29495,8 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
   assert.equal(retried.value?.submitted, true);
   assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
+  assert.equal(retried.value?.reset_already_applied, true);
+  assert.deepEqual(retried.value?.reset_plan, resetPreview.value?.reset_plan);
   assert.deepEqual(fs.readFileSync(plannedPrompt.rendered_prompt_path), expectedPrompt);
   assert.equal(fs.readFileSync(priorPlannedPrompt.rendered_prompt_path, "utf8"), "edited launch copy\n");
   const retriedCommands = fs.readFileSync(commandLog, "utf8");

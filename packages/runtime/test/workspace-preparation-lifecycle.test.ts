@@ -10,6 +10,7 @@ import { z } from "zod/v4";
 
 import * as artifacts from "@ultrafuzz/artifacts";
 import * as runtime from "../src/index.js";
+import { captureLegacyWorkspacePatch } from "./fixtures/legacy-workspace-patch.js";
 import { temporaryRoot } from "./temporary-root.js";
 
 function templatePath(): string {
@@ -214,7 +215,8 @@ async function lifecycleFixture(
     second: string;
     root: string;
     publishSecond: () => void;
-  }) => void | Promise<void>
+  }) => void | Promise<void>,
+  options: { legacyGeneratedFile?: boolean } = {}
 ): Promise<void> {
   const root = fs.realpathSync(temporaryRoot("uf-preparation-lifecycle-"));
   const previousCwd = process.cwd();
@@ -236,11 +238,18 @@ async function lifecycleFixture(
     fs.mkdirSync(path.join(workspace, "test"));
     const source = path.join(workspace, "test/Setup.t.sol");
     fs.writeFileSync(source, "contract Setup { uint constant GENERATION = 1; }\n");
-    const first = runtime.captureWorkspacePatch(workspace, base, ["src", "contracts"]);
+    const legacyGenerated = path.join(workspace, ".recon/build.json");
+    if (options.legacyGeneratedFile) {
+      fs.mkdirSync(path.dirname(legacyGenerated), { recursive: true });
+      fs.writeFileSync(legacyGenerated, "{}\n");
+    }
+    const capture = options.legacyGeneratedFile ? captureLegacyWorkspacePatch : runtime.captureWorkspacePatch;
+    const first = capture(workspace, base);
     fs.writeFileSync(source, "contract Setup { uint constant GENERATION = 2; }\n");
-    const second = runtime.captureWorkspacePatch(workspace, base, ["src", "contracts"]);
+    const second = capture(workspace, base);
     runtime.restoreWorkspaceTreeWithIndexLockRecovery(workspace, base);
     fs.rmSync(source, { force: true });
+    if (options.legacyGeneratedFile) fs.rmSync(legacyGenerated);
     const publish = (capture: typeof first) => {
       fs.writeFileSync(path.join(dependency, "workspace.patch"), capture.patch);
       fs.writeFileSync(path.join(dependency, "workspace-patch.json"), JSON.stringify(capture.manifest));
@@ -292,6 +301,36 @@ async function lifecycleFixture(
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("retained v1 generated paths survive preparation, resume and dependency replacement", () =>
+  lifecycleFixture(
+    (fixture) => {
+      const initial = preparationHarness(fixture.tasks);
+      const workspace = fixture.task.workspacePath;
+      initial.prepare(fixture.task);
+      assert.equal(initial.baseline(fixture.task), fixture.first);
+      assert.equal(initial.preparation(fixture.task), fixture.first);
+      assert.equal(runtime.captureWorkspaceTree(workspace, { trees: [fixture.first] }), fixture.first);
+      initial.prepare(fixture.task);
+      preparationHarness(fixture.tasks).prepare(fixture.task);
+
+      fixture.publishSecond();
+      const reopened = preparationHarness(fixture.tasks);
+      reopened.prepare(fixture.task);
+      assert.equal(reopened.baseline(fixture.task), fixture.second);
+      assert.equal(reopened.preparation(fixture.task), fixture.second);
+      assert.equal(runtime.captureWorkspaceTree(workspace, { trees: [fixture.second] }), fixture.second);
+      assert.equal(fs.readFileSync(path.join(workspace, ".recon/build.json"), "utf8"), "{}\n");
+      fs.mkdirSync(path.join(workspace, ".cov-work"));
+      fs.writeFileSync(path.join(workspace, ".cov-work/compiler-output.json"), "new scratch\n");
+      reopened.prepare(fixture.task, { replayWorkspacePatches: false, evidenceMode: "require" });
+      assert.equal(reopened.baseline(fixture.task), fixture.second);
+      const captured = runtime.captureWorkspacePatch(workspace, fixture.second);
+      assert.deepEqual(captured.manifest.files, []);
+      assert.equal(captured.manifest.result_tree, fixture.second);
+    },
+    { legacyGeneratedFile: true }
+  ));
 
 test("#1081 complete preparation regenerates every pre-agent store after a dependency replacement", () =>
   lifecycleFixture((fixture) => {

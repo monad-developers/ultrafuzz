@@ -16,6 +16,7 @@ forge_vmem_limit_kb = 12582912
 forge_rayon_threads = 1
 workspace_mode = "git-worktree"
 default_timeout_seconds = 3600
+finalization_grace_ms = 300000
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 

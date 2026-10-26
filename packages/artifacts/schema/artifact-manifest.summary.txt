@@ -1,0 +1,61 @@
+# artifact-manifest.schema.json - derived field summary
+# Shape only. The pinned schema is the sole authority on JSON shape; nothing validates against this file.
+# schema: 12073 bytes, sha256 47ab29caff652cac
+# "*" marks a required member. "->" names the JSON Pointer to read for the detail omitted here,
+# prefixed with a schema filename when the detail lives in another document of the same bundle.
+# "(rules)" counts constraints that bind several members at once and are not shown member by member.
+*schema_version: const(ultrafuzz.artifact-manifest.v3)
+*run_id: string
+*node_id: string
+*producer_node_id: string
+*created_at: string
+*files: array<object>
+  *path: string
+  *size_bytes: integer
+  *sha256: string
+  *provenance: object
+    *producer_node_id: string
+     run_id: string
+     logical_node_id: string
+     attempt_index: integer
+     loop_index: integer
+     model_id: string
+     model: string
+     model_index: integer
+     agent_ref: string
+     workflow_run_id: string
+     workflow_task_id: string
+     source_run_id: string
+     verification_marker_sha256: string
+     origin: string
+     metadata: oneOf[2]  -> $/$defs/provenanceMetadata/oneOf
+*output_contracts: array<object>
+   (rules): 1 cross-member rule  -> $/properties/output_contracts/items/allOf
+  *path: string
+  *contract: enum[44 values]  -> $/properties/output_contracts/items/properties/contract/enum
+  *contract_digest: string
+   schema_file: string
+   schema_id: string
+   schema_sha256: string
+   schema_bundle_sha256: string
+   validator_build: string
+  *primary: boolean
+*prerequisite_manifests: array<object>
+  *node_id: string
+  *sha256: string
+*provenance: object
+  *producer_node_id: string
+   run_id: string
+   logical_node_id: string
+   attempt_index: integer
+   loop_index: integer
+   model_id: string
+   model: string
+   model_index: integer
+   agent_ref: string
+   workflow_run_id: string
+   workflow_task_id: string
+   source_run_id: string
+   verification_marker_sha256: string
+   origin: string
+   metadata: oneOf[2]  -> $/$defs/provenanceMetadata/oneOf
