@@ -26,7 +26,7 @@
     "@ultrafuzz/security": "workspace:*",
     "smol-toml": "^1.9.0",
     "yaml": "^2.8.0",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
   "repository": {
