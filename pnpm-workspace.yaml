@@ -36,6 +36,8 @@ overrides:
   "@modelcontextprotocol/sdk": "1.32.0"
   "body-parser": "2.4.0"
   "dompurify": "3.4.17"
+  # The Smithers server and MCP SDK both allow this patched Hono release.
+  "hono": "4.13.14"
   "zod": "4.6.6"
 allowBuilds:
   "@moonshot-ai/kimi-code": false
