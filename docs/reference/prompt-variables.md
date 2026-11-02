@@ -86,6 +86,14 @@ prompt of the run names it, so a run whose prompts never mention it has no share
 log. A `resume` whose refreshed prompts first name it installs it then. A `fork`
 reruns the run's prompts and uses the command its launch installed.
 
+The built-in property-lens prompts (the eight `properties/` lenses, not the fan-in)
+name it, so a project initialized with the default prompts gets a shared log for
+its property lenses. Each lens is told how to post and read, asked to read the log
+when it starts and again with `read --new` before it finalizes, and left to decide
+what to post. The fan-in does not get the log. A project whose prompts predate this
+keeps them until it adopts the new defaults, and removing the section from a
+project's lens prompts turns the log off.
+
 The command takes three forms, run from the task's workspace:
 
 - `post <text>` appends an entry. With no arguments it reads the entry from stdin,
