@@ -5,7 +5,7 @@ import path from "node:path";
 // under `shared-log/<workflow run id>/`: `entries.jsonl` holds what agents posted and `reads.jsonl`
 // records every read. The command sits beside it and is rewritten whenever it is installed. Neither
 // placement stops an agent: agents run unsandboxed (docs/security.md).
-export const SHARED_LOG_ROOT_PATH = "shared-log";
+const SHARED_LOG_ROOT_PATH = "shared-log";
 export const SHARED_LOG_COMMAND_PATH = "shared-log-bin/ultrafuzz-shared-log";
 const SHARED_LOG_SCRIPT_PATH = "shared-log-bin/shared-log.mjs";
 
@@ -18,14 +18,14 @@ const SHARED_LOG_SCRIPT_PATH = "shared-log-bin/shared-log.mjs";
  *
  * It finds the run from its own location, so its bytes depend only on the Node executable.
  */
-export function sharedLogWrapper(nodePath: string): string {
+function sharedLogWrapper(nodePath: string): string {
   return `#!/bin/sh
 exec ${shellQuote(nodePath)} "$(dirname "$0")/shared-log.mjs" "$@"
 `;
 }
 
 /** The command's implementation, run by the wrapper with the Node that installed it. */
-export const SHARED_LOG_SCRIPT = String.raw`import fs from "node:fs";
+const SHARED_LOG_SCRIPT = String.raw`import fs from "node:fs";
 import path from "node:path";
 
 const runRoot = path.dirname(path.dirname(fs.realpathSync(process.argv[1])));
@@ -142,7 +142,7 @@ if (command === "post") {
 `;
 
 /** Whether any of the run's rendered agent prompts names the shared log command. */
-export function sharedLogReferenced(runRoot: string): boolean {
+function sharedLogReferenced(runRoot: string): boolean {
   const command = path.join(runRoot, SHARED_LOG_COMMAND_PATH);
   const artifacts = path.join(runRoot, "artifacts");
   if (!fs.existsSync(artifacts)) return false;
