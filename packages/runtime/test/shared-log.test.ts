@@ -191,6 +191,37 @@ test("parallel posts each get their own entry and number", async () => {
   assert.equal(fs.existsSync(path.join(fixture.runRoot, "shared-log", "wf-1", ".lock")), false);
 });
 
+test("rounds of many parallel posts never crash a writer or reuse a number", async () => {
+  const fixture = runFixture();
+  installSharedLogIfReferenced(fixture.runRoot);
+  // Many writers taking and releasing the lock back to back: a lock released by deleting it in
+  // place was briefly an empty directory that a waiter's staged lock could replace.
+  const rounds = 10;
+  const writers = 24;
+  for (let round = 0; round < rounds; round += 1) {
+    const codes = await Promise.all(
+      Array.from(
+        { length: writers },
+        (_, index) =>
+          new Promise<number | null>((resolve) => {
+            const child = spawn(fixture.command, ["post", `${String(round)}-${String(index)}`], {
+              cwd: path.join(fixture.runRoot, "workspaces", index % 2 === 0 ? "lens-a" : "lens-b"),
+              stdio: ["ignore", "ignore", "ignore"]
+            });
+            child.on("close", resolve);
+          })
+      )
+    );
+    assert.deepEqual(codes, Array(writers).fill(0), `round ${String(round)}`);
+  }
+  const log = path.join(fixture.runRoot, "shared-log", "wf-1");
+  assert.deepEqual(
+    lines(path.join(log, "entries.jsonl")).map((entry) => entry.seq),
+    Array.from({ length: rounds * writers }, (_, index) => index + 1)
+  );
+  assert.deepEqual(fs.readdirSync(log), ["entries.jsonl"]);
+});
+
 test("a dynamic task's prompt template that names the command installs it at launch", () => {
   // Rendered prompts that do not name it, as for a run whose only reference is in a dynamic task.
   const fixture = runFixture(false);

@@ -136,7 +136,13 @@ function withLock(dir, action) {
   try {
     return action();
   } finally {
-    if (lockOwner(lock) === token) fs.rmSync(lock, { recursive: true, force: true });
+    // Moved away whole before it is deleted: deleting it in place would leave an empty .lock for a
+    // moment, and a staged lock renamed onto an empty directory replaces it.
+    if (lockOwner(lock) === token) {
+      const released = path.join(dir, ".lock-released-" + token);
+      fs.renameSync(lock, released);
+      fs.rmSync(released, { recursive: true, force: true });
+    }
   }
 }
 
