@@ -48,6 +48,7 @@ export function redactText(text: string, secrets: string[] = []): { text: string
       return `${prefix}[REDACTED PRIVATE KEY]`;
     });
   for (const pattern of [
+    /\bsk-or-v1-[A-Za-z0-9_-]{32,}\b/g,
     /\bAIza[0-9A-Za-z_-]{35}\b/g,
     /\b(?:ak|as)-[A-Za-z0-9_-]{20,}\b/g,
   ]) text = text.replace(pattern, () => { count++; return "[REDACTED]"; });

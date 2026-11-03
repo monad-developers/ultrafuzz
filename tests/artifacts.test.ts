@@ -58,6 +58,16 @@ test("positive credential patterns include Google, Modal, and valid JWT structur
   expect(result.text).toContain("eyJbad.notjson.signature");
 });
 
+test("OpenRouter keys are redacted after an interrupted worker without the launch environment", async () => {
+  const { source, destination } = await fixture();
+  const key = `sk-or-v1-${"a1".repeat(32)}`;
+  await writeFile(join(source, "raw/transcript.jsonl"), JSON.stringify({ output: `Bearer ${key}` }) + "\n");
+  const result = await prepareArtifacts(source, destination, record());
+  expect(result.redactions).toBe(1);
+  expect(await readFile(join(destination, "raw/transcript.jsonl"), "utf8")).not.toContain(key);
+  expect(redactText("Set sk-or-v1-... in your environment").count).toBe(0);
+});
+
 test("worker redaction handles gzip and does not follow symlinks", async () => {
   const { root, source } = await fixture();
   await writeFile(join(root, "outside.txt"), "known-secret");
