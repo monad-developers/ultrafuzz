@@ -1,77 +1,30 @@
 {
   "name": "ultrafuzz",
-  "private": true,
+  "version": "0.2.0",
+  "description": "Prompt-driven audits on Modal",
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@11.1.1",
-  "engines": {
-    "node": ">=22.19.0"
-  },
+  "bin": { "ultrafuzz": "dist/cli.js" },
+  "files": ["dist", "profiles", "plugins", "Dockerfile", "README.md", "LICENSE.md"],
   "scripts": {
-    "benchmark:evmbench": "pnpm --filter @ultrafuzz/evmbench benchmark",
-    "benchmark:evmbench:lock": "pnpm --filter @ultrafuzz/evmbench lock",
-    "build": "pnpm -r build",
-    "benchmark:check": "pnpm --filter @ultrafuzz/cli... build && pnpm -w benchmark:check:prebuilt",
-    "benchmark:check:prebuilt": "node packages/cli/dist/index.js eval history --check --project .",
-    "benchmark:history:check": "pnpm -w benchmark:check",
-    "ci": "pnpm -w format:check && pnpm -w lint && pnpm -w knip && pnpm -w build && pnpm -w lint:strict && pnpm -w size && pnpm -w validate:release",
-    "docs:audit-profiles": "node scripts/audit-profile-docs.mjs",
-    "docs:prompt-catalog": "node scripts/prompt-catalog-docs.mjs",
-    "docs:schema-summaries": "node scripts/schema-field-summaries.mjs",
-    "docs:check": "node scripts/audit-profile-docs.mjs --check && node scripts/prompt-catalog-docs.mjs --check && node scripts/schema-field-summaries.mjs --check && node scripts/docs-check.mjs",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "knip": "pnpm dlx knip@6.33.0 --include files,dependencies,unlisted,unresolved,exports,types,duplicates --treat-config-hints-as-errors",
-    "lint": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\"",
-    "lint:fix": "eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --fix",
-    "lint:strict": "ULTRAFUZZ_STRICT_LINT=1 eslint \"packages/**/*.{ts,tsx,js,mjs,cjs}\" \"scripts/**/*.{ts,tsx,js,mjs,cjs}\" \"*.{js,mjs,cjs}\" --max-warnings 0",
-    "lint:strict:ci": "bash -o pipefail -c ': \"${ESLINT_PLUGIN_DIFF_COMMIT:?required}\"; git diff --name-only --diff-filter=ACMR -z \"$ESLINT_PLUGIN_DIFF_COMMIT\" -- \"*.js\" \"*.mjs\" \"*.cjs\" \"*.ts\" \"*.tsx\" | xargs -0 --no-run-if-empty env ULTRAFUZZ_STRICT_LINT=1 eslint --max-warnings 0'",
-    "security:dependency-advisories": "pnpm --filter @ultrafuzz/artifacts... build && node scripts/check-production-dependency-advisories.mjs",
-    "size": "size-limit",
-    "test": "pnpm run test:ci-scripts && pnpm -r test",
-    "test:ci-scripts": "pnpm --filter @ultrafuzz/modal... build && bun test --timeout 30000 scripts/ci/*.test.ts",
-    "validate:pack": "node scripts/validate-packed-install.mjs",
-    "validate:release": "node scripts/validate-release.mjs",
-    "typecheck": "pnpm -r --workspace-concurrency=1 typecheck"
+    "dev": "bun src/cli.ts",
+    "build": "bun scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test && bun run build"
+  },
+  "dependencies": {
+    "modal": "0.11.1",
+    "proper-lockfile": "4.1.2",
+    "smol-toml": "1.9.0",
+    "tar": "7.5.0",
+    "yaml": "2.8.1"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@size-limit/file": "13.0.3",
-    "@types/node": "^24.0.0",
-    "@ultrafuzz/modal": "workspace:*",
-    "eslint": "^10.6.0",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-diff": "2.1.7",
-    "globals": "^17.7.0",
-    "prettier": "^3.9.4",
-    "size-limit": "13.0.3",
-    "typescript": "^5.8.3",
-    "typescript-eslint": "^8.62.1",
-    "vitest": "^4.1.12",
-    "yaml": "^2.8.0"
+    "@types/bun": "1.3.10",
+    "@types/proper-lockfile": "4.1.4",
+    "typescript": "5.9.3"
   },
-  "workspaces": [
-    "packages/security",
-    "packages/references",
-    "packages/config",
-    "packages/prompts",
-    "packages/topology",
-    "packages/artifacts",
-    "packages/runtime",
-    "packages/evals",
-    "packages/dashboard",
-    "packages/evmbench",
-    "packages/modal",
-    "packages/cli"
-  ],
-  "version": "0.1.0",
-  "description": "Autonomous security auditing and fuzzing for smart-contract repositories",
-  "homepage": "https://github.com/monad-developers/ultrafuzz#readme",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/monad-developers/ultrafuzz.git"
-  },
-  "bugs": {
-    "url": "https://github.com/monad-developers/ultrafuzz/issues"
-  }
+  "engines": { "bun": ">=1.3.0" },
+  "repository": "github:monad-developers/ultrafuzz"
 }

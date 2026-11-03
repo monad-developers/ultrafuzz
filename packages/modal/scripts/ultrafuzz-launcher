@@ -1,3 +1,0 @@
-#!/bin/sh
-set -eu
-exec /usr/local/bin/node /opt/ultrafuzz/packages/cli/dist/index.js "$@"
