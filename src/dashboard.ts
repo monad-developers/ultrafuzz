@@ -23,14 +23,19 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
   let refresh: Promise<RunRecord[]> | undefined;
   const runs = () => refresh ??= (async () => {
     const records = await engine.list();
-    const updates = await Promise.allSettled(records.map(async record =>
-      record.state !== "finished" || record.publication.state !== "published" ? await engine.status(record.id) : record));
-    return updates.map((result, index) => result.status === "fulfilled" ? result.value : records[index]!);
+    const updates: RunRecord[] = [];
+    for (let index = 0; index < records.length; index += 4) {
+      const batch = records.slice(index, index + 4);
+      const observed = await Promise.allSettled(batch.map(async record =>
+        record.state !== "finished" || record.publication.state !== "published" ? await engine.status(record.id) : record));
+      updates.push(...observed.map((result, offset) => result.status === "fulfilled" ? result.value : batch[offset]!));
+    }
+    return updates;
   })().finally(() => { refresh = undefined; });
 
   const server = Bun.serve({
     hostname: "127.0.0.1", port, idleTimeout: 120,
-    async fetch(request) {
+    async fetch(request, server) {
       const url = new URL(request.url);
       const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
       if (!allowedHosts.has(request.headers.get("host") ?? "")) return json({ error: "Loopback host required." }, 403);
@@ -41,6 +46,8 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
           return json({ error: "Same-origin dashboard request required." }, 403);
         }
       }
+      // Image builds, collection and publication can outlast an HTTP idle timeout.
+      if (url.pathname.startsWith("/api/")) server.timeout(request, 0);
       try {
         if (url.pathname === "/api/bootstrap" && request.method === "GET") {
           const config = await loadConfig(home);
@@ -66,8 +73,11 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
       }
     },
   });
+  const collector = setInterval(() => {
+    void runs().catch(() => process.stderr.write("Ultrafuzz dashboard could not refresh the run registry.\n"));
+  }, 5000);
   process.stderr.write(`Ultrafuzz dashboard: http://127.0.0.1:${server.port}\n`);
-  const stop = () => server.stop(true);
+  const stop = () => { clearInterval(collector); server.stop(true); };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 }
