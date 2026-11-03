@@ -49,7 +49,9 @@ export async function serveDashboard(home: string, port = 3000): Promise<void> {
         if (url.pathname === "/api/runs" && request.method === "GET") return json({ runs: await runs() });
         if (url.pathname === "/api/runs" && request.method === "POST") {
           const body = await request.json() as LaunchOptions;
-          return json({ run: await engine.launch(body) }, 201);
+          // The form reloads config on page load, so launches must use that config too.
+          const current = await createEngine(home);
+          return json({ run: await current.launch(body) }, 201);
         }
         const route = /^\/api\/runs\/([a-zA-Z0-9_-]+)(\/cancel)?$/.exec(url.pathname);
         if (route && request.method === "GET" && !route[2]) return json({ run: await engine.status(route[1]!) });
