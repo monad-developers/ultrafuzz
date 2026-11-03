@@ -1,0 +1,7 @@
+.git
+node_modules
+src
+tests
+.ultrafuzz
+.env
+*.log
