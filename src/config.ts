@@ -28,7 +28,7 @@ key_env = "OPENROUTER_API_KEY"
 # Add one entry per target. Results repositories must be private.
 # [repositories.example]
 # url = "https://github.com/your-org/your-project"
-# results_repository = "https://github.com/your-org/audit-results"
+# results_repository = "your-org/audit-results"
 # scope = "contracts/"
 `;
 
@@ -88,7 +88,9 @@ export async function loadConfig(home: string): Promise<Config> {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name)) throw new Error(`Invalid repository alias: ${name}`);
     const repo = table(raw, `repositories.${name}`);
     keys(repo, ["url", "results_repository", "scope"], `repositories.${name}`);
-    repositories[name] = { url: string(repo.url, `repositories.${name}.url`), results_repository: string(repo.results_repository, `repositories.${name}.results_repository`), scope: optionalString(repo.scope, `repositories.${name}.scope`) };
+    const results = string(repo.results_repository, `repositories.${name}.results_repository`).replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/\/$/, "");
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(results)) throw new Error(`Config repositories.${name}.results_repository must be a GitHub owner/name.`);
+    repositories[name] = { url: string(repo.url, `repositories.${name}.url`), results_repository: results, scope: optionalString(repo.scope, `repositories.${name}.scope`) };
   }
   const keyEnv = string(openrouter.key_env, "openrouter.key_env");
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyEnv)) throw new Error("Config openrouter.key_env must name an environment variable.");

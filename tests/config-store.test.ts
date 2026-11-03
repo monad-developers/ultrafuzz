@@ -38,7 +38,7 @@ test("workspace init installs profiles and preserves user config and profile edi
   expect(await readFile(config, "utf8")).toBe(text);
   expect(await readFile(prompt, "utf8")).toBe("A locally edited profile");
   const loaded = await loadConfig(home);
-  expect(loaded.repositories.sample!.results_repository).toBe("https://github.com/example/results");
+  expect(loaded.repositories.sample!.results_repository).toBe("example/results");
   expect(process.env.ULTRAFUZZ_PROFILE_DIR).toBe(join(home, "prompts"));
   await writeFile(config, text.replace('harness = "opencode"', 'harness = "unsupported"'));
   await expect(loadConfig(home)).rejects.toThrow("defaults.harness");

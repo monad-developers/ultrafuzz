@@ -17,7 +17,7 @@ Usage: ultrafuzz <command> [options]
   status <id>                  Refresh, collect and publish a run if it ended
   wait <id>                    Wait until a run finishes
   collect <id>                 Collect artifacts and retry publication
-  cancel <id>                  Stop a run and collect available artifacts
+  cancel <id>                  Request a stop with time to export artifacts
   recover [id]                 Rebuild records from Modal Volumes
   profiles                     List profiles and supported harnesses
   viewer                       Serve the local dashboard on 127.0.0.1

@@ -119,6 +119,7 @@ async function prepareRepository(repository: string, revision: string | undefine
     if (revision) {
       await git(["fetch", "--no-tags", "origin", revision], checkout);
       await git(["checkout", "--detach", "FETCH_HEAD"], checkout);
+      await git(["submodule", "sync", "--recursive"], checkout);
       await git(["submodule", "update", "--init", "--recursive"], checkout);
     }
     const commit = (await git(["rev-parse", "HEAD"], checkout)).trim();
