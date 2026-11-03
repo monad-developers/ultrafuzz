@@ -141,13 +141,6 @@ export async function runInvocation(context: HarnessContext, prompt: string, cut
   });
 }
 
-function recoverReport(job: WorkerJob, baseline: Map<string, string>): void {
-  const destination = join(job.output_dir, "raw", "report.md");
-  if (nonemptyReport(destination)) return;
-  for (const path of [join(job.output_dir, "report.md"), join(job.workspace, "report.md")]) {
-    if (nonemptyReport(path) && !(path === join(job.workspace, "report.md") && baseline.get("report.md") === digest(path))) { cpSync(path, destination); return; }
-  }
-}
 function workspaceFiles(workspace: string): string[] {
   // Heavy caches/corpora stay on the Volume; the publisher receives generated source and evidence.
   const excluded = new Set([".git", "node_modules"]);
@@ -210,7 +203,6 @@ export async function runWorker(root: string): Promise<RunRecord> {
     let result = await runInvocation(context, prompt, plan.initial, { onRedaction, cancelled: () => cancelled, onChild: (child) => { active = child; }, onEvent });
     record.exit_code = result.code;
     record.end = cancelled ? "cancelled" : result.timedOut ? "timeout" : result.code === 0 ? "completed" : "error";
-    recoverReport(job, baseline);
     const usableMinutes = (plan.continuation - Date.now()) / minute;
     if (!nonemptyReport(report) && record.session_id && !cancelled && usableMinutes >= 5) {
       const message = `Continue. Your run stopped before report.md was written. About ${Math.floor(usableMinutes)} minutes remain. Subagents that were running when you stopped may have been stopped; rerun any whose results you do not have. Finish the task as originally instructed and write report.md before time runs out.`;
@@ -220,8 +212,7 @@ export async function runWorker(root: string): Promise<RunRecord> {
       result = await runInvocation(context, message, plan.continuation, { onRedaction, sessionId: record.session_id, cancelled: () => cancelled, onChild: (child) => { active = child; }, onEvent });
       record.exit_code = result.code;
       record.end = cancelled ? "cancelled" : result.timedOut ? "timeout" : result.code === 0 ? "completed" : "error";
-      recoverReport(job, baseline);
-      record.continuation.exit_code = result.code;
+        record.continuation.exit_code = result.code;
       record.continuation.report_after = nonemptyReport(report);
     }
   } catch (error) {
@@ -231,7 +222,6 @@ export async function runWorker(root: string): Promise<RunRecord> {
   } finally {
     clearInterval(heartbeat);
     if (active) signalGroup(active, "SIGKILL");
-    recoverReport(job, baseline);
     record.usage = usageFromEvents(record.harness.name, events);
     if (context) {
       try { record.usage = await exportSessions(context, Math.min(plan?.export ?? Date.now() + minute, Date.now() + (cancelled ? 4 : 8) * minute), (path, reason) => record.omitted.push({ path, reason })) ?? record.usage; }
