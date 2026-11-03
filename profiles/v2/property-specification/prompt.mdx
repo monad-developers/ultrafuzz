@@ -1,0 +1,9 @@
+# Specify the protocol's properties
+
+Read the supplied source within the configured scope and use the installed `specify-properties` skill. Identify the security and accounting properties that should hold across realistic sequences of public actions. Investigate implementation details, documentation and existing tests to distinguish intended behavior from an assumption.
+
+Produce **one final Markdown deliverable, `report.md`**, containing the property specification. Give each property a stable identifier beginning with `P-001`. Describe the invariant or transition relation, actors and state, preconditions, relevant source locations, an independent test oracle, and useful action sequences and boundary cases. State ambiguities explicitly. Separate properties supported by the implementation's intended behavior from proposals that need a product decision. Do not claim that a property has been proved by listing it.
+
+Prefer a compact set of distinct, testable properties over repetitions. Cover the applicable conservation, authorization, solvency, rounding, lifecycle and cross-component relationships. Retain identifiers when refining a draft; do not renumber to fill gaps. Include a coverage summary and any unresolved questions that would block implementation.
+
+The property specification itself is the report. Do not create an additional `properties.md` deliverable. Keep drafts and progress outside `report.md`; write it when the specification is ready.

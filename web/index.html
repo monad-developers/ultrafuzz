@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>Ultrafuzz · Runs</title>
+  <link rel="icon" href="/ultrafuzz-logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/" aria-label="Ultrafuzz home"><img src="/ultrafuzz-logo.svg" alt="" width="32" height="32"><span>ultrafuzz</span><span class="version">v0.2</span></a><span class="local"><span class="dot"></span>Local dashboard</span></header>
+  <main>
+    <div class="heading"><div><p class="eyebrow">AUDIT WORKSPACE</p><h1>Runs</h1><p class="subtitle">Launch audits, follow progress, and collect results.</p></div><button id="refresh" class="secondary" type="button">Refresh</button></div>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <div class="workspace">
+      <section class="runs-panel" aria-label="Audit runs">
+        <div class="toolbar"><label class="search-label"><span class="sr-only">Search runs</span><input id="search" type="search" placeholder="Search label, repository or run ID…"></label><label><span class="sr-only">Filter state</span><select id="state-filter"><option value="all">All runs</option><option value="active">Active</option><option value="finished">Finished</option></select></label></div>
+        <div class="list-heading"><span id="run-count">Loading runs…</span><span id="updated">Updates every 5 seconds</span></div>
+        <div class="table-scroll"><table><thead><tr><th>Run</th><th>Configuration</th><th>Status</th><th class="align-right">Cost</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="runs"></tbody></table></div>
+        <div id="empty" class="empty" hidden><div class="empty-mark">↗</div><h2>No runs yet</h2><p>Choose a repository and profile to start your first audit.</p></div>
+      </section>
+      <aside class="launch-panel"><div class="panel-title"><span class="panel-icon">+</span><h2>New run</h2></div><p class="panel-description">Use a label to group repeated experiments.</p>
+        <form id="launch-form">
+          <label>Repository<select id="repository" name="repository" required><option value="">Loading…</option></select></label>
+          <label>Profile<select id="profile" name="audit_profile" required></select></label><p id="profile-description" class="field-help"></p>
+          <div class="form-row"><label>Harness<select id="harness" name="harness" required><option value="claude-code">Claude Code</option><option value="opencode">OpenCode</option><option value="codex">Codex</option></select></label><label>Effort<input id="effort" name="effort" placeholder="Default"></label></div>
+          <label>Model<input id="model" name="model" placeholder="provider/model" required spellcheck="false"></label>
+          <label>Label<input id="label" name="label" placeholder="e.g. baseline-v2" required maxlength="120" spellcheck="false"></label>
+          <label id="properties-field" hidden>Properties<input id="properties" name="properties" placeholder="File path or prior run ID" spellcheck="false"><span class="field-help">Use the report from a property-specification run.</span></label>
+          <button id="launch" class="primary" type="submit" disabled>Launch run <span aria-hidden="true">↗</span></button>
+          <p class="form-footnote">Repository and model defaults come from your local config.</p>
+        </form>
+      </aside>
+    </div>
+  </main>
+  <footer>Ultrafuzz <span>·</span> Prompt-driven audits on Modal</footer>
+</body>
+</html>
