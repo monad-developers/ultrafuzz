@@ -69,7 +69,7 @@ timeouts, backend settings, or artifact requirements.
 | `strategy_loop_index`       | Zero-based loop index for this logical node.                                       |
 | `strategy_loop_count`       | Total loop count for this logical node.                                            |
 | `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt.             |
-| `shared_log_command`        | Absolute path to the run's shared log command. See [Shared log](#shared-log).      |
+| `shared_log_command`        | The run's shared log command, as one shell word. See [Shared log](#shared-log).    |
 
 `output_findings_path` is topology authority, not a configurable filename.
 Rendering fails unless the current node declares exactly one
@@ -81,9 +81,11 @@ is required.
 
 A prompt that names `{{shared_log_command}}` gives its run a shared log that every
 task whose prompt names the command can post to and read. `run` and `resume` install
-the command, at `<run>/shared-log-bin/ultrafuzz-shared-log`, only when a rendered
-prompt of the run names it, so a run whose prompts never mention it has no shared
-log. A `resume` whose refreshed prompts first name it installs it then. A `fork`
+the command, at `<run>/shared-log-bin/ultrafuzz-shared-log`, only when a prompt of
+the run names it, so a run whose prompts never mention it has no shared log. That
+includes a dynamic task's prompt, which is rendered only after launch: its template
+counts. The variable renders the command's absolute path, single-quoted when the path
+holds characters the shell treats specially, such as spaces. A `resume` whose refreshed prompts first name it installs it then. A `fork`
 reruns the run's prompts and uses the command its launch installed.
 
 The built-in property-lens prompts (the eight `properties/` lenses, not the fan-in)

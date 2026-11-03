@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { promptTemplateOccurrences, shellWord } from "@ultrafuzz/prompts";
+
+import { DEFERRED_PROMPT_TEMPLATE_DIR } from "./utils.js";
+
 // Run-relative locations. Each workflow a run executes (its launch, and each fork) gets its own log
 // under `shared-log/<workflow run id>/`: `entries.jsonl` holds what agents posted and `reads.jsonl`
 // records every read. The command sits beside it and is rewritten whenever it is installed. Neither
@@ -14,13 +18,15 @@ const SHARED_LOG_SCRIPT_PATH = "shared-log-bin/shared-log.mjs";
  * `read --new` only those posted since the caller's last read. Agents decide what to post; the command
  * only stamps each entry with the task that posted it (the task workspace the command runs in), that
  * task's retry count and the time, and records each read, so a run shows afterwards who read what.
- * It takes a lock directory around every write, so parallel tasks never interleave lines.
+ * It takes a lock directory around every write, so parallel tasks never interleave lines. Each lock
+ * carries its owner's token; a lock older than a minute is taken to belong to a writer that died,
+ * and only one waiter may clear it, so two waiters cannot both clear it and write at once.
  *
  * It finds the run from its own location, so its bytes depend only on the Node executable.
  */
 function sharedLogWrapper(nodePath: string): string {
   return `#!/bin/sh
-exec ${shellQuote(nodePath)} "$(dirname "$0")/shared-log.mjs" "$@"
+exec ${shellWord(nodePath)} "$(dirname "$0")/shared-log.mjs" "$@"
 `;
 }
 
@@ -74,25 +80,60 @@ function caller() {
   return { task, retry_count: typeof retryCount === "number" ? retryCount : null, workflowRunId };
 }
 
+function lockOwner(lock) {
+  try {
+    return fs.readFileSync(path.join(lock, "owner"), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+// A lock held past STALE_LOCK_MS belongs to a writer that died: a write holds it for milliseconds.
+// Waiters that find it race to create "reaping" inside that very lock, so exactly one clears it,
+// and the winner clears it only if it still carries the owner it judged stale. A lock that was
+// cleared and retaken meanwhile has a new owner and is left alone.
+function clearStaleLock(lock) {
+  const seen = fs.statSync(lock, { throwIfNoEntry: false });
+  if (seen === undefined || Date.now() - seen.mtimeMs <= STALE_LOCK_MS) return;
+  const owner = lockOwner(lock);
+  const claim = path.join(lock, "reaping");
+  try {
+    fs.mkdirSync(claim);
+  } catch {
+    return;
+  }
+  if (owner !== undefined && lockOwner(lock) === owner) fs.rmSync(lock, { recursive: true, force: true });
+  else fs.rmSync(claim, { recursive: true, force: true });
+}
+
+// Every lock is made whole, with its owner token, and renamed into place; renaming onto a lock
+// that exists fails, so a lock is never seen without an owner.
 function withLock(dir, action) {
   const lock = path.join(dir, ".lock");
+  const token = process.pid + "-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+  const staged = path.join(dir, ".lock-" + token);
+  fs.mkdirSync(staged);
+  fs.writeFileSync(path.join(staged, "owner"), token);
   const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      fs.mkdirSync(lock);
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-      if (age > STALE_LOCK_MS) fs.rmSync(lock, { recursive: true, force: true });
-      else if (Date.now() > deadline) fail("the shared log stayed locked for 30 seconds; try again");
-      else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  try {
+    for (;;) {
+      try {
+        fs.renameSync(staged, lock);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        clearStaleLock(lock);
+        if (Date.now() > deadline) fail("the shared log stayed locked for 30 seconds; try again");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
     }
+  } finally {
+    fs.rmSync(staged, { recursive: true, force: true });
   }
   try {
     return action();
   } finally {
-    fs.rmSync(lock, { recursive: true, force: true });
+    if (lockOwner(lock) === token) fs.rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -141,22 +182,39 @@ if (command === "post") {
 }
 `;
 
-/** Whether any of the run's rendered agent prompts names the shared log command. */
+/**
+ * Whether any of the run's agent prompts names the shared log command: a rendered prompt, or a
+ * template snapshot a later render reads. A dynamic task's prompt is rendered only once its source
+ * task finishes, long after launch, so its template is the only place its reference shows at launch.
+ */
 function sharedLogReferenced(runRoot: string): boolean {
   const command = path.join(runRoot, SHARED_LOG_COMMAND_PATH);
-  const artifacts = path.join(runRoot, "artifacts");
-  if (!fs.existsSync(artifacts)) return false;
-  for (const entry of fs.readdirSync(artifacts, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const prompt = path.join(artifacts, entry.name, "prompt.rendered.md");
-    if (
-      fs.lstatSync(prompt, { throwIfNoEntry: false })?.isFile() &&
-      fs.readFileSync(prompt, "utf8").includes(command)
-    ) {
-      return true;
-    }
-  }
-  return false;
+  return (
+    regularFilesIn(path.join(runRoot, "artifacts"), "prompt.rendered.md").some((prompt) => {
+      const text = fs.readFileSync(prompt, "utf8");
+      return text.includes(command) || text.includes(shellWord(command));
+    }) ||
+    regularFilesIn(path.join(runRoot, DEFERRED_PROMPT_TEMPLATE_DIR)).some((template) =>
+      promptTemplateOccurrences(fs.readFileSync(template, "utf8")).some(
+        (occurrence) => occurrence.name === "shared_log_command"
+      )
+    )
+  );
+}
+
+/**
+ * The regular files directly in `directory`, or, given `name`, the regular file of that name in
+ * each of its subdirectories.
+ */
+function regularFilesIn(directory: string, name?: string): string[] {
+  if (fs.lstatSync(directory, { throwIfNoEntry: false })?.isDirectory() !== true) return [];
+  return fs
+    .readdirSync(directory, { withFileTypes: true })
+    .flatMap((entry) => {
+      if (name === undefined) return entry.isFile() ? [path.join(directory, entry.name)] : [];
+      return entry.isDirectory() ? [path.join(directory, entry.name, name)] : [];
+    })
+    .filter((file) => fs.lstatSync(file, { throwIfNoEntry: false })?.isFile() === true);
 }
 
 /**
@@ -174,11 +232,7 @@ export function installSharedLogIfReferenced(runRoot: string, nodePath: string =
 }
 
 function writeStaged(target: string, content: string, mode: number): void {
-  const staged = `${target}.${process.pid}.${Date.now()}.tmp`;
+  const staged = `${target}.${String(process.pid)}.${String(Date.now())}.tmp`;
   fs.writeFileSync(staged, content, { mode, flag: "wx" });
   fs.renameSync(staged, target);
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
 }

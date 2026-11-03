@@ -13,8 +13,8 @@ interface Fixture {
 }
 
 // A run root with two task workspaces, and a prompt that names the command when `referenced`.
-function runFixture(referenced = true, workflowRunId = "wf-1"): Fixture {
-  const runRoot = path.join(fs.realpathSync(temporaryRoot("ultrafuzz-shared-log-")), "runs", "run-1");
+function runFixture(referenced = true, workflowRunId = "wf-1", parent = "runs"): Fixture {
+  const runRoot = path.join(fs.realpathSync(temporaryRoot("ultrafuzz-shared-log-")), parent, "run-1");
   const command = path.join(runRoot, ...SHARED_LOG_COMMAND_PATH.split("/"));
   for (const task of ["lens-a", "lens-b"]) {
     fs.mkdirSync(path.join(runRoot, "workspaces", task), { recursive: true });
@@ -146,7 +146,10 @@ test("each workflow of a run, such as a fork, gets its own shared log", () => {
   assert.equal(run(fixture, "workspaces/lens-a", ["read"]).stdout, "(no entries yet)\n");
   assert.equal(run(fixture, "workspaces/lens-a", ["post", "from the fork"]).stdout, "posted entry #1\n");
   assert.equal(lines(path.join(fixture.runRoot, "shared-log", "wf-1", "entries.jsonl")).length, 1);
-  assert.equal(lines(path.join(fixture.runRoot, "shared-log", "wf-2", "entries.jsonl"))[0]!.text, "from the fork");
+  assert.deepEqual(
+    lines(path.join(fixture.runRoot, "shared-log", "wf-2", "entries.jsonl")).map((entry) => entry.text),
+    ["from the fork"]
+  );
 });
 
 test("parallel posts each get their own entry and number", async () => {
@@ -186,4 +189,69 @@ test("parallel posts each get their own entry and number", async () => {
     "7"
   ]);
   assert.equal(fs.existsSync(path.join(fixture.runRoot, "shared-log", "wf-1", ".lock")), false);
+});
+
+test("a dynamic task's prompt template that names the command installs it at launch", () => {
+  // Rendered prompts that do not name it, as for a run whose only reference is in a dynamic task.
+  const fixture = runFixture(false);
+  const templates = path.join(fixture.runRoot, "dynamic-prompt-templates");
+  fs.mkdirSync(templates);
+  // An escaped reference renders literally, so it names nothing.
+  fs.writeFileSync(path.join(templates, "a.md"), "Literal \\{{shared_log_command}} only.\n");
+  assert.equal(installSharedLogIfReferenced(fixture.runRoot), false);
+
+  fs.writeFileSync(path.join(templates, "b.md"), "Share with {{ shared_log_command }} post <text>.\n");
+  assert.equal(installSharedLogIfReferenced(fixture.runRoot), true);
+  assert.equal(run(fixture, "workspaces/lens-a", ["post", "from a dynamic lens"]).stdout, "posted entry #1\n");
+});
+
+test("a run path with spaces gets a quoted command that still finds and runs it", () => {
+  const fixture = runFixture(false, "wf-1", "my runs");
+  for (const task of ["lens-a", "lens-b"]) {
+    fs.writeFileSync(
+      path.join(fixture.runRoot, "artifacts", task, "prompt.rendered.md"),
+      `Share with '${fixture.command}' post <text>.\n`
+    );
+  }
+  assert.equal(installSharedLogIfReferenced(fixture.runRoot), true);
+  const result = spawnSync("/bin/sh", ["-c", `'${fixture.command}' post "it works"`], {
+    cwd: path.join(fixture.runRoot, "workspaces", "lens-a"),
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "posted entry #1\n");
+});
+
+test("waiters that all find a dead writer's lock clear it once and then write one at a time", async () => {
+  const fixture = runFixture();
+  installSharedLogIfReferenced(fixture.runRoot);
+  const log = path.join(fixture.runRoot, "shared-log", "wf-1");
+  const lock = path.join(log, ".lock");
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, "owner"), "a writer that died");
+  const old = new Date(Date.now() - 120_000);
+  fs.utimesSync(lock, old, old);
+
+  const codes = await Promise.all(
+    Array.from(
+      { length: 8 },
+      (_, index) =>
+        new Promise<number | null>((resolve) => {
+          const child = spawn(fixture.command, ["post", `entry ${String(index)}`], {
+            cwd: path.join(fixture.runRoot, "workspaces", index % 2 === 0 ? "lens-a" : "lens-b"),
+            stdio: ["ignore", "ignore", "ignore"]
+          });
+          child.on("close", resolve);
+        })
+    )
+  );
+  assert.deepEqual(codes, Array(8).fill(0));
+  const entries = lines(path.join(log, "entries.jsonl"));
+  assert.deepEqual(
+    entries.map((entry) => entry.seq),
+    [1, 2, 3, 4, 5, 6, 7, 8]
+  );
+  assert.equal(new Set(entries.map((entry) => entry.text)).size, 8);
+  // Neither the lock nor any waiter's staged lock is left behind.
+  assert.deepEqual(fs.readdirSync(log).sort(), ["entries.jsonl"]);
 });

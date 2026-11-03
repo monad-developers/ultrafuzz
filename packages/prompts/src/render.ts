@@ -1191,9 +1191,20 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
     // A prompt that names this command is what gives its run a shared log: launch and resume
     // install the command only in a run whose rendered prompts mention it.
-    shared_log_command: path.join(path.dirname(input.run.metadataPath), "shared-log-bin", "ultrafuzz-shared-log"),
+    // Rendered as one shell word, so a run root with spaces still gives a runnable command.
+    shared_log_command: shellWord(
+      path.join(path.dirname(input.run.metadataPath), "shared-log-bin", "ultrafuzz-shared-log")
+    ),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
+}
+
+/**
+ * `value` as a single POSIX shell word: unchanged when it holds only characters the shell never
+ * treats specially, otherwise single-quoted.
+ */
+export function shellWord(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/u.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function validateRenderInputPaths(input: PromptRenderInput): void {
