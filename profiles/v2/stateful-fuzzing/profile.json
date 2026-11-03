@@ -1,0 +1,7 @@
+{
+  "name": "v2/stateful-fuzzing",
+  "description": "Implement supplied Markdown properties and run a bounded stateful fuzzing campaign.",
+  "harnesses": ["claude-code", "opencode", "codex"],
+  "available": true,
+  "requires_properties": true
+}

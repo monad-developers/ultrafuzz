@@ -1,0 +1,7 @@
+{
+  "name": "v2/property-specification",
+  "description": "Specify falsifiable stateful properties in a Markdown report with stable P-001 identifiers.",
+  "harnesses": ["claude-code", "opencode", "codex"],
+  "available": true,
+  "requires_properties": false
+}

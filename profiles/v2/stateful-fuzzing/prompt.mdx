@@ -1,0 +1,9 @@
+# Exercise the supplied properties
+
+Read the `properties` input identified in the run context. It is a Markdown property specification, optionally the `report.md` of a previous property-specification run. Use the installed `run-stateful-fuzzing` skill to implement its applicable properties and run stateful tests against the supplied source within scope.
+
+Preserve the specification's property identifiers. Read source and test setup before choosing a harness. Prefer the available Recon/Chimera and Foundry tools when they fit the project; inspect installed command help before invoking tool-specific options. Establish a working deployment and meaningful handlers before spending the fuzz budget. Keep test harness code and reproducible failure artifacts in the output directory.
+
+Use at most the run context's `fuzz_budget_seconds` for the fuzzing campaign and leave time to investigate failures and write the report. Distinguish a protocol defect from an invalid oracle, an impossible setup, a precondition violation or a harness failure. Minimize and replay meaningful counterexamples. Do not weaken a property merely to make a test pass; explain an invalid or unsupported property explicitly.
+
+Write the final **`report.md`** with findings, reproducible commands and relevant source locations, the outcome of every supplied property, actual tool versions, campaign duration and test coverage limitations. Report blocked properties and infrastructure failures honestly. A clean bounded campaign is not a proof. Do not publish fuzz corpora or build caches; preserve minimized reproducers instead. Keep progress outside `report.md` and write the final report only when the task is finished.

@@ -1,0 +1,7 @@
+{
+  "name": "v2/pareto",
+  "description": "TBD — the Pareto prompt and native harness configuration are being finalized. Launch is unavailable.",
+  "harnesses": ["claude-code", "opencode", "codex"],
+  "available": false,
+  "requires_properties": false
+}
