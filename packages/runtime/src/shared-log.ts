@@ -19,8 +19,9 @@ const SHARED_LOG_SCRIPT_PATH = "shared-log-bin/shared-log.mjs";
  * only stamps each entry with the task that posted it (the task workspace the command runs in), that
  * task's retry count and the time, and records each read, so a run shows afterwards who read what.
  * It takes a lock directory around every write, so parallel tasks never interleave lines. Each lock
- * carries its owner's token; a lock older than a minute is taken to belong to a writer that died,
- * and only one waiter may clear it, so two waiters cannot both clear it and write at once.
+ * carries its owner's token. A lock older than a minute belongs to a writer that died; a waiter
+ * moves it aside, once and in one step, so neither a race between waiters nor a waiter dying
+ * mid-way can let two writers in or leave the log locked.
  *
  * It finds the run from its own location, so its bytes depend only on the Node executable.
  */
@@ -89,21 +90,20 @@ function lockOwner(lock) {
 }
 
 // A lock held past STALE_LOCK_MS belongs to a writer that died: a write holds it for milliseconds.
-// Waiters that find it race to create "reaping" inside that very lock, so exactly one clears it,
-// and the winner clears it only if it still carries the owner it judged stale. A lock that was
-// cleared and retaken meanwhile has a new owner and is left alone.
-function clearStaleLock(lock) {
+// It is renamed aside, in one atomic step, to a name fixed by its owner, and kept there as a record
+// of the crash. Every waiter that judged the same lock stale aims at that one name, and a rename
+// onto a directory that is not empty fails, so only the first moves anything: a lock retaken since
+// is never moved. A waiter that dies here has either moved the lock or not, so none is left stuck.
+function clearStaleLock(dir, lock) {
   const seen = fs.statSync(lock, { throwIfNoEntry: false });
   if (seen === undefined || Date.now() - seen.mtimeMs <= STALE_LOCK_MS) return;
   const owner = lockOwner(lock);
-  const claim = path.join(lock, "reaping");
+  const name = owner !== undefined && /^[A-Za-z0-9-]+$/.test(owner) ? owner : "ino-" + seen.ino + "-" + seen.mtimeMs;
   try {
-    fs.mkdirSync(claim);
-  } catch {
-    return;
+    fs.renameSync(lock, path.join(dir, ".lock-stale-" + name));
+  } catch (error) {
+    if (error.code !== "ENOENT" && error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
   }
-  if (owner !== undefined && lockOwner(lock) === owner) fs.rmSync(lock, { recursive: true, force: true });
-  else fs.rmSync(claim, { recursive: true, force: true });
 }
 
 // Every lock is made whole, with its owner token, and renamed into place; renaming onto a lock
@@ -122,7 +122,7 @@ function withLock(dir, action) {
         break;
       } catch (error) {
         if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-        clearStaleLock(lock);
+        clearStaleLock(dir, lock);
         if (Date.now() > deadline) fail("the shared log stayed locked for 30 seconds; try again");
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
       }
@@ -130,6 +130,9 @@ function withLock(dir, action) {
   } finally {
     fs.rmSync(staged, { recursive: true, force: true });
   }
+  // The lock's age counts from now, not from when this waiter staged it.
+  const now = new Date();
+  fs.utimesSync(lock, now, now);
   try {
     return action();
   } finally {

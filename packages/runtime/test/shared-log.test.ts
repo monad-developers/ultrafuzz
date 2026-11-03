@@ -222,15 +222,20 @@ test("a run path with spaces gets a quoted command that still finds and runs it"
   assert.equal(result.stdout, "posted entry #1\n");
 });
 
-test("waiters that all find a dead writer's lock clear it once and then write one at a time", async () => {
+test("waiters that all find a dead writer's lock move it aside once and then write one at a time", async () => {
   const fixture = runFixture();
   installSharedLogIfReferenced(fixture.runRoot);
   const log = path.join(fixture.runRoot, "shared-log", "wf-1");
-  const lock = path.join(log, ".lock");
-  fs.mkdirSync(lock, { recursive: true });
-  fs.writeFileSync(path.join(lock, "owner"), "a writer that died");
   const old = new Date(Date.now() - 120_000);
-  fs.utimesSync(lock, old, old);
+  const staleLock = (directory: string, owner: string): void => {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "owner"), owner);
+    fs.utimesSync(directory, old, old);
+  };
+  staleLock(path.join(log, ".lock"), "111-1-dead");
+  // What earlier crashes leave: a lock already moved aside, and a dead waiter's staged lock.
+  staleLock(path.join(log, ".lock-stale-99-1-older"), "99-1-older");
+  staleLock(path.join(log, ".lock-98-1-waiter"), "98-1-waiter");
 
   const codes = await Promise.all(
     Array.from(
@@ -252,6 +257,30 @@ test("waiters that all find a dead writer's lock clear it once and then write on
     [1, 2, 3, 4, 5, 6, 7, 8]
   );
   assert.equal(new Set(entries.map((entry) => entry.text)).size, 8);
-  // Neither the lock nor any waiter's staged lock is left behind.
-  assert.deepEqual(fs.readdirSync(log).sort(), ["entries.jsonl"]);
+  // The dead writer's lock was moved aside exactly once, and no waiter left a lock behind.
+  assert.deepEqual(fs.readdirSync(log).sort(), [
+    ".lock-98-1-waiter",
+    ".lock-stale-111-1-dead",
+    ".lock-stale-99-1-older",
+    "entries.jsonl"
+  ]);
+  assert.equal(fs.readFileSync(path.join(log, ".lock-stale-111-1-dead", "owner"), "utf8"), "111-1-dead");
+});
+
+test("a lock that is not yet stale is left in place", () => {
+  const fixture = runFixture();
+  installSharedLogIfReferenced(fixture.runRoot);
+  const log = path.join(fixture.runRoot, "shared-log", "wf-1");
+  const lock = path.join(log, ".lock");
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, "owner"), "222-1-live");
+  // Due to go stale only after the command has given up waiting.
+  const recent = new Date(Date.now() - 20_000);
+  fs.utimesSync(lock, recent, recent);
+
+  const result = run(fixture, "workspaces/lens-a", ["post", "blocked"]);
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /stayed locked for 30 seconds/u);
+  assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), "222-1-live");
+  assert.equal(fs.existsSync(path.join(log, "entries.jsonl")), false);
 });
