@@ -3,8 +3,8 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { c as createTar } from "tar";
-import { deadlines, removeProjectCustomizations, runWorker } from "../src/worker";
-import { harnessCommand, prepareHarness, usageFromEvents } from "../src/harnesses";
+import { deadlines, nonemptyReport, removeProjectCustomizations, runWorker } from "../src/worker";
+import { codexPricingModelMatches, harnessCommand, prepareHarness, profileEnvironment, usageFromEvents } from "../src/harnesses";
 import type { WorkerJob } from "../src/types";
 
 const temporary: string[] = [];
@@ -37,6 +37,7 @@ describe("worker execution contract", () => {
   test("cutoffs share an absolute deadline, including short runs", () => {
     expect(deadlines(0, 3600_000)).toEqual({ initial: 1800_000, continuation: 3000_000, export: 3600_000 });
     expect(deadlines(0, 60_000)).toEqual({ initial: 30_000, continuation: 50_000, export: 60_000 });
+    expect(deadlines(120_000, 3600_000, 3600_000)).toEqual({ initial: 1800_000, continuation: 3000_000, export: 3600_000 });
   });
   test("missing report gets exactly one native continuation and retained evidence", async () => {
     const { root, job } = await stubRun(`if [[ "$*" == *"--session ses_test"* ]]; then echo finished > '${"REPLACE"}'; fi\necho "$OPENROUTER_API_KEY" >&2`);
@@ -73,7 +74,8 @@ describe("worker execution contract", () => {
   });
   test("timeout uses original deadline and preserves partial transcript", async () => {
     const { root, job } = await stubRun("sleep 20");
-    job.deadline_at = new Date(Date.now() + 100).toISOString();
+    job.deadline_at = new Date(Date.now() + 1000).toISOString();
+    job.record.modal.timeout_seconds = 1;
     writeFileSync(join(root, "job.json"), JSON.stringify(job));
     const record = await runWorker(root);
     expect(record.end).toBe("timeout"); expect(record.continuation).toBeNull();
@@ -95,6 +97,25 @@ describe("worker execution contract", () => {
     expect(existsSync(join(job.workspace, "nested/.agents"))).toBe(false);
     expect(existsSync(join(job.workspace, "nested/AGENTS.md"))).toBe(false);
     expect(existsSync(join(job.workspace, "nested/source.sol"))).toBe(true);
+  });
+  test("profile environment supports native knobs without replacing routing or homes", () => {
+    expect(profileEnvironment("opencode", { OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "64000" })).toEqual({ OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "64000" });
+    expect(profileEnvironment("claude-code", { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" })).toEqual({ CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" });
+    for (const key of ["OPENROUTER_API_KEY", "HOME", "OPENCODE_CONFIG", "OPENCODE_DISABLE_PROJECT_CONFIG"]) expect(() => profileEnvironment("opencode", { [key]: "x" })).toThrow();
+    expect(() => profileEnvironment("claude-code", { CLAUDE_CODE_OAUTH_TOKEN: "x" })).toThrow();
+  });
+  test("whitespace reports are incomplete", () => {
+    const { root } = jobFixture(); const report = join(root, "report.md"); writeFileSync(report, " \n\t");
+    expect(nonemptyReport(report)).toBe(false);
+  });
+  test("OpenCode accounting includes cache and reasoning components", () => {
+    const usage = usageFromEvents("opencode", [{ type: "step_finish", part: { id: "step", cost: 0.1, tokens: { input: 10, output: 20, reasoning: 30, cache: { read: 40, write: 50 } } } }]);
+    expect(usage.input_tokens).toBe(100); expect(usage.output_tokens).toBe(50); expect(usage.cost_usd).toBe(0.1);
+  });
+  test("mixed Codex model usage is not priced at the lead model's rate", () => {
+    expect(codexPricingModelMatches("vendor/model", [{ agents: { reviewer: { model: "vendor/other" } } }], [])).toBe(false);
+    expect(codexPricingModelMatches("vendor/model", [], ["vendor/other"])).toBe(false);
+    expect(codexPricingModelMatches("vendor/model", [{ model: "openrouter/vendor/model" }], ["vendor/model"])).toBe(true);
   });
   test("Claude resume cumulative costs are not double-counted", () => {
     const usage = usageFromEvents("claude-code", [{ type: "result", session_id: "same", total_cost_usd: 2, usage: { input_tokens: 4, output_tokens: 2 } }, { type: "result", session_id: "same", total_cost_usd: 3, usage: { input_tokens: 6, output_tokens: 3 } }]);

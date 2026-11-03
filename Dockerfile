@@ -97,7 +97,9 @@ RUN curl --fail --location --retry 3 \
     && npm install --global "recon-generate@${RECON_GENERATE_VERSION}" \
     && npm cache clean --force \
     && /opt/sectools/bin/pip install --no-cache-dir \
-       "covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval"
+       "covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval" \
+    && ln -s /opt/sectools/bin/covg-eval /usr/local/bin/covg-eval \
+    && covg-eval --help >/dev/null
 
 ENV OPENCODE_DISABLE_AUTOUPDATE=true
 COPY dist/worker.js /opt/ultrafuzz/worker.js

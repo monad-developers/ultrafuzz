@@ -12,9 +12,10 @@ import type { RunRecord, WorkerJob } from "./types";
 const minute = 60_000;
 export interface Deadlines { initial: number; continuation: number; export: number }
 /** Production runs reserve 20 minutes for continuation and 10 for export, within one absolute deadline. */
-export function deadlines(start: number, end: number): Deadlines {
+export function deadlines(start: number, end: number, configuredDuration = end - start): Deadlines {
   if (!Number.isFinite(end) || end <= start) throw new Error("Run deadline is invalid or already expired");
-  const duration = end - start, scale = Math.min(1, duration / (60 * minute));
+  if (!Number.isFinite(configuredDuration) || configuredDuration <= 0) throw new Error("Configured timeout must be positive");
+  const scale = Math.min(1, configuredDuration / (60 * minute));
   return { initial: end - 30 * minute * scale, continuation: end - 10 * minute * scale, export: end };
 }
 function atomicJson(path: string, value: unknown): void {
@@ -26,7 +27,7 @@ function atomicJson(path: string, value: unknown): void {
 const now = () => new Date().toISOString();
 const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 export function nonemptyReport(path: string): boolean {
-  try { const stat = lstatSync(path); return stat.isFile() && stat.size > 0; } catch { return false; }
+  try { const stat = lstatSync(path); return stat.isFile() && stat.size > 0 && readFileSync(path, "utf8").trim().length > 0; } catch { return false; }
 }
 const customizationDirs = new Set([".claude", ".codex", ".opencode", ".agents"]);
 const customizationFiles = new Set(["CLAUDE.md", "AGENTS.md", "AGENTS.override.md", "opencode.json", "opencode.jsonc", ".mcp.json"]);
@@ -169,7 +170,7 @@ export async function runWorker(root: string): Promise<RunRecord> {
   const heartbeat = setInterval(() => { if (existsSync(join(root, "cancelled"))) cancel(); record.last_observed_at = now(); save(); }, 10_000);
   heartbeat.unref();
   try {
-    plan = deadlines(Date.now(), Date.parse(job.deadline_at));
+    plan = deadlines(Date.now(), Date.parse(job.deadline_at), job.record.modal.timeout_seconds * 1000);
     if (existsSync(job.prompt_path)) cpSync(job.prompt_path, join(job.output_dir, "prompt.txt"));
     copyDirectory(job.profile_dir, join(raw, "profile"));
     if (cancelled) throw new Error("Cancelled before harness launch");
@@ -212,7 +213,7 @@ export async function runWorker(root: string): Promise<RunRecord> {
       result = await runInvocation(context, message, plan.continuation, { onRedaction, sessionId: record.session_id, cancelled: () => cancelled, onChild: (child) => { active = child; }, onEvent });
       record.exit_code = result.code;
       record.end = cancelled ? "cancelled" : result.timedOut ? "timeout" : result.code === 0 ? "completed" : "error";
-        record.continuation.exit_code = result.code;
+      record.continuation.exit_code = result.code;
       record.continuation.report_after = nonemptyReport(report);
     }
   } catch (error) {
@@ -253,9 +254,16 @@ export async function runWorker(root: string): Promise<RunRecord> {
     writeFileSync(join(job.output_dir, "usage.yml"), yaml(record.usage));
     writeFileSync(join(job.output_dir, "run.yml"), yaml(record));
     save();
-    process.off("SIGTERM", cancel); process.off("SIGINT", cancel);
-    // A collector must never see this until every output and the final run record are durable.
-    atomicJson(join(root, "complete.json"), record);
+    const sync = async () => {
+      const result = await captureCommand(["sync", "-f", root], { workspace: root, env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }, Math.max(1, Math.min(10_000, (plan?.export ?? Date.now() + 10_000) - Date.now())));
+      if (result.code !== 0) throw new Error(`Unable to synchronize run output: ${result.stderr || "deadline reached"}`);
+    };
+    try {
+      // Synchronize the mounted filesystem before exposing completion, then persist the marker itself.
+      await sync();
+      atomicJson(join(root, "complete.json"), record);
+      await sync();
+    } finally { process.off("SIGTERM", cancel); process.off("SIGINT", cancel); }
   }
   return record;
 }

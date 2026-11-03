@@ -69,6 +69,17 @@ function loadFragment(path: string): ObjectValue {
   return value;
 }
 
+export function profileEnvironment(name: Harness, fragment: ObjectValue): Record<string, string> {
+  const prefix = name === "opencode" ? "OPENCODE_" : name === "claude-code" ? "CLAUDE_CODE_" : null;
+  const environment: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fragment)) {
+    const reserved = /(?:AUTH|API_KEY|SERVER_PASSWORD)/.test(key) || /^OPENCODE_(?:CONFIG|DB|MODELS_PATH|DISABLE_PROJECT_CONFIG|DISABLE_CLAUDE_CODE)/.test(key);
+    if (!prefix || !key.startsWith(prefix) || reserved || typeof value !== "string") throw new Error(`Unsupported native profile environment entry: ${key}`);
+    environment[key] = value;
+  }
+  return environment;
+}
+
 /** Only the provider key enters the child; host/Modal/GitHub credentials are never inherited. */
 export function prepareHarness(root: string, job: WorkerJob, key: string): HarnessContext {
   const name = job.record.harness.name;
@@ -113,6 +124,7 @@ export function prepareHarness(root: string, job: WorkerJob, key: string): Harne
     config.plugin = [...(Array.isArray(config.plugin) ? config.plugin : []), pathToFileURL(registeredPlugin).href];
     Object.assign(env, { OPENCODE_CONFIG: configPath, OPENCODE_CONFIG_DIR: nativeHome, OPENCODE_DISABLE_PROJECT_CONFIG: "true", OPENCODE_DISABLE_AUTOUPDATE: "true", OPENCODE_DISABLE_CLAUDE_CODE: "true", OPENCODE_DISABLE_TERMINAL_TITLE: "true" });
   }
+  Object.assign(env, profileEnvironment(name, loadFragment(join(job.profile_dir, "config", `${name}.env.json`))));
   write(configPath, extension === "toml" ? stringifyToml(config) : `${JSON.stringify(config, null, 2)}\n`);
   const snapshot = join(raw, "profile");
   copyDirectory(job.profile_dir, snapshot);
@@ -134,6 +146,17 @@ export function sessionFromEvent(harness: Harness, event: ObjectValue): string |
 }
 const number = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 const sum = (values: Array<number | null>): number | null => values.length && values.every((value) => value !== null) ? (values as number[]).reduce((a, b) => a + b, 0) : null;
+export function opencodeStepUsage(parts: ObjectValue[], provenance: string): Usage {
+  const incoming = (part: ObjectValue) => sum([number(part.tokens?.input), number(part.tokens?.cache?.read ?? 0), number(part.tokens?.cache?.write ?? 0)]);
+  const outgoing = (part: ObjectValue) => sum([number(part.tokens?.output), number(part.tokens?.reasoning ?? 0)]);
+  return { input_tokens: sum(parts.map(incoming)), output_tokens: sum(parts.map(outgoing)), cost_usd: sum(parts.map((part) => number(part.cost))), cost_provenance: parts.length ? provenance : "unavailable" };
+}
+export function codexPricingModelMatches(selected: string, configs: unknown[], observed: string[]): boolean {
+  const model = (value: string) => value.replace(/^openrouter\//, "");
+  const matches = (value: unknown): boolean => !isObject(value) || Object.entries(value).every(([key, child]) =>
+    key === "model" && typeof child === "string" ? model(child) === model(selected) : Array.isArray(child) ? child.every(matches) : matches(child));
+  return configs.every(matches) && observed.every((value) => model(value) === model(selected));
+}
 export function usageFromEvents(harness: Harness, events: ObjectValue[]): Usage {
   if (harness === "claude-code") {
     const results = new Map<string, ObjectValue>();
@@ -149,8 +172,7 @@ export function usageFromEvents(harness: Harness, events: ObjectValue[]): Usage 
   }
   const steps = new Map<string, ObjectValue>();
   for (const [index, event] of events.entries()) if (event.type === "step_finish") steps.set(event.part?.id ?? String(index), event.part);
-  const values = [...steps.values()];
-  return { input_tokens: sum(values.map((e) => number(e?.tokens?.input))), output_tokens: sum(values.map((e) => number(e?.tokens?.output))), cost_usd: sum(values.map((e) => number(e?.cost))), cost_provenance: values.length ? "OpenCode completed lead step_finish.cost; estimate, subagents may be absent" : "unavailable" };
+  return opencodeStepUsage([...steps.values()], "OpenCode completed lead step_finish.cost; estimate, subagents may be absent");
 }
 
 /** All OpenCode sessions belong to this run's private home, so exporting every id includes native subagents. */
@@ -177,15 +199,17 @@ export async function exportSessions(context: HarnessContext, deadline: number, 
     if (output.code === 0) write(join(destination, `${id}.json`), redactText(output.stdout, [context.env.OPENROUTER_API_KEY!]).text);
     else omitted(`raw/sessions/${id}.json`, "Session export failed; native database retained on the Modal Volume");
   }
-  return { input_tokens: sum(parts.map((p) => number(p.tokens?.input))), output_tokens: sum(parts.map((p) => number(p.tokens?.output))), cost_usd: sum(parts.map((p) => number(p.cost))), cost_provenance: parts.length ? "OpenCode native completed step-finish.cost across all sessions; estimate, unfinished steps may be absent" : "unavailable" };
+  return opencodeStepUsage(parts, "OpenCode native completed step-finish.cost across all sessions; estimate, unfinished steps may be absent");
 }
 async function codexNativeUsage(context: HarnessContext, directory: string, deadline: number): Promise<Usage | null> {
-  const responses = new Map<string, ObjectValue>();
+  const responses = new Map<string, ObjectValue>(), observedModels: string[] = [];
   for (const path of files(directory)) {
     if (!path.endsWith(".jsonl")) continue;
     for (const [index, line] of readFileSync(path, "utf8").split("\n").entries()) {
       try {
         const event = JSON.parse(line);
+        if (typeof event.payload?.model === "string") observedModels.push(event.payload.model);
+        if (typeof event.payload?.usage?.model === "string") observedModels.push(event.payload.usage.model);
         if (event.type === "token_usage_record" && isObject(event.payload?.usage)) responses.set(event.payload.response_id ?? `${path}:${index}`, event.payload.usage);
       } catch { /* Retain partial raw rollouts unchanged. */ }
     }
@@ -195,6 +219,11 @@ async function codexNativeUsage(context: HarnessContext, directory: string, dead
   const usage: Usage = { input_tokens: input, output_tokens: output, cost_usd: null, cost_provenance: "Codex native response usage across sessions; catalog cost unavailable" };
   if (input === null || output === null || deadline - Date.now() < 3_000) return usage;
   try {
+    const configs = [...files(context.nativeHome)].filter((path) => path.endsWith(".toml")).map((path) => parseToml(readFileSync(path, "utf8")));
+    if (!codexPricingModelMatches(context.model, configs, observedModels)) {
+      usage.cost_provenance = "Codex native response usage; cost unavailable because multiple models were configured or observed";
+      return usage;
+    }
     const response = await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(3_000) });
     if (!response.ok) return usage;
     const catalog = await response.json() as { data?: Array<{ id: string; pricing?: Record<string, string> }> };
