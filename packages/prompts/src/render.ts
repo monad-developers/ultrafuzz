@@ -55,7 +55,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "artifact_schema_dir",
   "finding_reachability_vocabulary",
   "finding_note_key_vocabulary",
-  "coverage_evidence_markdown_projection"
+  "coverage_evidence_markdown_projection",
+  "shared_log_command"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -1188,8 +1189,22 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     finding_reachability_vocabulary: findingReachabilityPromptVocabulary(),
     finding_note_key_vocabulary: findingNoteKeyPromptVocabulary(),
     coverage_evidence_markdown_projection: renderOutputContractTemplate("coverage-evidence-markdown.mdx", {}),
+    // A prompt that names this command is what gives its run a shared log: launch and resume
+    // install the command only in a run whose rendered prompts mention it.
+    // Rendered as one shell word, so a run root with spaces still gives a runnable command.
+    shared_log_command: shellWord(
+      path.join(path.dirname(input.run.metadataPath), "shared-log-bin", "ultrafuzz-shared-log")
+    ),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
+}
+
+/**
+ * `value` as a single POSIX shell word: unchanged when it holds only characters the shell never
+ * treats specially, otherwise single-quoted.
+ */
+export function shellWord(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/u.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function validateRenderInputPaths(input: PromptRenderInput): void {
@@ -1224,7 +1239,8 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
     if (
       key === "finding_reachability_vocabulary" ||
       key === "finding_note_key_vocabulary" ||
-      key === "coverage_evidence_markdown_projection"
+      key === "coverage_evidence_markdown_projection" ||
+      key === "shared_log_command"
     ) {
       throw new PromptError("invalid-render-input", `${key} is authoritative and cannot be overridden`);
     }

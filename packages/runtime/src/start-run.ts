@@ -55,6 +55,7 @@ import { planRun } from "./plan-run.js";
 import { agentAuthenticationEnvironmentVariableNames } from "./provider-credential-environment.js";
 import { refreshRunPrompts } from "./prompt-refresh.js";
 import { previewResumeReset } from "./reset-preview.js";
+import { installSharedLogIfReferenced } from "./shared-log.js";
 import { probeCommandsForExecution } from "./required-commands.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import {
@@ -284,6 +285,7 @@ export async function startRun(input: StartRunInput) {
       )
     });
     runTrustedJsonValidatorPreflight({ layout: plan.layout, trusted: trustedCli });
+    const sharedLogDiagnostics = prepareSharedLog(plan.layout.root, "run");
     const activeAgentRefs = compiled.tasks.flatMap((task) => task.agentChain.map((profile) => profile.agentRef));
     const providerCredentialNames = agentCredentialEnvironmentVariableNames(plan.resolved_config, activeAgentRefs);
     const submissionEnvironment = {
@@ -331,7 +333,7 @@ export async function startRun(input: StartRunInput) {
         config_fingerprint: plan.config_fingerprint,
         workflow_ids: [compiled.smithersRunId]
       },
-      [...planned.diagnostics, ...(compiled.diagnostics ?? []), ...forgeGuard.diagnostics]
+      [...planned.diagnostics, ...(compiled.diagnostics ?? []), ...forgeGuard.diagnostics, ...sharedLogDiagnostics]
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_FAILED");
@@ -339,6 +341,37 @@ export async function startRun(input: StartRunInput) {
     return runtimeFailure<StartRunValue>([diagnostic]);
   } finally {
     await releaseControlLock();
+  }
+}
+
+/**
+ * Installs the shared log command when the run's prompts name it, after any prompt refresh, so a
+ * resume whose refreshed prompts first name it gets it too. A fork reruns the run's prompts, so the
+ * command its launch installed serves it. A failure never stops the run: the agents told to use the
+ * log find the command missing.
+ */
+function prepareSharedLog(runRoot: string, action: "run" | "resume"): RuntimeDiagnostic[] {
+  try {
+    return installSharedLogIfReferenced(runRoot)
+      ? [
+          {
+            code: "SHARED_LOG_INSTALLED",
+            message: `${action} installed the shared log command its prompts name`,
+            severity: "info",
+            source: "shared-log",
+            path: "shared-log-bin/ultrafuzz-shared-log"
+          }
+        ]
+      : [];
+  } catch (error) {
+    return [
+      {
+        code: "SHARED_LOG_UNAVAILABLE",
+        message: `${action} could not install the shared log command its prompts name: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "warning",
+        source: "shared-log"
+      }
+    ];
   }
 }
 
@@ -671,6 +704,7 @@ async function submitSmithersContinuation(input: WorkflowLifecycleInput) {
       // Applies the project's current prompts to the unfinished tasks; never fails the resume.
       beforeContinuation: async (context) => {
         diagnostics.push(...(await refreshRunPrompts({ projectRoot, layout, config, context })));
+        diagnostics.push(...prepareSharedLog(layout.root, "resume"));
       },
       relaunchPaths: {
         runRoot: layout.root,

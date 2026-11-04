@@ -69,12 +69,49 @@ timeouts, backend settings, or artifact requirements.
 | `strategy_loop_index`       | Zero-based loop index for this logical node.                                       |
 | `strategy_loop_count`       | Total loop count for this logical node.                                            |
 | `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt.             |
+| `shared_log_command`        | The run's shared log command, as one shell word. See [Shared log](#shared-log).    |
 
 `output_findings_path` is topology authority, not a configurable filename.
 Rendering fails unless the current node declares exactly one
 `ultrafuzz/findings@2` output, and callers cannot override the variable through
 prompt variables. Change the topology output declaration when a different path
 is required.
+
+## Shared log
+
+A prompt that names `{{shared_log_command}}` gives its run a shared log that every
+task whose prompt names the command can post to and read. `run` and `resume` install
+the command, at `<run>/shared-log-bin/ultrafuzz-shared-log`, only when a prompt of
+the run names it, so a run whose prompts never mention it has no shared log. That
+includes a dynamic task's prompt, which is rendered only after launch: its template
+counts. The variable renders the command's absolute path, single-quoted when the path
+holds characters the shell treats specially, such as spaces. A `resume` whose refreshed prompts first name it installs it then. A `fork`
+reruns the run's prompts and uses the command its launch installed.
+
+The built-in property-lens prompts (the eight `properties/` lenses, not the fan-in)
+name it, so a project initialized with the default prompts gets a shared log for
+its property lenses. Each lens is told how to post and read, asked to read the log
+when it starts and again with `read --new` before it finalizes, and left to decide
+what to post. The fan-in does not get the log. A project whose prompts predate this
+keeps them until it adopts the new defaults, and removing the section from a
+project's lens prompts turns the log off.
+
+The command takes three forms, run from the task's workspace:
+
+- `post <text>` appends an entry. With no arguments it reads the entry from stdin,
+  which suits long or multi-line entries.
+- `read` prints every entry, numbered, with the task that posted it and the time.
+- `read --new` prints only the entries posted since this task's last read.
+
+Agents decide what to post; the command sets no entry types and no size limits. It
+stamps each entry with the posting task, that task's retry count and the time,
+taken from the workspace it runs in rather than from the agent, and records every
+read. Each workflow of the run, the launch and each fork, gets its own log under
+`<run>/shared-log/<workflow run id>/`: `entries.jsonl` holds the entries and
+`reads.jsonl` one record per read, with the entry numbers it printed. A fork's
+log therefore starts empty. A lock around every write keeps parallel posts from
+interleaving. Agents run unsandboxed, so nothing stops one from editing these files
+directly; treat entries as untrusted text from other agents.
 
 ## Triage And Invariant Variables
 
