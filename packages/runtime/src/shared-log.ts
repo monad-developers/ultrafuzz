@@ -90,15 +90,15 @@ function lockOwner(lock) {
 }
 
 // A lock held past STALE_LOCK_MS belongs to a writer that died: a write holds it for milliseconds.
-// It is renamed aside, in one atomic step, to a name fixed by its owner, and kept there as a record
-// of the crash. Every waiter that judged the same lock stale aims at that one name, and a rename
-// onto a directory that is not empty fails, so only the first moves anything: a lock retaken since
-// is never moved. A waiter that dies here has either moved the lock or not, so none is left stuck.
+// It is renamed aside, in one atomic step, to a name fixed by the device and inode in the same
+// snapshot that established its age. Reading the owner from .lock afterwards could instead see a
+// new writer's token. Keeping the stale directory prevents its inode from being reused. Every
+// waiter that judged the same lock stale therefore aims at the same non-empty destination, so
+// only the first moves anything. A waiter that dies here either moved the lock or did not.
 function clearStaleLock(dir, lock) {
-  const seen = fs.statSync(lock, { throwIfNoEntry: false });
-  if (seen === undefined || Date.now() - seen.mtimeMs <= STALE_LOCK_MS) return;
-  const owner = lockOwner(lock);
-  const name = owner !== undefined && /^[A-Za-z0-9-]+$/.test(owner) ? owner : "ino-" + seen.ino + "-" + seen.mtimeMs;
+  const seen = fs.statSync(lock, { throwIfNoEntry: false, bigint: true });
+  if (seen === undefined || Date.now() - Number(seen.mtimeMs) <= STALE_LOCK_MS) return;
+  const name = "ino-" + seen.dev + "-" + seen.ino;
   try {
     fs.renameSync(lock, path.join(dir, ".lock-stale-" + name));
   } catch (error) {

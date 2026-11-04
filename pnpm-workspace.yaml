@@ -31,6 +31,9 @@ overrides:
   "@effect/platform-node-shared": "4.0.0-beta.105"
   "@effect/sql-sqlite-bun": "4.0.0-beta.105"
   "@smthrs/cli>@toon-format/toon": "2.3.1"
+  # Keep fresh packed installs on the already locked diff renderer: 1.6.3 was
+  # published with unresolved catalog/workspace dependency specifiers.
+  "@pierre/diffs": "1.2.12"
   # Mirror generated-controller security pins across the repository install.
   # The operator npm's bundled Undici is updated in patches/npm@11.19.0.patch.
   "@modelcontextprotocol/sdk": "1.32.0"
