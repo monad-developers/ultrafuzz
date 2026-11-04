@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { installSharedLogIfReferenced, SHARED_LOG_COMMAND_PATH } from "../src/shared-log.js";
 import { temporaryRoot } from "./temporary-root.js";
@@ -264,6 +265,8 @@ test("waiters that all find a dead writer's lock move it aside once and then wri
     fs.utimesSync(directory, old, old);
   };
   staleLock(path.join(log, ".lock"), "111-1-dead");
+  const seen = fs.statSync(path.join(log, ".lock"), { bigint: true });
+  const recoveredLock = `.lock-stale-ino-${String(seen.dev)}-${String(seen.ino)}`;
   // What earlier crashes leave: a lock already moved aside, and a dead waiter's staged lock.
   staleLock(path.join(log, ".lock-stale-99-1-older"), "99-1-older");
   staleLock(path.join(log, ".lock-98-1-waiter"), "98-1-waiter");
@@ -291,11 +294,158 @@ test("waiters that all find a dead writer's lock move it aside once and then wri
   // The dead writer's lock was moved aside exactly once, and no waiter left a lock behind.
   assert.deepEqual(fs.readdirSync(log).sort(), [
     ".lock-98-1-waiter",
-    ".lock-stale-111-1-dead",
     ".lock-stale-99-1-older",
+    recoveredLock,
     "entries.jsonl"
   ]);
-  assert.equal(fs.readFileSync(path.join(log, ".lock-stale-111-1-dead", "owner"), "utf8"), "111-1-dead");
+  assert.equal(fs.readFileSync(path.join(log, recoveredLock, "owner"), "utf8"), "111-1-dead");
+});
+
+test("a waiter that inspected a stale lock cannot move a replacement writer's lock", { timeout: 25_000 }, async () => {
+  const fixture = runFixture();
+  installSharedLogIfReferenced(fixture.runRoot);
+  const log = path.join(fixture.runRoot, "shared-log", "wf-1");
+  const lock = path.join(log, ".lock");
+  fs.mkdirSync(lock, { recursive: true });
+  fs.writeFileSync(path.join(lock, "owner"), "111-1-dead");
+  const old = new Date(Date.now() - 120_000);
+  fs.utimesSync(lock, old, old);
+
+  // Run the installed script unchanged. The preload controls only the interleaving: A keeps an
+  // old stat result while B recovers that lock, acquires a new one and pauses before appending.
+  const hook = path.join(fixture.runRoot, "lock-scheduler.mjs");
+  fs.writeFileSync(
+    hook,
+    String.raw`import fs from "node:fs";
+import path from "node:path";
+
+const root = process.env.SHARED_LOG_TEST_ROOT;
+const role = process.env.SHARED_LOG_TEST_ROLE;
+const lock = path.join(root, "shared-log", "wf-1", ".lock");
+const stat = fs.statSync;
+const rename = fs.renameSync;
+const append = fs.appendFileSync;
+let paused = false;
+let attempted = false;
+
+function signal(name) {
+  fs.writeFileSync(path.join(root, name), "");
+}
+
+function wait(name) {
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(path.join(root, name))) {
+    if (Date.now() > deadline) throw new Error("scheduler timed out waiting for " + name);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+}
+
+fs.statSync = function(file, ...args) {
+  const value = stat.call(fs, file, ...args);
+  if (role === "a" && !paused && String(file) === lock && value !== undefined) {
+    paused = true;
+    signal("a-saw-stale-lock");
+    wait("continue-a");
+  }
+  return value;
+};
+
+fs.renameSync = function(source, destination, ...args) {
+  if (role === "a" && !attempted && String(source) === lock && path.basename(String(destination)).startsWith(".lock-stale-")) {
+    attempted = true;
+    try {
+      return rename.call(fs, source, destination, ...args);
+    } finally {
+      // The fixed recovery fails with ENOTEMPTY because B already moved this generation aside.
+      signal("a-attempted-recovery");
+    }
+  }
+  return rename.call(fs, source, destination, ...args);
+};
+
+fs.appendFileSync = function(file, ...args) {
+  if (role === "b" && String(file) === path.join(root, "shared-log", "wf-1", "entries.jsonl")) {
+    signal("b-holds-new-lock");
+    wait("continue-b");
+  }
+  return append.call(fs, file, ...args);
+};
+`
+  );
+
+  const children: {
+    child: ReturnType<typeof spawn>;
+    done: Promise<{ code: number | null; stderr: string }>;
+  }[] = [];
+  const start = (role: "a" | "b") => {
+    const child = spawn(
+      process.execPath,
+      ["--import", hook, path.join(fixture.runRoot, "shared-log-bin", "shared-log.mjs"), "post", `post-from-${role}`],
+      {
+        cwd: path.join(fixture.runRoot, "workspaces", `lens-${role}`),
+        env: { ...process.env, SHARED_LOG_TEST_ROOT: fixture.runRoot, SHARED_LOG_TEST_ROLE: role },
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: 15_000,
+        killSignal: "SIGKILL"
+      }
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const done = new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      child.on("error", (error) => {
+        stderr += error.message;
+      });
+      child.on("close", (code) => resolve({ code, stderr }));
+    });
+    children.push({ child, done });
+  };
+  const waitFor = async (name: string): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    while (!fs.existsSync(path.join(fixture.runRoot, name))) {
+      assert.ok(Date.now() < deadline, `timed out waiting for ${name}`);
+      await delay(10);
+    }
+  };
+
+  try {
+    start("a");
+    await waitFor("a-saw-stale-lock");
+    start("b");
+    await waitFor("b-holds-new-lock");
+    const replacementOwner = fs.readFileSync(path.join(lock, "owner"), "utf8");
+    assert.notEqual(replacementOwner, "111-1-dead");
+    fs.writeFileSync(path.join(fixture.runRoot, "continue-a"), "");
+    await waitFor("a-attempted-recovery");
+    assert.equal(fs.readFileSync(path.join(lock, "owner"), "utf8"), replacementOwner);
+
+    fs.writeFileSync(path.join(fixture.runRoot, "continue-b"), "");
+    for (const result of await Promise.all(children.map(({ done }) => done))) {
+      assert.equal(result.code, 0, result.stderr);
+    }
+    const entries = lines(path.join(log, "entries.jsonl"));
+    assert.deepEqual(
+      entries.map((entry) => entry.seq),
+      [1, 2]
+    );
+    assert.deepEqual(
+      entries.map((entry) => entry.text),
+      ["post-from-b", "post-from-a"]
+    );
+    const firstRead = run(fixture, "workspaces/lens-a", ["read", "--new"]);
+    assert.equal(firstRead.status, 0, firstRead.stderr);
+    assert.match(firstRead.stdout, /^#1 from lens-b at \S+\npost-from-b\n\n#2 from lens-a at \S+\npost-from-a\n$/u);
+    assert.equal(
+      run(fixture, "workspaces/lens-a", ["read", "--new"]).stdout,
+      "(no new entries since your last read)\n"
+    );
+  } finally {
+    for (const { child } of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+    await Promise.all(children.map(({ done }) => done));
+  }
 });
 
 test("a lock that is not yet stale is left in place", () => {
